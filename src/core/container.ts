@@ -6,6 +6,7 @@ import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
 import { type EventBus, createEventBus } from './event-bus.js';
 import { type EventLoop, createEventLoop, type EventLoopConfig } from './event-loop.js';
+import { type LayerProcessor, createLayerProcessor } from '../layers/layer-processor.js';
 
 /**
  * Application configuration.
@@ -48,6 +49,8 @@ export interface Container {
   metrics: Metrics;
   /** The agent */
   agent: Agent;
+  /** Layer processor (brain pipeline) */
+  layerProcessor: LayerProcessor;
   /** The event loop (heartbeat) */
   eventLoop: EventLoop;
   /** Shutdown function */
@@ -106,8 +109,19 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create event bus
   const eventBus = createEventBus(logger);
 
-  // Create event loop
-  const eventLoop = createEventLoop(agent, eventQueue, eventBus, logger, metrics, config.eventLoop);
+  // Create layer processor (brain pipeline)
+  const layerProcessor = createLayerProcessor(logger);
+
+  // Create event loop (wired to layer processor)
+  const eventLoop = createEventLoop(
+    agent,
+    eventQueue,
+    eventBus,
+    layerProcessor,
+    logger,
+    metrics,
+    config.eventLoop
+  );
 
   // Shutdown function
   const shutdown = (): Promise<void> => {
@@ -122,6 +136,7 @@ export function createContainer(config: AppConfig = {}): Container {
     eventBus,
     metrics,
     agent,
+    layerProcessor,
     eventLoop,
     shutdown,
   };

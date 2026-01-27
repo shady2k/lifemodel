@@ -1,8 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import type { Event, EventQueue, Logger, Metrics, Intent, PruneConfig } from '../types/index.js';
+import type {
+  Event,
+  EventQueue,
+  Logger,
+  Metrics,
+  Intent,
+  PruneConfig,
+  Thought,
+} from '../types/index.js';
 import { Priority, PRIORITY_DISTURBANCE_WEIGHT } from '../types/index.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
+import type { LayerProcessor } from '../layers/layer-processor.js';
 
 /**
  * Event loop configuration.
@@ -64,6 +73,7 @@ export class EventLoop {
   private readonly agent: Agent;
   private readonly eventQueue: EventQueue;
   private readonly eventBus: EventBus;
+  private readonly layerProcessor: LayerProcessor;
   private readonly logger: Logger;
   private readonly metrics: Metrics;
   private readonly config: EventLoopConfig;
@@ -76,6 +86,7 @@ export class EventLoop {
     agent: Agent,
     eventQueue: EventQueue,
     eventBus: EventBus,
+    layerProcessor: LayerProcessor,
     logger: Logger,
     metrics: Metrics,
     config: Partial<EventLoopConfig> = {}
@@ -83,6 +94,7 @@ export class EventLoop {
     this.agent = agent;
     this.eventQueue = eventQueue;
     this.eventBus = eventBus;
+    this.layerProcessor = layerProcessor;
     this.logger = logger.child({ component: 'event-loop' });
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -239,7 +251,7 @@ export class EventLoop {
   }
 
   /**
-   * Process events from the queue.
+   * Process events from the queue through the layer processor.
    */
   private async processEvents(): Promise<number> {
     let processed = 0;
@@ -267,14 +279,40 @@ export class EventLoop {
         }
       }
 
-      // Pull and process the event
+      // Pull the event
       await this.eventQueue.pull();
 
-      // Notify agent of event processing
+      // Notify agent of event processing (drains energy)
       this.agent.onEventProcessed();
 
-      // Publish to subscribers
+      // Process through 6-layer brain pipeline
+      const result = await this.layerProcessor.process(event);
+
+      // Apply intents from layer processing
+      this.applyIntents(result.intents);
+
+      // Recycle thoughts that need further processing
+      await this.recycleThoughts(result.thoughts);
+
+      // Also publish to EventBus for any additional subscribers
       await this.eventBus.publish(event);
+
+      // Log processing summary
+      this.logger.debug(
+        {
+          eventId: event.id,
+          layers: result.layersExecuted.length,
+          intents: result.intents.length,
+          thoughts: result.thoughts.length,
+          hoisted: result.hoisted,
+          timeMs: result.processingTimeMs,
+        },
+        'Event processed through layers'
+      );
+
+      // Update metrics
+      this.metrics.histogram('layer_processing_time', result.processingTimeMs);
+      this.metrics.counter('events_processed_through_layers');
 
       processed++;
 
@@ -285,6 +323,50 @@ export class EventLoop {
     }
 
     return processed;
+  }
+
+  /**
+   * Convert thoughts that require processing into internal events.
+   * This completes the thinking loop - thoughts can trigger further processing.
+   */
+  private async recycleThoughts(thoughts: Thought[]): Promise<void> {
+    for (const thought of thoughts) {
+      if (!thought.requiresProcessing) {
+        // Just log thoughts that don't need processing
+        this.logger.debug(
+          { thoughtId: thought.id, content: thought.content },
+          'Thought noted (no processing needed)'
+        );
+        continue;
+      }
+
+      // Convert thought to internal event
+      const thoughtEvent: Event = {
+        id: randomUUID(),
+        source: 'thoughts',
+        type: 'internal_thought',
+        priority: thought.priority,
+        timestamp: new Date(),
+        payload: {
+          thoughtId: thought.id,
+          content: thought.content,
+          sourceEvent: thought.source,
+        },
+      };
+
+      await this.eventQueue.push(thoughtEvent);
+
+      this.logger.debug(
+        {
+          thoughtId: thought.id,
+          eventId: thoughtEvent.id,
+          priority: thought.priority,
+        },
+        'Thought recycled as internal event'
+      );
+
+      this.metrics.counter('thoughts_recycled');
+    }
   }
 
   /**
@@ -406,9 +488,10 @@ export function createEventLoop(
   agent: Agent,
   eventQueue: EventQueue,
   eventBus: EventBus,
+  layerProcessor: LayerProcessor,
   logger: Logger,
   metrics: Metrics,
   config?: Partial<EventLoopConfig>
 ): EventLoop {
-  return new EventLoop(agent, eventQueue, eventBus, logger, metrics, config);
+  return new EventLoop(agent, eventQueue, eventBus, layerProcessor, logger, metrics, config);
 }
