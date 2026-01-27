@@ -4,9 +4,12 @@
  * Entry point for the application.
  */
 
+import 'dotenv/config';
+
 import { createContainerAsync, type Container } from './core/container.js';
 
 let container: Container | undefined;
+let isShuttingDown = false;
 
 async function main(): Promise<void> {
   // Create the application container with async initialization
@@ -71,6 +74,11 @@ async function main(): Promise<void> {
 
 // Handle shutdown gracefully
 async function shutdown(): Promise<void> {
+  if (isShuttingDown) {
+    return; // Already shutting down, ignore duplicate signals
+  }
+  isShuttingDown = true;
+
   if (container) {
     await container.shutdown();
   }

@@ -27,6 +27,11 @@ export class ReflexLayer extends BaseLayer {
     const { event } = context;
     context.stage = 'reflex';
 
+    this.logger.debug(
+      { eventId: event.id, source: event.source, type: event.type },
+      'Reflex processing'
+    );
+
     // Handle system events directly
     if (event.source === 'system') {
       return this.handleSystemEvent(context);
@@ -43,6 +48,7 @@ export class ReflexLayer extends BaseLayer {
     }
 
     // Not a reflex-level event, pass to next layer
+    this.logger.debug({ eventId: event.id }, 'Reflex pass-through to higher layers');
     return this.success(context, 1.0);
   }
 

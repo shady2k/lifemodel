@@ -80,6 +80,19 @@ export class PerceptionLayer extends BaseLayer {
     // Confidence based on how well we understood the content
     const confidence = perception.contentType === 'unknown' ? 0.4 : 0.85;
 
+    this.logger.debug(
+      {
+        eventId: context.event.id,
+        contentType: perception.contentType,
+        language: perception.language,
+        isQuestion: perception.isQuestion,
+        isCommand: perception.isCommand,
+        keywords: perception.keywords.slice(0, 5),
+        textPreview: text.slice(0, 50) + (text.length > 50 ? '...' : ''),
+      },
+      'Perception complete'
+    );
+
     return this.success(context, confidence);
   }
 

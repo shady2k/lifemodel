@@ -74,6 +74,18 @@ export class DecisionLayer extends BaseLayer {
 
     context.decision = decision;
 
+    this.logger.debug(
+      {
+        eventId: context.event.id,
+        shouldAct,
+        actionType,
+        actionPriority,
+        reason,
+        constraints: constraints ?? null,
+      },
+      'Decision complete'
+    );
+
     // High confidence in decision layer (it's deterministic)
     return this.success(context, 0.9);
   }

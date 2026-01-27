@@ -65,6 +65,17 @@ export class CognitionLayer extends BaseLayer {
     // Confidence depends on whether we need reasoning
     const confidence = needsReasoning ? 0.4 : 0.8;
 
+    this.logger.debug(
+      {
+        eventId: context.event.id,
+        beliefUpdates: beliefUpdates.length,
+        thoughtsGenerated: thoughts.length,
+        needsReasoning,
+        thoughts: thoughts.map((t) => t.content.slice(0, 50)),
+      },
+      'Cognition complete'
+    );
+
     // Build extras object conditionally
     const extras: Partial<LayerResult> = {};
     if (thoughts.length > 0) {
@@ -160,6 +171,11 @@ export class CognitionLayer extends BaseLayer {
 
     if (!interpretation) return thoughts;
 
+    this.logger.debug(
+      { eventId: context.event.id, intent: interpretation.intent },
+      'Generating thoughts based on interpretation'
+    );
+
     // Generate thought based on interaction type
     if (interpretation.intent === 'question' && interpretation.intentConfidence < 0.7) {
       thoughts.push(
@@ -215,7 +231,7 @@ export class CognitionLayer extends BaseLayer {
     priority: Priority,
     requiresProcessing: boolean
   ): Thought {
-    return {
+    const thought: Thought = {
       id: randomUUID(),
       content,
       source,
@@ -223,6 +239,13 @@ export class CognitionLayer extends BaseLayer {
       requiresProcessing,
       createdAt: new Date(),
     };
+
+    this.logger.debug(
+      { thoughtId: thought.id, content, priority, requiresProcessing },
+      '💭 Thought generated'
+    );
+
+    return thought;
   }
 
   private checkNeedsReasoning(context: ProcessingContext): boolean {

@@ -265,6 +265,20 @@ export class EventLoop {
     const tickStart = Date.now();
     this.tickCount++;
 
+    const state = this.agent.getState();
+    this.logger.debug(
+      {
+        tick: this.tickCount,
+        energy: state.energy.toFixed(2),
+        socialDebt: state.socialDebt.toFixed(2),
+        taskPressure: state.taskPressure.toFixed(2),
+        curiosity: state.curiosity.toFixed(2),
+        mode: this.agent.getAlertnessMode(),
+        queueSize: this.eventQueue.size(),
+      },
+      '⏱️ Tick starting'
+    );
+
     try {
       // 1. Process queued events
       const eventsProcessed = await this.processEvents();
@@ -433,17 +447,21 @@ export class EventLoop {
    * This completes the thinking loop - thoughts can trigger further processing.
    */
   private async recycleThoughts(thoughts: Thought[]): Promise<void> {
+    if (thoughts.length > 0) {
+      this.logger.debug({ count: thoughts.length }, 'Processing generated thoughts');
+    }
+
     for (const thought of thoughts) {
       if (!thought.requiresProcessing) {
-        // Just log thoughts that don't need processing
+        // Log thoughts that don't need processing
         this.logger.debug(
           { thoughtId: thought.id, content: thought.content },
-          'Thought noted (no processing needed)'
+          '💭 Thought noted (passive)'
         );
         continue;
       }
 
-      // Convert thought to internal event
+      // Convert thought to internal event for further processing
       const thoughtEvent: Event = {
         id: randomUUID(),
         source: 'thoughts',
@@ -464,8 +482,9 @@ export class EventLoop {
           thoughtId: thought.id,
           eventId: thoughtEvent.id,
           priority: thought.priority,
+          content: thought.content,
         },
-        'Thought recycled as internal event'
+        '💭 Thought queued for processing (active)'
       );
 
       this.metrics.counter('thoughts_recycled');

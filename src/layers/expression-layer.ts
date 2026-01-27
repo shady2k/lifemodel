@@ -62,8 +62,19 @@ export class ExpressionLayer extends BaseLayer {
 
     // If no decision or shouldn't act, nothing to express
     if (!decision?.shouldAct) {
+      this.logger.debug({ eventId: context.event.id }, 'Expression skipped - no action needed');
       return this.stop(context);
     }
+
+    this.logger.debug(
+      {
+        eventId: context.event.id,
+        actionType: decision.actionType,
+        hasComposer: !!this.composer,
+        needsReasoning: context.cognition?.needsReasoning ?? false,
+      },
+      'Expression starting'
+    );
 
     // Generate appropriate response based on action type
     const response = await this.generateResponse(context, decision.actionType);

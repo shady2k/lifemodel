@@ -1,6 +1,7 @@
 import type { Event } from './event.js';
 import type { Intent } from './intent.js';
 import type { AgentState } from './agent/state.js';
+import type { Logger } from './logger.js';
 
 /**
  * Context passed to rule evaluation.
@@ -20,6 +21,9 @@ export interface RuleContext {
 
   /** Time since last interaction in ms */
   timeSinceLastInteraction: number;
+
+  /** Logger for debugging (optional) */
+  logger?: Logger | undefined;
 }
 
 /**

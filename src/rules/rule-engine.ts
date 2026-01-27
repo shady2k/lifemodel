@@ -81,6 +81,7 @@ export class RuleEngine {
       now,
       hour: now.getHours(),
       timeSinceLastInteraction: now.getTime() - this.lastInteractionAt.getTime(),
+      logger: this.logger,
     };
   }
 
@@ -93,10 +94,25 @@ export class RuleEngine {
       (rule) => rule.trigger === trigger || rule.trigger === 'tick'
     );
 
+    this.logger.debug(
+      {
+        trigger,
+        rulesCount: matchingRules.length,
+        hour: context.hour,
+        energy: context.state.energy.toFixed(2),
+        socialDebt: context.state.socialDebt.toFixed(2),
+      },
+      'Evaluating rules'
+    );
+
     for (const rule of matchingRules) {
       try {
         // Check condition
-        if (!rule.condition(context)) {
+        const conditionMet = rule.condition(context);
+
+        this.logger.debug({ ruleId: rule.id, conditionMet }, `Rule condition: ${rule.description}`);
+
+        if (!conditionMet) {
           continue;
         }
 
@@ -115,9 +131,9 @@ export class RuleEngine {
             {
               ruleId: rule.id,
               intents: intents.length,
-              trigger,
+              intentTypes: intents.map((i) => i.type),
             },
-            'Rule fired'
+            `🔥 Rule fired: ${rule.description}`
           );
         }
       } catch (error) {

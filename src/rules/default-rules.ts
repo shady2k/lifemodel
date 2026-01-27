@@ -94,7 +94,25 @@ const contactDecisionRule = createRule({
       threshold += 0.1; // Higher when tired
     }
 
-    return result.output >= threshold;
+    const crossed = result.output >= threshold;
+
+    // Log neuron evaluation for debugging
+    ctx.logger?.debug(
+      {
+        pressure: result.output.toFixed(3),
+        threshold: threshold.toFixed(2),
+        crossed,
+        inputs: {
+          socialDebt: ctx.state.socialDebt.toFixed(2),
+          taskPressure: ctx.state.taskPressure.toFixed(2),
+          curiosity: ctx.state.curiosity.toFixed(2),
+          userAvailability: userAvailability.toFixed(2),
+        },
+      },
+      `🧠 Contact pressure: ${result.output.toFixed(3)} (threshold: ${threshold.toFixed(2)}) ${crossed ? '✓ CROSSED' : '✗ below'}`
+    );
+
+    return crossed;
   },
 
   action: (ctx: RuleContext): Intent[] => {

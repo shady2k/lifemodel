@@ -99,6 +99,20 @@ export class InterpretationLayer extends BaseLayer {
     // Overall confidence based on intent confidence
     const confidence = intentConfidence;
 
+    this.logger.debug(
+      {
+        eventId: context.event.id,
+        intent,
+        intentConfidence: intentConfidence.toFixed(2),
+        sentiment,
+        sentimentStrength: strength.toFixed(2),
+        urgency: urgency.toFixed(2),
+        requiresResponse,
+        responsePriority,
+      },
+      'Interpretation complete'
+    );
+
     return this.success(context, confidence);
   }
 
