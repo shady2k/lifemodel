@@ -24,6 +24,9 @@ export interface ClassificationContext {
 
   /** Current user state (agent's beliefs) */
   userState?: UserStateContext | undefined;
+
+  /** Messages that need compaction (older messages to summarize) */
+  messagesToCompact?: Message[] | undefined;
 }
 
 /**
@@ -44,6 +47,9 @@ export interface ClassificationResult {
 
   /** Tokens used */
   tokensUsed?: number | undefined;
+
+  /** Summary of older conversation context (when compaction was requested) */
+  contextSummary?: string | undefined;
 }
 
 /**
@@ -246,6 +252,24 @@ export class MessageComposer {
 - Confidence in these beliefs: ${confidence.toFixed(1)}/1.0`;
     }
 
+    // Build compaction section if needed
+    let compactionSection = '';
+    let compactionJsonField = '';
+    if (context.messagesToCompact && context.messagesToCompact.length > 0) {
+      compactionSection = `
+## Conversation Compaction Required
+The conversation history includes older messages (marked below as [OLDER CONTEXT]) that need summarizing for future reference.
+After responding to the current message, provide a brief summary of the KEY FACTS from the older messages.
+Include: topics discussed, user preferences revealed, decisions made, important context.
+Keep the summary concise (2-4 sentences) but preserve essential information.
+
+[OLDER CONTEXT - Summarize this:]
+${context.messagesToCompact.map((m) => `${m.role}: ${m.content}`).join('\n')}
+[END OLDER CONTEXT]`;
+      compactionJsonField =
+        ',\n  "contextSummary": "Brief summary of older context (only when compaction requested)"';
+    }
+
     return `You are ${this.identity.name}, a personal AI assistant.
 
 ## Your Personality
@@ -253,6 +277,7 @@ export class MessageComposer {
 - Values: ${this.identity.values.join(', ')}
 - Boundaries: ${this.identity.boundaries.join(', ')}
 ${userStateSection}
+${compactionSection}
 
 ## Your Task
 Analyze the user's message and decide if you can respond naturally and confidently.
@@ -262,7 +287,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
   "canHandle": true or false,
   "confidence": 0.0 to 1.0,
   "suggestedResponse": "Your response in character (only if canHandle=true)",
-  "reasoning": "Brief explanation of your decision"
+  "reasoning": "Brief explanation of your decision"${compactionJsonField}
 }
 
 ## Guidelines
@@ -296,6 +321,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         confidence?: number;
         suggestedResponse?: string;
         reasoning?: string;
+        contextSummary?: string;
       };
 
       return {
@@ -303,6 +329,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
         suggestedResponse: parsed.suggestedResponse,
         reasoning: parsed.reasoning,
+        contextSummary: parsed.contextSummary,
       };
     } catch {
       // If parsing fails, assume we can't handle it

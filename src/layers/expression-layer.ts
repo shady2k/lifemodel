@@ -96,10 +96,7 @@ export class ExpressionLayer extends BaseLayer {
         payload,
       });
 
-      this.logger.debug(
-        { response: response.substring(0, 50), actionType: decision.actionType },
-        'Response generated'
-      );
+      this.logger.debug({ response, actionType: decision.actionType }, 'Response generated');
     }
 
     // Log the decision
@@ -150,7 +147,20 @@ export class ExpressionLayer extends BaseLayer {
   }
 
   private generateAcknowledgment(context: ProcessingContext, lang: string): string {
-    const { interpretation } = context;
+    const { interpretation, cognition } = context;
+
+    // If fast model provided a confident response, use it instead of templates
+    if (
+      cognition?.fastModelResponse &&
+      cognition.fastModelConfidence !== undefined &&
+      cognition.fastModelConfidence >= 0.8
+    ) {
+      this.logger.debug(
+        { confidence: cognition.fastModelConfidence },
+        '✨ Using fast model response for acknowledgment'
+      );
+      return cognition.fastModelResponse;
+    }
 
     if (!interpretation) {
       return this.getTemplate('ack', lang);

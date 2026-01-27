@@ -78,11 +78,34 @@ export class CognitionLayer extends BaseLayer {
       const generatedThoughts = this.generateThoughts(context);
       thoughts.push(...generatedThoughts);
 
-      // Use fast model classification if available, otherwise fall back to heuristics
-      const classification = await this.classifyWithFastModel(context);
-      needsReasoning = classification.needsReasoning;
-      fastModelResponse = classification.suggestedResponse;
-      fastModelConfidence = classification.confidence;
+      // Only call LLM if interpretation layer determined response is needed
+      // The interpretation layer already checked conversation context
+      if (context.interpretation.requiresResponse) {
+        const classification = await this.classifyWithFastModel(context);
+        needsReasoning = classification.needsReasoning;
+        fastModelResponse = classification.suggestedResponse;
+        fastModelConfidence = classification.confidence;
+
+        // Handle inline compaction if we got a summary
+        if (classification.contextSummary && classification.userId && this.conversationManager) {
+          await this.conversationManager.compact(
+            classification.userId,
+            classification.contextSummary
+          );
+          this.logger.info(
+            {
+              userId: classification.userId,
+              summaryLength: classification.contextSummary.length,
+            },
+            '📦 Conversation compacted inline'
+          );
+        }
+      } else {
+        this.logger.debug(
+          { intent: context.interpretation.intent },
+          '⏭️ Skipping LLM call - no response required'
+        );
+      }
     }
 
     const cognition: CognitionOutput = {
@@ -117,7 +140,7 @@ export class CognitionLayer extends BaseLayer {
         needsReasoning,
         fastModelConfidence,
         hasFastModelResponse: !!fastModelResponse,
-        thoughts: thoughts.map((t) => t.content.slice(0, 50)),
+        thoughts: thoughts.map((t) => t.content),
       },
       'Cognition complete'
     );
@@ -134,11 +157,14 @@ export class CognitionLayer extends BaseLayer {
   /**
    * Classify using fast model with full context.
    * Falls back to heuristics if fast model not available.
+   * Also handles conversation compaction in the same LLM call.
    */
   private async classifyWithFastModel(context: ProcessingContext): Promise<{
     needsReasoning: boolean;
     suggestedResponse?: string;
     confidence: number;
+    contextSummary?: string;
+    userId?: string;
   }> {
     const { perception } = context;
 
@@ -151,23 +177,37 @@ export class CognitionLayer extends BaseLayer {
     }
 
     try {
+      // Extract user ID from event payload
+      const payload = context.event.payload as Record<string, unknown> | undefined;
+      const chatId = payload?.['chatId'];
+      const oldUserId = payload?.['userId'];
+      const userId =
+        (typeof chatId === 'string' ? chatId : undefined) ??
+        (typeof oldUserId === 'string' ? oldUserId : undefined);
+
       // Get conversation history if available
       let history: Awaited<ReturnType<ConversationManager['getHistory']>> | undefined;
-      if (this.conversationManager) {
-        // Extract user ID from event payload
-        const payload = context.event.payload as Record<string, unknown> | undefined;
-        const chatId = payload?.['chatId'];
-        const odlUserId = payload?.['userId'];
-        const userId =
-          (typeof chatId === 'string' ? chatId : undefined) ??
-          (typeof odlUserId === 'string' ? odlUserId : undefined);
+      let messagesToCompact:
+        | Awaited<ReturnType<ConversationManager['getMessagesToCompact']>>
+        | undefined;
 
-        if (userId) {
-          history = await this.conversationManager.getHistory(userId, {
-            maxRecent: 3,
-            includeCompacted: true,
-          });
+      if (this.conversationManager && userId) {
+        // Check if compaction is needed
+        const needsCompaction = await this.conversationManager.needsCompaction(userId);
+
+        if (needsCompaction) {
+          // Get messages that need to be compacted
+          messagesToCompact = await this.conversationManager.getMessagesToCompact(userId);
+          this.logger.debug(
+            { userId, messagesToCompact: messagesToCompact.length },
+            '📦 Conversation needs compaction, including old messages for summarization'
+          );
         }
+
+        history = await this.conversationManager.getHistory(userId, {
+          maxRecent: 3,
+          includeCompacted: true,
+        });
       }
 
       // Get user state if available
@@ -183,21 +223,23 @@ export class CognitionLayer extends BaseLayer {
         };
       }
 
-      // Call fast model for classification
+      // Call fast model for classification (with compaction if needed)
       const result = await this.composer.classifyAndRespond({
         userMessage: perception.text,
         conversationHistory: history,
         userState,
+        messagesToCompact,
       });
 
       this.logger.debug(
         {
-          userMessage: perception.text.slice(0, 50),
+          userMessage: perception.text,
           canHandle: result.canHandle,
           confidence: result.confidence,
           reasoning: result.reasoning,
           hasUserState: !!userState,
           historyLength: history?.length ?? 0,
+          hasContextSummary: !!result.contextSummary,
         },
         '🧠 Fast model classification'
       );
@@ -208,6 +250,8 @@ export class CognitionLayer extends BaseLayer {
           needsReasoning: false,
           suggestedResponse: result.suggestedResponse,
           confidence: result.confidence,
+          ...(result.contextSummary && { contextSummary: result.contextSummary }),
+          ...(userId && { userId }),
         };
       }
 
@@ -215,6 +259,8 @@ export class CognitionLayer extends BaseLayer {
       return {
         needsReasoning: true,
         confidence: result.confidence,
+        ...(result.contextSummary && { contextSummary: result.contextSummary }),
+        ...(userId && { userId }),
       };
     } catch (error) {
       this.logger.warn(

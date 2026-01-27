@@ -4,7 +4,7 @@ import type { ProcessingContext } from './context.js';
 import { createProcessingContext } from './context.js';
 import { createReflexLayer } from './reflex-layer.js';
 import { createPerceptionLayer } from './perception-layer.js';
-import { createInterpretationLayer } from './interpretation-layer.js';
+import { createInterpretationLayer, type InterpretationLayer } from './interpretation-layer.js';
 import {
   createCognitionLayer,
   type CognitionLayer,
@@ -14,6 +14,7 @@ import { createDecisionLayer } from './decision-layer.js';
 import { createExpressionLayer, type ExpressionLayer } from './expression-layer.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { EventBus } from '../core/event-bus.js';
+import type { ConversationManager } from '../storage/conversation-manager.js';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -52,6 +53,7 @@ export interface ProcessingResult {
  */
 export class LayerProcessor {
   private readonly layers: ProcessingLayer[];
+  private readonly interpretationLayer: InterpretationLayer;
   private readonly expressionLayer: ExpressionLayer;
   private readonly cognitionLayer: CognitionLayer;
   private readonly logger: Logger;
@@ -60,17 +62,16 @@ export class LayerProcessor {
   constructor(logger: Logger) {
     this.logger = logger.child({ component: 'layer-processor' });
 
-    // Create expression layer separately to keep reference
+    // Create layers that need references separately
+    this.interpretationLayer = createInterpretationLayer(logger);
     this.expressionLayer = createExpressionLayer(logger);
-
-    // Create cognition layer separately to keep reference
     this.cognitionLayer = createCognitionLayer(logger);
 
     // Create all layers in order
     this.layers = [
       createReflexLayer(logger),
       createPerceptionLayer(logger),
-      createInterpretationLayer(logger),
+      this.interpretationLayer,
       this.cognitionLayer,
       createDecisionLayer(logger),
       this.expressionLayer,
@@ -93,6 +94,16 @@ export class LayerProcessor {
   setCognitionDependencies(deps: CognitionLayerDeps): void {
     this.cognitionLayer.setDependencies(deps);
     this.logger.debug('Cognition layer dependencies updated');
+  }
+
+  /**
+   * Set conversation manager for context-aware interpretation.
+   * This allows the interpretation layer to check conversation history
+   * for better decisions (e.g., is this an answer to our question?).
+   */
+  setConversationManager(manager: ConversationManager): void {
+    this.interpretationLayer.setConversationManager(manager);
+    this.logger.debug('Interpretation layer conversation manager set');
   }
 
   /**

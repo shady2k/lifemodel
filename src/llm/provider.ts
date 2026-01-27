@@ -151,18 +151,16 @@ export abstract class BaseLLMProvider implements LLMProvider {
       '🤖 LLM request started'
     );
 
-    // Log each message for debugging
+    // Log each message for debugging (full content)
     if (this.logger) {
       for (const [i, msg] of request.messages.entries()) {
-        const contentPreview =
-          msg.content.length > 500 ? `${msg.content.slice(0, 500)}...` : msg.content;
         this.logger.debug(
           {
             requestId,
             index: i,
             role: msg.role,
             contentLength: msg.content.length,
-            content: contentPreview,
+            content: msg.content,
           },
           `🤖 LLM message [${String(i)}] ${msg.role}`
         );
@@ -173,7 +171,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       const response = await this.doComplete(request);
       const duration = Date.now() - startTime;
 
-      // Log response
+      // Log response (full content)
       this.logger?.debug(
         {
           requestId,
@@ -185,10 +183,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
           completionTokens: response.usage?.completionTokens,
           totalTokens: response.usage?.totalTokens,
           responseLength: response.content.length,
-          responsePreview:
-            response.content.length > 200
-              ? `${response.content.slice(0, 200)}...`
-              : response.content,
+          response: response.content,
         },
         '🤖 LLM response received'
       );

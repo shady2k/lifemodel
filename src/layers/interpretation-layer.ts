@@ -8,6 +8,7 @@ import type {
   PerceptionOutput,
 } from './context.js';
 import { BaseLayer } from './base-layer.js';
+import type { ConversationManager } from '../storage/conversation-manager.js';
 
 /**
  * Layer 2: INTERPRETATION
@@ -26,6 +27,16 @@ import { BaseLayer } from './base-layer.js';
 export class InterpretationLayer extends BaseLayer {
   readonly name = 'interpretation';
   readonly confidenceThreshold = 0.6;
+
+  private conversationManager: ConversationManager | undefined;
+
+  /**
+   * Set conversation manager for context-aware decisions.
+   */
+  setConversationManager(manager: ConversationManager): void {
+    this.conversationManager = manager;
+    this.logger.debug('ConversationManager attached to interpretation layer');
+  }
 
   // Positive sentiment indicators
   private readonly positivePatterns = [
@@ -57,7 +68,7 @@ export class InterpretationLayer extends BaseLayer {
     super(logger, 'interpretation');
   }
 
-  protected processImpl(context: ProcessingContext): LayerResult {
+  protected async processImpl(context: ProcessingContext): Promise<LayerResult> {
     context.stage = 'interpretation';
 
     // Need perception output to interpret
@@ -78,8 +89,8 @@ export class InterpretationLayer extends BaseLayer {
     // Calculate urgency
     const urgency = this.calculateUrgency(context);
 
-    // Does this require a response?
-    const requiresResponse = this.checkRequiresResponse(intent, perception);
+    // Does this require a response? (needs conversation context)
+    const requiresResponse = await this.checkRequiresResponse(intent, perception, context);
 
     // Determine response priority
     const responsePriority = this.determineResponsePriority(intent, urgency, sentiment);
@@ -303,7 +314,11 @@ export class InterpretationLayer extends BaseLayer {
     return urgency;
   }
 
-  private checkRequiresResponse(intent: UserIntent, perception: PerceptionOutput): boolean {
+  private async checkRequiresResponse(
+    intent: UserIntent,
+    perception: PerceptionOutput,
+    context: ProcessingContext
+  ): Promise<boolean> {
     // These intents typically require a response
     const responseRequired: UserIntent[] = [
       'greeting',
@@ -326,7 +341,17 @@ export class InterpretationLayer extends BaseLayer {
       return true;
     }
 
-    // These don't need a response
+    // Check if this is an answer to our question (acknowledgments/information)
+    // This is a cheap check that prevents unnecessary LLM calls
+    if (intent === 'acknowledgment' || intent === 'information') {
+      const isAnswerToOurQuestion = await this.checkIsAnswerToOurQuestion(context);
+      if (isAnswerToOurQuestion) {
+        this.logger.debug('Message is answer to our question - requires response');
+        return true;
+      }
+    }
+
+    // These don't need a response (unless checked above)
     const noResponse: UserIntent[] = ['farewell', 'acknowledgment', 'busy_signal'];
 
     if (noResponse.includes(intent)) {
@@ -335,6 +360,43 @@ export class InterpretationLayer extends BaseLayer {
 
     // Default: informational content doesn't require response
     return false;
+  }
+
+  /**
+   * Check if the user's message is an answer to a question we asked.
+   * This is a cheap heuristic check (no LLM needed).
+   */
+  private async checkIsAnswerToOurQuestion(context: ProcessingContext): Promise<boolean> {
+    if (!this.conversationManager) {
+      return false;
+    }
+
+    // Extract user ID from event payload
+    const payload = context.event.payload as Record<string, unknown> | undefined;
+    const chatId = payload?.['chatId'];
+    const userId =
+      (typeof chatId === 'string' ? chatId : undefined) ??
+      (typeof payload?.['userId'] === 'string' ? payload['userId'] : undefined);
+
+    if (!userId) {
+      return false;
+    }
+
+    try {
+      // Get the last message (should be assistant's)
+      const history = await this.conversationManager.getHistory(userId, { maxRecent: 1 });
+      const lastAssistantMsg = history.find((m) => m.role === 'assistant');
+
+      if (!lastAssistantMsg) {
+        return false;
+      }
+
+      // Check if the last assistant message ended with a question
+      const content = lastAssistantMsg.content.trim();
+      return content.endsWith('?');
+    } catch {
+      return false;
+    }
   }
 
   private determineResponsePriority(

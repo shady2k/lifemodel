@@ -87,8 +87,8 @@ export class PerceptionLayer extends BaseLayer {
         language: perception.language,
         isQuestion: perception.isQuestion,
         isCommand: perception.isCommand,
-        keywords: perception.keywords.slice(0, 5),
-        textPreview: text.slice(0, 50) + (text.length > 50 ? '...' : ''),
+        keywords: perception.keywords,
+        text,
       },
       'Perception complete'
     );

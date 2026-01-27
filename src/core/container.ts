@@ -486,6 +486,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     userModel: userModel ?? undefined,
   });
 
+  // Set conversation manager on interpretation layer for context-aware decisions
+  layerProcessor.setConversationManager(conversationManager);
+
   // Set event bus for typing events
   layerProcessor.setEventBus(eventBus);
 
