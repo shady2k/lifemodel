@@ -12,6 +12,7 @@ import { Priority, PRIORITY_DISTURBANCE_WEIGHT } from '../types/index.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
 import type { LayerProcessor } from '../layers/layer-processor.js';
+import type { RuleEngine } from '../rules/rule-engine.js';
 
 /**
  * Event loop configuration.
@@ -74,6 +75,7 @@ export class EventLoop {
   private readonly eventQueue: EventQueue;
   private readonly eventBus: EventBus;
   private readonly layerProcessor: LayerProcessor;
+  private readonly ruleEngine: RuleEngine;
   private readonly logger: Logger;
   private readonly metrics: Metrics;
   private readonly config: EventLoopConfig;
@@ -87,6 +89,7 @@ export class EventLoop {
     eventQueue: EventQueue,
     eventBus: EventBus,
     layerProcessor: LayerProcessor,
+    ruleEngine: RuleEngine,
     logger: Logger,
     metrics: Metrics,
     config: Partial<EventLoopConfig> = {}
@@ -95,6 +98,7 @@ export class EventLoop {
     this.eventQueue = eventQueue;
     this.eventBus = eventBus;
     this.layerProcessor = layerProcessor;
+    this.ruleEngine = ruleEngine;
     this.logger = logger.child({ component: 'event-loop' });
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -205,27 +209,32 @@ export class EventLoop {
       const eventsProcessed = await this.processEvents();
 
       // 2. Update agent state (energy, social debt, etc.)
-      const intents = this.agent.tick();
+      const agentIntents = this.agent.tick();
 
-      // 3. Apply intents
-      this.applyIntents(intents);
+      // 3. Evaluate rules
+      const ruleIntents = this.ruleEngine.evaluateTick(this.agent.getState());
 
-      // 4. Emit tick event to subscribers
+      // 4. Combine and apply all intents
+      const allIntents = [...agentIntents, ...ruleIntents];
+      this.applyIntents(allIntents);
+
+      // 5. Emit tick event to subscribers
       this.emitTickEvent();
 
-      // 5. Periodic maintenance
+      // 6. Periodic maintenance
       await this.periodicMaintenance();
 
-      // 6. Calculate next tick interval
+      // 7. Calculate next tick interval
       const nextInterval = this.calculateNextInterval();
 
-      // 7. Log tick summary
+      // 8. Log tick summary
       const tickDuration = Date.now() - tickStart;
       this.logger.debug(
         {
           tick: this.tickCount,
           eventsProcessed,
-          intents: intents.length,
+          agentIntents: agentIntents.length,
+          ruleIntents: ruleIntents.length,
           duration: tickDuration,
           nextInterval,
           mode: this.agent.getAlertnessMode(),
@@ -288,8 +297,16 @@ export class EventLoop {
       // Process through 6-layer brain pipeline
       const result = await this.layerProcessor.process(event);
 
-      // Apply intents from layer processing
-      this.applyIntents(result.intents);
+      // Evaluate event-specific rules
+      const eventRuleIntents = this.ruleEngine.evaluateEvent(this.agent.getState(), event);
+
+      // Record interaction for rule engine (resets timeSinceLastInteraction)
+      if (event.source === 'communication') {
+        this.ruleEngine.recordInteraction();
+      }
+
+      // Apply intents from layer processing and rules
+      this.applyIntents([...result.intents, ...eventRuleIntents]);
 
       // Recycle thoughts that need further processing
       await this.recycleThoughts(result.thoughts);
@@ -489,9 +506,19 @@ export function createEventLoop(
   eventQueue: EventQueue,
   eventBus: EventBus,
   layerProcessor: LayerProcessor,
+  ruleEngine: RuleEngine,
   logger: Logger,
   metrics: Metrics,
   config?: Partial<EventLoopConfig>
 ): EventLoop {
-  return new EventLoop(agent, eventQueue, eventBus, layerProcessor, logger, metrics, config);
+  return new EventLoop(
+    agent,
+    eventQueue,
+    eventBus,
+    layerProcessor,
+    ruleEngine,
+    logger,
+    metrics,
+    config
+  );
 }

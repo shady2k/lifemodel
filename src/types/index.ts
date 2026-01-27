@@ -10,6 +10,7 @@ export type * from './plugin.js';
 export type * from './metrics.js';
 export type * from './thought.js';
 export type * from './logger.js';
+export type * from './rule.js';
 
 // Agent types
 export type * from './agent/index.js';
@@ -34,3 +35,6 @@ export {
   createDefaultPatterns,
   createDefaultPreferences,
 } from './user/index.js';
+
+// Re-export rule factory functions
+export { createRule } from './rule.js';

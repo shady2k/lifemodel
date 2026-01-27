@@ -7,6 +7,7 @@ import { type Agent, createAgent, type AgentConfig } from './agent.js';
 import { type EventBus, createEventBus } from './event-bus.js';
 import { type EventLoop, createEventLoop, type EventLoopConfig } from './event-loop.js';
 import { type LayerProcessor, createLayerProcessor } from '../layers/layer-processor.js';
+import { type RuleEngine, createRuleEngine, createDefaultRules } from '../rules/index.js';
 
 /**
  * Application configuration.
@@ -51,6 +52,8 @@ export interface Container {
   agent: Agent;
   /** Layer processor (brain pipeline) */
   layerProcessor: LayerProcessor;
+  /** Rule engine */
+  ruleEngine: RuleEngine;
   /** The event loop (heartbeat) */
   eventLoop: EventLoop;
   /** Shutdown function */
@@ -112,12 +115,19 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create layer processor (brain pipeline)
   const layerProcessor = createLayerProcessor(logger);
 
-  // Create event loop (wired to layer processor)
+  // Create rule engine and load default rules
+  const ruleEngine = createRuleEngine(logger);
+  for (const rule of createDefaultRules()) {
+    ruleEngine.addRule(rule);
+  }
+
+  // Create event loop (wired to layer processor and rule engine)
   const eventLoop = createEventLoop(
     agent,
     eventQueue,
     eventBus,
     layerProcessor,
+    ruleEngine,
     logger,
     metrics,
     config.eventLoop
@@ -137,6 +147,7 @@ export function createContainer(config: AppConfig = {}): Container {
     metrics,
     agent,
     layerProcessor,
+    ruleEngine,
     eventLoop,
     shutdown,
   };
