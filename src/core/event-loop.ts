@@ -103,6 +103,11 @@ export class EventLoop {
   private readonly messageComposer: MessageComposer | undefined;
   private readonly userModel: UserModel | undefined;
 
+  /** Timestamp of last message sent by agent (for response timing) */
+  private lastMessageSentAt: number | null = null;
+  /** Chat ID of last message sent (to match responses) */
+  private lastMessageChatId: string | null = null;
+
   constructor(
     agent: Agent,
     eventQueue: EventQueue,
@@ -262,6 +267,11 @@ export class EventLoop {
       // 2. Update agent state (energy, social debt, etc.)
       const agentIntents = this.agent.tick();
 
+      // 2b. Update user model beliefs (time-based decay)
+      if (this.userModel) {
+        this.userModel.updateTimeBasedBeliefs();
+      }
+
       // 3. Evaluate rules
       const ruleIntents = this.ruleEngine.evaluateTick(this.agent.getState());
 
@@ -361,6 +371,14 @@ export class EventLoop {
       // Record interaction for rule engine (resets timeSinceLastInteraction)
       if (event.source === 'communication') {
         this.ruleEngine.recordInteraction();
+
+        // Update user beliefs based on message
+        if (this.userModel) {
+          this.userModel.processSignal('message_received');
+
+          // Check for response timing (if we sent a message recently)
+          this.processResponseTiming(event);
+        }
       }
 
       // Apply intents from layer processing and rules
@@ -526,6 +544,48 @@ export class EventLoop {
   }
 
   /**
+   * Process response timing to learn from user behavior.
+   * Called when a communication event is received.
+   */
+  private processResponseTiming(event: Event): void {
+    if (!this.userModel || !this.lastMessageSentAt) {
+      return;
+    }
+
+    // Extract chat ID from event payload
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const chatId = payload?.['chatId'] as string | undefined;
+
+    // Only process if this is a response to our message
+    if (!chatId || chatId !== this.lastMessageChatId) {
+      return;
+    }
+
+    const responseTimeMs = Date.now() - this.lastMessageSentAt;
+    const responseTimeSec = responseTimeMs / 1000;
+
+    // Classify response speed
+    // Quick: < 30 seconds
+    // Normal: 30 seconds - 5 minutes
+    // Slow: 5 - 30 minutes
+    // Very slow: > 30 minutes (but still responded)
+    if (responseTimeSec < 30) {
+      this.userModel.processSignal('quick_response', { responseTimeMs });
+      this.logger.debug({ responseTimeSec: responseTimeSec.toFixed(1) }, 'Quick response detected');
+    } else if (responseTimeSec > 300) {
+      this.userModel.processSignal('slow_response', { responseTimeMs });
+      this.logger.debug({ responseTimeSec: responseTimeSec.toFixed(1) }, 'Slow response detected');
+    }
+    // Normal response time doesn't trigger a specific signal
+
+    // Reset tracking after processing
+    this.lastMessageSentAt = null;
+    this.lastMessageChatId = null;
+
+    this.metrics.histogram('user_response_time_ms', responseTimeMs);
+  }
+
+  /**
    * Check if an event should be processed based on alertness mode.
    */
   private shouldProcessEvent(event: Event, mode: string): boolean {
@@ -609,6 +669,9 @@ export class EventLoop {
             // Fire and forget - don't block tick on send
             void channelImpl.sendMessage(target, text, sendOptions).then((success) => {
               if (success) {
+                // Track for response timing
+                this.lastMessageSentAt = Date.now();
+                this.lastMessageChatId = target;
                 this.metrics.counter('messages_sent', { channel });
               } else {
                 this.metrics.counter('messages_failed', { channel });
