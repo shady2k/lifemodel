@@ -54,6 +54,14 @@ export interface Channel {
   sendMessage(target: string, text: string, options?: SendOptions): Promise<boolean>;
 
   /**
+   * Send typing indicator to show the bot is preparing a response.
+   * Optional - not all channels support this.
+   *
+   * @param target - Target identifier (user ID, chat ID, etc.)
+   */
+  sendTyping?(target: string): Promise<void>;
+
+  /**
    * Start the channel (begin receiving messages).
    * Optional - some channels may not need explicit start.
    */

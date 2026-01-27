@@ -210,6 +210,31 @@ export class TelegramChannel implements Channel {
   }
 
   /**
+   * Send typing indicator to show the bot is preparing a response.
+   */
+  async sendTyping(target: string): Promise<void> {
+    if (!this.bot) {
+      return;
+    }
+
+    const chatId = parseInt(target, 10);
+    if (isNaN(chatId)) {
+      return;
+    }
+
+    try {
+      await this.bot.api.sendChatAction(chatId, 'typing');
+      this.logger?.debug({ chatId: target }, 'Typing indicator sent');
+    } catch (error) {
+      // Don't fail if typing indicator fails - it's not critical
+      this.logger?.debug(
+        { chatId: target, error: error instanceof Error ? error.message : String(error) },
+        'Failed to send typing indicator'
+      );
+    }
+  }
+
+  /**
    * Handle incoming message - convert to Event and push to queue.
    */
   private async onMessage(ctx: {

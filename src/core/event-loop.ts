@@ -115,6 +115,8 @@ export class EventLoop {
   private lastMessageSentAt: number | null = null;
   /** Chat ID of last message sent (to match responses) */
   private lastMessageChatId: string | null = null;
+  /** Subscription ID for typing events */
+  private typingSubscriptionId: string | null = null;
 
   constructor(
     agent: Agent,
@@ -151,6 +153,13 @@ export class EventLoop {
     }
 
     this.running = true;
+
+    // Subscribe to typing events
+    this.typingSubscriptionId = this.eventBus.subscribe(
+      (event) => void this.handleTypingEvent(event),
+      { source: 'internal', type: 'typing_start' }
+    );
+
     this.logger.info('Event loop started');
 
     // Schedule first tick immediately
@@ -170,6 +179,12 @@ export class EventLoop {
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
       this.tickTimeout = null;
+    }
+
+    // Unsubscribe from typing events
+    if (this.typingSubscriptionId) {
+      this.eventBus.unsubscribe(this.typingSubscriptionId);
+      this.typingSubscriptionId = null;
     }
 
     this.logger.info({ tickCount: this.tickCount }, 'Event loop stopped');
@@ -650,6 +665,25 @@ export class EventLoop {
         { error: error instanceof Error ? error.message : String(error), chatId },
         'Failed to save agent message to history'
       );
+    }
+  }
+
+  /**
+   * Handle typing_start event from layer processor.
+   * Sends typing indicator to the appropriate channel.
+   */
+  private async handleTypingEvent(event: Event): Promise<void> {
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const chatId = payload?.['chatId'] as string | undefined;
+    const channelName = event.channel;
+
+    if (!chatId || !channelName) {
+      return;
+    }
+
+    const channel = this.channels.get(channelName);
+    if (channel?.sendTyping) {
+      await channel.sendTyping(chatId);
     }
   }
 

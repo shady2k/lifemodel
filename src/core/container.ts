@@ -486,6 +486,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     userModel: userModel ?? undefined,
   });
 
+  // Set event bus for typing events
+  layerProcessor.setEventBus(eventBus);
+
   // Create configurable neurons for learning
   const contactPressureNeuron = createConfigurableContactPressureNeuron();
   const alertnessNeuron = createConfigurableAlertnessNeuron();

@@ -1,4 +1,5 @@
 import type { Event, ProcessingLayer, Logger, Intent, Thought } from '../types/index.js';
+import { Priority } from '../types/index.js';
 import type { ProcessingContext } from './context.js';
 import { createProcessingContext } from './context.js';
 import { createReflexLayer } from './reflex-layer.js';
@@ -12,6 +13,8 @@ import {
 import { createDecisionLayer } from './decision-layer.js';
 import { createExpressionLayer, type ExpressionLayer } from './expression-layer.js';
 import type { MessageComposer } from '../llm/composer.js';
+import type { EventBus } from '../core/event-bus.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Result from processing an event through all layers.
@@ -52,6 +55,7 @@ export class LayerProcessor {
   private readonly expressionLayer: ExpressionLayer;
   private readonly cognitionLayer: CognitionLayer;
   private readonly logger: Logger;
+  private eventBus: EventBus | null = null;
 
   constructor(logger: Logger) {
     this.logger = logger.child({ component: 'layer-processor' });
@@ -92,6 +96,14 @@ export class LayerProcessor {
   }
 
   /**
+   * Set event bus for publishing typing events.
+   */
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
+    this.logger.debug('EventBus attached to layer processor');
+  }
+
+  /**
    * Process an event through all layers.
    */
   async process(event: Event): Promise<ProcessingResult> {
@@ -113,6 +125,11 @@ export class LayerProcessor {
         const result = await layer.process(context);
 
         layersExecuted.push(layer.name);
+
+        // After decision layer, emit typing event if we're going to respond
+        if (layer.name === 'decision' && context.decision?.shouldAct && this.eventBus) {
+          void this.emitTypingEvent(event);
+        }
 
         // Collect intents
         if (result.intents) {
@@ -194,6 +211,33 @@ export class LayerProcessor {
    */
   getLayerNames(): string[] {
     return this.layers.map((l) => l.name);
+  }
+
+  /**
+   * Emit typing event via event bus.
+   */
+  private async emitTypingEvent(originalEvent: Event): Promise<void> {
+    if (!this.eventBus) return;
+
+    // Extract target from original event payload
+    const payload = originalEvent.payload as Record<string, unknown> | undefined;
+    const chatId = payload?.['chatId'] as string | undefined;
+    const channel = originalEvent.channel;
+
+    if (!chatId || !channel) return;
+
+    const typingEvent: Event = {
+      id: randomUUID(),
+      source: 'internal',
+      channel,
+      type: 'typing_start',
+      priority: Priority.HIGH,
+      timestamp: new Date(),
+      payload: { chatId },
+    };
+
+    await this.eventBus.publish(typingEvent);
+    this.logger.debug({ chatId, channel }, '⌨️ Typing event emitted');
   }
 }
 
