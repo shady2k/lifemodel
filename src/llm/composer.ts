@@ -126,7 +126,7 @@ export class MessageComposer {
         messages,
         role: 'smart', // Use smart model for composition
         temperature: 0.7,
-        maxTokens: 300,
+        maxTokens: 800, // Enough for detailed responses
       });
 
       return {
@@ -271,7 +271,8 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 - Complex questions, deep reasoning, technical topics → canHandle=false
 - Anything you're unsure about → canHandle=false, let smart model handle it
 - Match the language of the user's message (if they write in Russian, respond in Russian)
-- Keep responses concise and natural`;
+- Keep responses concise and natural
+- Do NOT use markdown in suggestedResponse (no asterisks, no bold, plain text only)`;
   }
 
   /**
@@ -375,7 +376,9 @@ ${moodInstructions[context.mood ?? 'neutral'] ?? 'Be balanced and natural.'}`;
       prompt += `\n\nAdditional guidelines:\n${context.constraints.map((c) => `- ${c}`).join('\n')}`;
     }
 
-    prompt += `\n\nRespond naturally and conversationally. Keep messages concise.`;
+    prompt += `\n\nRespond naturally and conversationally. Keep messages concise.
+Do NOT use markdown formatting (no asterisks for bold, no headers, no bullet lists with dashes).
+Write plain text only.`;
 
     return prompt;
   }
