@@ -211,11 +211,10 @@ export class OpenRouterProvider implements LLMProvider {
 
       const data = (await response.json()) as OpenRouterResponse;
 
-      if (data.choices.length === 0) {
+      const firstChoice = data.choices[0];
+      if (!firstChoice) {
         throw new LLMError('Invalid response from OpenRouter', this.name);
       }
-
-      const firstChoice = data.choices[0];
 
       const result: CompletionResponse = {
         content: firstChoice.message.content,

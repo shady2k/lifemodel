@@ -38,3 +38,6 @@ export {
 
 // Re-export rule factory functions
 export { createRule } from './rule.js';
+
+// Channel types (re-exported from channels module)
+export type { Channel, CircuitStats, SendOptions } from '../channels/channel.js';

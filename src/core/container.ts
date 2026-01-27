@@ -1,13 +1,21 @@
 import type { Logger } from 'pino';
-import type { EventQueue, Metrics, AgentIdentity, AgentState } from '../types/index.js';
+import type { EventQueue, Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import { createLogger, type LoggerConfig } from './logger.js';
 import { createEventQueue } from './event-queue.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
 import { type EventBus, createEventBus } from './event-bus.js';
-import { type EventLoop, createEventLoop, type EventLoopConfig } from './event-loop.js';
+import { type EventLoop, type EventLoopConfig, createEventLoop } from './event-loop.js';
 import { type LayerProcessor, createLayerProcessor } from '../layers/layer-processor.js';
 import { type RuleEngine, createRuleEngine, createDefaultRules } from '../rules/index.js';
+import {
+  type TelegramChannel,
+  createTelegramChannel,
+  type TelegramConfig,
+} from '../channels/index.js';
+import { type UserModel, createNewUserWithModel } from '../models/user-model.js';
+import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
+import { type OpenRouterProvider, createOpenRouterProvider } from '../llm/openrouter.js';
 
 /**
  * Application configuration.
@@ -34,6 +42,22 @@ export interface AppConfig {
   };
   /** Event loop configuration */
   eventLoop?: Partial<EventLoopConfig>;
+  /** Telegram configuration */
+  telegram?: TelegramConfig;
+  /** Primary user configuration (for proactive contact) */
+  primaryUser?: {
+    /** User's name */
+    name?: string;
+    /** Telegram chat ID to send proactive messages to */
+    telegramChatId?: string;
+    /** User's timezone offset from UTC in hours (e.g., -5 for EST) */
+    timezoneOffset?: number;
+  };
+  /** LLM configuration */
+  llm?: {
+    /** OpenRouter API key */
+    openRouterApiKey?: string;
+  };
 }
 
 /**
@@ -56,6 +80,18 @@ export interface Container {
   ruleEngine: RuleEngine;
   /** The event loop (heartbeat) */
   eventLoop: EventLoop;
+  /** Telegram channel (optional, depends on config) */
+  telegramChannel: TelegramChannel | null;
+  /** All registered channels */
+  channels: Map<string, Channel>;
+  /** User model for tracking user beliefs (optional) */
+  userModel: UserModel | null;
+  /** LLM provider (optional) */
+  llmProvider: OpenRouterProvider | null;
+  /** Message composer (optional, needs LLM provider) */
+  messageComposer: MessageComposer | null;
+  /** Primary user's Telegram chat ID (for proactive messages) */
+  primaryUserChatId: string | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -121,7 +157,53 @@ export function createContainer(config: AppConfig = {}): Container {
     ruleEngine.addRule(rule);
   }
 
-  // Create event loop (wired to layer processor and rule engine)
+  // Get primary user chat ID
+  const primaryUserChatId =
+    config.primaryUser?.telegramChatId ?? process.env['PRIMARY_USER_CHAT_ID'] ?? null;
+
+  // Create UserModel if primary user configured
+  let userModel: UserModel | null = null;
+  if (primaryUserChatId) {
+    const userName = config.primaryUser?.name ?? 'User';
+    const timezoneOffset = config.primaryUser?.timezoneOffset ?? 0;
+    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
+    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
+  } else {
+    logger.debug('UserModel not created (no primary user configured)');
+  }
+
+  // Create LLM provider if configured
+  let llmProvider: OpenRouterProvider | null = null;
+  const openRouterApiKey = config.llm?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
+  if (openRouterApiKey) {
+    llmProvider = createOpenRouterProvider({ apiKey: openRouterApiKey }, logger);
+    logger.info('OpenRouter LLM provider configured');
+  } else {
+    logger.debug('LLM provider not configured (no API key)');
+  }
+
+  // Create MessageComposer if LLM available
+  let messageComposer: MessageComposer | null = null;
+  if (llmProvider) {
+    const identity = agentConfig.identity ?? agent.getIdentity();
+    messageComposer = createMessageComposer(llmProvider, identity);
+    logger.info('MessageComposer configured');
+  }
+
+  // Attach composer to expression layer if available
+  if (messageComposer) {
+    layerProcessor.setComposer(messageComposer);
+  }
+
+  // Create event loop config with primary user chat ID
+  const eventLoopConfig: Partial<EventLoopConfig> = {
+    ...config.eventLoop,
+  };
+  if (primaryUserChatId) {
+    eventLoopConfig.primaryUserChatId = primaryUserChatId;
+  }
+
+  // Create event loop (wired to layer processor, rule engine, and proactive messaging deps)
   const eventLoop = createEventLoop(
     agent,
     eventQueue,
@@ -130,14 +212,42 @@ export function createContainer(config: AppConfig = {}): Container {
     ruleEngine,
     logger,
     metrics,
-    config.eventLoop
+    eventLoopConfig,
+    {
+      messageComposer: messageComposer ?? undefined,
+      userModel: userModel ?? undefined,
+    }
   );
 
+  // Create channels registry
+  const channels = new Map<string, Channel>();
+
+  // Create Telegram channel if configured
+  let telegramChannel: TelegramChannel | null = null;
+  const telegramConfig = config.telegram ?? {
+    botToken: process.env['TELEGRAM_BOT_TOKEN'] ?? '',
+  };
+
+  if (telegramConfig.botToken) {
+    telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
+    channels.set('telegram', telegramChannel);
+    eventLoop.registerChannel(telegramChannel);
+    logger.info('Telegram channel configured');
+  } else {
+    logger.debug('Telegram channel not configured (no bot token)');
+  }
+
   // Shutdown function
-  const shutdown = (): Promise<void> => {
+  const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
     eventLoop.stop();
-    return Promise.resolve();
+
+    // Stop all channels
+    for (const channel of channels.values()) {
+      if (channel.stop) {
+        await channel.stop();
+      }
+    }
   };
 
   return {
@@ -149,6 +259,12 @@ export function createContainer(config: AppConfig = {}): Container {
     layerProcessor,
     ruleEngine,
     eventLoop,
+    telegramChannel,
+    channels,
+    userModel,
+    llmProvider,
+    messageComposer,
+    primaryUserChatId,
     shutdown,
   };
 }

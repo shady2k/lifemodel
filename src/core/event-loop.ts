@@ -7,12 +7,15 @@ import type {
   Intent,
   PruneConfig,
   Thought,
+  Channel,
 } from '../types/index.js';
 import { Priority, PRIORITY_DISTURBANCE_WEIGHT } from '../types/index.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
 import type { LayerProcessor } from '../layers/layer-processor.js';
 import type { RuleEngine } from '../rules/rule-engine.js';
+import type { MessageComposer } from '../llm/composer.js';
+import type { UserModel } from '../models/user-model.js';
 
 /**
  * Event loop configuration.
@@ -38,6 +41,19 @@ export interface EventLoopConfig {
 
   /** Prune config for overload handling */
   pruneConfig: PruneConfig;
+
+  /** Primary user's Telegram chat ID for proactive messages */
+  primaryUserChatId?: string;
+}
+
+/**
+ * Optional dependencies for proactive messaging.
+ */
+export interface EventLoopDeps {
+  /** Message composer for generating proactive messages */
+  messageComposer?: MessageComposer | undefined;
+  /** User model for checking user state before contacting */
+  userModel?: UserModel | undefined;
 }
 
 const DEFAULT_CONFIG: EventLoopConfig = {
@@ -83,6 +99,9 @@ export class EventLoop {
   private running = false;
   private tickCount = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
+  private readonly channels = new Map<string, Channel>();
+  private readonly messageComposer: MessageComposer | undefined;
+  private readonly userModel: UserModel | undefined;
 
   constructor(
     agent: Agent,
@@ -92,7 +111,8 @@ export class EventLoop {
     ruleEngine: RuleEngine,
     logger: Logger,
     metrics: Metrics,
-    config: Partial<EventLoopConfig> = {}
+    config: Partial<EventLoopConfig> = {},
+    deps: EventLoopDeps = {}
   ) {
     this.agent = agent;
     this.eventQueue = eventQueue;
@@ -102,6 +122,8 @@ export class EventLoop {
     this.logger = logger.child({ component: 'event-loop' });
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.messageComposer = deps.messageComposer;
+    this.userModel = deps.userModel;
   }
 
   /**
@@ -143,6 +165,35 @@ export class EventLoop {
    */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Register a channel for message routing.
+   */
+  registerChannel(channel: Channel): void {
+    if (this.channels.has(channel.name)) {
+      this.logger.warn({ channel: channel.name }, 'Channel already registered, replacing');
+    }
+    this.channels.set(channel.name, channel);
+    this.logger.info({ channel: channel.name }, 'Channel registered');
+  }
+
+  /**
+   * Unregister a channel.
+   */
+  unregisterChannel(name: string): boolean {
+    const removed = this.channels.delete(name);
+    if (removed) {
+      this.logger.info({ channel: name }, 'Channel unregistered');
+    }
+    return removed;
+  }
+
+  /**
+   * Get a registered channel by name.
+   */
+  getChannel(name: string): Channel | undefined {
+    return this.channels.get(name);
   }
 
   /**
@@ -294,6 +345,13 @@ export class EventLoop {
       // Notify agent of event processing (drains energy)
       this.agent.onEventProcessed();
 
+      // Special handling for proactive contact events
+      if (event.type === 'contact_pressure_threshold') {
+        await this.handleProactiveContact(event);
+        processed++;
+        continue;
+      }
+
       // Process through 6-layer brain pipeline
       const result = await this.layerProcessor.process(event);
 
@@ -387,6 +445,87 @@ export class EventLoop {
   }
 
   /**
+   * Handle proactive contact events.
+   * Composes a message using the LLM and sends it to the primary user.
+   */
+  private async handleProactiveContact(event: Event): Promise<void> {
+    const chatId = this.config.primaryUserChatId;
+
+    // Check prerequisites
+    if (!chatId) {
+      this.logger.debug('Skipping proactive contact: no primary user chat ID configured');
+      return;
+    }
+
+    if (!this.messageComposer) {
+      this.logger.debug('Skipping proactive contact: no message composer available');
+      return;
+    }
+
+    const telegramChannel = this.channels.get('telegram');
+    if (!telegramChannel) {
+      this.logger.debug('Skipping proactive contact: telegram channel not available');
+      return;
+    }
+
+    // Check if user is available (if userModel configured)
+    if (this.userModel) {
+      const contactScore = this.userModel.getContactScore();
+      if (contactScore < 0.3) {
+        this.logger.info(
+          { contactScore: contactScore.toFixed(2) },
+          'Skipping proactive contact: user likely unavailable'
+        );
+        return;
+      }
+
+      // Check if user is asleep
+      if (this.userModel.isLikelyAsleep()) {
+        this.logger.info('Skipping proactive contact: user likely asleep');
+        return;
+      }
+    }
+
+    // Extract reason from event payload
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const pressure = payload?.['pressure'] as number | undefined;
+    const reason = payload?.['reason'] as string | undefined;
+
+    // Compose proactive message
+    this.logger.info({ pressure: pressure?.toFixed(2), reason }, 'Composing proactive message');
+
+    // Notify agent of LLM call (drains energy)
+    this.agent.onLLMCall();
+
+    const result = await this.messageComposer.composeProactive(reason ?? 'social debt accumulated');
+
+    if (!result.success || !result.message) {
+      this.logger.warn({ error: result.error }, 'Failed to compose proactive message');
+      return;
+    }
+
+    // Send the message
+    const sent = await telegramChannel.sendMessage(chatId, result.message);
+
+    if (sent) {
+      this.logger.info(
+        { chatId, messageLength: result.message.length, tokensUsed: result.tokensUsed },
+        'Proactive message sent'
+      );
+      this.metrics.counter('proactive_messages_sent');
+
+      // Reset social debt after successful contact
+      this.agent.applyIntent({
+        type: 'UPDATE_STATE',
+        payload: { key: 'socialDebt', value: 0.1 },
+      });
+    } else {
+      this.logger.warn({ chatId }, 'Failed to send proactive message');
+      this.metrics.counter('proactive_messages_failed');
+    }
+  }
+
+  /**
    * Check if an event should be processed based on alertness mode.
    */
   private shouldProcessEvent(event: Event, mode: string): boolean {
@@ -420,15 +559,69 @@ export class EventLoop {
           this.agent.applyIntent(intent);
           break;
 
-        case 'SCHEDULE_EVENT':
-          // TODO: Implement scheduled events
-          this.logger.debug({ intent }, 'SCHEDULE_EVENT not yet implemented');
-          break;
+        case 'SCHEDULE_EVENT': {
+          const { event, delay, scheduleId } = intent.payload;
+          const fullEvent: Event = {
+            id: scheduleId ?? randomUUID(),
+            source: event.source as Event['source'],
+            type: event.type,
+            priority: event.priority,
+            timestamp: new Date(),
+            payload: event.payload,
+          };
+          // Only assign channel if provided
+          if (event.channel) {
+            fullEvent.channel = event.channel;
+          }
 
-        case 'SEND_MESSAGE':
-          // TODO: Route to channel
-          this.logger.debug({ intent }, 'SEND_MESSAGE not yet implemented');
+          if (delay <= 0) {
+            // Immediate - push to queue now
+            void this.eventQueue.push(fullEvent);
+            this.logger.debug(
+              { eventId: fullEvent.id, type: fullEvent.type },
+              'Event scheduled immediately'
+            );
+          } else {
+            // Delayed - schedule with setTimeout
+            setTimeout(() => {
+              if (this.running) {
+                void this.eventQueue.push(fullEvent);
+                this.logger.debug(
+                  { eventId: fullEvent.id, type: fullEvent.type, delay },
+                  'Delayed event queued'
+                );
+              }
+            }, delay);
+            this.logger.debug(
+              { eventId: fullEvent.id, type: fullEvent.type, delay },
+              'Event scheduled with delay'
+            );
+          }
           break;
+        }
+
+        case 'SEND_MESSAGE': {
+          const { channel, text, target, replyTo } = intent.payload;
+          const channelImpl = this.channels.get(channel);
+          if (channelImpl && target) {
+            // Build options only if replyTo is provided
+            const sendOptions = replyTo ? { replyTo } : undefined;
+            // Fire and forget - don't block tick on send
+            void channelImpl.sendMessage(target, text, sendOptions).then((success) => {
+              if (success) {
+                this.metrics.counter('messages_sent', { channel });
+              } else {
+                this.metrics.counter('messages_failed', { channel });
+              }
+            });
+          } else {
+            this.logger.warn(
+              { channel, target, hasChannel: Boolean(channelImpl) },
+              'Cannot route message: channel not found or no target'
+            );
+          }
+          break;
+        }
 
         case 'LOG':
           this.logger[intent.payload.level](intent.payload.context ?? {}, intent.payload.message);
@@ -509,7 +702,8 @@ export function createEventLoop(
   ruleEngine: RuleEngine,
   logger: Logger,
   metrics: Metrics,
-  config?: Partial<EventLoopConfig>
+  config?: Partial<EventLoopConfig>,
+  deps?: EventLoopDeps
 ): EventLoop {
   return new EventLoop(
     agent,
@@ -519,6 +713,7 @@ export function createEventLoop(
     ruleEngine,
     logger,
     metrics,
-    config
+    config,
+    deps
   );
 }

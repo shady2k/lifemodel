@@ -9,7 +9,7 @@ import { createContainer } from './core/container.js';
 // Create the application container
 const container = createContainer();
 
-const { logger, agent, eventLoop } = container;
+const { logger, agent, eventLoop, telegramChannel, messageComposer, primaryUserChatId } = container;
 
 logger.info('Lifemodel starting...');
 logger.info(
@@ -21,6 +21,25 @@ logger.info(
   },
   'Agent ready'
 );
+
+// Log proactive messaging capability
+if (messageComposer && primaryUserChatId && telegramChannel) {
+  logger.info({ chatId: primaryUserChatId }, 'Proactive messaging enabled');
+} else {
+  logger.info(
+    {
+      hasComposer: !!messageComposer,
+      hasChatId: !!primaryUserChatId,
+      hasTelegram: !!telegramChannel,
+    },
+    'Proactive messaging not fully configured'
+  );
+}
+
+// Start Telegram channel if configured
+if (telegramChannel) {
+  void telegramChannel.start();
+}
 
 // Start the event loop (heartbeat)
 eventLoop.start();
