@@ -19,8 +19,10 @@ import { type OpenRouterProvider, createOpenRouterProvider } from '../llm/openro
 import {
   type Storage,
   type StateManager,
+  type ConversationManager,
   createJSONStorage,
   createStateManager,
+  createConversationManager,
 } from '../storage/index.js';
 import {
   type ConfigurableNeuron,
@@ -113,6 +115,8 @@ export interface Container {
   storage: Storage | null;
   /** State manager for persistence */
   stateManager: StateManager | null;
+  /** Conversation manager for history */
+  conversationManager: ConversationManager | null;
   /** Learning engine for self-learning */
   learningEngine: LearningEngine | null;
   /** Configurable neurons for learning */
@@ -324,6 +328,7 @@ export function createContainer(config: AppConfig = {}): Container {
     primaryUserChatId,
     storage: null,
     stateManager: null,
+    conversationManager: null,
     learningEngine,
     neurons: {
       contactPressure: contactPressureNeuron,
@@ -366,6 +371,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create state manager
   const stateManager = createStateManager(storage, logger);
+
+  // Create conversation manager for history
+  const conversationManager = createConversationManager(storage, logger);
+  logger.info('ConversationManager configured');
 
   // Load persisted state
   const persistedState = await stateManager.load();
@@ -470,6 +479,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     layerProcessor.setComposer(messageComposer);
   }
 
+  // Set cognition layer dependencies (composer, conversation manager, user model)
+  layerProcessor.setCognitionDependencies({
+    composer: messageComposer ?? undefined,
+    conversationManager,
+    userModel: userModel ?? undefined,
+  });
+
   // Create configurable neurons for learning
   const contactPressureNeuron = createConfigurableContactPressureNeuron();
   const alertnessNeuron = createConfigurableAlertnessNeuron();
@@ -521,6 +537,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       messageComposer: messageComposer ?? undefined,
       userModel: userModel ?? undefined,
       learningEngine,
+      conversationManager,
     }
   );
 
@@ -602,6 +619,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     primaryUserChatId,
     storage,
     stateManager,
+    conversationManager,
     learningEngine,
     neurons: {
       contactPressure: contactPressureNeuron,

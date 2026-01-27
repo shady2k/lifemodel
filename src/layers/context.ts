@@ -174,6 +174,12 @@ export interface CognitionOutput {
 
   /** Does this need deeper reasoning (LLM)? */
   needsReasoning: boolean;
+
+  /** Suggested response from fast model (if available) */
+  fastModelResponse?: string | undefined;
+
+  /** Confidence of fast model classification (0-1) */
+  fastModelConfidence?: number | undefined;
 }
 
 /**

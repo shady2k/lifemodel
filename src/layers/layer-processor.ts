@@ -4,7 +4,11 @@ import { createProcessingContext } from './context.js';
 import { createReflexLayer } from './reflex-layer.js';
 import { createPerceptionLayer } from './perception-layer.js';
 import { createInterpretationLayer } from './interpretation-layer.js';
-import { createCognitionLayer } from './cognition-layer.js';
+import {
+  createCognitionLayer,
+  type CognitionLayer,
+  type CognitionLayerDeps,
+} from './cognition-layer.js';
 import { createDecisionLayer } from './decision-layer.js';
 import { createExpressionLayer, type ExpressionLayer } from './expression-layer.js';
 import type { MessageComposer } from '../llm/composer.js';
@@ -46,6 +50,7 @@ export interface ProcessingResult {
 export class LayerProcessor {
   private readonly layers: ProcessingLayer[];
   private readonly expressionLayer: ExpressionLayer;
+  private readonly cognitionLayer: CognitionLayer;
   private readonly logger: Logger;
 
   constructor(logger: Logger) {
@@ -54,12 +59,15 @@ export class LayerProcessor {
     // Create expression layer separately to keep reference
     this.expressionLayer = createExpressionLayer(logger);
 
+    // Create cognition layer separately to keep reference
+    this.cognitionLayer = createCognitionLayer(logger);
+
     // Create all layers in order
     this.layers = [
       createReflexLayer(logger),
       createPerceptionLayer(logger),
       createInterpretationLayer(logger),
-      createCognitionLayer(logger),
+      this.cognitionLayer,
       createDecisionLayer(logger),
       this.expressionLayer,
     ];
@@ -67,10 +75,20 @@ export class LayerProcessor {
 
   /**
    * Set the message composer for LLM-based responses.
+   * This is passed to both cognition (for classification) and expression (for composition).
    */
   setComposer(composer: MessageComposer): void {
     this.expressionLayer.setComposer(composer);
+    this.cognitionLayer.setDependencies({ composer });
     this.logger.info('MessageComposer attached to layer processor');
+  }
+
+  /**
+   * Set dependencies on the cognition layer.
+   */
+  setCognitionDependencies(deps: CognitionLayerDeps): void {
+    this.cognitionLayer.setDependencies(deps);
+    this.logger.debug('Cognition layer dependencies updated');
   }
 
   /**

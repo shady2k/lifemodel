@@ -177,7 +177,20 @@ export class ExpressionLayer extends BaseLayer {
   private async generateFullResponse(context: ProcessingContext, lang: string): Promise<string> {
     const { interpretation, cognition, decision, perception } = context;
 
-    // Try LLM for complex responses
+    // Check if fast model already provided a confident response
+    if (
+      cognition?.fastModelResponse &&
+      cognition.fastModelConfidence !== undefined &&
+      cognition.fastModelConfidence >= 0.8
+    ) {
+      this.logger.debug(
+        { confidence: cognition.fastModelConfidence },
+        '✨ Using fast model response'
+      );
+      return cognition.fastModelResponse;
+    }
+
+    // Use smart LLM for complex responses that need reasoning
     if (cognition?.needsReasoning && this.composer) {
       const userMessage =
         perception?.text ??
@@ -190,7 +203,7 @@ export class ExpressionLayer extends BaseLayer {
       if (userMessage) {
         const result = await this.composer.composeResponse(userMessage);
         if (result.success && result.message) {
-          this.logger.debug({ tokensUsed: result.tokensUsed }, 'LLM response generated');
+          this.logger.debug({ tokensUsed: result.tokensUsed }, '🧠 Smart model response generated');
           return result.message;
         }
         // Fall through to template if LLM fails

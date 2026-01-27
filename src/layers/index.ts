@@ -21,6 +21,7 @@ export { BaseLayer } from './base-layer.js';
 export { ReflexLayer, createReflexLayer } from './reflex-layer.js';
 export { PerceptionLayer, createPerceptionLayer } from './perception-layer.js';
 export { InterpretationLayer, createInterpretationLayer } from './interpretation-layer.js';
+export type { CognitionLayerDeps } from './cognition-layer.js';
 export { CognitionLayer, createCognitionLayer } from './cognition-layer.js';
 export { DecisionLayer, createDecisionLayer } from './decision-layer.js';
 export { ExpressionLayer, createExpressionLayer } from './expression-layer.js';

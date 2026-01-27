@@ -2,6 +2,51 @@ import type { AgentIdentity } from '../types/index.js';
 import type { LLMProvider, Message } from './provider.js';
 
 /**
+ * User state for classification context.
+ */
+export interface UserStateContext {
+  name: string;
+  energy: number;
+  availability: number;
+  mood: string;
+  confidence: number;
+}
+
+/**
+ * Context for fast model classification.
+ */
+export interface ClassificationContext {
+  /** The user's message to classify */
+  userMessage: string;
+
+  /** Conversation history (compacted) */
+  conversationHistory?: Message[] | undefined;
+
+  /** Current user state (agent's beliefs) */
+  userState?: UserStateContext | undefined;
+}
+
+/**
+ * Result from fast model classification.
+ */
+export interface ClassificationResult {
+  /** Can the fast model handle this confidently? */
+  canHandle: boolean;
+
+  /** Confidence level 0-1 */
+  confidence: number;
+
+  /** Suggested response if canHandle is true */
+  suggestedResponse?: string | undefined;
+
+  /** Brief reasoning for the decision */
+  reasoning?: string | undefined;
+
+  /** Tokens used */
+  tokensUsed?: number | undefined;
+}
+
+/**
  * Context for composing a message.
  */
 export interface CompositionContext {
@@ -119,6 +164,180 @@ export class MessageComposer {
       conversationHistory: history,
       mood: 'neutral',
     });
+  }
+
+  /**
+   * Classify a message and optionally generate a response using the fast model.
+   *
+   * This is the first step in processing - if the fast model can handle it
+   * confidently, we skip the expensive smart model.
+   */
+  async classifyAndRespond(context: ClassificationContext): Promise<ClassificationResult> {
+    if (!this.provider.isAvailable()) {
+      return {
+        canHandle: false,
+        confidence: 0,
+        reasoning: 'LLM provider not available',
+      };
+    }
+
+    try {
+      const systemPrompt = this.buildClassificationPrompt(context);
+
+      const messages: Message[] = [{ role: 'system', content: systemPrompt }];
+
+      // Add conversation history if available
+      if (context.conversationHistory) {
+        messages.push(...context.conversationHistory);
+      }
+
+      // Add the user message
+      messages.push({ role: 'user', content: context.userMessage });
+
+      const response = await this.provider.complete({
+        messages,
+        role: 'fast', // Use fast model for classification
+        temperature: 0.3, // Lower temperature for more consistent classification
+        maxTokens: 500,
+      });
+
+      // Parse JSON response
+      const parsed = this.parseClassificationResponse(response.content);
+
+      return {
+        ...parsed,
+        tokensUsed: response.usage?.totalTokens,
+      };
+    } catch (error) {
+      return {
+        canHandle: false,
+        confidence: 0,
+        reasoning: `Classification failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Build system prompt for classification with full context.
+   */
+  private buildClassificationPrompt(context: ClassificationContext): string {
+    const personality = this.identity.personality;
+
+    // Build personality traits description
+    const traits: string[] = [];
+    if (personality.humor > 0.7) traits.push('witty and playful');
+    if (personality.formality < 0.3) traits.push('casual and relaxed');
+    if (personality.formality > 0.7) traits.push('professional and polished');
+    if (personality.empathy > 0.7) traits.push('warm and empathetic');
+    if (personality.curiosity > 0.7) traits.push('curious and engaged');
+    if (personality.shyness > 0.6) traits.push('somewhat reserved');
+    if (personality.patience > 0.7) traits.push('patient');
+
+    // Build user state section
+    let userStateSection = '';
+    if (context.userState) {
+      const { name, energy, availability, mood, confidence } = context.userState;
+      userStateSection = `
+## Current User State (your beliefs about them)
+- Name: ${name}
+- Energy level: ${energy.toFixed(1)}/1.0 (${this.describeEnergy(energy)})
+- Availability: ${availability.toFixed(1)}/1.0
+- Mood: ${this.describeMood(mood)}
+- Confidence in these beliefs: ${confidence.toFixed(1)}/1.0`;
+    }
+
+    return `You are ${this.identity.name}, a personal AI assistant.
+
+## Your Personality
+- Traits: ${traits.length > 0 ? traits.join(', ') : 'balanced and helpful'}
+- Values: ${this.identity.values.join(', ')}
+- Boundaries: ${this.identity.boundaries.join(', ')}
+${userStateSection}
+
+## Your Task
+Analyze the user's message and decide if you can respond naturally and confidently.
+
+Respond ONLY with valid JSON (no markdown, no explanation):
+{
+  "canHandle": true or false,
+  "confidence": 0.0 to 1.0,
+  "suggestedResponse": "Your response in character (only if canHandle=true)",
+  "reasoning": "Brief explanation of your decision"
+}
+
+## Guidelines
+- Simple social interactions ("Hi", "How are you?", "Thanks") → canHandle=true, respond naturally
+- If user seems tired/busy based on their state → keep response brief and considerate
+- Complex questions, deep reasoning, technical topics → canHandle=false
+- Anything you're unsure about → canHandle=false, let smart model handle it
+- Match the language of the user's message (if they write in Russian, respond in Russian)
+- Keep responses concise and natural`;
+  }
+
+  /**
+   * Parse the classification response from JSON.
+   */
+  private parseClassificationResponse(content: string): Omit<ClassificationResult, 'tokensUsed'> {
+    try {
+      // Try to extract JSON from the response
+      let jsonStr = content.trim();
+
+      // Handle markdown code blocks
+      if (jsonStr.startsWith('```')) {
+        const match = /```(?:json)?\s*([\s\S]*?)```/.exec(jsonStr);
+        if (match) {
+          jsonStr = match[1]?.trim() ?? jsonStr;
+        }
+      }
+
+      const parsed = JSON.parse(jsonStr) as {
+        canHandle?: boolean;
+        confidence?: number;
+        suggestedResponse?: string;
+        reasoning?: string;
+      };
+
+      return {
+        canHandle: Boolean(parsed.canHandle),
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+        suggestedResponse: parsed.suggestedResponse,
+        reasoning: parsed.reasoning,
+      };
+    } catch {
+      // If parsing fails, assume we can't handle it
+      return {
+        canHandle: false,
+        confidence: 0,
+        reasoning: 'Failed to parse classification response',
+      };
+    }
+  }
+
+  /**
+   * Describe energy level in human-readable terms.
+   */
+  private describeEnergy(energy: number): string {
+    if (energy < 0.2) return 'very low, likely tired or sleeping';
+    if (energy < 0.4) return 'low, winding down';
+    if (energy < 0.6) return 'moderate';
+    if (energy < 0.8) return 'good, active';
+    return 'high, very alert';
+  }
+
+  /**
+   * Describe mood in human-readable terms.
+   */
+  private describeMood(mood: string): string {
+    switch (mood) {
+      case 'positive':
+        return 'good mood, seems happy';
+      case 'negative':
+        return 'seems upset or frustrated';
+      case 'tired':
+        return 'tired, low energy';
+      default:
+        return 'neutral/unknown';
+    }
   }
 
   /**

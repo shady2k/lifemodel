@@ -101,3 +101,121 @@ export class LLMError extends Error {
     this.retryable = options?.retryable ?? false;
   }
 }
+
+/**
+ * Logger interface for LLM providers.
+ */
+export interface LLMLogger {
+  debug(obj: Record<string, unknown>, msg: string): void;
+  info(obj: Record<string, unknown>, msg: string): void;
+  warn(obj: Record<string, unknown>, msg: string): void;
+  error(obj: Record<string, unknown>, msg: string): void;
+  child(bindings: Record<string, unknown>): LLMLogger;
+}
+
+/**
+ * Base LLM provider with detailed logging.
+ *
+ * Provides logging wrapper around complete() calls.
+ * Subclasses implement doComplete() for actual API calls.
+ */
+export abstract class BaseLLMProvider implements LLMProvider {
+  abstract readonly name: string;
+  protected readonly logger?: LLMLogger | undefined;
+  private requestCounter = 0;
+
+  constructor(logger?: LLMLogger) {
+    this.logger = logger?.child({ component: 'llm' });
+  }
+
+  abstract isAvailable(): boolean;
+
+  /**
+   * Generate a completion with detailed logging.
+   */
+  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+    const requestId = `req_${String(++this.requestCounter)}`;
+    const startTime = Date.now();
+
+    // Log request start
+    this.logger?.debug(
+      {
+        requestId,
+        provider: this.name,
+        role: request.role,
+        model: request.model,
+        temperature: request.temperature,
+        maxTokens: request.maxTokens,
+        messageCount: request.messages.length,
+      },
+      '🤖 LLM request started'
+    );
+
+    // Log each message for debugging
+    if (this.logger) {
+      for (const [i, msg] of request.messages.entries()) {
+        const contentPreview =
+          msg.content.length > 500 ? `${msg.content.slice(0, 500)}...` : msg.content;
+        this.logger.debug(
+          {
+            requestId,
+            index: i,
+            role: msg.role,
+            contentLength: msg.content.length,
+            content: contentPreview,
+          },
+          `🤖 LLM message [${String(i)}] ${msg.role}`
+        );
+      }
+    }
+
+    try {
+      const response = await this.doComplete(request);
+      const duration = Date.now() - startTime;
+
+      // Log response
+      this.logger?.debug(
+        {
+          requestId,
+          provider: this.name,
+          model: response.model,
+          durationMs: duration,
+          finishReason: response.finishReason,
+          promptTokens: response.usage?.promptTokens,
+          completionTokens: response.usage?.completionTokens,
+          totalTokens: response.usage?.totalTokens,
+          responseLength: response.content.length,
+          responsePreview:
+            response.content.length > 200
+              ? `${response.content.slice(0, 200)}...`
+              : response.content,
+        },
+        '🤖 LLM response received'
+      );
+
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+
+      this.logger?.error(
+        {
+          requestId,
+          provider: this.name,
+          durationMs: duration,
+          error: error instanceof Error ? error.message : String(error),
+          errorType: error instanceof LLMError ? 'LLMError' : 'Error',
+          retryable: error instanceof LLMError ? error.retryable : false,
+        },
+        '🤖 LLM request failed'
+      );
+
+      throw error;
+    }
+  }
+
+  /**
+   * Perform the actual completion request.
+   * Subclasses implement this method.
+   */
+  protected abstract doComplete(request: CompletionRequest): Promise<CompletionResponse>;
+}

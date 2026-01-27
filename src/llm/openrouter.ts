@@ -1,8 +1,8 @@
 import type { Logger } from '../types/index.js';
 import type { CircuitBreaker } from '../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../core/circuit-breaker.js';
-import type { LLMProvider, CompletionRequest, CompletionResponse } from './provider.js';
-import { LLMError } from './provider.js';
+import type { CompletionRequest, CompletionResponse } from './provider.js';
+import { BaseLLMProvider, LLMError } from './provider.js';
 
 /**
  * OpenRouter API response types.
@@ -74,8 +74,9 @@ const DEFAULT_CONFIG = {
  *
  * Provides access to multiple models via OpenRouter API.
  * Includes circuit breaker and retry logic.
+ * Extends BaseLLMProvider for detailed logging.
  */
-export class OpenRouterProvider implements LLMProvider {
+export class OpenRouterProvider extends BaseLLMProvider {
   readonly name = 'openrouter';
 
   private readonly config: Required<
@@ -91,12 +92,13 @@ export class OpenRouterProvider implements LLMProvider {
     >
   > &
     OpenRouterConfig;
-  private readonly logger?: Logger | undefined;
+  private readonly providerLogger?: Logger | undefined;
   private readonly circuitBreaker: CircuitBreaker;
 
   constructor(config: OpenRouterConfig, logger?: Logger) {
+    super(logger);
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.logger = logger?.child({ component: 'openrouter' });
+    this.providerLogger = logger?.child({ component: 'openrouter' });
 
     const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
       name: 'openrouter',
@@ -104,12 +106,12 @@ export class OpenRouterProvider implements LLMProvider {
       resetTimeout: 60_000, // 1 minute
       timeout: this.config.timeout,
     };
-    if (this.logger) {
-      circuitConfig.logger = this.logger;
+    if (this.providerLogger) {
+      circuitConfig.logger = this.providerLogger;
     }
     this.circuitBreaker = createCircuitBreaker(circuitConfig);
 
-    this.logger?.info(
+    this.providerLogger?.info(
       { fastModel: this.config.fastModel, smartModel: this.config.smartModel },
       'OpenRouter provider initialized'
     );
@@ -143,9 +145,9 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   /**
-   * Generate a completion.
+   * Generate a completion (called by BaseLLMProvider.complete with logging).
    */
-  async complete(request: CompletionRequest): Promise<CompletionResponse> {
+  protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.isAvailable()) {
       throw new LLMError('OpenRouter API key not configured', this.name);
     }
@@ -154,7 +156,7 @@ export class OpenRouterProvider implements LLMProvider {
 
     return this.circuitBreaker.execute(async () => {
       return this.executeWithRetry(async () => {
-        return this.doComplete(request, model);
+        return this.executeRequest(request, model);
       });
     });
   }
@@ -176,7 +178,7 @@ export class OpenRouterProvider implements LLMProvider {
         }
 
         if (attempt < this.config.maxRetries) {
-          this.logger?.warn(
+          this.providerLogger?.warn(
             { attempt: attempt + 1, maxRetries: this.config.maxRetries },
             'Retrying after error'
           );
@@ -189,9 +191,12 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   /**
-   * Perform the actual completion request.
+   * Perform the actual HTTP request to OpenRouter API.
    */
-  private async doComplete(request: CompletionRequest, model: string): Promise<CompletionResponse> {
+  private async executeRequest(
+    request: CompletionRequest,
+    model: string
+  ): Promise<CompletionResponse> {
     const url = `${this.config.baseUrl}/chat/completions`;
 
     const headers: Record<string, string> = {
@@ -216,11 +221,6 @@ export class OpenRouterProvider implements LLMProvider {
       temperature: request.temperature,
       stop: request.stop,
     };
-
-    this.logger?.debug(
-      { model, messageCount: request.messages.length },
-      'Sending completion request'
-    );
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
@@ -275,15 +275,6 @@ export class OpenRouterProvider implements LLMProvider {
           totalTokens: data.usage.total_tokens,
         };
       }
-
-      this.logger?.debug(
-        {
-          model: result.model,
-          tokens: result.usage?.totalTokens,
-          finishReason: result.finishReason,
-        },
-        'Completion received'
-      );
 
       return result;
     } catch (error) {

@@ -17,6 +17,7 @@ import type { RuleEngine } from '../rules/rule-engine.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { UserModel } from '../models/user-model.js';
 import type { LearningEngine } from '../learning/learning-engine.js';
+import type { ConversationManager } from '../storage/conversation-manager.js';
 
 /**
  * Event loop configuration.
@@ -57,6 +58,8 @@ export interface EventLoopDeps {
   userModel?: UserModel | undefined;
   /** Learning engine for self-learning */
   learningEngine?: LearningEngine | undefined;
+  /** Conversation manager for storing message history */
+  conversationManager?: ConversationManager | undefined;
 }
 
 const DEFAULT_CONFIG: EventLoopConfig = {
@@ -106,6 +109,7 @@ export class EventLoop {
   private readonly messageComposer: MessageComposer | undefined;
   private readonly userModel: UserModel | undefined;
   private readonly learningEngine: LearningEngine | undefined;
+  private readonly conversationManager: ConversationManager | undefined;
 
   /** Timestamp of last message sent by agent (for response timing) */
   private lastMessageSentAt: number | null = null;
@@ -134,6 +138,7 @@ export class EventLoop {
     this.messageComposer = deps.messageComposer;
     this.userModel = deps.userModel;
     this.learningEngine = deps.learningEngine;
+    this.conversationManager = deps.conversationManager;
   }
 
   /**
@@ -403,6 +408,9 @@ export class EventLoop {
         if (this.learningEngine) {
           this.learningEngine.processFeedback('message_received');
         }
+
+        // Save user message to conversation history
+        await this.saveUserMessage(event);
       }
 
       // Apply intents from layer processing and rules
@@ -596,6 +604,56 @@ export class EventLoop {
   }
 
   /**
+   * Save user message to conversation history.
+   */
+  private async saveUserMessage(event: Event): Promise<void> {
+    if (!this.conversationManager) {
+      return;
+    }
+
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const chatId = payload?.['chatId'] as string | undefined;
+    const text = payload?.['text'] as string | undefined;
+
+    if (!chatId || !text) {
+      return;
+    }
+
+    try {
+      await this.conversationManager.addMessage(chatId, {
+        role: 'user',
+        content: text,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error), chatId },
+        'Failed to save user message to history'
+      );
+    }
+  }
+
+  /**
+   * Save agent message to conversation history.
+   */
+  private async saveAgentMessage(chatId: string, text: string): Promise<void> {
+    if (!this.conversationManager) {
+      return;
+    }
+
+    try {
+      await this.conversationManager.addMessage(chatId, {
+        role: 'assistant',
+        content: text,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error), chatId },
+        'Failed to save agent message to history'
+      );
+    }
+  }
+
+  /**
    * Process response timing to learn from user behavior.
    * Called when a communication event is received.
    */
@@ -733,6 +791,8 @@ export class EventLoop {
                 this.lastMessageSentAt = Date.now();
                 this.lastMessageChatId = target;
                 this.metrics.counter('messages_sent', { channel });
+                // Save agent message to conversation history
+                void this.saveAgentMessage(target, text);
               } else {
                 this.metrics.counter('messages_failed', { channel });
               }
