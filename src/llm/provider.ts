@@ -19,6 +19,26 @@ export interface Message {
 export type ModelRole = 'fast' | 'smart';
 
 /**
+ * JSON Schema definition for structured output.
+ */
+export interface JsonSchemaDefinition {
+  name: string;
+  strict?: boolean;
+  schema: Record<string, unknown>;
+}
+
+/**
+ * Response format for structured output.
+ * - 'json_object': OpenAI-style JSON mode (simple)
+ * - 'json_schema': LM Studio / structured output with schema
+ * - 'text': Plain text (default)
+ */
+export interface ResponseFormat {
+  type: 'json_object' | 'json_schema' | 'text';
+  json_schema?: JsonSchemaDefinition;
+}
+
+/**
  * Request to generate a completion.
  */
 export interface CompletionRequest {
@@ -39,6 +59,9 @@ export interface CompletionRequest {
 
   /** Stop sequences */
   stop?: string[];
+
+  /** Response format (e.g., { type: 'json_object' } for JSON output) */
+  responseFormat?: ResponseFormat;
 }
 
 /**

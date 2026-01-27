@@ -204,7 +204,25 @@ export class MessageComposer {
         messages,
         role: 'fast', // Use fast model for classification
         temperature: 0.3, // Lower temperature for more consistent classification
-        maxTokens: 500,
+        maxTokens: 5000, // Higher limit for "thinking" models that use tokens for reasoning
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'classification',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                canHandle: { type: 'boolean' },
+                confidence: { type: 'number' },
+                suggestedResponse: { type: 'string' },
+                reasoning: { type: 'string' },
+                contextSummary: { type: 'string' },
+              },
+              required: ['canHandle', 'confidence'],
+            },
+          },
+        },
       });
 
       // Parse JSON response
@@ -302,11 +320,14 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 
   /**
    * Parse the classification response from JSON.
+   * Falls back to treating non-JSON responses as direct answers.
    */
   private parseClassificationResponse(content: string): Omit<ClassificationResult, 'tokensUsed'> {
+    const trimmed = content.trim();
+
+    // Try to parse as JSON first
     try {
-      // Try to extract JSON from the response
-      let jsonStr = content.trim();
+      let jsonStr = trimmed;
 
       // Handle markdown code blocks
       if (jsonStr.startsWith('```')) {
@@ -314,6 +335,12 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         if (match) {
           jsonStr = match[1]?.trim() ?? jsonStr;
         }
+      }
+
+      // Try to find JSON object in response (some models add text around it)
+      const jsonMatch = /\{[\s\S]*"canHandle"[\s\S]*\}/.exec(jsonStr);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
       }
 
       const parsed = JSON.parse(jsonStr) as {
@@ -332,7 +359,19 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         contextSummary: parsed.contextSummary,
       };
     } catch {
-      // If parsing fails, assume we can't handle it
+      // JSON parsing failed - check if we got a meaningful text response
+      // Some models (like GLM thinking models) respond with plain text instead of JSON
+      if (trimmed.length > 10) {
+        // Non-trivial response - treat it as a direct answer
+        return {
+          canHandle: true,
+          confidence: 0.7, // Moderate confidence since format wasn't followed
+          suggestedResponse: trimmed,
+          reasoning: 'Model responded with plain text instead of JSON - using as direct response',
+        };
+      }
+
+      // Empty or very short response - can't handle
       return {
         canHandle: false,
         confidence: 0,
@@ -420,6 +459,105 @@ Write plain text only.`;
 
     // For proactive messages
     return `Generate a message to the user. Reason: ${context.trigger}`;
+  }
+
+  /**
+   * Classify the conversation status based on the last exchange.
+   * Used to determine appropriate follow-up timing.
+   */
+  async classifyConversationStatus(
+    lastAssistantMessage: string,
+    lastUserMessage?: string
+  ): Promise<{
+    status: 'active' | 'awaiting_answer' | 'closed' | 'idle';
+    confidence: number;
+    reasoning: string;
+  }> {
+    const systemPrompt = `You analyze conversation state to determine appropriate follow-up timing.
+
+Classify the conversation status based on the last messages:
+
+- "active": Mid-conversation, natural exchange happening, user likely to respond soon
+- "awaiting_answer": Assistant asked a specific question or requested information, waiting for user's answer
+- "closed": Conversation ended (farewell, user said they're busy, "talk later", etc.) - don't disturb
+- "idle": Natural pause, statement made but no specific question asked, OK to reach out later
+
+Respond ONLY with valid JSON:
+{
+  "status": "active" | "awaiting_answer" | "closed" | "idle",
+  "confidence": 0.0 to 1.0,
+  "reasoning": "Brief explanation"
+}`;
+
+    let userPrompt = `Last assistant message: "${lastAssistantMessage}"`;
+    if (lastUserMessage) {
+      userPrompt = `Last user message: "${lastUserMessage}"\n${userPrompt}`;
+    }
+
+    try {
+      const response = await this.provider.complete({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        role: 'fast',
+        temperature: 0.2,
+        maxTokens: 200,
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'conversation_status',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                status: {
+                  type: 'string',
+                  enum: ['active', 'awaiting_answer', 'closed', 'idle'],
+                },
+                confidence: { type: 'number' },
+                reasoning: { type: 'string' },
+              },
+              required: ['status', 'confidence', 'reasoning'],
+            },
+          },
+        },
+      });
+
+      const parsed = JSON.parse(response.content) as {
+        status: 'active' | 'awaiting_answer' | 'closed' | 'idle';
+        confidence: number;
+        reasoning: string;
+      };
+
+      return {
+        status: parsed.status,
+        confidence: parsed.confidence,
+        reasoning: parsed.reasoning,
+      };
+    } catch {
+      // Fallback: simple heuristic
+      const hasQuestion = lastAssistantMessage.trim().endsWith('?');
+      const hasClosingWords = /(\bпока\b|\bbye\b|\bдо свидания\b|\bсвяжемся\b|\blater\b)/i.test(
+        lastAssistantMessage
+      );
+
+      if (hasClosingWords) {
+        return {
+          status: 'closed',
+          confidence: 0.6,
+          reasoning: 'Contains closing words (fallback)',
+        };
+      }
+      if (hasQuestion) {
+        return {
+          status: 'awaiting_answer',
+          confidence: 0.6,
+          reasoning: 'Ends with question mark (fallback)',
+        };
+      }
+      return { status: 'idle', confidence: 0.5, reasoning: 'Default fallback' };
+    }
   }
 }
 

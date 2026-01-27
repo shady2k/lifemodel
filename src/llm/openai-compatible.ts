@@ -5,15 +5,20 @@ import type { CompletionRequest, CompletionResponse } from './provider.js';
 import { BaseLLMProvider, LLMError } from './provider.js';
 
 /**
- * OpenRouter API response types.
+ * OpenAI-compatible API response types.
  */
-interface OpenRouterResponse {
+interface OpenAIResponse {
   id: string;
+  object: string;
+  created: number;
   model: string;
   choices: {
+    index: number;
     message: {
       role: string;
       content: string;
+      /** For "thinking" models that separate reasoning from final answer */
+      reasoning_content?: string;
     };
     finish_reason: string;
   }[];
@@ -25,85 +30,72 @@ interface OpenRouterResponse {
 }
 
 /**
- * OpenRouter provider configuration.
+ * OpenAI-compatible provider configuration.
+ *
+ * Works with any server that implements the OpenAI API format:
+ * - LM Studio
+ * - Ollama (with OpenAI compatibility)
+ * - LocalAI
+ * - vLLM
+ * - text-generation-webui
+ * - Any other OpenAI-compatible server
  */
-export interface OpenRouterConfig {
-  /** API key (required) */
-  apiKey: string;
+export interface OpenAICompatibleConfig {
+  /** Base URL of the server (e.g., http://localhost:1234) */
+  baseUrl: string;
 
-  /** Fast model for classification, yes/no, emotion detection (cheap) */
-  fastModel?: string;
+  /** Model to use (required for most servers) */
+  model: string;
 
-  /** Smart model for composition, reasoning (expensive) */
-  smartModel?: string;
+  /** Optional API key (some servers require it) */
+  apiKey?: string;
 
-  /** Default model to use when role not specified */
-  defaultModel?: string;
+  /** Provider name for logging (default: 'openai-compatible') */
+  name?: string;
 
-  /** Base URL (default: https://openrouter.ai/api/v1) */
-  baseUrl?: string;
-
-  /** Request timeout in ms (default: 30000) */
+  /** Request timeout in ms (default: 60000 for local models) */
   timeout?: number;
 
-  /** Max retries for retryable errors (default: 2) */
+  /** Max retries for retryable errors (default: 1) */
   maxRetries?: number;
 
-  /** Retry delay in ms (default: 1000) */
+  /** Retry delay in ms (default: 500) */
   retryDelay?: number;
-
-  /** Site URL for OpenRouter ranking */
-  siteUrl?: string;
-
-  /** Site name for OpenRouter ranking */
-  siteName?: string;
 }
 
 const DEFAULT_CONFIG = {
-  fastModel: 'anthropic/claude-3.5-haiku',
-  smartModel: 'anthropic/claude-sonnet-4',
-  defaultModel: 'anthropic/claude-3.5-haiku',
-  baseUrl: 'https://openrouter.ai/api/v1',
-  timeout: 30_000,
-  maxRetries: 2,
-  retryDelay: 1000,
+  name: 'openai-compatible',
+  timeout: 60_000, // Local models can be slower
+  maxRetries: 1,
+  retryDelay: 500,
 };
 
 /**
- * OpenRouter LLM provider.
+ * OpenAI-compatible LLM provider.
  *
- * Provides access to multiple models via OpenRouter API.
+ * Provides access to any server that implements the OpenAI chat completions API.
  * Includes circuit breaker and retry logic.
- * Extends BaseLLMProvider for detailed logging.
  */
-export class OpenRouterProvider extends BaseLLMProvider {
-  readonly name = 'openrouter';
+export class OpenAICompatibleProvider extends BaseLLMProvider {
+  readonly name: string;
 
   private readonly config: Required<
-    Pick<
-      OpenRouterConfig,
-      | 'fastModel'
-      | 'smartModel'
-      | 'defaultModel'
-      | 'baseUrl'
-      | 'timeout'
-      | 'maxRetries'
-      | 'retryDelay'
-    >
+    Pick<OpenAICompatibleConfig, 'baseUrl' | 'model' | 'timeout' | 'maxRetries' | 'retryDelay'>
   > &
-    OpenRouterConfig;
+    OpenAICompatibleConfig;
   private readonly providerLogger?: Logger | undefined;
   private readonly circuitBreaker: CircuitBreaker;
 
-  constructor(config: OpenRouterConfig, logger?: Logger) {
+  constructor(config: OpenAICompatibleConfig, logger?: Logger) {
     super(logger);
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.providerLogger = logger?.child({ component: 'openrouter' });
+    this.name = this.config.name ?? 'openai-compatible';
+    this.providerLogger = logger?.child({ component: this.name });
 
     const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
-      name: 'openrouter',
+      name: this.name,
       maxFailures: 3,
-      resetTimeout: 60_000, // 1 minute
+      resetTimeout: 30_000, // 30 seconds for local
       timeout: this.config.timeout,
     };
     if (this.providerLogger) {
@@ -112,8 +104,8 @@ export class OpenRouterProvider extends BaseLLMProvider {
     this.circuitBreaker = createCircuitBreaker(circuitConfig);
 
     this.providerLogger?.info(
-      { fastModel: this.config.fastModel, smartModel: this.config.smartModel },
-      'OpenRouter provider initialized'
+      { baseUrl: this.config.baseUrl, model: this.config.model },
+      `${this.name} provider initialized`
     );
   }
 
@@ -121,27 +113,7 @@ export class OpenRouterProvider extends BaseLLMProvider {
    * Check if provider is configured.
    */
   isAvailable(): boolean {
-    return Boolean(this.config.apiKey);
-  }
-
-  /**
-   * Get the model to use based on role or explicit model.
-   */
-  private getModel(request: CompletionRequest): string {
-    // Explicit model takes precedence
-    if (request.model) {
-      return request.model;
-    }
-
-    // Select based on role
-    switch (request.role) {
-      case 'fast':
-        return this.config.fastModel;
-      case 'smart':
-        return this.config.smartModel;
-      default:
-        return this.config.defaultModel;
-    }
+    return Boolean(this.config.baseUrl && this.config.model);
   }
 
   /**
@@ -149,10 +121,11 @@ export class OpenRouterProvider extends BaseLLMProvider {
    */
   protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.isAvailable()) {
-      throw new LLMError('OpenRouter API key not configured', this.name);
+      throw new LLMError(`${this.name} not configured (missing baseUrl or model)`, this.name);
     }
 
-    const model = this.getModel(request);
+    // Use explicit model from request or configured model
+    const model = request.model ?? this.config.model;
 
     return this.circuitBreaker.execute(async () => {
       return this.executeWithRetry(async () => {
@@ -191,24 +164,23 @@ export class OpenRouterProvider extends BaseLLMProvider {
   }
 
   /**
-   * Perform the actual HTTP request to OpenRouter API.
+   * Perform the actual HTTP request to the OpenAI-compatible API.
    */
   private async executeRequest(
     request: CompletionRequest,
     model: string
   ): Promise<CompletionResponse> {
-    const url = `${this.config.baseUrl}/chat/completions`;
+    // Normalize baseUrl (remove trailing slash)
+    const baseUrl = this.config.baseUrl.replace(/\/$/, '');
+    const url = `${baseUrl}/v1/chat/completions`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.config.apiKey}`,
     };
 
-    if (this.config.siteUrl) {
-      headers['HTTP-Referer'] = this.config.siteUrl;
-    }
-    if (this.config.siteName) {
-      headers['X-Title'] = this.config.siteName;
+    // Add API key if provided
+    if (this.config.apiKey) {
+      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
     const body: Record<string, unknown> = {
@@ -224,7 +196,14 @@ export class OpenRouterProvider extends BaseLLMProvider {
 
     // Add response_format if specified (for JSON mode)
     if (request.responseFormat) {
-      body['response_format'] = { type: request.responseFormat.type };
+      if (request.responseFormat.type === 'json_schema' && request.responseFormat.json_schema) {
+        body['response_format'] = {
+          type: 'json_schema',
+          json_schema: request.responseFormat.json_schema,
+        };
+      } else {
+        body['response_format'] = { type: request.responseFormat.type };
+      }
     }
 
     const controller = new AbortController();
@@ -247,7 +226,7 @@ export class OpenRouterProvider extends BaseLLMProvider {
         const retryable = response.status >= 500 || response.status === 429;
 
         throw new LLMError(
-          `OpenRouter API error: ${String(response.status)} - ${errorText}`,
+          `${this.name} API error: ${String(response.status)} - ${errorText}`,
           this.name,
           {
             statusCode: response.status,
@@ -256,15 +235,26 @@ export class OpenRouterProvider extends BaseLLMProvider {
         );
       }
 
-      const data = (await response.json()) as OpenRouterResponse;
+      const data = (await response.json()) as OpenAIResponse;
 
       const firstChoice = data.choices[0];
       if (!firstChoice) {
-        throw new LLMError('Invalid response from OpenRouter', this.name);
+        throw new LLMError(`Invalid response from ${this.name}`, this.name);
+      }
+
+      // For "thinking" models: if content is empty but reasoning_content exists,
+      // use reasoning_content as fallback (the model spent all tokens on reasoning)
+      let content = firstChoice.message.content;
+      if (!content && firstChoice.message.reasoning_content) {
+        this.providerLogger?.warn(
+          { finishReason: firstChoice.finish_reason },
+          'Using reasoning_content as fallback (content was empty)'
+        );
+        content = firstChoice.message.reasoning_content;
       }
 
       const result: CompletionResponse = {
-        content: firstChoice.message.content,
+        content,
         model: data.model,
       };
 
@@ -293,24 +283,29 @@ export class OpenRouterProvider extends BaseLLMProvider {
         throw new LLMError('Request timed out', this.name, { retryable: true });
       }
 
-      throw new LLMError(
-        `Network error: ${error instanceof Error ? error.message : String(error)}`,
-        this.name,
-        { retryable: true }
-      );
+      // Connection refused or network error - server might be down
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isConnectionError =
+        errorMessage.includes('ECONNREFUSED') || errorMessage.includes('fetch failed');
+
+      throw new LLMError(`Network error: ${errorMessage}`, this.name, {
+        retryable: !isConnectionError, // Don't retry if server is down
+      });
     }
   }
 
   /**
-   * Map OpenRouter finish reason to our format.
+   * Map finish reason to our format.
    */
   private mapFinishReason(
     reason: string
   ): 'stop' | 'length' | 'content_filter' | 'error' | undefined {
     switch (reason) {
       case 'stop':
+      case 'eos': // Some local models use this
         return 'stop';
       case 'length':
+      case 'max_tokens':
         return 'length';
       case 'content_filter':
         return 'content_filter';
@@ -337,9 +332,9 @@ export class OpenRouterProvider extends BaseLLMProvider {
 /**
  * Factory function.
  */
-export function createOpenRouterProvider(
-  config: OpenRouterConfig,
+export function createOpenAICompatibleProvider(
+  config: OpenAICompatibleConfig,
   logger?: Logger
-): OpenRouterProvider {
-  return new OpenRouterProvider(config, logger);
+): OpenAICompatibleProvider {
+  return new OpenAICompatibleProvider(config, logger);
 }

@@ -28,13 +28,11 @@ export class InterpretationLayer extends BaseLayer {
   readonly name = 'interpretation';
   readonly confidenceThreshold = 0.6;
 
-  private conversationManager: ConversationManager | undefined;
-
   /**
-   * Set conversation manager for context-aware decisions.
+   * Set conversation manager for context-aware decisions (reserved for future use).
    */
-  setConversationManager(manager: ConversationManager): void {
-    this.conversationManager = manager;
+  setConversationManager(_manager: ConversationManager): void {
+    // Reserved for future context-aware decisions
     this.logger.debug('ConversationManager attached to interpretation layer');
   }
 
@@ -68,13 +66,13 @@ export class InterpretationLayer extends BaseLayer {
     super(logger, 'interpretation');
   }
 
-  protected async processImpl(context: ProcessingContext): Promise<LayerResult> {
+  protected processImpl(context: ProcessingContext): Promise<LayerResult> {
     context.stage = 'interpretation';
 
     // Need perception output to interpret
     if (!context.perception) {
       // No perception data - can't interpret well
-      return this.success(context, 0.3);
+      return Promise.resolve(this.success(context, 0.3));
     }
 
     const { perception } = context;
@@ -90,7 +88,7 @@ export class InterpretationLayer extends BaseLayer {
     const urgency = this.calculateUrgency(context);
 
     // Does this require a response? (needs conversation context)
-    const requiresResponse = await this.checkRequiresResponse(intent, perception, context);
+    const requiresResponse = this.checkRequiresResponse(intent, perception, context);
 
     // Determine response priority
     const responsePriority = this.determineResponsePriority(intent, urgency, sentiment);
@@ -124,7 +122,7 @@ export class InterpretationLayer extends BaseLayer {
       'Interpretation complete'
     );
 
-    return this.success(context, confidence);
+    return Promise.resolve(this.success(context, confidence));
   }
 
   private detectIntent(context: ProcessingContext): UserIntent {
@@ -314,89 +312,36 @@ export class InterpretationLayer extends BaseLayer {
     return urgency;
   }
 
-  private async checkRequiresResponse(
+  private checkRequiresResponse(
     intent: UserIntent,
     perception: PerceptionOutput,
-    context: ProcessingContext
-  ): Promise<boolean> {
-    // These intents typically require a response
-    const responseRequired: UserIntent[] = [
-      'greeting',
-      'question',
-      'request',
-      'emotional_expression',
+    _context: ProcessingContext
+  ): boolean {
+    // WHITELIST approach: only skip response when we're CERTAIN we shouldn't respond
+    // When in doubt, let the LLM handle it
+
+    // These intents clearly don't need a response
+    const noResponseRequired: UserIntent[] = [
+      'farewell', // "Bye" - optional response
+      'busy_signal', // "I'm busy" - don't bother them
     ];
 
-    if (responseRequired.includes(intent)) {
-      return true;
-    }
-
-    // Questions always need response
-    if (perception.isQuestion) {
-      return true;
-    }
-
-    // Commands/requests need response
-    if (perception.isCommand) {
-      return true;
-    }
-
-    // Check if this is an answer to our question (acknowledgments/information)
-    // This is a cheap check that prevents unnecessary LLM calls
-    if (intent === 'acknowledgment' || intent === 'information') {
-      const isAnswerToOurQuestion = await this.checkIsAnswerToOurQuestion(context);
-      if (isAnswerToOurQuestion) {
-        this.logger.debug('Message is answer to our question - requires response');
-        return true;
-      }
-    }
-
-    // These don't need a response (unless checked above)
-    const noResponse: UserIntent[] = ['farewell', 'acknowledgment', 'busy_signal'];
-
-    if (noResponse.includes(intent)) {
+    if (noResponseRequired.includes(intent)) {
       return false;
     }
 
-    // Default: informational content doesn't require response
-    return false;
-  }
-
-  /**
-   * Check if the user's message is an answer to a question we asked.
-   * This is a cheap heuristic check (no LLM needed).
-   */
-  private async checkIsAnswerToOurQuestion(context: ProcessingContext): Promise<boolean> {
-    if (!this.conversationManager) {
-      return false;
-    }
-
-    // Extract user ID from event payload
-    const payload = context.event.payload as Record<string, unknown> | undefined;
-    const chatId = payload?.['chatId'];
-    const userId =
-      (typeof chatId === 'string' ? chatId : undefined) ??
-      (typeof payload?.['userId'] === 'string' ? payload['userId'] : undefined);
-
-    if (!userId) {
-      return false;
-    }
-
-    try {
-      // Get the last message (should be assistant's)
-      const history = await this.conversationManager.getHistory(userId, { maxRecent: 1 });
-      const lastAssistantMsg = history.find((m) => m.role === 'assistant');
-
-      if (!lastAssistantMsg) {
+    // Acknowledgments might not need response
+    if (intent === 'acknowledgment') {
+      // Short acknowledgments like "ok", "got it" usually don't need response
+      const text = perception.text ?? '';
+      if (text.length < 10) {
         return false;
       }
-
-      // Check if the last assistant message ended with a question
-      const content = lastAssistantMsg.content.trim();
-      return content.endsWith('?');
-    } catch {
-      return false;
     }
+
+    // Default: respond to everything else
+    // Let the LLM decide what to do with it
+    return true;
   }
 
   private determineResponsePriority(

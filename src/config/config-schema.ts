@@ -140,6 +140,13 @@ export interface MergedConfig {
     openRouterApiKey: string | null;
     fastModel: string;
     smartModel: string;
+    /** Local model configuration (OpenAI-compatible API) */
+    local: {
+      baseUrl: string | null;
+      model: string | null;
+      useForFast: boolean;
+      useForSmart: boolean;
+    };
   };
 
   /** Logging configuration */
@@ -213,8 +220,14 @@ export const DEFAULT_CONFIG: MergedConfig = {
   },
   llm: {
     openRouterApiKey: null,
-    fastModel: 'meta-llama/llama-3.1-8b-instruct:free',
-    smartModel: 'anthropic/claude-3.5-sonnet',
+    fastModel: 'anthropic/claude-haiku-4.5',
+    smartModel: 'anthropic/claude-sonnet-4.5',
+    local: {
+      baseUrl: null,
+      model: null,
+      useForFast: true, // Default: use local for fast if configured
+      useForSmart: false, // Default: use cloud for smart
+    },
   },
   logging: {
     level: 'info',

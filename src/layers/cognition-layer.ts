@@ -1,4 +1,4 @@
-import type { LayerResult, Logger, Thought } from '../types/index.js';
+import type { LayerResult, Logger, Thought, Event } from '../types/index.js';
 import { Priority } from '../types/index.js';
 import { randomUUID } from 'node:crypto';
 import type { ProcessingContext, CognitionOutput, BeliefUpdate } from './context.js';
@@ -6,6 +6,7 @@ import { BaseLayer } from './base-layer.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
+import type { EventBus } from '../core/event-bus.js';
 
 /**
  * Dependencies for CognitionLayer.
@@ -17,6 +18,8 @@ export interface CognitionLayerDeps {
   conversationManager?: ConversationManager | undefined;
   /** User model for user state */
   userModel?: UserModel | undefined;
+  /** Event bus for typing events */
+  eventBus?: EventBus | undefined;
 }
 
 /**
@@ -41,12 +44,14 @@ export class CognitionLayer extends BaseLayer {
   private composer: MessageComposer | undefined;
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
+  private eventBus: EventBus | undefined;
 
   constructor(logger: Logger, deps?: CognitionLayerDeps) {
     super(logger, 'cognition');
     this.composer = deps?.composer;
     this.conversationManager = deps?.conversationManager;
     this.userModel = deps?.userModel;
+    this.eventBus = deps?.eventBus;
   }
 
   /**
@@ -56,6 +61,7 @@ export class CognitionLayer extends BaseLayer {
     if (deps.composer) this.composer = deps.composer;
     if (deps.conversationManager) this.conversationManager = deps.conversationManager;
     if (deps.userModel) this.userModel = deps.userModel;
+    if (deps.eventBus) this.eventBus = deps.eventBus;
     this.logger.debug('CognitionLayer dependencies updated');
   }
 
@@ -221,6 +227,11 @@ export class CognitionLayer extends BaseLayer {
           mood: user.mood,
           confidence: user.confidence,
         };
+      }
+
+      // Emit typing indicator before LLM call
+      if (this.eventBus && userId && context.event.channel) {
+        await this.emitTypingEvent(userId, context.event.channel);
       }
 
       // Call fast model for classification (with compaction if needed)
@@ -464,6 +475,26 @@ export class CognitionLayer extends BaseLayer {
     );
 
     return thought;
+  }
+
+  /**
+   * Emit typing indicator event.
+   */
+  private async emitTypingEvent(chatId: string, channel: string): Promise<void> {
+    if (!this.eventBus) return;
+
+    const typingEvent: Event = {
+      id: randomUUID(),
+      source: 'internal',
+      channel,
+      type: 'typing_start',
+      priority: Priority.HIGH,
+      timestamp: new Date(),
+      payload: { chatId },
+    };
+
+    await this.eventBus.publish(typingEvent);
+    this.logger.debug({ chatId, channel }, '⌨️ Typing event emitted before LLM call');
   }
 }
 

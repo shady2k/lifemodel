@@ -15,7 +15,10 @@ import {
 } from '../channels/index.js';
 import { type UserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
-import { type OpenRouterProvider, createOpenRouterProvider } from '../llm/openrouter.js';
+import type { LLMProvider } from '../llm/provider.js';
+import { createOpenRouterProvider } from '../llm/openrouter.js';
+import { createOpenAICompatibleProvider } from '../llm/openai-compatible.js';
+import { createMultiProvider } from '../llm/multi-provider.js';
 import {
   type Storage,
   type StateManager,
@@ -72,10 +75,21 @@ export interface AppConfig {
   llm?: {
     /** OpenRouter API key */
     openRouterApiKey?: string;
-    /** Fast model for classification (cheap) */
+    /** Fast model for classification via OpenRouter (cheap) */
     fastModel?: string;
-    /** Smart model for composition (expensive) */
+    /** Smart model for composition via OpenRouter (expensive) */
     smartModel?: string;
+    /** Local model configuration (OpenAI-compatible API) */
+    local?: {
+      /** Base URL of the local server (e.g., http://localhost:1234) */
+      baseUrl?: string;
+      /** Model name to use */
+      model?: string;
+      /** Use local model for fast role */
+      useForFast?: boolean;
+      /** Use local model for smart role */
+      useForSmart?: boolean;
+    };
   };
 }
 
@@ -106,7 +120,7 @@ export interface Container {
   /** User model for tracking user beliefs (optional) */
   userModel: UserModel | null;
   /** LLM provider (optional) */
-  llmProvider: OpenRouterProvider | null;
+  llmProvider: LLMProvider | null;
   /** Message composer (optional, needs LLM provider) */
   messageComposer: MessageComposer | null;
   /** Primary user's Telegram chat ID (for proactive messages) */
@@ -208,22 +222,71 @@ export function createContainer(config: AppConfig = {}): Container {
     logger.debug('UserModel not created (no primary user configured)');
   }
 
-  // Create LLM provider if configured
-  let llmProvider: OpenRouterProvider | null = null;
+  // Create LLM providers
+  let llmProvider: LLMProvider | null = null;
+
   const openRouterApiKey = config.llm?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
+  const localBaseUrl = config.llm?.local?.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
+  const localModel = config.llm?.local?.model ?? process.env['LLM_LOCAL_MODEL'];
+  const useLocalForFast =
+    config.llm?.local?.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
+  const useLocalForSmart =
+    config.llm?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
+
+  // Create OpenRouter provider if configured
+  let openRouterProvider = null;
   if (openRouterApiKey) {
     const fastModel = config.llm?.fastModel ?? process.env['LLM_FAST_MODEL'];
     const smartModel = config.llm?.smartModel ?? process.env['LLM_SMART_MODEL'];
 
-    const llmConfig: Parameters<typeof createOpenRouterProvider>[0] = {
-      apiKey: openRouterApiKey,
-    };
-    if (fastModel) llmConfig.fastModel = fastModel;
-    if (smartModel) llmConfig.smartModel = smartModel;
+    openRouterProvider = createOpenRouterProvider(
+      {
+        apiKey: openRouterApiKey,
+        ...(fastModel && { fastModel }),
+        ...(smartModel && { smartModel }),
+      },
+      logger
+    );
+  }
 
-    llmProvider = createOpenRouterProvider(llmConfig, logger);
+  // Create local provider if configured
+  let localProvider = null;
+  if (localBaseUrl && localModel) {
+    localProvider = createOpenAICompatibleProvider(
+      {
+        baseUrl: localBaseUrl,
+        model: localModel,
+        name: 'local',
+      },
+      logger
+    );
+  }
+
+  // Create multi-provider if we have both, or use single provider
+  if (localProvider && openRouterProvider) {
+    llmProvider = createMultiProvider(
+      {
+        fast: useLocalForFast ? localProvider : openRouterProvider,
+        smart: useLocalForSmart ? localProvider : openRouterProvider,
+        default: openRouterProvider,
+      },
+      logger
+    );
+    logger.info(
+      {
+        fastProvider: useLocalForFast ? 'local' : 'openrouter',
+        smartProvider: useLocalForSmart ? 'local' : 'openrouter',
+      },
+      'MultiProvider configured'
+    );
+  } else if (localProvider) {
+    llmProvider = localProvider;
+    logger.info('Local LLM provider configured');
+  } else if (openRouterProvider) {
+    llmProvider = openRouterProvider;
+    logger.info('OpenRouter LLM provider configured');
   } else {
-    logger.debug('LLM provider not configured (no API key)');
+    logger.debug('LLM provider not configured');
   }
 
   // Create MessageComposer if LLM available
@@ -293,6 +356,10 @@ export function createContainer(config: AppConfig = {}): Container {
     telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
     channels.set('telegram', telegramChannel);
     eventLoop.registerChannel(telegramChannel);
+    // Wake up event loop immediately when messages arrive
+    telegramChannel.setWakeUpCallback(() => {
+      eventLoop.wakeUp();
+    });
     logger.info('Telegram channel configured');
   } else {
     logger.debug('Telegram channel not configured (no bot token)');
@@ -445,25 +512,73 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.debug('UserModel not created (no primary user configured)');
   }
 
-  // Create LLM provider if configured
-  let llmProvider: OpenRouterProvider | null = null;
+  // Create LLM providers
+  let llmProvider: LLMProvider | null = null;
+
   const openRouterApiKey =
     configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? '';
+  const localConfig = configOverrides.llm?.local ?? mergedConfig.llm.local;
+  const localBaseUrl = localConfig.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
+  const localModel = localConfig.model ?? process.env['LLM_LOCAL_MODEL'];
+  const useLocalForFast =
+    localConfig.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
+  const useLocalForSmart =
+    localConfig.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
+
+  // Create OpenRouter provider if configured
+  let openRouterProvider = null;
   if (openRouterApiKey) {
     const fastModel = configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel;
     const smartModel = configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel;
 
-    llmProvider = createOpenRouterProvider(
+    openRouterProvider = createOpenRouterProvider(
       {
         apiKey: openRouterApiKey,
-        fastModel,
-        smartModel,
+        ...(fastModel && { fastModel }),
+        ...(smartModel && { smartModel }),
       },
       logger
     );
-    logger.info('LLM provider configured');
+  }
+
+  // Create local provider if configured
+  let localProvider = null;
+  if (localBaseUrl && localModel) {
+    localProvider = createOpenAICompatibleProvider(
+      {
+        baseUrl: localBaseUrl,
+        model: localModel,
+        name: 'local',
+      },
+      logger
+    );
+  }
+
+  // Create multi-provider if we have both, or use single provider
+  if (localProvider && openRouterProvider) {
+    llmProvider = createMultiProvider(
+      {
+        fast: useLocalForFast ? localProvider : openRouterProvider,
+        smart: useLocalForSmart ? localProvider : openRouterProvider,
+        default: openRouterProvider,
+      },
+      logger
+    );
+    logger.info(
+      {
+        fastProvider: useLocalForFast ? 'local' : 'openrouter',
+        smartProvider: useLocalForSmart ? 'local' : 'openrouter',
+      },
+      'MultiProvider configured'
+    );
+  } else if (localProvider) {
+    llmProvider = localProvider;
+    logger.info('Local LLM provider configured');
+  } else if (openRouterProvider) {
+    llmProvider = openRouterProvider;
+    logger.info('OpenRouter LLM provider configured');
   } else {
-    logger.debug('LLM provider not configured (no API key)');
+    logger.debug('LLM provider not configured');
   }
 
   // Create MessageComposer if LLM available
@@ -479,11 +594,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     layerProcessor.setComposer(messageComposer);
   }
 
-  // Set cognition layer dependencies (composer, conversation manager, user model)
+  // Set cognition layer dependencies (composer, conversation manager, user model, eventBus)
   layerProcessor.setCognitionDependencies({
     composer: messageComposer ?? undefined,
     conversationManager,
     userModel: userModel ?? undefined,
+    eventBus,
   });
 
   // Set conversation manager on interpretation layer for context-aware decisions
@@ -563,6 +679,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
     channels.set('telegram', telegramChannel);
     eventLoop.registerChannel(telegramChannel);
+    // Wake up event loop immediately when messages arrive
+    telegramChannel.setWakeUpCallback(() => {
+      eventLoop.wakeUp();
+    });
     logger.info('Telegram channel configured');
   } else {
     logger.debug('Telegram channel not configured (no bot token)');

@@ -648,7 +648,7 @@ export class EventLoop {
   }
 
   /**
-   * Save agent message to conversation history.
+   * Save agent message to conversation history and classify conversation status.
    */
   private async saveAgentMessage(chatId: string, text: string): Promise<void> {
     if (!this.conversationManager) {
@@ -660,6 +660,22 @@ export class EventLoop {
         role: 'assistant',
         content: text,
       });
+
+      // Classify and store conversation status for follow-up timing
+      if (this.messageComposer) {
+        const classification = await this.messageComposer.classifyConversationStatus(text);
+        await this.conversationManager.setStatus(chatId, classification.status);
+
+        this.logger.debug(
+          {
+            chatId,
+            status: classification.status,
+            confidence: classification.confidence.toFixed(2),
+            reasoning: classification.reasoning,
+          },
+          '📊 Conversation status classified'
+        );
+      }
     } catch (error) {
       this.logger.warn(
         { error: error instanceof Error ? error.message : String(error), chatId },
@@ -891,12 +907,132 @@ export class EventLoop {
         }
       }
     }
+
+    // Check for conversation follow-up (every tick)
+    await this.checkConversationFollowUp();
+  }
+
+  /**
+   * Check if we should follow up on a conversation based on status and timing.
+   */
+  private async checkConversationFollowUp(): Promise<void> {
+    const chatId = this.config.primaryUserChatId;
+
+    if (!chatId || !this.conversationManager) {
+      return;
+    }
+
+    try {
+      const followUpCheck = await this.conversationManager.shouldFollowUp(chatId);
+
+      if (!followUpCheck.shouldFollowUp) {
+        return;
+      }
+
+      this.logger.info(
+        {
+          chatId,
+          status: followUpCheck.status,
+          reason: followUpCheck.reason,
+          timeSinceLastMessage: Math.round(followUpCheck.timeSinceLastMessage / 60000),
+        },
+        '⏰ Conversation follow-up triggered'
+      );
+
+      // Create a follow-up event that will be handled like proactive contact
+      const followUpEvent: Event = {
+        id: `followup_${String(Date.now())}`,
+        source: 'internal',
+        type: 'conversation_followup',
+        priority: Priority.NORMAL,
+        timestamp: new Date(),
+        payload: {
+          chatId,
+          status: followUpCheck.status,
+          reason: followUpCheck.reason,
+        },
+      };
+
+      await this.handleConversationFollowUp(followUpEvent);
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to check conversation follow-up'
+      );
+    }
+  }
+
+  /**
+   * Handle conversation follow-up by sending an appropriate message.
+   */
+  private async handleConversationFollowUp(event: Event): Promise<void> {
+    const payload = event.payload as Record<string, unknown>;
+    const chatId = payload['chatId'] as string;
+    const status = payload['status'] as string;
+
+    if (!chatId || !this.messageComposer) {
+      return;
+    }
+
+    const telegramChannel = this.channels.get('telegram');
+    if (!telegramChannel) {
+      return;
+    }
+
+    // Check if user is available
+    if (this.userModel?.isLikelyAsleep()) {
+      this.logger.debug('Skipping follow-up: user likely asleep');
+      return;
+    }
+
+    // Determine follow-up message based on status
+    let trigger: string;
+    switch (status) {
+      case 'awaiting_answer':
+        trigger = 'following up on unanswered question';
+        break;
+      case 'active':
+        trigger = 'continuing conversation after pause';
+        break;
+      case 'idle':
+        trigger = 'reaching out after idle period';
+        break;
+      default:
+        trigger = 'checking in';
+    }
+
+    this.logger.info({ status, trigger }, 'Composing follow-up message');
+
+    // Notify agent of LLM call
+    this.agent.onLLMCall();
+
+    const result = await this.messageComposer.composeProactive(trigger);
+
+    if (!result.success || !result.message) {
+      this.logger.warn({ error: result.error }, 'Failed to compose follow-up message');
+      return;
+    }
+
+    const sent = await telegramChannel.sendMessage(chatId, result.message);
+
+    if (sent) {
+      this.logger.info({ chatId, messageLength: result.message.length }, 'Follow-up message sent');
+      this.metrics.counter('followup_messages_sent');
+
+      // Save and classify the new message
+      await this.saveAgentMessage(chatId, result.message);
+    }
   }
 
   /**
    * Calculate the next tick interval based on agent state.
    */
   private calculateNextInterval(): number {
+    // If there are events in queue, process immediately
+    if (this.eventQueue.size() > 0) {
+      return this.config.minTickInterval;
+    }
+
     // Get interval from agent state
     const agentInterval = this.agent.getState().tickInterval;
 
@@ -905,6 +1041,24 @@ export class EventLoop {
       this.config.minTickInterval,
       Math.min(this.config.maxTickInterval, agentInterval)
     );
+  }
+
+  /**
+   * Wake up the event loop immediately to process pending events.
+   * Call this when urgent events are added to the queue.
+   */
+  wakeUp(): void {
+    if (!this.running) return;
+
+    // Cancel current scheduled tick
+    if (this.tickTimeout) {
+      clearTimeout(this.tickTimeout);
+      this.tickTimeout = null;
+    }
+
+    // Schedule immediate tick
+    this.scheduleTick(0);
+    this.logger.debug('Event loop woken up for immediate processing');
   }
 }
 

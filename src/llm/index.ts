@@ -15,6 +15,14 @@ export {
 } from './openrouter.js';
 
 export {
+  OpenAICompatibleProvider,
+  createOpenAICompatibleProvider,
+  type OpenAICompatibleConfig,
+} from './openai-compatible.js';
+
+export { MultiProvider, createMultiProvider, type MultiProviderConfig } from './multi-provider.js';
+
+export {
   MessageComposer,
   createMessageComposer,
   type CompositionContext,

@@ -97,13 +97,15 @@ export class LayerProcessor {
   }
 
   /**
-   * Set conversation manager for context-aware interpretation.
-   * This allows the interpretation layer to check conversation history
-   * for better decisions (e.g., is this an answer to our question?).
+   * Set conversation manager for context-aware processing.
+   * This allows:
+   * - Interpretation layer to check conversation history for better decisions
+   * - Expression layer to include history when calling smart model
    */
   setConversationManager(manager: ConversationManager): void {
     this.interpretationLayer.setConversationManager(manager);
-    this.logger.debug('Interpretation layer conversation manager set');
+    this.expressionLayer.setConversationManager(manager);
+    this.logger.debug('Conversation manager set on interpretation and expression layers');
   }
 
   /**

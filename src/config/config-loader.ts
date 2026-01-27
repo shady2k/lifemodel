@@ -198,6 +198,27 @@ export class ConfigLoader {
       config.llm.smartModel = smartModel;
     }
 
+    // Local model configuration
+    const localBaseUrl = process.env['LLM_LOCAL_BASE_URL'];
+    if (localBaseUrl) {
+      config.llm.local.baseUrl = localBaseUrl;
+    }
+
+    const localModel = process.env['LLM_LOCAL_MODEL'];
+    if (localModel) {
+      config.llm.local.model = localModel;
+    }
+
+    const localUseForFast = process.env['LLM_LOCAL_USE_FOR_FAST'];
+    if (localUseForFast !== undefined) {
+      config.llm.local.useForFast = localUseForFast === 'true';
+    }
+
+    const localUseForSmart = process.env['LLM_LOCAL_USE_FOR_SMART'];
+    if (localUseForSmart !== undefined) {
+      config.llm.local.useForSmart = localUseForSmart === 'true';
+    }
+
     // Log level
     const logLevel = process.env['LOG_LEVEL'];
     if (logLevel && ['debug', 'info', 'warn', 'error'].includes(logLevel)) {

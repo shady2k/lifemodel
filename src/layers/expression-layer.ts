@@ -2,6 +2,7 @@ import type { LayerResult, Logger, Intent } from '../types/index.js';
 import type { ProcessingContext, ActionType } from './context.js';
 import { BaseLayer } from './base-layer.js';
 import type { MessageComposer } from '../llm/composer.js';
+import type { ConversationManager } from '../storage/conversation-manager.js';
 
 /**
  * Layer 5: EXPRESSION
@@ -21,6 +22,7 @@ export class ExpressionLayer extends BaseLayer {
   readonly confidenceThreshold = 0.9; // Final layer, high threshold
 
   private composer: MessageComposer | null = null;
+  private conversationManager: ConversationManager | null = null;
 
   // Template responses for MVP (fallback when LLM not available)
   private readonly templates: Record<string, string[]> = {
@@ -52,6 +54,14 @@ export class ExpressionLayer extends BaseLayer {
   setComposer(composer: MessageComposer): void {
     this.composer = composer;
     this.logger.debug('MessageComposer attached to expression layer');
+  }
+
+  /**
+   * Set the conversation manager for accessing history.
+   */
+  setConversationManager(manager: ConversationManager): void {
+    this.conversationManager = manager;
+    this.logger.debug('ConversationManager attached to expression layer');
   }
 
   protected async processImpl(context: ProcessingContext): Promise<LayerResult> {
@@ -211,7 +221,29 @@ export class ExpressionLayer extends BaseLayer {
           : undefined);
 
       if (userMessage) {
-        const result = await this.composer.composeResponse(userMessage);
+        // Get conversation history if available
+        let history;
+        if (this.conversationManager) {
+          const payload = context.event.payload as Record<string, unknown> | undefined;
+          const chatId = payload?.['chatId'];
+          const userId = payload?.['userId'];
+          const targetId =
+            (typeof chatId === 'string' ? chatId : undefined) ??
+            (typeof userId === 'string' ? userId : undefined);
+
+          if (targetId) {
+            history = await this.conversationManager.getHistory(targetId, {
+              maxRecent: 5, // More context for smart model
+              includeCompacted: true,
+            });
+            this.logger.debug(
+              { userId: targetId, historyLength: history.length },
+              'Retrieved conversation history for smart model'
+            );
+          }
+        }
+
+        const result = await this.composer.composeResponse(userMessage, history);
         if (result.success && result.message) {
           this.logger.debug({ tokensUsed: result.tokensUsed }, '🧠 Smart model response generated');
           return result.message;
