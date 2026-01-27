@@ -18,6 +18,19 @@ export interface AgentState {
   /** General curiosity/engagement level (0-1). */
   curiosity: number;
 
+  /**
+   * Pressure to get acquainted with user (0-1).
+   * Builds when agent doesn't know user's name.
+   * Natural drive to introduce itself and learn about the user.
+   */
+  acquaintancePressure: number;
+
+  /**
+   * Whether an acquaintance message is pending/in-flight.
+   * Prevents duplicate acquaintance attempts.
+   */
+  acquaintancePending: boolean;
+
   /** Timestamp of last tick. */
   lastTickAt: Date;
 
@@ -58,6 +71,8 @@ export function createDefaultAgentState(): AgentState {
     socialDebt: 0.0,
     taskPressure: 0.0,
     curiosity: 0.5,
+    acquaintancePressure: 0.0,
+    acquaintancePending: false,
     lastTickAt: new Date(),
     tickInterval: 30_000, // 30 seconds default
   };

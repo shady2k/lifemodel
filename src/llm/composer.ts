@@ -10,6 +10,8 @@ export interface UserStateContext {
   availability: number;
   mood: string;
   confidence: number;
+  /** User's gender for grammatical agreement (Russian, etc.) */
+  gender?: 'male' | 'female' | 'unknown';
 }
 
 /**
@@ -50,6 +52,18 @@ export interface ClassificationResult {
 
   /** Summary of older conversation context (when compaction was requested) */
   contextSummary?: string | undefined;
+
+  /**
+   * User's name if they introduced themselves in this message.
+   * Only populated when user explicitly states their name.
+   */
+  detectedUserName?: string | undefined;
+
+  /**
+   * User's gender if they explicitly mentioned it.
+   * Only populated when user explicitly states their gender.
+   */
+  detectedGender?: 'male' | 'female' | undefined;
 }
 
 /**
@@ -70,6 +84,12 @@ export interface CompositionContext {
 
   /** Additional context or constraints */
   constraints?: string[] | undefined;
+
+  /** Language to respond in (e.g., 'ru', 'en'). If not specified, defaults to English. */
+  language?: string | undefined;
+
+  /** Which model to use. 'fast' for simple messages, 'smart' for complex. Default: 'fast' */
+  role?: 'fast' | 'smart' | undefined;
 }
 
 /**
@@ -128,11 +148,13 @@ export class MessageComposer {
 
       messages.push({ role: 'user', content: userPrompt });
 
+      const role = context.role ?? 'fast'; // Default to fast - only use smart when needed
       const response = await this.provider.complete({
         messages,
-        role: 'smart', // Use smart model for composition
+        role,
         temperature: 0.7,
-        maxTokens: 800, // Enough for detailed responses
+        // Higher limit for reasoning models that use tokens for thinking
+        maxTokens: 5000,
       });
 
       return {
@@ -163,12 +185,17 @@ export class MessageComposer {
   /**
    * Compose a response to user message.
    */
+  /**
+   * Compose a response when fast model wasn't confident enough.
+   * Uses smart model since this is called after fast model failed/was uncertain.
+   */
   async composeResponse(userMessage: string, history?: Message[]): Promise<CompositionResult> {
     return this.compose({
       trigger: 'responding to user',
       userMessage,
       conversationHistory: history,
       mood: 'neutral',
+      role: 'smart', // Explicitly use smart - called when fast wasn't confident
     });
   }
 
@@ -218,6 +245,8 @@ export class MessageComposer {
                 suggestedResponse: { type: 'string' },
                 reasoning: { type: 'string' },
                 contextSummary: { type: 'string' },
+                detectedUserName: { type: 'string' },
+                detectedGender: { type: 'string' },
               },
               required: ['canHandle', 'confidence'],
             },
@@ -259,15 +288,39 @@ export class MessageComposer {
 
     // Build user state section
     let userStateSection = '';
+    let nameUsageHint = '';
     if (context.userState) {
-      const { name, energy, availability, mood, confidence } = context.userState;
+      const { name, energy, availability, mood, confidence, gender } = context.userState;
+      const nameKnown = name !== 'User' && name.length > 0;
+
+      // Gender hint for grammatical agreement
+      let genderHint = '';
+      if (gender === 'male') {
+        genderHint = '\n- Gender: male (use masculine grammatical forms)';
+      } else if (gender === 'female') {
+        genderHint = '\n- Gender: female (use feminine grammatical forms)';
+      } else {
+        genderHint = '\n- Gender: unknown (use masculine grammatical forms by default)';
+      }
+
       userStateSection = `
 ## Current User State (your beliefs about them)
-- Name: ${name}
+- Name: ${nameKnown ? name : '(not yet known)'}${genderHint}
 - Energy level: ${energy.toFixed(1)}/1.0 (${this.describeEnergy(energy)})
 - Availability: ${availability.toFixed(1)}/1.0
 - Mood: ${this.describeMood(mood)}
 - Confidence in these beliefs: ${confidence.toFixed(1)}/1.0`;
+
+      // Add hint about using the user's name
+      if (nameKnown) {
+        nameUsageHint = `
+## Name Usage
+You know the user's name is "${name}". Occasionally use their name naturally in your responses (not every time - that would be weird). Use it when:
+- Greeting them
+- Showing empathy
+- Making a personal connection
+Don't overuse it - once per 3-4 messages is natural.`;
+      }
     }
 
     // Build compaction section if needed
@@ -295,6 +348,7 @@ ${context.messagesToCompact.map((m) => `${m.role}: ${m.content}`).join('\n')}
 - Values: ${this.identity.values.join(', ')}
 - Boundaries: ${this.identity.boundaries.join(', ')}
 ${userStateSection}
+${nameUsageHint}
 ${compactionSection}
 
 ## Your Task
@@ -305,7 +359,9 @@ Respond ONLY with valid JSON (no markdown, no explanation):
   "canHandle": true or false,
   "confidence": 0.0 to 1.0,
   "suggestedResponse": "Your response in character (only if canHandle=true)",
-  "reasoning": "Brief explanation of your decision"${compactionJsonField}
+  "reasoning": "Brief explanation of your decision",
+  "detectedUserName": "User's name if they introduced themselves (null if not)",
+  "detectedGender": "male or female if explicitly mentioned (null if not)"${compactionJsonField}
 }
 
 ## Guidelines
@@ -315,7 +371,16 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 - Anything you're unsure about → canHandle=false, let smart model handle it
 - Match the language of the user's message (if they write in Russian, respond in Russian)
 - Keep responses concise and natural
-- Do NOT use markdown in suggestedResponse (no asterisks, no bold, plain text only)`;
+- Do NOT use markdown in suggestedResponse (no asterisks, no bold, plain text only)
+
+## Name Detection
+- If the user introduces themselves (e.g., "I'm John", "My name is Maria", "Меня зовут Саша"), extract their name to detectedUserName
+- Only extract the name if they explicitly state it, don't guess from context
+- If responding to their introduction, use their name naturally in suggestedResponse
+
+## Gender Detection
+- If the user explicitly mentions their gender (e.g., "I'm a guy", "Я парень", "Я девушка"), extract it to detectedGender
+- Only extract gender if explicitly stated, don't guess from name or context`;
   }
 
   /**
@@ -349,7 +414,15 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         suggestedResponse?: string;
         reasoning?: string;
         contextSummary?: string;
+        detectedUserName?: string | null;
+        detectedGender?: string | null;
       };
+
+      // Parse detected gender if valid
+      let detectedGender: 'male' | 'female' | undefined;
+      if (parsed.detectedGender === 'male' || parsed.detectedGender === 'female') {
+        detectedGender = parsed.detectedGender;
+      }
 
       return {
         canHandle: Boolean(parsed.canHandle),
@@ -357,6 +430,12 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         suggestedResponse: parsed.suggestedResponse,
         reasoning: parsed.reasoning,
         contextSummary: parsed.contextSummary,
+        // Only include name if it's a non-empty string (not null or empty)
+        detectedUserName:
+          parsed.detectedUserName && parsed.detectedUserName.length > 0
+            ? parsed.detectedUserName
+            : undefined,
+        detectedGender,
       };
     } catch {
       // JSON parsing failed - check if we got a meaningful text response
@@ -440,6 +519,21 @@ ${moodInstructions[context.mood ?? 'neutral'] ?? 'Be balanced and natural.'}`;
 
     if (context.constraints && context.constraints.length > 0) {
       prompt += `\n\nAdditional guidelines:\n${context.constraints.map((c) => `- ${c}`).join('\n')}`;
+    }
+
+    // Add language instruction if specified
+    if (context.language) {
+      const langNames: Record<string, string> = {
+        ru: 'Russian',
+        en: 'English',
+        es: 'Spanish',
+        de: 'German',
+        fr: 'French',
+        zh: 'Chinese',
+        ja: 'Japanese',
+      };
+      const langName = langNames[context.language] ?? context.language;
+      prompt += `\n\nIMPORTANT: Respond in ${langName}. The user prefers ${langName}.`;
     }
 
     prompt += `\n\nRespond naturally and conversationally. Keep messages concise.

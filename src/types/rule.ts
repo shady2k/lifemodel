@@ -4,11 +4,35 @@ import type { AgentState } from './agent/state.js';
 import type { Logger } from './logger.js';
 
 /**
+ * User beliefs accessible to rules.
+ * Subset of User state needed for rule evaluation.
+ */
+export interface UserBeliefs {
+  /** User's name (may be placeholder if not known) */
+  name: string;
+
+  /** Whether agent has learned user's actual name */
+  nameKnown: boolean;
+
+  /** Estimated user energy (0-1) */
+  energy: number;
+
+  /** Estimated user availability (0-1) */
+  availability: number;
+
+  /** Agent's confidence in these beliefs (0-1) */
+  confidence: number;
+}
+
+/**
  * Context passed to rule evaluation.
  */
 export interface RuleContext {
   /** Current agent state */
   state: AgentState;
+
+  /** Agent's beliefs about the user (optional, may not be available) */
+  userBeliefs?: UserBeliefs | undefined;
 
   /** The event being processed (if any) */
   event?: Event | undefined;

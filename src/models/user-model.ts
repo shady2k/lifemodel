@@ -314,6 +314,85 @@ export class UserModel {
     this.logger.debug({ updates }, 'Patterns updated');
   }
 
+  /**
+   * Set the user's name after learning it.
+   * Marks the name as known so agent won't ask again.
+   */
+  setName(name: string): void {
+    const oldName = this.user.name;
+    this.user.name = name;
+    this.user.nameKnown = true;
+    this.logger.info({ oldName, newName: name }, 'User name learned');
+  }
+
+  /**
+   * Check if we know the user's actual name.
+   */
+  isNameKnown(): boolean {
+    return this.user.nameKnown;
+  }
+
+  /**
+   * Get the user's name (may be placeholder if not known).
+   */
+  getName(): string {
+    return this.user.name;
+  }
+
+  /**
+   * Get user beliefs for rule evaluation.
+   * Returns a snapshot of key user state needed by rules.
+   */
+  getBeliefs(): {
+    name: string;
+    nameKnown: boolean;
+    energy: number;
+    availability: number;
+    confidence: number;
+  } {
+    return {
+      name: this.user.name,
+      nameKnown: this.user.nameKnown,
+      energy: this.user.energy,
+      availability: this.user.availability,
+      confidence: this.user.confidence,
+    };
+  }
+
+  /**
+   * Set the user's preferred language (detected from their messages).
+   */
+  setLanguage(language: string): void {
+    if (this.user.preferences.language !== language) {
+      this.user.preferences.language = language;
+      this.logger.info({ language }, 'User language preference updated');
+    }
+  }
+
+  /**
+   * Get the user's preferred language (or null if not yet detected).
+   */
+  getLanguage(): string | null {
+    return this.user.preferences.language;
+  }
+
+  /**
+   * Set the user's gender (for languages with grammatical gender).
+   */
+  setGender(gender: 'male' | 'female' | 'unknown'): void {
+    if (this.user.preferences.gender !== gender) {
+      this.user.preferences.gender = gender;
+      this.logger.info({ gender }, 'User gender updated');
+    }
+  }
+
+  /**
+   * Get the user's gender (or 'unknown' if not yet detected).
+   */
+  getGender(): 'male' | 'female' | 'unknown' {
+    return this.user.preferences.gender;
+  }
+
   // === Private signal handlers ===
 
   private onMessageReceived(metadata?: Record<string, unknown>): void {

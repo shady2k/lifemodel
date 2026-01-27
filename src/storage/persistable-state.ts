@@ -74,6 +74,8 @@ export function createEmptyPersistableState(): PersistableState {
         socialDebt: 0.0,
         taskPressure: 0.0,
         curiosity: 0.5,
+        acquaintancePressure: 0.0,
+        acquaintancePending: false,
         lastTickAt: new Date(),
         tickInterval: 30_000,
       },
@@ -121,10 +123,11 @@ export function serializeState(state: PersistableState): string {
 
 /**
  * Deserialize state from storage.
- * Handles Date restoration.
+ * Handles Date restoration and migrations for missing fields.
  */
 export function deserializeState(json: string): PersistableState {
-  return JSON.parse(json, (key: string, value: unknown) => {
+  // Parse as unknown first to handle migrations for legacy data
+  const rawState = JSON.parse(json, (key: string, value: unknown) => {
     // Convert ISO date strings back to Date objects for specific fields
     if (key === 'lastTickAt' || key === 'lastMentioned' || key === 'lastSignalAt') {
       if (typeof value === 'string') {
@@ -132,5 +135,43 @@ export function deserializeState(json: string): PersistableState {
       }
     }
     return value;
-  }) as PersistableState;
+  }) as Record<string, unknown>;
+
+  // Cast to state type, then apply migrations
+  const state = rawState as PersistableState;
+
+  // Type-safe access to potentially missing fields via raw object
+  const user = rawState['user'] as Record<string, unknown> | null;
+  const agent = rawState['agent'] as Record<string, unknown> | undefined;
+  const agentState = agent?.['state'] as Record<string, unknown> | undefined;
+  const userPrefs = user?.['preferences'] as Record<string, unknown> | undefined;
+
+  // Migration: add nameKnown to user if missing (for data from before this field existed)
+  if (user && user['nameKnown'] === undefined && state.user) {
+    // Name is "known" if it's not a placeholder like "User" or the ID itself
+    state.user.nameKnown =
+      state.user.name !== 'User' && state.user.name !== state.user.id && state.user.name.length > 0;
+  }
+
+  // Migration: add acquaintancePressure to agent state if missing
+  if (agentState && agentState['acquaintancePressure'] === undefined) {
+    state.agent.state.acquaintancePressure = 0.0;
+  }
+
+  // Migration: add acquaintancePending to agent state if missing
+  if (agentState && agentState['acquaintancePending'] === undefined) {
+    state.agent.state.acquaintancePending = false;
+  }
+
+  // Migration: add language to user preferences if missing
+  if (userPrefs && userPrefs['language'] === undefined && state.user) {
+    state.user.preferences.language = null;
+  }
+
+  // Migration: add gender to user preferences if missing
+  if (userPrefs && userPrefs['gender'] === undefined && state.user) {
+    state.user.preferences.gender = 'unknown';
+  }
+
+  return state;
 }

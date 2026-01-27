@@ -21,6 +21,9 @@ export interface AgentConfig {
   /** Initial state (optional, uses defaults if not provided) */
   initialState?: Partial<AgentState>;
 
+  /** Initial sleep state (optional, uses defaults if not provided) */
+  initialSleepState?: Partial<SleepState>;
+
   /** Agent identity (optional, uses defaults if not provided) */
   identity?: AgentIdentity;
 
@@ -78,7 +81,12 @@ export class Agent {
       ...config.initialState,
     };
 
-    this.sleepState = createDefaultSleepState();
+    // Initialize sleep state
+    const defaultSleepState = createDefaultSleepState();
+    this.sleepState = {
+      ...defaultSleepState,
+      ...config.initialSleepState,
+    };
     this.identity = config.identity ?? createDefaultIdentity();
 
     // Create energy model
@@ -87,6 +95,7 @@ export class Agent {
     // Store config with defaults
     this.config = {
       initialState: this.state,
+      initialSleepState: this.sleepState,
       identity: this.identity,
       tickRate: config.tickRate ?? DEFAULT_TICK_RATE,
       socialDebtRate: config.socialDebtRate ?? 0.001,

@@ -309,6 +309,10 @@ export class EventLoop {
       // 2b. Update user model beliefs (time-based decay)
       if (this.userModel) {
         this.userModel.updateTimeBasedBeliefs();
+        // Also update rule engine with current user beliefs
+        this.ruleEngine.setUserBeliefs(this.userModel.getBeliefs());
+      } else {
+        this.ruleEngine.setUserBeliefs(undefined);
       }
 
       // 3. Evaluate rules
@@ -397,6 +401,13 @@ export class EventLoop {
       // Special handling for proactive contact events
       if (event.type === 'contact_pressure_threshold') {
         await this.handleProactiveContact(event);
+        processed++;
+        continue;
+      }
+
+      // Special handling for acquaintance events (agent wants to introduce itself)
+      if (event.type === 'acquaintance_threshold') {
+        await this.handleAcquaintance(event);
         processed++;
         continue;
       }
@@ -562,12 +573,59 @@ export class EventLoop {
     const reason = payload?.['reason'] as string | undefined;
 
     // Compose proactive message
-    this.logger.info({ pressure: pressure?.toFixed(2), reason }, 'Composing proactive message');
+    const userLanguage = this.userModel?.getLanguage() ?? undefined;
+
+    // Get conversation history for context (so LLM knows the language)
+    let conversationHistory: Awaited<ReturnType<ConversationManager['getHistory']>> | undefined;
+    if (this.conversationManager) {
+      conversationHistory = await this.conversationManager.getHistory(chatId, {
+        maxRecent: 5,
+        includeCompacted: true,
+      });
+    }
+
+    this.logger.info(
+      {
+        pressure: pressure?.toFixed(2),
+        reason,
+        language: userLanguage,
+        historyLength: conversationHistory?.length,
+      },
+      'Composing proactive message'
+    );
 
     // Notify agent of LLM call (drains energy)
     this.agent.onLLMCall();
 
-    const result = await this.messageComposer.composeProactive(reason ?? 'social debt accumulated');
+    // Calculate time since last message for context
+    let timeSinceLastMessage = '';
+    if (conversationHistory && conversationHistory.length > 0) {
+      const lastMsg = conversationHistory[conversationHistory.length - 1];
+      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+        const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
+        const diffMs = Date.now() - lastTime;
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 60) {
+          timeSinceLastMessage = `${String(diffMins)} minutes ago`;
+        } else {
+          const diffHours = Math.floor(diffMins / 60);
+          timeSinceLastMessage = `${String(diffHours)} hour${diffHours > 1 ? 's' : ''} ago`;
+        }
+      }
+    }
+
+    const result = await this.messageComposer.compose({
+      trigger: reason ?? 'social debt accumulated',
+      mood: 'friendly',
+      language: userLanguage,
+      conversationHistory,
+      constraints: [
+        `Context: The last message was ${timeSinceLastMessage || 'some time ago'}. You are now reaching out to the user on your own initiative.`,
+        'Keep it brief and natural',
+        "Don't be intrusive",
+        'Show genuine interest',
+      ],
+    });
 
     if (!result.success || !result.message) {
       this.logger.warn({ error: result.error }, 'Failed to compose proactive message');
@@ -615,6 +673,134 @@ export class EventLoop {
     } else {
       this.logger.warn({ chatId }, 'Failed to send proactive message');
       this.metrics.counter('proactive_messages_failed');
+    }
+  }
+
+  /**
+   * Handle acquaintance events.
+   * Agent naturally wants to introduce itself and learn user's name.
+   */
+  private async handleAcquaintance(_event: Event): Promise<void> {
+    const chatId = this.config.primaryUserChatId;
+
+    // Check prerequisites
+    if (!chatId) {
+      this.logger.debug('Skipping acquaintance: no primary user chat ID configured');
+      return;
+    }
+
+    if (!this.messageComposer) {
+      this.logger.debug('Skipping acquaintance: no message composer available');
+      return;
+    }
+
+    const telegramChannel = this.channels.get('telegram');
+    if (!telegramChannel) {
+      this.logger.debug('Skipping acquaintance: telegram channel not available');
+      return;
+    }
+
+    // Don't introduce if user is asleep or unavailable
+    if (this.userModel) {
+      if (this.userModel.isLikelyAsleep()) {
+        this.logger.debug('Skipping acquaintance: user likely asleep');
+        return;
+      }
+
+      // Skip if we already know the name
+      if (this.userModel.isNameKnown()) {
+        this.logger.debug('Skipping acquaintance: already know user name');
+        return;
+      }
+    }
+
+    // Compose introduction message asking for name
+    const agentName = this.agent.getIdentity().name;
+    const userLanguage = this.userModel?.getLanguage() ?? undefined;
+
+    // Get conversation history for context (agent should remember what was discussed)
+    let conversationHistory: Awaited<ReturnType<ConversationManager['getHistory']>> | undefined;
+    if (this.conversationManager) {
+      conversationHistory = await this.conversationManager.getHistory(chatId, {
+        maxRecent: 5,
+        includeCompacted: true,
+      });
+    }
+
+    this.logger.info(
+      { agentName, language: userLanguage, historyLength: conversationHistory?.length },
+      'Composing acquaintance message'
+    );
+
+    // Notify agent of LLM call
+    this.agent.onLLMCall();
+
+    // Calculate time since last message for context
+    let timeSinceLastMessage = '';
+    if (conversationHistory && conversationHistory.length > 0) {
+      const lastMsg = conversationHistory[conversationHistory.length - 1];
+      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+        const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
+        const diffMs = Date.now() - lastTime;
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 60) {
+          timeSinceLastMessage = `${String(diffMins)} minutes ago`;
+        } else {
+          const diffHours = Math.floor(diffMins / 60);
+          timeSinceLastMessage = `${String(diffHours)} hour${diffHours > 1 ? 's' : ''} ago`;
+        }
+      }
+    }
+
+    const result = await this.messageComposer.compose({
+      trigger: 'want to get acquainted with user',
+      mood: 'friendly',
+      language: userLanguage,
+      conversationHistory,
+      constraints: [
+        `Your name is ${agentName}`,
+        `Context: The last message was ${timeSinceLastMessage || 'some time ago'}. You are now reaching out to the user on your own initiative.`,
+        'You realized you never learned their name, so introduce yourself and ask for theirs.',
+        'Keep it short, warm, and natural',
+      ],
+    });
+
+    if (!result.success || !result.message) {
+      this.logger.warn({ error: result.error }, 'Failed to compose acquaintance message');
+      return;
+    }
+
+    // Send the message
+    const sent = await telegramChannel.sendMessage(chatId, result.message);
+
+    // Clear pending flag regardless of success/failure
+    this.agent.applyIntent({
+      type: 'UPDATE_STATE',
+      payload: { key: 'acquaintancePending', value: false },
+    });
+
+    if (sent) {
+      this.logger.info(
+        { chatId, messageLength: result.message.length, tokensUsed: result.tokensUsed },
+        '🤝 Acquaintance message sent'
+      );
+      this.metrics.counter('acquaintance_messages_sent');
+
+      // Track for response timing
+      this.lastMessageSentAt = Date.now();
+      this.lastMessageChatId = chatId;
+
+      // Save to conversation history
+      await this.saveAgentMessage(chatId, result.message);
+
+      // Reset acquaintance pressure after successful send
+      this.agent.applyIntent({
+        type: 'UPDATE_STATE',
+        payload: { key: 'acquaintancePressure', value: 0 },
+      });
+    } else {
+      this.logger.warn({ chatId }, 'Failed to send acquaintance message');
+      // Pressure stays high, will retry on next threshold check
     }
   }
 
@@ -922,6 +1108,12 @@ export class EventLoop {
       return;
     }
 
+    // Don't send follow-ups if we don't know the user's name yet
+    // Acquaintance takes priority - we should introduce ourselves first
+    if (this.userModel && !this.userModel.isNameKnown()) {
+      return;
+    }
+
     try {
       const followUpCheck = await this.conversationManager.shouldFollowUp(chatId);
 
@@ -1001,12 +1193,53 @@ export class EventLoop {
         trigger = 'checking in';
     }
 
-    this.logger.info({ status, trigger }, 'Composing follow-up message');
+    const userLanguage = this.userModel?.getLanguage() ?? undefined;
+
+    // Get conversation history for context (so LLM knows the language)
+    let conversationHistory: Awaited<ReturnType<ConversationManager['getHistory']>> | undefined;
+    if (this.conversationManager) {
+      conversationHistory = await this.conversationManager.getHistory(chatId, {
+        maxRecent: 5,
+        includeCompacted: true,
+      });
+    }
+
+    this.logger.info(
+      { status, trigger, language: userLanguage, historyLength: conversationHistory?.length },
+      'Composing follow-up message'
+    );
 
     // Notify agent of LLM call
     this.agent.onLLMCall();
 
-    const result = await this.messageComposer.composeProactive(trigger);
+    // Calculate time since last message for context
+    let timeSinceLastMessage = '';
+    if (conversationHistory && conversationHistory.length > 0) {
+      const lastMsg = conversationHistory[conversationHistory.length - 1];
+      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+        const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
+        const diffMs = Date.now() - lastTime;
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 60) {
+          timeSinceLastMessage = `${String(diffMins)} minutes ago`;
+        } else {
+          const diffHours = Math.floor(diffMins / 60);
+          timeSinceLastMessage = `${String(diffHours)} hour${diffHours > 1 ? 's' : ''} ago`;
+        }
+      }
+    }
+
+    const result = await this.messageComposer.compose({
+      trigger,
+      mood: 'friendly',
+      language: userLanguage,
+      conversationHistory,
+      constraints: [
+        `Context: The last message was ${timeSinceLastMessage || 'some time ago'} and the user hasn't responded. You are following up on your own initiative.`,
+        'Keep it brief and natural',
+        "Don't be intrusive",
+      ],
+    });
 
     if (!result.success || !result.message) {
       this.logger.warn({ error: result.error }, 'Failed to compose follow-up message');

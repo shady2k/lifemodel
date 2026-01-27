@@ -13,7 +13,7 @@ import {
   createTelegramChannel,
   type TelegramConfig,
 } from '../channels/index.js';
-import { type UserModel, createNewUserWithModel } from '../models/user-model.js';
+import { type UserModel, createUserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import type { LLMProvider } from '../llm/provider.js';
 import { createOpenRouterProvider } from '../llm/openrouter.js';
@@ -461,6 +461,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     },
     tickRate: configOverrides.agent?.tickRate ?? mergedConfig.tickRate,
   };
+  // Restore sleep state if available
+  if (persistedState?.agent.sleepState) {
+    agentConfig.initialSleepState = persistedState.agent.sleepState;
+  }
   if (configOverrides.agent?.socialDebtRate !== undefined) {
     agentConfig.socialDebtRate = configOverrides.agent.socialDebtRate;
   }
@@ -503,11 +507,38 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
   if (primaryUserChatId) {
-    const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
-    const timezoneOffset =
-      configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
-    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
-    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
+    // Try to restore from persisted state first
+    if (persistedState?.user?.id === primaryUserChatId) {
+      // Restore dates that were serialized
+      const restoredUser = {
+        ...persistedState.user,
+        lastMentioned:
+          typeof persistedState.user.lastMentioned === 'string'
+            ? new Date(persistedState.user.lastMentioned)
+            : persistedState.user.lastMentioned,
+        lastSignalAt:
+          typeof persistedState.user.lastSignalAt === 'string'
+            ? new Date(persistedState.user.lastSignalAt)
+            : persistedState.user.lastSignalAt,
+      };
+      userModel = createUserModel(restoredUser, logger);
+      logger.info(
+        {
+          userId: primaryUserChatId,
+          userName: restoredUser.name,
+          nameKnown: restoredUser.nameKnown,
+          language: restoredUser.preferences.language,
+        },
+        'UserModel restored from persisted state'
+      );
+    } else {
+      // Create new user from config
+      const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
+      const timezoneOffset =
+        configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
+      userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
+      logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
+    }
   } else {
     logger.debug('UserModel not created (no primary user configured)');
   }

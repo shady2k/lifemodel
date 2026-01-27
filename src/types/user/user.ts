@@ -8,6 +8,13 @@ import type { Person } from './person.js';
  */
 export interface User extends Person {
   /**
+   * Whether the agent has learned the user's actual name.
+   * False when name is a placeholder (like "User" or just their ID).
+   * Agent should naturally want to get acquainted when this is false.
+   */
+  nameKnown: boolean;
+
+  /**
    * Agent's estimate of user's energy level (0-1).
    * Based on time of day, response patterns, explicit signals.
    * This is a BELIEF, not truth.
@@ -93,6 +100,15 @@ export interface UserPreferences {
   /** Preferred communication style */
   communicationStyle: 'brief' | 'detailed' | 'unknown';
 
+  /** User's preferred language (detected from their messages) */
+  language: string | null;
+
+  /**
+   * User's gender (for languages with grammatical gender like Russian).
+   * Should be detected from context or explicit statement.
+   */
+  gender: 'male' | 'female' | 'unknown';
+
   /** Topics user enjoys discussing */
   favoriteTopics: string[];
 
@@ -125,6 +141,8 @@ export function createDefaultPatterns(): UserPatterns {
 export function createDefaultPreferences(): UserPreferences {
   return {
     communicationStyle: 'unknown',
+    language: null,
+    gender: 'unknown',
     favoriteTopics: [],
     avoidTopics: [],
     morningMessages: null,
@@ -137,9 +155,12 @@ export function createDefaultPreferences(): UserPreferences {
  */
 export function createUser(id: string, name: string, timezoneOffset = 0): User {
   const now = new Date();
+  // Name is "known" if it's not a placeholder like "User" or the ID itself
+  const nameKnown = name !== 'User' && name !== id && name.length > 0;
   return {
     id,
     name,
+    nameKnown,
     traits: [],
     topics: [],
     lastMentioned: now,

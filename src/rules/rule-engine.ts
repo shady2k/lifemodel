@@ -1,4 +1,12 @@
-import type { Rule, RuleContext, Intent, Event, AgentState, Logger } from '../types/index.js';
+import type {
+  Rule,
+  RuleContext,
+  UserBeliefs,
+  Intent,
+  Event,
+  AgentState,
+  Logger,
+} from '../types/index.js';
 
 /**
  * RuleEngine - evaluates rules and collects intents.
@@ -15,9 +23,18 @@ export class RuleEngine {
   private readonly rules = new Map<string, Rule>();
   private readonly logger: Logger;
   private lastInteractionAt: Date = new Date();
+  private userBeliefs: UserBeliefs | undefined;
 
   constructor(logger: Logger) {
     this.logger = logger.child({ component: 'rule-engine' });
+  }
+
+  /**
+   * Set current user beliefs for rule evaluation.
+   * Call this to update user state available to rules.
+   */
+  setUserBeliefs(beliefs: UserBeliefs | undefined): void {
+    this.userBeliefs = beliefs;
   }
 
   /**
@@ -77,6 +94,7 @@ export class RuleEngine {
     const now = new Date();
     return {
       state,
+      userBeliefs: this.userBeliefs,
       event,
       now,
       hour: now.getHours(),

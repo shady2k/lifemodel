@@ -226,6 +226,7 @@ export class CognitionLayer extends BaseLayer {
           availability: this.userModel.estimateAvailability(),
           mood: user.mood,
           confidence: user.confidence,
+          gender: this.userModel.getGender(),
         };
       }
 
@@ -251,9 +252,28 @@ export class CognitionLayer extends BaseLayer {
           hasUserState: !!userState,
           historyLength: history?.length ?? 0,
           hasContextSummary: !!result.contextSummary,
+          detectedUserName: result.detectedUserName,
         },
         '🧠 Fast model classification'
       );
+
+      // If LLM detected user's name, update the user model
+      if (result.detectedUserName && this.userModel) {
+        this.userModel.setName(result.detectedUserName);
+        this.logger.info(
+          { detectedName: result.detectedUserName },
+          '🤝 User introduced themselves - name learned!'
+        );
+      }
+
+      // If LLM detected user's gender, update the user model
+      if (result.detectedGender && this.userModel) {
+        this.userModel.setGender(result.detectedGender);
+        this.logger.info(
+          { detectedGender: result.detectedGender },
+          '🤝 User mentioned their gender - learned!'
+        );
+      }
 
       // If fast model is confident, use its response
       if (result.canHandle && result.confidence >= 0.8 && result.suggestedResponse) {
@@ -316,9 +336,14 @@ export class CognitionLayer extends BaseLayer {
 
   private processUserSignals(context: ProcessingContext): BeliefUpdate[] {
     const updates: BeliefUpdate[] = [];
-    const { interpretation } = context;
+    const { interpretation, perception } = context;
 
     if (!interpretation) return updates;
+
+    // Update user's language preference if detected
+    if (perception?.language && this.userModel) {
+      this.userModel.setLanguage(perception.language);
+    }
 
     // Update mood based on sentiment
     if (interpretation.sentiment !== 'neutral') {
