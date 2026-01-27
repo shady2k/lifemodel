@@ -4,6 +4,8 @@ import { createLogger, type LoggerConfig } from './logger.js';
 import { createEventQueue } from './event-queue.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
+import { type EventBus, createEventBus } from './event-bus.js';
+import { type EventLoop, createEventLoop, type EventLoopConfig } from './event-loop.js';
 
 /**
  * Application configuration.
@@ -28,6 +30,8 @@ export interface AppConfig {
     /** Social debt accumulation rate */
     socialDebtRate?: number;
   };
+  /** Event loop configuration */
+  eventLoop?: Partial<EventLoopConfig>;
 }
 
 /**
@@ -38,10 +42,14 @@ export interface Container {
   logger: Logger;
   /** Event queue */
   eventQueue: EventQueue;
+  /** Event bus for pub/sub */
+  eventBus: EventBus;
   /** Metrics collector */
   metrics: Metrics;
   /** The agent */
   agent: Agent;
+  /** The event loop (heartbeat) */
+  eventLoop: EventLoop;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -95,18 +103,26 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create agent
   const agent = createAgent({ logger, eventQueue, metrics }, agentConfig);
 
+  // Create event bus
+  const eventBus = createEventBus(logger);
+
+  // Create event loop
+  const eventLoop = createEventLoop(agent, eventQueue, eventBus, logger, metrics, config.eventLoop);
+
   // Shutdown function
   const shutdown = (): Promise<void> => {
     logger.info('Shutting down...');
-    // Add cleanup logic here as needed
+    eventLoop.stop();
     return Promise.resolve();
   };
 
   return {
     logger,
     eventQueue,
+    eventBus,
     metrics,
     agent,
+    eventLoop,
     shutdown,
   };
 }

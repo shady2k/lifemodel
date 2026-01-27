@@ -9,7 +9,7 @@ import { createContainer } from './core/container.js';
 // Create the application container
 const container = createContainer();
 
-const { logger, agent } = container;
+const { logger, agent, eventLoop } = container;
 
 logger.info('Lifemodel starting...');
 logger.info(
@@ -21,6 +21,9 @@ logger.info(
   },
   'Agent ready'
 );
+
+// Start the event loop (heartbeat)
+eventLoop.start();
 
 // Handle shutdown
 process.on('SIGINT', () => {
