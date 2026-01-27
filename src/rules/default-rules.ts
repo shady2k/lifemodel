@@ -1,6 +1,7 @@
 import type { Rule, RuleContext, Intent } from '../types/index.js';
 import { createRule } from '../types/index.js';
 import { Priority } from '../types/index.js';
+import { contactPressureNeuron } from '../decision/neuron.js';
 
 /**
  * Night hours (when to suppress non-urgent contact).
@@ -60,27 +61,55 @@ const nightSuppressionRule = createRule({
 });
 
 /**
- * Social pressure threshold rule.
+ * Contact decision rule using neuron-like weighted calculation.
  *
- * When social debt accumulates beyond threshold,
- * signal that agent should consider reaching out.
+ * Combines multiple factors (social debt, task pressure, curiosity,
+ * user availability estimate) into a single pressure value.
+ * When pressure exceeds threshold, triggers contact consideration.
  */
-const socialPressureRule = createRule({
-  id: 'social-pressure-threshold',
-  description: 'Trigger contact consideration when social debt is high',
+const contactDecisionRule = createRule({
+  id: 'contact-decision',
+  description: 'Neuron-based contact decision using weighted factors',
   trigger: 'tick',
-  weight: 0.8,
+  weight: 0.85,
 
   condition: (ctx: RuleContext): boolean => {
-    // Fire when social debt exceeds threshold
-    const threshold = isNightTime(ctx.hour) ? 0.9 : 0.7;
-    return ctx.state.socialDebt >= threshold;
+    // Estimate user availability based on time of day
+    const userAvailability = estimateUserAvailability(ctx.hour);
+
+    // Calculate contact pressure using neuron
+    const result = contactPressureNeuron({
+      socialDebt: ctx.state.socialDebt,
+      taskPressure: ctx.state.taskPressure,
+      curiosity: ctx.state.curiosity,
+      userAvailability,
+    });
+
+    // Adaptive threshold based on conditions
+    let threshold = 0.6; // Base threshold
+    if (isNightTime(ctx.hour)) {
+      threshold = 0.85; // Much higher at night
+    }
+    if (ctx.state.energy < 0.3) {
+      threshold += 0.1; // Higher when tired
+    }
+
+    return result.output >= threshold;
   },
 
   action: (ctx: RuleContext): Intent[] => {
     const intents: Intent[] = [];
+    const userAvailability = estimateUserAvailability(ctx.hour);
 
-    // Schedule an internal event to trigger contact consideration
+    // Calculate for logging
+    const result = contactPressureNeuron({
+      socialDebt: ctx.state.socialDebt,
+      taskPressure: ctx.state.taskPressure,
+      curiosity: ctx.state.curiosity,
+      userAvailability,
+    });
+
+    // Schedule contact consideration event
     intents.push({
       type: 'SCHEDULE_EVENT',
       payload: {
@@ -89,30 +118,70 @@ const socialPressureRule = createRule({
           type: 'contact_pressure_threshold',
           priority: isNightTime(ctx.hour) ? Priority.NORMAL : Priority.HIGH,
           payload: {
-            socialDebt: ctx.state.socialDebt,
-            reason: 'social_debt_accumulated',
+            pressure: result.output,
+            contributions: result.contributions,
+            reason: 'neuron_threshold_crossed',
           },
         },
-        delay: 0, // Immediate
-        scheduleId: 'contact-pressure-check',
+        delay: 0,
+        scheduleId: 'contact-decision',
       },
     });
 
+    // Log with full trace for explainability
     intents.push({
       type: 'LOG',
       payload: {
         level: 'info',
-        message: 'Social pressure threshold crossed',
+        message: 'Contact pressure threshold crossed',
         context: {
-          socialDebt: ctx.state.socialDebt,
+          pressure: result.output.toFixed(3),
+          contributions: result.contributions.map((c) => ({
+            [c.name]: `${c.value.toFixed(2)} * ${c.weight.toFixed(2)} = ${c.contribution.toFixed(3)}`,
+          })),
           isNight: isNightTime(ctx.hour),
         },
+      },
+    });
+
+    // Emit metrics
+    intents.push({
+      type: 'EMIT_METRIC',
+      payload: {
+        type: 'gauge',
+        name: 'contact_pressure',
+        value: result.output,
       },
     });
 
     return intents;
   },
 });
+
+/**
+ * Estimate user availability based on time of day.
+ * Simple heuristic - can be replaced with learned patterns later.
+ */
+function estimateUserAvailability(hour: number): number {
+  // Night (22-6): Very low availability
+  if (hour >= 22 || hour < 6) {
+    return 0.1;
+  }
+  // Early morning (6-9): Low availability
+  if (hour >= 6 && hour < 9) {
+    return 0.4;
+  }
+  // Work hours (9-12, 14-18): Medium availability
+  if ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)) {
+    return 0.6;
+  }
+  // Lunch (12-14): Higher availability
+  if (hour >= 12 && hour < 14) {
+    return 0.8;
+  }
+  // Evening (18-22): High availability
+  return 0.9;
+}
 
 /**
  * Inactivity awareness rule.
@@ -249,7 +318,7 @@ const messageReceivedRule = createRule({
 export function createDefaultRules(): Rule[] {
   return [
     nightSuppressionRule,
-    socialPressureRule,
+    contactDecisionRule,
     inactivityAwarenessRule,
     energyRecoveryRule,
     messageReceivedRule,

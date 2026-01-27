@@ -142,7 +142,7 @@ describe('RuleEngine', () => {
 
       expect(rules.length).toBeGreaterThan(0);
       expect(rules.some((r) => r.id === 'night-suppression')).toBe(true);
-      expect(rules.some((r) => r.id === 'social-pressure-threshold')).toBe(true);
+      expect(rules.some((r) => r.id === 'contact-decision')).toBe(true);
     });
 
     it('night suppression rule fires during night hours', () => {
@@ -171,29 +171,39 @@ describe('RuleEngine', () => {
       expect(nightRule?.condition(dayContext)).toBe(false);
     });
 
-    it('social pressure rule fires when debt exceeds threshold', () => {
+    it('contact decision rule uses neuron-based weighted calculation', () => {
       const { ruleEngine } = container;
 
-      const pressureRule = ruleEngine.getRules().find((r) => r.id === 'social-pressure-threshold');
-      expect(pressureRule).toBeDefined();
+      const contactRule = ruleEngine.getRules().find((r) => r.id === 'contact-decision');
+      expect(contactRule).toBeDefined();
 
-      // Low debt - should not fire
-      const lowDebtContext = {
-        state: { ...container.agent.getState(), socialDebt: 0.3 },
+      // Low pressure factors - should not fire
+      const lowPressureContext = {
+        state: {
+          ...container.agent.getState(),
+          socialDebt: 0.2,
+          taskPressure: 0.1,
+          curiosity: 0.3,
+        },
         now: new Date(),
-        hour: 12, // Day time
+        hour: 12, // Day time, good availability
         timeSinceLastInteraction: 0,
       };
 
-      expect(pressureRule?.condition(lowDebtContext)).toBe(false);
+      expect(contactRule?.condition(lowPressureContext)).toBe(false);
 
-      // High debt - should fire
-      const highDebtContext = {
-        ...lowDebtContext,
-        state: { ...lowDebtContext.state, socialDebt: 0.8 },
+      // High pressure factors - should fire
+      const highPressureContext = {
+        ...lowPressureContext,
+        state: {
+          ...lowPressureContext.state,
+          socialDebt: 0.9,
+          taskPressure: 0.8,
+          curiosity: 0.7,
+        },
       };
 
-      expect(pressureRule?.condition(highDebtContext)).toBe(true);
+      expect(contactRule?.condition(highPressureContext)).toBe(true);
     });
   });
 });
