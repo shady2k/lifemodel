@@ -16,6 +16,7 @@ import type { LayerProcessor } from '../layers/layer-processor.js';
 import type { RuleEngine } from '../rules/rule-engine.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { UserModel } from '../models/user-model.js';
+import type { LearningEngine } from '../learning/learning-engine.js';
 
 /**
  * Event loop configuration.
@@ -54,6 +55,8 @@ export interface EventLoopDeps {
   messageComposer?: MessageComposer | undefined;
   /** User model for checking user state before contacting */
   userModel?: UserModel | undefined;
+  /** Learning engine for self-learning */
+  learningEngine?: LearningEngine | undefined;
 }
 
 const DEFAULT_CONFIG: EventLoopConfig = {
@@ -102,6 +105,7 @@ export class EventLoop {
   private readonly channels = new Map<string, Channel>();
   private readonly messageComposer: MessageComposer | undefined;
   private readonly userModel: UserModel | undefined;
+  private readonly learningEngine: LearningEngine | undefined;
 
   /** Timestamp of last message sent by agent (for response timing) */
   private lastMessageSentAt: number | null = null;
@@ -129,6 +133,7 @@ export class EventLoop {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.messageComposer = deps.messageComposer;
     this.userModel = deps.userModel;
+    this.learningEngine = deps.learningEngine;
   }
 
   /**
@@ -379,6 +384,11 @@ export class EventLoop {
           // Check for response timing (if we sent a message recently)
           this.processResponseTiming(event);
         }
+
+        // Process learning for message received
+        if (this.learningEngine) {
+          this.learningEngine.processFeedback('message_received');
+        }
       }
 
       // Apply intents from layer processing and rules
@@ -532,6 +542,29 @@ export class EventLoop {
       );
       this.metrics.counter('proactive_messages_sent');
 
+      // Record behavior for learning
+      if (this.learningEngine) {
+        const userAvailability = this.userModel?.estimateAvailability() ?? 0.5;
+        const behaviorContext: Parameters<typeof this.learningEngine.recordBehavior>[1] = {
+          hour: new Date().getHours(),
+          userAvailability,
+          energy: this.agent.getEnergy(),
+        };
+        if (pressure !== undefined) {
+          behaviorContext.contactPressure = pressure;
+        }
+        this.learningEngine.recordBehavior('proactive_contact', behaviorContext, [
+          'socialDebt',
+          'taskPressure',
+          'curiosity',
+          'userAvailability',
+        ]);
+      }
+
+      // Track for response timing
+      this.lastMessageSentAt = Date.now();
+      this.lastMessageChatId = chatId;
+
       // Reset social debt after successful contact
       this.agent.applyIntent({
         type: 'UPDATE_STATE',
@@ -564,16 +597,24 @@ export class EventLoop {
     const responseTimeMs = Date.now() - this.lastMessageSentAt;
     const responseTimeSec = responseTimeMs / 1000;
 
-    // Classify response speed
+    // Classify response speed and process signals
     // Quick: < 30 seconds
     // Normal: 30 seconds - 5 minutes
     // Slow: 5 - 30 minutes
     // Very slow: > 30 minutes (but still responded)
     if (responseTimeSec < 30) {
       this.userModel.processSignal('quick_response', { responseTimeMs });
+      // Also process learning
+      if (this.learningEngine) {
+        this.learningEngine.processFeedback('quick_response', { responseTimeMs });
+      }
       this.logger.debug({ responseTimeSec: responseTimeSec.toFixed(1) }, 'Quick response detected');
     } else if (responseTimeSec > 300) {
       this.userModel.processSignal('slow_response', { responseTimeMs });
+      // Also process learning
+      if (this.learningEngine) {
+        this.learningEngine.processFeedback('slow_response', { responseTimeMs });
+      }
       this.logger.debug({ responseTimeSec: responseTimeSec.toFixed(1) }, 'Slow response detected');
     }
     // Normal response time doesn't trigger a specific signal

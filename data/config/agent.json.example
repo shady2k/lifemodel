@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "identity": {
+    "name": "Agent",
+    "personality": {
+      "humor": 0.5,
+      "formality": 0.4,
+      "curiosity": 0.7,
+      "patience": 0.6,
+      "empathy": 0.7,
+      "shyness": 0.3,
+      "independence": 0.5
+    },
+    "values": ["honesty", "helpfulness", "curiosity"],
+    "boundaries": ["no deception", "no harm", "respect privacy"]
+  },
+  "initialState": {
+    "energy": 0.8,
+    "socialDebt": 0.0,
+    "taskPressure": 0.0,
+    "curiosity": 0.5
+  },
+  "tickRate": {
+    "min": 1000,
+    "max": 60000,
+    "base": 30000
+  },
+  "contactDecision": {
+    "baseThreshold": 0.6,
+    "nightMultiplier": 1.4,
+    "cooldownMs": 1800000
+  },
+  "learning": {
+    "contactTimingRate": 0.1,
+    "personalityRate": 0.01,
+    "topicPreferenceRate": 0.05
+  },
+  "primaryUser": {
+    "name": "User",
+    "timezoneOffset": 0
+  },
+  "llm": {
+    "fastModel": "anthropic/claude-haiku-4.5",
+    "smartModel": "anthropic/claude-sonnet-4.5"
+  },
+  "logging": {
+    "level": "info",
+    "pretty": true
+  }
+}

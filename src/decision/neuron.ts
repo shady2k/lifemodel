@@ -147,3 +147,198 @@ export const alertnessNeuron = createNeuron({
   recentActivity: 0.3,
   timeOfDay: 0.3,
 });
+
+/**
+ * Weight bounds for learning.
+ */
+export interface WeightBounds {
+  /** Minimum weight value (default: 0.01) */
+  min: number;
+  /** Maximum weight value (default: 1.0) */
+  max: number;
+}
+
+const DEFAULT_WEIGHT_BOUNDS: WeightBounds = {
+  min: 0.01,
+  max: 1.0,
+};
+
+/**
+ * ConfigurableNeuron - a neuron with mutable weights for learning.
+ *
+ * Unlike the fixed createNeuron factory, this class allows weights
+ * to be updated at runtime based on feedback, enabling self-learning.
+ *
+ * @example
+ * const neuron = new ConfigurableNeuron({
+ *   socialDebt: 0.4,
+ *   taskPressure: 0.2,
+ * });
+ *
+ * // Evaluate
+ * const result = neuron.evaluate({ socialDebt: 0.8, taskPressure: 0.3 });
+ *
+ * // Learn from feedback
+ * neuron.updateWeight('socialDebt', 0.05); // Increase weight
+ * neuron.updateWeight('taskPressure', -0.02); // Decrease weight
+ */
+export class ConfigurableNeuron {
+  private weights: Record<string, number>;
+  private readonly bounds: WeightBounds;
+  private readonly name: string;
+
+  constructor(
+    initialWeights: Record<string, number>,
+    options?: { name?: string; bounds?: Partial<WeightBounds> }
+  ) {
+    this.weights = { ...initialWeights };
+    this.name = options?.name ?? 'unnamed';
+    this.bounds = { ...DEFAULT_WEIGHT_BOUNDS, ...options?.bounds };
+
+    // Clamp initial weights to bounds
+    for (const key of Object.keys(this.weights)) {
+      const weight = this.weights[key];
+      if (weight !== undefined) {
+        this.weights[key] = this.clampWeight(weight);
+      }
+    }
+  }
+
+  /**
+   * Get the neuron's name.
+   */
+  getName(): string {
+    return this.name;
+  }
+
+  /**
+   * Evaluate the neuron with given input values.
+   */
+  evaluate(values: Record<string, number>): NeuronResult {
+    const inputs: NeuronInput[] = Object.entries(this.weights).map(([name, weight]) => ({
+      name,
+      value: values[name] ?? 0,
+      weight,
+    }));
+    return neuron(inputs);
+  }
+
+  /**
+   * Update a single weight by a delta amount.
+   *
+   * @param inputName The name of the input to update
+   * @param delta The amount to add (positive) or subtract (negative)
+   * @returns The new weight value, or null if inputName doesn't exist
+   */
+  updateWeight(inputName: string, delta: number): number | null {
+    const oldWeight = this.weights[inputName];
+    if (oldWeight === undefined) {
+      return null;
+    }
+
+    const newWeight = this.clampWeight(oldWeight + delta);
+    this.weights[inputName] = newWeight;
+
+    return newWeight;
+  }
+
+  /**
+   * Set a weight to an absolute value.
+   *
+   * @param inputName The name of the input to set
+   * @param value The new weight value
+   * @returns The clamped weight value, or null if inputName doesn't exist
+   */
+  setWeight(inputName: string, value: number): number | null {
+    if (!(inputName in this.weights)) {
+      return null;
+    }
+
+    const newWeight = this.clampWeight(value);
+    this.weights[inputName] = newWeight;
+
+    return newWeight;
+  }
+
+  /**
+   * Get a single weight value.
+   */
+  getWeight(inputName: string): number | undefined {
+    return this.weights[inputName];
+  }
+
+  /**
+   * Get all current weights (readonly copy).
+   */
+  getWeights(): Readonly<Record<string, number>> {
+    return { ...this.weights };
+  }
+
+  /**
+   * Set all weights at once (for restoring from persistence).
+   */
+  setWeights(weights: Record<string, number>): void {
+    for (const [key, value] of Object.entries(weights)) {
+      if (key in this.weights) {
+        this.weights[key] = this.clampWeight(value);
+      }
+    }
+  }
+
+  /**
+   * Get the weight bounds.
+   */
+  getBounds(): Readonly<WeightBounds> {
+    return { ...this.bounds };
+  }
+
+  /**
+   * Check if the neuron has a specific input.
+   */
+  hasInput(inputName: string): boolean {
+    return inputName in this.weights;
+  }
+
+  /**
+   * Get all input names.
+   */
+  getInputNames(): string[] {
+    return Object.keys(this.weights);
+  }
+
+  /**
+   * Clamp weight to bounds.
+   */
+  private clampWeight(value: number): number {
+    return Math.max(this.bounds.min, Math.min(this.bounds.max, value));
+  }
+}
+
+/**
+ * Create a configurable neuron for contact pressure calculation.
+ */
+export function createConfigurableContactPressureNeuron(): ConfigurableNeuron {
+  return new ConfigurableNeuron(
+    {
+      socialDebt: 0.4,
+      taskPressure: 0.2,
+      curiosity: 0.1,
+      userAvailability: 0.3,
+    },
+    { name: 'contactPressure' }
+  );
+}
+
+/**
+ * Create a configurable neuron for alertness calculation.
+ */
+export function createConfigurableAlertnessNeuron(): ConfigurableNeuron {
+  return new ConfigurableNeuron(
+    {
+      energy: 0.4,
+      recentActivity: 0.3,
+      timeOfDay: 0.3,
+    },
+    { name: 'alertness' }
+  );
+}

@@ -16,6 +16,19 @@ import {
 import { type UserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import { type OpenRouterProvider, createOpenRouterProvider } from '../llm/openrouter.js';
+import {
+  type Storage,
+  type StateManager,
+  createJSONStorage,
+  createStateManager,
+} from '../storage/index.js';
+import {
+  type ConfigurableNeuron,
+  createConfigurableContactPressureNeuron,
+  createConfigurableAlertnessNeuron,
+} from '../decision/index.js';
+import { type LearningEngine, createLearningEngine } from '../learning/index.js';
+import { type MergedConfig, loadConfig } from '../config/index.js';
 
 /**
  * Application configuration.
@@ -96,6 +109,19 @@ export interface Container {
   messageComposer: MessageComposer | null;
   /** Primary user's Telegram chat ID (for proactive messages) */
   primaryUserChatId: string | null;
+  /** Storage backend */
+  storage: Storage | null;
+  /** State manager for persistence */
+  stateManager: StateManager | null;
+  /** Learning engine for self-learning */
+  learningEngine: LearningEngine | null;
+  /** Configurable neurons for learning */
+  neurons: {
+    contactPressure: ConfigurableNeuron | null;
+    alertness: ConfigurableNeuron | null;
+  };
+  /** Loaded configuration */
+  config: MergedConfig | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -105,6 +131,8 @@ export interface Container {
  *
  * This is the composition root - all dependencies are created here
  * and passed to components via constructor injection.
+ *
+ * For async initialization (loading config and state), use createContainerAsync.
  */
 export function createContainer(config: AppConfig = {}): Container {
   // Build logger config, only including defined values
@@ -207,6 +235,22 @@ export function createContainer(config: AppConfig = {}): Container {
     layerProcessor.setComposer(messageComposer);
   }
 
+  // Create configurable neurons for learning
+  const contactPressureNeuron = createConfigurableContactPressureNeuron();
+  const alertnessNeuron = createConfigurableAlertnessNeuron();
+
+  // Create learning engine
+  const learningEngine = createLearningEngine(
+    logger,
+    config.agent?.socialDebtRate !== undefined
+      ? { contactTimingRate: config.agent.socialDebtRate }
+      : undefined
+  );
+  learningEngine.registerNeurons({
+    contactPressure: contactPressureNeuron,
+    alertness: alertnessNeuron,
+  });
+
   // Create event loop config with primary user chat ID
   const eventLoopConfig: Partial<EventLoopConfig> = {
     ...config.eventLoop,
@@ -228,6 +272,7 @@ export function createContainer(config: AppConfig = {}): Container {
     {
       messageComposer: messageComposer ?? undefined,
       userModel: userModel ?? undefined,
+      learningEngine,
     }
   );
 
@@ -249,7 +294,7 @@ export function createContainer(config: AppConfig = {}): Container {
     logger.debug('Telegram channel not configured (no bot token)');
   }
 
-  // Shutdown function
+  // Shutdown function (without persistence - for sync container)
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
     eventLoop.stop();
@@ -277,6 +322,292 @@ export function createContainer(config: AppConfig = {}): Container {
     llmProvider,
     messageComposer,
     primaryUserChatId,
+    storage: null,
+    stateManager: null,
+    learningEngine,
+    neurons: {
+      contactPressure: contactPressureNeuron,
+      alertness: alertnessNeuron,
+    },
+    config: null,
+    shutdown,
+  };
+}
+
+/**
+ * Create the application container with async initialization.
+ *
+ * This version:
+ * - Loads configuration from file and environment
+ * - Initializes storage and state management
+ * - Restores state from disk if available
+ * - Sets up auto-save and shutdown hooks
+ */
+export async function createContainerAsync(configOverrides: AppConfig = {}): Promise<Container> {
+  // Load configuration from file and environment
+  const mergedConfig = await loadConfig(configOverrides.logDir ? undefined : 'data/config');
+
+  // Build logger config from merged config
+  const loggerConfig: Partial<LoggerConfig> = {
+    logDir: configOverrides.logDir ?? mergedConfig.logging.logDir,
+    maxFiles: configOverrides.maxLogFiles ?? mergedConfig.logging.maxFiles,
+    level: configOverrides.logLevel ?? mergedConfig.logging.level,
+    pretty: configOverrides.prettyLogs ?? mergedConfig.logging.pretty,
+  };
+
+  // Create logger
+  const logger = createLogger(loggerConfig);
+  logger.info('Loaded configuration');
+
+  // Create storage
+  const storagePath = mergedConfig.paths.state;
+  const storage = createJSONStorage(storagePath);
+  logger.info({ storagePath }, 'Storage initialized');
+
+  // Create state manager
+  const stateManager = createStateManager(storage, logger);
+
+  // Load persisted state
+  const persistedState = await stateManager.load();
+
+  // Create event queue
+  const eventQueue = createEventQueue();
+
+  // Create metrics
+  const metrics = createMetrics();
+
+  // Build agent config from merged config and persisted state
+  const agentConfig: AgentConfig = {
+    identity: configOverrides.agent?.identity ?? mergedConfig.identity,
+    initialState: persistedState?.agent.state ?? {
+      ...mergedConfig.initialState,
+      ...configOverrides.agent?.initialState,
+    },
+    tickRate: configOverrides.agent?.tickRate ?? mergedConfig.tickRate,
+  };
+  if (configOverrides.agent?.socialDebtRate !== undefined) {
+    agentConfig.socialDebtRate = configOverrides.agent.socialDebtRate;
+  }
+
+  // Create agent
+  const agent = createAgent({ logger, eventQueue, metrics }, agentConfig);
+
+  // Create event bus
+  const eventBus = createEventBus(logger);
+
+  // Create layer processor (brain pipeline)
+  const layerProcessor = createLayerProcessor(logger);
+
+  // Create rule engine and load default rules
+  const ruleEngine = createRuleEngine(logger);
+  for (const rule of createDefaultRules()) {
+    ruleEngine.addRule(rule);
+  }
+
+  // Restore rule states from persisted state
+  if (persistedState?.rules) {
+    const rules = ruleEngine.getRules();
+    for (const savedRule of persistedState.rules) {
+      const rule = rules.find((r) => r.id === savedRule.id);
+      if (rule) {
+        rule.weight = savedRule.weight;
+        rule.useCount = savedRule.useCount;
+        if (savedRule.lastUsed) {
+          rule.lastUsed = new Date(savedRule.lastUsed);
+        }
+      }
+    }
+    logger.debug({ rulesRestored: persistedState.rules.length }, 'Rule states restored');
+  }
+
+  // Get primary user chat ID
+  const primaryUserChatId =
+    configOverrides.primaryUser?.telegramChatId ?? mergedConfig.primaryUser.telegramChatId ?? null;
+
+  // Create UserModel if primary user configured
+  let userModel: UserModel | null = null;
+  if (primaryUserChatId) {
+    const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
+    const timezoneOffset =
+      configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
+    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
+    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
+  } else {
+    logger.debug('UserModel not created (no primary user configured)');
+  }
+
+  // Create LLM provider if configured
+  let llmProvider: OpenRouterProvider | null = null;
+  const openRouterApiKey =
+    configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? '';
+  if (openRouterApiKey) {
+    const fastModel = configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel;
+    const smartModel = configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel;
+
+    llmProvider = createOpenRouterProvider(
+      {
+        apiKey: openRouterApiKey,
+        fastModel,
+        smartModel,
+      },
+      logger
+    );
+    logger.info('LLM provider configured');
+  } else {
+    logger.debug('LLM provider not configured (no API key)');
+  }
+
+  // Create MessageComposer if LLM available
+  let messageComposer: MessageComposer | null = null;
+  if (llmProvider) {
+    const identity = agentConfig.identity ?? agent.getIdentity();
+    messageComposer = createMessageComposer(llmProvider, identity);
+    logger.info('MessageComposer configured');
+  }
+
+  // Attach composer to expression layer if available
+  if (messageComposer) {
+    layerProcessor.setComposer(messageComposer);
+  }
+
+  // Create configurable neurons for learning
+  const contactPressureNeuron = createConfigurableContactPressureNeuron();
+  const alertnessNeuron = createConfigurableAlertnessNeuron();
+
+  // Restore neuron weights from persisted state
+  if (persistedState?.neuronWeights) {
+    const contactWeights = persistedState.neuronWeights.contactPressure;
+    if (Object.keys(contactWeights).length > 0) {
+      contactPressureNeuron.setWeights(contactWeights);
+    }
+    const alertWeights = persistedState.neuronWeights.alertness;
+    if (Object.keys(alertWeights).length > 0) {
+      alertnessNeuron.setWeights(alertWeights);
+    }
+    logger.debug('Neuron weights restored');
+  }
+
+  // Create learning engine
+  const learningEngine = createLearningEngine(logger, mergedConfig.learning);
+  learningEngine.registerNeurons({
+    contactPressure: contactPressureNeuron,
+    alertness: alertnessNeuron,
+  });
+
+  // Mark state dirty when weights change
+  learningEngine.setWeightUpdateCallback(() => {
+    stateManager.markDirty();
+  });
+
+  // Create event loop config with primary user chat ID
+  const eventLoopConfig: Partial<EventLoopConfig> = {
+    ...configOverrides.eventLoop,
+  };
+  if (primaryUserChatId) {
+    eventLoopConfig.primaryUserChatId = primaryUserChatId;
+  }
+
+  // Create event loop
+  const eventLoop = createEventLoop(
+    agent,
+    eventQueue,
+    eventBus,
+    layerProcessor,
+    ruleEngine,
+    logger,
+    metrics,
+    eventLoopConfig,
+    {
+      messageComposer: messageComposer ?? undefined,
+      userModel: userModel ?? undefined,
+      learningEngine,
+    }
+  );
+
+  // Create channels registry
+  const channels = new Map<string, Channel>();
+
+  // Create Telegram channel if configured
+  let telegramChannel: TelegramChannel | null = null;
+  const telegramBotToken =
+    configOverrides.telegram?.botToken ?? mergedConfig.telegramBotToken ?? '';
+
+  if (telegramBotToken) {
+    const telegramConfig: TelegramConfig = {
+      botToken: telegramBotToken,
+      ...configOverrides.telegram,
+    };
+    telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
+    channels.set('telegram', telegramChannel);
+    eventLoop.registerChannel(telegramChannel);
+    logger.info('Telegram channel configured');
+  } else {
+    logger.debug('Telegram channel not configured (no bot token)');
+  }
+
+  // Register components with state manager
+  const stateManagerComponents: Parameters<typeof stateManager.registerComponents>[0] = {
+    agent,
+    ruleEngine,
+    neuronWeights: {
+      contactPressure: contactPressureNeuron.getWeights() as Record<string, number>,
+      alertness: alertnessNeuron.getWeights() as Record<string, number>,
+    },
+  };
+  if (userModel) {
+    stateManagerComponents.userModel = userModel;
+  }
+  stateManager.registerComponents(stateManagerComponents);
+
+  // Start auto-save
+  stateManager.startAutoSave();
+
+  // Shutdown function with persistence
+  const shutdown = async (): Promise<void> => {
+    logger.info('Shutting down...');
+    eventLoop.stop();
+
+    // Update neuron weights in state manager before save
+    stateManager.registerComponents({
+      neuronWeights: learningEngine.getNeuronWeights(),
+    });
+
+    // Save state
+    await stateManager.shutdown();
+
+    // Stop all channels
+    for (const channel of channels.values()) {
+      if (channel.stop) {
+        await channel.stop();
+      }
+    }
+
+    logger.info('Shutdown complete');
+  };
+
+  return {
+    logger,
+    eventQueue,
+    eventBus,
+    metrics,
+    agent,
+    layerProcessor,
+    ruleEngine,
+    eventLoop,
+    telegramChannel,
+    channels,
+    userModel,
+    llmProvider,
+    messageComposer,
+    primaryUserChatId,
+    storage,
+    stateManager,
+    learningEngine,
+    neurons: {
+      contactPressure: contactPressureNeuron,
+      alertness: alertnessNeuron,
+    },
+    config: mergedConfig,
     shutdown,
   };
 }
