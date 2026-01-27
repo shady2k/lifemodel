@@ -1,13 +1,21 @@
 import type { Logger } from 'pino';
-import type { EventQueue, Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
+import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import { createLogger, type LoggerConfig } from './logger.js';
-import { createEventQueue } from './event-queue.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
 import { type EventBus, createEventBus } from './event-bus.js';
-import { type EventLoop, type EventLoopConfig, createEventLoop } from './event-loop.js';
-import { type LayerProcessor, createLayerProcessor } from '../layers/layer-processor.js';
-import { type RuleEngine, createRuleEngine, createDefaultRules } from '../rules/index.js';
+import {
+  type CoreLoop,
+  type CoreLoopConfig,
+  type CoreLoopLayers,
+  createCoreLoop,
+} from './core-loop.js';
+import {
+  createAutonomicProcessor,
+  createAggregationProcessor,
+  createCognitionProcessor,
+  createSmartProcessor,
+} from '../layers/index.js';
 import {
   type TelegramChannel,
   createTelegramChannel,
@@ -27,13 +35,6 @@ import {
   createStateManager,
   createConversationManager,
 } from '../storage/index.js';
-import {
-  type ConfigurableNeuron,
-  createConfigurableContactPressureNeuron,
-  createConfigurableAlertnessNeuron,
-  type ContactDecider,
-  createContactDecider,
-} from '../decision/index.js';
 import { type LearningEngine, createLearningEngine } from '../learning/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
 
@@ -60,8 +61,8 @@ export interface AppConfig {
     /** Social debt accumulation rate */
     socialDebtRate?: number;
   };
-  /** Event loop configuration */
-  eventLoop?: Partial<EventLoopConfig>;
+  /** Core loop configuration */
+  coreLoop?: Partial<CoreLoopConfig>;
   /** Telegram configuration */
   telegram?: TelegramConfig;
   /** Primary user configuration (for proactive contact) */
@@ -101,20 +102,16 @@ export interface AppConfig {
 export interface Container {
   /** Application logger */
   logger: Logger;
-  /** Event queue */
-  eventQueue: EventQueue;
   /** Event bus for pub/sub */
   eventBus: EventBus;
   /** Metrics collector */
   metrics: Metrics;
   /** The agent */
   agent: Agent;
-  /** Layer processor (brain pipeline) */
-  layerProcessor: LayerProcessor;
-  /** Rule engine */
-  ruleEngine: RuleEngine;
-  /** The event loop (heartbeat) */
-  eventLoop: EventLoop;
+  /** 4-layer processors */
+  layers: CoreLoopLayers;
+  /** The core loop (heartbeat) */
+  coreLoop: CoreLoop;
   /** Telegram channel (optional, depends on config) */
   telegramChannel: TelegramChannel | null;
   /** All registered channels */
@@ -135,13 +132,6 @@ export interface Container {
   conversationManager: ConversationManager | null;
   /** Learning engine for self-learning */
   learningEngine: LearningEngine | null;
-  /** Configurable neurons for learning */
-  neurons: {
-    contactPressure: ConfigurableNeuron | null;
-    alertness: ConfigurableNeuron | null;
-  };
-  /** Contact decider for proactive messaging */
-  contactDecider: ContactDecider | null;
   /** Loaded configuration */
   config: MergedConfig | null;
   /** Shutdown function */
@@ -149,99 +139,52 @@ export interface Container {
 }
 
 /**
- * Create the application container with all dependencies wired up.
- *
- * This is the composition root - all dependencies are created here
- * and passed to components via constructor injection.
- *
- * For async initialization (loading config and state), use createContainerAsync.
+ * Create the 4-layer processors.
  */
-export function createContainer(config: AppConfig = {}): Container {
-  // Build logger config, only including defined values
-  const loggerConfig: Partial<LoggerConfig> = {};
-  if (config.logDir !== undefined) {
-    loggerConfig.logDir = config.logDir;
-  }
-  if (config.maxLogFiles !== undefined) {
-    loggerConfig.maxFiles = config.maxLogFiles;
-  }
-  if (config.logLevel !== undefined) {
-    loggerConfig.level = config.logLevel;
-  }
-  if (config.prettyLogs !== undefined) {
-    loggerConfig.pretty = config.prettyLogs;
-  }
+function createLayers(logger: Logger): CoreLoopLayers {
+  return {
+    autonomic: createAutonomicProcessor(logger),
+    aggregation: createAggregationProcessor(logger),
+    cognition: createCognitionProcessor(logger),
+    smart: createSmartProcessor(logger),
+  };
+}
 
-  // Create logger
-  const logger = createLogger(loggerConfig);
+/**
+ * LLM provider config type that allows undefined values.
+ */
+interface LLMProviderConfig {
+  openRouterApiKey?: string | null | undefined;
+  fastModel?: string | undefined;
+  smartModel?: string | undefined;
+  local?: {
+    baseUrl?: string | null | undefined;
+    model?: string | null | undefined;
+    useForFast?: boolean | undefined;
+    useForSmart?: boolean | undefined;
+  } | undefined;
+}
 
-  // Create event queue
-  const eventQueue = createEventQueue();
-
-  // Create metrics
-  const metrics = createMetrics();
-
-  // Build agent config, only including defined values
-  const agentConfig: AgentConfig = {};
-  if (config.agent?.identity !== undefined) {
-    agentConfig.identity = config.agent.identity;
-  }
-  if (config.agent?.initialState !== undefined) {
-    agentConfig.initialState = config.agent.initialState;
-  }
-  if (config.agent?.tickRate !== undefined) {
-    agentConfig.tickRate = config.agent.tickRate;
-  }
-  if (config.agent?.socialDebtRate !== undefined) {
-    agentConfig.socialDebtRate = config.agent.socialDebtRate;
-  }
-
-  // Create agent
-  const agent = createAgent({ logger, eventQueue, metrics }, agentConfig);
-
-  // Create event bus
-  const eventBus = createEventBus(logger);
-
-  // Create layer processor (brain pipeline)
-  const layerProcessor = createLayerProcessor(logger);
-
-  // Create rule engine and load default rules
-  const ruleEngine = createRuleEngine(logger);
-  for (const rule of createDefaultRules()) {
-    ruleEngine.addRule(rule);
-  }
-
-  // Get primary user chat ID
-  const primaryUserChatId =
-    config.primaryUser?.telegramChatId ?? process.env['PRIMARY_USER_CHAT_ID'] ?? null;
-
-  // Create UserModel if primary user configured
-  let userModel: UserModel | null = null;
-  if (primaryUserChatId) {
-    const userName = config.primaryUser?.name ?? 'User';
-    const timezoneOffset = config.primaryUser?.timezoneOffset ?? 0;
-    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
-    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
-  } else {
-    logger.debug('UserModel not created (no primary user configured)');
-  }
-
-  // Create LLM providers
-  let llmProvider: LLMProvider | null = null;
-
-  const openRouterApiKey = config.llm?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
-  const localBaseUrl = config.llm?.local?.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
-  const localModel = config.llm?.local?.model ?? process.env['LLM_LOCAL_MODEL'];
+/**
+ * Create LLM provider from config.
+ */
+function createLLMProvider(
+  config: LLMProviderConfig | undefined,
+  logger: Logger
+): LLMProvider | null {
+  const openRouterApiKey = config?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
+  const localBaseUrl = config?.local?.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
+  const localModel = config?.local?.model ?? process.env['LLM_LOCAL_MODEL'];
   const useLocalForFast =
-    config.llm?.local?.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
+    config?.local?.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
   const useLocalForSmart =
-    config.llm?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
+    config?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
 
   // Create OpenRouter provider if configured
   let openRouterProvider = null;
   if (openRouterApiKey) {
-    const fastModel = config.llm?.fastModel ?? process.env['LLM_FAST_MODEL'];
-    const smartModel = config.llm?.smartModel ?? process.env['LLM_SMART_MODEL'];
+    const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
+    const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
 
     openRouterProvider = createOpenRouterProvider(
       {
@@ -268,7 +211,7 @@ export function createContainer(config: AppConfig = {}): Container {
 
   // Create multi-provider if we have both, or use single provider
   if (localProvider && openRouterProvider) {
-    llmProvider = createMultiProvider(
+    const multiProvider = createMultiProvider(
       {
         fast: useLocalForFast ? localProvider : openRouterProvider,
         smart: useLocalForSmart ? localProvider : openRouterProvider,
@@ -283,15 +226,69 @@ export function createContainer(config: AppConfig = {}): Container {
       },
       'MultiProvider configured'
     );
+    return multiProvider;
   } else if (localProvider) {
-    llmProvider = localProvider;
     logger.info('Local LLM provider configured');
+    return localProvider;
   } else if (openRouterProvider) {
-    llmProvider = openRouterProvider;
     logger.info('OpenRouter LLM provider configured');
-  } else {
-    logger.debug('LLM provider not configured');
+    return openRouterProvider;
   }
+
+  logger.debug('LLM provider not configured');
+  return null;
+}
+
+/**
+ * Create the application container with all dependencies wired up.
+ *
+ * This is the composition root - all dependencies are created here
+ * and passed to components via constructor injection.
+ *
+ * For async initialization (loading config and state), use createContainerAsync.
+ */
+export function createContainer(config: AppConfig = {}): Container {
+  // Build logger config
+  const loggerConfig: Partial<LoggerConfig> = {};
+  if (config.logDir !== undefined) loggerConfig.logDir = config.logDir;
+  if (config.maxLogFiles !== undefined) loggerConfig.maxFiles = config.maxLogFiles;
+  if (config.logLevel !== undefined) loggerConfig.level = config.logLevel;
+  if (config.prettyLogs !== undefined) loggerConfig.pretty = config.prettyLogs;
+
+  // Create logger
+  const logger = createLogger(loggerConfig);
+
+  // Create metrics
+  const metrics = createMetrics();
+
+  // Build agent config
+  const agentConfig: AgentConfig = {};
+  if (config.agent?.identity !== undefined) agentConfig.identity = config.agent.identity;
+  if (config.agent?.initialState !== undefined) agentConfig.initialState = config.agent.initialState;
+  if (config.agent?.tickRate !== undefined) agentConfig.tickRate = config.agent.tickRate;
+  if (config.agent?.socialDebtRate !== undefined) agentConfig.socialDebtRate = config.agent.socialDebtRate;
+
+  // Create agent (without eventQueue - CoreLoop doesn't use it)
+  const agent = createAgent({ logger, metrics }, agentConfig);
+
+  // Create event bus
+  const eventBus = createEventBus(logger);
+
+  // Get primary user chat ID
+  const primaryUserChatId =
+    config.primaryUser?.telegramChatId ?? process.env['PRIMARY_USER_CHAT_ID'] ?? null;
+
+  // Create UserModel if primary user configured
+  let userModel: UserModel | null = null;
+  if (primaryUserChatId) {
+    const userName = config.primaryUser?.name ?? 'User';
+    const timezoneOffset = config.primaryUser?.timezoneOffset ?? 0;
+    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
+    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
+  }
+
+  // Create LLM provider
+  const llmProvider = createLLMProvider(config.llm, logger);
 
   // Create MessageComposer if LLM available
   let messageComposer: MessageComposer | null = null;
@@ -301,14 +298,8 @@ export function createContainer(config: AppConfig = {}): Container {
     logger.info('MessageComposer configured');
   }
 
-  // Attach composer to expression layer if available
-  if (messageComposer) {
-    layerProcessor.setComposer(messageComposer);
-  }
-
-  // Create configurable neurons for learning
-  const contactPressureNeuron = createConfigurableContactPressureNeuron();
-  const alertnessNeuron = createConfigurableAlertnessNeuron();
+  // Create 4-layer processors
+  const layers = createLayers(logger);
 
   // Create learning engine
   const learningEngine = createLearningEngine(
@@ -317,37 +308,26 @@ export function createContainer(config: AppConfig = {}): Container {
       ? { contactTimingRate: config.agent.socialDebtRate }
       : undefined
   );
-  learningEngine.registerNeurons({
-    contactPressure: contactPressureNeuron,
-    alertness: alertnessNeuron,
-  });
 
-  // Create contact decider with configurable neuron
-  const contactDecider = createContactDecider(contactPressureNeuron);
-
-  // Create event loop config with primary user chat ID
-  const eventLoopConfig: Partial<EventLoopConfig> = {
-    ...config.eventLoop,
+  // Create core loop config
+  const coreLoopConfig: Partial<CoreLoopConfig> = {
+    ...config.coreLoop,
   };
   if (primaryUserChatId) {
-    eventLoopConfig.primaryUserChatId = primaryUserChatId;
+    coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }
 
-  // Create event loop (wired to layer processor, rule engine, and proactive messaging deps)
-  const eventLoop = createEventLoop(
+  // Create core loop
+  const coreLoop = createCoreLoop(
     agent,
-    eventQueue,
     eventBus,
-    layerProcessor,
-    ruleEngine,
+    layers,
     logger,
     metrics,
-    eventLoopConfig,
+    coreLoopConfig,
     {
       messageComposer: messageComposer ?? undefined,
       userModel: userModel ?? undefined,
-      learningEngine,
-      contactDecider,
     }
   );
 
@@ -361,24 +341,28 @@ export function createContainer(config: AppConfig = {}): Container {
   };
 
   if (telegramConfig.botToken) {
-    telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
+    // Create telegram channel - it will push signals to coreLoop
+    telegramChannel = createTelegramChannel(telegramConfig, null, logger);
     channels.set('telegram', telegramChannel);
-    eventLoop.registerChannel(telegramChannel);
-    // Wake up event loop immediately when messages arrive
+    coreLoop.registerChannel(telegramChannel);
+
+    // When telegram receives messages, push as signals
+    telegramChannel.setSignalCallback((signal) => {
+      coreLoop.pushSignal(signal);
+    });
+
+    // Wake up core loop immediately when messages arrive
     telegramChannel.setWakeUpCallback(() => {
-      eventLoop.wakeUp();
+      coreLoop.wakeUp();
     });
     logger.info('Telegram channel configured');
-  } else {
-    logger.debug('Telegram channel not configured (no bot token)');
   }
 
-  // Shutdown function (without persistence - for sync container)
+  // Shutdown function
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
-    eventLoop.stop();
+    coreLoop.stop();
 
-    // Stop all channels
     for (const channel of channels.values()) {
       if (channel.stop) {
         await channel.stop();
@@ -388,13 +372,11 @@ export function createContainer(config: AppConfig = {}): Container {
 
   return {
     logger,
-    eventQueue,
     eventBus,
     metrics,
     agent,
-    layerProcessor,
-    ruleEngine,
-    eventLoop,
+    layers,
+    coreLoop,
     telegramChannel,
     channels,
     userModel,
@@ -405,11 +387,6 @@ export function createContainer(config: AppConfig = {}): Container {
     stateManager: null,
     conversationManager: null,
     learningEngine,
-    neurons: {
-      contactPressure: contactPressureNeuron,
-      alertness: alertnessNeuron,
-    },
-    contactDecider,
     config: null,
     shutdown,
   };
@@ -455,9 +432,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Load persisted state
   const persistedState = await stateManager.load();
 
-  // Create event queue
-  const eventQueue = createEventQueue();
-
   // Create metrics
   const metrics = createMetrics();
 
@@ -470,7 +444,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     },
     tickRate: configOverrides.agent?.tickRate ?? mergedConfig.tickRate,
   };
-  // Restore sleep state if available
   if (persistedState?.agent.sleepState) {
     agentConfig.initialSleepState = persistedState.agent.sleepState;
   }
@@ -479,35 +452,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Create agent
-  const agent = createAgent({ logger, eventQueue, metrics }, agentConfig);
+  const agent = createAgent({ logger, metrics }, agentConfig);
 
   // Create event bus
   const eventBus = createEventBus(logger);
-
-  // Create layer processor (brain pipeline)
-  const layerProcessor = createLayerProcessor(logger);
-
-  // Create rule engine and load default rules
-  const ruleEngine = createRuleEngine(logger);
-  for (const rule of createDefaultRules()) {
-    ruleEngine.addRule(rule);
-  }
-
-  // Restore rule states from persisted state
-  if (persistedState?.rules) {
-    const rules = ruleEngine.getRules();
-    for (const savedRule of persistedState.rules) {
-      const rule = rules.find((r) => r.id === savedRule.id);
-      if (rule) {
-        rule.weight = savedRule.weight;
-        rule.useCount = savedRule.useCount;
-        if (savedRule.lastUsed) {
-          rule.lastUsed = new Date(savedRule.lastUsed);
-        }
-      }
-    }
-    logger.debug({ rulesRestored: persistedState.rules.length }, 'Rule states restored');
-  }
 
   // Get primary user chat ID
   const primaryUserChatId =
@@ -516,9 +464,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
   if (primaryUserChatId) {
-    // Try to restore from persisted state first
     if (persistedState?.user?.id === primaryUserChatId) {
-      // Restore dates that were serialized
+      // Restore from persisted state
       const restoredUser = {
         ...persistedState.user,
         lastMentioned:
@@ -541,85 +488,22 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         'UserModel restored from persisted state'
       );
     } else {
-      // Create new user from config
       const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
       const timezoneOffset =
         configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
       userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
       logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
     }
-  } else {
-    logger.debug('UserModel not created (no primary user configured)');
   }
 
   // Create LLM providers
-  let llmProvider: LLMProvider | null = null;
-
-  const openRouterApiKey =
-    configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? '';
-  const localConfig = configOverrides.llm?.local ?? mergedConfig.llm.local;
-  const localBaseUrl = localConfig.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
-  const localModel = localConfig.model ?? process.env['LLM_LOCAL_MODEL'];
-  const useLocalForFast =
-    localConfig.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
-  const useLocalForSmart =
-    localConfig.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
-
-  // Create OpenRouter provider if configured
-  let openRouterProvider = null;
-  if (openRouterApiKey) {
-    const fastModel = configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel;
-    const smartModel = configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel;
-
-    openRouterProvider = createOpenRouterProvider(
-      {
-        apiKey: openRouterApiKey,
-        ...(fastModel && { fastModel }),
-        ...(smartModel && { smartModel }),
-      },
-      logger
-    );
-  }
-
-  // Create local provider if configured
-  let localProvider = null;
-  if (localBaseUrl && localModel) {
-    localProvider = createOpenAICompatibleProvider(
-      {
-        baseUrl: localBaseUrl,
-        model: localModel,
-        name: 'local',
-      },
-      logger
-    );
-  }
-
-  // Create multi-provider if we have both, or use single provider
-  if (localProvider && openRouterProvider) {
-    llmProvider = createMultiProvider(
-      {
-        fast: useLocalForFast ? localProvider : openRouterProvider,
-        smart: useLocalForSmart ? localProvider : openRouterProvider,
-        default: openRouterProvider,
-      },
-      logger
-    );
-    logger.info(
-      {
-        fastProvider: useLocalForFast ? 'local' : 'openrouter',
-        smartProvider: useLocalForSmart ? 'local' : 'openrouter',
-      },
-      'MultiProvider configured'
-    );
-  } else if (localProvider) {
-    llmProvider = localProvider;
-    logger.info('Local LLM provider configured');
-  } else if (openRouterProvider) {
-    llmProvider = openRouterProvider;
-    logger.info('OpenRouter LLM provider configured');
-  } else {
-    logger.debug('LLM provider not configured');
-  }
+  const llmConfig = {
+    openRouterApiKey: configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? undefined,
+    fastModel: configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel,
+    smartModel: configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel,
+    local: configOverrides.llm?.local ?? mergedConfig.llm.local,
+  };
+  const llmProvider = createLLMProvider(llmConfig, logger);
 
   // Create MessageComposer if LLM available
   let messageComposer: MessageComposer | null = null;
@@ -629,77 +513,32 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('MessageComposer configured');
   }
 
-  // Attach composer to expression layer if available
-  if (messageComposer) {
-    layerProcessor.setComposer(messageComposer);
-  }
-
-  // Set cognition layer dependencies (composer, conversation manager, user model, eventBus)
-  layerProcessor.setCognitionDependencies({
-    composer: messageComposer ?? undefined,
-    conversationManager,
-    userModel: userModel ?? undefined,
-    eventBus,
-  });
-
-  // Set conversation manager on interpretation layer for context-aware decisions
-  layerProcessor.setConversationManager(conversationManager);
-
-  // Set event bus for typing events
-  layerProcessor.setEventBus(eventBus);
-
-  // Create configurable neurons for learning
-  const contactPressureNeuron = createConfigurableContactPressureNeuron();
-  const alertnessNeuron = createConfigurableAlertnessNeuron();
-
-  // Restore neuron weights from persisted state
-  if (persistedState?.neuronWeights) {
-    const contactWeights = persistedState.neuronWeights.contactPressure;
-    if (Object.keys(contactWeights).length > 0) {
-      contactPressureNeuron.setWeights(contactWeights);
-    }
-    const alertWeights = persistedState.neuronWeights.alertness;
-    if (Object.keys(alertWeights).length > 0) {
-      alertnessNeuron.setWeights(alertWeights);
-    }
-    logger.debug('Neuron weights restored');
-  }
+  // Create 4-layer processors
+  const layers = createLayers(logger);
 
   // Create learning engine
   const learningEngine = createLearningEngine(logger, mergedConfig.learning);
-  learningEngine.registerNeurons({
-    contactPressure: contactPressureNeuron,
-    alertness: alertnessNeuron,
-  });
 
-  // Create contact decider with configurable neuron
-  const contactDecider = createContactDecider(contactPressureNeuron);
-  logger.info('ContactDecider configured with learnable neuron');
-
-  // Create event loop config with primary user chat ID
-  const eventLoopConfig: Partial<EventLoopConfig> = {
-    ...configOverrides.eventLoop,
+  // Create core loop config
+  const coreLoopConfig: Partial<CoreLoopConfig> = {
+    ...configOverrides.coreLoop,
   };
   if (primaryUserChatId) {
-    eventLoopConfig.primaryUserChatId = primaryUserChatId;
+    coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }
 
-  // Create event loop
-  const eventLoop = createEventLoop(
+  // Create core loop
+  const coreLoop = createCoreLoop(
     agent,
-    eventQueue,
     eventBus,
-    layerProcessor,
-    ruleEngine,
+    layers,
     logger,
     metrics,
-    eventLoopConfig,
+    coreLoopConfig,
     {
       messageComposer: messageComposer ?? undefined,
-      userModel: userModel ?? undefined,
-      learningEngine,
       conversationManager,
-      contactDecider,
+      userModel: userModel ?? undefined,
     }
   );
 
@@ -716,26 +555,25 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       botToken: telegramBotToken,
       ...configOverrides.telegram,
     };
-    telegramChannel = createTelegramChannel(telegramConfig, eventQueue, logger);
+    telegramChannel = createTelegramChannel(telegramConfig, null, logger);
     channels.set('telegram', telegramChannel);
-    eventLoop.registerChannel(telegramChannel);
-    // Wake up event loop immediately when messages arrive
+    coreLoop.registerChannel(telegramChannel);
+
+    // When telegram receives messages, push as signals
+    telegramChannel.setSignalCallback((signal) => {
+      coreLoop.pushSignal(signal);
+    });
+
+    // Wake up core loop immediately when messages arrive
     telegramChannel.setWakeUpCallback(() => {
-      eventLoop.wakeUp();
+      coreLoop.wakeUp();
     });
     logger.info('Telegram channel configured');
-  } else {
-    logger.debug('Telegram channel not configured (no bot token)');
   }
 
   // Register components with state manager
   const stateManagerComponents: Parameters<typeof stateManager.registerComponents>[0] = {
     agent,
-    ruleEngine,
-    neuronWeights: {
-      contactPressure: contactPressureNeuron.getWeights() as Record<string, number>,
-      alertness: alertnessNeuron.getWeights() as Record<string, number>,
-    },
   };
   if (userModel) {
     stateManagerComponents.userModel = userModel;
@@ -748,12 +586,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Shutdown function with persistence
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
-    eventLoop.stop();
-
-    // Update neuron weights in state manager before save
-    stateManager.registerComponents({
-      neuronWeights: learningEngine.getNeuronWeights(),
-    });
+    coreLoop.stop();
 
     // Save state
     await stateManager.shutdown();
@@ -770,13 +603,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   return {
     logger,
-    eventQueue,
     eventBus,
     metrics,
     agent,
-    layerProcessor,
-    ruleEngine,
-    eventLoop,
+    layers,
+    coreLoop,
     telegramChannel,
     channels,
     userModel,
@@ -787,11 +618,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     stateManager,
     conversationManager,
     learningEngine,
-    neurons: {
-      contactPressure: contactPressureNeuron,
-      alertness: alertnessNeuron,
-    },
-    contactDecider,
     config: mergedConfig,
     shutdown,
   };

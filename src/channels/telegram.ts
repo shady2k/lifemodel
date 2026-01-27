@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Bot } from 'grammy';
-import type { Logger, EventQueue, Event } from '../types/index.js';
-import { Priority } from '../types/index.js';
+import type { Logger, EventQueue, Event, Signal } from '../types/index.js';
+import { Priority, createUserMessageSignal } from '../types/index.js';
 import type { CircuitBreaker } from '../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../core/circuit-breaker.js';
 import type { Channel, CircuitStats, SendOptions } from './channel.js';
@@ -86,13 +86,14 @@ export class TelegramChannel implements Channel {
   private readonly config: Required<Pick<TelegramConfig, 'timeout' | 'maxRetries' | 'retryDelay'>> &
     TelegramConfig;
   private readonly logger: Logger | undefined;
-  private readonly eventQueue: EventQueue;
+  private readonly eventQueue: EventQueue | null;
   private readonly circuitBreaker: CircuitBreaker;
   private bot: Bot | null = null;
   private running = false;
   private wakeUpCallback: (() => void) | null = null;
+  private signalCallback: ((signal: Signal) => void) | null = null;
 
-  constructor(config: TelegramConfig, eventQueue: EventQueue, logger?: Logger) {
+  constructor(config: TelegramConfig, eventQueue: EventQueue | null, logger?: Logger) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.eventQueue = eventQueue;
     this.logger = logger ? logger.child({ component: 'telegram' }) : undefined;
@@ -122,6 +123,14 @@ export class TelegramChannel implements Channel {
    */
   setWakeUpCallback(callback: () => void): void {
     this.wakeUpCallback = callback;
+  }
+
+  /**
+   * Set callback to push signals to CoreLoop (4-layer architecture).
+   * When set, incoming messages will be converted to Signals instead of Events.
+   */
+  setSignalCallback(callback: (signal: Signal) => void): void {
+    this.signalCallback = callback;
   }
 
   /**
@@ -244,7 +253,7 @@ export class TelegramChannel implements Channel {
   }
 
   /**
-   * Handle incoming message - convert to Event and push to queue.
+   * Handle incoming message - convert to Signal or Event and dispatch.
    */
   private async onMessage(ctx: {
     from?: { id: number; username?: string; first_name?: string; last_name?: string };
@@ -255,39 +264,66 @@ export class TelegramChannel implements Channel {
       return;
     }
 
-    const payload: TelegramMessagePayload = {
-      userId: ctx.from.id.toString(),
-      chatId: ctx.chat.id.toString(),
-      text: ctx.message.text,
-      messageId: ctx.message.message_id,
-      username: ctx.from.username,
-      firstName: ctx.from.first_name,
-      lastName: ctx.from.last_name,
-    };
+    const userId = ctx.from.id.toString();
+    const chatId = ctx.chat.id.toString();
+    const text = ctx.message.text;
 
-    const event: Event = {
-      id: randomUUID(),
-      source: 'communication',
-      channel: 'telegram',
-      type: 'message_received',
-      priority: Priority.HIGH,
-      timestamp: new Date(),
-      payload,
-    };
+    // Use Signal callback if available (4-layer architecture)
+    if (this.signalCallback) {
+      const signal = createUserMessageSignal({
+        text,
+        chatId,
+        channel: 'telegram',
+        userId,
+      });
+      this.signalCallback(signal);
 
-    await this.eventQueue.push(event);
+      this.logger?.debug(
+        {
+          signalId: signal.id,
+          userId,
+          chatId,
+          textLength: text.length,
+        },
+        'Message received as Signal'
+      );
+    }
+    // Fall back to Event queue (legacy)
+    else if (this.eventQueue) {
+      const payload: TelegramMessagePayload = {
+        userId,
+        chatId,
+        text,
+        messageId: ctx.message.message_id,
+        username: ctx.from.username,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name,
+      };
 
-    this.logger?.debug(
-      {
-        eventId: event.id,
-        userId: payload.userId,
-        chatId: payload.chatId,
-        textLength: payload.text.length,
-      },
-      'Message received and queued'
-    );
+      const event: Event = {
+        id: randomUUID(),
+        source: 'communication',
+        channel: 'telegram',
+        type: 'message_received',
+        priority: Priority.HIGH,
+        timestamp: new Date(),
+        payload,
+      };
 
-    // Wake up the event loop for immediate processing
+      await this.eventQueue.push(event);
+
+      this.logger?.debug(
+        {
+          eventId: event.id,
+          userId,
+          chatId,
+          textLength: text.length,
+        },
+        'Message received as Event'
+      );
+    }
+
+    // Wake up the loop for immediate processing
     if (this.wakeUpCallback) {
       this.wakeUpCallback();
     }
@@ -390,7 +426,7 @@ export class TelegramChannel implements Channel {
  */
 export function createTelegramChannel(
   config: TelegramConfig,
-  eventQueue: EventQueue,
+  eventQueue: EventQueue | null,
   logger?: Logger
 ): TelegramChannel {
   return new TelegramChannel(config, eventQueue, logger);

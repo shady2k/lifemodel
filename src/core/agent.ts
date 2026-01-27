@@ -10,7 +10,7 @@ import { type EnergyModel, createEnergyModel } from './energy.js';
  */
 export interface AgentDependencies {
   logger: Logger;
-  eventQueue: EventQueue;
+  eventQueue?: EventQueue | undefined;
   metrics: Metrics;
 }
 
@@ -60,7 +60,7 @@ const DEFAULT_TICK_RATE = {
  */
 export class Agent {
   private readonly logger: Logger;
-  private readonly eventQueue: EventQueue;
+  private readonly eventQueue: EventQueue | undefined;
   private readonly metrics: Metrics;
 
   private state: AgentState;
@@ -133,9 +133,9 @@ export class Agent {
   }
 
   /**
-   * Get the event queue (for use by event loop in Phase 5).
+   * Get the event queue (for use by event loop - optional in 4-layer architecture).
    */
-  getEventQueue(): EventQueue {
+  getEventQueue(): EventQueue | undefined {
     return this.eventQueue;
   }
 

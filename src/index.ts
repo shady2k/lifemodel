@@ -19,7 +19,7 @@ async function main(): Promise<void> {
   const {
     logger,
     agent,
-    eventLoop,
+    coreLoop,
     telegramChannel,
     messageComposer,
     primaryUserChatId,
@@ -68,8 +68,8 @@ async function main(): Promise<void> {
     void telegramChannel.start();
   }
 
-  // Start the event loop (heartbeat)
-  eventLoop.start();
+  // Start the core loop (heartbeat)
+  coreLoop.start();
 }
 
 // Handle shutdown gracefully

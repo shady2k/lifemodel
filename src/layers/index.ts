@@ -1,39 +1,43 @@
 /**
- * Processing layers - brain-like event processing.
+ * Processing layers - 4-layer brain architecture.
  *
- * Events flow through 6 layers:
- * 0. REFLEX - mechanical, no understanding
- * 1. PERCEPTION - parse, extract structure
- * 2. INTERPRETATION - intent, sentiment
- * 3. COGNITION - beliefs, memory, thoughts
- * 4. DECISION - should act?
- * 5. EXPRESSION - compose output
+ * Signals flow through 4 layers:
+ * 1. AUTONOMIC - neurons monitor state, emit signals (zero LLM cost)
+ * 2. AGGREGATION - collect signals, decide when to wake cognition (zero LLM cost)
+ * 3. COGNITION - fast LLM processing, decide action or escalate
+ * 4. SMART - expensive LLM for complex reasoning (only when needed)
  */
 
-// Context types
-export type * from './context.js';
-export { createProcessingContext } from './context.js';
-
-// Base layer
-export { BaseLayer } from './base-layer.js';
-
-// Individual layers
-export { ReflexLayer, createReflexLayer } from './reflex-layer.js';
-export { PerceptionLayer, createPerceptionLayer } from './perception-layer.js';
-export { InterpretationLayer, createInterpretationLayer } from './interpretation-layer.js';
-export type { CognitionLayerDeps } from './cognition-layer.js';
-export { CognitionLayer, createCognitionLayer } from './cognition-layer.js';
-export { DecisionLayer, createDecisionLayer } from './decision-layer.js';
-export { ExpressionLayer, createExpressionLayer } from './expression-layer.js';
-
-// Layer processor (pipeline)
-export type { ProcessingResult } from './layer-processor.js';
-export { LayerProcessor, createLayerProcessor } from './layer-processor.js';
-
-// Pattern accumulator
-export type { Pattern, PatternTrigger } from './pattern-accumulator.js';
+// AUTONOMIC layer
 export {
-  PatternAccumulator,
-  createPatternAccumulator,
-  createDefaultPatterns,
-} from './pattern-accumulator.js';
+  AutonomicProcessor,
+  createAutonomicProcessor,
+} from './autonomic/index.js';
+export type { AutonomicProcessorConfig } from './autonomic/index.js';
+
+// AGGREGATION layer
+export {
+  AggregationProcessor,
+  createAggregationProcessor,
+} from './aggregation/index.js';
+export type { AggregationProcessorConfig } from './aggregation/index.js';
+
+// COGNITION layer
+export {
+  CognitionProcessor,
+  createCognitionProcessor,
+} from './cognition/index.js';
+export type {
+  CognitionProcessorConfig,
+  CognitionProcessorDeps,
+} from './cognition/index.js';
+
+// SMART layer
+export {
+  SmartProcessor,
+  createSmartProcessor,
+} from './smart/index.js';
+export type {
+  SmartProcessorConfig,
+  SmartProcessorDeps,
+} from './smart/index.js';

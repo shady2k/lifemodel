@@ -12,6 +12,10 @@ export type * from './thought.js';
 export type * from './logger.js';
 export type * from './rule.js';
 
+// 4-layer architecture types
+export type * from './signal.js';
+export type * from './layers.js';
+
 // Agent types
 export type * from './agent/index.js';
 
@@ -20,6 +24,18 @@ export type * from './user/index.js';
 
 // Re-export Priority enum as value (needed for runtime use)
 export { Priority, PRIORITY_DISTURBANCE_WEIGHT } from './priority.js';
+
+// Re-export signal utilities
+export {
+  SIGNAL_TTL,
+  createSignal,
+  createUserMessageSignal,
+  isSignalExpired,
+  createSignalBuffer,
+} from './signal.js';
+
+// Re-export layer constants
+export { DEFAULT_WAKE_THRESHOLDS } from './layers.js';
 
 // Re-export agent factory functions
 export {
