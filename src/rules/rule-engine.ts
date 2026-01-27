@@ -105,11 +105,13 @@ export class RuleEngine {
 
   /**
    * Evaluate rules that match a trigger.
+   * Rules only fire when their trigger exactly matches the current trigger.
+   * Tick rules run only during tick cycles, event rules only on their specific events.
    */
   private evaluateRules(trigger: string, context: RuleContext): Intent[] {
     const allIntents: Intent[] = [];
     const matchingRules = Array.from(this.rules.values()).filter(
-      (rule) => rule.trigger === trigger || rule.trigger === 'tick'
+      (rule) => rule.trigger === trigger
     );
 
     this.logger.debug(

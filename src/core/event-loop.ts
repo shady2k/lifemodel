@@ -18,6 +18,7 @@ import type { MessageComposer } from '../llm/composer.js';
 import type { UserModel } from '../models/user-model.js';
 import type { LearningEngine } from '../learning/learning-engine.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
+import type { ContactDecider } from '../decision/contact-decider.js';
 
 /**
  * Event loop configuration.
@@ -60,6 +61,8 @@ export interface EventLoopDeps {
   learningEngine?: LearningEngine | undefined;
   /** Conversation manager for storing message history */
   conversationManager?: ConversationManager | undefined;
+  /** Contact decider for gating proactive contact (cooldown, thresholds) */
+  contactDecider?: ContactDecider | undefined;
 }
 
 const DEFAULT_CONFIG: EventLoopConfig = {
@@ -110,6 +113,7 @@ export class EventLoop {
   private readonly userModel: UserModel | undefined;
   private readonly learningEngine: LearningEngine | undefined;
   private readonly conversationManager: ConversationManager | undefined;
+  private readonly contactDecider: ContactDecider | undefined;
 
   /** Timestamp of last message sent by agent (for response timing) */
   private lastMessageSentAt: number | null = null;
@@ -141,6 +145,7 @@ export class EventLoop {
     this.userModel = deps.userModel;
     this.learningEngine = deps.learningEngine;
     this.conversationManager = deps.conversationManager;
+    this.contactDecider = deps.contactDecider;
   }
 
   /**
@@ -315,6 +320,9 @@ export class EventLoop {
         this.ruleEngine.setUserBeliefs(undefined);
       }
 
+      // 2c. Check if we should proactively contact user (via ContactDecider)
+      await this.checkProactiveContact();
+
       // 3. Evaluate rules
       const ruleIntents = this.ruleEngine.evaluateTick(this.agent.getState());
 
@@ -430,6 +438,11 @@ export class EventLoop {
           this.processResponseTiming(event);
         }
 
+        // Reset contact cooldown when user initiates contact
+        if (this.contactDecider) {
+          this.contactDecider.resetCooldown();
+        }
+
         // Process learning for message received
         if (this.learningEngine) {
           this.learningEngine.processFeedback('message_received');
@@ -526,6 +539,67 @@ export class EventLoop {
   }
 
   /**
+   * Check if we should proactively contact the user.
+   * Uses ContactDecider to evaluate pressure, thresholds, and cooldown.
+   */
+  private async checkProactiveContact(): Promise<void> {
+    // Skip if no contact decider configured
+    if (!this.contactDecider) {
+      return;
+    }
+
+    const chatId = this.config.primaryUserChatId;
+    if (!chatId) {
+      return;
+    }
+
+    // Get current state and user beliefs
+    const state = this.agent.getState();
+    const userBeliefs = this.userModel?.getBeliefs();
+    const hour = new Date().getHours();
+
+    // Evaluate contact decision
+    const decision = this.contactDecider.evaluate(state, userBeliefs, hour);
+
+    this.logger.debug(
+      {
+        shouldContact: decision.shouldContact,
+        pressure: decision.pressure.toFixed(2),
+        threshold: decision.threshold.toFixed(2),
+        reason: decision.reason,
+        availabilitySource: decision.factors.availabilitySource,
+        userAvailability: decision.factors.userAvailability.toFixed(2),
+      },
+      'Contact decision evaluated'
+    );
+
+    if (!decision.shouldContact) {
+      return;
+    }
+
+    // Create synthetic event for handleProactiveContact
+    const contactEvent: Event = {
+      id: `contact-${String(Date.now())}`,
+      source: 'internal',
+      type: 'contact_pressure_threshold',
+      priority: Priority.NORMAL,
+      timestamp: new Date(),
+      payload: {
+        pressure: decision.pressure,
+        threshold: decision.threshold,
+        reason: decision.reason,
+        trace: decision.trace,
+      },
+    };
+
+    // Handle the proactive contact
+    await this.handleProactiveContact(contactEvent);
+
+    // Record contact attempt for cooldown
+    this.contactDecider.recordContactAttempt();
+  }
+
+  /**
    * Handle proactive contact events.
    * Composes a message using the LLM and sends it to the primary user.
    */
@@ -549,23 +623,8 @@ export class EventLoop {
       return;
     }
 
-    // Check if user is available (if userModel configured)
-    if (this.userModel) {
-      const contactScore = this.userModel.getContactScore();
-      if (contactScore < 0.3) {
-        this.logger.info(
-          { contactScore: contactScore.toFixed(2) },
-          'Skipping proactive contact: user likely unavailable'
-        );
-        return;
-      }
-
-      // Check if user is asleep
-      if (this.userModel.isLikelyAsleep()) {
-        this.logger.info('Skipping proactive contact: user likely asleep');
-        return;
-      }
-    }
+    // Note: User availability check is handled by ContactDecider before we get here.
+    // This method focuses on composing and sending the message.
 
     // Extract reason from event payload
     const payload = event.payload as Record<string, unknown> | undefined;
@@ -601,7 +660,7 @@ export class EventLoop {
     let timeSinceLastMessage = '';
     if (conversationHistory && conversationHistory.length > 0) {
       const lastMsg = conversationHistory[conversationHistory.length - 1];
-      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+      if (lastMsg && 'timestamp' in lastMsg && lastMsg.timestamp) {
         const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
         const diffMs = Date.now() - lastTime;
         const diffMins = Math.floor(diffMs / 60000);
@@ -739,7 +798,7 @@ export class EventLoop {
     let timeSinceLastMessage = '';
     if (conversationHistory && conversationHistory.length > 0) {
       const lastMsg = conversationHistory[conversationHistory.length - 1];
-      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+      if (lastMsg && 'timestamp' in lastMsg && lastMsg.timestamp) {
         const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
         const diffMs = Date.now() - lastTime;
         const diffMins = Math.floor(diffMs / 60000);
@@ -1216,7 +1275,7 @@ export class EventLoop {
     let timeSinceLastMessage = '';
     if (conversationHistory && conversationHistory.length > 0) {
       const lastMsg = conversationHistory[conversationHistory.length - 1];
-      if ('timestamp' in lastMsg && lastMsg.timestamp) {
+      if (lastMsg && 'timestamp' in lastMsg && lastMsg.timestamp) {
         const lastTime = new Date(lastMsg.timestamp as string | Date).getTime();
         const diffMs = Date.now() - lastTime;
         const diffMins = Math.floor(diffMs / 60000);

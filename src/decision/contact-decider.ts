@@ -1,5 +1,5 @@
-import type { AgentState } from '../types/index.js';
-import { contactPressureNeuron, type NeuronResult } from './neuron.js';
+import type { AgentState, UserBeliefs } from '../types/index.js';
+import type { ConfigurableNeuron, NeuronResult } from './neuron.js';
 
 /**
  * Configuration for contact decision thresholds.
@@ -8,34 +8,49 @@ export interface ContactDeciderConfig {
   /** Base threshold to initiate contact (default: 0.6) */
   baseThreshold: number;
 
-  /** Threshold multiplier during night hours (default: 1.5) */
-  nightMultiplier: number;
+  /** Threshold multiplier when user availability is low (default: 1.5) */
+  lowAvailabilityMultiplier: number;
 
-  /** Threshold multiplier when energy is low (default: 1.3) */
+  /** User availability considered "low" (default: 0.3) */
+  lowAvailabilityThreshold: number;
+
+  /** Threshold multiplier when agent energy is low (default: 1.3) */
   lowEnergyMultiplier: number;
 
-  /** Energy level considered "low" (default: 0.3) */
+  /** Agent energy level considered "low" (default: 0.3) */
   lowEnergyThreshold: number;
-
-  /** Night start hour (default: 22) */
-  nightStart: number;
-
-  /** Night end hour (default: 8) */
-  nightEnd: number;
 
   /** Minimum time between contact attempts in ms (default: 5 minutes) */
   cooldownMs: number;
+
+  /** User confidence below which we use societal norms (default: 0.4) */
+  beliefConfidenceThreshold: number;
 }
 
 const DEFAULT_CONFIG: ContactDeciderConfig = {
   baseThreshold: 0.6,
-  nightMultiplier: 1.5,
+  lowAvailabilityMultiplier: 1.5,
+  lowAvailabilityThreshold: 0.3,
   lowEnergyMultiplier: 1.3,
   lowEnergyThreshold: 0.3,
-  nightStart: 22,
-  nightEnd: 8,
   cooldownMs: 5 * 60 * 1000, // 5 minutes
+  beliefConfidenceThreshold: 0.4,
 };
+
+/**
+ * Societal norms for user availability by hour.
+ * Used as fallback when user patterns aren't learned yet.
+ */
+function getSocietalAvailability(hour: number): number {
+  // Night hours (22:00 - 07:00) - very low availability
+  if (hour >= 22 || hour < 7) return 0.2;
+  // Early morning (07:00 - 09:00) - moderate
+  if (hour >= 7 && hour < 9) return 0.5;
+  // Work hours (09:00 - 17:00) - good availability
+  if (hour >= 9 && hour < 17) return 0.8;
+  // Evening (17:00 - 22:00) - moderate
+  return 0.6;
+}
 
 /**
  * Result of contact decision evaluation.
@@ -58,7 +73,9 @@ export interface ContactDecision {
 
   /** Factors that influenced the decision */
   factors: {
-    isNightTime: boolean;
+    userAvailability: number;
+    availabilitySource: 'learned' | 'societal';
+    isLowAvailability: boolean;
     isLowEnergy: boolean;
     isCooldown: boolean;
   };
@@ -67,15 +84,23 @@ export interface ContactDecision {
 /**
  * ContactDecider - determines when the agent should initiate contact.
  *
- * Uses neuron-like weighted calculation to combine multiple factors
- * into a single pressure value, then compares against an adaptive
- * threshold that considers time of day and agent state.
+ * Uses a configurable neuron (with learnable weights) to combine multiple
+ * factors into a single pressure value, then compares against an adaptive
+ * threshold that considers user availability and agent state.
+ *
+ * Key design decisions:
+ * - Uses UserModel beliefs when confidence is high enough
+ * - Falls back to societal norms when user patterns unknown
+ * - Enforces cooldown to prevent spamming
+ * - Provides full trace for explainability
  */
 export class ContactDecider {
   private readonly config: ContactDeciderConfig;
+  private readonly neuron: ConfigurableNeuron;
   private lastContactAttempt: Date | null = null;
 
-  constructor(config: Partial<ContactDeciderConfig> = {}) {
+  constructor(neuron: ConfigurableNeuron, config: Partial<ContactDeciderConfig> = {}) {
+    this.neuron = neuron;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
@@ -83,10 +108,10 @@ export class ContactDecider {
    * Evaluate whether to initiate contact.
    *
    * @param state Current agent state
-   * @param userAvailability Belief about user availability (0-1)
-   * @param hour Current hour (0-23)
+   * @param userBeliefs Agent's beliefs about the user (optional)
+   * @param hour Current hour (0-23), used for societal fallback
    */
-  evaluate(state: AgentState, userAvailability: number, hour: number): ContactDecision {
+  evaluate(state: AgentState, userBeliefs: UserBeliefs | undefined, hour: number): ContactDecision {
     const now = new Date();
 
     // Check cooldown
@@ -94,12 +119,26 @@ export class ContactDecider {
       this.lastContactAttempt !== null &&
       now.getTime() - this.lastContactAttempt.getTime() < this.config.cooldownMs;
 
-    // Check time factors
-    const isNightTime = this.isNightTime(hour);
+    // Determine user availability (learned vs societal fallback)
+    let userAvailability: number;
+    let availabilitySource: 'learned' | 'societal';
+
+    if (userBeliefs && userBeliefs.confidence > this.config.beliefConfidenceThreshold) {
+      // Use learned patterns
+      userAvailability = userBeliefs.availability;
+      availabilitySource = 'learned';
+    } else {
+      // Fall back to societal norms
+      userAvailability = getSocietalAvailability(hour);
+      availabilitySource = 'societal';
+    }
+
+    // Check state factors
+    const isLowAvailability = userAvailability < this.config.lowAvailabilityThreshold;
     const isLowEnergy = state.energy < this.config.lowEnergyThreshold;
 
-    // Calculate pressure using neuron
-    const trace = contactPressureNeuron({
+    // Calculate pressure using configurable neuron
+    const trace = this.neuron.evaluate({
       socialDebt: state.socialDebt,
       taskPressure: state.taskPressure,
       curiosity: state.curiosity,
@@ -108,22 +147,25 @@ export class ContactDecider {
 
     // Calculate adaptive threshold
     let threshold = this.config.baseThreshold;
-    if (isNightTime) {
-      threshold *= this.config.nightMultiplier;
+    if (isLowAvailability) {
+      threshold *= this.config.lowAvailabilityMultiplier;
     }
     if (isLowEnergy) {
       threshold *= this.config.lowEnergyMultiplier;
     }
-    // Cap threshold at 0.95 to always allow very high pressure to break through
+    // Cap threshold at 0.95 to allow very high pressure to break through
     threshold = Math.min(0.95, threshold);
 
     // Make decision
     let shouldContact = trace.output >= threshold && !isCooldown;
     let reason: string;
 
-    if (isCooldown) {
+    if (isCooldown && this.lastContactAttempt) {
       shouldContact = false;
-      reason = 'In cooldown period after recent contact attempt';
+      const remainingMs =
+        this.config.cooldownMs - (now.getTime() - this.lastContactAttempt.getTime());
+      const remainingSec = Math.ceil(remainingMs / 1000);
+      reason = `In cooldown period (${String(remainingSec)}s remaining)`;
     } else if (trace.output < threshold) {
       reason = `Pressure (${trace.output.toFixed(2)}) below threshold (${threshold.toFixed(2)})`;
     } else {
@@ -137,7 +179,9 @@ export class ContactDecider {
       trace,
       reason,
       factors: {
-        isNightTime,
+        userAvailability,
+        availabilitySource,
+        isLowAvailability,
         isLowEnergy,
         isCooldown,
       },
@@ -153,17 +197,22 @@ export class ContactDecider {
   }
 
   /**
-   * Reset the cooldown (e.g., after user initiates contact).
+   * Reset the cooldown (e.g., when user initiates contact).
    */
   resetCooldown(): void {
     this.lastContactAttempt = null;
   }
 
   /**
-   * Check if current hour is during night.
+   * Get time until cooldown expires (ms), or 0 if not in cooldown.
    */
-  private isNightTime(hour: number): boolean {
-    return hour >= this.config.nightStart || hour < this.config.nightEnd;
+  getCooldownRemaining(): number {
+    if (this.lastContactAttempt === null) {
+      return 0;
+    }
+    const elapsed = Date.now() - this.lastContactAttempt.getTime();
+    const remaining = this.config.cooldownMs - elapsed;
+    return Math.max(0, remaining);
   }
 
   /**
@@ -172,11 +221,21 @@ export class ContactDecider {
   getConfig(): Readonly<ContactDeciderConfig> {
     return { ...this.config };
   }
+
+  /**
+   * Get the neuron (for inspection/learning).
+   */
+  getNeuron(): ConfigurableNeuron {
+    return this.neuron;
+  }
 }
 
 /**
  * Factory function.
  */
-export function createContactDecider(config?: Partial<ContactDeciderConfig>): ContactDecider {
-  return new ContactDecider(config);
+export function createContactDecider(
+  neuron: ConfigurableNeuron,
+  config?: Partial<ContactDeciderConfig>
+): ContactDecider {
+  return new ContactDecider(neuron, config);
 }

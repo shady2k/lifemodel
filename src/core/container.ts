@@ -31,6 +31,8 @@ import {
   type ConfigurableNeuron,
   createConfigurableContactPressureNeuron,
   createConfigurableAlertnessNeuron,
+  type ContactDecider,
+  createContactDecider,
 } from '../decision/index.js';
 import { type LearningEngine, createLearningEngine } from '../learning/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
@@ -138,6 +140,8 @@ export interface Container {
     contactPressure: ConfigurableNeuron | null;
     alertness: ConfigurableNeuron | null;
   };
+  /** Contact decider for proactive messaging */
+  contactDecider: ContactDecider | null;
   /** Loaded configuration */
   config: MergedConfig | null;
   /** Shutdown function */
@@ -318,6 +322,9 @@ export function createContainer(config: AppConfig = {}): Container {
     alertness: alertnessNeuron,
   });
 
+  // Create contact decider with configurable neuron
+  const contactDecider = createContactDecider(contactPressureNeuron);
+
   // Create event loop config with primary user chat ID
   const eventLoopConfig: Partial<EventLoopConfig> = {
     ...config.eventLoop,
@@ -340,6 +347,7 @@ export function createContainer(config: AppConfig = {}): Container {
       messageComposer: messageComposer ?? undefined,
       userModel: userModel ?? undefined,
       learningEngine,
+      contactDecider,
     }
   );
 
@@ -401,6 +409,7 @@ export function createContainer(config: AppConfig = {}): Container {
       contactPressure: contactPressureNeuron,
       alertness: alertnessNeuron,
     },
+    contactDecider,
     config: null,
     shutdown,
   };
@@ -663,10 +672,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     alertness: alertnessNeuron,
   });
 
-  // Mark state dirty when weights change
-  learningEngine.setWeightUpdateCallback(() => {
-    stateManager.markDirty();
-  });
+  // Create contact decider with configurable neuron
+  const contactDecider = createContactDecider(contactPressureNeuron);
+  logger.info('ContactDecider configured with learnable neuron');
 
   // Create event loop config with primary user chat ID
   const eventLoopConfig: Partial<EventLoopConfig> = {
@@ -691,6 +699,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       userModel: userModel ?? undefined,
       learningEngine,
       conversationManager,
+      contactDecider,
     }
   );
 
@@ -782,6 +791,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       contactPressure: contactPressureNeuron,
       alertness: alertnessNeuron,
     },
+    contactDecider,
     config: mergedConfig,
     shutdown,
   };

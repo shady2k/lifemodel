@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Logger } from '../types/index.js';
 import type { Storage } from './storage.js';
 import type { JSONStorage } from './json-storage.js';
@@ -45,7 +46,9 @@ export class StateManager {
   private readonly config: Required<StateManagerConfig>;
 
   private autoSaveTimer: ReturnType<typeof setInterval> | null = null;
-  private isDirty = false;
+
+  /** Hash of last saved state (for change detection) */
+  private lastSavedHash: string | null = null;
 
   // References to components for state collection
   private agent: Agent | null = null;
@@ -76,6 +79,7 @@ export class StateManager {
 
   /**
    * Start auto-save timer.
+   * Checks for state changes on each interval and saves if changed.
    */
   startAutoSave(): void {
     if (this.config.autoSaveInterval <= 0) {
@@ -84,11 +88,9 @@ export class StateManager {
     }
 
     this.autoSaveTimer = setInterval(() => {
-      if (this.isDirty) {
-        void this.save().catch((err: unknown) => {
-          this.logger.error({ error: err }, 'Auto-save failed');
-        });
-      }
+      void this.saveIfChanged().catch((err: unknown) => {
+        this.logger.error({ error: err }, 'Auto-save failed');
+      });
     }, this.config.autoSaveInterval);
 
     this.logger.info({ intervalMs: this.config.autoSaveInterval }, 'Auto-save started');
@@ -106,10 +108,10 @@ export class StateManager {
   }
 
   /**
-   * Mark state as dirty (needs saving).
+   * Compute hash of serialized state for change detection.
    */
-  markDirty(): void {
-    this.isDirty = true;
+  private computeHash(serialized: string): string {
+    return createHash('sha256').update(serialized).digest('hex');
   }
 
   /**
@@ -150,15 +152,35 @@ export class StateManager {
   }
 
   /**
-   * Save current state to storage.
+   * Save current state to storage if it has changed.
+   * Compares hash of current state with last saved state.
+   * Returns true if saved, false if skipped (no changes).
+   */
+  async saveIfChanged(): Promise<boolean> {
+    const state = this.collectState();
+    const serialized = serializeState(state);
+    const hash = this.computeHash(serialized);
+
+    if (hash === this.lastSavedHash) {
+      this.logger.debug('State unchanged, skipping save');
+      return false;
+    }
+
+    await this.storage.save(this.config.stateKey, JSON.parse(serialized));
+    this.lastSavedHash = hash;
+    this.logger.debug({ savedAt: state.savedAt }, 'State saved');
+    return true;
+  }
+
+  /**
+   * Force save current state to storage (always writes).
    */
   async save(): Promise<void> {
     const state = this.collectState();
     const serialized = serializeState(state);
 
     await this.storage.save(this.config.stateKey, JSON.parse(serialized));
-
-    this.isDirty = false;
+    this.lastSavedHash = this.computeHash(serialized);
     this.logger.debug({ savedAt: state.savedAt }, 'State saved');
   }
 
@@ -222,7 +244,7 @@ export class StateManager {
   async shutdown(): Promise<void> {
     this.stopAutoSave();
 
-    if (this.isDirty || this.agent) {
+    if (this.agent) {
       this.logger.info('Saving state before shutdown...');
       await this.save();
     }

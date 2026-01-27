@@ -138,7 +138,7 @@ export function deserializeState(json: string): PersistableState {
   }) as Record<string, unknown>;
 
   // Cast to state type, then apply migrations
-  const state = rawState as PersistableState;
+  const state = rawState as unknown as PersistableState;
 
   // Type-safe access to potentially missing fields via raw object
   const user = rawState['user'] as Record<string, unknown> | null;

@@ -29,11 +29,6 @@ export class LearningEngine {
   // Behavior history
   private readonly behaviorHistory: RecordedBehavior[] = [];
 
-  // Feedback callback for external notification
-  private onWeightUpdate:
-    | ((neuronName: string, inputName: string, delta: number, newWeight: number) => void)
-    | null = null;
-
   constructor(logger: Logger, config: Partial<LearningConfig> = {}) {
     this.logger = logger.child({ component: 'learning-engine' });
     this.config = { ...DEFAULT_LEARNING_CONFIG, ...config };
@@ -54,15 +49,6 @@ export class LearningEngine {
       this.alertnessNeuron = neurons.alertness;
       this.logger.debug('Alertness neuron registered for learning');
     }
-  }
-
-  /**
-   * Set callback for weight updates.
-   */
-  setWeightUpdateCallback(
-    callback: (neuronName: string, inputName: string, delta: number, newWeight: number) => void
-  ): void {
-    this.onWeightUpdate = callback;
   }
 
   /**
@@ -187,10 +173,6 @@ export class LearningEngine {
               },
               'Weight updated'
             );
-
-            if (this.onWeightUpdate) {
-              this.onWeightUpdate('contactPressure', weightName, delta, newWeight);
-            }
           }
         }
       }
@@ -212,10 +194,6 @@ export class LearningEngine {
               },
               'Weight updated'
             );
-
-            if (this.onWeightUpdate) {
-              this.onWeightUpdate('alertness', weightName, delta, newWeight);
-            }
           }
         }
       }

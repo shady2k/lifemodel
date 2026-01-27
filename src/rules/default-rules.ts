@@ -1,205 +1,10 @@
 import type { Rule, RuleContext, Intent } from '../types/index.js';
 import { createRule } from '../types/index.js';
 import { Priority } from '../types/index.js';
-import { contactPressureNeuron } from '../decision/neuron.js';
 
-/**
- * Night hours (when to suppress non-urgent contact).
- */
-const NIGHT_START = 22; // 10 PM
-const NIGHT_END = 8; // 8 AM
-
-/**
- * Check if current hour is during night.
- */
-function isNightTime(hour: number): boolean {
-  return hour >= NIGHT_START || hour < NIGHT_END;
-}
-
-/**
- * Night suppression rule.
- *
- * During night hours, suppress non-critical activity:
- * - Increase wake threshold (harder to wake)
- * - Reduce contact urgency
- */
-const nightSuppressionRule = createRule({
-  id: 'night-suppression',
-  description: 'Suppress non-urgent activity during night hours',
-  trigger: 'tick',
-  weight: 0.9,
-
-  condition: (ctx: RuleContext): boolean => {
-    return isNightTime(ctx.hour);
-  },
-
-  action: (ctx: RuleContext): Intent[] => {
-    const intents: Intent[] = [];
-
-    // Log that we're in night mode
-    intents.push({
-      type: 'LOG',
-      payload: {
-        level: 'debug',
-        message: 'Night suppression active',
-        context: { hour: ctx.hour },
-      },
-    });
-
-    // Emit metric for tracking
-    intents.push({
-      type: 'EMIT_METRIC',
-      payload: {
-        type: 'gauge',
-        name: 'rule_night_suppression_active',
-        value: 1,
-      },
-    });
-
-    return intents;
-  },
-});
-
-/**
- * Contact decision rule using neuron-like weighted calculation.
- *
- * Combines multiple factors (social debt, task pressure, curiosity,
- * user availability estimate) into a single pressure value.
- * When pressure exceeds threshold, triggers contact consideration.
- */
-const contactDecisionRule = createRule({
-  id: 'contact-decision',
-  description: 'Neuron-based contact decision using weighted factors',
-  trigger: 'tick',
-  weight: 0.85,
-
-  condition: (ctx: RuleContext): boolean => {
-    // Estimate user availability based on time of day
-    const userAvailability = estimateUserAvailability(ctx.hour);
-
-    // Calculate contact pressure using neuron
-    const result = contactPressureNeuron({
-      socialDebt: ctx.state.socialDebt,
-      taskPressure: ctx.state.taskPressure,
-      curiosity: ctx.state.curiosity,
-      userAvailability,
-    });
-
-    // Adaptive threshold based on conditions
-    let threshold = 0.6; // Base threshold
-    if (isNightTime(ctx.hour)) {
-      threshold = 0.85; // Much higher at night
-    }
-    if (ctx.state.energy < 0.3) {
-      threshold += 0.1; // Higher when tired
-    }
-
-    const crossed = result.output >= threshold;
-
-    // Log neuron evaluation for debugging
-    ctx.logger?.debug(
-      {
-        pressure: result.output.toFixed(3),
-        threshold: threshold.toFixed(2),
-        crossed,
-        inputs: {
-          socialDebt: ctx.state.socialDebt.toFixed(2),
-          taskPressure: ctx.state.taskPressure.toFixed(2),
-          curiosity: ctx.state.curiosity.toFixed(2),
-          userAvailability: userAvailability.toFixed(2),
-        },
-      },
-      `🧠 Contact pressure: ${result.output.toFixed(3)} (threshold: ${threshold.toFixed(2)}) ${crossed ? '✓ CROSSED' : '✗ below'}`
-    );
-
-    return crossed;
-  },
-
-  action: (ctx: RuleContext): Intent[] => {
-    const intents: Intent[] = [];
-    const userAvailability = estimateUserAvailability(ctx.hour);
-
-    // Calculate for logging
-    const result = contactPressureNeuron({
-      socialDebt: ctx.state.socialDebt,
-      taskPressure: ctx.state.taskPressure,
-      curiosity: ctx.state.curiosity,
-      userAvailability,
-    });
-
-    // Schedule contact consideration event
-    intents.push({
-      type: 'SCHEDULE_EVENT',
-      payload: {
-        event: {
-          source: 'internal',
-          type: 'contact_pressure_threshold',
-          priority: isNightTime(ctx.hour) ? Priority.NORMAL : Priority.HIGH,
-          payload: {
-            pressure: result.output,
-            contributions: result.contributions,
-            reason: 'neuron_threshold_crossed',
-          },
-        },
-        delay: 0,
-        scheduleId: 'contact-decision',
-      },
-    });
-
-    // Log with full trace for explainability
-    intents.push({
-      type: 'LOG',
-      payload: {
-        level: 'info',
-        message: 'Contact pressure threshold crossed',
-        context: {
-          pressure: result.output.toFixed(3),
-          contributions: result.contributions.map((c) => ({
-            [c.name]: `${c.value.toFixed(2)} * ${c.weight.toFixed(2)} = ${c.contribution.toFixed(3)}`,
-          })),
-          isNight: isNightTime(ctx.hour),
-        },
-      },
-    });
-
-    // Emit metrics
-    intents.push({
-      type: 'EMIT_METRIC',
-      payload: {
-        type: 'gauge',
-        name: 'contact_pressure',
-        value: result.output,
-      },
-    });
-
-    return intents;
-  },
-});
-
-/**
- * Estimate user availability based on time of day.
- * Simple heuristic - can be replaced with learned patterns later.
- */
-function estimateUserAvailability(hour: number): number {
-  // Night (22-6): Very low availability
-  if (hour >= 22 || hour < 6) {
-    return 0.1;
-  }
-  // Early morning (6-9): Low availability
-  if (hour >= 6 && hour < 9) {
-    return 0.4;
-  }
-  // Work hours (9-12, 14-18): Medium availability
-  if ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)) {
-    return 0.6;
-  }
-  // Lunch (12-14): Higher availability
-  if (hour >= 12 && hour < 14) {
-    return 0.8;
-  }
-  // Evening (18-22): High availability
-  return 0.9;
-}
+// Note: Contact decisions are now handled by ContactDecider in the event loop.
+// This provides learnable neuron weights, cooldown, and UserModel integration.
+// Night suppression is handled by UserModel availability beliefs.
 
 /**
  * Inactivity awareness rule.
@@ -349,8 +154,8 @@ const acquaintancePressureRule = createRule({
       return false;
     }
 
-    // Don't build pressure at night
-    if (isNightTime(ctx.hour)) {
+    // Don't build pressure when user availability is low (e.g., night)
+    if (ctx.userBeliefs.availability < 0.3) {
       return false;
     }
 
@@ -465,8 +270,6 @@ const acquaintanceThresholdRule = createRule({
  */
 export function createDefaultRules(): Rule[] {
   return [
-    nightSuppressionRule,
-    contactDecisionRule,
     inactivityAwarenessRule,
     energyRecoveryRule,
     messageReceivedRule,

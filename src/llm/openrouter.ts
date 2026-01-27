@@ -224,7 +224,16 @@ export class OpenRouterProvider extends BaseLLMProvider {
 
     // Add response_format if specified (for JSON mode)
     if (request.responseFormat) {
-      body['response_format'] = { type: request.responseFormat.type };
+      if (request.responseFormat.type === 'json_schema' && request.responseFormat.json_schema) {
+        // Pass full JSON schema for structured output
+        body['response_format'] = {
+          type: 'json_schema',
+          json_schema: request.responseFormat.json_schema,
+        };
+      } else {
+        // Simple json_object or text mode
+        body['response_format'] = { type: request.responseFormat.type };
+      }
     }
 
     const controller = new AbortController();
