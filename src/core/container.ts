@@ -1,8 +1,9 @@
 import type { Logger } from 'pino';
-import type { EventQueue, Metrics } from '../types/index.js';
+import type { EventQueue, Metrics, AgentIdentity, AgentState } from '../types/index.js';
 import { createLogger, type LoggerConfig } from './logger.js';
 import { createEventQueue } from './event-queue.js';
 import { createMetrics } from './metrics.js';
+import { type Agent, createAgent, type AgentConfig } from './agent.js';
 
 /**
  * Application configuration.
@@ -16,6 +17,17 @@ export interface AppConfig {
   logLevel?: LoggerConfig['level'];
   /** Enable pretty logging */
   prettyLogs?: boolean;
+  /** Agent configuration */
+  agent?: {
+    /** Agent identity (name, personality, etc.) */
+    identity?: AgentIdentity;
+    /** Initial agent state */
+    initialState?: Partial<AgentState>;
+    /** Tick rate configuration */
+    tickRate?: AgentConfig['tickRate'];
+    /** Social debt accumulation rate */
+    socialDebtRate?: number;
+  };
 }
 
 /**
@@ -28,6 +40,8 @@ export interface Container {
   eventQueue: EventQueue;
   /** Metrics collector */
   metrics: Metrics;
+  /** The agent */
+  agent: Agent;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -63,6 +77,24 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create metrics
   const metrics = createMetrics();
 
+  // Build agent config, only including defined values
+  const agentConfig: AgentConfig = {};
+  if (config.agent?.identity !== undefined) {
+    agentConfig.identity = config.agent.identity;
+  }
+  if (config.agent?.initialState !== undefined) {
+    agentConfig.initialState = config.agent.initialState;
+  }
+  if (config.agent?.tickRate !== undefined) {
+    agentConfig.tickRate = config.agent.tickRate;
+  }
+  if (config.agent?.socialDebtRate !== undefined) {
+    agentConfig.socialDebtRate = config.agent.socialDebtRate;
+  }
+
+  // Create agent
+  const agent = createAgent({ logger, eventQueue, metrics }, agentConfig);
+
   // Shutdown function
   const shutdown = (): Promise<void> => {
     logger.info('Shutting down...');
@@ -74,6 +106,7 @@ export function createContainer(config: AppConfig = {}): Container {
     logger,
     eventQueue,
     metrics,
+    agent,
     shutdown,
   };
 }

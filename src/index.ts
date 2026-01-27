@@ -9,7 +9,18 @@ import { createContainer } from './core/container.js';
 // Create the application container
 const container = createContainer();
 
-container.logger.info('Lifemodel starting...');
+const { logger, agent } = container;
+
+logger.info('Lifemodel starting...');
+logger.info(
+  {
+    name: agent.getName(),
+    energy: agent.getEnergy(),
+    mode: agent.getAlertnessMode(),
+    state: agent.getState(),
+  },
+  'Agent ready'
+);
 
 // Handle shutdown
 process.on('SIGINT', () => {

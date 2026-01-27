@@ -1063,3 +1063,10 @@ The "aliveness" comes from:
 2. Energy awareness (agent gets tired)
 3. User modeling (respects their state)
 4. Natural emergence (not scripted triggers)
+
+---
+
+## Development Environment Notes
+
+- **Platform**: macOS (Darwin)
+- **No `timeout` command**: macOS doesn't have GNU `timeout`. Use `gtimeout` from coreutils (`brew install coreutils`) or run commands without timeout.
