@@ -1,8 +1,8 @@
 import type { Logger, EventQueue, Metrics, Intent } from '../types/index.js';
-import type { AgentState, AlertnessMode, SleepState } from '../types/agent-state.js';
-import type { AgentIdentity } from '../types/agent-identity.js';
-import { createDefaultAgentState, createDefaultSleepState } from '../types/agent-state.js';
-import { createDefaultIdentity } from '../types/agent-identity.js';
+import type { AgentState, AlertnessMode, SleepState } from '../types/agent/state.js';
+import type { AgentIdentity } from '../types/agent/identity.js';
+import { createDefaultAgentState, createDefaultSleepState } from '../types/agent/state.js';
+import { createDefaultIdentity } from '../types/agent/identity.js';
 import { type EnergyModel, createEnergyModel } from './energy.js';
 
 /**
