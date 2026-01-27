@@ -1,6 +1,7 @@
 import type { LayerResult, Logger, Intent } from '../types/index.js';
 import type { ProcessingContext, ActionType } from './context.js';
 import { BaseLayer } from './base-layer.js';
+import type { MessageComposer } from '../llm/composer.js';
 
 /**
  * Layer 5: EXPRESSION
@@ -19,7 +20,9 @@ export class ExpressionLayer extends BaseLayer {
   readonly name = 'expression';
   readonly confidenceThreshold = 0.9; // Final layer, high threshold
 
-  // Template responses for MVP (will use LLM later)
+  private composer: MessageComposer | null = null;
+
+  // Template responses for MVP (fallback when LLM not available)
   private readonly templates: Record<string, string[]> = {
     greeting_en: ['Hi!', 'Hello!', 'Hey there!', 'Hi, how are you?'],
     greeting_ru: ['Привет!', 'Здравствуй!', 'Привет, как дела?'],
@@ -43,7 +46,15 @@ export class ExpressionLayer extends BaseLayer {
     super(logger, 'expression');
   }
 
-  protected processImpl(context: ProcessingContext): LayerResult {
+  /**
+   * Set the message composer for LLM-based responses.
+   */
+  setComposer(composer: MessageComposer): void {
+    this.composer = composer;
+    this.logger.debug('MessageComposer attached to expression layer');
+  }
+
+  protected async processImpl(context: ProcessingContext): Promise<LayerResult> {
     context.stage = 'expression';
 
     const { decision } = context;
@@ -55,7 +66,7 @@ export class ExpressionLayer extends BaseLayer {
     }
 
     // Generate appropriate response based on action type
-    const response = this.generateResponse(context, decision.actionType);
+    const response = await this.generateResponse(context, decision.actionType);
 
     if (response) {
       // Create send message intent
@@ -96,7 +107,10 @@ export class ExpressionLayer extends BaseLayer {
     return this.stop(context, { intents });
   }
 
-  private generateResponse(context: ProcessingContext, actionType: ActionType): string | null {
+  private async generateResponse(
+    context: ProcessingContext,
+    actionType: ActionType
+  ): Promise<string | null> {
     const { perception } = context;
 
     if (actionType === 'ignore' || actionType === 'remember') {
@@ -149,14 +163,31 @@ export class ExpressionLayer extends BaseLayer {
     }
   }
 
-  private generateFullResponse(context: ProcessingContext, lang: string): string {
-    const { interpretation, cognition, decision } = context;
+  private async generateFullResponse(context: ProcessingContext, lang: string): Promise<string> {
+    const { interpretation, cognition, decision, perception } = context;
 
-    // For complex responses that need LLM, return a placeholder
-    // In production, this would call the LLM
-    if (cognition?.needsReasoning) {
-      return this.getTemplate('thinking', lang);
+    // Try LLM for complex responses
+    if (cognition?.needsReasoning && this.composer) {
+      const userMessage =
+        perception?.text ??
+        (context.event.payload &&
+        typeof context.event.payload === 'object' &&
+        'text' in context.event.payload
+          ? String(context.event.payload.text)
+          : undefined);
+
+      if (userMessage) {
+        const result = await this.composer.composeResponse(userMessage);
+        if (result.success && result.message) {
+          this.logger.debug({ tokensUsed: result.tokensUsed }, 'LLM response generated');
+          return result.message;
+        }
+        // Fall through to template if LLM fails
+        this.logger.warn({ error: result.error }, 'LLM composition failed, using template');
+      }
     }
+
+    // Fallback to templates when LLM not available or not needed
 
     // Handle specific intents
     if (interpretation) {
@@ -168,11 +199,10 @@ export class ExpressionLayer extends BaseLayer {
           return this.getTemplate('farewell', lang);
 
         case 'question':
-          // MVP: indicate we're thinking (would use LLM in production)
+          // Indicate we're thinking if LLM not available
           return this.getTemplate('thinking', lang);
 
         case 'request':
-          // MVP: acknowledge the request
           return this.getTemplate('ack', lang);
 
         case 'emotional_expression':
