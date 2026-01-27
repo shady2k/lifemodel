@@ -79,6 +79,7 @@ export class MessageComposer {
 
       const response = await this.provider.complete({
         messages,
+        role: 'smart', // Use smart model for composition
         temperature: 0.7,
         maxTokens: 300,
       });

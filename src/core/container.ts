@@ -57,6 +57,10 @@ export interface AppConfig {
   llm?: {
     /** OpenRouter API key */
     openRouterApiKey?: string;
+    /** Fast model for classification (cheap) */
+    fastModel?: string;
+    /** Smart model for composition (expensive) */
+    smartModel?: string;
   };
 }
 
@@ -176,8 +180,16 @@ export function createContainer(config: AppConfig = {}): Container {
   let llmProvider: OpenRouterProvider | null = null;
   const openRouterApiKey = config.llm?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
   if (openRouterApiKey) {
-    llmProvider = createOpenRouterProvider({ apiKey: openRouterApiKey }, logger);
-    logger.info('OpenRouter LLM provider configured');
+    const fastModel = config.llm?.fastModel ?? process.env['LLM_FAST_MODEL'];
+    const smartModel = config.llm?.smartModel ?? process.env['LLM_SMART_MODEL'];
+
+    const llmConfig: Parameters<typeof createOpenRouterProvider>[0] = {
+      apiKey: openRouterApiKey,
+    };
+    if (fastModel) llmConfig.fastModel = fastModel;
+    if (smartModel) llmConfig.smartModel = smartModel;
+
+    llmProvider = createOpenRouterProvider(llmConfig, logger);
   } else {
     logger.debug('LLM provider not configured (no API key)');
   }

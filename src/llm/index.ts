@@ -1,4 +1,10 @@
-export type { LLMProvider, Message, CompletionRequest, CompletionResponse } from './provider.js';
+export type {
+  LLMProvider,
+  Message,
+  CompletionRequest,
+  CompletionResponse,
+  ModelRole,
+} from './provider.js';
 export { LLMError } from './provider.js';
 
 export {

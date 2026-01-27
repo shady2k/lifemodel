@@ -31,7 +31,13 @@ export interface OpenRouterConfig {
   /** API key (required) */
   apiKey: string;
 
-  /** Default model to use */
+  /** Fast model for classification, yes/no, emotion detection (cheap) */
+  fastModel?: string;
+
+  /** Smart model for composition, reasoning (expensive) */
+  smartModel?: string;
+
+  /** Default model to use when role not specified */
   defaultModel?: string;
 
   /** Base URL (default: https://openrouter.ai/api/v1) */
@@ -54,6 +60,8 @@ export interface OpenRouterConfig {
 }
 
 const DEFAULT_CONFIG = {
+  fastModel: 'anthropic/claude-3.5-haiku',
+  smartModel: 'anthropic/claude-sonnet-4',
   defaultModel: 'anthropic/claude-3.5-haiku',
   baseUrl: 'https://openrouter.ai/api/v1',
   timeout: 30_000,
@@ -71,7 +79,16 @@ export class OpenRouterProvider implements LLMProvider {
   readonly name = 'openrouter';
 
   private readonly config: Required<
-    Pick<OpenRouterConfig, 'defaultModel' | 'baseUrl' | 'timeout' | 'maxRetries' | 'retryDelay'>
+    Pick<
+      OpenRouterConfig,
+      | 'fastModel'
+      | 'smartModel'
+      | 'defaultModel'
+      | 'baseUrl'
+      | 'timeout'
+      | 'maxRetries'
+      | 'retryDelay'
+    >
   > &
     OpenRouterConfig;
   private readonly logger?: Logger | undefined;
@@ -91,6 +108,11 @@ export class OpenRouterProvider implements LLMProvider {
       circuitConfig.logger = this.logger;
     }
     this.circuitBreaker = createCircuitBreaker(circuitConfig);
+
+    this.logger?.info(
+      { fastModel: this.config.fastModel, smartModel: this.config.smartModel },
+      'OpenRouter provider initialized'
+    );
   }
 
   /**
@@ -101,6 +123,26 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   /**
+   * Get the model to use based on role or explicit model.
+   */
+  private getModel(request: CompletionRequest): string {
+    // Explicit model takes precedence
+    if (request.model) {
+      return request.model;
+    }
+
+    // Select based on role
+    switch (request.role) {
+      case 'fast':
+        return this.config.fastModel;
+      case 'smart':
+        return this.config.smartModel;
+      default:
+        return this.config.defaultModel;
+    }
+  }
+
+  /**
    * Generate a completion.
    */
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
@@ -108,7 +150,7 @@ export class OpenRouterProvider implements LLMProvider {
       throw new LLMError('OpenRouter API key not configured', this.name);
     }
 
-    const model = request.model ?? this.config.defaultModel;
+    const model = this.getModel(request);
 
     return this.circuitBreaker.execute(async () => {
       return this.executeWithRetry(async () => {

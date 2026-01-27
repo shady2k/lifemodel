@@ -14,13 +14,21 @@ export interface Message {
 }
 
 /**
+ * Model role for selecting appropriate model tier.
+ */
+export type ModelRole = 'fast' | 'smart';
+
+/**
  * Request to generate a completion.
  */
 export interface CompletionRequest {
   /** Conversation messages */
   messages: Message[];
 
-  /** Model to use (provider-specific format) */
+  /** Model role: 'fast' for classification, 'smart' for reasoning */
+  role?: ModelRole;
+
+  /** Explicit model to use (overrides role) */
   model?: string;
 
   /** Maximum tokens to generate */
