@@ -197,7 +197,7 @@ describe('ThresholdEngine', () => {
   });
 
   describe('Trigger signals', () => {
-    it('provides trigger signal for threshold_crossed wakes', async () => {
+    it('provides trigger signal for contact_urge wakes', async () => {
       // Need primaryUserChatId for proactive contact to work
       engine.updateDeps({ primaryUserChatId: '123' });
 
@@ -208,7 +208,8 @@ describe('ThresholdEngine', () => {
 
       expect(decision.shouldWake).toBe(true);
       expect(decision.triggerSignals.length).toBeGreaterThan(0);
-      expect(decision.triggerSignals[0].type).toBe('threshold_crossed');
+      // Now uses contact_urge signal type instead of threshold_crossed
+      expect(decision.triggerSignals[0].type).toBe('contact_urge');
       // Verify chatId is included in the signal data
       const data = decision.triggerSignals[0].data as { chatId?: string };
       expect(data.chatId).toBe('123');

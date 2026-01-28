@@ -16,6 +16,7 @@ import { createSignal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
+import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
 import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
 
@@ -23,6 +24,9 @@ import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
  * Configuration for contact pressure neuron.
  */
 export interface ContactPressureNeuronConfig {
+  /** Change detection config (Weber-Fechner) */
+  changeConfig: ChangeDetectorConfig;
+
   /** Minimum interval between emissions (ms) */
   refractoryPeriodMs: number;
 
@@ -42,6 +46,12 @@ export interface ContactPressureNeuronConfig {
  * Default configuration.
  */
 export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
+  changeConfig: {
+    baseThreshold: 0.1, // 10% change is noticeable
+    minAbsoluteChange: 0.02, // Ignore tiny changes
+    maxThreshold: 0.4, // Don't become too insensitive
+    alertnessInfluence: 0.3, // Alertness has mild effect
+  },
   refractoryPeriodMs: 5000,
   highPriorityThreshold: 0.6,
   weights: {
@@ -69,34 +79,68 @@ export class ContactPressureNeuron extends BaseNeuron {
     this.config = { ...DEFAULT_CONTACT_PRESSURE_CONFIG, ...config };
   }
 
-  check(state: AgentState, _alertness: number, correlationId: string): Signal | undefined {
+  check(state: AgentState, alertness: number, correlationId: string): Signal | undefined {
     // Calculate pressure using weighted neuron
     const result = this.calculatePressure(state);
     const currentValue = result.output;
+
+    // First check - establish baseline
+    if (this.previousValue === undefined) {
+      this.updatePrevious(currentValue);
+      this.lastNeuronResult = result;
+      // Emit initial signal if pressure is significant
+      if (currentValue > 0.1) {
+        this.recordEmission();
+        return this.createSignal(currentValue, result, 0, correlationId);
+      }
+      return undefined;
+    }
 
     // Check refractory period to avoid signal spam
     if (this.isInRefractoryPeriod(this.config.refractoryPeriodMs)) {
       return undefined;
     }
 
-    // Emit signal with current pressure value
-    // Aggregation layer decides what's significant, not the neuron
-    const signal = this.createSignal(currentValue, result, correlationId);
+    // Detect if change is significant using Weber-Fechner law
+    const changeResult = detectChange(
+      currentValue,
+      this.previousValue,
+      alertness,
+      this.config.changeConfig
+    );
+
+    if (!changeResult.isSignificant) {
+      // Still update previous to track gradual changes
+      this.updatePrevious(currentValue);
+      this.lastNeuronResult = result;
+      return undefined;
+    }
+
+    // Significant change detected - emit signal
+    const signal = this.createSignal(
+      currentValue,
+      result,
+      changeResult.relativeChange,
+      correlationId
+    );
 
     this.updatePrevious(currentValue);
     this.lastNeuronResult = result;
     this.recordEmission();
 
-    this.logger.trace(
+    this.logger.debug(
       {
-        pressure: currentValue.toFixed(2),
+        previous: this.previousValue,
+        current: currentValue.toFixed(2),
+        change: changeResult.relativeChange.toFixed(2),
+        reason: changeResult.reason,
         contributions: result.contributions.map((c) => ({
           name: c.name,
           value: c.value.toFixed(2),
           contribution: c.contribution.toFixed(2),
         })),
       },
-      'Contact pressure emitted'
+      'Contact pressure change detected'
     );
 
     return signal;
@@ -130,12 +174,18 @@ export class ContactPressureNeuron extends BaseNeuron {
     ]);
   }
 
-  private createSignal(value: number, neuronResult: NeuronResult, correlationId: string): Signal {
+  private createSignal(
+    value: number,
+    neuronResult: NeuronResult,
+    rateOfChange: number,
+    correlationId: string
+  ): Signal {
     const priority = value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
 
     // Include contribution breakdown in metrics
     const metrics: SignalMetrics = {
       value,
+      rateOfChange,
       confidence: 1.0,
     };
 

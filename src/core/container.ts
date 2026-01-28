@@ -39,6 +39,10 @@ import { type MergedConfig, loadConfig } from '../config/index.js';
 import { type JsonMemoryProvider, createJsonMemoryProvider } from '../storage/memory-provider.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
+import {
+  type MemoryConsolidator,
+  createMemoryConsolidator,
+} from '../storage/memory-consolidator.js';
 
 /**
  * Application configuration.
@@ -128,6 +132,8 @@ export interface Container {
   cognitionLLM: CognitionLLM | null;
   /** Memory provider (optional, for agentic loop) */
   memoryProvider: JsonMemoryProvider | null;
+  /** Memory consolidator (for sleep-cycle consolidation) */
+  memoryConsolidator: MemoryConsolidator | null;
   /** Primary user's Telegram chat ID (for proactive messages) */
   primaryUserChatId: string | null;
   /** Storage backend */
@@ -321,6 +327,10 @@ export function createContainer(config: AppConfig = {}): Container {
   });
   logger.info('MemoryProvider configured');
 
+  // Create memory consolidator (for sleep-cycle consolidation)
+  const memoryConsolidator = createMemoryConsolidator(logger);
+  logger.info('MemoryConsolidator configured');
+
   // Create 4-layer processors
   const layers = createLayers(logger);
 
@@ -339,6 +349,7 @@ export function createContainer(config: AppConfig = {}): Container {
     agent,
     cognitionLLM: cognitionLLM ?? undefined,
     memoryProvider,
+    memoryConsolidator,
   });
 
   // Create channels registry
@@ -394,6 +405,7 @@ export function createContainer(config: AppConfig = {}): Container {
     messageComposer,
     cognitionLLM,
     memoryProvider,
+    memoryConsolidator,
     primaryUserChatId,
     storage: null,
     stateManager: null,
@@ -558,6 +570,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   });
   logger.info('MemoryProvider configured');
 
+  // Create memory consolidator (for sleep-cycle consolidation)
+  const memoryConsolidator = createMemoryConsolidator(logger);
+  logger.info('MemoryConsolidator configured');
+
   // Create 4-layer processors
   const layers = createLayers(logger);
 
@@ -577,6 +593,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     agent,
     cognitionLLM: cognitionLLM ?? undefined,
     memoryProvider,
+    memoryConsolidator,
   });
 
   // Create channels registry
@@ -652,6 +669,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     messageComposer,
     cognitionLLM,
     memoryProvider,
+    memoryConsolidator,
     primaryUserChatId,
     storage,
     stateManager,

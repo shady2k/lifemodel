@@ -27,6 +27,7 @@ import type { PatternDetector } from './pattern-detector.js';
 import { createPatternDetector } from './pattern-detector.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
+import type { SignalAckRegistry } from './ack-registry.js';
 
 /**
  * Configuration for AGGREGATION processor.
@@ -149,10 +150,15 @@ export class AggregationProcessor implements AggregationLayer {
   }
 
   /**
-   * Get current aggregate for a signal type.
+   * Get current aggregate for a signal type and source.
    */
-  getAggregate(type: SignalType, source: SignalSource): SignalAggregate | undefined {
-    return this.aggregator.getAggregate(type, source);
+  getAggregate(type: SignalType, source?: SignalSource): SignalAggregate | undefined {
+    // If source is provided, get specific aggregate
+    if (source) {
+      return this.aggregator.getAggregate(type, source);
+    }
+    // Otherwise, find first aggregate for this type
+    return this.aggregator.getAllAggregates().find((a) => a.type === type);
   }
 
   /**
@@ -177,6 +183,13 @@ export class AggregationProcessor implements AggregationLayer {
       buckets: this.aggregator.getBucketCount(),
       signals: this.aggregator.getTotalSignalCount(),
     };
+  }
+
+  /**
+   * Get the ack registry (for external access from CoreLoop).
+   */
+  getAckRegistry(): SignalAckRegistry {
+    return this.thresholdEngine.getAckRegistry();
   }
 
   /**

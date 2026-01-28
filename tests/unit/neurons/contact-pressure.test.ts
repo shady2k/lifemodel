@@ -76,19 +76,34 @@ describe('ContactPressureNeuron', () => {
       expect(second).toBeUndefined();
     });
 
-    it('emits on every tick after refractory period', async () => {
+    it('emits on significant change after refractory period (Weber-Fechner)', async () => {
       const neuron = createContactPressureNeuron(logger, {
         refractoryPeriodMs: 10, // 10ms for testing
+        changeConfig: {
+          baseThreshold: 0.10, // 10% change is noticeable
+          minAbsoluteChange: 0.02,
+          maxThreshold: 0.4,
+          alertnessInfluence: 0.3,
+        },
       });
-      const state = createAgentState({ socialDebt: 1.0 });
+      const state1 = createAgentState({ socialDebt: 0.5 });
+      const state2 = createAgentState({ socialDebt: 0.7 }); // 40% increase - significant change
 
-      const first = neuron.check(state, 0.5, 'tick-1');
+      const first = neuron.check(state1, 0.5, 'tick-1');
       expect(first).toBeDefined();
 
       // Wait for refractory to expire
       await new Promise((r) => setTimeout(r, 15));
 
-      const second = neuron.check(state, 0.5, 'tick-2');
+      // Same state - no change, no signal (Weber-Fechner)
+      const sameState = neuron.check(state1, 0.5, 'tick-2');
+      expect(sameState).toBeUndefined();
+
+      // Wait for refractory again
+      await new Promise((r) => setTimeout(r, 15));
+
+      // Significant change - should emit
+      const second = neuron.check(state2, 0.5, 'tick-3');
       expect(second).toBeDefined();
     });
   });

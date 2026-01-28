@@ -15,6 +15,8 @@ export type IntentType =
   | 'SCHEDULE_EVENT'
   | 'SEND_MESSAGE'
   | 'CANCEL_EVENT'
+  | 'ACK_SIGNAL'
+  | 'DEFER_SIGNAL'
   | 'LOG'
   | 'EMIT_METRIC';
 
@@ -132,6 +134,44 @@ export interface CancelEventIntent {
 }
 
 /**
+ * Acknowledge a signal (marks it as handled).
+ * Used to indicate COGNITION has processed a signal.
+ */
+export interface AckSignalIntent {
+  type: 'ACK_SIGNAL';
+  payload: {
+    /** The signal type being acknowledged */
+    signalType: string;
+    /** Optional: specific source (e.g., neuron.contact_pressure) */
+    source?: string;
+    /** Why it's being acknowledged */
+    reason: string;
+  };
+}
+
+/**
+ * Defer a signal (agent decides "not now, but later").
+ * Works for any signal type, not just proactive contact.
+ */
+export interface DeferSignalIntent {
+  type: 'DEFER_SIGNAL';
+  payload: {
+    /** The signal type being deferred */
+    signalType: string;
+    /** Optional: specific source */
+    source?: string;
+    /** Delay in milliseconds before reconsidering */
+    deferMs: number;
+    /** Current value at deferral time (for override detection) */
+    valueAtDeferral?: number;
+    /** Value increase required to override deferral */
+    overrideDelta?: number;
+    /** Why the agent is deferring */
+    reason: string;
+  };
+}
+
+/**
  * Log something (for debugging/tracing).
  */
 export interface LogIntent {
@@ -166,5 +206,7 @@ export type Intent =
   | ScheduleEventIntent
   | SendMessageIntent
   | CancelEventIntent
+  | AckSignalIntent
+  | DeferSignalIntent
   | LogIntent
   | EmitMetricIntent;

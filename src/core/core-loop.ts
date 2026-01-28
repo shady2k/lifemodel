@@ -16,7 +16,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Signal, Logger, Metrics, Intent, Channel, Event } from '../types/index.js';
+import type {
+  Signal,
+  SignalType,
+  SignalSource,
+  Logger,
+  Metrics,
+  Intent,
+  Channel,
+  Event,
+} from '../types/index.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -42,6 +51,8 @@ import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
+import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
+import type { AlertnessMode } from '../types/agent/state.js';
 
 /**
  * Core loop configuration.
@@ -95,6 +106,8 @@ export interface CoreLoopDeps {
   cognitionLLM?: CognitionLLM | undefined;
   /** Memory provider for agentic loop tools */
   memoryProvider?: MemoryProvider | undefined;
+  /** Memory consolidator for sleep-cycle consolidation */
+  memoryConsolidator?: MemoryConsolidator | undefined;
 }
 
 /**
@@ -142,6 +155,10 @@ export class CoreLoop {
   private readonly conversationManager: ConversationManager | undefined;
   private readonly userModel: UserModel | undefined;
   private readonly memoryProvider: MemoryProvider | undefined;
+  private readonly memoryConsolidator: MemoryConsolidator | undefined;
+
+  /** Previous alertness mode for detecting transitions */
+  private previousAlertnessMode: AlertnessMode | undefined;
 
   /** Subscription ID for typing events */
   private typingSubscriptionId: string | null = null;
@@ -172,6 +189,7 @@ export class CoreLoop {
     this.conversationManager = deps.conversationManager;
     this.userModel = deps.userModel;
     this.memoryProvider = deps.memoryProvider;
+    this.memoryConsolidator = deps.memoryConsolidator;
 
     // Initialize system health monitor
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
@@ -456,6 +474,34 @@ export class CoreLoop {
       const agentIntents = this.agent.tick();
       allIntents.push(...agentIntents);
 
+      // 6b. Check for sleep mode transition - trigger memory consolidation
+      const currentMode = this.agent.getAlertnessMode();
+      if (
+        this.memoryConsolidator &&
+        this.memoryProvider &&
+        currentMode === 'sleep' &&
+        this.previousAlertnessMode !== 'sleep'
+      ) {
+        // Entering sleep mode - consolidate memories (like human sleep)
+        this.logger.info('Entering sleep mode - triggering memory consolidation');
+        void this.memoryConsolidator.consolidate(this.memoryProvider).then((result) => {
+          this.logger.info(
+            {
+              merged: result.merged,
+              forgotten: result.forgotten,
+              before: result.totalBefore,
+              after: result.totalAfter,
+              durationMs: result.durationMs,
+            },
+            'Memory consolidation complete'
+          );
+          this.metrics.counter('memory_consolidations');
+          this.metrics.gauge('memory_entries_merged', result.merged);
+          this.metrics.gauge('memory_entries_forgotten', result.forgotten);
+        });
+      }
+      this.previousAlertnessMode = currentMode;
+
       // 7. Update user model beliefs (time-based decay)
       if (this.userModel) {
         this.userModel.updateTimeBasedBeliefs();
@@ -532,6 +578,8 @@ export class CoreLoop {
    * Process user message signal for side effects.
    */
   private processUserMessageSignal(signal: Signal): void {
+    // Note: Ack clearing is now handled by ThresholdEngine when it sees user_message
+
     // Update user model
     if (this.userModel) {
       this.userModel.processSignal('message_received');
@@ -948,6 +996,58 @@ export class CoreLoop {
           }
 
           this.metrics.counter('memory_saves', { type: memoryType });
+          break;
+        }
+
+        case 'ACK_SIGNAL': {
+          const { signalType, source, reason } = intent.payload;
+
+          const ackRegistry = this.layers.aggregation.getAckRegistry();
+          ackRegistry.registerAck({
+            signalType: signalType as SignalType,
+            source: source as SignalSource | undefined,
+            ackType: 'handled',
+            reason,
+          });
+
+          this.logger.debug({ signalType, source, reason }, 'Signal acknowledged');
+          this.metrics.counter('signal_acks', { signalType, ackType: 'handled' });
+          break;
+        }
+
+        case 'DEFER_SIGNAL': {
+          const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } =
+            intent.payload;
+
+          // Get current value if not provided
+          let currentValue = valueAtDeferral;
+          if (currentValue === undefined) {
+            const aggregate = this.layers.aggregation.getAggregate(signalType as SignalType);
+            currentValue = aggregate?.currentValue;
+          }
+
+          const ackRegistry = this.layers.aggregation.getAckRegistry();
+          ackRegistry.registerAck({
+            signalType: signalType as SignalType,
+            source: source as SignalSource | undefined,
+            ackType: 'deferred',
+            deferUntil: new Date(Date.now() + deferMs),
+            valueAtAck: currentValue,
+            overrideDelta,
+            reason,
+          });
+
+          this.logger.info(
+            {
+              signalType,
+              deferMs,
+              deferHours: (deferMs / (60 * 60 * 1000)).toFixed(1),
+              reason,
+              valueAtDeferral: currentValue?.toFixed(2),
+            },
+            'Signal deferred'
+          );
+          this.metrics.counter('signal_acks', { signalType, ackType: 'deferred' });
           break;
         }
       }

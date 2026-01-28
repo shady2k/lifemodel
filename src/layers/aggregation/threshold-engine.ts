@@ -17,7 +17,7 @@
  * - closed: much longer wait before initiating
  */
 
-import type { Signal, SignalAggregate } from '../../types/signal.js';
+import type { Signal, SignalAggregate, ContactUrgeData } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import { Priority } from '../../types/priority.js';
 import type { AgentState } from '../../types/agent/state.js';
@@ -26,6 +26,8 @@ import { DEFAULT_WAKE_THRESHOLDS } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
+import type { SignalAckRegistry } from './ack-registry.js';
+import { createAckRegistry } from './ack-registry.js';
 
 /**
  * Conversation status for proactive contact decisions.
@@ -42,7 +44,7 @@ export interface ContactTimingConfig {
   idleDelayMs: number;
   /** Time to wait before contact when conversation is closed (ms) - default 4 hours */
   closedDelayMs: number;
-  /** Minimum cooldown between any proactive contacts (ms) - default 5 min */
+  /** Minimum cooldown between any proactive contacts (ms) - default 30 min (safety minimum) */
   cooldownMs: number;
   /** User availability threshold below which we don't contact (0-1) */
   lowAvailabilityThreshold: number;
@@ -52,7 +54,7 @@ const DEFAULT_CONTACT_TIMING: ContactTimingConfig = {
   awaitingAnswerDelayMs: 3 * 60 * 1000, // 3 minutes
   idleDelayMs: 30 * 60 * 1000, // 30 minutes
   closedDelayMs: 4 * 60 * 60 * 1000, // 4 hours
-  cooldownMs: 5 * 60 * 1000, // 5 minutes
+  cooldownMs: 30 * 60 * 1000, // 30 minutes (safety minimum)
   lowAvailabilityThreshold: 0.25,
 };
 
@@ -80,6 +82,9 @@ export interface WakeDecision {
 
   /** Proactive contact type (if applicable) */
   proactiveType?: 'follow_up' | 'initiate';
+
+  /** Whether this wake is overriding a deferral */
+  deferralOverride?: boolean;
 }
 
 /**
@@ -89,6 +94,7 @@ export interface ThresholdEngineDeps {
   conversationManager?: ConversationManager;
   userModel?: UserModel;
   primaryUserChatId?: string;
+  ackRegistry?: SignalAckRegistry;
 }
 
 /**
@@ -104,8 +110,14 @@ export class ThresholdEngine {
   private userModel: UserModel | undefined;
   private primaryUserChatId: string | undefined;
 
+  // Acknowledgment registry for deferrals (unified mechanism)
+  private ackRegistry: SignalAckRegistry;
+
   // Cooldown tracking
   private lastProactiveContact: Date | null = null;
+
+  // Follow-up attempt tracking
+  private followUpAttempts = 0;
 
   constructor(
     logger: Logger,
@@ -115,6 +127,7 @@ export class ThresholdEngine {
     this.logger = logger.child({ component: 'threshold-engine' });
     this.config = { ...DEFAULT_WAKE_THRESHOLDS, ...config };
     this.contactTiming = { ...DEFAULT_CONTACT_TIMING, ...contactTiming };
+    this.ackRegistry = createAckRegistry(logger);
   }
 
   /**
@@ -124,6 +137,14 @@ export class ThresholdEngine {
     if (deps.conversationManager) this.conversationManager = deps.conversationManager;
     if (deps.userModel) this.userModel = deps.userModel;
     if (deps.primaryUserChatId) this.primaryUserChatId = deps.primaryUserChatId;
+    if (deps.ackRegistry) this.ackRegistry = deps.ackRegistry;
+  }
+
+  /**
+   * Get the ack registry (for external access, e.g., from CoreLoop).
+   */
+  getAckRegistry(): SignalAckRegistry {
+    return this.ackRegistry;
   }
 
   /**
@@ -141,8 +162,11 @@ export class ThresholdEngine {
     // Check for high-priority triggers first (always wake for user messages)
     const userMessages = signals.filter((s) => s.type === 'user_message');
     if (userMessages.length > 0) {
-      // Reset cooldown when user contacts us
+      // Reset cooldown and follow-up tracking when user contacts us
       this.lastProactiveContact = null;
+      this.followUpAttempts = 0;
+      // Clear all acks when user initiates contact (unified mechanism)
+      this.ackRegistry.clearAll();
       return {
         shouldWake: true,
         trigger: 'user_message',
@@ -204,7 +228,7 @@ export class ThresholdEngine {
 
   /**
    * Check if we should initiate proactive contact.
-   * This is conversation-status-aware.
+   * This is conversation-status-aware and respects deferrals via AckRegistry.
    */
   private async checkProactiveContact(
     aggregates: SignalAggregate[],
@@ -216,8 +240,26 @@ export class ThresholdEngine {
       return { shouldWake: false, triggerSignals: [] };
     }
 
-    // Check cooldown first
+    // Check cooldown first (safety minimum)
     if (this.isInCooldown()) {
+      return { shouldWake: false, triggerSignals: [] };
+    }
+
+    // Get current pressure
+    const contactPressure = aggregates.find((a) => a.type === 'contact_pressure');
+    const currentPressure = contactPressure?.currentValue ?? 0;
+
+    // Check ack registry for deferrals (unified mechanism)
+    const ackResult = this.ackRegistry.checkBlocked('contact_urge', undefined, currentPressure);
+
+    if (ackResult.blocked) {
+      this.logger.trace(
+        {
+          reason: ackResult.reason,
+          currentPressure: currentPressure.toFixed(2),
+        },
+        'Proactive contact blocked by ack registry'
+      );
       return { shouldWake: false, triggerSignals: [] };
     }
 
@@ -242,31 +284,69 @@ export class ThresholdEngine {
           ? Math.round(timeSinceLastMessage / 1000)
           : null,
         userAvailability: userAvailability.toFixed(2),
+        deferralOverride: ackResult.isOverride,
       },
       'Checking proactive contact conditions'
     );
 
     // Different logic based on conversation status
+    // primaryUserChatId is guaranteed to exist (checked at start of this method)
+    const chatId = this.primaryUserChatId;
+
+    let result: WakeDecision;
     switch (conversationStatus) {
       case 'awaiting_answer':
-        return this.checkFollowUp(timeSinceLastMessage, state);
+        result = this.checkFollowUp(
+          timeSinceLastMessage,
+          state,
+          currentPressure,
+          conversationStatus,
+          chatId
+        );
+        break;
 
       case 'closed':
-        return this.checkClosedConversationContact(aggregates, state, timeSinceLastMessage);
+        result = this.checkClosedConversationContact(
+          aggregates,
+          state,
+          timeSinceLastMessage,
+          conversationStatus,
+          chatId
+        );
+        break;
 
       case 'active':
       case 'idle':
       case 'unknown':
       default:
-        return this.checkNormalProactiveContact(aggregates, state, timeSinceLastMessage);
+        result = this.checkNormalProactiveContact(
+          aggregates,
+          state,
+          timeSinceLastMessage,
+          conversationStatus,
+          chatId
+        );
     }
+
+    // Add deferral override flag if applicable
+    if (result.shouldWake && ackResult.isOverride) {
+      result.deferralOverride = true;
+    }
+
+    return result;
   }
 
   /**
    * Check if we should follow up when awaiting answer.
    * This is a gentle "are you still there?" after user went silent.
    */
-  private checkFollowUp(timeSinceLastMessage: number | null, _state: AgentState): WakeDecision {
+  private checkFollowUp(
+    timeSinceLastMessage: number | null,
+    _state: AgentState,
+    currentPressure: number,
+    conversationStatus: string,
+    chatId: string
+  ): WakeDecision {
     if (timeSinceLastMessage === null) {
       return { shouldWake: false, triggerSignals: [] };
     }
@@ -281,24 +361,29 @@ export class ThresholdEngine {
       'Triggering follow-up - user has not responded'
     );
 
-    // Record contact and create trigger
+    // Record contact and increment follow-up counter
     this.recordProactiveContact();
+    this.followUpAttempts++;
+
+    const urgeData: ContactUrgeData = {
+      kind: 'contact_urge',
+      pressure: currentPressure,
+      pressureDelta: 0,
+      timeSinceLastContactMs: timeSinceLastMessage,
+      conversationStatus,
+      followUpAttempts: this.followUpAttempts,
+      deferralOverride: false,
+      chatId,
+      channel: 'telegram',
+    };
 
     const triggerSignal = createSignal(
-      'threshold_crossed',
+      'contact_urge',
       'meta.threshold_monitor',
-      { value: 1.0, confidence: 1.0 },
+      { value: currentPressure, confidence: 1.0 },
       {
         priority: Priority.NORMAL,
-        data: {
-          kind: 'threshold',
-          thresholdName: 'proactive_follow_up',
-          value: 1.0,
-          threshold: 0,
-          direction: 'above',
-          chatId: this.primaryUserChatId,
-          channel: 'telegram',
-        },
+        data: urgeData,
       }
     );
 
@@ -318,7 +403,9 @@ export class ThresholdEngine {
   private checkClosedConversationContact(
     aggregates: SignalAggregate[],
     state: AgentState,
-    timeSinceLastMessage: number | null
+    timeSinceLastMessage: number | null,
+    conversationStatus: string,
+    chatId: string
   ): WakeDecision {
     // Must wait at least closedDelayMs before contacting after closed conversation
     if (timeSinceLastMessage === null || timeSinceLastMessage < this.contactTiming.closedDelayMs) {
@@ -348,22 +435,28 @@ export class ThresholdEngine {
     );
 
     this.recordProactiveContact();
+    // Reset follow-up attempts on new initiation
+    this.followUpAttempts = 0;
+
+    const urgeData: ContactUrgeData = {
+      kind: 'contact_urge',
+      pressure: contactPressure.currentValue,
+      pressureDelta: contactPressure.currentValue - contactPressure.minValue,
+      timeSinceLastContactMs: timeSinceLastMessage,
+      conversationStatus,
+      followUpAttempts: 0,
+      deferralOverride: false,
+      chatId,
+      channel: 'telegram',
+    };
 
     const triggerSignal = createSignal(
-      'threshold_crossed',
+      'contact_urge',
       'meta.threshold_monitor',
       { value: contactPressure.currentValue, confidence: 1.0 },
       {
         priority: Priority.NORMAL,
-        data: {
-          kind: 'threshold',
-          thresholdName: 'proactive_initiate_closed',
-          value: contactPressure.currentValue,
-          threshold,
-          direction: 'above',
-          chatId: this.primaryUserChatId,
-          channel: 'telegram',
-        },
+        data: urgeData,
       }
     );
 
@@ -384,7 +477,9 @@ export class ThresholdEngine {
   private checkNormalProactiveContact(
     aggregates: SignalAggregate[],
     state: AgentState,
-    timeSinceLastMessage: number | null
+    timeSinceLastMessage: number | null,
+    conversationStatus: string,
+    chatId: string
   ): WakeDecision {
     // Must wait at least idleDelayMs before contacting
     if (timeSinceLastMessage !== null && timeSinceLastMessage < this.contactTiming.idleDelayMs) {
@@ -412,22 +507,28 @@ export class ThresholdEngine {
     );
 
     this.recordProactiveContact();
+    // Reset follow-up attempts on new initiation
+    this.followUpAttempts = 0;
+
+    const urgeData: ContactUrgeData = {
+      kind: 'contact_urge',
+      pressure: contactPressure.currentValue,
+      pressureDelta: contactPressure.currentValue - contactPressure.minValue,
+      timeSinceLastContactMs: timeSinceLastMessage ?? 0,
+      conversationStatus,
+      followUpAttempts: 0,
+      deferralOverride: false,
+      chatId,
+      channel: 'telegram',
+    };
 
     const triggerSignal = createSignal(
-      'threshold_crossed',
+      'contact_urge',
       'meta.threshold_monitor',
       { value: contactPressure.currentValue, confidence: 1.0 },
       {
         priority: Priority.NORMAL,
-        data: {
-          kind: 'threshold',
-          thresholdName: 'proactive_initiate',
-          value: contactPressure.currentValue,
-          threshold,
-          direction: 'above',
-          chatId: this.primaryUserChatId,
-          channel: 'telegram',
-        },
+        data: urgeData,
       }
     );
 
@@ -500,6 +601,8 @@ export class ThresholdEngine {
    */
   resetCooldown(): void {
     this.lastProactiveContact = null;
+    this.followUpAttempts = 0;
+    this.ackRegistry.clearAll();
   }
 
   /**

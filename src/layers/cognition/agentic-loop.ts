@@ -544,10 +544,15 @@ NOTE: Do NOT use the user's name in every message. Check conversation history fi
 
     const isFollowUp = triggerType.includes('follow_up');
 
+    // Check if this is a deferral override
+    const data = context.triggerSignal.data as Record<string, unknown> | undefined;
+    const isDeferralOverride = data?.['deferralOverride'] === true;
+
     const section = `## Proactive Contact Trigger
 
 IMPORTANT: This is NOT a response to a user message. You are INITIATING contact.
 ${timeContext ? `Time since last conversation: ${timeContext}` : ''}
+${isDeferralOverride ? '\n⚠️ OVERRIDE: Your earlier deferral is being reconsidered because pressure increased significantly.' : ''}
 
 ${isFollowUp ? 'Trigger: Follow-up (user did not respond to your previous message)' : 'Trigger: Internal drive to reach out (social debt accumulated)'}
 
@@ -557,7 +562,18 @@ Guidelines for proactive contact:
 - Keep it brief and natural - one short message
 - Examples: "Привет! Как дела?", "Эй, давно не общались. Как ты?", "Привет! Чем занимаешься?"
 - Do NOT ask about the previous conversation topic unless it's truly unfinished business
-- If "noAction" feels right (user might be busy, it's late, etc.), that's OK too`;
+
+DEFERRAL OPTION:
+If you decide NOT to contact now (user might be busy, it's late, etc.), use "defer" terminal:
+- Specify signalType (usually "contact_urge" for proactive contact)
+- Specify deferHours (2-8 hours typically)
+- Give a reason ("User seems busy", "It's late evening", etc.)
+- You won't be asked again until:
+  a) The deferral time passes, OR
+  b) Something significant changes (value increases significantly)
+
+Example defer terminal:
+{ "type": "defer", "signalType": "contact_urge", "reason": "User seems busy right now", "deferHours": 4, "parentId": "t1" }`;
 
     return section;
   }
@@ -580,7 +596,15 @@ Respond with valid JSON:
   // OR: { "type": "needsToolResult", "stepId": "tool1" }
   // OR: { "type": "escalate", "reason": "complex question", "parentId": "t1" }
   // OR: { "type": "noAction", "reason": "nothing to do", "parentId": "t1" }
+  // OR: { "type": "defer", "signalType": "contact_urge", "reason": "User seems busy", "deferHours": 4, "parentId": "t1" }
 }
+
+Terminal types:
+- "respond": Send a message to user
+- "noAction": Do nothing (for non-proactive triggers)
+- "defer": Don't act now, reconsider in deferHours - works for any signal type
+- "escalate": Need deeper reasoning from SMART layer
+- "needsToolResult": Waiting for tool to complete
 
 Available tools: searchMemory, saveToMemory, getCurrentTime, getTimeSince, getAgentState, getUserModel`;
   }
@@ -687,6 +711,20 @@ Available tools: searchMemory, saveToMemory, getCurrentTime, getTimeSince, getAg
           text: terminal.text,
           target: context.chatId,
           channel: 'telegram', // TODO: get from context
+        },
+      });
+    }
+
+    // Add deferral intent if terminal is defer
+    if (terminal.type === 'defer') {
+      const deferMs = terminal.deferHours * 60 * 60 * 1000;
+
+      intents.push({
+        type: 'DEFER_SIGNAL',
+        payload: {
+          signalType: terminal.signalType,
+          deferMs,
+          reason: terminal.reason,
         },
       });
     }

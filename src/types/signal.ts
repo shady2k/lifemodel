@@ -23,7 +23,7 @@ import type { Priority } from './priority.js';
  * Categories:
  * - Sensory: from external world via channels (user_message, channel_*)
  * - Internal: from state-monitoring neurons (social_debt, energy, etc.)
- * - Meta: from aggregation layer (pattern_break, threshold_crossed)
+ * - Meta: from aggregation layer (pattern_break, threshold_crossed, contact_urge)
  */
 export type SignalType =
   // === SENSORY (from channels - our "senses") ===
@@ -49,6 +49,7 @@ export type SignalType =
   // === META (from aggregation layer) ===
   | 'pattern_break' // Detected break in expected pattern
   | 'threshold_crossed' // Some threshold was exceeded
+  | 'contact_urge' // Urge to contact user emerged (deferral-aware)
   | 'novelty'; // Something unusual detected
 
 /**
@@ -130,7 +131,8 @@ export type SignalData =
   | ChannelStatusData
   | TimeData
   | ThresholdData
-  | PatternData;
+  | PatternData
+  | ContactUrgeData;
 
 /**
  * Data for user_message signals.
@@ -241,6 +243,40 @@ export interface PatternData {
 }
 
 /**
+ * Data for contact_urge signals.
+ *
+ * Emitted when pressure to contact user emerges naturally,
+ * respecting deferral decisions.
+ */
+export interface ContactUrgeData {
+  kind: 'contact_urge';
+
+  /** Current contact pressure (0-1) */
+  pressure: number;
+
+  /** How much pressure increased since last check */
+  pressureDelta: number;
+
+  /** Time since last contact in milliseconds */
+  timeSinceLastContactMs: number;
+
+  /** Current conversation status */
+  conversationStatus: string;
+
+  /** Number of follow-up attempts made */
+  followUpAttempts: number;
+
+  /** True if this urge is overriding an active deferral due to significant pressure increase */
+  deferralOverride: boolean;
+
+  /** Target chat ID for contact */
+  chatId: string;
+
+  /** Channel to use */
+  channel: string;
+}
+
+/**
  * Signal metrics - the actual measurements.
  *
  * All values are typically 0-1 normalized, but some can be raw counts or times.
@@ -293,6 +329,7 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
   // Meta signals
   pattern_break: 60_000, // 1 minute - patterns need attention
   threshold_crossed: 30_000, // 30 seconds
+  contact_urge: 60_000, // 1 minute - urge to contact user
   novelty: 30_000, // 30 seconds
 };
 

@@ -143,6 +143,27 @@ export interface NoActionTerminal {
 }
 
 /**
+ * Defer a signal - loop complete, but will reconsider later.
+ *
+ * Used when agent decides "not now, but later" - this prevents
+ * reconsidering the same decision every tick. The deferral can be
+ * overridden by significant value increase.
+ *
+ * Works for any signal type (proactive contact, pattern breaks, etc.)
+ */
+export interface DeferTerminal {
+  type: 'defer';
+  /** Signal type being deferred (e.g., 'contact_urge', 'pattern_break') */
+  signalType: string;
+  /** Why the agent is deferring */
+  reason: string;
+  /** Hours to defer (2-8 typical) */
+  deferHours: number;
+  /** Parent step ID */
+  parentId: string;
+}
+
+/**
  * Waiting for tool result - loop paused.
  */
 export interface NeedsToolResultTerminal {
@@ -157,6 +178,7 @@ export type Terminal =
   | RespondTerminal
   | EscalateTerminal
   | NoActionTerminal
+  | DeferTerminal
   | NeedsToolResultTerminal;
 
 // ============================================================
