@@ -187,7 +187,7 @@ export class SignalAggregator {
     }
 
     if (pruned > 0) {
-      this.logger.debug({ pruned }, 'Pruned expired signals');
+      this.logger.trace({ pruned }, 'Pruned expired signals');
     }
 
     return pruned;
@@ -273,8 +273,7 @@ export class SignalAggregator {
 
     // Check volatility (variance)
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
-    const variance =
-      values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+    const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
     const stdDev = Math.sqrt(variance);
     const coeffOfVariation = mean !== 0 ? stdDev / Math.abs(mean) : 0;
 

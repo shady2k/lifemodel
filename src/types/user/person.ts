@@ -8,8 +8,8 @@ export interface Person {
   /** Unique identifier */
   id: string;
 
-  /** Person's name */
-  name: string;
+  /** Person's name (null if unknown) */
+  name: string | null;
 
   /** Known personality traits */
   traits: string[];
@@ -22,9 +22,16 @@ export interface Person {
 }
 
 /**
+ * Check if we know the person's name.
+ */
+export function isNameKnown(person: Person): boolean {
+  return person.name !== null && person.name.trim().length > 0;
+}
+
+/**
  * Create a new person with defaults.
  */
-export function createPerson(id: string, name: string): Person {
+export function createPerson(id: string, name: string | null = null): Person {
   return {
     id,
     name,

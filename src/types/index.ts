@@ -2,6 +2,17 @@
  * Core type definitions for Lifemodel.
  */
 
+// Belief system
+export type * from './belief.js';
+export {
+  createBelief,
+  updateBelief,
+  updateNumericBelief,
+  decayBelief,
+  isBeliefStale,
+  getBeliefValue,
+} from './belief.js';
+
 // Core types
 export type * from './priority.js';
 export type * from './event.js';
@@ -57,3 +68,11 @@ export { createRule } from './rule.js';
 
 // Channel types (re-exported from channels module)
 export type { Channel, CircuitStats, SendOptions } from '../channels/channel.js';
+
+/**
+ * Round a number to 3 decimal places.
+ * Use this for all state values to avoid floating point noise.
+ */
+export function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}

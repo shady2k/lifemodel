@@ -1,4 +1,4 @@
-import type { AgentState, UserBeliefs } from '../types/index.js';
+import type { AgentState, UserBeliefsSnapshot } from '../types/index.js';
 import type { ConfigurableNeuron, NeuronResult } from './neuron.js';
 
 /**
@@ -111,7 +111,11 @@ export class ContactDecider {
    * @param userBeliefs Agent's beliefs about the user (optional)
    * @param hour Current hour (0-23), used for societal fallback
    */
-  evaluate(state: AgentState, userBeliefs: UserBeliefs | undefined, hour: number): ContactDecision {
+  evaluate(
+    state: AgentState,
+    userBeliefs: UserBeliefsSnapshot | undefined,
+    hour: number
+  ): ContactDecision {
     const now = new Date();
 
     // Check cooldown

@@ -429,6 +429,9 @@ export interface LoopState {
 
   /** Abort reason (if aborted) */
   abortReason?: string;
+
+  /** Force LLM to respond (tool already executed but LLM keeps asking) */
+  forceRespond?: boolean;
 }
 
 /**

@@ -106,6 +106,20 @@ interface PendingSignal {
 }
 
 /**
+ * Pending COGNITION operation (non-blocking).
+ */
+interface PendingCognition {
+  /** Promise that resolves when COGNITION completes */
+  promise: Promise<CognitionResult>;
+  /** Correlation ID for logging */
+  correlationId: string;
+  /** When the operation started */
+  startedAt: number;
+  /** Original trigger signal (may be undefined) */
+  triggerSignal: Signal | undefined;
+}
+
+/**
  * CoreLoop - orchestrates the 4-layer processing pipeline.
  */
 export class CoreLoop {
@@ -127,6 +141,7 @@ export class CoreLoop {
   private readonly messageComposer: MessageComposer | undefined;
   private readonly conversationManager: ConversationManager | undefined;
   private readonly userModel: UserModel | undefined;
+  private readonly memoryProvider: MemoryProvider | undefined;
 
   /** Subscription ID for typing events */
   private typingSubscriptionId: string | null = null;
@@ -134,6 +149,9 @@ export class CoreLoop {
   /** Timestamp of last message sent (for response timing) */
   private lastMessageSentAt: number | null = null;
   private lastMessageChatId: string | null = null;
+
+  /** Pending COGNITION operation (non-blocking) */
+  private pendingCognition: PendingCognition | null = null;
 
   constructor(
     agent: Agent,
@@ -153,6 +171,7 @@ export class CoreLoop {
     this.messageComposer = deps.messageComposer;
     this.conversationManager = deps.conversationManager;
     this.userModel = deps.userModel;
+    this.memoryProvider = deps.memoryProvider;
 
     // Initialize system health monitor
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
@@ -328,7 +347,7 @@ export class CoreLoop {
     const { activeLayers, stressLevel } = health;
 
     const state = this.agent.getState();
-    this.logger.debug(
+    this.logger.trace(
       {
         tick: this.tickCount,
         energy: state.energy.toFixed(2),
@@ -370,39 +389,54 @@ export class CoreLoop {
         this.logger.warn({ stressLevel }, 'AGGREGATION layer disabled due to stress');
       }
 
-      // 4. COGNITION: (if woken) process with fast LLM
+      // 4. COGNITION: (if woken) process with fast LLM (NON-BLOCKING)
       let cognitionResult: CognitionResult | null = null;
       let smartResult: SmartResult | null = null;
 
+      // Check if pending COGNITION completed
+      if (this.pendingCognition) {
+        const result = await this.checkPendingCognition();
+        if (result) {
+          cognitionResult = result;
+          allIntents.push(...result.intents);
+        }
+      }
+
       const shouldWakeCognition = aggregationResult?.wakeCognition && activeLayers.cognition;
 
-      if (shouldWakeCognition && aggregationResult) {
-        this.logger.debug({ wakeReason: aggregationResult.wakeReason }, '🧠 COGNITION layer woken');
+      // Only start new COGNITION if no pending operation
+      if (shouldWakeCognition && aggregationResult && !this.pendingCognition) {
+        this.logger.debug(
+          { wakeReason: aggregationResult.wakeReason },
+          '🧠 COGNITION layer woken (non-blocking)'
+        );
 
         const cognitionContext = this.buildCognitionContext(aggregationResult, correlationId);
 
-        cognitionResult = await this.layers.cognition.process(cognitionContext);
-        allIntents.push(...cognitionResult.intents);
+        // Start COGNITION in background (non-blocking)
+        this.startCognitionAsync(cognitionContext, aggregationResult.triggerSignals[0]);
+      } else if (this.pendingCognition && shouldWakeCognition) {
+        // Already processing, log that we're queueing
+        this.logger.debug('COGNITION already processing, new wake request queued');
+      }
 
-        // 5. SMART: (if escalated) process with expensive LLM
-        const shouldEngageSmart =
-          cognitionResult.escalateToSmart && cognitionResult.smartContext && activeLayers.smart;
+      // 5. SMART: (if COGNITION completed and escalated) process with expensive LLM
+      if (cognitionResult?.escalateToSmart && cognitionResult.smartContext && activeLayers.smart) {
+        this.logger.debug(
+          { escalationReason: cognitionResult.escalationReason },
+          '🎯 SMART layer engaged'
+        );
 
-        if (shouldEngageSmart && cognitionResult.smartContext) {
-          this.logger.debug(
-            { escalationReason: cognitionResult.escalationReason },
-            '🎯 SMART layer engaged'
-          );
+        smartResult = await this.layers.smart.process(cognitionResult.smartContext);
+        allIntents.push(...smartResult.intents);
+      } else if (cognitionResult?.escalateToSmart && !activeLayers.smart) {
+        this.logger.warn(
+          { stressLevel, escalationReason: cognitionResult.escalationReason },
+          'SMART layer disabled due to stress - escalation blocked'
+        );
+      }
 
-          smartResult = await this.layers.smart.process(cognitionResult.smartContext);
-          allIntents.push(...smartResult.intents);
-        } else if (cognitionResult.escalateToSmart && !activeLayers.smart) {
-          this.logger.warn(
-            { stressLevel, escalationReason: cognitionResult.escalationReason },
-            'SMART layer disabled due to stress - escalation blocked'
-          );
-        }
-      } else if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
+      if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
         this.logger.warn(
           { stressLevel, wakeReason: aggregationResult.wakeReason },
           'COGNITION layer disabled due to stress - wake blocked'
@@ -431,7 +465,7 @@ export class CoreLoop {
 
       // Log tick summary
       const tickDuration = Date.now() - tickStart;
-      this.logger.debug(
+      this.logger.trace(
         {
           tick: this.tickCount,
           duration: tickDuration,
@@ -574,6 +608,92 @@ export class CoreLoop {
   }
 
   /**
+   * Start COGNITION processing asynchronously (non-blocking).
+   */
+  private startCognitionAsync(context: CognitionContext, triggerSignal: Signal | undefined): void {
+    const startedAt = Date.now();
+
+    // Create promise for COGNITION processing
+    const promise = this.layers.cognition.process(context);
+
+    this.pendingCognition = {
+      promise,
+      correlationId: context.correlationId,
+      startedAt,
+      triggerSignal: triggerSignal ?? context.triggerSignals[0] ?? undefined,
+    };
+
+    // Handle completion in background (don't await here)
+    promise
+      .then(() => {
+        this.logger.debug(
+          {
+            correlationId: context.correlationId,
+            duration: Date.now() - startedAt,
+          },
+          'COGNITION completed (async)'
+        );
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            correlationId: context.correlationId,
+          },
+          'COGNITION failed (async)'
+        );
+        // Clear pending on error
+        this.pendingCognition = null;
+      });
+  }
+
+  /**
+   * Check if pending COGNITION completed and return result.
+   * Returns null if still processing.
+   */
+  private async checkPendingCognition(): Promise<CognitionResult | null> {
+    if (!this.pendingCognition) return null;
+
+    // Check if promise is settled (non-blocking check using Promise.race)
+    const pending = this.pendingCognition;
+    const timeoutPromise = new Promise<'pending'>((resolve) => {
+      // Resolve immediately to check if cognition is done
+      setImmediate(() => {
+        resolve('pending');
+      });
+    });
+
+    try {
+      const result = await Promise.race([pending.promise, timeoutPromise]);
+
+      if (result === 'pending') {
+        // Still processing
+        const elapsed = Date.now() - pending.startedAt;
+        if (elapsed > 5000 && elapsed % 5000 < 1000) {
+          // Log every ~5 seconds
+          this.logger.debug(
+            { correlationId: pending.correlationId, elapsed },
+            'COGNITION still processing...'
+          );
+        }
+        return null;
+      }
+
+      // Completed - clear pending and return result
+      this.pendingCognition = null;
+      return result;
+    } catch (error) {
+      // COGNITION rejected - clear pending and log error
+      this.pendingCognition = null;
+      this.logger.error(
+        { error, correlationId: pending.correlationId },
+        'COGNITION rejected unexpectedly'
+      );
+      return null;
+    }
+  }
+
+  /**
    * Apply intents from all layers.
    */
   private applyIntents(intents: Intent[]): void {
@@ -690,12 +810,72 @@ export class CoreLoop {
           const { chatId, field, value, confidence, source } = intent.payload;
           if (this.userModel && chatId) {
             // Apply update to user model based on field
-            // For now, log and track - full implementation depends on UserModel API
+            let applied = false;
+
+            switch (field) {
+              case 'name':
+                if (typeof value === 'string' && value.length > 0) {
+                  this.userModel.setName(value);
+                  applied = true;
+                }
+                break;
+
+              case 'gender':
+                if (value === 'male' || value === 'female') {
+                  this.userModel.setGender(value);
+                  applied = true;
+                }
+                break;
+
+              case 'mood':
+                if (typeof value === 'string') {
+                  this.userModel.setMood(
+                    value as
+                      | 'positive'
+                      | 'neutral'
+                      | 'negative'
+                      | 'stressed'
+                      | 'tired'
+                      | 'excited'
+                      | 'unknown'
+                  );
+                  applied = true;
+                }
+                break;
+
+              case 'energy':
+                if (typeof value === 'number') {
+                  this.userModel.updateEnergy(value);
+                  applied = true;
+                }
+                break;
+
+              case 'availability':
+                if (typeof value === 'number') {
+                  this.userModel.updateAvailability(value);
+                  applied = true;
+                }
+                break;
+
+              case 'language':
+                if (typeof value === 'string') {
+                  this.userModel.setLanguage(value);
+                  applied = true;
+                }
+                break;
+
+              case 'timezone':
+                if (typeof value === 'number') {
+                  this.userModel.setTimezone(value);
+                  applied = true;
+                }
+                break;
+            }
+
             this.logger.debug(
-              { chatId, field, value, confidence, source },
+              { chatId, field, value, confidence, source, applied },
               'User model update from COGNITION'
             );
-            // TODO: Add UserModel.updateField(field, value, confidence) method
             this.metrics.counter('user_model_updates', { field, source });
           }
           break;
@@ -703,11 +883,48 @@ export class CoreLoop {
 
         case 'SAVE_TO_MEMORY': {
           const { type: memoryType, chatId: memoryChatId, content, fact, tags } = intent.payload;
-          this.logger.debug(
-            { memoryType, chatId: memoryChatId, hasFact: !!fact, hasContent: !!content, tags },
-            'Memory save from COGNITION'
-          );
-          // TODO: Integrate with MemoryProvider when available in CoreLoop
+
+          if (this.memoryProvider) {
+            // Build memory entry from fact or content
+            const subject = fact?.subject ?? '';
+            const predicate = fact?.predicate ?? '';
+            const object = fact?.object ?? '';
+            const evidence = fact?.evidence ?? '';
+            const entryContent = fact
+              ? `${subject} ${predicate} ${object}${evidence ? ` (${evidence})` : ''}`
+              : (content ?? '');
+
+            if (entryContent.trim()) {
+              const entry = {
+                id: `mem_${Date.now().toString()}_${Math.random().toString(36).slice(2, 8)}`,
+                type: memoryType as 'fact' | 'thought' | 'message',
+                content: entryContent,
+                timestamp: new Date(),
+                chatId: memoryChatId,
+                tags: tags ?? fact?.tags,
+                confidence: fact?.confidence,
+                metadata: fact ? { subject, predicate, object } : undefined,
+              };
+
+              this.memoryProvider.save(entry).catch((err: unknown) => {
+                this.logger.error(
+                  { error: err instanceof Error ? err.message : String(err) },
+                  'Failed to save to memory'
+                );
+              });
+
+              this.logger.debug(
+                { entryId: entry.id, type: memoryType, content: entryContent.slice(0, 50) },
+                'Memory entry saved'
+              );
+            }
+          } else {
+            this.logger.debug(
+              { memoryType, chatId: memoryChatId, hasFact: !!fact, hasContent: !!content },
+              'Memory save skipped (no provider)'
+            );
+          }
+
           this.metrics.counter('memory_saves', { type: memoryType });
           break;
         }

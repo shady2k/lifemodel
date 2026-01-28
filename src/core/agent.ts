@@ -1,4 +1,4 @@
-import type { Logger, EventQueue, Metrics, Intent } from '../types/index.js';
+import { round3, type Logger, type EventQueue, type Metrics, type Intent } from '../types/index.js';
 import type { AgentState, AlertnessMode, SleepState } from '../types/agent/state.js';
 import type { AgentIdentity } from '../types/agent/identity.js';
 import { createDefaultAgentState, createDefaultSleepState } from '../types/agent/state.js';
@@ -175,7 +175,7 @@ export class Agent {
     this.state.energy = this.energy.getEnergy();
 
     // Accumulate social debt
-    this.state.socialDebt = Math.min(1, this.state.socialDebt + this.config.socialDebtRate);
+    this.setStateValue('socialDebt', this.state.socialDebt + this.config.socialDebtRate);
 
     // Update alertness mode based on state
     this.updateAlertnessMode();
@@ -185,7 +185,7 @@ export class Agent {
     this.state.lastTickAt = now;
 
     // Log state periodically (every 10th tick or on mode change)
-    this.logger.debug(
+    this.logger.trace(
       {
         energy: this.state.energy.toFixed(3),
         socialDebt: this.state.socialDebt.toFixed(3),
@@ -219,8 +219,11 @@ export class Agent {
           const currentValue = this.state[stateKey];
           if (typeof currentValue === 'number') {
             // @ts-expect-error - we've validated the types
-            this.state[stateKey] = Math.max(0, Math.min(1, currentValue + value));
+            this.state[stateKey] = round3(Math.max(0, Math.min(1, currentValue + value)));
           }
+        } else if (typeof value === 'number') {
+          // @ts-expect-error - dynamic state update
+          this.state[stateKey] = round3(value);
         } else {
           // @ts-expect-error - dynamic state update
           this.state[stateKey] = value;
@@ -234,7 +237,7 @@ export class Agent {
           }
         }
 
-        this.logger.debug({ key, value, delta }, 'State updated via intent');
+        this.logger.trace({ key, value, delta }, 'State updated via intent');
       }
     }
   }
@@ -271,7 +274,7 @@ export class Agent {
     this.state.energy = this.energy.getEnergy();
 
     // Also reduce social debt
-    this.state.socialDebt = Math.max(0, this.state.socialDebt - 0.1);
+    this.setStateValue('socialDebt', this.state.socialDebt - 0.1);
 
     this.logger.debug('Received positive feedback');
   }
@@ -373,6 +376,13 @@ export class Agent {
 
     // Decay disturbance
     this.sleepState.disturbance *= this.sleepState.disturbanceDecay;
+  }
+
+  /**
+   * Set a numeric state value with rounding and clamping.
+   */
+  private setStateValue(key: 'socialDebt' | 'taskPressure' | 'curiosity', value: number): void {
+    this.state[key] = round3(Math.max(0, Math.min(1, value)));
   }
 
   /**

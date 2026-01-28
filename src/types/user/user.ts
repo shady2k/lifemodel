@@ -1,48 +1,21 @@
 import type { Person } from './person.js';
+import type { Belief } from '../belief.js';
+import { createBelief } from '../belief.js';
 
 /**
  * User - the primary person the agent interacts with.
  *
  * Unlike Person, User has detailed state tracking including
  * the agent's **beliefs** about the user (not ground truth).
+ *
+ * Note: Use isNameKnown(user) from person.ts to check if name is known.
  */
 export interface User extends Person {
   /**
-   * Whether the agent has learned the user's actual name.
-   * False when name is a placeholder (like "User" or just their ID).
-   * Agent should naturally want to get acquainted when this is false.
+   * Agent's beliefs about user's current state.
+   * Each belief has confidence that builds with evidence and decays over time.
    */
-  nameKnown: boolean;
-
-  /**
-   * Agent's estimate of user's energy level (0-1).
-   * Based on time of day, response patterns, explicit signals.
-   * This is a BELIEF, not truth.
-   */
-  energy: number;
-
-  /**
-   * Agent's belief about user's current mood.
-   */
-  mood: UserMood;
-
-  /**
-   * Agent's estimate of user's availability (0-1).
-   * 0 = definitely busy/unavailable
-   * 1 = definitely free/available
-   */
-  availability: number;
-
-  /**
-   * Confidence in current beliefs (0-1).
-   * Decays over time without new signals.
-   */
-  confidence: number;
-
-  /**
-   * Last time beliefs were updated from a direct signal.
-   */
-  lastSignalAt: Date;
+  beliefs: UserBeliefs;
 
   /**
    * Detected patterns in user behavior.
@@ -59,6 +32,20 @@ export interface User extends Person {
    * Used for time-of-day calculations.
    */
   timezoneOffset: number;
+}
+
+/**
+ * Agent's beliefs about user's current state.
+ */
+export interface UserBeliefs {
+  /** Estimated energy level (0-1) */
+  energy: Belief<number>;
+
+  /** Current mood */
+  mood: Belief<UserMood>;
+
+  /** Estimated availability (0-1) */
+  availability: Belief<number>;
 }
 
 /**
@@ -151,24 +138,31 @@ export function createDefaultPreferences(): UserPreferences {
 }
 
 /**
- * Create a new user with defaults.
+ * Create default user beliefs.
  */
-export function createUser(id: string, name: string, timezoneOffset = 0): User {
-  const now = new Date();
-  // Name is "known" if it's not a placeholder like "User" or the ID itself
-  const nameKnown = name !== 'User' && name !== id && name.length > 0;
+export function createDefaultBeliefs(): UserBeliefs {
+  return {
+    energy: createBelief(0.5, 0.3, 'default'),
+    mood: createBelief<UserMood>('unknown', 0.3, 'default'),
+    availability: createBelief(0.5, 0.3, 'default'),
+  };
+}
+
+/**
+ * Create a new user with defaults.
+ *
+ * @param id - User's unique identifier
+ * @param name - User's name (null if unknown)
+ * @param timezoneOffset - Timezone offset from UTC in hours
+ */
+export function createUser(id: string, name: string | null = null, timezoneOffset = 0): User {
   return {
     id,
     name,
-    nameKnown,
     traits: [],
     topics: [],
-    lastMentioned: now,
-    energy: 0.5,
-    mood: 'unknown',
-    availability: 0.5,
-    confidence: 0.3, // Low initial confidence
-    lastSignalAt: now,
+    lastMentioned: new Date(),
+    beliefs: createDefaultBeliefs(),
     patterns: createDefaultPatterns(),
     preferences: createDefaultPreferences(),
     timezoneOffset,

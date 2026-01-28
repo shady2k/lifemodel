@@ -105,7 +105,7 @@ export class AggregationProcessor implements AggregationLayer {
 
     const duration = Date.now() - startTime;
 
-    this.logger.debug(
+    this.logger.trace(
       {
         signalCount: signals.length,
         aggregateCount: aggregates.length,

@@ -150,7 +150,7 @@ const acquaintancePressureRule = createRule({
 
   condition: (ctx: RuleContext): boolean => {
     // Only fire if we have user beliefs and don't know their name
-    if (!ctx.userBeliefs || ctx.userBeliefs.nameKnown) {
+    if (ctx.userBeliefs?.name !== null) {
       return false;
     }
 
@@ -206,7 +206,7 @@ const acquaintanceThresholdRule = createRule({
 
   condition: (ctx: RuleContext): boolean => {
     // Only fire if we have user beliefs and don't know their name
-    if (!ctx.userBeliefs || ctx.userBeliefs.nameKnown) {
+    if (ctx.userBeliefs?.name !== null) {
       return false;
     }
 

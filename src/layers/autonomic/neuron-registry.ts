@@ -36,11 +36,7 @@ export interface Neuron {
    * @param correlationId Tick correlation ID for bundling
    * @returns Signal if change is significant, undefined otherwise
    */
-  check(
-    state: AgentState,
-    alertness: number,
-    correlationId: string
-  ): Signal | undefined;
+  check(state: AgentState, alertness: number, correlationId: string): Signal | undefined;
 
   /**
    * Reset neuron state (e.g., clear previous values).
@@ -70,11 +66,7 @@ export abstract class BaseNeuron implements Neuron {
     this.logger = logger.child({ neuron: this.constructor.name });
   }
 
-  abstract check(
-    state: AgentState,
-    alertness: number,
-    correlationId: string
-  ): Signal | undefined;
+  abstract check(state: AgentState, alertness: number, correlationId: string): Signal | undefined;
 
   reset(): void {
     this.previousValue = undefined;
@@ -130,10 +122,7 @@ export class NeuronRegistry {
       this.logger.warn({ neuronId: neuron.id }, 'Replacing existing neuron');
     }
     this.neurons.set(neuron.id, neuron);
-    this.logger.debug(
-      { neuronId: neuron.id, signalType: neuron.signalType },
-      'Neuron registered'
-    );
+    this.logger.debug({ neuronId: neuron.id, signalType: neuron.signalType }, 'Neuron registered');
   }
 
   /**
@@ -177,7 +166,7 @@ export class NeuronRegistry {
         const signal = neuron.check(state, alertness, correlationId);
         if (signal) {
           signals.push(signal);
-          this.logger.debug(
+          this.logger.trace(
             {
               neuronId: neuron.id,
               signalType: signal.type,

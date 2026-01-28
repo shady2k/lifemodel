@@ -137,41 +137,6 @@ export function deserializeState(json: string): PersistableState {
     return value;
   }) as Record<string, unknown>;
 
-  // Cast to state type, then apply migrations
-  const state = rawState as unknown as PersistableState;
-
-  // Type-safe access to potentially missing fields via raw object
-  const user = rawState['user'] as Record<string, unknown> | null;
-  const agent = rawState['agent'] as Record<string, unknown> | undefined;
-  const agentState = agent?.['state'] as Record<string, unknown> | undefined;
-  const userPrefs = user?.['preferences'] as Record<string, unknown> | undefined;
-
-  // Migration: add nameKnown to user if missing (for data from before this field existed)
-  if (user && user['nameKnown'] === undefined && state.user) {
-    // Name is "known" if it's not a placeholder like "User" or the ID itself
-    state.user.nameKnown =
-      state.user.name !== 'User' && state.user.name !== state.user.id && state.user.name.length > 0;
-  }
-
-  // Migration: add acquaintancePressure to agent state if missing
-  if (agentState && agentState['acquaintancePressure'] === undefined) {
-    state.agent.state.acquaintancePressure = 0.0;
-  }
-
-  // Migration: add acquaintancePending to agent state if missing
-  if (agentState && agentState['acquaintancePending'] === undefined) {
-    state.agent.state.acquaintancePending = false;
-  }
-
-  // Migration: add language to user preferences if missing
-  if (userPrefs && userPrefs['language'] === undefined && state.user) {
-    state.user.preferences.language = null;
-  }
-
-  // Migration: add gender to user preferences if missing
-  if (userPrefs && userPrefs['gender'] === undefined && state.user) {
-    state.user.preferences.gender = 'unknown';
-  }
-
-  return state;
+  // Cast to state type - no migrations, clean slate
+  return rawState as unknown as PersistableState;
 }

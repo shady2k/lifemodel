@@ -259,10 +259,16 @@ export class CognitionProcessor implements CognitionLayer {
       await this.emitTypingIndicatorEvent(chatId, channel);
     }
 
+    // Get agent identity
+    const identity = this.agent?.getIdentity();
+
     // Build loop context
     const loopContext: LoopContext = {
       triggerSignal,
       agentState: context.agentState,
+      agentIdentity: identity
+        ? { name: identity.name, gender: identity.gender, values: identity.values }
+        : undefined,
       conversationHistory: await this.getConversationHistory(chatId),
       userModel: this.userModel?.getBeliefs() ?? {},
       correlationId: context.correlationId,

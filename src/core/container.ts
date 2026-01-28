@@ -292,7 +292,7 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
   if (primaryUserChatId) {
-    const userName = config.primaryUser?.name ?? 'User';
+    const userName = config.primaryUser?.name ?? null;
     const timezoneOffset = config.primaryUser?.timezoneOffset ?? 0;
     userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
     logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
@@ -485,25 +485,45 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
   if (primaryUserChatId) {
-    if (persistedState?.user?.id === primaryUserChatId) {
-      // Restore from persisted state
+    // Check if user has beliefs (may be missing from old persisted states)
+    const hasBeliefs = persistedState?.user && 'beliefs' in persistedState.user;
+    if (persistedState?.user?.id === primaryUserChatId && hasBeliefs) {
+      // Restore from persisted state - convert date strings
       const restoredUser = {
         ...persistedState.user,
         lastMentioned:
           typeof persistedState.user.lastMentioned === 'string'
             ? new Date(persistedState.user.lastMentioned)
             : persistedState.user.lastMentioned,
-        lastSignalAt:
-          typeof persistedState.user.lastSignalAt === 'string'
-            ? new Date(persistedState.user.lastSignalAt)
-            : persistedState.user.lastSignalAt,
+        beliefs: {
+          energy: {
+            ...persistedState.user.beliefs.energy,
+            updatedAt:
+              typeof persistedState.user.beliefs.energy.updatedAt === 'string'
+                ? new Date(persistedState.user.beliefs.energy.updatedAt)
+                : persistedState.user.beliefs.energy.updatedAt,
+          },
+          mood: {
+            ...persistedState.user.beliefs.mood,
+            updatedAt:
+              typeof persistedState.user.beliefs.mood.updatedAt === 'string'
+                ? new Date(persistedState.user.beliefs.mood.updatedAt)
+                : persistedState.user.beliefs.mood.updatedAt,
+          },
+          availability: {
+            ...persistedState.user.beliefs.availability,
+            updatedAt:
+              typeof persistedState.user.beliefs.availability.updatedAt === 'string'
+                ? new Date(persistedState.user.beliefs.availability.updatedAt)
+                : persistedState.user.beliefs.availability.updatedAt,
+          },
+        },
       };
       userModel = createUserModel(restoredUser, logger);
       logger.info(
         {
           userId: primaryUserChatId,
           userName: restoredUser.name,
-          nameKnown: restoredUser.nameKnown,
           language: restoredUser.preferences.language,
         },
         'UserModel restored from persisted state'

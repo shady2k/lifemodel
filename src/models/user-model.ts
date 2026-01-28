@@ -1,6 +1,13 @@
-import type { Logger } from '../types/index.js';
-import type { User, UserPatterns } from '../types/user/user.js';
+import {
+  round3,
+  type Logger,
+  updateNumericBelief,
+  createBelief,
+  decayBelief,
+} from '../types/index.js';
+import type { User, UserPatterns, UserMood } from '../types/user/user.js';
 import { createUser } from '../types/user/user.js';
+import { isNameKnown as checkNameKnown } from '../types/user/person.js';
 
 /**
  * Configuration for the user model.
@@ -93,12 +100,14 @@ export class UserModel {
   private readonly config: UserModelConfig;
   private readonly logger: Logger;
   private energyProfile: Record<number, number>;
+  private lastDecayAt: Date;
 
   constructor(user: User, logger: Logger, config: Partial<UserModelConfig> = {}) {
     this.user = { ...user };
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.logger = logger.child({ component: 'user-model', userId: user.id });
     this.energyProfile = { ...DEFAULT_ENERGY_PROFILE };
+    this.lastDecayAt = new Date();
 
     // Adjust energy profile based on user patterns
     this.adjustEnergyProfile();
@@ -122,7 +131,7 @@ export class UserModel {
     const baseEnergy = this.energyProfile[userHour] ?? 0.5;
 
     // Confidence-weighted: less confident = closer to 0.5 (uncertain)
-    const confidence = this.user.confidence;
+    const confidence = this.user.beliefs.energy.confidence;
     const uncertainEnergy = 0.5;
     const estimatedEnergy = baseEnergy * confidence + uncertainEnergy * (1 - confidence);
 
@@ -150,12 +159,22 @@ export class UserModel {
     const energyFactor = 0.3 + energy * 0.7; // Energy contributes 30-100%
 
     // Confidence-weighted
-    const confidence = this.user.confidence;
+    const confidence = this.user.beliefs.availability.confidence;
     const uncertainAvailability = 0.5;
     const estimatedAvailability =
       baseAvailability * energyFactor * confidence + uncertainAvailability * (1 - confidence);
 
     return Math.min(1, Math.max(0, estimatedAvailability));
+  }
+
+  /**
+   * Get average confidence across all beliefs.
+   */
+  getAverageConfidence(): number {
+    const beliefs = this.user.beliefs;
+    return (
+      (beliefs.energy.confidence + beliefs.mood.confidence + beliefs.availability.confidence) / 3
+    );
   }
 
   /**
@@ -198,27 +217,26 @@ export class UserModel {
         break;
       case 'message_read':
         // Minimal update - just shows they're somewhat active
-        this.boostConfidence(0.1);
+        this.setAvailability(this.user.beliefs.availability.value + 0.05, 0.4);
         break;
     }
 
-    this.user.lastSignalAt = now;
     this.user.lastMentioned = now;
 
     this.logger.debug(
       {
         signal,
         before: {
-          energy: oldState.energy.toFixed(2),
-          availability: oldState.availability.toFixed(2),
-          confidence: oldState.confidence.toFixed(2),
-          mood: oldState.mood,
+          energy: oldState.beliefs.energy.value.toFixed(2),
+          availability: oldState.beliefs.availability.value.toFixed(2),
+          confidence: this.getAverageConfidence().toFixed(2),
+          mood: oldState.beliefs.mood.value,
         },
         after: {
-          energy: this.user.energy.toFixed(2),
-          availability: this.user.availability.toFixed(2),
-          confidence: this.user.confidence.toFixed(2),
-          mood: this.user.mood,
+          energy: this.user.beliefs.energy.value.toFixed(2),
+          availability: this.user.beliefs.availability.value.toFixed(2),
+          confidence: this.getAverageConfidence().toFixed(2),
+          mood: this.user.beliefs.mood.value,
         },
       },
       'Signal processed'
@@ -226,20 +244,38 @@ export class UserModel {
   }
 
   /**
-   * Apply time-based decay to confidence.
+   * Apply time-based decay to all belief confidences.
    * Call this periodically (e.g., on each tick).
+   * Uses actual elapsed time since last decay call.
    */
   decayConfidence(): void {
     const now = new Date();
-    const hoursSinceSignal = (now.getTime() - this.user.lastSignalAt.getTime()) / (1000 * 60 * 60);
+    const elapsedMs = now.getTime() - this.lastDecayAt.getTime();
+    this.lastDecayAt = now;
 
-    if (hoursSinceSignal > 0) {
-      const decay = this.config.confidenceDecayRate * hoursSinceSignal;
-      this.user.confidence = Math.max(
-        this.config.minConfidence,
-        this.user.confidence - decay * 0.01 // Small decay per tick
-      );
-    }
+    // Skip if called too frequently (< 1 second)
+    if (elapsedMs < 1000) return;
+
+    const halfLifeMs = 3600000; // 1 hour half-life
+
+    this.user.beliefs.energy = decayBelief(
+      this.user.beliefs.energy,
+      elapsedMs,
+      halfLifeMs,
+      this.config.minConfidence
+    );
+    this.user.beliefs.mood = decayBelief(
+      this.user.beliefs.mood,
+      elapsedMs,
+      halfLifeMs,
+      this.config.minConfidence
+    );
+    this.user.beliefs.availability = decayBelief(
+      this.user.beliefs.availability,
+      elapsedMs,
+      halfLifeMs,
+      this.config.minConfidence
+    );
   }
 
   /**
@@ -248,10 +284,10 @@ export class UserModel {
    */
   updateTimeBasedBeliefs(date: Date = new Date()): void {
     // Update energy estimate
-    this.user.energy = this.estimateEnergy(date);
+    this.setEnergy(this.estimateEnergy(date));
 
     // Update availability estimate
-    this.user.availability = this.estimateAvailability(date);
+    this.setAvailability(this.estimateAvailability(date));
 
     // Apply confidence decay
     this.decayConfidence();
@@ -264,7 +300,7 @@ export class UserModel {
   getContactScore(date: Date = new Date()): number {
     const availability = this.estimateAvailability(date);
     const energy = this.estimateEnergy(date);
-    const confidence = this.user.confidence;
+    const confidence = this.getAverageConfidence();
 
     // Base score from availability and energy
     const baseScore = availability * 0.6 + energy * 0.4;
@@ -316,12 +352,10 @@ export class UserModel {
 
   /**
    * Set the user's name after learning it.
-   * Marks the name as known so agent won't ask again.
    */
   setName(name: string): void {
     const oldName = this.user.name;
     this.user.name = name;
-    this.user.nameKnown = true;
     this.logger.info({ oldName, newName: name }, 'User name learned');
   }
 
@@ -329,13 +363,13 @@ export class UserModel {
    * Check if we know the user's actual name.
    */
   isNameKnown(): boolean {
-    return this.user.nameKnown;
+    return checkNameKnown(this.user);
   }
 
   /**
-   * Get the user's name (may be placeholder if not known).
+   * Get the user's name (null if not known).
    */
-  getName(): string {
+  getName(): string | null {
     return this.user.name;
   }
 
@@ -344,18 +378,16 @@ export class UserModel {
    * Returns a snapshot of key user state needed by rules.
    */
   getBeliefs(): {
-    name: string;
-    nameKnown: boolean;
+    name: string | null;
     energy: number;
     availability: number;
     confidence: number;
   } {
     return {
       name: this.user.name,
-      nameKnown: this.user.nameKnown,
-      energy: this.user.energy,
-      availability: this.user.availability,
-      confidence: this.user.confidence,
+      energy: this.user.beliefs.energy.value,
+      availability: this.user.beliefs.availability.value,
+      confidence: this.getAverageConfidence(),
     };
   }
 
@@ -393,15 +425,49 @@ export class UserModel {
     return this.user.preferences.gender;
   }
 
+  /**
+   * Set the user's mood.
+   */
+  setMood(mood: UserMood): void {
+    if (this.user.beliefs.mood.value !== mood) {
+      this.user.beliefs.mood = createBelief(mood, 0.8, 'explicit');
+      this.logger.debug({ mood }, 'User mood updated');
+    }
+  }
+
+  /**
+   * Update the user's energy level (0-1).
+   */
+  updateEnergy(value: number): void {
+    this.setEnergy(value);
+  }
+
+  /**
+   * Update the user's availability (0-1).
+   */
+  updateAvailability(value: number): void {
+    this.setAvailability(value);
+  }
+
+  /**
+   * Set the user's timezone offset.
+   */
+  setTimezone(offset: number): void {
+    if (this.user.timezoneOffset !== offset) {
+      this.user.timezoneOffset = offset;
+      this.adjustEnergyProfile();
+      this.logger.info({ offset }, 'User timezone updated');
+    }
+  }
+
   // === Private signal handlers ===
 
   private onMessageReceived(metadata?: Record<string, unknown>): void {
-    // User is active - boost availability and confidence
-    this.user.availability = Math.min(1, this.user.availability + 0.3);
-    this.boostConfidence(this.config.messageConfidenceBoost);
+    // User is active - boost availability
+    this.setAvailability(this.user.beliefs.availability.value + 0.3, 0.7);
 
     // Update energy based on time
-    this.user.energy = this.estimateEnergy();
+    this.setEnergy(this.estimateEnergy(), 0.6);
 
     // Check for response time if provided
     if (metadata?.['responseTimeMs'] !== undefined) {
@@ -412,64 +478,71 @@ export class UserModel {
 
   private onQuickResponse(): void {
     // Quick response suggests high availability and energy
-    this.user.availability = Math.min(1, this.user.availability + 0.2);
-    this.user.energy = Math.min(1, this.user.energy + 0.1);
-    this.boostConfidence(0.2);
-    if (this.user.mood === 'unknown') {
-      this.user.mood = 'neutral';
+    this.setAvailability(this.user.beliefs.availability.value + 0.2, 0.7);
+    this.setEnergy(this.user.beliefs.energy.value + 0.1, 0.7);
+    if (this.user.beliefs.mood.value === 'unknown') {
+      this.user.beliefs.mood = createBelief<UserMood>('neutral', 0.5, 'inferred');
     }
   }
 
   private onSlowResponse(): void {
     // Slow response suggests lower availability
-    this.user.availability = Math.max(0, this.user.availability - 0.1);
-    this.boostConfidence(0.1);
+    this.setAvailability(this.user.beliefs.availability.value - 0.1, 0.6);
   }
 
   private onNoResponse(): void {
-    // No response - decrease availability, slight confidence boost (we learned something)
-    this.user.availability = Math.max(0, this.user.availability - 0.3);
-    this.boostConfidence(0.05);
+    // No response - decrease availability
+    this.setAvailability(this.user.beliefs.availability.value - 0.3, 0.5);
   }
 
   private onPositiveTone(): void {
-    this.user.mood = 'positive';
-    this.user.energy = Math.min(1, this.user.energy + 0.1);
-    this.boostConfidence(0.15);
+    this.user.beliefs.mood = createBelief<UserMood>('positive', 0.8, 'inferred');
+    this.setEnergy(this.user.beliefs.energy.value + 0.1, 0.7);
   }
 
   private onNegativeTone(): void {
-    this.user.mood = 'negative';
-    this.boostConfidence(0.15);
+    this.user.beliefs.mood = createBelief<UserMood>('negative', 0.8, 'inferred');
   }
 
   private onExplicitBusy(): void {
-    this.user.availability = 0.1;
-    this.boostConfidence(this.config.explicitSignalBoost);
+    this.setAvailability(0.1, 0.95);
   }
 
   private onExplicitFree(): void {
-    this.user.availability = 0.9;
-    this.boostConfidence(this.config.explicitSignalBoost);
+    this.setAvailability(0.9, 0.95);
   }
 
   private onExplicitTired(): void {
-    this.user.mood = 'tired';
-    this.user.energy = 0.2;
-    this.user.availability = Math.max(0, this.user.availability - 0.2);
-    this.boostConfidence(this.config.explicitSignalBoost);
+    this.user.beliefs.mood = createBelief<UserMood>('tired', 0.95, 'explicit');
+    this.setEnergy(0.2, 0.95);
+    this.setAvailability(this.user.beliefs.availability.value - 0.2, 0.8);
   }
 
   private onExplicitEnergetic(): void {
-    this.user.mood = 'positive';
-    this.user.energy = 0.9;
-    this.boostConfidence(this.config.explicitSignalBoost);
+    this.user.beliefs.mood = createBelief<UserMood>('positive', 0.95, 'explicit');
+    this.setEnergy(0.9, 0.95);
   }
 
-  // === Private helpers ===
+  // === Private setters (update beliefs with confidence) ===
 
-  private boostConfidence(amount: number): void {
-    this.user.confidence = Math.min(this.config.maxConfidence, this.user.confidence + amount);
+  private setEnergy(value: number, confidence = 0.6): void {
+    const clampedValue = round3(Math.max(0, Math.min(1, value)));
+    this.user.beliefs.energy = updateNumericBelief(
+      this.user.beliefs.energy,
+      clampedValue,
+      confidence,
+      'inferred'
+    );
+  }
+
+  private setAvailability(value: number, confidence = 0.6): void {
+    const clampedValue = round3(Math.max(0, Math.min(1, value)));
+    this.user.beliefs.availability = updateNumericBelief(
+      this.user.beliefs.availability,
+      clampedValue,
+      confidence,
+      'inferred'
+    );
   }
 
   private getUserLocalHour(date: Date): number {
@@ -530,7 +603,7 @@ export function createUserModel(
  */
 export function createNewUserWithModel(
   id: string,
-  name: string,
+  name: string | null,
   logger: Logger,
   timezoneOffset = 0,
   config?: Partial<UserModelConfig>

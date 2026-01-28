@@ -5,7 +5,7 @@ import type { LLMProvider, Message } from './provider.js';
  * User state for classification context.
  */
 export interface UserStateContext {
-  name: string;
+  name: string | null;
   energy: number;
   availability: number;
   mood: string;
@@ -291,7 +291,6 @@ export class MessageComposer {
     let nameUsageHint = '';
     if (context.userState) {
       const { name, energy, availability, mood, confidence, gender } = context.userState;
-      const nameKnown = name !== 'User' && name.length > 0;
 
       // Gender hint for grammatical agreement
       let genderHint = '';
@@ -305,14 +304,14 @@ export class MessageComposer {
 
       userStateSection = `
 ## Current User State (your beliefs about them)
-- Name: ${nameKnown ? name : '(not yet known)'}${genderHint}
+- Name: ${name ?? '(not yet known)'}${genderHint}
 - Energy level: ${energy.toFixed(1)}/1.0 (${this.describeEnergy(energy)})
 - Availability: ${availability.toFixed(1)}/1.0
 - Mood: ${this.describeMood(mood)}
 - Confidence in these beliefs: ${confidence.toFixed(1)}/1.0`;
 
       // Add hint about using the user's name
-      if (nameKnown) {
+      if (name) {
         nameUsageHint = `
 ## Name Usage
 You know the user's name is "${name}". Occasionally use their name naturally in your responses (not every time - that would be weird). Use it when:

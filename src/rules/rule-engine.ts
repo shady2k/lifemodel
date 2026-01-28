@@ -1,7 +1,7 @@
 import type {
   Rule,
   RuleContext,
-  UserBeliefs,
+  UserBeliefsSnapshot,
   Intent,
   Event,
   AgentState,
@@ -23,7 +23,7 @@ export class RuleEngine {
   private readonly rules = new Map<string, Rule>();
   private readonly logger: Logger;
   private lastInteractionAt: Date = new Date();
-  private userBeliefs: UserBeliefs | undefined;
+  private userBeliefs: UserBeliefsSnapshot | undefined;
 
   constructor(logger: Logger) {
     this.logger = logger.child({ component: 'rule-engine' });
@@ -33,7 +33,7 @@ export class RuleEngine {
    * Set current user beliefs for rule evaluation.
    * Call this to update user state available to rules.
    */
-  setUserBeliefs(beliefs: UserBeliefs | undefined): void {
+  setUserBeliefs(beliefs: UserBeliefsSnapshot | undefined): void {
     this.userBeliefs = beliefs;
   }
 

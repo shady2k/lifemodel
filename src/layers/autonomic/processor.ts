@@ -157,7 +157,7 @@ export class AutonomicProcessor implements AutonomicLayer {
 
     const duration = Date.now() - startTime;
 
-    this.logger.debug(
+    this.logger.trace(
       {
         incomingSignals: incomingSignals.length,
         neuronSignals: neuronSignals.length,

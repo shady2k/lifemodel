@@ -1,4 +1,4 @@
-import type { Logger } from '../types/index.js';
+import { round3, type Logger } from '../types/index.js';
 
 /**
  * Energy model configuration.
@@ -98,7 +98,7 @@ export class EnergyModel {
     this.energy = this.clamp(this.energy - amount);
 
     if (before !== this.energy) {
-      this.logger.debug({ type, amount, before, after: this.energy }, 'Energy drained');
+      this.logger.trace({ type, amount, before, after: this.energy }, 'Energy drained');
     }
 
     return this.energy;
@@ -113,7 +113,7 @@ export class EnergyModel {
     this.energy = this.clamp(this.energy + amount);
 
     if (before !== this.energy) {
-      this.logger.debug(
+      this.logger.trace(
         { type, amount, multiplier, before, after: this.energy },
         'Energy recharged'
       );
@@ -204,7 +204,7 @@ export class EnergyModel {
   }
 
   private clamp(value: number): number {
-    return Math.max(this.config.minEnergy, Math.min(this.config.maxEnergy, value));
+    return round3(Math.max(this.config.minEnergy, Math.min(this.config.maxEnergy, value)));
   }
 }
 

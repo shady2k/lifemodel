@@ -130,7 +130,7 @@ export interface MergedConfig {
 
   /** Primary user configuration */
   primaryUser: {
-    name: string;
+    name: string | null;
     timezoneOffset: number;
     telegramChatId: string | null;
   };
@@ -174,7 +174,8 @@ export interface MergedConfig {
  */
 export const DEFAULT_CONFIG: MergedConfig = {
   identity: {
-    name: 'Agent',
+    name: 'Nika',
+    gender: 'female',
     values: ['honesty', 'helpfulness', 'curiosity'],
     boundaries: ['no deception', 'no harm', 'respect privacy'],
     personality: {
@@ -214,7 +215,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
     topicPreferenceRate: 0.05,
   },
   primaryUser: {
-    name: 'User',
+    name: null,
     timezoneOffset: 0,
     telegramChatId: null,
   },

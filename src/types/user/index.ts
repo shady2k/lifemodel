@@ -6,5 +6,10 @@ export type * from './person.js';
 export type * from './user.js';
 
 // Re-export factory functions
-export { createPerson } from './person.js';
-export { createUser, createDefaultPatterns, createDefaultPreferences } from './user.js';
+export { createPerson, isNameKnown } from './person.js';
+export {
+  createUser,
+  createDefaultPatterns,
+  createDefaultPreferences,
+  createDefaultBeliefs,
+} from './user.js';

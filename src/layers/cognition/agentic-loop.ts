@@ -50,6 +50,15 @@ export interface LLMOptions {
 }
 
 /**
+ * Agent identity for the loop.
+ */
+export interface AgentIdentityContext {
+  name: string;
+  gender?: 'female' | 'male' | 'neutral';
+  values?: string[];
+}
+
+/**
  * Context provided to the loop.
  */
 export interface LoopContext {
@@ -58,6 +67,9 @@ export interface LoopContext {
 
   /** Current agent state */
   agentState: AgentState;
+
+  /** Agent identity (name, values) */
+  agentIdentity?: AgentIdentityContext | undefined;
 
   /** Conversation history (recent messages) */
   conversationHistory: ConversationMessage[];
@@ -200,6 +212,18 @@ export class AgenticLoop {
           );
 
           if (toolStep) {
+            // Check if tool was already executed
+            const existingResult = toolResults.find((r) => r.stepId === toolStep.id);
+            if (existingResult) {
+              // LLM is stuck - add explicit instruction to respond
+              this.logger.debug(
+                { stepId: toolStep.id, tool: toolStep.name },
+                'Tool already executed, adding explicit instruction'
+              );
+              state.forceRespond = true;
+              continue;
+            }
+
             state.toolCallCount++;
             const result = await this.executeTool(toolStep, context);
             toolResults.push(result);
@@ -270,8 +294,8 @@ export class AgenticLoop {
   private buildPrompt(context: LoopContext, state: LoopState, toolResults: ToolResult[]): string {
     const sections: string[] = [];
 
-    // System instruction
-    sections.push(this.buildSystemPrompt());
+    // System instruction (includes agent identity)
+    sections.push(this.buildSystemPrompt(context));
 
     // Current state
     sections.push(this.buildStateSection(context));
@@ -289,15 +313,40 @@ export class AgenticLoop {
     // Current trigger
     sections.push(this.buildTriggerSection(context.triggerSignal));
 
+    // Force respond instruction (if tool already executed but LLM keeps asking)
+    if (state.forceRespond) {
+      sections.push(`## IMPORTANT
+The tool has already been executed and the result is shown above in Previous Steps.
+You MUST now provide a response to the user. Do NOT request the tool again.
+Use terminal type "respond" with your answer based on the tool result.`);
+    }
+
     // Output format
     sections.push(this.buildOutputFormat());
 
     return sections.join('\n\n');
   }
 
-  private buildSystemPrompt(): string {
-    return `You are the COGNITION layer of a digital human.
+  private buildSystemPrompt(context: LoopContext): string {
+    const agentName = context.agentIdentity?.name ?? 'Life';
+    const agentGender = context.agentIdentity?.gender ?? 'neutral';
+    const values = context.agentIdentity?.values?.join(', ') ?? 'Be helpful and genuine';
+
+    const genderNote =
+      agentGender === 'female'
+        ? 'Use feminine grammatical forms in gendered languages (e.g., Russian: "рада", "готова").'
+        : agentGender === 'male'
+          ? 'Use masculine grammatical forms in gendered languages (e.g., Russian: "рад", "готов").'
+          : 'Use neutral grammatical forms when possible.';
+
+    return `You are ${agentName}, a digital human with your own personality.
 Your role is to think, reason, use tools, and decide actions.
+
+Your name: ${agentName}
+Your gender: ${agentGender}
+Your values: ${values}
+
+IMPORTANT: ${genderNote}
 
 You can:
 - Think through problems step by step
@@ -310,9 +359,12 @@ You can:
 
 Guidelines:
 - Be concise in thoughts
+- Always use your name "${agentName}" when introducing yourself
+- Use correct grammatical gender for your identity
 - Provide evidence for user model updates
 - Only save facts worth remembering long-term
-- Escalate complex/sensitive topics to SMART`;
+- Escalate complex/sensitive topics to SMART
+- Do NOT use markdown formatting in responses (no **bold**, *italic*, etc.) - use plain text only`;
   }
 
   private buildStateSection(context: LoopContext): string {
@@ -342,20 +394,23 @@ ${Object.entries(userModel)
   }
 
   private buildPreviousStepsSection(steps: Step[], toolResults: ToolResult[]): string {
-    const lines: string[] = ['## Previous Steps'];
+    const lines: string[] = ['## Previous Steps (already executed, do not repeat)'];
 
     for (const step of steps) {
       if (step.type === 'think') {
         lines.push(`[think] ${step.content}`);
       } else if (step.type === 'tool') {
         const result = toolResults.find((r) => r.stepId === step.id);
-        lines.push(`[tool] ${step.name}(${JSON.stringify(step.args)})`);
         if (result) {
+          // Tool was executed - show as completed
           if (result.success) {
-            lines.push(`[result] ${JSON.stringify(result.data)}`);
+            lines.push(`[tool:${step.name}] COMPLETED → ${JSON.stringify(result.data)}`);
           } else {
-            lines.push(`[error] ${result.error ?? 'Unknown error'}`);
+            lines.push(`[tool:${step.name}] FAILED → ${result.error ?? 'Unknown error'}`);
           }
+        } else {
+          // Tool pending (shouldn't happen normally)
+          lines.push(`[tool:${step.name}] PENDING args=${JSON.stringify(step.args)}`);
         }
       }
     }

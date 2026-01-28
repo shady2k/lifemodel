@@ -103,11 +103,7 @@ export class ActionDecider {
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
 
-  constructor(
-    logger: Logger,
-    config: Partial<ActionDeciderConfig> = {},
-    deps?: ActionDeciderDeps
-  ) {
+  constructor(logger: Logger, config: Partial<ActionDeciderConfig> = {}, deps?: ActionDeciderDeps) {
     this.logger = logger.child({ component: 'action-decider' });
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.composer = deps?.composer;
@@ -132,10 +128,7 @@ export class ActionDecider {
    * @param context Original cognition context
    * @returns Action decision
    */
-  async decide(
-    synthesis: SynthesisResult,
-    context: CognitionContext
-  ): Promise<ActionDecision> {
+  async decide(synthesis: SynthesisResult, context: CognitionContext): Promise<ActionDecision> {
     const { situation } = synthesis;
 
     switch (situation) {
@@ -308,8 +301,8 @@ export class ActionDecider {
           name: user.name,
           energy: this.userModel.estimateEnergy(),
           availability: this.userModel.estimateAvailability(),
-          mood: user.mood,
-          confidence: user.confidence,
+          mood: user.beliefs.mood.value,
+          confidence: this.userModel.getAverageConfidence(),
           gender: this.userModel.getGender(),
         };
       }
@@ -425,7 +418,7 @@ export class ActionDecider {
     return this.buildEscalation(
       synthesis,
       context,
-      `Proactive contact: pressure=${contactPressure?.toFixed(2)}, debt=${socialDebt?.toFixed(2)}`
+      `Proactive contact: pressure=${contactPressure?.toFixed(2) ?? 'N/A'}, debt=${socialDebt?.toFixed(2) ?? 'N/A'}`
     );
   }
 
@@ -437,10 +430,7 @@ export class ActionDecider {
     _context: CognitionContext
   ): ActionDecision {
     // Log the anomaly but don't take action (for now)
-    this.logger.info(
-      { anomalies: synthesis.anomalies },
-      'Pattern anomaly detected'
-    );
+    this.logger.info({ anomalies: synthesis.anomalies }, 'Pattern anomaly detected');
 
     return {
       action: 'none',
@@ -458,10 +448,7 @@ export class ActionDecider {
     _context: CognitionContext
   ): ActionDecision {
     // Log the issue - channel recovery is handled elsewhere
-    this.logger.warn(
-      { anomalies: synthesis.anomalies },
-      'Channel issue detected'
-    );
+    this.logger.warn({ anomalies: synthesis.anomalies }, 'Channel issue detected');
 
     return {
       action: 'none',
@@ -474,10 +461,7 @@ export class ActionDecider {
   /**
    * Decide about time event.
    */
-  private decideTimeEvent(
-    _synthesis: SynthesisResult,
-    _context: CognitionContext
-  ): ActionDecision {
+  private decideTimeEvent(_synthesis: SynthesisResult, _context: CognitionContext): ActionDecision {
     // Time events don't require direct action
     // They affect state which is handled by neurons
     return {

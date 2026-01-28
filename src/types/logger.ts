@@ -5,6 +5,8 @@
  * allowing us to inject the logger without coupling to Pino directly.
  */
 export interface Logger {
+  trace(obj: object, msg?: string): void;
+  trace(msg: string): void;
   debug(obj: object, msg?: string): void;
   debug(msg: string): void;
   info(obj: object, msg?: string): void;

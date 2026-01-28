@@ -8,6 +8,9 @@ export interface AgentIdentity {
   /** Agent's name */
   name: string;
 
+  /** Agent's gender (for grammatically correct responses in gendered languages) */
+  gender: 'female' | 'male' | 'neutral';
+
   /** Core values that guide behavior */
   values: string[];
 
@@ -78,10 +81,12 @@ export interface AgentPreferences {
  * Default MVP identity - hardcoded for now.
  *
  * In the future, this will be configurable via JSON.
+ * Name "Nika" (Ника) works in both Russian and English.
  */
 export function createDefaultIdentity(): AgentIdentity {
   return {
-    name: 'Life',
+    name: 'Nika',
+    gender: 'female',
     values: [
       'Be helpful and genuine',
       'Respect user autonomy',
