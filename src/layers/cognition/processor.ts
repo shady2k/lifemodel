@@ -68,7 +68,7 @@ export interface CognitionProcessorConfig {
  * Default configuration.
  */
 const DEFAULT_CONFIG: CognitionProcessorConfig = {
-  useAgenticLoop: false, // Start with legacy mode, enable when ready
+  useAgenticLoop: true,
   synthesizer: {},
   decider: {},
   loopConfig: {},

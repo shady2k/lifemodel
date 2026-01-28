@@ -37,6 +37,9 @@ import {
 } from '../storage/index.js';
 import { type LearningEngine, createLearningEngine } from '../learning/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
+import { type JsonMemoryProvider, createJsonMemoryProvider } from '../storage/memory-provider.js';
+import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
+import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
 
 /**
  * Application configuration.
@@ -122,6 +125,10 @@ export interface Container {
   llmProvider: LLMProvider | null;
   /** Message composer (optional, needs LLM provider) */
   messageComposer: MessageComposer | null;
+  /** COGNITION LLM adapter (optional, for agentic loop) */
+  cognitionLLM: CognitionLLM | null;
+  /** Memory provider (optional, for agentic loop) */
+  memoryProvider: JsonMemoryProvider | null;
   /** Primary user's Telegram chat ID (for proactive messages) */
   primaryUserChatId: string | null;
   /** Storage backend */
@@ -157,12 +164,14 @@ interface LLMProviderConfig {
   openRouterApiKey?: string | null | undefined;
   fastModel?: string | undefined;
   smartModel?: string | undefined;
-  local?: {
-    baseUrl?: string | null | undefined;
-    model?: string | null | undefined;
-    useForFast?: boolean | undefined;
-    useForSmart?: boolean | undefined;
-  } | undefined;
+  local?:
+    | {
+        baseUrl?: string | null | undefined;
+        model?: string | null | undefined;
+        useForFast?: boolean | undefined;
+        useForSmart?: boolean | undefined;
+      }
+    | undefined;
 }
 
 /**
@@ -264,9 +273,11 @@ export function createContainer(config: AppConfig = {}): Container {
   // Build agent config
   const agentConfig: AgentConfig = {};
   if (config.agent?.identity !== undefined) agentConfig.identity = config.agent.identity;
-  if (config.agent?.initialState !== undefined) agentConfig.initialState = config.agent.initialState;
+  if (config.agent?.initialState !== undefined)
+    agentConfig.initialState = config.agent.initialState;
   if (config.agent?.tickRate !== undefined) agentConfig.tickRate = config.agent.tickRate;
-  if (config.agent?.socialDebtRate !== undefined) agentConfig.socialDebtRate = config.agent.socialDebtRate;
+  if (config.agent?.socialDebtRate !== undefined)
+    agentConfig.socialDebtRate = config.agent.socialDebtRate;
 
   // Create agent (without eventQueue - CoreLoop doesn't use it)
   const agent = createAgent({ logger, metrics }, agentConfig);
@@ -298,6 +309,19 @@ export function createContainer(config: AppConfig = {}): Container {
     logger.info('MessageComposer configured');
   }
 
+  // Create COGNITION LLM adapter if LLM available
+  let cognitionLLM: CognitionLLM | null = null;
+  if (llmProvider) {
+    cognitionLLM = createLLMAdapter(llmProvider, logger, { role: 'fast' });
+    logger.info('CognitionLLM adapter configured');
+  }
+
+  // Create memory provider
+  const memoryProvider = createJsonMemoryProvider(logger, {
+    storagePath: './data/memory.json',
+  });
+  logger.info('MemoryProvider configured');
+
   // Create 4-layer processors
   const layers = createLayers(logger);
 
@@ -318,18 +342,13 @@ export function createContainer(config: AppConfig = {}): Container {
   }
 
   // Create core loop
-  const coreLoop = createCoreLoop(
+  const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
+    messageComposer: messageComposer ?? undefined,
+    userModel: userModel ?? undefined,
     agent,
-    eventBus,
-    layers,
-    logger,
-    metrics,
-    coreLoopConfig,
-    {
-      messageComposer: messageComposer ?? undefined,
-      userModel: userModel ?? undefined,
-    }
-  );
+    cognitionLLM: cognitionLLM ?? undefined,
+    memoryProvider,
+  });
 
   // Create channels registry
   const channels = new Map<string, Channel>();
@@ -382,6 +401,8 @@ export function createContainer(config: AppConfig = {}): Container {
     userModel,
     llmProvider,
     messageComposer,
+    cognitionLLM,
+    memoryProvider,
     primaryUserChatId,
     storage: null,
     stateManager: null,
@@ -498,7 +519,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create LLM providers
   const llmConfig = {
-    openRouterApiKey: configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? undefined,
+    openRouterApiKey:
+      configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? undefined,
     fastModel: configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel,
     smartModel: configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel,
     local: configOverrides.llm?.local ?? mergedConfig.llm.local,
@@ -512,6 +534,19 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     messageComposer = createMessageComposer(llmProvider, identity);
     logger.info('MessageComposer configured');
   }
+
+  // Create COGNITION LLM adapter if LLM available
+  let cognitionLLM: CognitionLLM | null = null;
+  if (llmProvider) {
+    cognitionLLM = createLLMAdapter(llmProvider, logger, { role: 'fast' });
+    logger.info('CognitionLLM adapter configured');
+  }
+
+  // Create memory provider
+  const memoryProvider = createJsonMemoryProvider(logger, {
+    storagePath: mergedConfig.paths.state.replace('state', 'memory') || './data/memory.json',
+  });
+  logger.info('MemoryProvider configured');
 
   // Create 4-layer processors
   const layers = createLayers(logger);
@@ -528,19 +563,14 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Create core loop
-  const coreLoop = createCoreLoop(
+  const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
+    messageComposer: messageComposer ?? undefined,
+    conversationManager,
+    userModel: userModel ?? undefined,
     agent,
-    eventBus,
-    layers,
-    logger,
-    metrics,
-    coreLoopConfig,
-    {
-      messageComposer: messageComposer ?? undefined,
-      conversationManager,
-      userModel: userModel ?? undefined,
-    }
-  );
+    cognitionLLM: cognitionLLM ?? undefined,
+    memoryProvider,
+  });
 
   // Create channels registry
   const channels = new Map<string, Channel>();
@@ -613,6 +643,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     userModel,
     llmProvider,
     messageComposer,
+    cognitionLLM,
+    memoryProvider,
     primaryUserChatId,
     storage,
     stateManager,

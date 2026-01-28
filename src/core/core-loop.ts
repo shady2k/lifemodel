@@ -40,6 +40,8 @@ import type { SmartProcessor } from '../layers/smart/processor.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
+import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
+import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
 
 /**
  * Core loop configuration.
@@ -87,6 +89,12 @@ export interface CoreLoopDeps {
   messageComposer?: MessageComposer | undefined;
   conversationManager?: ConversationManager | undefined;
   userModel?: UserModel | undefined;
+  /** Agent instance for agentic loop tools */
+  agent?: Agent | undefined;
+  /** COGNITION LLM adapter for agentic loop */
+  cognitionLLM?: CognitionLLM | undefined;
+  /** Memory provider for agentic loop tools */
+  memoryProvider?: MemoryProvider | undefined;
 }
 
 /**
@@ -155,6 +163,9 @@ export class CoreLoop {
       conversationManager: deps.conversationManager,
       userModel: deps.userModel,
       eventBus,
+      agent: deps.agent,
+      cognitionLLM: deps.cognitionLLM,
+      memoryProvider: deps.memoryProvider,
     });
 
     this.layers.smart.setDependencies({

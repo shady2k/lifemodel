@@ -1,37 +1,24 @@
 /**
  * LLM Adapter for Agentic Loop
  *
- * Wraps LLM providers to provide the simple interface needed by the agentic loop.
- * Provider-agnostic: works with OpenRouter, local models, etc.
+ * Wraps the application's LLMProvider to provide the simple interface
+ * needed by the agentic loop. Provider-agnostic: works with OpenRouter,
+ * local models, etc.
  */
 
 import type { Logger } from '../../types/logger.js';
 import type { CognitionLLM, LLMOptions } from './agentic-loop.js';
-
-/**
- * Generic LLM provider interface.
- */
-export interface LLMProvider {
-  complete(messages: LLMMessage[], options?: ProviderOptions): Promise<string>;
-}
-
-export interface LLMMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
-export interface ProviderOptions {
-  maxTokens?: number;
-  temperature?: number;
-  model?: string;
-}
+import type { LLMProvider as AppLLMProvider, Message, ModelRole } from '../../llm/provider.js';
 
 /**
  * Configuration for the LLM adapter.
  */
 export interface LLMAdapterConfig {
   /** Model to use for cognition (fast/cheap model) */
-  model: string;
+  model?: string;
+
+  /** Model role for provider selection ('fast' for cheap quick calls) */
+  role?: ModelRole;
 
   /** Temperature for generation */
   temperature: number;
@@ -44,19 +31,22 @@ export interface LLMAdapterConfig {
  * Default configuration.
  */
 const DEFAULT_CONFIG: LLMAdapterConfig = {
-  model: 'anthropic/claude-3-haiku',
+  role: 'fast', // Use fast/cheap model for COGNITION layer
   temperature: 0.3,
 };
 
 /**
  * LLM Adapter implementation.
+ *
+ * Wraps the application's LLMProvider (which uses CompletionRequest/Response)
+ * to provide the simpler CognitionLLM interface for the agentic loop.
  */
 export class LLMAdapter implements CognitionLLM {
-  private readonly provider: LLMProvider;
+  private readonly provider: AppLLMProvider;
   private readonly config: LLMAdapterConfig;
   private readonly logger: Logger;
 
-  constructor(provider: LLMProvider, logger: Logger, config: Partial<LLMAdapterConfig> = {}) {
+  constructor(provider: AppLLMProvider, logger: Logger, config: Partial<LLMAdapterConfig> = {}) {
     this.provider = provider;
     this.logger = logger.child({ component: 'llm-adapter' });
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -71,30 +61,41 @@ export class LLMAdapter implements CognitionLLM {
     // Split prompt into system and user parts
     const { systemPrompt, userPrompt } = this.splitPrompt(prompt);
 
-    const messages: LLMMessage[] = [
+    const messages: Message[] = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ];
 
     try {
-      const response = await this.provider.complete(messages, {
+      const request: Parameters<typeof this.provider.complete>[0] = {
+        messages,
         maxTokens: options?.maxTokens ?? 2000,
         temperature: options?.temperature ?? this.config.temperature,
-        model: this.config.model,
-      });
+      };
+
+      // Only add model or role if defined
+      if (this.config.model) {
+        request.model = this.config.model;
+      }
+      if (this.config.role) {
+        request.role = this.config.role;
+      }
+
+      const response = await this.provider.complete(request);
 
       const duration = Date.now() - startTime;
       this.logger.debug(
         {
-          model: this.config.model,
+          model: response.model,
           promptLength: prompt.length,
-          responseLength: response.length,
+          responseLength: response.content.length,
           duration,
+          usage: response.usage,
         },
         'LLM completion done'
       );
 
-      return response;
+      return response.content;
     } catch (error) {
       this.logger.error({ error }, 'LLM completion failed');
       throw error;
@@ -135,10 +136,10 @@ export class LLMAdapter implements CognitionLLM {
   }
 
   /**
-   * Get current model.
+   * Get current model or role.
    */
-  getModel(): string {
-    return this.config.model;
+  getModel(): string | undefined {
+    return this.config.model ?? (this.config.role ? `role:${this.config.role}` : undefined);
   }
 }
 
@@ -146,7 +147,7 @@ export class LLMAdapter implements CognitionLLM {
  * Create an LLM adapter.
  */
 export function createLLMAdapter(
-  provider: LLMProvider,
+  provider: AppLLMProvider,
   logger: Logger,
   config?: Partial<LLMAdapterConfig>
 ): LLMAdapter {
@@ -154,43 +155,6 @@ export function createLLMAdapter(
 }
 
 /**
- * Mock LLM provider for testing.
+ * Re-export the AppLLMProvider type for convenience.
  */
-export class MockLLMProvider implements LLMProvider {
-  private responses: string[] = [];
-  private responseIndex = 0;
-
-  /**
-   * Add a response to return.
-   */
-  addResponse(response: string): void {
-    this.responses.push(response);
-  }
-
-  /**
-   * Complete with mock response.
-   */
-  complete(_messages: LLMMessage[], _options?: ProviderOptions): Promise<string> {
-    const response = this.responses[this.responseIndex];
-    if (response !== undefined) {
-      this.responseIndex++;
-      return Promise.resolve(response);
-    }
-
-    // Default response
-    return Promise.resolve(
-      JSON.stringify({
-        steps: [{ type: 'think', id: 't1', parentId: 'trigger', content: 'Processing...' }],
-        terminal: { type: 'noAction', reason: 'No mock response', parentId: 't1' },
-      })
-    );
-  }
-
-  /**
-   * Reset mock state.
-   */
-  reset(): void {
-    this.responses = [];
-    this.responseIndex = 0;
-  }
-}
+export type { AppLLMProvider as LLMProviderType };
