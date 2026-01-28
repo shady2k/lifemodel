@@ -8,17 +8,18 @@ export type {
 } from './provider.js';
 export { LLMError, BaseLLMProvider } from './provider.js';
 
+// Providers (from plugins)
 export {
   OpenRouterProvider,
   createOpenRouterProvider,
   type OpenRouterConfig,
-} from './openrouter.js';
+} from '../plugins/providers/openrouter.js';
 
 export {
   OpenAICompatibleProvider,
   createOpenAICompatibleProvider,
   type OpenAICompatibleConfig,
-} from './openai-compatible.js';
+} from '../plugins/providers/openai-compatible.js';
 
 export { MultiProvider, createMultiProvider, type MultiProviderConfig } from './multi-provider.js';
 

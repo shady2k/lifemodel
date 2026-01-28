@@ -3,9 +3,7 @@ import {
   neuron,
   createNeuron,
   contactPressureNeuron,
-} from '../../src/decision/neuron.js';
-import { createContactDecider } from '../../src/decision/contact-decider.js';
-import { createDefaultAgentState } from '../../src/types/index.js';
+} from '../../src/core/utils/weighted-score.js';
 
 describe('Neuron', () => {
   describe('neuron function', () => {
@@ -114,67 +112,3 @@ describe('Neuron', () => {
   });
 });
 
-describe('ContactDecider', () => {
-  it('evaluates contact decision based on state', () => {
-    const decider = createContactDecider();
-    const state = createDefaultAgentState();
-
-    const decision = decider.evaluate(state, 0.8, 12); // noon, good availability
-
-    expect(decision).toHaveProperty('shouldContact');
-    expect(decision).toHaveProperty('pressure');
-    expect(decision).toHaveProperty('threshold');
-    expect(decision).toHaveProperty('trace');
-    expect(decision).toHaveProperty('reason');
-  });
-
-  it('uses higher threshold at night', () => {
-    const decider = createContactDecider();
-    const state = { ...createDefaultAgentState(), socialDebt: 0.7 };
-
-    const dayDecision = decider.evaluate(state, 0.8, 12); // noon
-    const nightDecision = decider.evaluate(state, 0.8, 23); // 11 PM
-
-    expect(nightDecision.threshold).toBeGreaterThan(dayDecision.threshold);
-  });
-
-  it('uses higher threshold when energy is low', () => {
-    const decider = createContactDecider();
-    const normalState = { ...createDefaultAgentState(), energy: 0.8 };
-    const lowEnergyState = { ...createDefaultAgentState(), energy: 0.2 };
-
-    const normalDecision = decider.evaluate(normalState, 0.8, 12);
-    const lowEnergyDecision = decider.evaluate(lowEnergyState, 0.8, 12);
-
-    expect(lowEnergyDecision.threshold).toBeGreaterThan(normalDecision.threshold);
-  });
-
-  it('respects cooldown period', () => {
-    const decider = createContactDecider({ cooldownMs: 1000 });
-    const state = { ...createDefaultAgentState(), socialDebt: 0.9 };
-
-    // First decision should allow contact
-    const firstDecision = decider.evaluate(state, 0.9, 12);
-    decider.recordContactAttempt();
-
-    // Second decision immediately after should be blocked by cooldown
-    const secondDecision = decider.evaluate(state, 0.9, 12);
-
-    expect(secondDecision.factors.isCooldown).toBe(true);
-    expect(secondDecision.shouldContact).toBe(false);
-  });
-
-  it('provides explainable trace', () => {
-    const decider = createContactDecider();
-    const state = createDefaultAgentState();
-
-    const decision = decider.evaluate(state, 0.8, 12);
-
-    expect(decision.trace.contributions).toBeDefined();
-    expect(decision.trace.contributions.length).toBeGreaterThan(0);
-    expect(decision.trace.contributions[0]).toHaveProperty('name');
-    expect(decision.trace.contributions[0]).toHaveProperty('value');
-    expect(decision.trace.contributions[0]).toHaveProperty('weight');
-    expect(decision.trace.contributions[0]).toHaveProperty('contribution');
-  });
-});

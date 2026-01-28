@@ -24,5 +24,5 @@ export {
 } from './change-detector.js';
 export type { ChangeDetectorConfig, ChangeResult } from './change-detector.js';
 
-// Individual neurons
-export * from './neurons/index.js';
+// Individual neurons (from plugins)
+export * from '../../plugins/neurons/index.js';

@@ -11,14 +11,14 @@
  * - Curiosity (want to engage)
  */
 
-import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../../types/signal.js';
-import { createSignal } from '../../../types/signal.js';
-import type { AgentState } from '../../../types/agent/state.js';
-import type { Logger } from '../../../types/logger.js';
-import { BaseNeuron } from '../neuron-registry.js';
-import { detectChange, type ChangeDetectorConfig } from '../change-detector.js';
-import { Priority } from '../../../types/priority.js';
-import { neuron, type NeuronResult } from '../../../decision/neuron.js';
+import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../types/signal.js';
+import { createSignal } from '../../types/signal.js';
+import type { AgentState } from '../../types/agent/state.js';
+import type { Logger } from '../../types/logger.js';
+import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
+import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
+import { Priority } from '../../types/priority.js';
+import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
 
 /**
  * Configuration for contact pressure neuron.
@@ -173,13 +173,8 @@ export class ContactPressureNeuron extends BaseNeuron {
     ]);
   }
 
-  private createSignal(
-    value: number,
-    neuronResult: NeuronResult,
-    correlationId: string
-  ): Signal {
-    const priority =
-      value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
+  private createSignal(value: number, neuronResult: NeuronResult, correlationId: string): Signal {
+    const priority = value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
 
     // Include contribution breakdown in metrics
     const metrics: SignalMetrics = {

@@ -21,10 +21,12 @@ import type { Logger } from '../../types/logger.js';
 
 import type { SignalAggregator } from './aggregator.js';
 import { createSignalAggregator } from './aggregator.js';
-import type { ThresholdEngine } from './threshold-engine.js';
+import type { ThresholdEngine, ThresholdEngineDeps } from './threshold-engine.js';
 import { createThresholdEngine } from './threshold-engine.js';
 import type { PatternDetector } from './pattern-detector.js';
 import { createPatternDetector } from './pattern-detector.js';
+import type { ConversationManager } from '../../storage/conversation-manager.js';
+import type { UserModel } from '../../models/user-model.js';
 
 /**
  * Configuration for AGGREGATION processor.
@@ -68,13 +70,29 @@ export class AggregationProcessor implements AggregationLayer {
   }
 
   /**
+   * Update dependencies for conversation-aware proactive contact.
+   */
+  updateDeps(deps: {
+    conversationManager?: ConversationManager;
+    userModel?: UserModel;
+    primaryUserChatId?: string;
+  }): void {
+    const thresholdDeps: ThresholdEngineDeps = {};
+    if (deps.conversationManager) thresholdDeps.conversationManager = deps.conversationManager;
+    if (deps.userModel) thresholdDeps.userModel = deps.userModel;
+    if (deps.primaryUserChatId) thresholdDeps.primaryUserChatId = deps.primaryUserChatId;
+    this.thresholdEngine.updateDeps(thresholdDeps);
+    this.logger.debug('AGGREGATION dependencies updated');
+  }
+
+  /**
    * Process signals and decide whether to wake COGNITION.
    *
    * @param signals All signals from this tick
    * @param state Current agent state
    * @returns Aggregation result with wake decision
    */
-  process(signals: Signal[], state: AgentState): AggregationResult {
+  async process(signals: Signal[], state: AgentState): Promise<AggregationResult> {
     const startTime = Date.now();
     this.tickCount++;
 
@@ -95,8 +113,8 @@ export class AggregationProcessor implements AggregationLayer {
       }
     }
 
-    // 4. Evaluate wake decision
-    const wakeDecision = this.thresholdEngine.evaluate(allSignals, aggregates, state);
+    // 4. Evaluate wake decision (async for conversation status checks)
+    const wakeDecision = await this.thresholdEngine.evaluate(allSignals, aggregates, state);
 
     // 5. Periodic pruning
     if (this.tickCount % this.config.pruneIntervalTicks === 0) {

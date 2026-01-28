@@ -27,7 +27,7 @@ import {
   createTimeNeuron,
   createAlertnessNeuron,
   type AlertnessNeuron,
-} from './neurons/index.js';
+} from '../../plugins/neurons/index.js';
 
 /**
  * Configuration for AUTONOMIC processor.

@@ -6,13 +6,13 @@
  * that you "should" reach out to someone.
  */
 
-import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../../types/signal.js';
-import { createSignal } from '../../../types/signal.js';
-import type { AgentState } from '../../../types/agent/state.js';
-import type { Logger } from '../../../types/logger.js';
-import { BaseNeuron } from '../neuron-registry.js';
-import { detectChange, type ChangeDetectorConfig } from '../change-detector.js';
-import { Priority } from '../../../types/priority.js';
+import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../types/signal.js';
+import { createSignal } from '../../types/signal.js';
+import type { AgentState } from '../../types/agent/state.js';
+import type { Logger } from '../../types/logger.js';
+import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
+import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
+import { Priority } from '../../types/priority.js';
 
 /**
  * Configuration for social debt neuron.
@@ -35,7 +35,7 @@ export const DEFAULT_SOCIAL_DEBT_CONFIG: SocialDebtNeuronConfig = {
   changeConfig: {
     baseThreshold: 0.08, // 8% change is noticeable
     minAbsoluteChange: 0.02, // Ignore tiny changes
-    maxThreshold: 0.30, // Don't become too insensitive
+    maxThreshold: 0.3, // Don't become too insensitive
     alertnessInfluence: 0.3, // Alertness has mild effect
   },
   refractoryPeriodMs: 5000, // Don't emit more than every 5 seconds
@@ -91,11 +91,7 @@ export class SocialDebtNeuron extends BaseNeuron {
     }
 
     // Significant change detected - emit signal
-    const signal = this.createSignal(
-      currentValue,
-      changeResult.relativeChange,
-      correlationId
-    );
+    const signal = this.createSignal(currentValue, changeResult.relativeChange, correlationId);
 
     this.updatePrevious(currentValue);
     this.recordEmission();
@@ -113,14 +109,9 @@ export class SocialDebtNeuron extends BaseNeuron {
     return signal;
   }
 
-  private createSignal(
-    value: number,
-    rateOfChange: number,
-    correlationId: string
-  ): Signal {
+  private createSignal(value: number, rateOfChange: number, correlationId: string): Signal {
     // High priority if debt is high
-    const priority =
-      value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
+    const priority = value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
 
     const metrics: SignalMetrics = {
       value,

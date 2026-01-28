@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Bot } from 'grammy';
-import type { Logger, EventQueue, Event, Signal } from '../types/index.js';
-import { Priority, createUserMessageSignal } from '../types/index.js';
-import type { CircuitBreaker } from '../core/circuit-breaker.js';
-import { createCircuitBreaker } from '../core/circuit-breaker.js';
-import type { Channel, CircuitStats, SendOptions } from './channel.js';
+import type { Logger, EventQueue, Event, Signal } from '../../types/index.js';
+import { Priority, createUserMessageSignal } from '../../types/index.js';
+import type { CircuitBreaker } from '../../core/circuit-breaker.js';
+import { createCircuitBreaker } from '../../core/circuit-breaker.js';
+import type { Channel, CircuitStats, SendOptions } from '../../channels/channel.js';
 
 /**
  * Telegram message payload structure.

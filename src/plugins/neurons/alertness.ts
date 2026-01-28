@@ -13,14 +13,14 @@
  * - Time of day
  */
 
-import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../../types/signal.js';
-import { createSignal } from '../../../types/signal.js';
-import type { AgentState, AlertnessMode } from '../../../types/agent/state.js';
-import type { Logger } from '../../../types/logger.js';
-import { BaseNeuron } from '../neuron-registry.js';
-import { detectTransition } from '../change-detector.js';
-import { Priority } from '../../../types/priority.js';
-import { neuron, type NeuronResult } from '../../../decision/neuron.js';
+import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../types/signal.js';
+import { createSignal } from '../../types/signal.js';
+import type { AgentState, AlertnessMode } from '../../types/agent/state.js';
+import type { Logger } from '../../types/logger.js';
+import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
+import { detectTransition } from '../../layers/autonomic/change-detector.js';
+import { Priority } from '../../types/priority.js';
+import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
 
 /**
  * Configuration for alertness neuron.
@@ -192,8 +192,7 @@ export class AlertnessNeuron extends BaseNeuron {
     correlationId: string
   ): Signal {
     // Higher priority for significant mode changes
-    const priority =
-      mode === 'alert' || mode === 'sleep' ? Priority.NORMAL : Priority.LOW;
+    const priority = mode === 'alert' || mode === 'sleep' ? Priority.NORMAL : Priority.LOW;
 
     const metrics: SignalMetrics = {
       value,
@@ -238,7 +237,7 @@ export class AlertnessNeuron extends BaseNeuron {
    * Update recent activity level.
    * Call this when events are processed.
    */
-  recordActivity(intensity: number = 0.1): void {
+  recordActivity(intensity = 0.1): void {
     // Activity adds to level, decays over time
     this.recentActivityLevel = Math.min(1, this.recentActivityLevel + intensity);
   }
@@ -247,7 +246,7 @@ export class AlertnessNeuron extends BaseNeuron {
    * Decay activity level.
    * Call this each tick.
    */
-  decayActivity(decayFactor: number = 0.95): void {
+  decayActivity(decayFactor = 0.95): void {
     this.recentActivityLevel *= decayFactor;
   }
 

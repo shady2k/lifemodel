@@ -398,7 +398,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   timeoutMs: 30000,
   abortOnNewMessage: true,
   maxInputTokens: 10000,
-  maxOutputTokens: 2000,
+  maxOutputTokens: 5000,
 };
 
 // ============================================================

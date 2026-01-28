@@ -24,8 +24,8 @@ import {
 import { type UserModel, createUserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import type { LLMProvider } from '../llm/provider.js';
-import { createOpenRouterProvider } from '../llm/openrouter.js';
-import { createOpenAICompatibleProvider } from '../llm/openai-compatible.js';
+import { createOpenRouterProvider } from '../plugins/providers/openrouter.js';
+import { createOpenAICompatibleProvider } from '../plugins/providers/openai-compatible.js';
 import { createMultiProvider } from '../llm/multi-provider.js';
 import {
   type Storage,
@@ -35,7 +35,6 @@ import {
   createStateManager,
   createConversationManager,
 } from '../storage/index.js';
-import { type LearningEngine, createLearningEngine } from '../learning/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
 import { type JsonMemoryProvider, createJsonMemoryProvider } from '../storage/memory-provider.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
@@ -137,8 +136,6 @@ export interface Container {
   stateManager: StateManager | null;
   /** Conversation manager for history */
   conversationManager: ConversationManager | null;
-  /** Learning engine for self-learning */
-  learningEngine: LearningEngine | null;
   /** Loaded configuration */
   config: MergedConfig | null;
   /** Shutdown function */
@@ -206,6 +203,7 @@ function createLLMProvider(
   }
 
   // Create local provider if configured
+  // Thinking mode is disabled by default for fast cognition (saves tokens)
   let localProvider = null;
   if (localBaseUrl && localModel) {
     localProvider = createOpenAICompatibleProvider(
@@ -213,6 +211,7 @@ function createLLMProvider(
         baseUrl: localBaseUrl,
         model: localModel,
         name: 'local',
+        enableThinking: false,
       },
       logger
     );
@@ -325,14 +324,6 @@ export function createContainer(config: AppConfig = {}): Container {
   // Create 4-layer processors
   const layers = createLayers(logger);
 
-  // Create learning engine
-  const learningEngine = createLearningEngine(
-    logger,
-    config.agent?.socialDebtRate !== undefined
-      ? { contactTimingRate: config.agent.socialDebtRate }
-      : undefined
-  );
-
   // Create core loop config
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...config.coreLoop,
@@ -407,7 +398,6 @@ export function createContainer(config: AppConfig = {}): Container {
     storage: null,
     stateManager: null,
     conversationManager: null,
-    learningEngine,
     config: null,
     shutdown,
   };
@@ -564,15 +554,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create memory provider
   const memoryProvider = createJsonMemoryProvider(logger, {
-    storagePath: mergedConfig.paths.state.replace('state', 'memory') || './data/memory.json',
+    storagePath: mergedConfig.paths.state.replace('state', 'memory.json') || './data/memory.json',
   });
   logger.info('MemoryProvider configured');
 
   // Create 4-layer processors
   const layers = createLayers(logger);
-
-  // Create learning engine
-  const learningEngine = createLearningEngine(logger, mergedConfig.learning);
 
   // Create core loop config
   const coreLoopConfig: Partial<CoreLoopConfig> = {
@@ -669,7 +656,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     storage,
     stateManager,
     conversationManager,
-    learningEngine,
     config: mergedConfig,
     shutdown,
   };

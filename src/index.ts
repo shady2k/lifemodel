@@ -24,7 +24,6 @@ async function main(): Promise<void> {
     messageComposer,
     primaryUserChatId,
     stateManager,
-    learningEngine,
   } = container;
 
   logger.info('Lifemodel starting...');
@@ -41,12 +40,6 @@ async function main(): Promise<void> {
   // Log persistence status
   if (stateManager) {
     logger.info('State persistence enabled (auto-save every 5 minutes)');
-  }
-
-  // Log learning status
-  if (learningEngine) {
-    const stats = learningEngine.getStats();
-    logger.info({ stats }, 'Learning engine enabled');
   }
 
   // Log proactive messaging capability

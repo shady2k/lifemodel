@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TelegramChannel, type TelegramConfig, type TelegramMessagePayload } from '../../../src/channels/telegram.js';
+import { TelegramChannel, type TelegramConfig, type TelegramMessagePayload } from '../../../src/channels/index.js';
 import { Priority } from '../../../src/types/index.js';
 import type { EventQueue, Event } from '../../../src/types/index.js';
 

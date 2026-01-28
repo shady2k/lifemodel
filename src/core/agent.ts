@@ -98,7 +98,7 @@ export class Agent {
       initialSleepState: this.sleepState,
       identity: this.identity,
       tickRate: config.tickRate ?? DEFAULT_TICK_RATE,
-      socialDebtRate: config.socialDebtRate ?? 0.001,
+      socialDebtRate: config.socialDebtRate ?? 0.005, // Increased from 0.001 for faster accumulation
     };
 
     this.logger.info({ name: this.identity.name, energy: this.state.energy }, 'Agent initialized');

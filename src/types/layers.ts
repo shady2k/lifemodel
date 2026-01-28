@@ -282,8 +282,8 @@ export interface WakeThresholdConfig {
  * Default wake threshold configuration.
  */
 export const DEFAULT_WAKE_THRESHOLDS: WakeThresholdConfig = {
-  contactPressure: 0.6,
-  socialDebt: 0.8,
+  contactPressure: 0.35, // Lowered from 0.6 - trigger proactive contact sooner
+  socialDebt: 0.5, // Lowered from 0.8 - trigger when debt is moderate
   lowEnergy: 0.3,
   lowEnergyMultiplier: 1.3,
   patternSensitivity: 0.5,

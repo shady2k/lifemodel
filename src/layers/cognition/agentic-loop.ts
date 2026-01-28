@@ -263,11 +263,49 @@ export class AgenticLoop {
         'Agentic loop aborted'
       );
 
+      // On timeout or loop, escalate to SMART layer instead of failing silently
+      if (context.chatId && (state.abortReason?.includes('Timeout') || state.forceRespond)) {
+        this.logger.info(
+          { chatId: context.chatId, reason: state.abortReason },
+          'COGNITION failed, escalating to SMART layer'
+        );
+        return {
+          success: false,
+          terminal: {
+            type: 'escalate',
+            reason: state.abortReason ?? 'COGNITION timeout/loop',
+            parentId: 'loop',
+          },
+          steps: state.allSteps,
+          intents: [],
+          pendingEscalation,
+          state,
+          error: state.abortReason,
+        };
+      }
+
+      // Create fallback response for parse failures
+      const fallbackIntents: Intent[] = [];
+      if (context.chatId && state.abortReason?.includes('parse')) {
+        this.logger.info(
+          { chatId: context.chatId },
+          'Sending fallback response due to parse failure'
+        );
+        fallbackIntents.push({
+          type: 'SEND_MESSAGE',
+          payload: {
+            text: 'Извини, у меня возникли технические проблемы. Можешь повторить?',
+            target: context.chatId,
+            channel: 'telegram',
+          },
+        });
+      }
+
       return {
         success: false,
         terminal: { type: 'noAction', reason: state.abortReason ?? 'Aborted', parentId: 'loop' },
         steps: state.allSteps,
-        intents: [],
+        intents: fallbackIntents,
         pendingEscalation,
         state,
         error: state.abortReason,
@@ -276,11 +314,25 @@ export class AgenticLoop {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error({ error: errorMessage }, 'Agentic loop error');
 
+      // Create fallback response if we have a chat to respond to
+      const errorFallbackIntents: Intent[] = [];
+      if (context.chatId) {
+        this.logger.info({ chatId: context.chatId }, 'Sending fallback response due to error');
+        errorFallbackIntents.push({
+          type: 'SEND_MESSAGE',
+          payload: {
+            text: 'Извини, что-то пошло не так. Попробуй ещё раз.',
+            target: context.chatId,
+            channel: 'telegram',
+          },
+        });
+      }
+
       return {
         success: false,
         terminal: { type: 'noAction', reason: errorMessage, parentId: 'loop' },
         steps: state.allSteps,
-        intents: [],
+        intents: errorFallbackIntents,
         pendingEscalation,
         state,
         error: errorMessage,
@@ -364,11 +416,31 @@ Guidelines:
 - Provide evidence for user model updates
 - Only save facts worth remembering long-term
 - Escalate complex/sensitive topics to SMART
-- Do NOT use markdown formatting in responses (no **bold**, *italic*, etc.) - use plain text only`;
+- Do NOT use markdown formatting in responses (no **bold**, *italic*, etc.) - use plain text only
+- Do NOT re-greet (e.g., "Привет", "Hello") if you've already exchanged greetings in the conversation history
+- Use the user's name sparingly (first greeting, after long pauses) - not in every message. Check the conversation history before using their name.`;
   }
 
   private buildStateSection(context: LoopContext): string {
     const { agentState, userModel } = context;
+
+    // Format user model values with explanations
+    const formatUserModelValue = (value: unknown): string => {
+      if (value === null || value === undefined) return 'unknown';
+      if (typeof value === 'number') {
+        // Convert 0-1 values to percentages
+        return `${(value * 100).toFixed(0)}%`;
+      }
+      if (typeof value === 'string') return value;
+      return 'unknown';
+    };
+
+    const userModelLines = [
+      `- name: ${formatUserModelValue(userModel['name'])}`,
+      `- energy: ${formatUserModelValue(userModel['energy'])} (estimated user energy level)`,
+      `- availability: ${formatUserModelValue(userModel['availability'])} (how available user seems)`,
+      `- mood: ${formatUserModelValue(userModel['mood'])} (detected from messages)`,
+    ];
 
     return `## Current State
 
@@ -378,10 +450,8 @@ Agent:
 - Task Pressure: ${(agentState.taskPressure * 100).toFixed(0)}%
 - Curiosity: ${(agentState.curiosity * 100).toFixed(0)}%
 
-User Model:
-${Object.entries(userModel)
-  .map(([k, v]) => `- ${k}: ${JSON.stringify(v)}`)
-  .join('\n')}`;
+User Model (your beliefs about the user - use name sparingly, not every message):
+${userModelLines.join('\n')}`;
   }
 
   private buildHistorySection(history: ConversationMessage[]): string {
@@ -402,11 +472,17 @@ ${Object.entries(userModel)
       } else if (step.type === 'tool') {
         const result = toolResults.find((r) => r.stepId === step.id);
         if (result) {
-          // Tool was executed - show as completed
+          // Tool was executed - show as completed with clear instruction
           if (result.success) {
-            lines.push(`[tool:${step.name}] COMPLETED → ${JSON.stringify(result.data)}`);
+            lines.push(`[tool:${step.name}] RESULT: ${JSON.stringify(result.data)}`);
+            lines.push(
+              `  ↳ Tool executed successfully. Use this result to formulate your response. Do NOT call this tool again.`
+            );
           } else {
-            lines.push(`[tool:${step.name}] FAILED → ${result.error ?? 'Unknown error'}`);
+            lines.push(`[tool:${step.name}] FAILED: ${result.error ?? 'Unknown error'}`);
+            lines.push(
+              `  ↳ Tool failed. Respond to user without this information or try a different approach.`
+            );
           }
         } else {
           // Tool pending (shouldn't happen normally)

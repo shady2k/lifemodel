@@ -2,11 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Logger } from '../types/index.js';
 import type { Storage } from './storage.js';
 import type { JSONStorage } from './json-storage.js';
-import type {
-  PersistableState,
-  PersistableRuleState,
-  PersistableNeuronWeights,
-} from './persistable-state.js';
+import type { PersistableState, PersistableNeuronWeights } from './persistable-state.js';
 import {
   PERSISTABLE_STATE_VERSION,
   createEmptyPersistableState,
@@ -14,8 +10,6 @@ import {
 } from './persistable-state.js';
 import type { Agent } from '../core/agent.js';
 import type { UserModel } from '../models/user-model.js';
-import type { RuleEngine } from '../rules/rule-engine.js';
-
 /**
  * State manager configuration.
  */
@@ -53,7 +47,6 @@ export class StateManager {
   // References to components for state collection
   private agent: Agent | null = null;
   private userModel: UserModel | null = null;
-  private ruleEngine: RuleEngine | null = null;
   private neuronWeights: PersistableNeuronWeights | null = null;
 
   constructor(storage: Storage, logger: Logger, config: Partial<StateManagerConfig> = {}) {
@@ -68,12 +61,10 @@ export class StateManager {
   registerComponents(components: {
     agent?: Agent;
     userModel?: UserModel;
-    ruleEngine?: RuleEngine;
     neuronWeights?: PersistableNeuronWeights;
   }): void {
     if (components.agent) this.agent = components.agent;
     if (components.userModel) this.userModel = components.userModel;
-    if (components.ruleEngine) this.ruleEngine = components.ruleEngine;
     if (components.neuronWeights) this.neuronWeights = components.neuronWeights;
   }
 
@@ -127,28 +118,11 @@ export class StateManager {
         sleepState: this.agent?.getSleepState() ?? createEmptyPersistableState().agent.sleepState,
       },
       user: this.userModel?.getUser() ?? null,
-      rules: this.collectRuleStates(),
+      rules: [],
       neuronWeights: this.neuronWeights ?? createEmptyPersistableState().neuronWeights,
     };
 
     return state;
-  }
-
-  /**
-   * Collect rule states from rule engine.
-   */
-  private collectRuleStates(): PersistableRuleState[] {
-    if (!this.ruleEngine) {
-      return [];
-    }
-
-    const rules = this.ruleEngine.getRules();
-    return rules.map((rule) => ({
-      id: rule.id,
-      weight: rule.weight,
-      useCount: rule.useCount,
-      lastUsed: rule.lastUsed?.toISOString() ?? null,
-    }));
   }
 
   /**

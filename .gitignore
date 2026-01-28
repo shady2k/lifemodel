@@ -5,9 +5,7 @@ node_modules/
 dist/
 
 # Data (mounted volume in production)
-data/state/
-data/logs/
-data/plugins/
+data/
 
 # Keep config template but ignore actual config
 !data/config/.gitkeep

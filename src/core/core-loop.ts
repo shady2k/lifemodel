@@ -193,6 +193,15 @@ export class CoreLoop {
       userModel: deps.userModel,
       eventBus,
     });
+
+    // Set dependencies on AGGREGATION for conversation-aware proactive contact
+    if ('updateDeps' in this.layers.aggregation) {
+      (this.layers.aggregation as { updateDeps: (deps: unknown) => void }).updateDeps({
+        conversationManager: deps.conversationManager,
+        userModel: deps.userModel,
+        primaryUserChatId: config.primaryUserChatId,
+      });
+    }
   }
 
   /**
@@ -675,6 +684,19 @@ export class CoreLoop {
             { correlationId: pending.correlationId, elapsed },
             'COGNITION still processing...'
           );
+
+          // Resend typing indicator (Telegram typing expires after ~5 seconds)
+          const chatId = (pending.triggerSignal?.data as Record<string, unknown> | undefined)?.[
+            'chatId'
+          ] as string | undefined;
+          if (chatId) {
+            const channel = this.channels.get('telegram');
+            if (channel?.sendTyping) {
+              channel.sendTyping(chatId).catch(() => {
+                /* ignore typing errors */
+              });
+            }
+          }
         }
         return null;
       }

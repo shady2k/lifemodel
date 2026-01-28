@@ -10,13 +10,13 @@
  * - Less sensitive to non-critical signals
  */
 
-import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../../types/signal.js';
-import { createSignal } from '../../../types/signal.js';
-import type { AgentState } from '../../../types/agent/state.js';
-import type { Logger } from '../../../types/logger.js';
-import { BaseNeuron } from '../neuron-registry.js';
-import { detectChange, type ChangeDetectorConfig } from '../change-detector.js';
-import { Priority } from '../../../types/priority.js';
+import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../types/signal.js';
+import { createSignal } from '../../types/signal.js';
+import type { AgentState } from '../../types/agent/state.js';
+import type { Logger } from '../../types/logger.js';
+import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
+import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
+import { Priority } from '../../types/priority.js';
 
 /**
  * Configuration for energy neuron.
@@ -40,7 +40,7 @@ export interface EnergyNeuronConfig {
  */
 export const DEFAULT_ENERGY_CONFIG: EnergyNeuronConfig = {
   changeConfig: {
-    baseThreshold: 0.10, // 10% change is noticeable
+    baseThreshold: 0.1, // 10% change is noticeable
     minAbsoluteChange: 0.03, // Ignore tiny fluctuations
     maxThreshold: 0.25, // Don't become too insensitive
     alertnessInfluence: 0.2, // Alertness has mild effect on sensitivity
@@ -111,11 +111,7 @@ export class EnergyNeuron extends BaseNeuron {
     }
 
     // Change detected - emit signal
-    const signal = this.createSignal(
-      currentValue,
-      changeResult.relativeChange,
-      correlationId
-    );
+    const signal = this.createSignal(currentValue, changeResult.relativeChange, correlationId);
 
     this.updatePrevious(currentValue);
     this.recordEmission();
@@ -134,11 +130,7 @@ export class EnergyNeuron extends BaseNeuron {
     return signal;
   }
 
-  private createSignal(
-    value: number,
-    rateOfChange: number,
-    correlationId: string
-  ): Signal {
+  private createSignal(value: number, rateOfChange: number, correlationId: string): Signal {
     // Determine priority based on energy level
     let priority: Priority;
     if (value < this.config.criticalEnergyThreshold) {
