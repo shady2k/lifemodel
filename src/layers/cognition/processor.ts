@@ -19,20 +19,12 @@ import type { MessageComposer } from '../../llm/composer.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
-import type { Event } from '../../types/index.js';
-import { Priority } from '../../types/index.js';
-import { randomUUID } from 'node:crypto';
+import { emitTypingIndicator } from '../shared/index.js';
 
-import {
-  ThoughtSynthesizer,
-  createThoughtSynthesizer,
-  type ThoughtSynthesizerConfig,
-} from './thought-synthesizer.js';
-import {
-  ActionDecider,
-  createActionDecider,
-  type ActionDeciderConfig,
-} from './action-decider.js';
+import type { ThoughtSynthesizer } from './thought-synthesizer.js';
+import { createThoughtSynthesizer, type ThoughtSynthesizerConfig } from './thought-synthesizer.js';
+import type { ActionDecider } from './action-decider.js';
+import { createActionDecider, type ActionDeciderConfig } from './action-decider.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -149,7 +141,7 @@ export class CognitionProcessor implements CognitionLayer {
       synthesis.chatId &&
       synthesis.channel
     ) {
-      await this.emitTypingIndicator(synthesis.chatId, synthesis.channel);
+      await this.emitTypingIndicatorEvent(synthesis.chatId, synthesis.channel);
     }
 
     // 3. Decide action
@@ -189,11 +181,9 @@ export class CognitionProcessor implements CognitionLayer {
 
     // Add send_message intent if we have a response
     if (decision.response && decision.chatId && decision.channel) {
-      result.intents.push(this.buildSendMessageIntent(
-        decision.response,
-        decision.chatId,
-        decision.channel
-      ));
+      result.intents.push(
+        this.buildSendMessageIntent(decision.response, decision.chatId, decision.channel)
+      );
     }
 
     return result;
@@ -202,11 +192,7 @@ export class CognitionProcessor implements CognitionLayer {
   /**
    * Build a send_message intent.
    */
-  private buildSendMessageIntent(
-    message: string,
-    chatId: string,
-    channel: string
-  ): Intent {
+  private buildSendMessageIntent(message: string, chatId: string, channel: string): Intent {
     return {
       type: 'SEND_MESSAGE',
       payload: {
@@ -220,21 +206,8 @@ export class CognitionProcessor implements CognitionLayer {
   /**
    * Emit typing indicator event.
    */
-  private async emitTypingIndicator(chatId: string, channel: string): Promise<void> {
-    if (!this.eventBus) return;
-
-    const typingEvent: Event = {
-      id: randomUUID(),
-      source: 'internal',
-      channel,
-      type: 'typing_start',
-      priority: Priority.HIGH,
-      timestamp: new Date(),
-      payload: { chatId },
-    };
-
-    await this.eventBus.publish(typingEvent);
-    this.logger.debug({ chatId, channel }, 'Typing indicator emitted');
+  private async emitTypingIndicatorEvent(chatId: string, channel: string): Promise<void> {
+    await emitTypingIndicator(this.eventBus, chatId, channel, this.logger);
   }
 
   /**

@@ -16,14 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type {
-  Signal,
-  Logger,
-  Metrics,
-  Intent,
-  Channel,
-  Event,
-} from '../types/index.js';
+import type { Signal, Logger, Metrics, Intent, Channel, Event } from '../types/index.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -34,6 +27,12 @@ import type {
 import { Priority } from '../types/index.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
+import type { SystemHealthMonitor } from './system-health.js';
+import {
+  createSystemHealthMonitor,
+  type SystemHealth,
+  type SystemHealthConfig,
+} from './system-health.js';
 import type { AutonomicProcessor } from '../layers/autonomic/processor.js';
 import type { AggregationProcessor } from '../layers/aggregation/processor.js';
 import type { CognitionProcessor } from '../layers/cognition/processor.js';
@@ -57,6 +56,9 @@ export interface CoreLoopConfig {
 
   /** Primary user's Telegram chat ID for proactive messages */
   primaryUserChatId?: string | undefined;
+
+  /** System health monitor configuration */
+  health?: Partial<SystemHealthConfig>;
 }
 
 /**
@@ -112,6 +114,7 @@ export class CoreLoop {
 
   private readonly channels = new Map<string, Channel>();
   private readonly pendingSignals: PendingSignal[] = [];
+  private readonly healthMonitor: SystemHealthMonitor;
 
   private readonly messageComposer: MessageComposer | undefined;
   private readonly conversationManager: ConversationManager | undefined;
@@ -143,6 +146,9 @@ export class CoreLoop {
     this.conversationManager = deps.conversationManager;
     this.userModel = deps.userModel;
 
+    // Initialize system health monitor
+    this.healthMonitor = createSystemHealthMonitor(logger, config.health);
+
     // Set dependencies on layers
     this.layers.cognition.setDependencies({
       composer: deps.messageComposer,
@@ -170,6 +176,9 @@ export class CoreLoop {
 
     this.running = true;
 
+    // Start system health monitoring
+    this.healthMonitor.start();
+
     // Subscribe to typing events
     this.typingSubscriptionId = this.eventBus.subscribe(
       (event) => void this.handleTypingEvent(event),
@@ -196,6 +205,9 @@ export class CoreLoop {
       clearTimeout(this.tickTimeout);
       this.tickTimeout = null;
     }
+
+    // Stop system health monitoring
+    this.healthMonitor.stop();
 
     // Unsubscribe from typing events
     if (this.typingSubscriptionId) {
@@ -250,6 +262,20 @@ export class CoreLoop {
   }
 
   /**
+   * Get current system health.
+   */
+  getHealth(): SystemHealth {
+    return this.healthMonitor.getHealth();
+  }
+
+  /**
+   * Get the health monitor (for testing/debugging).
+   */
+  getHealthMonitor(): SystemHealthMonitor {
+    return this.healthMonitor;
+  }
+
+  /**
    * Push a signal into the pending queue.
    * Called by channels when they receive data.
    */
@@ -286,6 +312,10 @@ export class CoreLoop {
     this.tickCount++;
     const correlationId = `tick-${String(this.tickCount)}-${randomUUID().slice(0, 8)}`;
 
+    // Check system health - determines which layers are active
+    const health = this.healthMonitor.getHealth();
+    const { activeLayers, stressLevel } = health;
+
     const state = this.agent.getState();
     this.logger.debug(
       {
@@ -293,6 +323,7 @@ export class CoreLoop {
         energy: state.energy.toFixed(2),
         socialDebt: state.socialDebt.toFixed(2),
         pendingSignals: this.pendingSignals.length,
+        stressLevel,
         correlationId,
       },
       '⏱️ Tick starting'
@@ -301,44 +332,52 @@ export class CoreLoop {
     try {
       // Collect all intents from all layers
       const allIntents: Intent[] = [];
+      let allSignals: Signal[] = [];
 
       // 1. Collect incoming signals from channels (sensory input)
       const incomingSignals = this.collectIncomingSignals();
 
       // 2. AUTONOMIC: neurons check state, emit internal signals
-      const autonomicResult = await this.processAutonomic(
-        incomingSignals,
-        correlationId
-      );
-      allIntents.push(...autonomicResult.intents);
-
-      // Combined signals: incoming + autonomic
-      const allSignals = autonomicResult.signals;
+      // Always runs - vital signs monitoring
+      if (activeLayers.autonomic) {
+        const autonomicResult = await this.processAutonomic(incomingSignals, correlationId);
+        allIntents.push(...autonomicResult.intents);
+        allSignals = autonomicResult.signals;
+      } else {
+        // Critical stress - just pass through incoming signals
+        allSignals = incomingSignals;
+        this.logger.warn({ stressLevel }, 'AUTONOMIC layer disabled due to stress');
+      }
 
       // 3. AGGREGATION: collect signals, decide if COGNITION should wake
-      const aggregationResult = await this.processAggregation(allSignals);
-      allIntents.push(...aggregationResult.intents);
+      let aggregationResult: AggregationResult | null = null;
+
+      if (activeLayers.aggregation) {
+        aggregationResult = await this.processAggregation(allSignals);
+        allIntents.push(...aggregationResult.intents);
+      } else {
+        this.logger.warn({ stressLevel }, 'AGGREGATION layer disabled due to stress');
+      }
 
       // 4. COGNITION: (if woken) process with fast LLM
       let cognitionResult: CognitionResult | null = null;
       let smartResult: SmartResult | null = null;
 
-      if (aggregationResult.wakeCognition) {
-        this.logger.debug(
-          { wakeReason: aggregationResult.wakeReason },
-          '🧠 COGNITION layer woken'
-        );
+      const shouldWakeCognition = aggregationResult?.wakeCognition && activeLayers.cognition;
 
-        const cognitionContext = this.buildCognitionContext(
-          aggregationResult,
-          correlationId
-        );
+      if (shouldWakeCognition && aggregationResult) {
+        this.logger.debug({ wakeReason: aggregationResult.wakeReason }, '🧠 COGNITION layer woken');
+
+        const cognitionContext = this.buildCognitionContext(aggregationResult, correlationId);
 
         cognitionResult = await this.layers.cognition.process(cognitionContext);
         allIntents.push(...cognitionResult.intents);
 
         // 5. SMART: (if escalated) process with expensive LLM
-        if (cognitionResult.escalateToSmart && cognitionResult.smartContext) {
+        const shouldEngageSmart =
+          cognitionResult.escalateToSmart && cognitionResult.smartContext && activeLayers.smart;
+
+        if (shouldEngageSmart && cognitionResult.smartContext) {
           this.logger.debug(
             { escalationReason: cognitionResult.escalationReason },
             '🎯 SMART layer engaged'
@@ -346,7 +385,17 @@ export class CoreLoop {
 
           smartResult = await this.layers.smart.process(cognitionResult.smartContext);
           allIntents.push(...smartResult.intents);
+        } else if (cognitionResult.escalateToSmart && !activeLayers.smart) {
+          this.logger.warn(
+            { stressLevel, escalationReason: cognitionResult.escalationReason },
+            'SMART layer disabled due to stress - escalation blocked'
+          );
         }
+      } else if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
+        this.logger.warn(
+          { stressLevel, wakeReason: aggregationResult.wakeReason },
+          'COGNITION layer disabled due to stress - wake blocked'
+        );
       }
 
       // 6. Update agent state (energy, social debt, etc.)
@@ -361,8 +410,8 @@ export class CoreLoop {
       // 8. Apply all intents
       this.applyIntents(allIntents);
 
-      // 9. Periodic maintenance
-      if (this.tickCount % this.config.pruneInterval === 0) {
+      // 9. Periodic maintenance (only if aggregation is active)
+      if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {
         const pruned = this.layers.aggregation.prune();
         if (pruned > 0) {
           this.logger.debug({ pruned }, 'Signals pruned from aggregation');
@@ -377,8 +426,9 @@ export class CoreLoop {
           duration: tickDuration,
           signalsProcessed: allSignals.length,
           intentsApplied: allIntents.length,
-          cognitionWoke: aggregationResult.wakeCognition,
+          cognitionWoke: shouldWakeCognition,
           smartEngaged: smartResult !== null,
+          stressLevel,
           energy: this.agent.getEnergy().toFixed(2),
         },
         'Tick completed'
@@ -388,6 +438,9 @@ export class CoreLoop {
       this.metrics.counter('signal_loop_ticks');
       this.metrics.gauge('signal_loop_tick_duration', tickDuration);
       this.metrics.gauge('signal_loop_signals_processed', allSignals.length);
+      this.metrics.gauge('system_event_loop_lag_ms', health.eventLoopLagMs);
+      this.metrics.gauge('system_cpu_percent', health.cpuPercent);
+      this.metrics.gauge('system_stress_level', this.stressLevelToNumber(stressLevel));
 
       // Schedule next tick
       this.scheduleTick();
@@ -434,7 +487,7 @@ export class CoreLoop {
     // Save to conversation history
     if (this.conversationManager) {
       const data = signal.data as { text?: string; chatId?: string } | undefined;
-      if (data?.text && data?.chatId) {
+      if (data?.text && data.chatId) {
         void this.conversationManager.addMessage(data.chatId, {
           role: 'user',
           content: data.text,
@@ -477,10 +530,10 @@ export class CoreLoop {
   /**
    * Process through AUTONOMIC layer.
    */
-  private async processAutonomic(
+  private processAutonomic(
     incomingSignals: Signal[],
     correlationId: string
-  ): Promise<AutonomicResult> {
+  ): AutonomicResult | Promise<AutonomicResult> {
     const state = this.agent.getState();
     return this.layers.autonomic.process(state, incomingSignals, correlationId);
   }
@@ -488,7 +541,7 @@ export class CoreLoop {
   /**
    * Process through AGGREGATION layer.
    */
-  private async processAggregation(signals: Signal[]): Promise<AggregationResult> {
+  private processAggregation(signals: Signal[]): AggregationResult | Promise<AggregationResult> {
     const state = this.agent.getState();
     return this.layers.aggregation.process(signals, state);
   }
@@ -524,24 +577,50 @@ export class CoreLoop {
           const channelImpl = this.channels.get(channel);
           if (channelImpl && target) {
             const sendOptions = replyTo ? { replyTo } : undefined;
-            void channelImpl.sendMessage(target, text, sendOptions).then((success) => {
-              if (success) {
-                this.lastMessageSentAt = Date.now();
-                this.lastMessageChatId = target;
-                this.metrics.counter('messages_sent', { channel });
-                // Save agent message to history
-                if (this.conversationManager) {
-                  void this.saveAgentMessage(target, text);
+            channelImpl
+              .sendMessage(target, text, sendOptions)
+              .then((success) => {
+                if (success) {
+                  this.lastMessageSentAt = Date.now();
+                  this.lastMessageChatId = target;
+                  this.metrics.counter('messages_sent', { channel });
+                  // Save agent message to history
+                  if (this.conversationManager) {
+                    void this.saveAgentMessage(target, text);
+                  }
+                } else {
+                  this.logger.warn(
+                    { channel, target, textLength: text.length },
+                    'Message send returned false'
+                  );
+                  this.metrics.counter('messages_failed', { channel, reason: 'returned_false' });
                 }
-              } else {
-                this.metrics.counter('messages_failed', { channel });
-              }
-            });
+              })
+              .catch((error: unknown) => {
+                this.logger.error(
+                  {
+                    error: error instanceof Error ? error.message : String(error),
+                    channel,
+                    target,
+                    textLength: text.length,
+                  },
+                  'Message send threw an error'
+                );
+                this.metrics.counter('messages_failed', { channel, reason: 'exception' });
+              });
           } else {
-            this.logger.warn(
-              { channel, target, hasChannel: Boolean(channelImpl) },
+            this.logger.error(
+              {
+                channel,
+                target,
+                hasChannel: Boolean(channelImpl),
+                hasTarget: Boolean(target),
+                textPreview: text.slice(0, 50),
+                registeredChannels: Array.from(this.channels.keys()),
+              },
               'Cannot route message: channel not found or no target'
             );
+            this.metrics.counter('messages_failed', { channel, reason: 'routing' });
           }
           break;
         }
@@ -637,6 +716,24 @@ export class CoreLoop {
     const channel = this.channels.get(channelName);
     if (channel?.sendTyping) {
       await channel.sendTyping(chatId);
+    }
+  }
+
+  /**
+   * Convert stress level to numeric value for metrics.
+   */
+  private stressLevelToNumber(level: string): number {
+    switch (level) {
+      case 'normal':
+        return 0;
+      case 'elevated':
+        return 1;
+      case 'high':
+        return 2;
+      case 'critical':
+        return 3;
+      default:
+        return 0;
     }
   }
 

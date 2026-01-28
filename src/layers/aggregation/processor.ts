@@ -14,14 +14,17 @@
  * - Decide if COGNITION should be woken
  */
 
-import type { Signal, SignalAggregate } from '../../types/signal.js';
+import type { Signal, SignalAggregate, SignalType, SignalSource } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { AggregationLayer, AggregationResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
 
-import { SignalAggregator, createSignalAggregator } from './aggregator.js';
-import { ThresholdEngine, createThresholdEngine } from './threshold-engine.js';
-import { PatternDetector, createPatternDetector } from './pattern-detector.js';
+import type { SignalAggregator } from './aggregator.js';
+import { createSignalAggregator } from './aggregator.js';
+import type { ThresholdEngine } from './threshold-engine.js';
+import { createThresholdEngine } from './threshold-engine.js';
+import type { PatternDetector } from './pattern-detector.js';
+import { createPatternDetector } from './pattern-detector.js';
 
 /**
  * Configuration for AGGREGATION processor.
@@ -130,11 +133,8 @@ export class AggregationProcessor implements AggregationLayer {
   /**
    * Get current aggregate for a signal type.
    */
-  getAggregate(type: string, source: string): SignalAggregate | undefined {
-    return this.aggregator.getAggregate(
-      type as Signal['type'],
-      source as Signal['source']
-    );
+  getAggregate(type: SignalType, source: SignalSource): SignalAggregate | undefined {
+    return this.aggregator.getAggregate(type, source);
   }
 
   /**

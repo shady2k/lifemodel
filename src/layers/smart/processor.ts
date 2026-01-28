@@ -18,15 +18,10 @@ import type { MessageComposer } from '../../llm/composer.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
-import type { Event } from '../../types/index.js';
-import { Priority } from '../../types/index.js';
-import { randomUUID } from 'node:crypto';
+import { emitTypingIndicator } from '../shared/index.js';
 
-import {
-  EscalationHandler,
-  createEscalationHandler,
-  type EscalationHandlerConfig,
-} from './escalation-handler.js';
+import type { EscalationHandler } from './escalation-handler.js';
+import { createEscalationHandler, type EscalationHandlerConfig } from './escalation-handler.js';
 
 /**
  * Configuration for SMART processor.
@@ -129,18 +124,16 @@ export class SmartProcessor implements SmartLayer {
     const userMessageSignal = context.cognitionContext.triggerSignals.find(
       (s) => s.type === 'user_message'
     );
-    const messageData = userMessageSignal?.data as {
-      chatId?: string;
-      channel?: string;
-    } | undefined;
+    const messageData = userMessageSignal?.data as
+      | {
+          chatId?: string;
+          channel?: string;
+        }
+      | undefined;
 
     // Emit typing indicator if we have chat info
-    if (
-      this.config.emitTypingIndicator &&
-      messageData?.chatId &&
-      messageData?.channel
-    ) {
-      await this.emitTypingIndicator(messageData.chatId, messageData.channel);
+    if (this.config.emitTypingIndicator && messageData?.chatId && messageData.channel) {
+      await this.emitTypingIndicatorEvent(messageData.chatId, messageData.channel);
     }
 
     // Handle the escalation
@@ -193,21 +186,8 @@ export class SmartProcessor implements SmartLayer {
   /**
    * Emit typing indicator event.
    */
-  private async emitTypingIndicator(chatId: string, channel: string): Promise<void> {
-    if (!this.eventBus) return;
-
-    const typingEvent: Event = {
-      id: randomUUID(),
-      source: 'internal',
-      channel,
-      type: 'typing_start',
-      priority: Priority.HIGH,
-      timestamp: new Date(),
-      payload: { chatId },
-    };
-
-    await this.eventBus.publish(typingEvent);
-    this.logger.debug({ chatId, channel }, 'Typing indicator emitted');
+  private async emitTypingIndicatorEvent(chatId: string, channel: string): Promise<void> {
+    await emitTypingIndicator(this.eventBus, chatId, channel, this.logger);
   }
 
   /**

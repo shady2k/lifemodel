@@ -24,7 +24,7 @@
  *    - Handles complex questions, composition
  */
 
-import type { Signal, SignalAggregate } from './signal.js';
+import type { Signal, SignalAggregate, SignalType, SignalSource } from './signal.js';
 import type { Intent } from './intent.js';
 import type { AgentState } from './agent/state.js';
 
@@ -192,15 +192,12 @@ export interface AggregationLayer {
    * @param state Current agent state (for threshold adjustment)
    * @returns Aggregation result with wake decision
    */
-  process(
-    signals: Signal[],
-    state: AgentState
-  ): Promise<AggregationResult> | AggregationResult;
+  process(signals: Signal[], state: AgentState): Promise<AggregationResult> | AggregationResult;
 
   /**
    * Get current aggregates for a signal type.
    */
-  getAggregate(type: string, source: string): SignalAggregate | undefined;
+  getAggregate(type: SignalType, source: SignalSource): SignalAggregate | undefined;
 
   /**
    * Prune expired signals from buffers.

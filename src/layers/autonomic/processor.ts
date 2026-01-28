@@ -18,7 +18,8 @@ import type { Intent } from '../../types/intent.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { AutonomicLayer, AutonomicResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
-import { NeuronRegistry, createNeuronRegistry } from './neuron-registry.js';
+import type { NeuronRegistry } from './neuron-registry.js';
+import { createNeuronRegistry } from './neuron-registry.js';
 import {
   createSocialDebtNeuron,
   createEnergyNeuron,
@@ -40,6 +41,12 @@ export interface AutonomicProcessorConfig {
     time: boolean;
     alertness: boolean;
   };
+
+  /** Energy drain per incoming signal processed */
+  energyDrainPerSignal: number;
+
+  /** Energy drain per neuron signal emitted */
+  energyDrainPerNeuron: number;
 }
 
 /**
@@ -53,6 +60,8 @@ const DEFAULT_CONFIG: AutonomicProcessorConfig = {
     time: true,
     alertness: true,
   },
+  energyDrainPerSignal: 0.001,
+  energyDrainPerNeuron: 0.0005,
 };
 
 /**
@@ -101,10 +110,7 @@ export class AutonomicProcessor implements AutonomicLayer {
       this.registry.register(createTimeNeuron(this.logger));
     }
 
-    this.logger.info(
-      { neuronCount: this.registry.size() },
-      'AUTONOMIC layer initialized'
-    );
+    this.logger.info({ neuronCount: this.registry.size() }, 'AUTONOMIC layer initialized');
   }
 
   /**
@@ -115,17 +121,11 @@ export class AutonomicProcessor implements AutonomicLayer {
    * @param correlationId Tick correlation ID
    * @returns Signals emitted by neurons + state intents
    */
-  process(
-    state: AgentState,
-    incomingSignals: Signal[],
-    correlationId: string
-  ): AutonomicResult {
+  process(state: AgentState, incomingSignals: Signal[], correlationId: string): AutonomicResult {
     const startTime = Date.now();
 
     // Get current alertness for sensitivity adjustment
-    const alertness = this.alertnessNeuron
-      ? this.alertnessNeuron.getCurrentAlertness(state)
-      : 0.5;
+    const alertness = this.alertnessNeuron ? this.alertnessNeuron.getCurrentAlertness(state) : 0.5;
 
     // Decay activity in alertness neuron
     if (this.alertnessNeuron) {
@@ -135,13 +135,14 @@ export class AutonomicProcessor implements AutonomicLayer {
     // Record activity from incoming signals
     if (this.alertnessNeuron && incomingSignals.length > 0) {
       // User messages are high activity
-      const userMessages = incomingSignals.filter((s) => s.type === 'user_message');
-      for (const _ of userMessages) {
-        this.alertnessNeuron.recordActivity(0.3);
+      const userMessageCount = incomingSignals.filter((s) => s.type === 'user_message').length;
+      if (userMessageCount > 0) {
+        this.alertnessNeuron.recordActivity(0.3 * userMessageCount);
       }
       // Other signals are mild activity
-      for (const _ of incomingSignals.filter((s) => s.type !== 'user_message')) {
-        this.alertnessNeuron.recordActivity(0.05);
+      const otherSignalCount = incomingSignals.length - userMessageCount;
+      if (otherSignalCount > 0) {
+        this.alertnessNeuron.recordActivity(0.05 * otherSignalCount);
       }
     }
 
@@ -180,7 +181,9 @@ export class AutonomicProcessor implements AutonomicLayer {
     const intents: Intent[] = [];
 
     // Processing drains energy (very small amount per signal)
-    const energyDrain = (incomingCount * 0.001) + (neuronCount * 0.0005);
+    const energyDrain =
+      incomingCount * this.config.energyDrainPerSignal +
+      neuronCount * this.config.energyDrainPerNeuron;
     if (energyDrain > 0) {
       intents.push({
         type: 'UPDATE_STATE',
@@ -206,9 +209,7 @@ export class AutonomicProcessor implements AutonomicLayer {
    * Get current alertness value.
    */
   getAlertness(state: AgentState): number {
-    return this.alertnessNeuron
-      ? this.alertnessNeuron.getCurrentAlertness(state)
-      : 0.5;
+    return this.alertnessNeuron ? this.alertnessNeuron.getCurrentAlertness(state) : 0.5;
   }
 
   /**
