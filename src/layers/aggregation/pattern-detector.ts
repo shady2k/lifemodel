@@ -56,24 +56,38 @@ export interface PatternMatch {
  * Configuration for pattern detector.
  */
 export interface PatternDetectorConfig {
-  /** Minimum rate of change to consider a spike */
-  rateOfChangeSpikeThreshold: number;
-
   /** How long silence must last to be considered a break (ms) */
   silenceThresholdMs: number;
 
   /** Minimum signals before pattern detection activates */
   minSignalsForDetection: number;
+
+  /** Minimum change in pattern value to re-fire (prevents repeated triggers for same condition) */
+  significantChangeThreshold: number;
 }
 
 /**
  * Default configuration.
  */
 export const DEFAULT_PATTERN_CONFIG: PatternDetectorConfig = {
-  rateOfChangeSpikeThreshold: 0.5, // 50% change per second
   silenceThresholdMs: 30_000, // 30 seconds of silence
   minSignalsForDetection: 5,
+  significantChangeThreshold: 0.2, // 20% change needed to re-fire pattern
 };
+
+/**
+ * Acknowledged pattern state - what COGNITION already knows about.
+ * Like pain awareness - once brain processes it, we don't re-analyze
+ * unless the condition CHANGES significantly.
+ */
+interface AcknowledgedPattern {
+  /** The condition value when acknowledged */
+  value: number;
+  /** What type of condition (e.g., "energy_decreasing") */
+  conditionKey: string;
+  /** When acknowledged */
+  acknowledgedAt: number;
+}
 
 /**
  * Pattern Detector - identifies anomalies and patterns.
@@ -84,6 +98,11 @@ export class PatternDetector {
   private readonly logger: Logger;
   private lastActivityAt: Date = new Date();
   private activityHistory: { timestamp: Date; count: number }[] = [];
+  /**
+   * Acknowledged patterns - COGNITION already knows about these.
+   * Key: "patternId:conditionKey" (e.g., "rate_spike:energy_decreasing")
+   */
+  private readonly acknowledged = new Map<string, AcknowledgedPattern>();
 
   constructor(logger: Logger, config: Partial<PatternDetectorConfig> = {}) {
     this.logger = logger.child({ component: 'pattern-detector' });
@@ -93,16 +112,66 @@ export class PatternDetector {
   }
 
   /**
+   * Acknowledge a pattern - COGNITION has processed it.
+   * Called by COGNITION after handling a pattern_break signal.
+   */
+  acknowledge(patternId: string, conditionKey: string, value: number): void {
+    const key = `${patternId}:${conditionKey}`;
+    this.acknowledged.set(key, {
+      value,
+      conditionKey,
+      acknowledgedAt: Date.now(),
+    });
+    this.logger.debug({ patternId, conditionKey, value }, 'Pattern acknowledged');
+  }
+
+  /**
+   * Check if a pattern condition is already acknowledged and unchanged.
+   * Returns true if we should SKIP firing (already known, no significant change).
+   */
+  private isAlreadyAcknowledged(
+    patternId: string,
+    conditionKey: string,
+    currentValue: number
+  ): boolean {
+    const key = `${patternId}:${conditionKey}`;
+    const ack = this.acknowledged.get(key);
+
+    if (!ack) return false; // Not acknowledged, should fire
+
+    // Check if condition changed significantly
+    const change = Math.abs(currentValue - ack.value);
+    if (change >= this.config.significantChangeThreshold) {
+      // Condition changed significantly - clear ack, allow re-fire
+      this.acknowledged.delete(key);
+      this.logger.debug(
+        { patternId, conditionKey, oldValue: ack.value, newValue: currentValue, change },
+        'Pattern condition changed significantly, clearing acknowledgment'
+      );
+      return false;
+    }
+
+    return true; // Still acknowledged, skip firing
+  }
+
+  /**
+   * Clear acknowledgment when condition resolves.
+   */
+  private clearAcknowledgmentIfResolved(patternId: string, conditionKey: string): void {
+    const key = `${patternId}:${conditionKey}`;
+    if (this.acknowledged.has(key)) {
+      this.acknowledged.delete(key);
+      this.logger.debug({ patternId, conditionKey }, 'Pattern resolved, acknowledgment cleared');
+    }
+  }
+
+  /**
    * Register built-in patterns.
    */
   private registerBuiltInPatterns(): void {
-    // Rate of change spike (novelty)
-    this.patterns.push({
-      id: 'rate_spike',
-      description: 'Sudden change in rate',
-      signalTypes: ['social_debt', 'energy', 'contact_pressure'],
-      detect: (aggregates) => this.detectRateSpike(aggregates),
-    });
+    // NOTE: Removed rate_spike pattern for internal signals (energy, social_debt).
+    // Monotone changes in internal state are expected behavior, not anomalies.
+    // Pattern detection should focus on USER behavior anomalies.
 
     // Sudden silence after activity
     this.patterns.push({
@@ -112,13 +181,8 @@ export class PatternDetector {
       detect: (aggregates, signals) => this.detectSuddenSilence(aggregates, signals),
     });
 
-    // Energy dropping while pressure rising
-    this.patterns.push({
-      id: 'energy_pressure_conflict',
-      description: 'Low energy with high pressure',
-      signalTypes: ['energy', 'contact_pressure'],
-      detect: (aggregates) => this.detectEnergyPressureConflict(aggregates),
-    });
+    // NOTE: Removed energy_pressure_conflict - handled by energy gate in threshold-engine.
+    // When energy is low, COGNITION won't wake for contact pressure anyway.
   }
 
   /**
@@ -138,17 +202,41 @@ export class PatternDetector {
     for (const pattern of this.patterns) {
       try {
         const match = pattern.detect(aggregates, signals);
+
         if (match && match.confidence >= 0.5) {
+          // Get condition key from context (e.g., "energy_decreasing")
+          const rawConditionKey = match.context?.['conditionKey'];
+          const rawConditionValue = match.context?.['conditionValue'];
+          const conditionKey = typeof rawConditionKey === 'string' ? rawConditionKey : 'default';
+          const conditionValue =
+            typeof rawConditionValue === 'number' ? rawConditionValue : match.confidence;
+
+          // Check if already acknowledged (COGNITION already knows)
+          if (this.isAlreadyAcknowledged(match.patternId, conditionKey, conditionValue)) {
+            this.logger.debug(
+              { patternId: match.patternId, conditionKey },
+              'Pattern already acknowledged, skipping'
+            );
+            continue;
+          }
+
           patternSignals.push(this.createPatternSignal(match));
 
           this.logger.debug(
             {
               patternId: match.patternId,
+              conditionKey,
               confidence: match.confidence.toFixed(2),
               description: match.description,
             },
-            'Pattern detected'
+            'Pattern detected (needs attention)'
           );
+        } else {
+          // Condition not detected - clear any acknowledgment so it can fire again if it returns
+          const conditionKey = (pattern as { defaultConditionKey?: string }).defaultConditionKey;
+          if (conditionKey) {
+            this.clearAcknowledgmentIfResolved(pattern.id, conditionKey);
+          }
         }
       } catch (error) {
         this.logger.warn(
@@ -172,31 +260,8 @@ export class PatternDetector {
     this.logger.debug({ patternId: pattern.id }, 'Pattern registered');
   }
 
-  /**
-   * Detect rate of change spikes.
-   */
-  private detectRateSpike(aggregates: SignalAggregate[]): PatternMatch | null {
-    for (const aggregate of aggregates) {
-      if (Math.abs(aggregate.rateOfChange) > this.config.rateOfChangeSpikeThreshold) {
-        const direction = aggregate.rateOfChange > 0 ? 'increasing' : 'decreasing';
-        return {
-          patternId: 'rate_spike',
-          confidence: Math.min(
-            1,
-            Math.abs(aggregate.rateOfChange) / this.config.rateOfChangeSpikeThreshold
-          ),
-          description: `${aggregate.type} is ${direction} rapidly`,
-          triggerSignals: [],
-          context: {
-            type: aggregate.type,
-            rateOfChange: aggregate.rateOfChange,
-            currentValue: aggregate.currentValue,
-          },
-        };
-      }
-    }
-    return null;
-  }
+  // NOTE: detectRateSpike removed - monotone internal state changes are expected,
+  // not anomalies. Pattern detection focuses on user behavior anomalies.
 
   /**
    * Detect sudden silence after activity.
@@ -241,31 +306,7 @@ export class PatternDetector {
     return null;
   }
 
-  /**
-   * Detect energy-pressure conflict.
-   */
-  private detectEnergyPressureConflict(aggregates: SignalAggregate[]): PatternMatch | null {
-    const energy = aggregates.find((a) => a.type === 'energy');
-    const pressure = aggregates.find((a) => a.type === 'contact_pressure');
-
-    if (!energy || !pressure) return null;
-
-    // Low energy + high pressure = conflict
-    if (energy.currentValue < 0.3 && pressure.currentValue > 0.6) {
-      return {
-        patternId: 'energy_pressure_conflict',
-        confidence: (1 - energy.currentValue) * pressure.currentValue,
-        description: 'Want to contact but energy is low',
-        triggerSignals: [],
-        context: {
-          energy: energy.currentValue,
-          pressure: pressure.currentValue,
-        },
-      };
-    }
-
-    return null;
-  }
+  // NOTE: detectEnergyPressureConflict removed - handled by energy gate.
 
   /**
    * Update activity history.
@@ -285,9 +326,7 @@ export class PatternDetector {
 
     // Trim old history
     const cutoff = Date.now() - this.config.silenceThresholdMs * 3;
-    this.activityHistory = this.activityHistory.filter(
-      (h) => h.timestamp.getTime() > cutoff
-    );
+    this.activityHistory = this.activityHistory.filter((h) => h.timestamp.getTime() > cutoff);
   }
 
   /**

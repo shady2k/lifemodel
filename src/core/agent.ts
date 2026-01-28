@@ -227,8 +227,11 @@ export class Agent {
         }
 
         // Special handling: sync energy state to energy model
-        if (key === 'energy' && typeof value === 'number') {
-          this.energy.setEnergy(value);
+        if (key === 'energy') {
+          const newEnergy = this.state.energy;
+          if (typeof newEnergy === 'number') {
+            this.energy.setEnergy(newEnergy);
+          }
         }
 
         this.logger.debug({ key, value, delta }, 'State updated via intent');

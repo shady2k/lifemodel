@@ -13,6 +13,8 @@
  */
 
 import type { Signal, SignalAggregate } from '../../types/signal.js';
+import { createSignal } from '../../types/signal.js';
+import { Priority } from '../../types/priority.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { WakeTrigger, WakeThresholdConfig } from '../../types/layers.js';
 import { DEFAULT_WAKE_THRESHOLDS } from '../../types/layers.js';
@@ -60,12 +62,8 @@ export class ThresholdEngine {
    * @param aggregates Current aggregates
    * @param state Agent state (for threshold adjustment)
    */
-  evaluate(
-    signals: Signal[],
-    aggregates: SignalAggregate[],
-    state: AgentState
-  ): WakeDecision {
-    // Check for high-priority triggers first (always wake)
+  evaluate(signals: Signal[], aggregates: SignalAggregate[], state: AgentState): WakeDecision {
+    // Check for high-priority triggers first (always wake for user messages)
     const userMessages = signals.filter((s) => s.type === 'user_message');
     if (userMessages.length > 0) {
       return {
@@ -73,6 +71,19 @@ export class ThresholdEngine {
         trigger: 'user_message',
         reason: 'User sent a message',
         triggerSignals: userMessages,
+      };
+    }
+
+    // Energy gate: if energy is critically low, don't wake for anything else
+    // This saves expensive LLM calls when agent is "tired"
+    if (state.energy < this.config.lowEnergy) {
+      this.logger.debug(
+        { energy: state.energy.toFixed(2), threshold: this.config.lowEnergy },
+        'Skipping COGNITION wake - energy too low'
+      );
+      return {
+        shouldWake: false,
+        triggerSignals: [],
       };
     }
 
@@ -87,19 +98,25 @@ export class ThresholdEngine {
       };
     }
 
-    // Check for pattern breaks
-    const patternBreaks = signals.filter((s) => s.type === 'pattern_break');
+    // Check for pattern breaks - only wake for user-related patterns
+    const patternBreaks = signals.filter((s) => {
+      if (s.type !== 'pattern_break') return false;
+      const data = s.data as { patternName?: string } | undefined;
+      // Only wake for user-behavior patterns, not internal state patterns
+      // Internal patterns (rate_spike, energy_pressure_conflict) are handled autonomically
+      return data?.patternName === 'sudden_silence';
+    });
     if (patternBreaks.length > 0) {
       return {
         shouldWake: true,
         trigger: 'pattern_break',
-        reason: 'Unusual pattern detected',
+        reason: 'User behavior pattern detected',
         triggerSignals: patternBreaks,
       };
     }
 
     // Check for threshold crossings in aggregates
-    const thresholdResult = this.checkThresholds(aggregates, state);
+    const thresholdResult = this.checkThresholds(aggregates, state, signals);
     if (thresholdResult.shouldWake) {
       return thresholdResult;
     }
@@ -116,7 +133,8 @@ export class ThresholdEngine {
    */
   private checkThresholds(
     aggregates: SignalAggregate[],
-    state: AgentState
+    state: AgentState,
+    _signals: Signal[]
   ): WakeDecision {
     // Get contact pressure aggregate
     const contactPressure = aggregates.find((a) => a.type === 'contact_pressure');
@@ -134,11 +152,28 @@ export class ThresholdEngine {
           'Contact pressure threshold crossed'
         );
 
+        // Create synthetic trigger signal so COGNITION has context
+        const triggerSignal = createSignal(
+          'threshold_crossed',
+          'meta.threshold_monitor',
+          { value: contactPressure.currentValue, confidence: 1.0 },
+          {
+            priority: Priority.NORMAL,
+            data: {
+              kind: 'threshold',
+              thresholdName: 'contact_pressure',
+              threshold,
+              value: contactPressure.currentValue,
+              direction: 'above',
+            },
+          }
+        );
+
         return {
           shouldWake: true,
           trigger: 'threshold_crossed',
           reason: `Contact pressure ${(contactPressure.currentValue * 100).toFixed(0)}% >= threshold ${(threshold * 100).toFixed(0)}%`,
-          triggerSignals: [],
+          triggerSignals: [triggerSignal],
           threshold,
           value: contactPressure.currentValue,
         };
@@ -149,11 +184,28 @@ export class ThresholdEngine {
     const socialDebt = aggregates.find((a) => a.type === 'social_debt');
 
     if (socialDebt && socialDebt.currentValue >= this.config.socialDebt) {
+      // Create synthetic trigger signal
+      const triggerSignal = createSignal(
+        'threshold_crossed',
+        'meta.threshold_monitor',
+        { value: socialDebt.currentValue, confidence: 1.0 },
+        {
+          priority: Priority.NORMAL,
+          data: {
+            kind: 'threshold',
+            thresholdName: 'social_debt',
+            threshold: this.config.socialDebt,
+            value: socialDebt.currentValue,
+            direction: 'above',
+          },
+        }
+      );
+
       return {
         shouldWake: true,
         trigger: 'threshold_crossed',
         reason: `Social debt ${(socialDebt.currentValue * 100).toFixed(0)}% is high`,
-        triggerSignals: [],
+        triggerSignals: [triggerSignal],
         threshold: this.config.socialDebt,
         value: socialDebt.currentValue,
       };
