@@ -9,32 +9,56 @@
  * - Decision making
  * - Only activated when AGGREGATION layer determines it's needed
  *
- * Uses fast LLM for classification. Escalates to SMART for complex reasoning.
+ * Supports two modes:
+ * - Legacy: ThoughtSynthesizer + ActionDecider (simpler, single LLM call)
+ * - Agentic: Full agentic loop with tools (multiple LLM calls, more capable)
  */
 
-import type { CognitionLayer, CognitionContext, CognitionResult } from '../../types/layers.js';
+import type {
+  CognitionLayer,
+  CognitionContext,
+  CognitionResult,
+  SmartContext,
+} from '../../types/layers.js';
 import type { Intent } from '../../types/intent.js';
 import type { Logger } from '../../types/logger.js';
 import type { MessageComposer } from '../../llm/composer.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
+import type { Agent } from '../../core/agent.js';
+import type { LoopConfig } from '../../types/cognition.js';
 import { emitTypingIndicator } from '../shared/index.js';
 
 import type { ThoughtSynthesizer } from './thought-synthesizer.js';
 import { createThoughtSynthesizer, type ThoughtSynthesizerConfig } from './thought-synthesizer.js';
 import type { ActionDecider } from './action-decider.js';
 import { createActionDecider, type ActionDeciderConfig } from './action-decider.js';
+import type { AgenticLoop } from './agentic-loop.js';
+import {
+  createAgenticLoop,
+  type CognitionLLM,
+  type LoopContext,
+  type ConversationMessage,
+} from './agentic-loop.js';
+import type { ToolRegistry } from './tools/registry.js';
+import { createToolRegistry, type MemoryProvider } from './tools/registry.js';
 
 /**
  * Configuration for COGNITION processor.
  */
 export interface CognitionProcessorConfig {
-  /** Thought synthesizer config */
+  /** Use agentic loop instead of legacy mode */
+  useAgenticLoop: boolean;
+
+  /** Thought synthesizer config (legacy mode) */
   synthesizer: Partial<ThoughtSynthesizerConfig>;
 
-  /** Action decider config */
+  /** Action decider config (legacy mode) */
   decider: Partial<ActionDeciderConfig>;
+
+  /** Agentic loop config */
+  loopConfig: Partial<LoopConfig>;
 
   /** Emit typing indicator before LLM calls */
   emitTypingIndicator: boolean;
@@ -44,8 +68,10 @@ export interface CognitionProcessorConfig {
  * Default configuration.
  */
 const DEFAULT_CONFIG: CognitionProcessorConfig = {
+  useAgenticLoop: false, // Start with legacy mode, enable when ready
   synthesizer: {},
   decider: {},
+  loopConfig: {},
   emitTypingIndicator: true,
 };
 
@@ -57,6 +83,9 @@ export interface CognitionProcessorDeps {
   conversationManager?: ConversationManager | undefined;
   userModel?: UserModel | undefined;
   eventBus?: EventBus | undefined;
+  agent?: Agent | undefined;
+  memoryProvider?: MemoryProvider | undefined;
+  cognitionLLM?: CognitionLLM | undefined;
 }
 
 /**
@@ -65,12 +94,21 @@ export interface CognitionProcessorDeps {
 export class CognitionProcessor implements CognitionLayer {
   readonly name = 'cognition' as const;
 
+  // Legacy mode components
   private readonly synthesizer: ThoughtSynthesizer;
   private readonly decider: ActionDecider;
+
+  // Agentic mode components
+  private agenticLoop: AgenticLoop | undefined;
+  private toolRegistry: ToolRegistry | undefined;
+
   private readonly config: CognitionProcessorConfig;
   private readonly logger: Logger;
 
   private eventBus: EventBus | undefined;
+  private agent: Agent | undefined;
+  private conversationManager: ConversationManager | undefined;
+  private userModel: UserModel | undefined;
 
   constructor(
     logger: Logger,
@@ -83,8 +121,10 @@ export class CognitionProcessor implements CognitionLayer {
       ...config,
       synthesizer: { ...DEFAULT_CONFIG.synthesizer, ...config.synthesizer },
       decider: { ...DEFAULT_CONFIG.decider, ...config.decider },
+      loopConfig: { ...DEFAULT_CONFIG.loopConfig, ...config.loopConfig },
     };
 
+    // Legacy mode setup
     this.synthesizer = createThoughtSynthesizer(this.logger, this.config.synthesizer);
     this.decider = createActionDecider(this.logger, this.config.decider, {
       composer: deps?.composer,
@@ -93,12 +133,46 @@ export class CognitionProcessor implements CognitionLayer {
     });
 
     this.eventBus = deps?.eventBus;
+    this.agent = deps?.agent;
+    this.conversationManager = deps?.conversationManager;
+    this.userModel = deps?.userModel;
+
+    // Agentic mode setup
+    if (this.config.useAgenticLoop && deps?.cognitionLLM) {
+      this.setupAgenticLoop(deps.cognitionLLM, deps.memoryProvider);
+    }
+  }
+
+  /**
+   * Setup the agentic loop.
+   */
+  private setupAgenticLoop(llm: CognitionLLM, memoryProvider?: MemoryProvider): void {
+    const agent = this.agent;
+    const userModel = this.userModel;
+
+    this.toolRegistry = createToolRegistry(this.logger, {
+      memoryProvider,
+      agentStateProvider: agent
+        ? { getState: () => agent.getState() as unknown as Record<string, unknown> }
+        : undefined,
+      userModelProvider: userModel ? { getModel: () => userModel.getBeliefs() } : undefined,
+    });
+
+    this.agenticLoop = createAgenticLoop(
+      this.logger,
+      llm,
+      this.toolRegistry,
+      this.config.loopConfig
+    );
+
+    this.logger.info('Agentic loop initialized');
   }
 
   /**
    * Set dependencies after construction.
    */
   setDependencies(deps: CognitionProcessorDeps): void {
+    // Legacy mode
     this.decider.setDependencies({
       composer: deps.composer,
       conversationManager: deps.conversationManager,
@@ -107,6 +181,35 @@ export class CognitionProcessor implements CognitionLayer {
 
     if (deps.eventBus) {
       this.eventBus = deps.eventBus;
+    }
+    if (deps.agent) {
+      this.agent = deps.agent;
+    }
+    if (deps.conversationManager) {
+      this.conversationManager = deps.conversationManager;
+    }
+    if (deps.userModel) {
+      this.userModel = deps.userModel;
+    }
+
+    // Agentic mode - setup if we have LLM now
+    if (this.config.useAgenticLoop && deps.cognitionLLM && !this.agenticLoop) {
+      this.setupAgenticLoop(deps.cognitionLLM, deps.memoryProvider);
+    }
+
+    // Update tool registry dependencies
+    if (this.toolRegistry) {
+      const depsAgent = deps.agent;
+      const depsUserModel = deps.userModel;
+      this.toolRegistry.setDependencies({
+        memoryProvider: deps.memoryProvider,
+        agentStateProvider: depsAgent
+          ? { getState: () => depsAgent.getState() as unknown as Record<string, unknown> }
+          : undefined,
+        userModelProvider: depsUserModel
+          ? { getModel: () => depsUserModel.getBeliefs() }
+          : undefined,
+      });
     }
 
     this.logger.debug('COGNITION processor dependencies updated');
@@ -119,6 +222,107 @@ export class CognitionProcessor implements CognitionLayer {
    * @returns Cognition result with response or escalation
    */
   async process(context: CognitionContext): Promise<CognitionResult> {
+    // Use agentic loop if enabled and available
+    if (this.config.useAgenticLoop && this.agenticLoop) {
+      return this.processAgentic(context);
+    }
+
+    // Legacy mode
+    return this.processLegacy(context);
+  }
+
+  /**
+   * Process using the agentic loop (new mode).
+   */
+  private async processAgentic(context: CognitionContext): Promise<CognitionResult> {
+    const startTime = Date.now();
+
+    // Find the trigger signal (usually user_message)
+    const triggerSignal = context.triggerSignals[0];
+    if (!triggerSignal) {
+      return {
+        escalateToSmart: false,
+        confidence: 1.0,
+        intents: [],
+      };
+    }
+
+    // Extract chat info
+    const signalData = triggerSignal.data as
+      | { chatId?: string; userId?: string; channel?: string }
+      | undefined;
+    const chatId = signalData?.chatId;
+    const channel = signalData?.channel ?? 'telegram';
+
+    // Emit typing indicator
+    if (this.config.emitTypingIndicator && chatId && channel) {
+      await this.emitTypingIndicatorEvent(chatId, channel);
+    }
+
+    // Build loop context
+    const loopContext: LoopContext = {
+      triggerSignal,
+      agentState: context.agentState,
+      conversationHistory: await this.getConversationHistory(chatId),
+      userModel: this.userModel?.getBeliefs() ?? {},
+      correlationId: context.correlationId,
+      chatId,
+      userId: signalData?.userId,
+    };
+
+    // Run the agentic loop (we know it exists because processAgentic is only called when agenticLoop is set)
+    const agenticLoop = this.agenticLoop;
+    if (!agenticLoop) {
+      throw new Error('Agentic loop not initialized');
+    }
+    const loopResult = await agenticLoop.run(loopContext);
+
+    const duration = Date.now() - startTime;
+
+    this.logger.debug(
+      {
+        success: loopResult.success,
+        terminalType: loopResult.terminal.type,
+        steps: loopResult.steps.length,
+        intents: loopResult.intents.length,
+        pendingEscalation: loopResult.pendingEscalation.length,
+        duration,
+      },
+      'Agentic loop complete'
+    );
+
+    // Build result based on terminal state
+    const result: CognitionResult = {
+      escalateToSmart: loopResult.terminal.type === 'escalate',
+      confidence: loopResult.success ? 0.8 : 0.3,
+      intents: loopResult.intents,
+    };
+
+    if (loopResult.terminal.type === 'respond') {
+      result.response = loopResult.terminal.text;
+    }
+
+    if (loopResult.terminal.type === 'escalate') {
+      result.escalationReason = loopResult.terminal.reason;
+      result.smartContext = this.buildSmartContext(context, loopResult);
+    }
+
+    // Handle pending escalation (low confidence updates)
+    if (loopResult.pendingEscalation.length > 0) {
+      this.logger.debug(
+        { pendingSteps: loopResult.pendingEscalation.length },
+        'Some steps need SMART confirmation'
+      );
+      // TODO: Could escalate or store for later review
+    }
+
+    return result;
+  }
+
+  /**
+   * Process using legacy mode (ThoughtSynthesizer + ActionDecider).
+   */
+  private async processLegacy(context: CognitionContext): Promise<CognitionResult> {
     const startTime = Date.now();
 
     // 1. Synthesize understanding
@@ -187,6 +391,42 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     return result;
+  }
+
+  /**
+   * Get conversation history for context.
+   */
+  private async getConversationHistory(chatId?: string): Promise<ConversationMessage[]> {
+    if (!chatId || !this.conversationManager) {
+      return [];
+    }
+
+    try {
+      const history = await this.conversationManager.getHistory(chatId, { maxRecent: 10 });
+      return history.map((msg) => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Build SMART context from agentic loop result.
+   */
+  private buildSmartContext(
+    context: CognitionContext,
+    loopResult: { terminal: { type: string; reason?: string; parentId?: string }; steps: unknown[] }
+  ): SmartContext {
+    return {
+      cognitionContext: context,
+      escalationReason:
+        loopResult.terminal.type === 'escalate'
+          ? (loopResult.terminal.reason ?? 'Unknown')
+          : 'Escalated',
+      partialAnalysis: `COGNITION completed ${String(loopResult.steps.length)} steps before escalating`,
+    };
   }
 
   /**

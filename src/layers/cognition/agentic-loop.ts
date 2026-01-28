@@ -1,0 +1,614 @@
+/**
+ * COGNITION Agentic Loop
+ *
+ * Executes the think → tool → think cycle until natural conclusion.
+ * Handles tool execution, state updates, and escalation decisions.
+ *
+ * Flow:
+ * 1. Build prompt with context
+ * 2. Call LLM, get CognitionOutput
+ * 3. Execute any tool calls
+ * 4. If needsToolResult → inject results, go to step 2
+ * 5. If respond/escalate/noAction → compile to intents, return
+ */
+
+import type { Logger } from '../../types/logger.js';
+import type { Intent } from '../../types/intent.js';
+import type { Signal } from '../../types/signal.js';
+import type { AgentState } from '../../types/agent/state.js';
+import type {
+  CognitionOutput,
+  Step,
+  ToolStep,
+  ToolResult,
+  LoopConfig,
+  LoopState,
+  Terminal,
+} from '../../types/cognition.js';
+import {
+  DEFAULT_LOOP_CONFIG,
+  createLoopState,
+  getFieldPolicy,
+  COGNITION_SCHEMA_VERSION,
+} from '../../types/cognition.js';
+import type { ToolRegistry } from './tools/registry.js';
+import type { ToolContext } from './tools/types.js';
+
+/**
+ * LLM interface for the agentic loop.
+ */
+export interface CognitionLLM {
+  /**
+   * Call the LLM with a prompt and get structured output.
+   */
+  complete(prompt: string, options?: LLMOptions): Promise<string>;
+}
+
+export interface LLMOptions {
+  maxTokens?: number;
+  temperature?: number;
+}
+
+/**
+ * Context provided to the loop.
+ */
+export interface LoopContext {
+  /** Trigger signal */
+  triggerSignal: Signal;
+
+  /** Current agent state */
+  agentState: AgentState;
+
+  /** Conversation history (recent messages) */
+  conversationHistory: ConversationMessage[];
+
+  /** User model beliefs */
+  userModel: Record<string, unknown>;
+
+  /** Correlation ID */
+  correlationId: string;
+
+  /** Chat ID (if applicable) */
+  chatId?: string | undefined;
+
+  /** User ID (if applicable) */
+  userId?: string | undefined;
+}
+
+export interface ConversationMessage {
+  role: 'user' | 'assistant' | 'thought';
+  content: string;
+  timestamp?: Date | undefined;
+}
+
+/**
+ * Result from the agentic loop.
+ */
+export interface LoopResult {
+  /** Whether loop completed successfully */
+  success: boolean;
+
+  /** Terminal state reached */
+  terminal: Terminal;
+
+  /** All steps taken */
+  steps: Step[];
+
+  /** Compiled intents to execute */
+  intents: Intent[];
+
+  /** Steps that need escalation review (low confidence) */
+  pendingEscalation: Step[];
+
+  /** Loop state for debugging */
+  state: LoopState;
+
+  /** Error message (if failed) */
+  error?: string | undefined;
+}
+
+/**
+ * Agentic Loop implementation.
+ */
+export class AgenticLoop {
+  private readonly logger: Logger;
+  private readonly llm: CognitionLLM;
+  private readonly toolRegistry: ToolRegistry;
+  private readonly config: LoopConfig;
+
+  constructor(
+    logger: Logger,
+    llm: CognitionLLM,
+    toolRegistry: ToolRegistry,
+    config: Partial<LoopConfig> = {}
+  ) {
+    this.logger = logger.child({ component: 'agentic-loop' });
+    this.llm = llm;
+    this.toolRegistry = toolRegistry;
+    this.config = { ...DEFAULT_LOOP_CONFIG, ...config };
+  }
+
+  /**
+   * Run the agentic loop until completion.
+   */
+  async run(context: LoopContext): Promise<LoopResult> {
+    const state = createLoopState();
+    const toolResults: ToolResult[] = [];
+    const pendingEscalation: Step[] = [];
+
+    this.logger.debug(
+      {
+        correlationId: context.correlationId,
+        triggerType: context.triggerSignal.type,
+      },
+      'Agentic loop starting'
+    );
+
+    try {
+      while (!state.aborted) {
+        // Check limits
+        if (state.iteration >= this.config.maxIterations) {
+          state.aborted = true;
+          state.abortReason = `Max iterations reached (${String(this.config.maxIterations)})`;
+          break;
+        }
+
+        if (Date.now() - state.startTime > this.config.timeoutMs) {
+          state.aborted = true;
+          state.abortReason = `Timeout reached (${String(this.config.timeoutMs)}ms)`;
+          break;
+        }
+
+        if (state.toolCallCount >= this.config.maxToolCalls) {
+          state.aborted = true;
+          state.abortReason = `Max tool calls reached (${String(this.config.maxToolCalls)})`;
+          break;
+        }
+
+        // Build prompt
+        const prompt = this.buildPrompt(context, state, toolResults);
+
+        // Call LLM
+        state.iteration++;
+        const rawOutput = await this.llm.complete(prompt, {
+          maxTokens: this.config.maxOutputTokens,
+        });
+
+        // Parse output
+        const output = this.parseOutput(rawOutput, context.correlationId, context.triggerSignal.id);
+        if (!output) {
+          state.aborted = true;
+          state.abortReason = 'Failed to parse LLM output';
+          break;
+        }
+
+        // Add steps to state (deduplicate by id to prevent double processing)
+        const existingIds = new Set(state.allSteps.map((s) => s.id));
+        const newSteps = output.steps.filter((s) => !existingIds.has(s.id));
+        state.allSteps.push(...newSteps);
+
+        // Check for steps needing escalation
+        const escalationSteps = this.checkEscalation(output.steps);
+        pendingEscalation.push(...escalationSteps);
+
+        // Handle terminal state
+        if (output.terminal.type === 'needsToolResult') {
+          // Execute tools and continue - search ALL steps, not just current iteration
+          const needsResultTerminal = output.terminal;
+          const toolStep = state.allSteps.find(
+            (s): s is ToolStep => s.type === 'tool' && s.id === needsResultTerminal.stepId
+          );
+
+          if (toolStep) {
+            state.toolCallCount++;
+            const result = await this.executeTool(toolStep, context);
+            toolResults.push(result);
+            state.toolResults.push(result);
+          }
+
+          continue;
+        }
+
+        // Terminal states: respond, escalate, noAction
+        this.logger.debug(
+          {
+            terminal: output.terminal.type,
+            iterations: state.iteration,
+            toolCalls: state.toolCallCount,
+            steps: state.allSteps.length,
+          },
+          'Agentic loop completed'
+        );
+
+        // Compile intents
+        const intents = this.compileIntents(state.allSteps, output.terminal, context);
+
+        return {
+          success: true,
+          terminal: output.terminal,
+          steps: state.allSteps,
+          intents,
+          pendingEscalation,
+          state,
+        };
+      }
+
+      // Aborted
+      this.logger.warn(
+        { reason: state.abortReason, iterations: state.iteration },
+        'Agentic loop aborted'
+      );
+
+      return {
+        success: false,
+        terminal: { type: 'noAction', reason: state.abortReason ?? 'Aborted', parentId: 'loop' },
+        steps: state.allSteps,
+        intents: [],
+        pendingEscalation,
+        state,
+        error: state.abortReason,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error({ error: errorMessage }, 'Agentic loop error');
+
+      return {
+        success: false,
+        terminal: { type: 'noAction', reason: errorMessage, parentId: 'loop' },
+        steps: state.allSteps,
+        intents: [],
+        pendingEscalation,
+        state,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Build prompt for LLM.
+   */
+  private buildPrompt(context: LoopContext, state: LoopState, toolResults: ToolResult[]): string {
+    const sections: string[] = [];
+
+    // System instruction
+    sections.push(this.buildSystemPrompt());
+
+    // Current state
+    sections.push(this.buildStateSection(context));
+
+    // Conversation history
+    if (context.conversationHistory.length > 0) {
+      sections.push(this.buildHistorySection(context.conversationHistory));
+    }
+
+    // Previous steps (if continuing)
+    if (state.allSteps.length > 0) {
+      sections.push(this.buildPreviousStepsSection(state.allSteps, toolResults));
+    }
+
+    // Current trigger
+    sections.push(this.buildTriggerSection(context.triggerSignal));
+
+    // Output format
+    sections.push(this.buildOutputFormat());
+
+    return sections.join('\n\n');
+  }
+
+  private buildSystemPrompt(): string {
+    return `You are the COGNITION layer of a digital human.
+Your role is to think, reason, use tools, and decide actions.
+
+You can:
+- Think through problems step by step
+- Call tools to gather information
+- Update beliefs about the user (with evidence)
+- Update your internal state
+- Save important facts to memory
+- Respond to the user
+- Escalate to SMART layer if uncertain
+
+Guidelines:
+- Be concise in thoughts
+- Provide evidence for user model updates
+- Only save facts worth remembering long-term
+- Escalate complex/sensitive topics to SMART`;
+  }
+
+  private buildStateSection(context: LoopContext): string {
+    const { agentState, userModel } = context;
+
+    return `## Current State
+
+Agent:
+- Energy: ${(agentState.energy * 100).toFixed(0)}%
+- Social Debt: ${(agentState.socialDebt * 100).toFixed(0)}%
+- Task Pressure: ${(agentState.taskPressure * 100).toFixed(0)}%
+- Curiosity: ${(agentState.curiosity * 100).toFixed(0)}%
+
+User Model:
+${Object.entries(userModel)
+  .map(([k, v]) => `- ${k}: ${JSON.stringify(v)}`)
+  .join('\n')}`;
+  }
+
+  private buildHistorySection(history: ConversationMessage[]): string {
+    const formatted = history
+      .slice(-10) // Last 10 messages
+      .map((m) => `${m.role}: ${m.content}`)
+      .join('\n');
+
+    return `## Recent Conversation\n${formatted}`;
+  }
+
+  private buildPreviousStepsSection(steps: Step[], toolResults: ToolResult[]): string {
+    const lines: string[] = ['## Previous Steps'];
+
+    for (const step of steps) {
+      if (step.type === 'think') {
+        lines.push(`[think] ${step.content}`);
+      } else if (step.type === 'tool') {
+        const result = toolResults.find((r) => r.stepId === step.id);
+        lines.push(`[tool] ${step.name}(${JSON.stringify(step.args)})`);
+        if (result) {
+          if (result.success) {
+            lines.push(`[result] ${JSON.stringify(result.data)}`);
+          } else {
+            lines.push(`[error] ${result.error ?? 'Unknown error'}`);
+          }
+        }
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private buildTriggerSection(signal: Signal): string {
+    const data = signal.data as Record<string, unknown> | undefined;
+
+    if (signal.type === 'user_message' && data) {
+      const text = (data['text'] as string | undefined) ?? '';
+      return `## Current Input\nUser message: "${text}"`;
+    }
+
+    return `## Current Trigger\nType: ${signal.type}\nData: ${JSON.stringify(data ?? {})}`;
+  }
+
+  private buildOutputFormat(): string {
+    return `## Output Format
+
+Respond with valid JSON:
+
+{
+  "steps": [
+    { "type": "think", "id": "t1", "parentId": "<signal_id or previous_step_id>", "content": "..." },
+    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "searchMemory", "args": { "query": "..." } },
+    { "type": "updateUser", "id": "u1", "parentId": "t1", "field": "mood", "value": "happy", "confidence": 0.8, "source": "inferred" },
+    { "type": "updateAgent", "id": "a1", "parentId": "t1", "field": "socialDebt", "operation": "delta", "value": -0.1, "confidence": 0.9, "reason": "had conversation" },
+    { "type": "saveFact", "id": "f1", "parentId": "t1", "fact": { "subject": "user", "predicate": "name", "object": "Shady", "source": "user_quote", "evidence": "said 'I'm Shady'", "confidence": 0.95, "tags": ["identity"] } },
+    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } }
+  ],
+  "terminal": { "type": "respond", "text": "Hello!", "parentId": "t1" }
+  // OR: { "type": "needsToolResult", "stepId": "tool1" }
+  // OR: { "type": "escalate", "reason": "complex question", "parentId": "t1" }
+  // OR: { "type": "noAction", "reason": "nothing to do", "parentId": "t1" }
+}
+
+Available tools: searchMemory, saveToMemory, getCurrentTime, getTimeSince, getAgentState, getUserModel`;
+  }
+
+  /**
+   * Parse LLM output to CognitionOutput.
+   */
+  private parseOutput(
+    raw: string,
+    correlationId: string,
+    triggerSignalId: string
+  ): CognitionOutput | null {
+    try {
+      // Extract JSON from response (handle markdown code blocks)
+      let jsonStr = raw;
+      const jsonMatch = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
+      if (jsonMatch?.[1]) {
+        jsonStr = jsonMatch[1];
+      }
+
+      const parsed = JSON.parse(jsonStr.trim()) as {
+        steps?: Step[];
+        terminal?: Terminal;
+      };
+
+      // Validate required fields
+      if (!parsed.terminal) {
+        this.logger.error({ raw: raw.slice(0, 500) }, 'LLM output missing terminal');
+        return null;
+      }
+
+      return {
+        schemaVersion: COGNITION_SCHEMA_VERSION,
+        correlationId,
+        triggerSignalId,
+        steps: parsed.steps ?? [],
+        terminal: parsed.terminal,
+      };
+    } catch (error) {
+      this.logger.error({ error, raw: raw.slice(0, 500) }, 'Failed to parse LLM output');
+      return null;
+    }
+  }
+
+  /**
+   * Execute a tool step.
+   */
+  private async executeTool(step: ToolStep, context: LoopContext): Promise<ToolResult> {
+    const toolContext: ToolContext = {
+      chatId: context.chatId,
+      userId: context.userId,
+      correlationId: context.correlationId,
+    };
+
+    return this.toolRegistry.execute({
+      stepId: step.id,
+      name: step.name,
+      args: step.args,
+      context: toolContext,
+    });
+  }
+
+  /**
+   * Check which steps need escalation due to low confidence.
+   */
+  private checkEscalation(steps: Step[]): Step[] {
+    const needsEscalation: Step[] = [];
+
+    for (const step of steps) {
+      if (step.type === 'updateUser') {
+        const policy = getFieldPolicy(`user.${step.field}`);
+        if (step.confidence < policy.minConfidence && policy.escalateIfUncertain) {
+          needsEscalation.push(step);
+        }
+      } else if (step.type === 'updateAgent') {
+        const policy = getFieldPolicy(`agent.${step.field}`);
+        if (step.confidence < policy.minConfidence) {
+          needsEscalation.push(step);
+        }
+      }
+    }
+
+    return needsEscalation;
+  }
+
+  /**
+   * Compile steps to intents.
+   */
+  private compileIntents(steps: Step[], terminal: Terminal, context: LoopContext): Intent[] {
+    const intents: Intent[] = [];
+
+    for (const step of steps) {
+      const intent = this.stepToIntent(step, context);
+      if (intent) {
+        intents.push(intent);
+      }
+    }
+
+    // Add response intent if terminal is respond
+    if (terminal.type === 'respond' && context.chatId) {
+      intents.push({
+        type: 'SEND_MESSAGE',
+        payload: {
+          text: terminal.text,
+          target: context.chatId,
+          channel: 'telegram', // TODO: get from context
+        },
+      });
+    }
+
+    return intents;
+  }
+
+  /**
+   * Convert a step to an intent.
+   */
+  private stepToIntent(step: Step, context: LoopContext): Intent | null {
+    switch (step.type) {
+      case 'updateUser': {
+        const policy = getFieldPolicy(`user.${step.field}`);
+        if (step.confidence >= policy.minConfidence) {
+          const intent: Intent = {
+            type: 'UPDATE_USER_MODEL',
+            payload: {
+              chatId: context.chatId,
+              field: step.field,
+              value: step.value,
+              confidence: step.confidence,
+              source: step.source,
+              evidence: step.evidence,
+            },
+          };
+          return intent;
+        }
+        return null;
+      }
+
+      case 'updateAgent': {
+        const policy = getFieldPolicy(`agent.${step.field}`);
+        if (step.confidence >= policy.minConfidence) {
+          let value = step.value;
+
+          if (step.operation === 'delta') {
+            // Check maxDelta for delta operations only
+            if (policy.maxDelta && Math.abs(value) > policy.maxDelta) {
+              this.logger.warn(
+                { field: step.field, value, maxDelta: policy.maxDelta },
+                'Delta value exceeds maxDelta, clamping'
+              );
+              value = Math.sign(value) * policy.maxDelta;
+            }
+          } else {
+            // For 'set' operations, clamp to valid range [0, 1]
+            value = Math.max(0, Math.min(1, value));
+          }
+
+          return {
+            type: 'UPDATE_STATE',
+            payload: {
+              key: step.field,
+              value,
+              delta: step.operation === 'delta',
+            },
+          };
+        }
+        return null;
+      }
+
+      case 'saveFact': {
+        const saveIntent: Intent = {
+          type: 'SAVE_TO_MEMORY',
+          payload: {
+            type: 'fact',
+            chatId: context.chatId,
+            fact: step.fact,
+          },
+        };
+        return saveIntent;
+      }
+
+      case 'schedule': {
+        const scheduleIntent: Intent = {
+          type: 'SCHEDULE_EVENT',
+          payload: {
+            event: {
+              source: 'cognition',
+              type: step.event.type,
+              priority: 50,
+              payload: step.event.context,
+            },
+            delay: step.delayMs,
+            scheduleId: step.id,
+          },
+        };
+        return scheduleIntent;
+      }
+
+      case 'think':
+      case 'tool':
+        // These don't produce intents directly
+        return null;
+
+      default:
+        return null;
+    }
+  }
+}
+
+/**
+ * Create an agentic loop.
+ */
+export function createAgenticLoop(
+  logger: Logger,
+  llm: CognitionLLM,
+  toolRegistry: ToolRegistry,
+  config?: Partial<LoopConfig>
+): AgenticLoop {
+  return new AgenticLoop(logger, llm, toolRegistry, config);
+}

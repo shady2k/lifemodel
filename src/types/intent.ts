@@ -10,6 +10,8 @@
  */
 export type IntentType =
   | 'UPDATE_STATE'
+  | 'UPDATE_USER_MODEL'
+  | 'SAVE_TO_MEMORY'
   | 'SCHEDULE_EVENT'
   | 'SEND_MESSAGE'
   | 'CANCEL_EVENT'
@@ -28,6 +30,55 @@ export interface UpdateStateIntent {
     value: unknown;
     /** If true, value is added to current (for numbers) */
     delta?: boolean;
+  };
+}
+
+/**
+ * Update user model (beliefs about user).
+ */
+export interface UpdateUserModelIntent {
+  type: 'UPDATE_USER_MODEL';
+  payload: {
+    /** Chat ID for the user */
+    chatId?: string | undefined;
+    /** Field to update */
+    field: string;
+    /** New value */
+    value: unknown;
+    /** Confidence in this update (0-1) */
+    confidence: number;
+    /** Source of evidence */
+    source: string;
+    /** Supporting evidence */
+    evidence?: string | undefined;
+  };
+}
+
+/**
+ * Save to memory (fact, thought, observation).
+ */
+export interface SaveToMemoryIntent {
+  type: 'SAVE_TO_MEMORY';
+  payload: {
+    /** Type of memory entry */
+    type: 'fact' | 'thought' | 'observation';
+    /** Chat ID context */
+    chatId?: string | undefined;
+    /** The content to save */
+    content?: string | undefined;
+    /** Structured fact (if type is 'fact') */
+    fact?: {
+      subject: string;
+      predicate: string;
+      object: string;
+      source: string;
+      evidence?: string | undefined;
+      confidence: number;
+      ttl?: number | null | undefined;
+      tags: string[];
+    };
+    /** Tags for search */
+    tags?: string[] | undefined;
   };
 }
 
@@ -110,6 +161,8 @@ export interface EmitMetricIntent {
  */
 export type Intent =
   | UpdateStateIntent
+  | UpdateUserModelIntent
+  | SaveToMemoryIntent
   | ScheduleEventIntent
   | SendMessageIntent
   | CancelEventIntent

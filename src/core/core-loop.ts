@@ -674,6 +674,32 @@ export class CoreLoop {
         case 'CANCEL_EVENT':
           this.logger.debug({ intent }, 'CANCEL_EVENT not yet implemented');
           break;
+
+        case 'UPDATE_USER_MODEL': {
+          const { chatId, field, value, confidence, source } = intent.payload;
+          if (this.userModel && chatId) {
+            // Apply update to user model based on field
+            // For now, log and track - full implementation depends on UserModel API
+            this.logger.debug(
+              { chatId, field, value, confidence, source },
+              'User model update from COGNITION'
+            );
+            // TODO: Add UserModel.updateField(field, value, confidence) method
+            this.metrics.counter('user_model_updates', { field, source });
+          }
+          break;
+        }
+
+        case 'SAVE_TO_MEMORY': {
+          const { type: memoryType, chatId: memoryChatId, content, fact, tags } = intent.payload;
+          this.logger.debug(
+            { memoryType, chatId: memoryChatId, hasFact: !!fact, hasContent: !!content, tags },
+            'Memory save from COGNITION'
+          );
+          // TODO: Integrate with MemoryProvider when available in CoreLoop
+          this.metrics.counter('memory_saves', { type: memoryType });
+          break;
+        }
       }
     }
   }
