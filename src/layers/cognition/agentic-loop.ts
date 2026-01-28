@@ -421,7 +421,12 @@ Guidelines:
 - Escalate complex/sensitive topics to SMART
 - Do NOT use markdown formatting in responses (no **bold**, *italic*, etc.) - use plain text only
 - Do NOT re-greet (e.g., "Привет", "Hello") if you've already exchanged greetings in the conversation history
-- Use the user's name sparingly (first greeting, after long pauses) - not in every message. Check the conversation history before using their name.`;
+
+CRITICAL - User's name usage:
+- Do NOT use the user's name in EVERY message - this sounds robotic and unnatural
+- Check the conversation history: if you used their name in the last 2-3 messages, do NOT use it again
+- Only use the name: on first greeting, after long pauses (hours), or for emphasis
+- Natural conversation rarely uses names - prefer "ты" without the name`;
   }
 
   private buildStateSection(context: LoopContext): string {
@@ -453,8 +458,9 @@ Agent:
 - Task Pressure: ${(agentState.taskPressure * 100).toFixed(0)}%
 - Curiosity: ${(agentState.curiosity * 100).toFixed(0)}%
 
-User Model (your beliefs about the user - use name sparingly, not every message):
-${userModelLines.join('\n')}`;
+User Model (your beliefs about the user):
+${userModelLines.join('\n')}
+NOTE: Do NOT use the user's name in every message. Check conversation history first.`;
   }
 
   private buildHistorySection(history: ConversationMessage[]): string {
