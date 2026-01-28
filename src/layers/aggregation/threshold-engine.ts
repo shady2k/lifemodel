@@ -210,9 +210,10 @@ export class ThresholdEngine {
     aggregates: SignalAggregate[],
     state: AgentState
   ): Promise<WakeDecision> {
-    // Need primary user chat ID to check conversation status
+    // Need primary user chat ID for proactive contact
     if (!this.primaryUserChatId) {
-      return this.checkThresholdsLegacy(aggregates, state);
+      this.logger.debug('Skipping proactive contact - no primary user chat ID configured');
+      return { shouldWake: false, triggerSignals: [] };
     }
 
     // Check cooldown first
@@ -295,6 +296,8 @@ export class ThresholdEngine {
           value: 1.0,
           threshold: 0,
           direction: 'above',
+          chatId: this.primaryUserChatId,
+          channel: 'telegram',
         },
       }
     );
@@ -358,6 +361,8 @@ export class ThresholdEngine {
           value: contactPressure.currentValue,
           threshold,
           direction: 'above',
+          chatId: this.primaryUserChatId,
+          channel: 'telegram',
         },
       }
     );
@@ -420,6 +425,8 @@ export class ThresholdEngine {
           value: contactPressure.currentValue,
           threshold,
           direction: 'above',
+          chatId: this.primaryUserChatId,
+          channel: 'telegram',
         },
       }
     );
@@ -432,87 +439,6 @@ export class ThresholdEngine {
       threshold,
       value: contactPressure.currentValue,
       proactiveType: 'initiate',
-    };
-  }
-
-  /**
-   * Legacy threshold check (used when no conversation manager available).
-   */
-  private checkThresholdsLegacy(aggregates: SignalAggregate[], state: AgentState): WakeDecision {
-    const contactPressure = aggregates.find((a) => a.type === 'contact_pressure');
-
-    if (contactPressure) {
-      const threshold = this.calculateAdaptiveThreshold(state);
-
-      if (contactPressure.currentValue >= threshold) {
-        this.logger.debug(
-          {
-            value: contactPressure.currentValue.toFixed(2),
-            threshold: threshold.toFixed(2),
-          },
-          'Contact pressure threshold crossed (legacy)'
-        );
-
-        const triggerSignal = createSignal(
-          'threshold_crossed',
-          'meta.threshold_monitor',
-          { value: contactPressure.currentValue, confidence: 1.0 },
-          {
-            priority: Priority.NORMAL,
-            data: {
-              kind: 'threshold',
-              thresholdName: 'contact_pressure',
-              threshold,
-              value: contactPressure.currentValue,
-              direction: 'above',
-            },
-          }
-        );
-
-        return {
-          shouldWake: true,
-          trigger: 'threshold_crossed',
-          reason: `Contact pressure ${(contactPressure.currentValue * 100).toFixed(0)}% >= threshold ${(threshold * 100).toFixed(0)}%`,
-          triggerSignals: [triggerSignal],
-          threshold,
-          value: contactPressure.currentValue,
-        };
-      }
-    }
-
-    // Check social debt alone
-    const socialDebt = aggregates.find((a) => a.type === 'social_debt');
-
-    if (socialDebt && socialDebt.currentValue >= this.config.socialDebt) {
-      const triggerSignal = createSignal(
-        'threshold_crossed',
-        'meta.threshold_monitor',
-        { value: socialDebt.currentValue, confidence: 1.0 },
-        {
-          priority: Priority.NORMAL,
-          data: {
-            kind: 'threshold',
-            thresholdName: 'social_debt',
-            threshold: this.config.socialDebt,
-            value: socialDebt.currentValue,
-            direction: 'above',
-          },
-        }
-      );
-
-      return {
-        shouldWake: true,
-        trigger: 'threshold_crossed',
-        reason: `Social debt ${(socialDebt.currentValue * 100).toFixed(0)}% is high`,
-        triggerSignals: [triggerSignal],
-        threshold: this.config.socialDebt,
-        value: socialDebt.currentValue,
-      };
-    }
-
-    return {
-      shouldWake: false,
-      triggerSignals: [],
     };
   }
 

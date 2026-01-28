@@ -85,6 +85,9 @@ export interface LoopContext {
 
   /** User ID (if applicable) */
   userId?: string | undefined;
+
+  /** Time since last message in ms (for proactive contact context) */
+  timeSinceLastMessageMs?: number | undefined;
 }
 
 export interface ConversationMessage {
@@ -363,7 +366,7 @@ export class AgenticLoop {
     }
 
     // Current trigger
-    sections.push(this.buildTriggerSection(context.triggerSignal));
+    sections.push(this.buildTriggerSection(context.triggerSignal, context));
 
     // Force respond instruction (if tool already executed but LLM keeps asking)
     if (state.forceRespond) {
@@ -494,7 +497,7 @@ ${userModelLines.join('\n')}`;
     return lines.join('\n');
   }
 
-  private buildTriggerSection(signal: Signal): string {
+  private buildTriggerSection(signal: Signal, context: LoopContext): string {
     const data = signal.data as Record<string, unknown> | undefined;
 
     if (signal.type === 'user_message' && data) {
@@ -502,7 +505,55 @@ ${userModelLines.join('\n')}`;
       return `## Current Input\nUser message: "${text}"`;
     }
 
+    // Handle proactive contact triggers specially
+    if (signal.type === 'threshold_crossed' && data) {
+      const thresholdName = data['thresholdName'] as string | undefined;
+      if (thresholdName?.includes('proactive')) {
+        return this.buildProactiveContactSection(context, thresholdName);
+      }
+    }
+
     return `## Current Trigger\nType: ${signal.type}\nData: ${JSON.stringify(data ?? {})}`;
+  }
+
+  /**
+   * Build special section for proactive contact explaining this is NOT a response.
+   */
+  private buildProactiveContactSection(context: LoopContext, triggerType: string): string {
+    const timeSinceMs = context.timeSinceLastMessageMs;
+    let timeContext = '';
+
+    if (timeSinceMs !== undefined) {
+      const hours = Math.floor(timeSinceMs / (1000 * 60 * 60));
+      const minutes = Math.floor((timeSinceMs % (1000 * 60 * 60)) / (1000 * 60));
+
+      if (hours > 0) {
+        timeContext = `${String(hours)} hour${hours > 1 ? 's' : ''}${minutes > 0 ? ` ${String(minutes)} min` : ''}`;
+      } else if (minutes > 0) {
+        timeContext = `${String(minutes)} minute${minutes > 1 ? 's' : ''}`;
+      } else {
+        timeContext = 'less than a minute';
+      }
+    }
+
+    const isFollowUp = triggerType.includes('follow_up');
+
+    const section = `## Proactive Contact Trigger
+
+IMPORTANT: This is NOT a response to a user message. You are INITIATING contact.
+${timeContext ? `Time since last conversation: ${timeContext}` : ''}
+
+${isFollowUp ? 'Trigger: Follow-up (user did not respond to your previous message)' : 'Trigger: Internal drive to reach out (social debt accumulated)'}
+
+Guidelines for proactive contact:
+- Do NOT continue or reference the previous conversation directly
+- Start FRESH with a new topic or friendly check-in
+- Keep it brief and natural - one short message
+- Examples: "Привет! Как дела?", "Эй, давно не общались. Как ты?", "Привет! Чем занимаешься?"
+- Do NOT ask about the previous conversation topic unless it's truly unfinished business
+- If "noAction" feels right (user might be busy, it's late, etc.), that's OK too`;
+
+    return section;
   }
 
   private buildOutputFormat(): string {

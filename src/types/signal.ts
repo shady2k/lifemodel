@@ -213,6 +213,12 @@ export interface ThresholdData {
 
   /** Direction: above or below */
   direction: 'above' | 'below';
+
+  /** Target chat ID for proactive contact */
+  chatId?: string | undefined;
+
+  /** Channel to use for proactive contact */
+  channel?: string | undefined;
 }
 
 /**

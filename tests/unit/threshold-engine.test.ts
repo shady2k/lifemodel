@@ -34,6 +34,9 @@ describe('ThresholdEngine', () => {
     });
 
     it('allows COGNITION wake when energy is above threshold with high pressure', async () => {
+      // Need primaryUserChatId for proactive contact to work
+      engine.updateDeps({ primaryUserChatId: '123' });
+
       const state = createAgentState({ energy: 0.5 });
       const aggregates = [createContactPressureAggregate(0.8)];
 
@@ -77,21 +80,19 @@ describe('ThresholdEngine', () => {
   });
 
   describe('Proactive contact with high socialDebt', () => {
-    it('triggers proactive contact when socialDebt is maxed and no primaryUserChatId (legacy path)', async () => {
-      // Scenario: Agent starts with socialDebt=1.0, should trigger contact
+    it('does NOT trigger proactive contact when no primaryUserChatId configured', async () => {
+      // Without primaryUserChatId, agent can't send proactive messages
       const state = createAgentState({
         energy: 1.0,
         socialDebt: 1.0,
         curiosity: 0.5,
       });
-      // Contact pressure = (1.0*0.4 + 0*0.2 + 0.5*0.1 + 0.5*0.3) / 1.0 = 0.6
       const aggregates = [createContactPressureAggregate(0.6)];
 
       const decision = await engine.evaluate([], aggregates, state);
 
-      // Threshold is 0.35, pressure is 0.6 -> should wake
-      expect(decision.shouldWake).toBe(true);
-      expect(decision.trigger).toBe('threshold_crossed');
+      // Should NOT wake - no way to contact user without chatId
+      expect(decision.shouldWake).toBe(false);
     });
 
     it('triggers proactive contact with conversation manager after idle delay', async () => {
@@ -197,6 +198,9 @@ describe('ThresholdEngine', () => {
 
   describe('Trigger signals', () => {
     it('provides trigger signal for threshold_crossed wakes', async () => {
+      // Need primaryUserChatId for proactive contact to work
+      engine.updateDeps({ primaryUserChatId: '123' });
+
       const state = createAgentState({ energy: 0.8 });
       const aggregates = [createContactPressureAggregate(0.9)];
 
@@ -205,6 +209,9 @@ describe('ThresholdEngine', () => {
       expect(decision.shouldWake).toBe(true);
       expect(decision.triggerSignals.length).toBeGreaterThan(0);
       expect(decision.triggerSignals[0].type).toBe('threshold_crossed');
+      // Verify chatId is included in the signal data
+      const data = decision.triggerSignals[0].data as { chatId?: string };
+      expect(data.chatId).toBe('123');
     });
   });
 });

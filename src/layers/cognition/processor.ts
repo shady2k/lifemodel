@@ -262,6 +262,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get agent identity
     const identity = this.agent?.getIdentity();
 
+    // Get time since last message (for proactive contact context)
+    const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(chatId);
+
     // Build loop context
     const loopContext: LoopContext = {
       triggerSignal,
@@ -274,6 +277,7 @@ export class CognitionProcessor implements CognitionLayer {
       correlationId: context.correlationId,
       chatId,
       userId: signalData?.userId,
+      timeSinceLastMessageMs,
     };
 
     // Run the agentic loop (we know it exists because processAgentic is only called when agenticLoop is set)
@@ -415,6 +419,25 @@ export class CognitionProcessor implements CognitionLayer {
       }));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Get time since last message in conversation.
+   */
+  private async getTimeSinceLastMessage(chatId?: string): Promise<number | undefined> {
+    if (!chatId || !this.conversationManager) {
+      return undefined;
+    }
+
+    try {
+      const status = await this.conversationManager.getStatus(chatId);
+      if (status.lastMessageAt) {
+        return Date.now() - status.lastMessageAt.getTime();
+      }
+      return undefined;
+    } catch {
+      return undefined;
     }
   }
 
