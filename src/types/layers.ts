@@ -65,39 +65,22 @@ export interface AggregationResult {
 
 /**
  * Result from COGNITION layer processing.
+ *
+ * Note: SMART layer merged into COGNITION. Low confidence triggers
+ * internal smart model retry, not escalation to separate layer.
  */
 export interface CognitionResult {
-  /** Whether to escalate to SMART layer */
-  escalateToSmart: boolean;
-
-  /** Why escalating (if escalateToSmart is true) */
-  escalationReason?: string;
-
-  /** Confidence in handling this without SMART (0-1) */
+  /** Confidence in the response (0-1). Below 0.6 triggers smart retry. */
   confidence: number;
 
-  /** Generated response (if confident enough) */
+  /** Generated response */
   response?: string;
 
   /** Action intents to execute */
   intents: Intent[];
 
-  /** Context to pass to SMART if escalating */
-  smartContext?: SmartContext;
-}
-
-/**
- * Result from SMART layer processing.
- */
-export interface SmartResult {
-  /** Generated response */
-  response?: string | undefined;
-
-  /** Action intents to execute */
-  intents: Intent[];
-
-  /** Confidence in the response (0-1) */
-  confidence: number;
+  /** Whether smart model retry was used */
+  usedSmartRetry?: boolean;
 }
 
 // ============================================================
@@ -122,29 +105,12 @@ export interface CognitionContext {
 
   /** Tick correlation ID */
   correlationId: string;
-}
 
-/**
- * Context passed to SMART layer from COGNITION.
- */
-export interface SmartContext {
-  /** Original context from AGGREGATION */
-  cognitionContext: CognitionContext;
-
-  /** Why COGNITION is escalating */
-  escalationReason: string;
-
-  /** What COGNITION tried and failed */
-  attemptedApproach?: string;
-
-  /** COGNITION's partial analysis (if any) */
-  partialAnalysis?: string;
-
-  /** Specific question for SMART to answer */
-  question?: string;
-
-  /** Failed tool executions (if any) - SMART should not promise these actions succeeded */
-  failedTools?: { name: string; error: string }[];
+  /** Runtime config from CoreLoop */
+  runtimeConfig?: {
+    /** Whether smart model retry is enabled (based on system health) */
+    enableSmartRetry: boolean;
+  };
 }
 
 // ============================================================
@@ -211,8 +177,9 @@ export interface AggregationLayer {
 /**
  * COGNITION layer interface.
  *
- * Processes aggregated signals using fast LLM.
- * Decides actions or escalates to SMART.
+ * Processes aggregated signals using LLM.
+ * Uses fast model by default, retries with smart model if confidence is low.
+ * Note: SMART layer merged into COGNITION - no separate escalation.
  */
 export interface CognitionLayer {
   /** Layer name for logging */
@@ -222,28 +189,9 @@ export interface CognitionLayer {
    * Process aggregated context and decide on action.
    *
    * @param context Context from AGGREGATION layer
-   * @returns Cognition result with response or escalation
+   * @returns Cognition result with response
    */
   process(context: CognitionContext): Promise<CognitionResult>;
-}
-
-/**
- * SMART layer interface.
- *
- * Complex reasoning using expensive LLM.
- * Only called when COGNITION is uncertain.
- */
-export interface SmartLayer {
-  /** Layer name for logging */
-  readonly name: 'smart';
-
-  /**
-   * Process escalated context with full reasoning.
-   *
-   * @param context Context from COGNITION layer
-   * @returns Smart result with response
-   */
-  process(context: SmartContext): Promise<SmartResult>;
 }
 
 // ============================================================

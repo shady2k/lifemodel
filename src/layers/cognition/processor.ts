@@ -1,28 +1,17 @@
 /**
  * COGNITION Layer Processor
  *
- * Processes aggregated signals using fast LLM.
- * Decides actions or escalates to SMART when uncertain.
+ * Processes aggregated signals using LLM with automatic smart retry.
  *
  * Like the prefrontal cortex:
  * - Conscious processing
  * - Decision making
+ * - Uses fast model by default, smart model when confidence is low
  * - Only activated when AGGREGATION layer determines it's needed
- *
- * Supports two modes:
- * - Legacy: ThoughtSynthesizer + ActionDecider (simpler, single LLM call)
- * - Agentic: Full agentic loop with tools (multiple LLM calls, more capable)
  */
 
-import type {
-  CognitionLayer,
-  CognitionContext,
-  CognitionResult,
-  SmartContext,
-} from '../../types/layers.js';
-import type { Intent } from '../../types/intent.js';
+import type { CognitionLayer, CognitionContext, CognitionResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
-import type { MessageComposer } from '../../llm/composer.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
@@ -30,10 +19,6 @@ import type { Agent } from '../../core/agent.js';
 import type { LoopConfig } from '../../types/cognition.js';
 import { emitTypingIndicator } from '../shared/index.js';
 
-import type { ThoughtSynthesizer } from './thought-synthesizer.js';
-import { createThoughtSynthesizer, type ThoughtSynthesizerConfig } from './thought-synthesizer.js';
-import type { ActionDecider } from './action-decider.js';
-import { createActionDecider, type ActionDeciderConfig } from './action-decider.js';
 import type { AgenticLoop } from './agentic-loop.js';
 import {
   createAgenticLoop,
@@ -48,15 +33,6 @@ import { createToolRegistry, type MemoryProvider } from './tools/registry.js';
  * Configuration for COGNITION processor.
  */
 export interface CognitionProcessorConfig {
-  /** Use agentic loop instead of legacy mode */
-  useAgenticLoop: boolean;
-
-  /** Thought synthesizer config (legacy mode) */
-  synthesizer: Partial<ThoughtSynthesizerConfig>;
-
-  /** Action decider config (legacy mode) */
-  decider: Partial<ActionDeciderConfig>;
-
   /** Agentic loop config */
   loopConfig: Partial<LoopConfig>;
 
@@ -68,9 +44,6 @@ export interface CognitionProcessorConfig {
  * Default configuration.
  */
 const DEFAULT_CONFIG: CognitionProcessorConfig = {
-  useAgenticLoop: true,
-  synthesizer: {},
-  decider: {},
   loopConfig: {},
   emitTypingIndicator: true,
 };
@@ -79,7 +52,6 @@ const DEFAULT_CONFIG: CognitionProcessorConfig = {
  * Dependencies for COGNITION processor.
  */
 export interface CognitionProcessorDeps {
-  composer?: MessageComposer | undefined;
   conversationManager?: ConversationManager | undefined;
   userModel?: UserModel | undefined;
   eventBus?: EventBus | undefined;
@@ -94,11 +66,6 @@ export interface CognitionProcessorDeps {
 export class CognitionProcessor implements CognitionLayer {
   readonly name = 'cognition' as const;
 
-  // Legacy mode components
-  private readonly synthesizer: ThoughtSynthesizer;
-  private readonly decider: ActionDecider;
-
-  // Agentic mode components
   private agenticLoop: AgenticLoop | undefined;
   private toolRegistry: ToolRegistry | undefined;
   private cognitionLLM: CognitionLLM | undefined;
@@ -120,26 +87,16 @@ export class CognitionProcessor implements CognitionLayer {
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
-      synthesizer: { ...DEFAULT_CONFIG.synthesizer, ...config.synthesizer },
-      decider: { ...DEFAULT_CONFIG.decider, ...config.decider },
       loopConfig: { ...DEFAULT_CONFIG.loopConfig, ...config.loopConfig },
     };
-
-    // Legacy mode setup
-    this.synthesizer = createThoughtSynthesizer(this.logger, this.config.synthesizer);
-    this.decider = createActionDecider(this.logger, this.config.decider, {
-      composer: deps?.composer,
-      conversationManager: deps?.conversationManager,
-      userModel: deps?.userModel,
-    });
 
     this.eventBus = deps?.eventBus;
     this.agent = deps?.agent;
     this.conversationManager = deps?.conversationManager;
     this.userModel = deps?.userModel;
 
-    // Agentic mode setup
-    if (this.config.useAgenticLoop && deps?.cognitionLLM) {
+    // Setup agentic loop if LLM available
+    if (deps?.cognitionLLM) {
       this.setupAgenticLoop(deps.cognitionLLM, deps.memoryProvider);
     }
   }
@@ -176,13 +133,6 @@ export class CognitionProcessor implements CognitionLayer {
    * Set dependencies after construction.
    */
   setDependencies(deps: CognitionProcessorDeps): void {
-    // Legacy mode
-    this.decider.setDependencies({
-      composer: deps.composer,
-      conversationManager: deps.conversationManager,
-      userModel: deps.userModel,
-    });
-
     if (deps.eventBus) {
       this.eventBus = deps.eventBus;
     }
@@ -196,8 +146,8 @@ export class CognitionProcessor implements CognitionLayer {
       this.userModel = deps.userModel;
     }
 
-    // Agentic mode - setup if we have LLM now
-    if (this.config.useAgenticLoop && deps.cognitionLLM && !this.agenticLoop) {
+    // Setup agentic loop if we have LLM now
+    if (deps.cognitionLLM && !this.agenticLoop) {
       this.setupAgenticLoop(deps.cognitionLLM, deps.memoryProvider);
     }
 
@@ -223,29 +173,23 @@ export class CognitionProcessor implements CognitionLayer {
    * Process aggregated context and decide on action.
    *
    * @param context Context from AGGREGATION layer
-   * @returns Cognition result with response or escalation
+   * @returns Cognition result with response
    */
   async process(context: CognitionContext): Promise<CognitionResult> {
-    // Use agentic loop if enabled and available
-    if (this.config.useAgenticLoop && this.agenticLoop) {
-      return this.processAgentic(context);
+    if (!this.agenticLoop) {
+      this.logger.error('Agentic loop not initialized');
+      return {
+        confidence: 0,
+        intents: [],
+      };
     }
 
-    // Legacy mode
-    return this.processLegacy(context);
-  }
-
-  /**
-   * Process using the agentic loop (new mode).
-   */
-  private async processAgentic(context: CognitionContext): Promise<CognitionResult> {
     const startTime = Date.now();
 
     // Find the trigger signal (usually user_message)
     const triggerSignal = context.triggerSignals[0];
     if (!triggerSignal) {
       return {
-        escalateToSmart: false,
         confidence: 1.0,
         intents: [],
       };
@@ -271,7 +215,7 @@ export class CognitionProcessor implements CognitionLayer {
     // Get time since last message (for proactive contact context)
     const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(recipientId);
 
-    // Build loop context
+    // Build loop context with runtime config
     const loopContext: LoopContext = {
       triggerSignal,
       agentState: context.agentState,
@@ -284,14 +228,40 @@ export class CognitionProcessor implements CognitionLayer {
       recipientId,
       userId: signalData?.userId,
       timeSinceLastMessageMs,
+      runtimeConfig: {
+        enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
+      },
     };
 
-    // Run the agentic loop (we know it exists because processAgentic is only called when agenticLoop is set)
-    const agenticLoop = this.agenticLoop;
-    if (!agenticLoop) {
-      throw new Error('Agentic loop not initialized');
+    // Run the agentic loop
+    let loopResult;
+    try {
+      loopResult = await this.agenticLoop.run(loopContext);
+    } catch (error) {
+      // AgenticLoop threw an error - send generic error response
+      this.logger.error(
+        { error: error instanceof Error ? error.message : String(error), recipientId },
+        'COGNITION failed'
+      );
+
+      // Send error response to user if we have a recipient
+      const errorIntents = recipientId
+        ? [
+            {
+              type: 'SEND_MESSAGE' as const,
+              payload: {
+                recipientId,
+                text: 'Извини, произошла ошибка. Попробуй ещё раз.',
+              },
+            },
+          ]
+        : [];
+
+      return {
+        confidence: 0,
+        intents: errorIntents,
+      };
     }
-    const loopResult = await agenticLoop.run(loopContext);
 
     const duration = Date.now() - startTime;
 
@@ -301,35 +271,31 @@ export class CognitionProcessor implements CognitionLayer {
         terminalType: loopResult.terminal.type,
         steps: loopResult.steps.length,
         intents: loopResult.intents.length,
-        pendingEscalation: loopResult.pendingEscalation.length,
+        usedSmartRetry: loopResult.usedSmartRetry,
         duration,
       },
       'Agentic loop complete'
     );
 
     // Build result based on terminal state
+    const confidence =
+      loopResult.terminal.type === 'respond'
+        ? loopResult.terminal.confidence
+        : loopResult.success
+          ? 0.8
+          : 0.3;
+
     const result: CognitionResult = {
-      escalateToSmart: loopResult.terminal.type === 'escalate',
-      confidence: loopResult.success ? 0.8 : 0.3,
+      confidence,
       intents: loopResult.intents,
     };
 
+    if (loopResult.usedSmartRetry !== undefined) {
+      result.usedSmartRetry = loopResult.usedSmartRetry;
+    }
+
     if (loopResult.terminal.type === 'respond') {
       result.response = loopResult.terminal.text;
-    }
-
-    if (loopResult.terminal.type === 'escalate') {
-      result.escalationReason = loopResult.terminal.reason;
-      result.smartContext = this.buildSmartContext(context, loopResult);
-    }
-
-    // Handle pending escalation (low confidence updates)
-    if (loopResult.pendingEscalation.length > 0) {
-      this.logger.debug(
-        { pendingSteps: loopResult.pendingEscalation.length },
-        'Some steps need SMART confirmation'
-      );
-      // TODO: Could escalate or store for later review
     }
 
     // ACK all processed thought signals to prevent duplicate processing within session
@@ -390,79 +356,6 @@ export class CognitionProcessor implements CognitionLayer {
   }
 
   /**
-   * Process using legacy mode (ThoughtSynthesizer + ActionDecider).
-   */
-  private async processLegacy(context: CognitionContext): Promise<CognitionResult> {
-    const startTime = Date.now();
-
-    // 1. Synthesize understanding
-    const synthesis = this.synthesizer.synthesize(context);
-
-    this.logger.debug(
-      {
-        situation: synthesis.situation,
-        requiresResponse: synthesis.requiresResponse,
-        initiateContact: synthesis.initiateContact,
-        summary: synthesis.summary,
-      },
-      'Thought synthesis complete'
-    );
-
-    // 2. Emit typing indicator if responding to user message
-    // Note: Typing indicator uses recipientId to resolve destination
-    if (
-      this.config.emitTypingIndicator &&
-      synthesis.situation === 'user_message' &&
-      synthesis.recipientId
-    ) {
-      // TODO: Resolve channel from recipientId via RecipientRegistry
-      await this.emitTypingIndicatorEvent(synthesis.recipientId, 'telegram');
-    }
-
-    // 3. Decide action
-    const decision = await this.decider.decide(synthesis, context);
-
-    const duration = Date.now() - startTime;
-
-    this.logger.debug(
-      {
-        action: decision.action,
-        escalateToSmart: decision.escalateToSmart,
-        confidence: decision.confidence,
-        hasResponse: !!decision.response,
-        duration,
-      },
-      'COGNITION tick complete'
-    );
-
-    // 4. Build result
-    const result: CognitionResult = {
-      escalateToSmart: decision.escalateToSmart,
-      confidence: decision.confidence,
-      intents: decision.intents,
-    };
-
-    if (decision.escalationReason) {
-      result.escalationReason = decision.escalationReason;
-    }
-
-    if (decision.response) {
-      result.response = decision.response;
-    }
-
-    if (decision.smartContext) {
-      result.smartContext = decision.smartContext;
-    }
-
-    // Add send_message intent if we have a response
-    if (decision.response && decision.recipientId) {
-      result.intents.push(this.buildSendMessageIntent(decision.response, decision.recipientId));
-    }
-
-    return result;
-  }
-
-  /**
    * Get conversation history for context.
    */
   private async getConversationHistory(chatId?: string): Promise<ConversationMessage[]> {
@@ -501,57 +394,6 @@ export class CognitionProcessor implements CognitionLayer {
   }
 
   /**
-   * Build SMART context from agentic loop result.
-   */
-  private buildSmartContext(
-    context: CognitionContext,
-    loopResult: {
-      terminal: { type: string; reason?: string; parentId?: string };
-      steps: unknown[];
-      state?: { toolResults?: { toolName: string; success: boolean; error?: string }[] };
-    }
-  ): SmartContext {
-    // Extract failed tool executions so SMART doesn't promise things that failed
-    // Sanitize error messages to avoid leaking sensitive internal details
-    const failedTools =
-      loopResult.state?.toolResults
-        ?.filter((r) => !r.success)
-        .map((r) => ({
-          name: r.toolName,
-          // Sanitize: only expose safe, generic error descriptions
-          error: r.error ? 'Tool execution failed' : 'Unknown error',
-        })) ?? [];
-
-    const smartContext: SmartContext = {
-      cognitionContext: context,
-      escalationReason:
-        loopResult.terminal.type === 'escalate'
-          ? (loopResult.terminal.reason ?? 'Unknown')
-          : 'Escalated',
-      partialAnalysis: `COGNITION completed ${String(loopResult.steps.length)} steps before escalating`,
-    };
-
-    if (failedTools.length > 0) {
-      smartContext.failedTools = failedTools;
-    }
-
-    return smartContext;
-  }
-
-  /**
-   * Build a send_message intent.
-   */
-  private buildSendMessageIntent(message: string, recipientId: string): Intent {
-    return {
-      type: 'SEND_MESSAGE',
-      payload: {
-        recipientId,
-        text: message,
-      },
-    };
-  }
-
-  /**
    * Emit typing indicator event.
    */
   private async emitTypingIndicatorEvent(chatId: string, channel: string): Promise<void> {
@@ -567,10 +409,8 @@ export class CognitionProcessor implements CognitionLayer {
 
   /**
    * Get the tool registry for dynamic tool registration.
-   * Creates a default registry if not in agentic mode.
    */
   getToolRegistry(): ToolRegistry {
-    // Create a minimal registry for tool registration if not in agentic mode
     this.toolRegistry ??= createToolRegistry(this.logger);
     return this.toolRegistry;
   }

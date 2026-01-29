@@ -1,18 +1,19 @@
 /**
- * CoreLoop - the heartbeat of the 4-layer agent architecture.
+ * CoreLoop - the heartbeat of the 3-layer agent architecture.
  *
  * Unlike the EventLoop which uses dynamic tick intervals, CoreLoop:
  * - Uses a fixed 1-second tick (like a steady heartbeat)
- * - Processes Signals (not Events) through the 4-layer pipeline
+ * - Processes Signals (not Events) through the 3-layer pipeline
  * - Channels act as "sensory organs" that emit Signals
  *
  * Pipeline per tick:
  * 1. Collect signals from sensory organs (channels)
  * 2. AUTONOMIC: neurons check state, emit internal signals
  * 3. AGGREGATION: collect signals, decide if COGNITION should wake
- * 4. COGNITION: (if woken) process with fast LLM, decide action or escalate
- * 5. SMART: (if escalated) process with expensive LLM
- * 6. Apply intents from all layers
+ * 4. COGNITION: (if woken) process with LLM (auto-retries with smart model if low confidence)
+ * 5. Apply intents from all layers
+ *
+ * Note: SMART layer merged into COGNITION - smart retry is internal to COGNITION.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -32,7 +33,6 @@ import type {
   AutonomicResult,
   AggregationResult,
   CognitionResult,
-  SmartResult,
   CognitionContext,
 } from '../types/layers.js';
 import { Priority } from '../types/index.js';
@@ -47,7 +47,6 @@ import {
 import type { AutonomicProcessor } from '../layers/autonomic/processor.js';
 import type { AggregationProcessor } from '../layers/aggregation/processor.js';
 import type { CognitionProcessor } from '../layers/cognition/processor.js';
-import type { SmartProcessor } from '../layers/smart/processor.js';
 import type { MessageComposer } from '../llm/composer.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
@@ -88,13 +87,13 @@ const DEFAULT_CONFIG: CoreLoopConfig = {
 };
 
 /**
- * Layer processors for the 4-layer pipeline.
+ * Layer processors for the 3-layer pipeline.
+ * Note: SMART layer merged into COGNITION (smart retry is internal).
  */
 export interface CoreLoopLayers {
   autonomic: AutonomicProcessor;
   aggregation: AggregationProcessor;
   cognition: CognitionProcessor;
-  smart: SmartProcessor;
 }
 
 /**
@@ -213,20 +212,12 @@ export class CoreLoop {
 
     // Set dependencies on layers
     this.layers.cognition.setDependencies({
-      composer: deps.messageComposer,
       conversationManager: deps.conversationManager,
       userModel: deps.userModel,
       eventBus,
       agent: deps.agent,
       cognitionLLM: deps.cognitionLLM,
       memoryProvider: deps.memoryProvider,
-    });
-
-    this.layers.smart.setDependencies({
-      composer: deps.messageComposer,
-      conversationManager: deps.conversationManager,
-      userModel: deps.userModel,
-      eventBus,
     });
 
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
@@ -445,8 +436,6 @@ export class CoreLoop {
 
       // 4. COGNITION: (if woken) process with fast LLM (NON-BLOCKING)
       let cognitionResult: CognitionResult | null = null;
-      let smartResult: SmartResult | null = null;
-
       // Check if pending COGNITION completed
       if (this.pendingCognition) {
         const result = await this.checkPendingCognition();
@@ -465,29 +454,18 @@ export class CoreLoop {
           '🧠 COGNITION layer woken (non-blocking)'
         );
 
-        const cognitionContext = this.buildCognitionContext(aggregationResult, correlationId);
+        // Pass enableSmartRetry based on activeLayers.smart (reuses health gating)
+        const cognitionContext = this.buildCognitionContext(
+          aggregationResult,
+          correlationId,
+          activeLayers.smart
+        );
 
         // Start COGNITION in background (non-blocking)
         this.startCognitionAsync(cognitionContext, aggregationResult.triggerSignals[0]);
       } else if (this.pendingCognition && shouldWakeCognition) {
         // Already processing, log that we're queueing
         this.logger.debug('COGNITION already processing, new wake request queued');
-      }
-
-      // 5. SMART: (if COGNITION completed and escalated) process with expensive LLM
-      if (cognitionResult?.escalateToSmart && cognitionResult.smartContext && activeLayers.smart) {
-        this.logger.debug(
-          { escalationReason: cognitionResult.escalationReason },
-          '🎯 SMART layer engaged'
-        );
-
-        smartResult = await this.layers.smart.process(cognitionResult.smartContext);
-        allIntents.push(...smartResult.intents);
-      } else if (cognitionResult?.escalateToSmart && !activeLayers.smart) {
-        this.logger.warn(
-          { stressLevel, escalationReason: cognitionResult.escalationReason },
-          'SMART layer disabled due to stress - escalation blocked'
-        );
       }
 
       if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
@@ -584,7 +562,7 @@ export class CoreLoop {
           signalsProcessed: allSignals.length,
           intentsApplied: allIntents.length,
           cognitionWoke: shouldWakeCognition,
-          smartEngaged: smartResult !== null,
+          usedSmartRetry: cognitionResult?.usedSmartRetry,
           stressLevel,
           energy: this.agent.getEnergy().toFixed(2),
         },
@@ -711,7 +689,8 @@ export class CoreLoop {
    */
   private buildCognitionContext(
     aggregationResult: AggregationResult,
-    correlationId: string
+    correlationId: string,
+    enableSmartRetry = true
   ): CognitionContext {
     return {
       aggregates: aggregationResult.aggregates,
@@ -719,6 +698,9 @@ export class CoreLoop {
       wakeReason: aggregationResult.wakeReason ?? 'unknown',
       agentState: this.agent.getState(),
       correlationId,
+      runtimeConfig: {
+        enableSmartRetry,
+      },
     };
   }
 
@@ -832,7 +814,7 @@ export class CoreLoop {
           break;
 
         case 'SEND_MESSAGE': {
-          const { recipientId, text, replyTo } = intent.payload;
+          const { recipientId, text, replyTo, conversationStatus } = intent.payload;
 
           if (!this.recipientRegistry) {
             this.logger.error({ recipientId }, 'RecipientRegistry not configured');
@@ -876,7 +858,7 @@ export class CoreLoop {
                 this.metrics.counter('messages_sent', { channel: route.channel });
                 if (this.conversationManager) {
                   // Use recipientId as conversation key for consistency
-                  void this.saveAgentMessage(recipientId, text);
+                  void this.saveAgentMessage(recipientId, text, conversationStatus);
                 }
               } else {
                 this.logger.warn(
@@ -1244,7 +1226,11 @@ export class CoreLoop {
   /**
    * Save agent message to conversation history.
    */
-  private async saveAgentMessage(chatId: string, text: string): Promise<void> {
+  private async saveAgentMessage(
+    chatId: string,
+    text: string,
+    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle'
+  ): Promise<void> {
     if (!this.conversationManager) return;
 
     try {
@@ -1253,8 +1239,11 @@ export class CoreLoop {
         content: text,
       });
 
-      // Classify conversation status
-      if (this.messageComposer) {
+      // Use inline status if provided, otherwise fall back to LLM classification
+      if (conversationStatus) {
+        await this.conversationManager.setStatus(chatId, conversationStatus);
+      } else if (this.messageComposer) {
+        // Fallback: classify via separate LLM call (legacy path)
         const classification = await this.messageComposer.classifyConversationStatus(text);
         await this.conversationManager.setStatus(chatId, classification.status);
       }

@@ -100,10 +100,19 @@ export class ToolRegistry {
   }
 
   /**
+   * Find a tool by name.
+   * Requires exact tool names (e.g., "core.memory", "plugin.reminder").
+   * Short names are NOT supported - LLM should use full names from prompt.
+   */
+  private findTool(name: string): Tool | undefined {
+    return this.tools.get(name);
+  }
+
+  /**
    * Execute a tool request.
    */
   async execute(request: ToolRequest): Promise<ToolResult> {
-    const tool = this.tools.get(request.name);
+    const tool = this.findTool(request.name);
 
     if (!tool) {
       this.logger.warn({ toolName: request.name }, 'Unknown tool requested');
@@ -156,6 +165,16 @@ export class ToolRegistry {
   }
 
   /**
+   * Check if a tool has side effects.
+   * Returns true (safe default) if tool not found.
+   */
+  hasToolSideEffects(name: string): boolean {
+    const tool = this.findTool(name);
+    // Default to true (safe) if tool not found or hasSideEffects not set
+    return tool?.hasSideEffects ?? true;
+  }
+
+  /**
    * Get all registered tool names.
    */
   getToolNames(): ToolName[] {
@@ -172,8 +191,8 @@ export class ToolRegistry {
     const sortedTools = Array.from(this.tools.entries()).sort((a, b) => a[0].localeCompare(b[0]));
 
     for (const [name, tool] of sortedTools) {
-      // Skip the 'tools' meta-tool itself from the card list
-      if (name === 'tools') continue;
+      // Skip the meta-tool itself from the card list
+      if (name === 'core.tools') continue;
 
       // Get first sentence of description (brief)
       const firstLine = tool.description.split('\n')[0] ?? '';
@@ -232,11 +251,13 @@ export class ToolRegistry {
    */
   private registerDefaultTools(): void {
     // memory - search and save
-    this.tools.set('memory', {
-      name: 'memory',
+    // Note: hasSideEffects depends on action, but we mark as true since save has effects
+    this.tools.set('core.memory', {
+      name: 'core.memory',
       description:
         'Manage long-term memory. Actions: search (find past info), save (store new facts).',
       tags: ['search', 'save', 'facts', 'history'],
+      hasSideEffects: true, // save action has side effects
       parameters: [
         { name: 'action', type: 'string', description: 'Action: search or save', required: true },
         {
@@ -372,12 +393,13 @@ export class ToolRegistry {
       },
     });
 
-    // time - now and since
-    this.tools.set('time', {
-      name: 'time',
+    // time - now and since (read-only, no side effects)
+    this.tools.set('core.time', {
+      name: 'core.time',
       description:
         'Get time information. Actions: now (current time), since (elapsed time from event).',
       tags: ['current-time', 'elapsed', 'timezone'],
+      hasSideEffects: false, // read-only tool
       parameters: [
         { name: 'action', type: 'string', description: 'Action: now or since', required: true },
         {
@@ -501,11 +523,12 @@ export class ToolRegistry {
       },
     });
 
-    // state - agent and user
-    this.tools.set('state', {
-      name: 'state',
+    // state - agent and user (read-only, no side effects)
+    this.tools.set('core.state', {
+      name: 'core.state',
       description: 'Get current state. Actions: agent (energy, mood), user (beliefs about user).',
       tags: ['agent-state', 'user-model'],
+      hasSideEffects: false, // read-only tool
       parameters: [
         { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
         {
@@ -560,11 +583,12 @@ export class ToolRegistry {
       },
     });
 
-    // tools - meta-tool for schema discovery
-    this.tools.set('tools', {
-      name: 'tools',
+    // tools - meta-tool for schema discovery (read-only, no side effects)
+    this.tools.set('core.tools', {
+      name: 'core.tools',
       description: 'Get detailed schema for any tool. Use when you need exact parameters.',
       tags: ['meta', 'schema', 'help'],
+      hasSideEffects: false, // read-only tool
       parameters: [
         { name: 'action', type: 'string', description: 'Action: describe', required: true },
         {
@@ -594,7 +618,7 @@ export class ToolRegistry {
           });
         }
 
-        const schema = this.getToolSchema(toolName as ToolName);
+        const schema = this.getToolSchema(toolName);
         if (!schema) {
           return Promise.resolve({
             success: false,
@@ -608,6 +632,69 @@ export class ToolRegistry {
           success: true,
           action: 'describe',
           schema,
+        });
+      },
+    });
+
+    // thought - queue thoughts for future processing
+    this.tools.set('core.thought', {
+      name: 'core.thought',
+      description:
+        'Queue a thought for future processing. Use only when concrete follow-up or deeper analysis is needed. Do NOT use for vague "monitoring". Example: User says "I have an interview tomorrow" → emit thought to check in later.',
+      tags: ['thinking', 'follow-up', 'reflection'],
+      hasSideEffects: true, // Creates a signal
+      parameters: [
+        { name: 'action', type: 'string', description: 'Action: emit', required: true },
+        {
+          name: 'content',
+          type: 'string',
+          description: 'The thought to process later',
+          required: true,
+        },
+        {
+          name: 'reason',
+          type: 'string',
+          description: 'Why this thought matters (optional, for observability)',
+          required: false,
+        },
+      ],
+      execute: (args) => {
+        const action = args['action'] as string;
+
+        if (action !== 'emit') {
+          return Promise.resolve({
+            success: false,
+            action,
+            error: `Unknown action: ${action}. Use "emit".`,
+          });
+        }
+
+        const content = args['content'] as string | undefined;
+        if (!content) {
+          return Promise.resolve({
+            success: false,
+            action: 'emit',
+            error: 'Missing required parameter: content',
+          });
+        }
+
+        if (content.length < 5) {
+          return Promise.resolve({
+            success: false,
+            action: 'emit',
+            error: 'Thought content too short (minimum 5 characters)',
+          });
+        }
+
+        const reason = args['reason'] as string | undefined;
+
+        // Return success with thought data - the agentic loop will convert this to EMIT_THOUGHT intent
+        return Promise.resolve({
+          success: true,
+          action: 'emit',
+          content,
+          reason,
+          message: 'Thought queued for future processing',
         });
       },
     });

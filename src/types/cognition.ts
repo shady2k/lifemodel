@@ -100,23 +100,8 @@ export interface ScheduleStep extends BaseStep {
 }
 
 /**
- * Emit an internal thought for later processing.
- * Thoughts queue as signals and wake COGNITION on next tick.
- */
-export interface EmitThoughtStep extends BaseStep {
-  type: 'emitThought';
-  /** The thought content */
-  content: string;
-  /** Parent thought data if this is a follow-up (optional) */
-  parentThought?: {
-    id: string;
-    depth: number;
-    rootThoughtId: string;
-  };
-}
-
-/**
  * All possible step types.
+ * Note: EmitThought removed - use core.thought tool instead.
  */
 export type Step =
   | ThinkStep
@@ -124,30 +109,31 @@ export type Step =
   | UpdateUserStep
   | UpdateAgentStep
   | SaveFactStep
-  | ScheduleStep
-  | EmitThoughtStep;
+  | ScheduleStep;
 
 // ============================================================
 // Terminal States
 // ============================================================
 
 /**
+ * Conversation status for follow-up timing.
+ */
+export type ConversationStatus = 'active' | 'awaiting_answer' | 'closed' | 'idle';
+
+/**
  * Respond to user - loop complete.
+ *
+ * confidence and conversationStatus are REQUIRED fields.
+ * Low confidence (< 0.6) triggers smart model retry if safe.
  */
 export interface RespondTerminal {
   type: 'respond';
   text: string;
   parentId: string;
-}
-
-/**
- * Escalate to SMART layer - needs deeper reasoning.
- */
-export interface EscalateTerminal {
-  type: 'escalate';
-  reason: string;
-  parentId: string;
-  context?: Record<string, unknown>;
+  /** Conversation status for follow-up timing - REQUIRED */
+  conversationStatus: ConversationStatus;
+  /** Confidence in response (0-1) - REQUIRED. Below 0.6 triggers smart retry. */
+  confidence: number;
 }
 
 /**
@@ -190,13 +176,9 @@ export interface NeedsToolResultTerminal {
 
 /**
  * All possible terminal states.
+ * Note: EscalateTerminal removed - use low confidence in RespondTerminal instead.
  */
-export type Terminal =
-  | RespondTerminal
-  | EscalateTerminal
-  | NoActionTerminal
-  | DeferTerminal
-  | NeedsToolResultTerminal;
+export type Terminal = RespondTerminal | NoActionTerminal | DeferTerminal | NeedsToolResultTerminal;
 
 // ============================================================
 // Main Output
@@ -229,17 +211,17 @@ export interface CognitionOutput {
 /**
  * Built-in tools for COGNITION (consolidated).
  * - memory: search/save long-term memories
- * - time: get current time or time since event
- * - state: get agent state or user model
- * - tools: get full schema for any tool (meta-tool for discovery)
+ * - core.time: get current time or time since event
+ * - core.state: get agent state or user model
+ * - core.tools: get full schema for any tool (meta-tool for discovery)
  */
-export type BuiltInToolName = 'memory' | 'time' | 'state' | 'tools';
-
 /**
  * Available tools for COGNITION.
- * Includes built-in tools and dynamic plugin tools (prefixed with pluginId:).
+ * - Core tools: core.memory, core.time, core.state, core.tools, core.thought
+ * - Plugin tools: plugin.reminder, plugin.weather, etc.
+ * Requires exact tool names (no short form fallbacks).
  */
-export type ToolName = BuiltInToolName | `${string}:${string}`;
+export type ToolName = string;
 
 /**
  * Tool definitions for prompt building.
@@ -277,6 +259,165 @@ export interface ToolResult {
 
   /** Error message (if failed) */
   error?: string;
+}
+
+/**
+ * Executed tool tracking for safe retry detection.
+ */
+export interface ExecutedTool {
+  /** Step ID from the tool call */
+  stepId: string;
+  /** Tool name that was executed */
+  name: ToolName;
+  /** Tool arguments */
+  args: Record<string, unknown>;
+  /** Whether tool has side effects (from Tool interface) */
+  hasSideEffects: boolean;
+}
+
+/**
+ * Validate a RespondTerminal at parse time.
+ * Throws if required fields are missing.
+ */
+export function validateRespondTerminal(terminal: unknown): RespondTerminal {
+  if (typeof terminal !== 'object' || terminal === null) {
+    throw new Error('RespondTerminal must be an object');
+  }
+
+  const t = terminal as Record<string, unknown>;
+
+  if (t['type'] !== 'respond') {
+    throw new Error('Invalid terminal type');
+  }
+
+  if (typeof t['text'] !== 'string') {
+    throw new Error('RespondTerminal missing required field: text');
+  }
+
+  if (typeof t['parentId'] !== 'string') {
+    throw new Error('RespondTerminal missing required field: parentId');
+  }
+
+  const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
+  if (!validStatuses.includes(t['conversationStatus'] as string)) {
+    throw new Error(
+      `RespondTerminal missing/invalid conversationStatus. Got: ${String(t['conversationStatus'])}`
+    );
+  }
+
+  if (typeof t['confidence'] !== 'number' || t['confidence'] < 0 || t['confidence'] > 1) {
+    throw new Error(`RespondTerminal missing/invalid confidence. Got: ${String(t['confidence'])}`);
+  }
+
+  return terminal as RespondTerminal;
+}
+
+/**
+ * Validate a DeferTerminal at parse time.
+ * Throws if required fields are missing.
+ */
+export function validateDeferTerminal(terminal: unknown): DeferTerminal {
+  if (typeof terminal !== 'object' || terminal === null) {
+    throw new Error('DeferTerminal must be an object');
+  }
+
+  const t = terminal as Record<string, unknown>;
+
+  if (t['type'] !== 'defer') {
+    throw new Error('Invalid terminal type');
+  }
+
+  if (typeof t['signalType'] !== 'string') {
+    throw new Error('DeferTerminal missing required field: signalType');
+  }
+
+  if (typeof t['reason'] !== 'string') {
+    throw new Error('DeferTerminal missing required field: reason');
+  }
+
+  if (typeof t['deferHours'] !== 'number' || t['deferHours'] <= 0) {
+    throw new Error(`DeferTerminal missing/invalid deferHours. Got: ${String(t['deferHours'])}`);
+  }
+
+  if (typeof t['parentId'] !== 'string') {
+    throw new Error('DeferTerminal missing required field: parentId');
+  }
+
+  return terminal as DeferTerminal;
+}
+
+/**
+ * Validate a NoActionTerminal at parse time.
+ * Throws if required fields are missing.
+ */
+export function validateNoActionTerminal(terminal: unknown): NoActionTerminal {
+  if (typeof terminal !== 'object' || terminal === null) {
+    throw new Error('NoActionTerminal must be an object');
+  }
+
+  const t = terminal as Record<string, unknown>;
+
+  if (t['type'] !== 'noAction') {
+    throw new Error('Invalid terminal type');
+  }
+
+  if (typeof t['reason'] !== 'string') {
+    throw new Error('NoActionTerminal missing required field: reason');
+  }
+
+  if (typeof t['parentId'] !== 'string') {
+    throw new Error('NoActionTerminal missing required field: parentId');
+  }
+
+  return terminal as NoActionTerminal;
+}
+
+/**
+ * Validate a NeedsToolResultTerminal at parse time.
+ * Throws if required fields are missing.
+ */
+export function validateNeedsToolResultTerminal(terminal: unknown): NeedsToolResultTerminal {
+  if (typeof terminal !== 'object' || terminal === null) {
+    throw new Error('NeedsToolResultTerminal must be an object');
+  }
+
+  const t = terminal as Record<string, unknown>;
+
+  if (t['type'] !== 'needsToolResult') {
+    throw new Error('Invalid terminal type');
+  }
+
+  if (typeof t['stepId'] !== 'string') {
+    throw new Error('NeedsToolResultTerminal missing required field: stepId');
+  }
+
+  return terminal as NeedsToolResultTerminal;
+}
+
+/**
+ * Validate any terminal at parse time.
+ * Throws if required fields are missing.
+ */
+export function validateTerminal(terminal: unknown): Terminal {
+  if (typeof terminal !== 'object' || terminal === null) {
+    throw new Error('Terminal must be an object');
+  }
+
+  const t = terminal as Record<string, unknown>;
+  const terminalType = t['type'];
+
+  switch (terminalType) {
+    case 'respond':
+      return validateRespondTerminal(terminal);
+    case 'defer':
+      return validateDeferTerminal(terminal);
+    case 'noAction':
+      return validateNoActionTerminal(terminal);
+    case 'needsToolResult':
+      return validateNeedsToolResultTerminal(terminal);
+    default:
+      throw new Error(`Unknown terminal type: ${String(terminalType)}`);
+  }
 }
 
 // ============================================================
@@ -470,6 +611,9 @@ export interface LoopState {
   /** Tool results collected */
   toolResults: ToolResult[];
 
+  /** Executed tools with side-effect tracking (for safe retry detection) */
+  executedTools: ExecutedTool[];
+
   /** Whether loop was aborted */
   aborted: boolean;
 
@@ -490,6 +634,7 @@ export function createLoopState(): LoopState {
     startTime: Date.now(),
     allSteps: [],
     toolResults: [],
+    executedTools: [],
     aborted: false,
   };
 }

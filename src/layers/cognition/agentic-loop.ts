@@ -9,7 +9,8 @@
  * 2. Call LLM, get CognitionOutput
  * 3. Execute any tool calls
  * 4. If needsToolResult → inject results, go to step 2
- * 5. If respond/escalate/noAction → compile to intents, return
+ * 5. If respond/noAction/defer → compile to intents, return
+ * 6. If low confidence and safe to retry → retry with smart model
  */
 
 import type { Logger } from '../../types/logger.js';
@@ -30,6 +31,7 @@ import {
   createLoopState,
   getFieldPolicy,
   COGNITION_SCHEMA_VERSION,
+  validateTerminal,
 } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { ThoughtData } from '../../types/signal.js';
@@ -42,6 +44,8 @@ import type { ToolContext } from './tools/types.js';
 export interface CognitionLLM {
   /**
    * Call the LLM with a prompt and get structured output.
+   * @param prompt The prompt to complete
+   * @param options LLM options including useSmart for smart model retry
    */
   complete(prompt: string, options?: LLMOptions): Promise<string>;
 }
@@ -49,6 +53,8 @@ export interface CognitionLLM {
 export interface LLMOptions {
   maxTokens?: number;
   temperature?: number;
+  /** Use smart (expensive) model instead of fast model */
+  useSmart?: boolean;
 }
 
 /**
@@ -58,6 +64,26 @@ export interface AgentIdentityContext {
   name: string;
   gender?: 'female' | 'male' | 'neutral';
   values?: string[];
+}
+
+/**
+ * Previous attempt context for smart retry.
+ */
+export interface PreviousAttempt {
+  /** Steps from first attempt */
+  steps: Step[];
+  /** Tool results from first attempt (reuse, don't re-execute) */
+  toolResults: ToolResult[];
+  /** Why we're retrying */
+  reason: string;
+}
+
+/**
+ * Runtime configuration for the loop.
+ */
+export interface RuntimeConfig {
+  /** Whether smart model retry is enabled (based on system health) */
+  enableSmartRetry: boolean;
 }
 
 /**
@@ -90,6 +116,12 @@ export interface LoopContext {
 
   /** Time since last message in ms (for proactive contact context) */
   timeSinceLastMessageMs?: number | undefined;
+
+  /** Previous attempt context for smart retry */
+  previousAttempt?: PreviousAttempt | undefined;
+
+  /** Runtime config from processor */
+  runtimeConfig?: RuntimeConfig | undefined;
 }
 
 export interface ConversationMessage {
@@ -122,7 +154,13 @@ export interface LoopResult {
 
   /** Error message (if failed) */
   error?: string | undefined;
+
+  /** Whether smart model retry was used */
+  usedSmartRetry?: boolean | undefined;
 }
+
+/** Confidence threshold below which smart retry is triggered */
+const SMART_RETRY_CONFIDENCE_THRESHOLD = 0.6;
 
 /**
  * Agentic Loop implementation.
@@ -146,9 +184,105 @@ export class AgenticLoop {
   }
 
   /**
+   * Check if result needs deeper thinking (smart retry).
+   */
+  private needsDeepThinking(result: LoopResult): boolean {
+    // Only respond terminal triggers retry consideration
+    if (result.terminal.type !== 'respond') {
+      return false; // noAction, defer, needsToolResult - no retry needed
+    }
+
+    // Check terminal confidence (now REQUIRED field)
+    if (result.terminal.confidence < SMART_RETRY_CONFIDENCE_THRESHOLD) {
+      return true;
+    }
+
+    // Check for pending low-confidence updates
+    if (result.pendingEscalation.length > 0) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if it's safe to retry (no side-effect tools executed).
+   */
+  private canSafelyRetry(state: LoopState): boolean {
+    // CRITICAL: Only retry if no tools with side effects were executed
+    return !state.executedTools.some((t) => t.hasSideEffects);
+  }
+
+  /**
+   * Retry with smart model, reusing tool results from first attempt.
+   */
+  private async retryWithSmartModel(
+    firstResult: LoopResult,
+    context: LoopContext
+  ): Promise<LoopResult> {
+    this.logger.info(
+      {
+        originalConfidence:
+          firstResult.terminal.type === 'respond' ? firstResult.terminal.confidence : undefined,
+        pendingEscalation: firstResult.pendingEscalation.length,
+      },
+      'Retrying with smart model due to low confidence'
+    );
+
+    // Build enriched context with first attempt info
+    const enrichedContext: LoopContext = {
+      ...context,
+      previousAttempt: {
+        steps: firstResult.steps,
+        toolResults: firstResult.state.toolResults,
+        reason: 'Low confidence, using deeper reasoning',
+      },
+    };
+
+    // Run again with smart model
+    return this.runInternal(enrichedContext, true);
+  }
+
+  /**
    * Run the agentic loop until completion.
+   * Automatically retries with smart model if confidence is low and safe to retry.
    */
   async run(context: LoopContext): Promise<LoopResult> {
+    const enableSmartRetry = context.runtimeConfig?.enableSmartRetry ?? true;
+    const useSmart = context.previousAttempt !== undefined; // Use smart if this is a retry
+
+    try {
+      const result = await this.runInternal(context, useSmart);
+
+      // Check if we need smart retry
+      if (
+        enableSmartRetry &&
+        !useSmart && // Don't retry if already using smart
+        this.needsDeepThinking(result) &&
+        this.canSafelyRetry(result.state)
+      ) {
+        return await this.retryWithSmartModel(result, context);
+      }
+
+      return result;
+    } catch (error) {
+      // On fast model failure, we can ONLY retry with smart model if no side effects occurred
+      // Since we threw an error, we don't have a result to check - we cannot safely retry
+      // The error is thrown to the caller (processor) which will send a generic error response
+      this.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Agentic loop failed - cannot safely retry (no state to check for side effects)'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Internal run implementation.
+   * @param context Loop context
+   * @param useSmart Whether to use smart model
+   */
+  private async runInternal(context: LoopContext, useSmart: boolean): Promise<LoopResult> {
     const state = createLoopState();
     const toolResults: ToolResult[] = [];
     const pendingEscalation: Step[] = [];
@@ -157,230 +291,201 @@ export class AgenticLoop {
       {
         correlationId: context.correlationId,
         triggerType: context.triggerSignal.type,
+        useSmart,
+        hasPreviousAttempt: !!context.previousAttempt,
       },
       'Agentic loop starting'
     );
 
-    try {
-      while (!state.aborted) {
-        // Check limits
-        if (state.iteration >= this.config.maxIterations) {
-          state.aborted = true;
-          state.abortReason = `Max iterations reached (${String(this.config.maxIterations)})`;
-          break;
-        }
+    // If retrying, pre-populate steps and tool results from previous attempt
+    // This allows the smart model to see what the fast model tried
+    if (context.previousAttempt) {
+      // Add previous steps so they appear in the prompt
+      state.allSteps.push(...context.previousAttempt.steps);
 
-        if (Date.now() - state.startTime > this.config.timeoutMs) {
-          state.aborted = true;
-          state.abortReason = `Timeout reached (${String(this.config.timeoutMs)}ms)`;
-          break;
-        }
+      // Add previous tool results (will be shown to LLM)
+      toolResults.push(...context.previousAttempt.toolResults);
+      state.toolResults.push(...context.previousAttempt.toolResults);
 
-        if (state.toolCallCount >= this.config.maxToolCalls) {
-          state.aborted = true;
-          state.abortReason = `Max tool calls reached (${String(this.config.maxToolCalls)})`;
-          break;
-        }
-
-        // Build prompt
-        const prompt = this.buildPrompt(context, state, toolResults);
-
-        // Call LLM
-        state.iteration++;
-        const rawOutput = await this.llm.complete(prompt, {
-          maxTokens: this.config.maxOutputTokens,
+      // Mark all previous tools as executed (they won't be re-run)
+      for (const result of context.previousAttempt.toolResults) {
+        state.executedTools.push({
+          stepId: result.stepId,
+          name: result.toolName,
+          args: {}, // Args not available from ToolResult, but not needed for tracking
+          hasSideEffects: this.toolRegistry.hasToolSideEffects(result.toolName),
         });
+      }
+    }
 
-        // Parse output
-        const output = this.parseOutput(rawOutput, context.correlationId, context.triggerSignal.id);
-        if (!output) {
-          state.aborted = true;
-          state.abortReason = 'Failed to parse LLM output';
-          break;
-        }
-
-        // Track ALL executed tools by composite key (stepId:toolName) to handle ID reuse
-        // LLM sometimes reuses step IDs across different tools
-        // Note: We track all executions (success+failure) because the deduplication logic
-        // filters by (stepId:toolName) only, not args. Allowing "retries" would just
-        // re-execute the same args repeatedly. True retry would need args-aware identity.
-        const executedToolKeys = new Set(toolResults.map((r) => `${r.stepId}:${r.toolName}`));
-
-        // Add steps to state (deduplicate by composite key for tools, by id for others)
-        // This allows different tools with same stepId to coexist
-        const existingStepKeys = new Set(
-          state.allSteps.map((s) => (s.type === 'tool' ? `${s.id}:${s.name}` : s.id))
-        );
-        const newSteps = output.steps.filter((s) => {
-          const key = s.type === 'tool' ? `${s.id}:${s.name}` : s.id;
-          return !existingStepKeys.has(key);
-        });
-        state.allSteps.push(...newSteps);
-
-        // Check for steps needing escalation
-        const escalationSteps = this.checkEscalation(output.steps);
-        pendingEscalation.push(...escalationSteps);
-
-        // Find all pending tool steps (tools that haven't been executed yet)
-        const pendingToolSteps = state.allSteps.filter(
-          (s): s is ToolStep => s.type === 'tool' && !executedToolKeys.has(`${s.id}:${s.name}`)
-        );
-
-        // Handle terminal state
-        if (output.terminal.type === 'needsToolResult') {
-          // Find the PENDING tool with this stepId (first one not yet executed)
-          const needsResultTerminal = output.terminal;
-          const toolStep = pendingToolSteps.find((s) => s.id === needsResultTerminal.stepId);
-
-          if (toolStep) {
-            // Tool is pending - execute it
-            state.toolCallCount++;
-            const result = await this.executeTool(toolStep, context);
-            toolResults.push(result);
-            state.toolResults.push(result);
-          } else {
-            // No pending tool with this stepId - might be already executed or doesn't exist
-            // Force LLM to respond instead of looping
-            this.logger.debug(
-              { stepId: needsResultTerminal.stepId },
-              'No pending tool found for stepId, forcing response'
-            );
-            state.forceRespond = true;
-          }
-
-          continue;
-        }
-
-        // For non-needsToolResult terminals: execute any pending tools first
-        // This handles the case where LLM returns tool steps with respond/noAction terminal
-        if (pendingToolSteps.length > 0) {
-          const pendingTool = pendingToolSteps[0];
-          if (pendingTool) {
-            this.logger.warn(
-              {
-                terminal: output.terminal.type,
-                pendingTools: pendingToolSteps.map((t) => t.name),
-                executing: pendingTool.name,
-              },
-              'LLM returned terminal with pending tools - executing tools first'
-            );
-
-            state.toolCallCount++;
-            const result = await this.executeTool(pendingTool, context);
-            toolResults.push(result);
-            state.toolResults.push(result);
-
-            // Continue loop so LLM can see tool result and provide proper response
-            continue;
-          }
-        }
-
-        // Terminal states: respond, escalate, noAction (only when no pending tools)
-        this.logger.debug(
-          {
-            terminal: output.terminal.type,
-            iterations: state.iteration,
-            toolCalls: state.toolCallCount,
-            steps: state.allSteps.length,
-          },
-          'Agentic loop completed'
-        );
-
-        // Compile intents
-        const intents = this.compileIntents(state.allSteps, output.terminal, context);
-
-        return {
-          success: true,
-          terminal: output.terminal,
-          steps: state.allSteps,
-          intents,
-          pendingEscalation,
-          state,
-        };
+    while (!state.aborted) {
+      // Check limits
+      if (state.iteration >= this.config.maxIterations) {
+        state.aborted = true;
+        state.abortReason = `Max iterations reached (${String(this.config.maxIterations)})`;
+        break;
       }
 
-      // Aborted
-      this.logger.warn(
-        { reason: state.abortReason, iterations: state.iteration },
-        'Agentic loop aborted'
+      if (Date.now() - state.startTime > this.config.timeoutMs) {
+        state.aborted = true;
+        state.abortReason = `Timeout reached (${String(this.config.timeoutMs)}ms)`;
+        break;
+      }
+
+      if (state.toolCallCount >= this.config.maxToolCalls) {
+        state.aborted = true;
+        state.abortReason = `Max tool calls reached (${String(this.config.maxToolCalls)})`;
+        break;
+      }
+
+      // Build prompt
+      const prompt = this.buildPrompt(context, state, toolResults);
+
+      // Call LLM (use smart model if specified)
+      state.iteration++;
+      const rawOutput = await this.llm.complete(prompt, {
+        maxTokens: this.config.maxOutputTokens,
+        useSmart,
+      });
+
+      // Parse output
+      const output = this.parseOutput(rawOutput, context.correlationId, context.triggerSignal.id);
+      if (!output) {
+        state.aborted = true;
+        state.abortReason = 'Failed to parse LLM output';
+        break;
+      }
+
+      // Track ALL executed tools by composite key (stepId:toolName) to handle ID reuse
+      // LLM sometimes reuses step IDs across different tools
+      // Note: We track all executions (success+failure) because the deduplication logic
+      // filters by (stepId:toolName) only, not args. Allowing "retries" would just
+      // re-execute the same args repeatedly. True retry would need args-aware identity.
+      const executedToolKeys = new Set(toolResults.map((r) => `${r.stepId}:${r.toolName}`));
+
+      // Add steps to state (deduplicate by composite key for tools, by id for others)
+      // This allows different tools with same stepId to coexist
+      const existingStepKeys = new Set(
+        state.allSteps.map((s) => (s.type === 'tool' ? `${s.id}:${s.name}` : s.id))
+      );
+      const newSteps = output.steps.filter((s) => {
+        const key = s.type === 'tool' ? `${s.id}:${s.name}` : s.id;
+        return !existingStepKeys.has(key);
+      });
+      state.allSteps.push(...newSteps);
+
+      // Check for steps needing escalation
+      const escalationSteps = this.checkEscalation(output.steps);
+      pendingEscalation.push(...escalationSteps);
+
+      // Find all pending tool steps (tools that haven't been executed yet)
+      const pendingToolSteps = state.allSteps.filter(
+        (s): s is ToolStep => s.type === 'tool' && !executedToolKeys.has(`${s.id}:${s.name}`)
       );
 
-      // On timeout or loop, escalate to SMART layer instead of failing silently
-      if (context.recipientId && (state.abortReason?.includes('Timeout') || state.forceRespond)) {
-        this.logger.info(
-          { recipientId: context.recipientId, reason: state.abortReason },
-          'COGNITION failed, escalating to SMART layer'
-        );
-        return {
-          success: false,
-          terminal: {
-            type: 'escalate',
-            reason: state.abortReason ?? 'COGNITION timeout/loop',
-            parentId: 'loop',
-          },
-          steps: state.allSteps,
-          intents: [],
-          pendingEscalation,
-          state,
-          error: state.abortReason,
-        };
+      // Handle terminal state
+      if (output.terminal.type === 'needsToolResult') {
+        // Find the PENDING tool with this stepId (first one not yet executed)
+        const needsResultTerminal = output.terminal;
+        const toolStep = pendingToolSteps.find((s) => s.id === needsResultTerminal.stepId);
+
+        if (toolStep) {
+          // Tool is pending - execute it
+          state.toolCallCount++;
+          const result = await this.executeTool(toolStep, context);
+          toolResults.push(result);
+          state.toolResults.push(result);
+
+          // Track executed tool with side effects info
+          state.executedTools.push({
+            stepId: toolStep.id,
+            name: toolStep.name,
+            args: toolStep.args,
+            hasSideEffects: this.toolRegistry.hasToolSideEffects(toolStep.name),
+          });
+        } else {
+          // No pending tool with this stepId - might be already executed or doesn't exist
+          // Force LLM to respond instead of looping
+          this.logger.debug(
+            { stepId: needsResultTerminal.stepId },
+            'No pending tool found for stepId, forcing response'
+          );
+          state.forceRespond = true;
+        }
+
+        continue;
       }
 
-      // Create fallback response for parse failures
-      const fallbackIntents: Intent[] = [];
-      if (context.recipientId && state.abortReason?.includes('parse')) {
-        this.logger.info(
-          { recipientId: context.recipientId },
-          'Sending fallback response due to parse failure'
-        );
-        fallbackIntents.push({
-          type: 'SEND_MESSAGE',
-          payload: {
-            recipientId: context.recipientId,
-            text: 'Извини, у меня возникли технические проблемы. Можешь повторить?',
-          },
-        });
+      // For non-needsToolResult terminals: execute any pending tools first
+      // This handles the case where LLM returns tool steps with respond/noAction terminal
+      if (pendingToolSteps.length > 0) {
+        const pendingTool = pendingToolSteps[0];
+        if (pendingTool) {
+          this.logger.warn(
+            {
+              terminal: output.terminal.type,
+              pendingTools: pendingToolSteps.map((t) => t.name),
+              executing: pendingTool.name,
+            },
+            'LLM returned terminal with pending tools - executing tools first'
+          );
+
+          state.toolCallCount++;
+          const result = await this.executeTool(pendingTool, context);
+          toolResults.push(result);
+          state.toolResults.push(result);
+
+          // Track executed tool with side effects info
+          state.executedTools.push({
+            stepId: pendingTool.id,
+            name: pendingTool.name,
+            args: pendingTool.args,
+            hasSideEffects: this.toolRegistry.hasToolSideEffects(pendingTool.name),
+          });
+
+          // Continue loop so LLM can see tool result and provide proper response
+          continue;
+        }
       }
+
+      // Terminal states: respond, noAction, defer (only when no pending tools)
+      this.logger.debug(
+        {
+          terminal: output.terminal.type,
+          iterations: state.iteration,
+          toolCalls: state.toolCallCount,
+          steps: state.allSteps.length,
+        },
+        'Agentic loop completed'
+      );
+
+      // Compile intents (from steps and tool results)
+      const intents = this.compileIntents(
+        state.allSteps,
+        output.terminal,
+        context,
+        state.toolResults
+      );
 
       return {
-        success: false,
-        terminal: { type: 'noAction', reason: state.abortReason ?? 'Aborted', parentId: 'loop' },
+        success: true,
+        terminal: output.terminal,
         steps: state.allSteps,
-        intents: fallbackIntents,
+        intents,
         pendingEscalation,
         state,
-        error: state.abortReason,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error({ error: errorMessage }, 'Agentic loop error');
-
-      // Create fallback response if we have a chat to respond to
-      const errorFallbackIntents: Intent[] = [];
-      if (context.recipientId) {
-        this.logger.info(
-          { recipientId: context.recipientId },
-          'Sending fallback response due to error'
-        );
-        errorFallbackIntents.push({
-          type: 'SEND_MESSAGE',
-          payload: {
-            recipientId: context.recipientId,
-            text: 'Извини, что-то пошло не так. Попробуй ещё раз.',
-          },
-        });
-      }
-
-      return {
-        success: false,
-        terminal: { type: 'noAction', reason: errorMessage, parentId: 'loop' },
-        steps: state.allSteps,
-        intents: errorFallbackIntents,
-        pendingEscalation,
-        state,
-        error: errorMessage,
+        usedSmartRetry: useSmart,
       };
     }
+
+    // Aborted - throw error to trigger smart retry at run() level
+    this.logger.warn(
+      { reason: state.abortReason, iterations: state.iteration, useSmart },
+      'Agentic loop aborted'
+    );
+
+    // Throw error to let run() handle retry logic
+    throw new Error(state.abortReason ?? 'Agentic loop aborted');
   }
 
   /**
@@ -437,14 +542,14 @@ Use terminal type "respond" with your answer based on the tool result.`);
     return `You are ${agentName} (${agentGender}). Values: ${values}
 ${genderNote}
 
-Capabilities: think → use tools → update beliefs (with evidence) → respond/escalate
+Capabilities: think → use tools → update beliefs (with evidence) → respond
 
 Rules:
 - Plain text only (no markdown)
 - Don't re-greet if already greeted
 - User's name: only on first greeting or after long pauses, not every message
 - Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
-- Escalate complex/sensitive topics to SMART`;
+- Set confidence below 0.6 when uncertain about complex/sensitive topics`;
   }
 
   private buildStateSection(context: LoopContext): string {
@@ -607,45 +712,48 @@ Respond with valid JSON:
 {
   "steps": [
     { "type": "think", "id": "t1", "parentId": "<signal_id or previous_step_id>", "content": "..." },
-    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "memory", "args": { "action": "search", "query": "..." } },
+    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "core.memory", "args": { "action": "search", "query": "..." } },
     { "type": "updateUser", "id": "u1", "parentId": "t1", "field": "mood", "value": "happy", "confidence": 0.8, "source": "inferred" },
     { "type": "updateAgent", "id": "a1", "parentId": "t1", "field": "socialDebt", "operation": "delta", "value": -0.1, "confidence": 0.9, "reason": "had conversation" },
     { "type": "saveFact", "id": "f1", "parentId": "t1", "fact": { "subject": "user", "predicate": "name", "object": "Shady", "source": "user_quote", "evidence": "said 'I'm Shady'", "confidence": 0.95, "tags": ["identity"] } },
-    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } },
-    { "type": "emitThought", "id": "th1", "parentId": "t1", "content": "User mentioned being stressed - follow up later" }
+    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } }
   ],
-  "terminal": { "type": "respond", "text": "Hello!", "parentId": "t1" }
+  "terminal": { "type": "respond", "text": "Hello!", "parentId": "t1", "conversationStatus": "awaiting_answer", "confidence": 0.85 }
   // OR: { "type": "needsToolResult", "stepId": "tool1" }
-  // OR: { "type": "escalate", "reason": "complex question", "parentId": "t1" }
   // OR: { "type": "noAction", "reason": "nothing to do", "parentId": "t1" }
   // OR: { "type": "defer", "signalType": "contact_urge", "reason": "User seems busy", "deferHours": 4, "parentId": "t1" }
 }
 
 Terminal types:
-- "respond": Send a message to user (only when no tool steps need results)
-- "noAction": Do nothing (for non-proactive triggers)
+- "respond": Send message. ALL fields REQUIRED:
+  - text: The message to send
+  - conversationStatus: One of:
+    - "active": Mid-conversation, expect quick reply
+    - "awaiting_answer": Asked a question, waiting for response
+    - "closed": Said goodbye or user is busy - don't follow up
+    - "idle": Statement made, no question asked, OK to reach out later
+  - confidence: 0-1 (how confident you are in this response)
+    - 0.8-1.0: High confidence, proceed normally
+    - 0.6-0.8: Moderate confidence, acceptable
+    - Below 0.6: Uncertain - system will use deeper reasoning
+- "noAction": Do nothing (for internal triggers with nothing to do)
 - "defer": Don't act now, reconsider in deferHours - works for any signal type
-- "escalate": Need deeper reasoning from SMART layer
 - "needsToolResult": Waiting for tool to complete
 
 IMPORTANT: If you include any tool step, use "needsToolResult" terminal to wait for the result before responding.
-
-Step type "emitThought": Queue an internal thought for later processing.
-- Use ONLY when a concrete future action is needed (not just "monitor" or "watch for")
-- When processing a thought trigger and choosing noAction, do NOT emit another thought - end the chain
-- Prefer ACTION over more thinking - if no action needed, just stop
 
 ## Available Tools
 ${this.toolRegistry.getToolCards().join('\n') || '(none)'}
 
 IMPORTANT: Tool cards above show only brief descriptions. Before using a plugin.* tool for the first time, get its full schema:
 { "type": "tool", "id": "help1", "parentId": "t1", "name": "core.tools", "args": { "action": "describe", "name": "plugin.reminder" } }
-Use the EXACT tool name from the cards (e.g., "plugin.reminder", not "reminder").
+Use the EXACT tool name from the cards (e.g., "core.memory", "plugin.reminder", not "memory").
 If a tool returns an error with a "schema" field, use that schema to correct your parameters.`;
   }
 
   /**
    * Parse LLM output to CognitionOutput.
+   * Throws on validation failure (caller should catch and retry with smart model).
    */
   private parseOutput(
     raw: string,
@@ -668,6 +776,23 @@ If a tool returns an error with a "schema" field, use that schema to correct you
       // Validate required fields
       if (!parsed.terminal) {
         this.logger.error({ raw: raw.slice(0, 500) }, 'LLM output missing terminal');
+        return null;
+      }
+
+      // Validate terminal has required fields based on type
+      try {
+        validateTerminal(parsed.terminal);
+      } catch (validationError) {
+        this.logger.warn(
+          {
+            error:
+              validationError instanceof Error ? validationError.message : String(validationError),
+            terminalType: (parsed.terminal as unknown as Record<string, unknown>)['type'],
+            terminal: parsed.terminal,
+          },
+          'Terminal validation failed, will retry with smart model'
+        );
+        // Return null to trigger smart retry
         return null;
       }
 
@@ -726,15 +851,30 @@ If a tool returns an error with a "schema" field, use that schema to correct you
   }
 
   /**
-   * Compile steps to intents.
+   * Compile steps and tool results to intents.
    */
-  private compileIntents(steps: Step[], terminal: Terminal, context: LoopContext): Intent[] {
+  private compileIntents(
+    steps: Step[],
+    terminal: Terminal,
+    context: LoopContext,
+    toolResults: ToolResult[]
+  ): Intent[] {
     const intents: Intent[] = [];
 
     for (const step of steps) {
       const intent = this.stepToIntent(step, context);
       if (intent) {
         intents.push(intent);
+      }
+    }
+
+    // Handle core.thought tool results → EMIT_THOUGHT intents
+    for (const result of toolResults) {
+      if (result.toolName === 'core.thought' && result.success) {
+        const thoughtIntent = this.thoughtToolResultToIntent(result, context);
+        if (thoughtIntent) {
+          intents.push(thoughtIntent);
+        }
       }
     }
 
@@ -745,6 +885,7 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         payload: {
           recipientId: context.recipientId,
           text: terminal.text,
+          conversationStatus: terminal.conversationStatus,
         },
       });
     }
@@ -764,6 +905,69 @@ If a tool returns an error with a "schema" field, use that schema to correct you
     }
 
     return intents;
+  }
+
+  /**
+   * Convert core.thought tool result to EMIT_THOUGHT intent.
+   */
+  private thoughtToolResultToIntent(result: ToolResult, context: LoopContext): Intent | null {
+    const data = result.data as { content?: string; reason?: string } | undefined;
+    if (!data?.content) {
+      return null;
+    }
+
+    const content = data.content;
+    const dedupeKey = content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
+
+    // SECURITY: Derive depth from actual trigger signal, not LLM-provided data
+    // This prevents the LLM from resetting depth to 0 to bypass recursion limits
+    let depth: number;
+    let rootId: string;
+    let parentId: string | undefined;
+    let triggerSource: 'conversation' | 'memory' | 'thought';
+
+    if (context.triggerSignal.type === 'thought') {
+      // Processing a thought signal - MUST increment from trigger's depth
+      const triggerData = context.triggerSignal.data as ThoughtData | undefined;
+      if (triggerData) {
+        depth = triggerData.depth + 1;
+        rootId = triggerData.rootThoughtId;
+        parentId = context.triggerSignal.id;
+        triggerSource = 'thought';
+      } else {
+        // Malformed thought signal - reject
+        this.logger.warn('Thought signal missing ThoughtData, rejecting thought tool');
+        return null;
+      }
+    } else {
+      // Not triggered by thought - this is a root thought from conversation/other
+      depth = 0;
+      rootId = `thought_${result.stepId}`;
+      parentId = undefined;
+      triggerSource = context.triggerSignal.type === 'user_message' ? 'conversation' : 'memory';
+    }
+
+    // Validate depth limit
+    if (depth > THOUGHT_LIMITS.MAX_DEPTH) {
+      this.logger.warn(
+        { depth, content: content.slice(0, 30) },
+        'Thought rejected: max depth exceeded'
+      );
+      return null;
+    }
+
+    return {
+      type: 'EMIT_THOUGHT',
+      payload: {
+        content,
+        triggerSource,
+        depth,
+        rootThoughtId: rootId,
+        dedupeKey,
+        signalSource: 'cognition.thought',
+        ...(parentId !== undefined && { parentThoughtId: parentId }),
+      },
+    };
   }
 
   /**
@@ -848,61 +1052,6 @@ If a tool returns an error with a "schema" field, use that schema to correct you
           },
         };
         return scheduleIntent;
-      }
-
-      case 'emitThought': {
-        const dedupeKey = step.content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
-
-        // SECURITY: Derive depth from actual trigger signal, not LLM-provided data
-        // This prevents the LLM from resetting depth to 0 to bypass recursion limits
-        let depth: number;
-        let rootId: string;
-        let parentId: string | undefined;
-        let triggerSource: 'conversation' | 'memory' | 'thought';
-
-        if (context.triggerSignal.type === 'thought') {
-          // Processing a thought signal - MUST increment from trigger's depth
-          const triggerData = context.triggerSignal.data as ThoughtData | undefined;
-          if (triggerData) {
-            depth = triggerData.depth + 1;
-            rootId = triggerData.rootThoughtId;
-            parentId = context.triggerSignal.id;
-            triggerSource = 'thought';
-          } else {
-            // Malformed thought signal - reject
-            this.logger.warn('Thought signal missing ThoughtData, rejecting emitThought');
-            return null;
-          }
-        } else {
-          // Not triggered by thought - this is a root thought from conversation/other
-          // LLM-provided parentThought is ignored for security
-          depth = 0;
-          rootId = `thought_${step.id}`;
-          parentId = undefined;
-          triggerSource = context.triggerSignal.type === 'user_message' ? 'conversation' : 'memory';
-        }
-
-        // Validate depth limit
-        if (depth > THOUGHT_LIMITS.MAX_DEPTH) {
-          this.logger.warn(
-            { depth, content: step.content.slice(0, 30) },
-            'Thought rejected: max depth exceeded'
-          );
-          return null;
-        }
-
-        return {
-          type: 'EMIT_THOUGHT',
-          payload: {
-            content: step.content,
-            triggerSource,
-            depth,
-            rootThoughtId: rootId,
-            dedupeKey,
-            signalSource: 'cognition.thought',
-            ...(parentId !== undefined && { parentThoughtId: parentId }),
-          },
-        };
       }
 
       case 'think':

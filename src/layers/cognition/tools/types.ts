@@ -26,6 +26,14 @@ export interface Tool {
   execute: ToolExecutor;
   /** Capability tags for tool discovery (e.g., ['recurring', 'one-time']) */
   tags?: string[];
+  /**
+   * Whether this tool has side effects.
+   * - true: Mutates state (send message, save data, create reminder)
+   * - false: Read-only (get time, search memory, get state)
+   * Defaults to true for safety (unknown tools assumed to have side effects).
+   * Used to determine if smart retry is safe after low confidence response.
+   */
+  hasSideEffects?: boolean;
 }
 
 /**

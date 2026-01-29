@@ -107,6 +107,11 @@ export interface ScheduleEventIntent {
 }
 
 /**
+ * Conversation status for follow-up timing.
+ */
+export type ConversationStatus = 'active' | 'awaiting_answer' | 'closed' | 'idle';
+
+/**
  * Send a message through a channel.
  */
 export interface SendMessageIntent {
@@ -118,6 +123,8 @@ export interface SendMessageIntent {
     text: string;
     /** Optional: reply to message ID */
     replyTo?: string;
+    /** Conversation status for follow-up timing (avoids separate LLM call) */
+    conversationStatus?: ConversationStatus;
   };
   /** Source that emitted this intent (for attribution/auditing) */
   source?: string;

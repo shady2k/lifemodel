@@ -14,11 +14,17 @@ import type { LLMProvider as AppLLMProvider, Message, ModelRole } from '../../ll
  * Configuration for the LLM adapter.
  */
 export interface LLMAdapterConfig {
-  /** Model to use for cognition (fast/cheap model) */
+  /** Model to use for fast cognition (cheap/quick model) */
   model?: string;
 
   /** Model role for provider selection ('fast' for cheap quick calls) */
   role?: ModelRole;
+
+  /** Model to use for smart retry (expensive/powerful model) */
+  smartModel?: string;
+
+  /** Model role for smart retry ('smart' for powerful model) */
+  smartRole?: ModelRole;
 
   /** Temperature for generation */
   temperature: number;
@@ -32,6 +38,7 @@ export interface LLMAdapterConfig {
  */
 const DEFAULT_CONFIG: LLMAdapterConfig = {
   role: 'fast', // Use fast/cheap model for COGNITION layer
+  smartRole: 'smart', // Use smart/powerful model for retries
   temperature: 0.3,
 };
 
@@ -54,9 +61,12 @@ export class LLMAdapter implements CognitionLLM {
 
   /**
    * Complete a prompt and return the response.
+   * @param prompt The prompt to complete
+   * @param options LLM options including useSmart for smart model retry
    */
-  async complete(prompt: string, options?: LLMOptions): Promise<string> {
+  async complete(prompt: string, options?: LLMOptions & { useSmart?: boolean }): Promise<string> {
     const startTime = Date.now();
+    const useSmart = options?.useSmart ?? false;
 
     // Split prompt into system and user parts
     const { systemPrompt, userPrompt } = this.splitPrompt(prompt);
@@ -73,12 +83,23 @@ export class LLMAdapter implements CognitionLLM {
         temperature: options?.temperature ?? this.config.temperature,
       };
 
-      // Only add model or role if defined
-      if (this.config.model) {
-        request.model = this.config.model;
-      }
-      if (this.config.role) {
-        request.role = this.config.role;
+      // Select model based on useSmart flag
+      if (useSmart) {
+        // Use smart model for retry
+        if (this.config.smartModel) {
+          request.model = this.config.smartModel;
+        }
+        if (this.config.smartRole) {
+          request.role = this.config.smartRole;
+        }
+      } else {
+        // Use fast model for initial attempt
+        if (this.config.model) {
+          request.model = this.config.model;
+        }
+        if (this.config.role) {
+          request.role = this.config.role;
+        }
       }
 
       const response = await this.provider.complete(request);
@@ -87,6 +108,7 @@ export class LLMAdapter implements CognitionLLM {
       this.logger.debug(
         {
           model: response.model,
+          useSmart,
           promptLength: prompt.length,
           responseLength: response.content.length,
           duration,
@@ -97,7 +119,7 @@ export class LLMAdapter implements CognitionLLM {
 
       return response.content;
     } catch (error) {
-      this.logger.error({ error }, 'LLM completion failed');
+      this.logger.error({ error, useSmart }, 'LLM completion failed');
       throw error;
     }
   }

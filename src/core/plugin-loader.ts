@@ -745,10 +745,11 @@ export class PluginLoader {
     }
 
     for (const tool of tools) {
-      // Prefix tool name with plugin ID
+      // Prefix tool name with "plugin." for clear categorization
+      // Results in names like "plugin.reminder", "plugin.weather"
       const prefixedTool: PluginTool = {
         ...tool,
-        name: `${pluginId}:${tool.name}`,
+        name: `plugin.${tool.name}`,
       };
       this.toolRegisterCallback(prefixedTool);
       this.logger.debug({ pluginId, toolName: prefixedTool.name }, 'Tool registered');

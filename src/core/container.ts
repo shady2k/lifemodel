@@ -1,6 +1,5 @@
 import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
-import type { ToolName } from '../types/cognition.js';
 import type { PluginEventData } from '../types/signal.js';
 import { createLogger, type LoggerConfig } from './logger.js';
 import { createMetrics } from './metrics.js';
@@ -16,7 +15,6 @@ import {
   createAutonomicProcessor,
   createAggregationProcessor,
   createCognitionProcessor,
-  createSmartProcessor,
 } from '../layers/index.js';
 import {
   type TelegramChannel,
@@ -165,14 +163,14 @@ export interface Container {
 }
 
 /**
- * Create the 4-layer processors.
+ * Create the 3-layer processors.
+ * Note: SMART layer merged into COGNITION - smart retry is internal.
  */
 function createLayers(logger: Logger): CoreLoopLayers {
   return {
     autonomic: createAutonomicProcessor(logger),
     aggregation: createAggregationProcessor(logger),
     cognition: createCognitionProcessor(logger),
-    smart: createSmartProcessor(logger),
   };
 }
 
@@ -693,7 +691,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   pluginLoader.setToolCallbacks(
     (tool) => {
       layers.cognition.getToolRegistry().registerTool({
-        name: tool.name as ToolName,
+        name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
         execute: tool.execute,
@@ -701,7 +699,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       });
     },
     (toolName) => {
-      return layers.cognition.getToolRegistry().unregisterTool(toolName as ToolName);
+      return layers.cognition.getToolRegistry().unregisterTool(toolName);
     }
   );
 
