@@ -638,8 +638,10 @@ Step type "emitThought": Queue an internal thought for later processing.
 ## Available Tools
 ${this.toolRegistry.getToolCards().join('\n') || '(none)'}
 
-To get full parameter schema for any tool:
-{ "type": "tool", "id": "help1", "parentId": "t1", "name": "tools", "args": { "action": "describe", "name": "<tool_name>" } }`;
+IMPORTANT: Tool cards above show only brief descriptions. Before using a plugin.* tool for the first time, get its full schema:
+{ "type": "tool", "id": "help1", "parentId": "t1", "name": "core.tools", "args": { "action": "describe", "name": "plugin.reminder" } }
+Use the EXACT tool name from the cards (e.g., "plugin.reminder", not "reminder").
+If a tool returns an error with a "schema" field, use that schema to correct your parameters.`;
   }
 
   /**

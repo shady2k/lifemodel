@@ -42,7 +42,113 @@ interface ReminderToolResult {
   reminders?: ReminderSummary[];
   total?: number;
   error?: string;
+  receivedParams?: string[];
+  schema?: Record<string, unknown>;
 }
+
+/**
+ * Schema definitions for error responses.
+ * These help the LLM self-correct when it sends invalid parameters.
+ */
+const SCHEMA_CREATE = {
+  action: { type: 'string', required: true, enum: ['create'] },
+  content: { type: 'string', required: true, description: 'What to remind about' },
+  anchor: {
+    type: 'object',
+    required: true,
+    description: 'Semantic date anchor defining WHEN to fire',
+    properties: {
+      type: { type: 'string', required: true, enum: ['relative', 'absolute', 'recurring'] },
+      confidence: { type: 'number', required: true, description: '0-1 confidence score' },
+      originalPhrase: {
+        type: 'string',
+        required: true,
+        description: 'Original time expression from user',
+      },
+      relative: {
+        type: 'object',
+        required: false,
+        description: 'Required when anchor.type="relative"',
+        properties: {
+          unit: {
+            type: 'string',
+            required: true,
+            enum: ['minute', 'hour', 'day', 'week', 'month'],
+          },
+          amount: { type: 'number', required: true },
+        },
+      },
+      absolute: {
+        type: 'object',
+        required: false,
+        description: 'Required when anchor.type="absolute"',
+        properties: {
+          special: {
+            type: 'string',
+            required: false,
+            enum: [
+              'tomorrow',
+              'next_week',
+              'next_month',
+              'this_evening',
+              'tonight',
+              'this_afternoon',
+            ],
+          },
+          year: { type: 'number', required: false },
+          month: { type: 'number', required: false },
+          day: { type: 'number', required: false },
+          hour: { type: 'number', required: false },
+          minute: { type: 'number', required: false },
+          dayOfWeek: {
+            type: 'number',
+            required: false,
+            description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
+          },
+        },
+      },
+      recurring: {
+        type: 'object',
+        required: false,
+        description: 'Required when anchor.type="recurring"',
+        properties: {
+          frequency: { type: 'string', required: true, enum: ['daily', 'weekly', 'monthly'] },
+          interval: { type: 'number', required: true, default: 1 },
+          hour: { type: 'number', required: false },
+          minute: { type: 'number', required: false },
+          daysOfWeek: {
+            type: 'array',
+            items: 'number (0-6)',
+            required: false,
+            description: 'For weekly',
+          },
+          dayOfMonth: { type: 'number', required: false, description: 'For monthly, fixed day' },
+          anchorDay: {
+            type: 'number',
+            required: false,
+            description: 'For monthly with constraint',
+          },
+          constraint: {
+            type: 'string',
+            required: false,
+            enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
+          },
+        },
+      },
+    },
+  },
+  tags: { type: 'array', items: 'string', required: false },
+};
+
+const SCHEMA_CANCEL = {
+  action: { type: 'string', required: true, enum: ['cancel'] },
+  reminderId: { type: 'string', required: true, description: 'ID returned by create or list' },
+};
+
+const SCHEMA_LIST = {
+  action: { type: 'string', required: true, enum: ['list'] },
+  limit: { type: 'number', required: false, default: 10 },
+};
 
 /**
  * Create the unified reminder tool.
@@ -328,6 +434,10 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
           success: false,
           action: 'unknown',
           error: 'Missing or invalid action parameter',
+          receivedParams: Object.keys(args),
+          schema: {
+            availableActions: { create: SCHEMA_CREATE, list: SCHEMA_LIST, cancel: SCHEMA_CANCEL },
+          },
         };
       }
 
@@ -351,6 +461,8 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
               success: false,
               action: 'create',
               error: 'Missing required parameters: content, anchor',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_CREATE,
             };
           }
 
@@ -370,6 +482,8 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
               success: false,
               action: 'cancel',
               error: 'Missing required parameter: reminderId',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_CANCEL,
             };
           }
           return cancelReminder(reminderId, recipientId);
@@ -380,6 +494,10 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
             success: false,
             action: action || 'unknown',
             error: `Unknown action: ${action}. Use "create", "list", or "cancel".`,
+            receivedParams: Object.keys(args),
+            schema: {
+              availableActions: { create: SCHEMA_CREATE, list: SCHEMA_LIST, cancel: SCHEMA_CANCEL },
+            },
           };
       }
     },
