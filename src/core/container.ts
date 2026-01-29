@@ -77,8 +77,8 @@ export interface AppConfig {
     name?: string;
     /** Telegram chat ID to send proactive messages to */
     telegramChatId?: string;
-    /** User's timezone offset from UTC in hours (e.g., -5 for EST) */
-    timezoneOffset?: number;
+    /** User's timezone offset from UTC in hours (e.g., -5 for EST), null = unknown */
+    timezoneOffset?: number | null;
   };
   /** LLM configuration */
   llm?: {
@@ -298,7 +298,7 @@ export function createContainer(config: AppConfig = {}): Container {
   let userModel: UserModel | null = null;
   if (primaryUserChatId) {
     const userName = config.primaryUser?.name ?? null;
-    const timezoneOffset = config.primaryUser?.timezoneOffset ?? 0;
+    const timezoneOffset = config.primaryUser?.timezoneOffset ?? null;
     userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
     logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
   }

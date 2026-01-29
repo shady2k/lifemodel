@@ -101,6 +101,8 @@ export class UserModel {
   private readonly logger: Logger;
   private energyProfile: Record<number, number>;
   private lastDecayAt: Date;
+  private lastAvailabilitySignalAt: Date | null = null;
+  private lastAvailabilityDriftAt: Date;
 
   constructor(user: User, logger: Logger, config: Partial<UserModelConfig> = {}) {
     this.user = { ...user };
@@ -108,6 +110,11 @@ export class UserModel {
     this.logger = logger.child({ component: 'user-model', userId: user.id });
     this.energyProfile = { ...DEFAULT_ENERGY_PROFILE };
     this.lastDecayAt = new Date();
+    // Signal timestamp not persisted - no grace period after restart
+    // (we don't know if last update was signal-based or drift-based)
+    this.lastAvailabilitySignalAt = null;
+    // Initialize drift timestamp from persisted state for continuity
+    this.lastAvailabilityDriftAt = user.beliefs.availability.updatedAt;
 
     // Adjust energy profile based on user patterns
     this.adjustEnergyProfile();
@@ -281,16 +288,64 @@ export class UserModel {
   /**
    * Update beliefs based on current time.
    * Call this periodically to keep energy/availability current.
+   *
+   * Time-based and event-based signals are merged, not overridden:
+   * - Time estimate provides the baseline (where availability drifts toward)
+   * - Event signals shift the value from baseline
+   * - Value gradually blends back toward time estimate over time
+   * - Time drift only nudges value, preserves signal metadata (source, evidence)
    */
   updateTimeBasedBeliefs(date: Date = new Date()): void {
-    // Update energy estimate
+    // Update energy estimate (follows circadian rhythm)
     this.setEnergy(this.estimateEnergy(date));
 
-    // Update availability estimate
-    this.setAvailability(this.estimateAvailability(date));
+    // Drift availability toward time-based estimate
+    this.driftAvailabilityTowardEstimate(date);
 
     // Apply confidence decay
     this.decayConfidence();
+  }
+
+  /**
+   * Drift availability toward time estimate without overwriting signal metadata.
+   * Uses half-life formula for time-independent decay.
+   * Updates value and updatedAt, preserves source/evidenceCount.
+   */
+  private driftAvailabilityTowardEstimate(date: Date): void {
+    // Grace period: don't drift for 30 seconds after a signal
+    const gracePeriodMs = 30_000;
+    if (this.lastAvailabilitySignalAt) {
+      const timeSinceSignal = date.getTime() - this.lastAvailabilitySignalAt.getTime();
+      if (timeSinceSignal < gracePeriodMs) {
+        return;
+      }
+    }
+
+    const timeEstimate = this.estimateAvailability(date);
+    const currentValue = this.user.beliefs.availability.value;
+    const diff = timeEstimate - currentValue;
+
+    // Skip if already close enough
+    if (Math.abs(diff) < 0.01) {
+      return;
+    }
+
+    // Time-scaled drift using half-life formula
+    // Half-life of 5 minutes = value moves halfway to target in 5 min
+    const halfLifeMs = 5 * 60 * 1000;
+    const elapsedMs = Math.max(0, date.getTime() - this.lastAvailabilityDriftAt.getTime());
+    const decayFactor = Math.pow(0.5, elapsedMs / halfLifeMs);
+    const driftedValue = timeEstimate - diff * decayFactor;
+
+    // Update value and updatedAt, preserve source/evidenceCount
+    // Use passed date for consistency (allows simulations/tests to work correctly)
+    this.user.beliefs.availability = {
+      ...this.user.beliefs.availability,
+      value: round3(Math.max(0, Math.min(1, driftedValue))),
+      updatedAt: date,
+    };
+
+    this.lastAvailabilityDriftAt = date;
   }
 
   /**
@@ -535,7 +590,7 @@ export class UserModel {
     );
   }
 
-  private setAvailability(value: number, confidence = 0.6): void {
+  private setAvailability(value: number, confidence = 0.6, fromSignal = true): void {
     const clampedValue = round3(Math.max(0, Math.min(1, value)));
     this.user.beliefs.availability = updateNumericBelief(
       this.user.beliefs.availability,
@@ -543,9 +598,16 @@ export class UserModel {
       confidence,
       'inferred'
     );
+    if (fromSignal) {
+      this.lastAvailabilitySignalAt = new Date();
+    }
   }
 
   private getUserLocalHour(date: Date): number {
+    // If timezone unknown, use system local time as fallback
+    if (this.user.timezoneOffset === null) {
+      return date.getHours();
+    }
     const utcHour = date.getUTCHours();
     let localHour = utcHour + this.user.timezoneOffset;
     if (localHour < 0) localHour += 24;
@@ -605,7 +667,7 @@ export function createNewUserWithModel(
   id: string,
   name: string | null,
   logger: Logger,
-  timezoneOffset = 0,
+  timezoneOffset: number | null = null,
   config?: Partial<UserModelConfig>
 ): UserModel {
   const user = createUser(id, name, timezoneOffset);

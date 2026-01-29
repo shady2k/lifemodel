@@ -131,7 +131,7 @@ export interface MergedConfig {
   /** Primary user configuration */
   primaryUser: {
     name: string | null;
-    timezoneOffset: number;
+    timezoneOffset: number | null;
     telegramChatId: string | null;
   };
 
@@ -216,7 +216,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
   },
   primaryUser: {
     name: null,
-    timezoneOffset: 0,
+    timezoneOffset: null,
     telegramChatId: null,
   },
   llm: {

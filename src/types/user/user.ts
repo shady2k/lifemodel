@@ -30,8 +30,9 @@ export interface User extends Person {
   /**
    * Timezone offset in hours from UTC (e.g., +3 for Moscow).
    * Used for time-of-day calculations.
+   * Null means unknown - will use system local time as fallback.
    */
-  timezoneOffset: number;
+  timezoneOffset: number | null;
 }
 
 /**
@@ -153,9 +154,13 @@ export function createDefaultBeliefs(): UserBeliefs {
  *
  * @param id - User's unique identifier
  * @param name - User's name (null if unknown)
- * @param timezoneOffset - Timezone offset from UTC in hours
+ * @param timezoneOffset - Timezone offset from UTC in hours (null = unknown, use system local)
  */
-export function createUser(id: string, name: string | null = null, timezoneOffset = 0): User {
+export function createUser(
+  id: string,
+  name: string | null = null,
+  timezoneOffset: number | null = null
+): User {
   return {
     id,
     name,
