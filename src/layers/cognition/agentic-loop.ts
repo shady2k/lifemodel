@@ -208,9 +208,15 @@ export class AgenticLoop {
         const escalationSteps = this.checkEscalation(output.steps);
         pendingEscalation.push(...escalationSteps);
 
+        // Find all pending tool steps (tools that haven't been executed yet)
+        const executedToolIds = new Set(toolResults.map((r) => r.stepId));
+        const pendingToolSteps = state.allSteps.filter(
+          (s): s is ToolStep => s.type === 'tool' && !executedToolIds.has(s.id)
+        );
+
         // Handle terminal state
         if (output.terminal.type === 'needsToolResult') {
-          // Execute tools and continue - search ALL steps, not just current iteration
+          // Execute the specific tool requested
           const needsResultTerminal = output.terminal;
           const toolStep = state.allSteps.find(
             (s): s is ToolStep => s.type === 'tool' && s.id === needsResultTerminal.stepId
@@ -238,7 +244,31 @@ export class AgenticLoop {
           continue;
         }
 
-        // Terminal states: respond, escalate, noAction
+        // For non-needsToolResult terminals: execute any pending tools first
+        // This handles the case where LLM returns tool steps with respond/noAction terminal
+        if (pendingToolSteps.length > 0) {
+          const pendingTool = pendingToolSteps[0];
+          if (pendingTool) {
+            this.logger.warn(
+              {
+                terminal: output.terminal.type,
+                pendingTools: pendingToolSteps.map((t) => t.name),
+                executing: pendingTool.name,
+              },
+              'LLM returned terminal with pending tools - executing tools first'
+            );
+
+            state.toolCallCount++;
+            const result = await this.executeTool(pendingTool, context);
+            toolResults.push(result);
+            state.toolResults.push(result);
+
+            // Continue loop so LLM can see tool result and provide proper response
+            continue;
+          }
+        }
+
+        // Terminal states: respond, escalate, noAction (only when no pending tools)
         this.logger.debug(
           {
             terminal: output.terminal.type,
@@ -583,11 +613,13 @@ Respond with valid JSON:
 }
 
 Terminal types:
-- "respond": Send a message to user
+- "respond": Send a message to user (only when no tool steps need results)
 - "noAction": Do nothing (for non-proactive triggers)
 - "defer": Don't act now, reconsider in deferHours - works for any signal type
 - "escalate": Need deeper reasoning from SMART layer
 - "needsToolResult": Waiting for tool to complete
+
+IMPORTANT: If you include any tool step, use "needsToolResult" terminal to wait for the result before responding.
 
 Step type "emitThought": Queue an internal thought for later processing.
 - Use ONLY when a concrete future action is needed (not just "monitor" or "watch for")
