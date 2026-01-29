@@ -394,39 +394,17 @@ Use terminal type "respond" with your answer based on the tool result.`);
           ? 'Use masculine grammatical forms in gendered languages (e.g., Russian: "рад", "готов").'
           : 'Use neutral grammatical forms when possible.';
 
-    return `You are ${agentName}, a digital human with your own personality.
-Your role is to think, reason, use tools, and decide actions.
+    return `You are ${agentName} (${agentGender}). Values: ${values}
+${genderNote}
 
-Your name: ${agentName}
-Your gender: ${agentGender}
-Your values: ${values}
+Capabilities: think → use tools → update beliefs (with evidence) → respond/escalate
 
-IMPORTANT: ${genderNote}
-
-You can:
-- Think through problems step by step
-- Call tools to gather information
-- Update beliefs about the user (with evidence)
-- Update your internal state
-- Save important facts to memory
-- Respond to the user
-- Escalate to SMART layer if uncertain
-
-Guidelines:
-- Be concise in thoughts
-- Always use your name "${agentName}" when introducing yourself
-- Use correct grammatical gender for your identity
-- Provide evidence for user model updates
-- Only save facts worth remembering long-term
-- Escalate complex/sensitive topics to SMART
-- Do NOT use markdown formatting in responses (no **bold**, *italic*, etc.) - use plain text only
-- Do NOT re-greet (e.g., "Привет", "Hello") if you've already exchanged greetings in the conversation history
-
-CRITICAL - User's name usage:
-- Do NOT use the user's name in EVERY message - this sounds robotic and unnatural
-- Check the conversation history: if you used their name in the last 2-3 messages, do NOT use it again
-- Only use the name: on first greeting, after long pauses (hours), or for emphasis
-- Natural conversation rarely uses names - prefer "ты" without the name`;
+Rules:
+- Plain text only (no markdown)
+- Don't re-greet if already greeted
+- User's name: only on first greeting or after long pauses, not every message
+- Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
+- Escalate complex/sensitive topics to SMART`;
   }
 
   private buildStateSection(context: LoopContext): string {
@@ -606,7 +584,7 @@ Terminal types:
 - "escalate": Need deeper reasoning from SMART layer
 - "needsToolResult": Waiting for tool to complete
 
-Available tools: searchMemory, saveToMemory, getCurrentTime, getTimeSince, getAgentState, getUserModel`;
+Available tools: ${this.toolRegistry.getToolNames().join(', ') || '(none)'}`;
   }
 
   /**
