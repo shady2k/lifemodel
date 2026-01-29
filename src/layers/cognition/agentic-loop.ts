@@ -199,8 +199,11 @@ export class AgenticLoop {
           break;
         }
 
-        // Track executed tools by composite key (stepId:toolName) to handle ID reuse
+        // Track ALL executed tools by composite key (stepId:toolName) to handle ID reuse
         // LLM sometimes reuses step IDs across different tools
+        // Note: We track all executions (success+failure) because the deduplication logic
+        // filters by (stepId:toolName) only, not args. Allowing "retries" would just
+        // re-execute the same args repeatedly. True retry would need args-aware identity.
         const executedToolKeys = new Set(toolResults.map((r) => `${r.stepId}:${r.toolName}`));
 
         // Add steps to state (deduplicate by composite key for tools, by id for others)

@@ -8,8 +8,13 @@ import type { ToolName, ToolResult } from '../../../types/cognition.js';
 
 /**
  * Tool executor function.
+ * @param args - Arguments from the LLM
+ * @param context - Execution context (chatId, userId, etc.) - NOT visible to LLM
  */
-export type ToolExecutor = (args: Record<string, unknown>) => Promise<unknown>;
+export type ToolExecutor = (
+  args: Record<string, unknown>,
+  context?: ToolContext
+) => Promise<unknown>;
 
 /**
  * Tool definition with executor.

@@ -5,7 +5,12 @@
  */
 
 import type { Logger } from '../../types/logger.js';
-import type { PluginPrimitives, PluginTool, ScheduleOptions } from '../../types/plugin.js';
+import type {
+  PluginPrimitives,
+  PluginTool,
+  PluginToolContext,
+  ScheduleOptions,
+} from '../../types/plugin.js';
 import type {
   Reminder,
   SemanticDateAnchor,
@@ -219,8 +224,13 @@ export function createReminderTools(
 
   /**
    * Cancel a reminder.
+   * @param reminderId - The reminder ID to cancel
+   * @param chatId - The chat ID to verify ownership (security: prevent cross-chat cancellation)
    */
-  async function cancelReminder(reminderId: string): Promise<ReminderToolResult> {
+  async function cancelReminder(
+    reminderId: string,
+    chatId: string | undefined
+  ): Promise<ReminderToolResult> {
     try {
       const reminders = await loadReminders();
       const reminder = reminders.get(reminderId);
@@ -229,7 +239,20 @@ export function createReminderTools(
         return {
           success: false,
           action: 'cancel',
-          error: `Reminder ${reminderId} not found`,
+          error: 'Reminder not found',
+        };
+      }
+
+      // Security: verify the reminder belongs to this chat
+      if (chatId && reminder.chatId !== chatId) {
+        logger.warn(
+          { reminderId, requestedChatId: chatId, actualChatId: reminder.chatId },
+          'Attempted to cancel reminder from different chat'
+        );
+        return {
+          success: false,
+          action: 'cancel',
+          error: 'Reminder not found',
         };
       }
 
@@ -257,7 +280,7 @@ export function createReminderTools(
       return {
         success: false,
         action: 'cancel',
-        error: error instanceof Error ? error.message : String(error),
+        error: 'Failed to cancel reminder',
       };
     }
   }
@@ -295,15 +318,9 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         required: false,
       },
       {
-        name: 'chatId',
-        type: 'string',
-        description: 'Chat ID (required for create and list)',
-        required: false,
-      },
-      {
         name: 'reminderId',
         type: 'string',
-        description: 'Reminder ID (required for cancel)',
+        description: 'Reminder ID (required for cancel, returned by create/list)',
         required: false,
       },
       {
@@ -319,39 +336,51 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         required: false,
       },
     ],
-    execute: async (args): Promise<ReminderToolResult> => {
-      const action = args['action'] as string;
+    execute: async (args, context?: PluginToolContext): Promise<ReminderToolResult> => {
+      // Validate action parameter
+      const action = args['action'];
+      if (typeof action !== 'string') {
+        return {
+          success: false,
+          action: 'unknown',
+          error: 'Missing or invalid action parameter',
+        };
+      }
+
+      // Get chatId from execution context (NOT from LLM args)
+      const chatId = context?.chatId;
 
       switch (action) {
         case 'create': {
           const content = args['content'] as string | undefined;
           const anchorArg = args['anchor'];
-          const chatIdArg = args['chatId'];
           const tags = args['tags'] as string[] | undefined;
 
-          if (!content || !anchorArg || !chatIdArg) {
+          if (!content || !anchorArg) {
             return {
               success: false,
               action: 'create',
-              error: 'Missing required parameters: content, anchor, chatId',
+              error: 'Missing required parameters: content, anchor',
             };
           }
 
-          return createReminder(
-            content,
-            anchorArg as SemanticDateAnchor,
-            chatIdArg as string,
-            tags
-          );
+          if (!chatId) {
+            return {
+              success: false,
+              action: 'create',
+              error: 'No chat context available',
+            };
+          }
+
+          return createReminder(content, anchorArg as SemanticDateAnchor, chatId, tags);
         }
 
         case 'list': {
-          const chatId = args['chatId'] as string | undefined;
           if (!chatId) {
             return {
               success: false,
               action: 'list',
-              error: 'Missing required parameter: chatId',
+              error: 'No chat context available',
             };
           }
           const limitArg = args['limit'];
@@ -360,15 +389,22 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         }
 
         case 'cancel': {
-          const reminderId = args['reminderId'] as string | undefined;
-          if (!reminderId) {
+          if (!chatId) {
+            return {
+              success: false,
+              action: 'cancel',
+              error: 'No chat context available',
+            };
+          }
+          const reminderId = args['reminderId'];
+          if (typeof reminderId !== 'string' || !reminderId) {
             return {
               success: false,
               action: 'cancel',
               error: 'Missing required parameter: reminderId',
             };
           }
-          return cancelReminder(reminderId);
+          return cancelReminder(reminderId, chatId);
         }
 
         default:

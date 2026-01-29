@@ -124,7 +124,9 @@ export class ToolRegistry {
         'Executing tool'
       );
 
-      const result = await tool.execute(request.args);
+      // Pass context as second parameter - tools can use it for chatId, userId, etc.
+      // This keeps implementation details (like chatId) hidden from the LLM
+      const result = await tool.execute(request.args, request.context);
       const duration = Date.now() - startTime;
 
       this.logger.debug(

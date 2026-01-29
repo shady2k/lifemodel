@@ -506,9 +506,24 @@ export class CognitionProcessor implements CognitionLayer {
    */
   private buildSmartContext(
     context: CognitionContext,
-    loopResult: { terminal: { type: string; reason?: string; parentId?: string }; steps: unknown[] }
+    loopResult: {
+      terminal: { type: string; reason?: string; parentId?: string };
+      steps: unknown[];
+      state?: { toolResults?: { toolName: string; success: boolean; error?: string }[] };
+    }
   ): SmartContext {
-    return {
+    // Extract failed tool executions so SMART doesn't promise things that failed
+    // Sanitize error messages to avoid leaking sensitive internal details
+    const failedTools =
+      loopResult.state?.toolResults
+        ?.filter((r) => !r.success)
+        .map((r) => ({
+          name: r.toolName,
+          // Sanitize: only expose safe, generic error descriptions
+          error: r.error ? 'Tool execution failed' : 'Unknown error',
+        })) ?? [];
+
+    const smartContext: SmartContext = {
       cognitionContext: context,
       escalationReason:
         loopResult.terminal.type === 'escalate'
@@ -516,6 +531,12 @@ export class CognitionProcessor implements CognitionLayer {
           : 'Escalated',
       partialAnalysis: `COGNITION completed ${String(loopResult.steps.length)} steps before escalating`,
     };
+
+    if (failedTools.length > 0) {
+      smartContext.failedTools = failedTools;
+    }
+
+    return smartContext;
   }
 
   /**

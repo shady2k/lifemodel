@@ -142,6 +142,9 @@ export interface SmartContext {
 
   /** Specific question for SMART to answer */
   question?: string;
+
+  /** Failed tool executions (if any) - SMART should not promise these actions succeeded */
+  failedTools?: { name: string; error: string }[];
 }
 
 // ============================================================

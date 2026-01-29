@@ -500,6 +500,19 @@ export interface PluginV2 {
 }
 
 /**
+ * Execution context for plugin tools.
+ * Contains system information NOT visible to LLM.
+ */
+export interface PluginToolContext {
+  /** Current chat ID (for reminders, context-specific actions) */
+  chatId?: string | undefined;
+  /** Current user ID */
+  userId?: string | undefined;
+  /** Correlation ID for tracing */
+  correlationId: string;
+}
+
+/**
  * Tool definition from a plugin.
  */
 export interface PluginTool {
@@ -521,8 +534,12 @@ export interface PluginTool {
     default?: unknown;
   }[];
 
-  /** Tool executor */
-  execute: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Tool executor
+   * @param args - Arguments from the LLM
+   * @param context - Execution context (NOT visible to LLM) - contains chatId, userId, etc.
+   */
+  execute: (args: Record<string, unknown>, context?: PluginToolContext) => Promise<unknown>;
 }
 
 /**
