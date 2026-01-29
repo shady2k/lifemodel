@@ -171,186 +171,255 @@ export class ToolRegistry {
   }
 
   /**
-   * Register default tools.
+   * Register default tools (consolidated).
    */
   private registerDefaultTools(): void {
-    // searchMemory
-    this.tools.set('searchMemory', {
-      name: 'searchMemory',
-      description: 'Search past conversations and facts',
+    // memory - search and save
+    this.tools.set('memory', {
+      name: 'memory',
+      description: 'Manage long-term memory (search/save)',
       parameters: [
-        { name: 'query', type: 'string', description: 'Search query', required: true },
-        { name: 'limit', type: 'number', description: 'Max results', required: false, default: 5 },
+        { name: 'action', type: 'string', description: 'Action: search or save', required: true },
       ],
       execute: async (args) => {
-        if (!this.deps.memoryProvider) {
-          return { results: [], message: 'Memory provider not available' };
+        const action = args['action'] as string;
+
+        switch (action) {
+          case 'search': {
+            if (!this.deps.memoryProvider) {
+              return { success: false, action: 'search', message: 'Memory provider not available' };
+            }
+
+            const query = args['query'] as string | undefined;
+            if (!query) {
+              return {
+                success: false,
+                action: 'search',
+                error: 'Missing required parameter: query',
+              };
+            }
+
+            const limit = (args['limit'] as number | undefined) ?? 5;
+            const types = args['types'] as ('message' | 'thought' | 'fact')[] | undefined;
+            const chatId = args['chatId'] as string | undefined;
+
+            const options: MemorySearchOptions = { limit };
+            if (types) options.types = types;
+            if (chatId) options.chatId = chatId;
+
+            const results = await this.deps.memoryProvider.search(query, options);
+            return {
+              success: true,
+              action: 'search',
+              results: results.map((r) => ({
+                type: r.type,
+                content: r.content,
+                timestamp: r.timestamp.toISOString(),
+                tags: r.tags,
+              })),
+              count: results.length,
+            };
+          }
+
+          case 'save': {
+            if (!this.deps.memoryProvider) {
+              return { success: false, action: 'save', message: 'Memory provider not available' };
+            }
+
+            const content = args['content'] as string | undefined;
+            if (!content) {
+              return {
+                success: false,
+                action: 'save',
+                error: 'Missing required parameter: content',
+              };
+            }
+
+            const entryType = (args['type'] as string | undefined) ?? 'fact';
+            const tags = (args['tags'] as string[] | undefined) ?? [];
+            const confidence = (args['confidence'] as number | undefined) ?? 0.8;
+
+            const entry: MemoryEntry = {
+              id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
+              type: entryType === 'fact' ? 'fact' : 'thought',
+              content,
+              timestamp: new Date(),
+              tags,
+              confidence,
+            };
+
+            await this.deps.memoryProvider.save(entry);
+            return { success: true, action: 'save', id: entry.id };
+          }
+
+          default:
+            return {
+              success: false,
+              action,
+              error: `Unknown action: ${action}. Use "search" or "save".`,
+            };
         }
-
-        const query = args['query'] as string;
-        const limit = (args['limit'] as number | undefined) ?? 5;
-        const types = args['types'] as ('message' | 'thought' | 'fact')[] | undefined;
-        const chatId = args['chatId'] as string | undefined;
-
-        const options: MemorySearchOptions = { limit };
-        if (types) options.types = types;
-        if (chatId) options.chatId = chatId;
-
-        const results = await this.deps.memoryProvider.search(query, options);
-        return {
-          results: results.map((r) => ({
-            type: r.type,
-            content: r.content,
-            timestamp: r.timestamp.toISOString(),
-            tags: r.tags,
-          })),
-          count: results.length,
-        };
       },
     });
 
-    // saveToMemory
-    this.tools.set('saveToMemory', {
-      name: 'saveToMemory',
-      description: 'Save fact or observation to memory',
+    // time - now and since
+    this.tools.set('time', {
+      name: 'time',
+      description: 'Get time information (now/since)',
       parameters: [
-        { name: 'type', type: 'string', description: 'Type of memory', required: true },
-        { name: 'content', type: 'string', description: 'Content to save', required: true },
+        { name: 'action', type: 'string', description: 'Action: now or since', required: true },
       ],
-      execute: async (args) => {
-        if (!this.deps.memoryProvider) {
-          return { success: false, message: 'Memory provider not available' };
-        }
-
-        const entryType = args['type'] as string;
-        const content = args['content'] as string;
-        const tags = (args['tags'] as string[] | undefined) ?? [];
-        const confidence = (args['confidence'] as number | undefined) ?? 0.8;
-
-        const entry: MemoryEntry = {
-          id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
-          type: entryType === 'fact' ? 'fact' : 'thought',
-          content,
-          timestamp: new Date(),
-          tags,
-          confidence,
-        };
-
-        await this.deps.memoryProvider.save(entry);
-        return { success: true, id: entry.id };
-      },
-    });
-
-    // getCurrentTime
-    this.tools.set('getCurrentTime', {
-      name: 'getCurrentTime',
-      description: 'Get current time',
-      parameters: [{ name: 'timezone', type: 'string', description: 'Timezone', required: false }],
       execute: (args) => {
-        const now = new Date();
-        const timezone = args['timezone'] as string | undefined;
+        const action = args['action'] as string;
 
-        if (timezone) {
-          try {
-            const formatted = now.toLocaleString('en-US', { timeZone: timezone });
-            return Promise.resolve({ time: formatted, timezone, iso: now.toISOString() });
-          } catch {
+        switch (action) {
+          case 'now': {
+            const now = new Date();
+            const timezone = args['timezone'] as string | undefined;
+
+            if (timezone) {
+              try {
+                const formatted = now.toLocaleString('en-US', { timeZone: timezone });
+                return Promise.resolve({
+                  success: true,
+                  action: 'now',
+                  time: formatted,
+                  timezone,
+                  iso: now.toISOString(),
+                });
+              } catch {
+                return Promise.resolve({
+                  success: true,
+                  action: 'now',
+                  time: now.toISOString(),
+                  timezone: 'UTC',
+                  iso: now.toISOString(),
+                });
+              }
+            }
+
             return Promise.resolve({
+              success: true,
+              action: 'now',
               time: now.toISOString(),
-              timezone: 'UTC',
+              timezone: 'system',
               iso: now.toISOString(),
             });
           }
-        }
 
-        return Promise.resolve({
-          time: now.toISOString(),
-          timezone: 'system',
-          iso: now.toISOString(),
-        });
+          case 'since': {
+            const event = args['event'] as string | undefined;
+            if (!event) {
+              return Promise.resolve({
+                success: false,
+                action: 'since',
+                error: 'Missing required parameter: event',
+              });
+            }
+
+            const chatId = args['chatId'] as string | undefined;
+            let eventTime: Date | null = null;
+
+            if (event === 'lastMessage' && this.deps.conversationProvider) {
+              eventTime = this.deps.conversationProvider.getLastMessageTime(chatId);
+            } else if (event === 'lastContact' && this.deps.conversationProvider) {
+              eventTime = this.deps.conversationProvider.getLastContactTime(chatId);
+            } else {
+              const parsed = new Date(event);
+              if (!isNaN(parsed.getTime())) {
+                eventTime = parsed;
+              }
+            }
+
+            if (!eventTime) {
+              return Promise.resolve({
+                success: false,
+                action: 'since',
+                error: `Event not found: ${event}`,
+              });
+            }
+
+            const now = Date.now();
+            const diffMs = now - eventTime.getTime();
+            const diffSeconds = Math.floor(diffMs / 1000);
+            const diffMinutes = Math.floor(diffSeconds / 60);
+            const diffHours = Math.floor(diffMinutes / 60);
+            const diffDays = Math.floor(diffHours / 24);
+
+            return Promise.resolve({
+              success: true,
+              action: 'since',
+              eventTime: eventTime.toISOString(),
+              elapsed: {
+                ms: diffMs,
+                seconds: diffSeconds,
+                minutes: diffMinutes,
+                hours: diffHours,
+                days: diffDays,
+              },
+              human: this.formatDuration(diffMs),
+            });
+          }
+
+          default:
+            return Promise.resolve({
+              success: false,
+              action,
+              error: `Unknown action: ${action}. Use "now" or "since".`,
+            });
+        }
       },
     });
 
-    // getTimeSince
-    this.tools.set('getTimeSince', {
-      name: 'getTimeSince',
-      description: 'Calculate time since event',
+    // state - agent and user
+    this.tools.set('state', {
+      name: 'state',
+      description: 'Get state information (agent/user)',
       parameters: [
-        { name: 'event', type: 'string', description: 'Event identifier', required: true },
+        { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
       ],
       execute: (args) => {
-        const event = args['event'] as string;
-        const chatId = args['chatId'] as string | undefined;
-        let eventTime: Date | null = null;
+        const action = args['action'] as string;
 
-        if (event === 'lastMessage' && this.deps.conversationProvider) {
-          eventTime = this.deps.conversationProvider.getLastMessageTime(chatId);
-        } else if (event === 'lastContact' && this.deps.conversationProvider) {
-          eventTime = this.deps.conversationProvider.getLastContactTime(chatId);
-        } else {
-          // Try parsing as ISO timestamp
-          const parsed = new Date(event);
-          if (!isNaN(parsed.getTime())) {
-            eventTime = parsed;
+        switch (action) {
+          case 'agent': {
+            if (!this.deps.agentStateProvider) {
+              return Promise.resolve({
+                success: false,
+                action: 'agent',
+                error: 'Agent state provider not available',
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              action: 'agent',
+              ...this.deps.agentStateProvider.getState(),
+            });
           }
+
+          case 'user': {
+            if (!this.deps.userModelProvider) {
+              return Promise.resolve({
+                success: false,
+                action: 'user',
+                error: 'User model provider not available',
+              });
+            }
+            const chatId = args['chatId'] as string | undefined;
+            return Promise.resolve({
+              success: true,
+              action: 'user',
+              ...this.deps.userModelProvider.getModel(chatId),
+            });
+          }
+
+          default:
+            return Promise.resolve({
+              success: false,
+              action,
+              error: `Unknown action: ${action}. Use "agent" or "user".`,
+            });
         }
-
-        if (!eventTime) {
-          return Promise.resolve({ found: false, message: `Event not found: ${event}` });
-        }
-
-        const now = Date.now();
-        const diffMs = now - eventTime.getTime();
-        const diffSeconds = Math.floor(diffMs / 1000);
-        const diffMinutes = Math.floor(diffSeconds / 60);
-        const diffHours = Math.floor(diffMinutes / 60);
-        const diffDays = Math.floor(diffHours / 24);
-
-        return Promise.resolve({
-          found: true,
-          eventTime: eventTime.toISOString(),
-          elapsed: {
-            ms: diffMs,
-            seconds: diffSeconds,
-            minutes: diffMinutes,
-            hours: diffHours,
-            days: diffDays,
-          },
-          human: this.formatDuration(diffMs),
-        });
-      },
-    });
-
-    // getAgentState
-    this.tools.set('getAgentState', {
-      name: 'getAgentState',
-      description: 'Get current agent state',
-      parameters: [],
-      execute: () => {
-        if (!this.deps.agentStateProvider) {
-          return Promise.resolve({
-            available: false,
-            message: 'Agent state provider not available',
-          });
-        }
-        return Promise.resolve(this.deps.agentStateProvider.getState());
-      },
-    });
-
-    // getUserModel
-    this.tools.set('getUserModel', {
-      name: 'getUserModel',
-      description: 'Get user model',
-      parameters: [{ name: 'chatId', type: 'string', description: 'Chat ID', required: false }],
-      execute: (args) => {
-        if (!this.deps.userModelProvider) {
-          return Promise.resolve({
-            available: false,
-            message: 'User model provider not available',
-          });
-        }
-        const chatId = args['chatId'] as string | undefined;
-        return Promise.resolve(this.deps.userModelProvider.getModel(chatId));
       },
     });
   }

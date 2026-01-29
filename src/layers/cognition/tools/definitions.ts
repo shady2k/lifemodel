@@ -3,6 +3,11 @@
  *
  * Defines the schema for all available COGNITION tools.
  * Used for prompt building to tell LLM what tools are available.
+ *
+ * Consolidated tools:
+ * - memory: search/save memories and facts
+ * - time: get current time or time since event
+ * - state: get agent state or user model
  */
 
 import type { ToolParameter } from './types.js';
@@ -21,28 +26,62 @@ export interface ToolDefinition {
  */
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
-    name: 'searchMemory',
-    description:
-      'Search past conversations, thoughts, and facts. Returns relevant memories sorted by relevance.',
+    name: 'memory',
+    description: `Manage long-term memory. Actions:
+- "search": Search past conversations, thoughts, and facts
+- "save": Save important information worth remembering`,
     parameters: [
+      {
+        name: 'action',
+        type: 'string',
+        description: 'Action: "search" or "save"',
+        required: true,
+      },
       {
         name: 'query',
         type: 'string',
-        description: 'Search query',
-        required: true,
+        description: 'Search query (required for search)',
+        required: false,
+      },
+      {
+        name: 'content',
+        type: 'string',
+        description: 'Content to save (required for save)',
+        required: false,
+      },
+      {
+        name: 'type',
+        type: 'string',
+        description: 'Type of memory: "fact" or "observation" (for save)',
+        required: false,
+        default: 'fact',
       },
       {
         name: 'limit',
         type: 'number',
-        description: 'Maximum results to return (default: 5)',
+        description: 'Maximum results (for search, default: 5)',
         required: false,
         default: 5,
       },
       {
         name: 'types',
         type: 'array',
-        description: 'Filter by type: "message", "thought", "fact"',
+        description: 'Filter by type: "message", "thought", "fact" (for search)',
         required: false,
+      },
+      {
+        name: 'tags',
+        type: 'array',
+        description: 'Tags for categorization (for save)',
+        required: false,
+        default: [],
+      },
+      {
+        name: 'confidence',
+        type: 'number',
+        description: 'Confidence in this information 0-1 (for save)',
+        required: false,
+        default: 0.8,
       },
       {
         name: 'chatId',
@@ -53,88 +92,53 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     ],
   },
   {
-    name: 'saveToMemory',
-    description:
-      'Save a fact or observation to long-term memory. Use for important information worth remembering.',
+    name: 'time',
+    description: `Get time information. Actions:
+- "now": Get current time (optionally in specific timezone)
+- "since": Calculate time elapsed since an event`,
     parameters: [
       {
-        name: 'type',
+        name: 'action',
         type: 'string',
-        description: 'Type of memory: "fact" or "observation"',
+        description: 'Action: "now" or "since"',
         required: true,
       },
-      {
-        name: 'content',
-        type: 'string',
-        description: 'The content to save',
-        required: true,
-      },
-      {
-        name: 'tags',
-        type: 'array',
-        description: 'Tags for categorization and search',
-        required: false,
-        default: [],
-      },
-      {
-        name: 'confidence',
-        type: 'number',
-        description: 'Confidence in this information (0-1)',
-        required: false,
-        default: 0.8,
-      },
-      {
-        name: 'ttl',
-        type: 'number',
-        description: 'Time-to-live in milliseconds (null = permanent)',
-        required: false,
-        default: null,
-      },
-    ],
-  },
-  {
-    name: 'getCurrentTime',
-    description: 'Get the current time, optionally in a specific timezone.',
-    parameters: [
       {
         name: 'timezone',
         type: 'string',
-        description: 'IANA timezone (e.g., "Europe/Moscow"). Default: system timezone.',
+        description: 'IANA timezone e.g. "Europe/Moscow" (for now)',
+        required: false,
+      },
+      {
+        name: 'event',
+        type: 'string',
+        description: 'Event: "lastMessage", "lastContact", or ISO timestamp (for since)',
+        required: false,
+      },
+      {
+        name: 'chatId',
+        type: 'string',
+        description: 'Chat ID for chat-specific events (for since)',
         required: false,
       },
     ],
   },
   {
-    name: 'getTimeSince',
-    description: 'Calculate how much time has passed since an event.',
+    name: 'state',
+    description: `Get current state information. Actions:
+- "agent": Get agent internal state (energy, socialDebt, alertness, etc.)
+- "user": Get beliefs about the user (name, mood, preferences, etc.)`,
     parameters: [
       {
-        name: 'event',
+        name: 'action',
         type: 'string',
-        description: 'Event identifier: "lastMessage", "lastContact", or ISO timestamp',
+        description: 'Action: "agent" or "user"',
         required: true,
       },
       {
         name: 'chatId',
         type: 'string',
-        description: 'Chat ID for chat-specific events',
-        required: false,
-      },
-    ],
-  },
-  {
-    name: 'getAgentState',
-    description: 'Get current agent internal state (energy, socialDebt, alertness, etc.).',
-    parameters: [],
-  },
-  {
-    name: 'getUserModel',
-    description: 'Get current beliefs about the user (name, mood, preferences, etc.).',
-    parameters: [
-      {
-        name: 'chatId',
-        type: 'string',
-        description: 'Chat ID to get user model for',
+        description: 'Chat ID for user model (for user action)',
         required: false,
       },
     ],

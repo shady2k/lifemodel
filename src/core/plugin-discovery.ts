@@ -155,14 +155,20 @@ async function discoverPluginsInDir(
       if (!entry.isDirectory()) continue;
 
       const pluginPath = join(dir, entry.name);
-      const indexPath = join(pluginPath, 'index.js');
 
-      // Check if index.js exists
+      // Check for index.js (compiled) or index.ts (dev mode)
+      let indexPath = join(pluginPath, 'index.js');
       try {
         await access(indexPath);
       } catch {
-        logger.debug({ path: pluginPath }, 'No index.js found, skipping');
-        continue;
+        // Try .ts for dev mode
+        indexPath = join(pluginPath, 'index.ts');
+        try {
+          await access(indexPath);
+        } catch {
+          logger.debug({ path: pluginPath }, 'No index.js or index.ts found, skipping');
+          continue;
+        }
       }
 
       // For external plugins, read package.json for manifest
@@ -219,7 +225,13 @@ export async function loadDiscoveredPlugin(
   discovered: DiscoveredPlugin,
   logger: Logger
 ): Promise<LoadedPluginInfo | null> {
-  const indexPath = join(discovered.path, 'index.js');
+  // Try .js first (compiled), then .ts (dev mode)
+  let indexPath = join(discovered.path, 'index.js');
+  try {
+    await access(indexPath);
+  } catch {
+    indexPath = join(discovered.path, 'index.ts');
+  }
 
   try {
     // Convert to file:// URL for dynamic import

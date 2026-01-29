@@ -210,15 +210,12 @@ export interface CognitionOutput {
 // ============================================================
 
 /**
- * Built-in tools for COGNITION.
+ * Built-in tools for COGNITION (consolidated).
+ * - memory: search/save long-term memories
+ * - time: get current time or time since event
+ * - state: get agent state or user model
  */
-export type BuiltInToolName =
-  | 'searchMemory'
-  | 'saveToMemory'
-  | 'getCurrentTime'
-  | 'getTimeSince'
-  | 'getAgentState'
-  | 'getUserModel';
+export type BuiltInToolName = 'memory' | 'time' | 'state';
 
 /**
  * Available tools for COGNITION.

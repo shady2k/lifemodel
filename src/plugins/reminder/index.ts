@@ -53,11 +53,7 @@ const manifest: PluginManifestV2 = {
   name: 'Reminder Plugin',
   version: '1.0.0',
   description: 'Create and manage reminders with natural language support and recurrence',
-  provides: [
-    { type: 'tool', id: 'createReminder' },
-    { type: 'tool', id: 'listReminders' },
-    { type: 'tool', id: 'cancelReminder' },
-  ],
+  provides: [{ type: 'tool', id: 'reminder' }],
   requires: ['scheduler', 'storage', 'signalEmitter', 'logger'],
   limits: {
     maxSchedules: 100, // Max 100 active reminders per user
