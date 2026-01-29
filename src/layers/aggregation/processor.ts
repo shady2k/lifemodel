@@ -21,7 +21,11 @@ import type { Logger } from '../../types/logger.js';
 
 import type { SignalAggregator } from './aggregator.js';
 import { createSignalAggregator } from './aggregator.js';
-import type { ThresholdEngine, ThresholdEngineDeps } from './threshold-engine.js';
+import type {
+  ThresholdEngine,
+  ThresholdEngineDeps,
+  PluginEventValidator,
+} from './threshold-engine.js';
 import { createThresholdEngine } from './threshold-engine.js';
 import type { PatternDetector } from './pattern-detector.js';
 import { createPatternDetector } from './pattern-detector.js';
@@ -77,11 +81,13 @@ export class AggregationProcessor implements AggregationLayer {
     conversationManager?: ConversationManager;
     userModel?: UserModel;
     primaryUserChatId?: string;
+    pluginEventValidator?: PluginEventValidator;
   }): void {
     const thresholdDeps: ThresholdEngineDeps = {};
     if (deps.conversationManager) thresholdDeps.conversationManager = deps.conversationManager;
     if (deps.userModel) thresholdDeps.userModel = deps.userModel;
     if (deps.primaryUserChatId) thresholdDeps.primaryUserChatId = deps.primaryUserChatId;
+    if (deps.pluginEventValidator) thresholdDeps.pluginEventValidator = deps.pluginEventValidator;
     this.thresholdEngine.updateDeps(thresholdDeps);
     this.logger.debug('AGGREGATION dependencies updated');
   }

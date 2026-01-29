@@ -50,7 +50,10 @@ export type SignalType =
   | 'pattern_break' // Detected break in expected pattern
   | 'threshold_crossed' // Some threshold was exceeded
   | 'contact_urge' // Urge to contact user emerged (deferral-aware)
-  | 'novelty'; // Something unusual detected
+  | 'novelty' // Something unusual detected
+
+  // === PLUGIN (from plugin scheduler/signals) ===
+  | 'plugin_event'; // Generic plugin event with namespaced kind
 
 /**
  * Signal sources - which "organ" emitted the signal.
@@ -80,7 +83,11 @@ export type SignalSource =
 
   // === META (aggregation) ===
   | 'meta.pattern_detector'
-  | 'meta.threshold_monitor';
+  | 'meta.threshold_monitor'
+
+  // === PLUGIN (from plugin system) ===
+  | 'plugin.scheduler'
+  | `plugin.${string}`; // Dynamic plugin sources
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -132,7 +139,8 @@ export type SignalData =
   | TimeData
   | ThresholdData
   | PatternData
-  | ContactUrgeData;
+  | ContactUrgeData
+  | PluginEventData;
 
 /**
  * Data for user_message signals.
@@ -277,6 +285,28 @@ export interface ContactUrgeData {
 }
 
 /**
+ * Data for plugin_event signals.
+ *
+ * Envelope pattern for plugin-emitted signals.
+ * Kind is namespaced as '{pluginId}:{eventType}' to avoid collisions.
+ */
+export interface PluginEventData {
+  kind: 'plugin_event';
+
+  /** Namespaced event kind: '{pluginId}:{eventType}' */
+  eventKind: string;
+
+  /** Plugin ID that emitted this signal */
+  pluginId: string;
+
+  /** Idempotency key for scheduled signals */
+  fireId?: string;
+
+  /** Plugin-specific payload */
+  payload: Record<string, unknown>;
+}
+
+/**
  * Signal metrics - the actual measurements.
  *
  * All values are typically 0-1 normalized, but some can be raw counts or times.
@@ -331,6 +361,9 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
   threshold_crossed: 30_000, // 30 seconds
   contact_urge: 60_000, // 1 minute - urge to contact user
   novelty: 30_000, // 30 seconds
+
+  // Plugin signals
+  plugin_event: 60_000, // 1 minute - plugin events need processing
 };
 
 /**

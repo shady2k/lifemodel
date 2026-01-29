@@ -1,5 +1,7 @@
 import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
+import type { ToolName } from '../types/cognition.js';
+import type { PluginEventData } from '../types/signal.js';
 import { createLogger, type LoggerConfig } from './logger.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
@@ -43,6 +45,9 @@ import {
   type MemoryConsolidator,
   createMemoryConsolidator,
 } from '../storage/memory-consolidator.js';
+import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
+import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
+import { loadAllPlugins } from './plugin-discovery.js';
 
 /**
  * Application configuration.
@@ -144,6 +149,10 @@ export interface Container {
   conversationManager: ConversationManager | null;
   /** Loaded configuration */
   config: MergedConfig | null;
+  /** Scheduler service for plugin timers */
+  schedulerService: SchedulerService | null;
+  /** Plugin loader */
+  pluginLoader: PluginLoader | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -411,6 +420,8 @@ export function createContainer(config: AppConfig = {}): Container {
     stateManager: null,
     conversationManager: null,
     config: null,
+    schedulerService: null,
+    pluginLoader: null,
     shutdown,
   };
 }
@@ -637,6 +648,79 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Start auto-save
   stateManager.startAutoSave();
 
+  // Create scheduler service for plugins
+  const schedulerService = createSchedulerService(logger);
+  schedulerService.setSignalCallback((signal) => {
+    coreLoop.pushSignal(signal);
+  });
+  // Plugin event callback is set after pluginLoader is created (below)
+
+  // Create plugin loader
+  const pluginLoader = createPluginLoader(logger, storage, schedulerService);
+  pluginLoader.setSignalCallback((signal) => {
+    coreLoop.pushSignal(signal);
+  });
+
+  // Set tool registration callbacks
+  pluginLoader.setToolCallbacks(
+    (tool) => {
+      layers.cognition.getToolRegistry().registerTool({
+        name: tool.name as ToolName,
+        description: tool.description,
+        parameters: tool.parameters,
+        execute: tool.execute,
+      });
+    },
+    (toolName) => {
+      return layers.cognition.getToolRegistry().unregisterTool(toolName as ToolName);
+    }
+  );
+
+  // Set services provider for plugins
+  // Note: registerEventSchema is added by PluginLoader per-plugin, not here
+  pluginLoader.setServicesProvider(() => ({
+    getTimezone: (chatId?: string) => {
+      if (userModel) {
+        return userModel.getTimezone(chatId) ?? 'UTC';
+      }
+      return 'UTC';
+    },
+  }));
+
+  // Wire scheduler to dispatch events to plugins
+  schedulerService.setPluginEventCallback(async (pluginId, eventKind, payload) => {
+    await pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload);
+  });
+
+  // Set scheduler service on core loop
+  coreLoop.setSchedulerService(schedulerService);
+
+  // Wire plugin event validator to aggregation layer
+  layers.aggregation.updateDeps({
+    pluginEventValidator: (data: PluginEventData) => pluginLoader.validatePluginEvent(data),
+  });
+
+  // Discover and load plugins
+  const pluginConfig = mergedConfig.plugins;
+  const discoveredPlugins = await loadAllPlugins(pluginConfig, logger);
+
+  for (const { plugin } of discoveredPlugins) {
+    try {
+      await pluginLoader.load({ default: plugin });
+      logger.info({ pluginId: plugin.manifest.id }, 'Plugin activated');
+    } catch (error) {
+      logger.error(
+        {
+          pluginId: plugin.manifest.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to activate plugin'
+      );
+    }
+  }
+
+  logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
+
   // Shutdown function with persistence
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
@@ -675,6 +759,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     stateManager,
     conversationManager,
     config: mergedConfig,
+    schedulerService,
+    pluginLoader,
     shutdown,
   };
 }

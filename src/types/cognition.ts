@@ -210,15 +210,21 @@ export interface CognitionOutput {
 // ============================================================
 
 /**
- * Available tools for COGNITION.
+ * Built-in tools for COGNITION.
  */
-export type ToolName =
+export type BuiltInToolName =
   | 'searchMemory'
   | 'saveToMemory'
   | 'getCurrentTime'
   | 'getTimeSince'
   | 'getAgentState'
   | 'getUserModel';
+
+/**
+ * Available tools for COGNITION.
+ * Includes built-in tools and dynamic plugin tools (prefixed with pluginId:).
+ */
+export type ToolName = BuiltInToolName | `${string}:${string}`;
 
 /**
  * Tool definitions for prompt building.

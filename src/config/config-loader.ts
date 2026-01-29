@@ -164,6 +164,19 @@ export class ConfigLoader {
         config.logging.pretty = file.logging.pretty;
       }
     }
+
+    // Plugins
+    if (file.plugins) {
+      if (file.plugins.externalDir) {
+        config.plugins.externalDir = file.plugins.externalDir;
+      }
+      if (file.plugins.enabled) {
+        config.plugins.enabled = file.plugins.enabled;
+      }
+      if (file.plugins.disabled) {
+        config.plugins.disabled = file.plugins.disabled;
+      }
+    }
   }
 
   /**
@@ -233,6 +246,23 @@ export class ConfigLoader {
       config.paths.state = join(dataPath, 'state');
       config.paths.logs = join(dataPath, 'logs');
       config.logging.logDir = config.paths.logs;
+      config.plugins.externalDir = join(dataPath, 'plugins');
+    }
+
+    // Plugins (env override)
+    const pluginsDir = process.env['PLUGINS_DIR'];
+    if (pluginsDir) {
+      config.plugins.externalDir = pluginsDir;
+    }
+
+    const pluginsEnabled = process.env['PLUGINS_ENABLED'];
+    if (pluginsEnabled) {
+      config.plugins.enabled = pluginsEnabled.split(',').map((s) => s.trim());
+    }
+
+    const pluginsDisabled = process.env['PLUGINS_DISABLED'];
+    if (pluginsDisabled) {
+      config.plugins.disabled = pluginsDisabled.split(',').map((s) => s.trim());
     }
   }
 

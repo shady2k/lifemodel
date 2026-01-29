@@ -104,6 +104,18 @@ export class UserModel {
   private lastAvailabilitySignalAt: Date | null = null;
   private lastAvailabilityDriftAt: Date;
 
+  /**
+   * Per-chat timezone overrides (IANA timezone names).
+   * Used by plugins for DST-aware scheduling.
+   */
+  private chatTimezones = new Map<string, string>();
+
+  /**
+   * Default timezone (IANA name) for the user.
+   * Derived from timezoneOffset if not explicitly set.
+   */
+  private defaultTimezone: string | null = null;
+
   constructor(user: User, logger: Logger, config: Partial<UserModelConfig> = {}) {
     this.user = { ...user };
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -116,6 +128,14 @@ export class UserModel {
     // Initialize drift timestamp from persisted state for continuity
     this.lastAvailabilityDriftAt = user.beliefs.availability.updatedAt;
 
+    // Restore chat timezones from persisted state
+    if (user.chatTimezones) {
+      this.restoreChatTimezones(user.chatTimezones);
+    }
+    if (user.defaultTimezone) {
+      this.defaultTimezone = user.defaultTimezone;
+    }
+
     // Adjust energy profile based on user patterns
     this.adjustEnergyProfile();
 
@@ -124,9 +144,18 @@ export class UserModel {
 
   /**
    * Get current user state (readonly copy).
+   * Includes chatTimezones and defaultTimezone for persistence.
    */
   getUser(): Readonly<User> {
-    return { ...this.user };
+    const user = { ...this.user };
+    // Include timezone overrides for persistence
+    if (this.chatTimezones.size > 0) {
+      user.chatTimezones = Object.fromEntries(this.chatTimezones);
+    }
+    if (this.defaultTimezone) {
+      user.defaultTimezone = this.defaultTimezone;
+    }
+    return user;
   }
 
   /**
@@ -512,6 +541,76 @@ export class UserModel {
       this.user.timezoneOffset = offset;
       this.adjustEnergyProfile();
       this.logger.info({ offset }, 'User timezone updated');
+    }
+  }
+
+  /**
+   * Get the user's timezone (IANA name) for a specific chat.
+   *
+   * Resolution order:
+   * 1. Per-chat override (chatTimezones map)
+   * 2. Default timezone (if set explicitly)
+   * 3. Derive from timezoneOffset (approximate)
+   * 4. Return null (unknown - caller should ask user)
+   *
+   * @param chatId Optional chat ID for per-chat override
+   */
+  getTimezone(chatId?: string): string | null {
+    // 1. Per-chat override
+    if (chatId) {
+      const chatTz = this.chatTimezones.get(chatId);
+      if (chatTz) return chatTz;
+    }
+
+    // 2. Default timezone
+    if (this.defaultTimezone) return this.defaultTimezone;
+
+    // 3. Derive from offset (approximate - no DST awareness)
+    if (this.user.timezoneOffset !== null) {
+      // This is a rough approximation - use Etc/GMT timezones
+      // Note: Etc/GMT signs are inverted from what you might expect
+      const invertedOffset = -this.user.timezoneOffset;
+      const sign = invertedOffset >= 0 ? '+' : '';
+      return `Etc/GMT${sign}${String(invertedOffset)}`;
+    }
+
+    // 4. Unknown
+    return null;
+  }
+
+  /**
+   * Set the timezone for a specific chat (IANA timezone name).
+   * Used when user explicitly specifies timezone in a message.
+   */
+  setChatTimezone(chatId: string, timezone: string): void {
+    this.chatTimezones.set(chatId, timezone);
+    this.logger.info({ chatId, timezone }, 'Chat timezone set');
+  }
+
+  /**
+   * Set the default timezone (IANA name).
+   * Takes precedence over derived timezone from offset.
+   */
+  setDefaultTimezone(timezone: string): void {
+    this.defaultTimezone = timezone;
+    this.logger.info({ timezone }, 'Default timezone set');
+  }
+
+  /**
+   * Get all chat timezones (for persistence).
+   */
+  getChatTimezones(): Map<string, string> {
+    return new Map(this.chatTimezones);
+  }
+
+  /**
+   * Restore chat timezones (from persistence).
+   */
+  restoreChatTimezones(timezones: Map<string, string> | Record<string, string>): void {
+    this.chatTimezones.clear();
+    const entries = timezones instanceof Map ? timezones.entries() : Object.entries(timezones);
+    for (const [chatId, tz] of entries) {
+      this.chatTimezones.set(chatId, tz);
     }
   }
 

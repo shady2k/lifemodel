@@ -145,6 +145,32 @@ export class ToolRegistry {
   }
 
   /**
+   * Register a new tool dynamically.
+   * Used by plugins to add tools at runtime.
+   */
+  registerTool(tool: Tool): void {
+    if (this.tools.has(tool.name)) {
+      this.logger.warn({ toolName: tool.name }, 'Tool already registered, replacing');
+    }
+    this.tools.set(tool.name, tool);
+    this.logger.info({ toolName: tool.name }, 'Tool registered dynamically');
+  }
+
+  /**
+   * Unregister a tool.
+   * Used by plugins when being unloaded.
+   * @returns true if tool was removed, false if it didn't exist
+   */
+  unregisterTool(name: ToolName): boolean {
+    const existed = this.tools.has(name);
+    if (existed) {
+      this.tools.delete(name);
+      this.logger.info({ toolName: name }, 'Tool unregistered');
+    }
+    return existed;
+  }
+
+  /**
    * Register default tools.
    */
   private registerDefaultTools(): void {

@@ -278,7 +278,16 @@ export class MemoryConsolidator {
     });
 
     // We know facts.length > 1 when this is called, so sorted[0] exists
-    const [best] = sorted;
+    const best = sorted[0];
+    if (!best) {
+      // This should never happen, but TypeScript needs the check
+      const fallback = facts[0];
+      if (!fallback) {
+        throw new Error('Unexpected: no facts to merge');
+      }
+      return fallback;
+    }
+
     const allTags = new Set<string>();
     let latestTimestamp = best.timestamp;
     let highestConfidence = best.confidence ?? 0.5;

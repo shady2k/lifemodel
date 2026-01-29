@@ -17,7 +17,12 @@
  * - closed: much longer wait before initiating
  */
 
-import type { Signal, SignalAggregate, ContactUrgeData } from '../../types/signal.js';
+import type {
+  Signal,
+  SignalAggregate,
+  ContactUrgeData,
+  PluginEventData,
+} from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import { Priority } from '../../types/priority.js';
 import type { AgentState } from '../../types/agent/state.js';
@@ -88,6 +93,11 @@ export interface WakeDecision {
 }
 
 /**
+ * Plugin event validator function type.
+ */
+export type PluginEventValidator = (data: PluginEventData) => { valid: boolean; error?: string };
+
+/**
  * Dependencies for ThresholdEngine.
  */
 export interface ThresholdEngineDeps {
@@ -95,6 +105,7 @@ export interface ThresholdEngineDeps {
   userModel?: UserModel;
   primaryUserChatId?: string;
   ackRegistry?: SignalAckRegistry;
+  pluginEventValidator?: PluginEventValidator;
 }
 
 /**
@@ -112,6 +123,9 @@ export class ThresholdEngine {
 
   // Acknowledgment registry for deferrals (unified mechanism)
   private ackRegistry: SignalAckRegistry;
+
+  // Plugin event validator (optional)
+  private pluginEventValidator: PluginEventValidator | undefined;
 
   // Cooldown tracking
   private lastProactiveContact: Date | null = null;
@@ -138,6 +152,7 @@ export class ThresholdEngine {
     if (deps.userModel) this.userModel = deps.userModel;
     if (deps.primaryUserChatId) this.primaryUserChatId = deps.primaryUserChatId;
     if (deps.ackRegistry) this.ackRegistry = deps.ackRegistry;
+    if (deps.pluginEventValidator) this.pluginEventValidator = deps.pluginEventValidator;
   }
 
   /**
@@ -211,6 +226,49 @@ export class ThresholdEngine {
         reason: 'User behavior pattern detected',
         triggerSignals: patternBreaks,
       };
+    }
+
+    // Check for plugin events (scheduled reminders, etc.)
+    const pluginEvents = signals.filter((s) => s.type === 'plugin_event');
+    if (pluginEvents.length > 0) {
+      // Validate plugin events if validator is available
+      const validEvents: Signal[] = [];
+      for (const event of pluginEvents) {
+        const pluginData = event.data as PluginEventData | undefined;
+        if (!pluginData) continue;
+
+        if (this.pluginEventValidator) {
+          const validation = this.pluginEventValidator(pluginData);
+          if (!validation.valid) {
+            // Soft validation: warn but accept if no schema registered
+            // This allows plugins to work before registering schemas
+            if (validation.error?.includes('No schema registered')) {
+              this.logger.debug(
+                { eventKind: pluginData.eventKind },
+                'Plugin event has no schema registered, accepting'
+              );
+            } else {
+              // Hard validation failure - schema exists but data invalid
+              this.logger.warn(
+                { eventKind: pluginData.eventKind, error: validation.error },
+                'Plugin event failed schema validation, dropping'
+              );
+              continue;
+            }
+          }
+        }
+        validEvents.push(event);
+      }
+
+      if (validEvents.length > 0) {
+        const firstEvent = validEvents[0]?.data as PluginEventData | undefined;
+        return {
+          shouldWake: true,
+          trigger: 'scheduled',
+          reason: `Plugin event: ${firstEvent?.eventKind ?? 'unknown'}`,
+          triggerSignals: validEvents,
+        };
+      }
     }
 
     // Check for proactive contact (conversation-aware)

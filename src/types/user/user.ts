@@ -33,6 +33,17 @@ export interface User extends Person {
    * Null means unknown - will use system local time as fallback.
    */
   timezoneOffset: number | null;
+
+  /**
+   * Per-chat timezone overrides (IANA timezone names).
+   * Used by plugins for DST-aware scheduling.
+   */
+  chatTimezones?: Record<string, string>;
+
+  /**
+   * Default IANA timezone name (takes precedence over offset-derived).
+   */
+  defaultTimezone?: string;
 }
 
 /**

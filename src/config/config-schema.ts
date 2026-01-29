@@ -90,6 +90,16 @@ export interface AgentConfigFile {
     /** Enable pretty logging */
     pretty?: boolean;
   };
+
+  /** Plugin configuration */
+  plugins?: {
+    /** Directory for external plugins (default: data/plugins) */
+    externalDir?: string;
+    /** List of plugin IDs to enable (empty = all discovered plugins) */
+    enabled?: string[];
+    /** List of plugin IDs to disable (takes precedence over enabled) */
+    disabled?: string[];
+  };
 }
 
 /**
@@ -167,6 +177,16 @@ export interface MergedConfig {
     state: string;
     logs: string;
   };
+
+  /** Plugin configuration */
+  plugins: {
+    /** Directory for external plugins */
+    externalDir: string;
+    /** List of plugin IDs to enable (empty = all discovered) */
+    enabled: string[];
+    /** List of plugin IDs to disable */
+    disabled: string[];
+  };
 }
 
 /**
@@ -242,6 +262,11 @@ export const DEFAULT_CONFIG: MergedConfig = {
     config: 'data/config',
     state: 'data/state',
     logs: 'data/logs',
+  },
+  plugins: {
+    externalDir: 'data/plugins',
+    enabled: [], // Empty = all discovered plugins
+    disabled: [],
   },
 };
 

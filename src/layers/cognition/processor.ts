@@ -485,6 +485,16 @@ export class CognitionProcessor implements CognitionLayer {
   reset(): void {
     this.logger.debug('COGNITION processor reset');
   }
+
+  /**
+   * Get the tool registry for dynamic tool registration.
+   * Creates a default registry if not in agentic mode.
+   */
+  getToolRegistry(): ToolRegistry {
+    // Create a minimal registry for tool registration if not in agentic mode
+    this.toolRegistry ??= createToolRegistry(this.logger);
+    return this.toolRegistry;
+  }
 }
 
 /**

@@ -53,6 +53,7 @@ import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
 import type { AlertnessMode } from '../types/agent/state.js';
+import type { SchedulerService } from './scheduler-service.js';
 
 /**
  * Core loop configuration.
@@ -169,6 +170,9 @@ export class CoreLoop {
 
   /** Pending COGNITION operation (non-blocking) */
   private pendingCognition: PendingCognition | null = null;
+
+  /** Scheduler service for plugin timers */
+  private schedulerService: SchedulerService | null = null;
 
   constructor(
     agent: Agent,
@@ -505,6 +509,18 @@ export class CoreLoop {
       // 7. Update user model beliefs (time-based decay)
       if (this.userModel) {
         this.userModel.updateTimeBasedBeliefs();
+      }
+
+      // 7b. Check plugin schedulers for due events
+      if (this.schedulerService) {
+        try {
+          await this.schedulerService.tick();
+        } catch (error) {
+          this.logger.error(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Scheduler service tick failed'
+          );
+        }
       }
 
       // 8. Apply all intents
@@ -1130,6 +1146,14 @@ export class CoreLoop {
     }, 0);
 
     this.logger.debug('Core loop woken up');
+  }
+
+  /**
+   * Set the scheduler service for plugin timers.
+   */
+  setSchedulerService(service: SchedulerService): void {
+    this.schedulerService = service;
+    this.logger.debug('Scheduler service configured');
   }
 }
 
