@@ -16,12 +16,14 @@ import type {
   PluginPrimitives,
   PluginServices,
   BasePluginServices,
-  SignalEmitterPrimitive,
+  IntentEmitterPrimitive,
+  EmitSignalResult,
   PluginSignalInput,
   PluginTool,
   MigrationBundle,
   EventSchema,
 } from '../types/plugin.js';
+import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
 import { createSchedulerPrimitive, type SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import type { SchedulerService } from './scheduler-service.js';
@@ -40,6 +42,12 @@ export type ToolRegisterCallback = (tool: PluginTool) => void;
  * Callback type for unregistering tools.
  */
 export type ToolUnregisterCallback = (toolName: string) => boolean;
+
+/**
+ * Callback type for emitting intents.
+ * Used by IntentEmitter to route intents to core loop.
+ */
+export type IntentEmitCallback = (intent: Intent) => void;
 
 /**
  * Loaded plugin state.
@@ -75,6 +83,7 @@ export class PluginLoader {
   private readonly pluginSchemas = new Map<string, Set<string>>();
 
   private signalCallback: SignalPushCallback | null = null;
+  private intentCallback: IntentEmitCallback | null = null;
   private toolRegisterCallback: ToolRegisterCallback | null = null;
   private toolUnregisterCallback: ToolUnregisterCallback | null = null;
   private servicesProvider: (() => BasePluginServices) | null = null;
@@ -96,6 +105,14 @@ export class PluginLoader {
    */
   setSignalCallback(callback: SignalPushCallback): void {
     this.signalCallback = callback;
+  }
+
+  /**
+   * Set the callback for emitting intents.
+   * Used by IntentEmitter to route intents to core loop.
+   */
+  setIntentCallback(callback: IntentEmitCallback): void {
+    this.intentCallback = callback;
   }
 
   /**
@@ -476,6 +493,17 @@ export class PluginLoader {
       throw new Error('Plugin manifest must have a valid id');
     }
 
+    // Validate plugin ID format: lowercase alphanumeric with hyphens, no colons or whitespace
+    // This prevents namespace collisions in event kinds and tool names
+    const pluginIdPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+    if (!pluginIdPattern.test(manifest.id)) {
+      throw new Error(
+        `Plugin ID '${manifest.id}' is invalid. ` +
+          `Must be lowercase alphanumeric with hyphens (e.g., 'my-plugin'), ` +
+          `no colons, whitespace, or leading numbers.`
+      );
+    }
+
     if (!manifest.version || !semver.valid(manifest.version)) {
       throw new Error(`Plugin ${manifest.id} has invalid version: ${manifest.version}`);
     }
@@ -552,8 +580,8 @@ export class PluginLoader {
     // Register scheduler with service
     this.schedulerService.registerScheduler(manifest.id, scheduler);
 
-    // Create signal emitter
-    const signalEmitter = this.createSignalEmitter(manifest.id, manifest.limits?.signalsPerMinute);
+    // Create intent emitter
+    const intentEmitter = this.createIntentEmitter(manifest.id, manifest.limits?.signalsPerMinute);
 
     // Get base services from provider (registerEventSchema added below)
     const baseServices = this.servicesProvider?.() ?? {
@@ -563,7 +591,6 @@ export class PluginLoader {
     // Create services with schema registration bound to this plugin
     const services: PluginServices = {
       ...baseServices,
-      // Override/add registerEventSchema bound to this plugin's ID
       registerEventSchema: (kind: string, schema) => {
         this.registerEventSchema(kind, schema, manifest.id);
       },
@@ -573,84 +600,134 @@ export class PluginLoader {
       logger: pluginLogger,
       scheduler,
       storage,
-      signalEmitter,
+      intentEmitter,
       services,
     };
   }
 
   /**
-   * Create a signal emitter for a plugin.
+   * Create an intent emitter for a plugin.
    */
-  private createSignalEmitter(pluginId: string, rateLimit?: number): SignalEmitterPrimitive {
-    // Track rate limiting
+  private createIntentEmitter(pluginId: string, signalRateLimit?: number): IntentEmitterPrimitive {
+    // Rate limiting for signals
     let emitCount = 0;
     let lastMinuteStart = Date.now();
-    const warningThreshold = rateLimit ?? 120;
+    const warningThreshold = signalRateLimit ?? 120;
     let warningLogged = false;
 
+    const emitSignalImpl = (input: PluginSignalInput): EmitSignalResult => {
+      const now = Date.now();
+      if (now - lastMinuteStart > 60_000) {
+        emitCount = 0;
+        lastMinuteStart = now;
+        warningLogged = false;
+      }
+
+      emitCount++;
+
+      if (!warningLogged && emitCount >= warningThreshold) {
+        this.logger.warn(
+          { pluginId, emitCount, threshold: warningThreshold },
+          'Plugin signal rate approaching limit'
+        );
+        warningLogged = true;
+      }
+
+      // Fail-soft on rate limit: drop signal and return error instead of throwing
+      if (signalRateLimit && emitCount > signalRateLimit) {
+        const error = `Signal rate limit exceeded for plugin ${pluginId}: ${String(signalRateLimit)}/minute`;
+        this.logger.error({ pluginId, emitCount, limit: signalRateLimit }, error);
+        return { success: false, error };
+      }
+
+      // Type guard: eventKind must be a string to call startsWith
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive check for runtime safety
+      const eventKind = input.data?.kind;
+      if (typeof eventKind !== 'string') {
+        const error = `Invalid event kind: expected string, got ${typeof eventKind}`;
+        this.logger.error({ pluginId, eventKind }, error);
+        return { success: false, error };
+      }
+
+      if (!eventKind.startsWith(`${pluginId}:`)) {
+        const error = `Invalid event kind '${eventKind}': must start with '${pluginId}:'`;
+        this.logger.error({ pluginId, eventKind }, error);
+        return { success: false, error };
+      }
+
+      // Deep clone payload to prevent external mutation after emit
+      // Sanitize: strip any pluginId from input.data to prevent spoofing
+      let sanitizedPayload: Record<string, unknown>;
+      try {
+        // input.data is guaranteed to exist here (checked via eventKind access above)
+        sanitizedPayload = structuredClone(input.data) as Record<string, unknown>;
+        delete sanitizedPayload['pluginId'];
+      } catch (cloneError) {
+        const error = `Failed to clone signal payload: ${cloneError instanceof Error ? cloneError.message : String(cloneError)}`;
+        this.logger.error({ pluginId, error: cloneError }, error);
+        return { success: false, error };
+      }
+
+      const signalId = randomUUID();
+      const signal: Signal = {
+        id: signalId,
+        type: 'plugin_event',
+        source: `plugin.${pluginId}`,
+        timestamp: new Date(),
+        priority: input.priority ?? 2,
+        metrics: { value: 1, confidence: 1 },
+        data: {
+          kind: 'plugin_event',
+          eventKind,
+          pluginId, // Authoritative pluginId set by loader, not from input
+          fireId: input.data.fireId,
+          payload: sanitizedPayload,
+        } as SignalPluginEventData,
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+
+      if (this.signalCallback) {
+        this.signalCallback(signal);
+        return { success: true, signalId };
+      } else {
+        this.logger.warn({ pluginId }, 'Signal emitted but no callback registered');
+        return { success: false, error: 'No signal callback registered' };
+      }
+    };
+
     return {
-      emit: (input: PluginSignalInput): string => {
-        // Check rate limit
-        const now = Date.now();
-        if (now - lastMinuteStart > 60_000) {
-          // Reset counter for new minute
-          emitCount = 0;
-          lastMinuteStart = now;
-          warningLogged = false;
-        }
-
-        emitCount++;
-
-        // Warn at soft limit
-        if (!warningLogged && emitCount >= warningThreshold) {
-          this.logger.warn(
-            { pluginId, emitCount, threshold: warningThreshold },
-            'Plugin signal rate approaching limit'
-          );
-          warningLogged = true;
-        }
-
-        // Hard limit
-        if (rateLimit && emitCount > rateLimit) {
-          throw new Error(
-            `Signal rate limit exceeded for plugin ${pluginId}: ${String(rateLimit)}/minute`
-          );
-        }
-
-        // Validate kind prefix
-        const eventKind = input.data.kind;
-        if (!eventKind.startsWith(`${pluginId}:`)) {
-          throw new Error(`Invalid event kind '${eventKind}': must start with '${pluginId}:'`);
-        }
-
-        // Create signal
-        const signalId = randomUUID();
-        const signal: Signal = {
-          id: signalId,
-          type: 'plugin_event',
-          source: `plugin.${pluginId}`,
-          timestamp: new Date(),
-          priority: input.priority ?? 2,
-          metrics: { value: 1, confidence: 1 },
-          data: {
-            kind: 'plugin_event',
-            eventKind,
-            pluginId,
-            fireId: input.data.fireId,
-            payload: input.data,
-          } as SignalPluginEventData,
-          expiresAt: new Date(Date.now() + 60_000),
+      emitSendMessage: (recipientId: string, text: string, replyTo?: string): void => {
+        const intent: Intent = {
+          type: 'SEND_MESSAGE',
+          payload: { recipientId, text, ...(replyTo && { replyTo }) },
+          source: `plugin.${pluginId}`, // Provenance: which plugin emitted this
         };
 
-        // Push signal
-        if (this.signalCallback) {
-          this.signalCallback(signal);
+        if (this.intentCallback) {
+          this.intentCallback(intent);
         } else {
-          this.logger.warn({ pluginId }, 'Signal emitted but no callback registered');
+          this.logger.warn({ pluginId, recipientId }, 'Intent emitted but no callback registered');
         }
-
-        return signalId;
       },
+
+      emitIntent: (intent: Intent): void => {
+        // Add source provenance if not already set
+        const intentWithSource = {
+          ...intent,
+          source: (intent as { source?: string }).source ?? `plugin.${pluginId}`,
+        };
+
+        if (this.intentCallback) {
+          this.intentCallback(intentWithSource as Intent);
+        } else {
+          this.logger.warn(
+            { pluginId, intentType: intent.type },
+            'Intent emitted but no callback registered'
+          );
+        }
+      },
+
+      emitSignal: emitSignalImpl,
     };
   }
 

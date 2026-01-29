@@ -126,14 +126,14 @@ export class SmartProcessor implements SmartLayer {
     );
     const messageData = userMessageSignal?.data as
       | {
-          chatId?: string;
+          recipientId?: string;
           channel?: string;
         }
       | undefined;
 
     // Emit typing indicator if we have chat info
-    if (this.config.emitTypingIndicator && messageData?.chatId && messageData.channel) {
-      await this.emitTypingIndicatorEvent(messageData.chatId, messageData.channel);
+    if (this.config.emitTypingIndicator && messageData?.recipientId && messageData.channel) {
+      await this.emitTypingIndicatorEvent(messageData.recipientId, messageData.channel);
     }
 
     // Handle the escalation
@@ -156,16 +156,14 @@ export class SmartProcessor implements SmartLayer {
 
     // Add send_message intent if we have a response
     if (escalationResult.response) {
-      const chatId = escalationResult.chatId ?? messageData?.chatId;
-      const channel = escalationResult.channel ?? messageData?.channel;
+      const recipientId = escalationResult.recipientId ?? messageData?.recipientId;
 
-      if (chatId && channel) {
+      if (recipientId) {
         intents.push({
           type: 'SEND_MESSAGE',
           payload: {
+            recipientId,
             text: escalationResult.response,
-            target: chatId,
-            channel,
           },
         });
       }

@@ -76,11 +76,8 @@ export interface ActionDecision {
   /** Context to pass to SMART (if escalating) */
   smartContext?: SmartContext | undefined;
 
-  /** Chat ID to respond to (if responding) */
-  chatId?: string | undefined;
-
-  /** Channel to respond on */
-  channel?: string | undefined;
+  /** Recipient ID to respond to (if responding) */
+  recipientId?: string | undefined;
 }
 
 /**
@@ -164,7 +161,7 @@ export class ActionDecider {
     synthesis: SynthesisResult,
     context: CognitionContext
   ): Promise<ActionDecision> {
-    const { messageText, chatId, channel, userId, complexity } = synthesis;
+    const { messageText, recipientId, userId, complexity } = synthesis;
 
     if (!messageText) {
       return {
@@ -217,8 +214,7 @@ export class ActionDecider {
           confidence: classification.confidence,
           response: classification.suggestedResponse,
           intents,
-          chatId,
-          channel,
+          recipientId,
         };
       }
 
@@ -246,8 +242,7 @@ export class ActionDecider {
           confidence: classification.confidence,
           response: classification.suggestedResponse,
           intents,
-          chatId,
-          channel,
+          recipientId,
         };
       }
     }
@@ -499,8 +494,7 @@ export class ActionDecider {
       confidence: 0.3, // Low confidence since we're escalating
       intents: [],
       smartContext,
-      chatId: synthesis.chatId,
-      channel: synthesis.channel,
+      recipientId: synthesis.recipientId,
     };
   }
 }

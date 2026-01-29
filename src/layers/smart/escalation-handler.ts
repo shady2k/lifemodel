@@ -49,11 +49,8 @@ export interface EscalationResult {
   /** Intents to execute */
   intents: Intent[];
 
-  /** Chat ID to respond to */
-  chatId?: string;
-
-  /** Channel to respond on */
-  channel?: string;
+  /** Recipient ID to respond to */
+  recipientId?: string;
 }
 
 /**
@@ -132,7 +129,7 @@ export class EscalationHandler {
       } else if (isProactive) {
         result = await this.handleProactiveMessage(context);
       } else {
-        result = await this.handleGenericEscalation(context);
+        result = this.handleGenericEscalation(context);
       }
 
       const duration = Date.now() - startTime;
@@ -172,9 +169,7 @@ export class EscalationHandler {
   private isProactiveContact(context: SmartContext): boolean {
     const { escalationReason, question } = context;
     return (
-      escalationReason.includes('Proactive contact') ||
-      question?.includes('proactive') ||
-      false
+      escalationReason.includes('Proactive contact') || (question?.includes('proactive') ?? false)
     );
   }
 
@@ -183,9 +178,7 @@ export class EscalationHandler {
    */
   private isUserMessageResponse(context: SmartContext): boolean {
     const { question, cognitionContext } = context;
-    const hasUserMessage = cognitionContext.triggerSignals.some(
-      (s) => s.type === 'user_message'
-    );
+    const hasUserMessage = cognitionContext.triggerSignals.some((s) => s.type === 'user_message');
     return hasUserMessage || (question?.startsWith('Respond to:') ?? false);
   }
 
@@ -198,15 +191,17 @@ export class EscalationHandler {
       (s) => s.type === 'user_message'
     );
 
-    const messageData = userMessageSignal?.data as {
-      kind: string;
-      text: string;
-      chatId: string;
-      channel: string;
-      userId?: string;
-    } | undefined;
+    const messageData = userMessageSignal?.data as
+      | {
+          kind: string;
+          text: string;
+          recipientId: string;
+          channel: string;
+          userId?: string;
+        }
+      | undefined;
 
-    if (!messageData || messageData.kind !== 'user_message') {
+    if (messageData?.kind !== 'user_message') {
       return {
         success: false,
         confidence: 0,
@@ -215,7 +210,7 @@ export class EscalationHandler {
       };
     }
 
-    const userId = messageData.userId ?? messageData.chatId;
+    const userId = messageData.userId ?? messageData.recipientId;
 
     // Get conversation history
     let history;
@@ -230,10 +225,15 @@ export class EscalationHandler {
     // const language = this.userModel?.getLanguage();
 
     // Compose response using smart model
-    const result = await this.composer!.composeResponse(
-      messageData.text,
-      history
-    );
+    if (!this.composer) {
+      return {
+        success: false,
+        confidence: 0,
+        intents: [],
+        error: 'MessageComposer not configured',
+      };
+    }
+    const result = await this.composer.composeResponse(messageData.text, history);
 
     if (!result.success || !result.message) {
       return {
@@ -262,8 +262,7 @@ export class EscalationHandler {
       confidence: 0.8, // Smart model generally confident
       response: result.message,
       intents,
-      chatId: messageData.chatId,
-      channel: messageData.channel,
+      recipientId: messageData.recipientId,
     };
   }
 
@@ -278,7 +277,15 @@ export class EscalationHandler {
     const reason = context.escalationReason.replace('Proactive contact: ', '');
 
     // Compose proactive message
-    const result = await this.composer!.composeProactive(reason);
+    if (!this.composer) {
+      return {
+        success: false,
+        confidence: 0,
+        intents: [],
+        error: 'MessageComposer not configured',
+      };
+    }
+    const result = await this.composer.composeProactive(reason);
 
     if (!result.success || !result.message) {
       return {
@@ -325,7 +332,7 @@ export class EscalationHandler {
   /**
    * Handle generic escalation (catch-all).
    */
-  private async handleGenericEscalation(context: SmartContext): Promise<EscalationResult> {
+  private handleGenericEscalation(context: SmartContext): EscalationResult {
     this.logger.warn(
       { escalationReason: context.escalationReason },
       'Generic escalation - not sure how to handle'

@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import { Bot } from 'grammy';
-import type { Logger, EventQueue, Event, Signal } from '../../types/index.js';
-import { Priority, createUserMessageSignal } from '../../types/index.js';
+import type { Logger, Signal } from '../../types/index.js';
+import { createUserMessageSignal } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
 import type { Channel, CircuitStats, SendOptions } from '../../channels/channel.js';
+import type { IRecipientRegistry } from '../../core/recipient-registry.js';
 
 /**
  * Telegram message payload structure.
@@ -32,6 +32,8 @@ export interface TelegramMessagePayload {
 export interface TelegramConfig {
   /** Bot token from BotFather (required) */
   botToken: string;
+  /** Chat IDs allowed to interact with the bot (empty = allow all) */
+  allowedChatIds?: string[];
   /** API request timeout in ms (default: 30000) */
   timeout?: number;
   /** Max retries for retryable errors (default: 2) */
@@ -86,17 +88,21 @@ export class TelegramChannel implements Channel {
   private readonly config: Required<Pick<TelegramConfig, 'timeout' | 'maxRetries' | 'retryDelay'>> &
     TelegramConfig;
   private readonly logger: Logger | undefined;
-  private readonly eventQueue: EventQueue | null;
   private readonly circuitBreaker: CircuitBreaker;
+  private readonly recipientRegistry: IRecipientRegistry;
   private bot: Bot | null = null;
   private running = false;
   private wakeUpCallback: (() => void) | null = null;
   private signalCallback: ((signal: Signal) => void) | null = null;
 
-  constructor(config: TelegramConfig, eventQueue: EventQueue | null, logger?: Logger) {
+  constructor(
+    config: TelegramConfig,
+    logger: Logger | undefined,
+    recipientRegistry: IRecipientRegistry
+  ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.eventQueue = eventQueue;
     this.logger = logger ? logger.child({ component: 'telegram' }) : undefined;
+    this.recipientRegistry = recipientRegistry;
 
     const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
       name: 'telegram',
@@ -151,7 +157,7 @@ export class TelegramChannel implements Channel {
 
     // Handle text messages
     this.bot.on('message:text', (ctx) => {
-      void this.onMessage(ctx);
+      this.onMessage(ctx);
     });
 
     // Handle errors
@@ -253,28 +259,37 @@ export class TelegramChannel implements Channel {
   }
 
   /**
-   * Handle incoming message - convert to Signal or Event and dispatch.
+   * Handle incoming message - convert to Signal and dispatch.
    */
-  private async onMessage(ctx: {
+  private onMessage(ctx: {
     from?: { id: number; username?: string; first_name?: string; last_name?: string };
     chat: { id: number };
     message: { message_id: number; text?: string };
-  }): Promise<void> {
+  }): void {
     if (!ctx.from || !ctx.message.text) {
       return;
     }
 
-    const userId = ctx.from.id.toString();
     const chatId = ctx.chat.id.toString();
-    const text = ctx.message.text;
 
-    // Use Signal callback if available (4-layer architecture)
+    // Filter by allowed chat IDs if configured
+    const allowedChatIds = this.config.allowedChatIds;
+    if (allowedChatIds && allowedChatIds.length > 0 && !allowedChatIds.includes(chatId)) {
+      this.logger?.debug({ chatId, allowedChatIds }, 'Ignoring message from non-allowed chat ID');
+      return;
+    }
+
+    const userId = ctx.from.id.toString();
+    const destination = chatId;
+    const text = ctx.message.text;
+    const recipientId = this.recipientRegistry.getOrCreate(this.name, destination);
+
     if (this.signalCallback) {
       const signal = createUserMessageSignal({
         text,
-        chatId,
         channel: 'telegram',
         userId,
+        recipientId,
       });
       this.signalCallback(signal);
 
@@ -282,48 +297,13 @@ export class TelegramChannel implements Channel {
         {
           signalId: signal.id,
           userId,
-          chatId,
+          recipientId,
           textLength: text.length,
         },
         'Message received as Signal'
       );
     }
-    // Fall back to Event queue (legacy)
-    else if (this.eventQueue) {
-      const payload: TelegramMessagePayload = {
-        userId,
-        chatId,
-        text,
-        messageId: ctx.message.message_id,
-        username: ctx.from.username,
-        firstName: ctx.from.first_name,
-        lastName: ctx.from.last_name,
-      };
 
-      const event: Event = {
-        id: randomUUID(),
-        source: 'communication',
-        channel: 'telegram',
-        type: 'message_received',
-        priority: Priority.HIGH,
-        timestamp: new Date(),
-        payload,
-      };
-
-      await this.eventQueue.push(event);
-
-      this.logger?.debug(
-        {
-          eventId: event.id,
-          userId,
-          chatId,
-          textLength: text.length,
-        },
-        'Message received as Event'
-      );
-    }
-
-    // Wake up the loop for immediate processing
     if (this.wakeUpCallback) {
       this.wakeUpCallback();
     }
@@ -426,8 +406,8 @@ export class TelegramChannel implements Channel {
  */
 export function createTelegramChannel(
   config: TelegramConfig,
-  eventQueue: EventQueue | null,
-  logger?: Logger
+  logger: Logger | undefined,
+  recipientRegistry: IRecipientRegistry
 ): TelegramChannel {
-  return new TelegramChannel(config, eventQueue, logger);
+  return new TelegramChannel(config, logger, recipientRegistry);
 }

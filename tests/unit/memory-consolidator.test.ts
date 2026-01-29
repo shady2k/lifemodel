@@ -40,7 +40,7 @@ function createMemoryEntry(
     type: 'fact',
     content: `${subject ?? 'user'} ${predicate ?? 'has'} ${object ?? 'value'}`,
     timestamp: new Date(),
-    chatId: '123',
+    recipientId: 'rcpt_123',
     confidence: 0.8,
     tags: [],
     metadata: {
@@ -197,18 +197,18 @@ describe('MemoryConsolidator', () => {
       expect(result.totalAfter).toBe(2);
     });
 
-    it('does not merge facts with different chatIds', async () => {
+    it('does not merge facts with different recipientIds', async () => {
       const entries: MemoryEntry[] = [
         createMemoryEntry({
           id: 'mem_1',
-          chatId: '123',
+          recipientId: 'rcpt_123',
           subject: 'user',
           predicate: 'name',
           object: 'Alice',
         }),
         createMemoryEntry({
           id: 'mem_2',
-          chatId: '456',
+          recipientId: 'rcpt_456',
           subject: 'user',
           predicate: 'name',
           object: 'Bob',

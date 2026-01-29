@@ -21,7 +21,6 @@ import { REMINDER_EVENT_KINDS } from './reminder-types.js';
 
 /**
  * Zod schema for reminder_due event validation.
- * Validates the full PluginEventData envelope with reminder-specific payload.
  */
 const reminderDueSchema = z.object({
   kind: z.literal('plugin_event'),
@@ -30,7 +29,7 @@ const reminderDueSchema = z.object({
   fireId: z.string().optional(),
   payload: z.object({
     reminderId: z.string(),
-    chatId: z.string(),
+    recipientId: z.string(),
     content: z.string(),
     isRecurring: z.boolean(),
     fireCount: z.number(),
@@ -81,8 +80,8 @@ const lifecycle: PluginLifecycleV2 = {
     primitives.logger.debug('Registered event schema for reminder_due');
 
     // Create tools using services.getTimezone for timezone resolution
-    pluginTools = createReminderTools(primitives, (chatId) =>
-      primitives.services.getTimezone(chatId)
+    pluginTools = createReminderTools(primitives, (recipientId) =>
+      primitives.services.getTimezone(recipientId)
     );
 
     primitives.logger.info('Reminder plugin activated');

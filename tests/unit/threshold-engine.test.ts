@@ -35,7 +35,7 @@ describe('ThresholdEngine', () => {
 
     it('allows COGNITION wake when energy is above threshold with high pressure', async () => {
       // Need primaryUserChatId for proactive contact to work
-      engine.updateDeps({ primaryUserChatId: '123' });
+      engine.updateDeps({ primaryRecipientId: 'rcpt_123' });
 
       const state = createAgentState({ energy: 0.5 });
       const aggregates = [createContactPressureAggregate(0.8)];
@@ -105,7 +105,7 @@ describe('ThresholdEngine', () => {
       engine.updateDeps({
         conversationManager: conversationManager as any,
         userModel: userModel as any,
-        primaryUserChatId: '123',
+        primaryRecipientId: 'rcpt_123',
       });
 
       const state = createAgentState({
@@ -131,7 +131,7 @@ describe('ThresholdEngine', () => {
       engine.updateDeps({
         conversationManager: conversationManager as any,
         userModel: userModel as any,
-        primaryUserChatId: '123',
+        primaryRecipientId: 'rcpt_123',
       });
 
       const state = createAgentState({
@@ -155,7 +155,7 @@ describe('ThresholdEngine', () => {
       engine.updateDeps({
         conversationManager: conversationManager as any,
         userModel: userModel as any,
-        primaryUserChatId: '123',
+        primaryRecipientId: 'rcpt_123',
       });
 
       const state = createAgentState({
@@ -179,7 +179,7 @@ describe('ThresholdEngine', () => {
       engine.updateDeps({
         conversationManager: conversationManager as any,
         userModel: userModel as any,
-        primaryUserChatId: '123',
+        primaryRecipientId: 'rcpt_123',
       });
 
       const state = createAgentState({
@@ -198,8 +198,8 @@ describe('ThresholdEngine', () => {
 
   describe('Trigger signals', () => {
     it('provides trigger signal for contact_urge wakes', async () => {
-      // Need primaryUserChatId for proactive contact to work
-      engine.updateDeps({ primaryUserChatId: '123' });
+      // Need primaryRecipientId for proactive contact to work
+      engine.updateDeps({ primaryRecipientId: 'rcpt_123' });
 
       const state = createAgentState({ energy: 0.8 });
       const aggregates = [createContactPressureAggregate(0.9)];
@@ -210,9 +210,9 @@ describe('ThresholdEngine', () => {
       expect(decision.triggerSignals.length).toBeGreaterThan(0);
       // Now uses contact_urge signal type instead of threshold_crossed
       expect(decision.triggerSignals[0].type).toBe('contact_urge');
-      // Verify chatId is included in the signal data
-      const data = decision.triggerSignals[0].data as { chatId?: string };
-      expect(data.chatId).toBe('123');
+      // Verify recipientId is included in the signal data
+      const data = decision.triggerSignals[0].data as { recipientId?: string };
+      expect(data.recipientId).toBe('rcpt_123');
     });
   });
 });

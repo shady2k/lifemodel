@@ -21,8 +21,8 @@ export interface Reminder {
   /** What to remind about */
   content: string;
 
-  /** Chat ID where reminder was created */
-  chatId: string;
+  /** Opaque recipient identifier - core resolves to channel+destination */
+  recipientId: string;
 
   /** When to fire (UTC for one-time) */
   triggerAt: Date;
@@ -233,8 +233,8 @@ export interface ReminderDueData {
   /** Reminder ID */
   reminderId: string;
 
-  /** Chat ID to notify */
-  chatId: string;
+  /** Opaque recipient identifier */
+  recipientId: string;
 
   /** Reminder content */
   content: string;

@@ -43,8 +43,8 @@ export interface ToolParameter {
  * Context provided to tools during execution.
  */
 export interface ToolContext {
-  /** Current chat ID (if applicable) */
-  chatId?: string | undefined;
+  /** Opaque recipient identifier */
+  recipientId: string;
 
   /** Current user ID (if applicable) */
   userId?: string | undefined;

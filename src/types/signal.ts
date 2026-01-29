@@ -160,10 +160,10 @@ export interface UserMessageData {
   /** The message text */
   text: string;
 
-  /** Chat/conversation ID */
-  chatId: string;
+  /** Opaque recipient identifier */
+  recipientId: string;
 
-  /** User ID (if different from chatId) */
+  /** User ID */
   userId?: string;
 
   /** Channel the message came from */
@@ -232,11 +232,8 @@ export interface ThresholdData {
   /** Direction: above or below */
   direction: 'above' | 'below';
 
-  /** Target chat ID for proactive contact */
-  chatId?: string | undefined;
-
-  /** Channel to use for proactive contact */
-  channel?: string | undefined;
+  /** Target recipient for proactive contact */
+  recipientId?: string | undefined;
 }
 
 /**
@@ -285,11 +282,8 @@ export interface ContactUrgeData {
   /** True if this urge is overriding an active deferral due to significant pressure increase */
   deferralOverride: boolean;
 
-  /** Target chat ID for contact */
-  chatId: string;
-
-  /** Channel to use */
-  channel: string;
+  /** Target recipient for contact */
+  recipientId: string;
 }
 
 /**

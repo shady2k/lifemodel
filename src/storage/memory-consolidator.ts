@@ -298,7 +298,7 @@ export class MemoryConsolidator {
     const metadata = fact.metadata as { subject?: string; predicate?: string } | undefined;
     const subject = metadata?.subject ?? '';
     const predicate = metadata?.predicate ?? '';
-    const chatId = fact.chatId ?? 'global';
+    const chatId = fact.recipientId ?? 'global';
 
     // Normalize to lowercase for comparison
     return `${chatId}:${subject.toLowerCase()}:${predicate.toLowerCase()}`;
@@ -372,7 +372,7 @@ export class MemoryConsolidator {
       type: 'fact',
       content: best.content,
       timestamp: latestTimestamp,
-      chatId: best.chatId,
+      recipientId: best.recipientId,
       tags: Array.from(allTags),
       confidence: highestConfidence,
       metadata: {

@@ -51,7 +51,7 @@ interface StoredEntry {
   type: 'message' | 'thought' | 'fact';
   content: string;
   timestamp: string;
-  chatId?: string | undefined;
+  recipientId?: string | undefined;
   tags?: string[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
@@ -91,7 +91,7 @@ export class JsonMemoryProvider implements MemoryProvider {
 
     const limit = options?.limit ?? 10;
     const types = options?.types;
-    const chatId = options?.chatId;
+    const recipientId = options?.recipientId;
 
     // Normalize query for matching
     const queryLower = trimmedQuery.toLowerCase();
@@ -104,8 +104,8 @@ export class JsonMemoryProvider implements MemoryProvider {
         if (types && !types.includes(entry.type)) {
           return false;
         }
-        // Filter by chatId
-        if (chatId && entry.chatId !== chatId) {
+        // Filter by recipientId
+        if (recipientId && entry.recipientId !== recipientId) {
           return false;
         }
         return true;
@@ -184,11 +184,11 @@ export class JsonMemoryProvider implements MemoryProvider {
   /**
    * Get recent entries for a chat.
    */
-  async getRecent(chatId: string, limit: number): Promise<MemoryEntry[]> {
+  async getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]> {
     await this.ensureLoaded();
 
     return this.entries
-      .filter((e) => e.chatId === chatId)
+      .filter((e) => e.recipientId === recipientId)
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       .slice(0, limit);
   }
@@ -255,7 +255,7 @@ export class JsonMemoryProvider implements MemoryProvider {
           type: e.type,
           content: e.content,
           timestamp: e.timestamp.toISOString(),
-          chatId: e.chatId,
+          recipientId: e.recipientId,
           tags: e.tags,
           confidence: e.confidence,
           metadata: e.metadata,
@@ -291,7 +291,7 @@ export class JsonMemoryProvider implements MemoryProvider {
           type: e.type,
           content: e.content,
           timestamp: new Date(e.timestamp),
-          chatId: e.chatId,
+          recipientId: e.recipientId,
           tags: e.tags,
           confidence: e.confidence,
           metadata: e.metadata,

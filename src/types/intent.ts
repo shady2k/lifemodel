@@ -42,8 +42,8 @@ export interface UpdateStateIntent {
 export interface UpdateUserModelIntent {
   type: 'UPDATE_USER_MODEL';
   payload: {
-    /** Chat ID for the user */
-    chatId?: string | undefined;
+    /** Recipient identifier */
+    recipientId?: string | undefined;
     /** Field to update */
     field: string;
     /** New value */
@@ -65,8 +65,8 @@ export interface SaveToMemoryIntent {
   payload: {
     /** Type of memory entry */
     type: 'fact' | 'thought' | 'observation';
-    /** Chat ID context */
-    chatId?: string | undefined;
+    /** Recipient context */
+    recipientId?: string | undefined;
     /** The content to save */
     content?: string | undefined;
     /** Structured fact (if type is 'fact') */
@@ -112,15 +112,15 @@ export interface ScheduleEventIntent {
 export interface SendMessageIntent {
   type: 'SEND_MESSAGE';
   payload: {
-    /** Channel to send through (e.g., "telegram") */
-    channel: string;
+    /** Opaque recipient identifier. Core resolves to channel+destination. */
+    recipientId: string;
     /** Message content */
     text: string;
-    /** Optional: target (user ID, chat ID) */
-    target?: string;
     /** Optional: reply to message ID */
     replyTo?: string;
   };
+  /** Source that emitted this intent (for attribution/auditing) */
+  source?: string;
 }
 
 /**

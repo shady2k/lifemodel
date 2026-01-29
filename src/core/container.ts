@@ -48,6 +48,11 @@ import {
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { loadAllPlugins } from './plugin-discovery.js';
+import {
+  createRecipientRegistry,
+  createPersistentRecipientRegistry,
+  type IRecipientRegistry,
+} from './recipient-registry.js';
 
 /**
  * Application configuration.
@@ -153,6 +158,8 @@ export interface Container {
   schedulerService: SchedulerService | null;
   /** Plugin loader */
   pluginLoader: PluginLoader | null;
+  /** Recipient registry for message routing */
+  recipientRegistry: IRecipientRegistry | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -340,6 +347,11 @@ export function createContainer(config: AppConfig = {}): Container {
   const memoryConsolidator = createMemoryConsolidator(logger);
   logger.info('MemoryConsolidator configured');
 
+  // Create recipient registry for message routing (in-memory only, no persistence)
+  // For production use createContainerAsync() which uses PersistentRecipientRegistry
+  const recipientRegistry = createRecipientRegistry();
+  logger.info('RecipientRegistry configured (in-memory, not persisted)');
+
   // Create 4-layer processors
   const layers = createLayers(logger);
 
@@ -359,6 +371,7 @@ export function createContainer(config: AppConfig = {}): Container {
     cognitionLLM: cognitionLLM ?? undefined,
     memoryProvider,
     memoryConsolidator,
+    recipientRegistry,
   });
 
   // Create channels registry
@@ -371,8 +384,12 @@ export function createContainer(config: AppConfig = {}): Container {
   };
 
   if (telegramConfig.botToken) {
+    // Add allowed chat IDs filter if primary user is configured
+    const telegramConfigWithFilter: TelegramConfig = primaryUserChatId
+      ? { ...telegramConfig, allowedChatIds: [primaryUserChatId] }
+      : telegramConfig;
     // Create telegram channel - it will push signals to coreLoop
-    telegramChannel = createTelegramChannel(telegramConfig, null, logger);
+    telegramChannel = createTelegramChannel(telegramConfigWithFilter, logger, recipientRegistry);
     channels.set('telegram', telegramChannel);
     coreLoop.registerChannel(telegramChannel);
 
@@ -422,6 +439,7 @@ export function createContainer(config: AppConfig = {}): Container {
     config: null,
     schedulerService: null,
     pluginLoader: null,
+    recipientRegistry,
     shutdown,
   };
 }
@@ -585,6 +603,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const memoryConsolidator = createMemoryConsolidator(logger);
   logger.info('MemoryConsolidator configured');
 
+  // Create recipient registry for message routing (with persistence)
+  const recipientRegistry = createPersistentRecipientRegistry(storage, logger);
+  await recipientRegistry.init();
+  logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
+
   // Create 4-layer processors
   const layers = createLayers(logger);
 
@@ -605,6 +628,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     cognitionLLM: cognitionLLM ?? undefined,
     memoryProvider,
     memoryConsolidator,
+    recipientRegistry,
   });
 
   // Create channels registry
@@ -616,11 +640,15 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     configOverrides.telegram?.botToken ?? mergedConfig.telegramBotToken ?? '';
 
   if (telegramBotToken) {
-    const telegramConfig: TelegramConfig = {
-      botToken: telegramBotToken,
-      ...configOverrides.telegram,
-    };
-    telegramChannel = createTelegramChannel(telegramConfig, null, logger);
+    // Build base config with allowed chat IDs filter if primary user is configured
+    const telegramConfig: TelegramConfig = primaryUserChatId
+      ? {
+          botToken: telegramBotToken,
+          allowedChatIds: [primaryUserChatId],
+          ...configOverrides.telegram,
+        }
+      : { botToken: telegramBotToken, ...configOverrides.telegram };
+    telegramChannel = createTelegramChannel(telegramConfig, logger, recipientRegistry);
     channels.set('telegram', telegramChannel);
     coreLoop.registerChannel(telegramChannel);
 
@@ -730,6 +758,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     // Save state
     await stateManager.shutdown();
 
+    // Flush recipient registry
+    await recipientRegistry.flush();
+
     // Stop all channels
     for (const channel of channels.values()) {
       if (channel.stop) {
@@ -762,6 +793,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     config: mergedConfig,
     schedulerService,
     pluginLoader,
+    recipientRegistry,
     shutdown,
   };
 }

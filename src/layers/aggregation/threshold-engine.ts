@@ -103,7 +103,7 @@ export type PluginEventValidator = (data: PluginEventData) => { valid: boolean; 
 export interface ThresholdEngineDeps {
   conversationManager?: ConversationManager;
   userModel?: UserModel;
-  primaryUserChatId?: string;
+  primaryRecipientId?: string;
   ackRegistry?: SignalAckRegistry;
   pluginEventValidator?: PluginEventValidator;
 }
@@ -119,7 +119,7 @@ export class ThresholdEngine {
   // Dependencies (optional - for conversation-aware contact)
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
-  private primaryUserChatId: string | undefined;
+  private primaryRecipientId: string | undefined;
 
   // Acknowledgment registry for deferrals (unified mechanism)
   private ackRegistry: SignalAckRegistry;
@@ -150,7 +150,7 @@ export class ThresholdEngine {
   updateDeps(deps: ThresholdEngineDeps): void {
     if (deps.conversationManager) this.conversationManager = deps.conversationManager;
     if (deps.userModel) this.userModel = deps.userModel;
-    if (deps.primaryUserChatId) this.primaryUserChatId = deps.primaryUserChatId;
+    if (deps.primaryRecipientId) this.primaryRecipientId = deps.primaryRecipientId;
     if (deps.ackRegistry) this.ackRegistry = deps.ackRegistry;
     if (deps.pluginEventValidator) this.pluginEventValidator = deps.pluginEventValidator;
   }
@@ -314,7 +314,7 @@ export class ThresholdEngine {
     state: AgentState
   ): Promise<WakeDecision> {
     // Need primary user chat ID for proactive contact
-    if (!this.primaryUserChatId) {
+    if (!this.primaryRecipientId) {
       this.logger.debug('Skipping proactive contact - no primary user chat ID configured');
       return { shouldWake: false, triggerSignals: [] };
     }
@@ -369,8 +369,8 @@ export class ThresholdEngine {
     );
 
     // Different logic based on conversation status
-    // primaryUserChatId is guaranteed to exist (checked at start of this method)
-    const chatId = this.primaryUserChatId;
+    // primaryRecipientId is guaranteed to exist (checked at start of this method)
+    const recipientId = this.primaryRecipientId;
 
     let result: WakeDecision;
     switch (conversationStatus) {
@@ -380,7 +380,7 @@ export class ThresholdEngine {
           state,
           currentPressure,
           conversationStatus,
-          chatId
+          recipientId
         );
         break;
 
@@ -390,7 +390,7 @@ export class ThresholdEngine {
           state,
           timeSinceLastMessage,
           conversationStatus,
-          chatId
+          recipientId
         );
         break;
 
@@ -403,7 +403,7 @@ export class ThresholdEngine {
           state,
           timeSinceLastMessage,
           conversationStatus,
-          chatId
+          recipientId
         );
     }
 
@@ -424,7 +424,7 @@ export class ThresholdEngine {
     _state: AgentState,
     currentPressure: number,
     conversationStatus: string,
-    chatId: string
+    recipientId: string
   ): WakeDecision {
     if (timeSinceLastMessage === null) {
       return { shouldWake: false, triggerSignals: [] };
@@ -452,8 +452,7 @@ export class ThresholdEngine {
       conversationStatus,
       followUpAttempts: this.followUpAttempts,
       deferralOverride: false,
-      chatId,
-      channel: 'telegram',
+      recipientId,
     };
 
     const triggerSignal = createSignal(
@@ -484,7 +483,7 @@ export class ThresholdEngine {
     state: AgentState,
     timeSinceLastMessage: number | null,
     conversationStatus: string,
-    chatId: string
+    recipientId: string
   ): WakeDecision {
     // Must wait at least closedDelayMs before contacting after closed conversation
     if (timeSinceLastMessage === null || timeSinceLastMessage < this.contactTiming.closedDelayMs) {
@@ -525,8 +524,7 @@ export class ThresholdEngine {
       conversationStatus,
       followUpAttempts: 0,
       deferralOverride: false,
-      chatId,
-      channel: 'telegram',
+      recipientId,
     };
 
     const triggerSignal = createSignal(
@@ -558,7 +556,7 @@ export class ThresholdEngine {
     state: AgentState,
     timeSinceLastMessage: number | null,
     conversationStatus: string,
-    chatId: string
+    recipientId: string
   ): WakeDecision {
     // Must wait at least idleDelayMs before contacting
     if (timeSinceLastMessage !== null && timeSinceLastMessage < this.contactTiming.idleDelayMs) {
@@ -597,8 +595,7 @@ export class ThresholdEngine {
       conversationStatus,
       followUpAttempts: 0,
       deferralOverride: false,
-      chatId,
-      channel: 'telegram',
+      recipientId,
     };
 
     const triggerSignal = createSignal(
@@ -626,12 +623,12 @@ export class ThresholdEngine {
    * Get conversation status from conversation manager.
    */
   private async getConversationStatus(): Promise<ConversationStatus> {
-    if (!this.conversationManager || !this.primaryUserChatId) {
+    if (!this.conversationManager || !this.primaryRecipientId) {
       return 'unknown';
     }
 
     try {
-      const statusInfo = await this.conversationManager.getStatus(this.primaryUserChatId);
+      const statusInfo = await this.conversationManager.getStatus(this.primaryRecipientId);
       return statusInfo.status as ConversationStatus;
     } catch {
       return 'unknown';
@@ -642,12 +639,12 @@ export class ThresholdEngine {
    * Get time since last message in conversation.
    */
   private async getTimeSinceLastMessage(): Promise<number | null> {
-    if (!this.conversationManager || !this.primaryUserChatId) {
+    if (!this.conversationManager || !this.primaryRecipientId) {
       return null;
     }
 
     try {
-      const statusInfo = await this.conversationManager.getStatus(this.primaryUserChatId);
+      const statusInfo = await this.conversationManager.getStatus(this.primaryRecipientId);
       if (statusInfo.lastMessageAt) {
         return Date.now() - statusInfo.lastMessageAt.getTime();
       }

@@ -26,13 +26,13 @@ export interface ToolSchema {
 export interface MemoryProvider {
   search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]>;
   save(entry: MemoryEntry): Promise<void>;
-  getRecent(chatId: string, limit: number): Promise<MemoryEntry[]>;
+  getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]>;
 }
 
 export interface MemorySearchOptions {
   limit?: number | undefined;
   types?: ('message' | 'thought' | 'fact')[] | undefined;
-  chatId?: string | undefined;
+  recipientId?: string | undefined;
 }
 
 export interface MemoryEntry {
@@ -40,7 +40,7 @@ export interface MemoryEntry {
   type: 'message' | 'thought' | 'fact';
   content: string;
   timestamp: Date;
-  chatId?: string | undefined;
+  recipientId?: string | undefined;
   tags?: string[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
@@ -57,15 +57,15 @@ export interface AgentStateProvider {
  * User model provider interface.
  */
 export interface UserModelProvider {
-  getModel(chatId?: string): Record<string, unknown>;
+  getModel(recipientId?: string): Record<string, unknown>;
 }
 
 /**
  * Conversation provider for time-based queries.
  */
 export interface ConversationProvider {
-  getLastMessageTime(chatId?: string): Date | null;
-  getLastContactTime(chatId?: string): Date | null;
+  getLastMessageTime(recipientId?: string): Date | null;
+  getLastContactTime(recipientId?: string): Date | null;
 }
 
 /**
@@ -312,7 +312,7 @@ export class ToolRegistry {
 
             const options: MemorySearchOptions = { limit };
             if (types) options.types = types;
-            if (chatId) options.chatId = chatId;
+            if (chatId) options.recipientId = chatId;
 
             const results = await this.deps.memoryProvider.search(query, options);
             return {
@@ -345,14 +345,15 @@ export class ToolRegistry {
             const entryType = (args['type'] as string | undefined) ?? 'fact';
             const tags = (args['tags'] as string[] | undefined) ?? [];
             const confidence = (args['confidence'] as number | undefined) ?? 0.8;
-            const chatId = args['chatId'] as string | undefined;
+            // Map chatId parameter to recipientId for storage
+            const recipientId = args['chatId'] as string | undefined;
 
             const entry: MemoryEntry = {
               id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
               type: entryType === 'fact' ? 'fact' : 'thought',
               content,
               timestamp: new Date(),
-              chatId,
+              recipientId,
               tags,
               confidence,
             };

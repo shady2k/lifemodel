@@ -82,8 +82,8 @@ export interface LoopContext {
   /** Correlation ID */
   correlationId: string;
 
-  /** Chat ID (if applicable) */
-  chatId?: string | undefined;
+  /** Opaque recipient identifier */
+  recipientId?: string | undefined;
 
   /** User ID (if applicable) */
   userId?: string | undefined;
@@ -306,9 +306,9 @@ export class AgenticLoop {
       );
 
       // On timeout or loop, escalate to SMART layer instead of failing silently
-      if (context.chatId && (state.abortReason?.includes('Timeout') || state.forceRespond)) {
+      if (context.recipientId && (state.abortReason?.includes('Timeout') || state.forceRespond)) {
         this.logger.info(
-          { chatId: context.chatId, reason: state.abortReason },
+          { recipientId: context.recipientId, reason: state.abortReason },
           'COGNITION failed, escalating to SMART layer'
         );
         return {
@@ -328,17 +328,16 @@ export class AgenticLoop {
 
       // Create fallback response for parse failures
       const fallbackIntents: Intent[] = [];
-      if (context.chatId && state.abortReason?.includes('parse')) {
+      if (context.recipientId && state.abortReason?.includes('parse')) {
         this.logger.info(
-          { chatId: context.chatId },
+          { recipientId: context.recipientId },
           'Sending fallback response due to parse failure'
         );
         fallbackIntents.push({
           type: 'SEND_MESSAGE',
           payload: {
+            recipientId: context.recipientId,
             text: 'Извини, у меня возникли технические проблемы. Можешь повторить?',
-            target: context.chatId,
-            channel: 'telegram',
           },
         });
       }
@@ -358,14 +357,16 @@ export class AgenticLoop {
 
       // Create fallback response if we have a chat to respond to
       const errorFallbackIntents: Intent[] = [];
-      if (context.chatId) {
-        this.logger.info({ chatId: context.chatId }, 'Sending fallback response due to error');
+      if (context.recipientId) {
+        this.logger.info(
+          { recipientId: context.recipientId },
+          'Sending fallback response due to error'
+        );
         errorFallbackIntents.push({
           type: 'SEND_MESSAGE',
           payload: {
+            recipientId: context.recipientId,
             text: 'Извини, что-то пошло не так. Попробуй ещё раз.',
-            target: context.chatId,
-            channel: 'telegram',
           },
         });
       }
@@ -686,7 +687,7 @@ To get full parameter schema for any tool:
    */
   private async executeTool(step: ToolStep, context: LoopContext): Promise<ToolResult> {
     const toolContext: ToolContext = {
-      chatId: context.chatId,
+      recipientId: context.recipientId ?? '',
       userId: context.userId,
       correlationId: context.correlationId,
     };
@@ -736,13 +737,12 @@ To get full parameter schema for any tool:
     }
 
     // Add response intent if terminal is respond
-    if (terminal.type === 'respond' && context.chatId) {
+    if (terminal.type === 'respond' && context.recipientId) {
       intents.push({
         type: 'SEND_MESSAGE',
         payload: {
+          recipientId: context.recipientId,
           text: terminal.text,
-          target: context.chatId,
-          channel: 'telegram', // TODO: get from context
         },
       });
     }
@@ -775,7 +775,7 @@ To get full parameter schema for any tool:
           const intent: Intent = {
             type: 'UPDATE_USER_MODEL',
             payload: {
-              chatId: context.chatId,
+              recipientId: context.recipientId,
               field: step.field,
               value: step.value,
               confidence: step.confidence,
@@ -824,7 +824,7 @@ To get full parameter schema for any tool:
           type: 'SAVE_TO_MEMORY',
           payload: {
             type: 'fact',
-            chatId: context.chatId,
+            recipientId: context.recipientId,
             fact: step.fact,
           },
         };

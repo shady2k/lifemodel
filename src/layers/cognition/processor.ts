@@ -253,23 +253,23 @@ export class CognitionProcessor implements CognitionLayer {
 
     // Extract chat info
     const signalData = triggerSignal.data as
-      | { chatId?: string; userId?: string; channel?: string }
+      | { recipientId?: string; userId?: string; channel?: string }
       | undefined;
-    const chatId = signalData?.chatId;
+    const recipientId = signalData?.recipientId;
     const channel = signalData?.channel ?? 'telegram';
 
     // Emit typing indicator only for user messages (not proactive triggers)
     // For proactive contact, we don't know if we'll respond until LLM decides
     const isUserMessage = triggerSignal.type === 'user_message';
-    if (this.config.emitTypingIndicator && chatId && channel && isUserMessage) {
-      await this.emitTypingIndicatorEvent(chatId, channel);
+    if (this.config.emitTypingIndicator && recipientId && channel && isUserMessage) {
+      await this.emitTypingIndicatorEvent(recipientId, channel);
     }
 
     // Get agent identity
     const identity = this.agent?.getIdentity();
 
     // Get time since last message (for proactive contact context)
-    const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(chatId);
+    const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(recipientId);
 
     // Build loop context
     const loopContext: LoopContext = {
@@ -278,10 +278,10 @@ export class CognitionProcessor implements CognitionLayer {
       agentIdentity: identity
         ? { name: identity.name, gender: identity.gender, values: identity.values }
         : undefined,
-      conversationHistory: await this.getConversationHistory(chatId),
+      conversationHistory: await this.getConversationHistory(recipientId),
       userModel: this.userModel?.getBeliefs() ?? {},
       correlationId: context.correlationId,
-      chatId,
+      recipientId,
       userId: signalData?.userId,
       timeSinceLastMessageMs,
     };
@@ -350,8 +350,8 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     // Trigger compaction check (non-blocking, fire-and-forget)
-    if (chatId) {
-      void this.triggerCompactionIfNeeded(chatId);
+    if (recipientId) {
+      void this.triggerCompactionIfNeeded(recipientId);
     }
 
     return result;
@@ -409,13 +409,14 @@ export class CognitionProcessor implements CognitionLayer {
     );
 
     // 2. Emit typing indicator if responding to user message
+    // Note: Typing indicator uses recipientId to resolve destination
     if (
       this.config.emitTypingIndicator &&
       synthesis.situation === 'user_message' &&
-      synthesis.chatId &&
-      synthesis.channel
+      synthesis.recipientId
     ) {
-      await this.emitTypingIndicatorEvent(synthesis.chatId, synthesis.channel);
+      // TODO: Resolve channel from recipientId via RecipientRegistry
+      await this.emitTypingIndicatorEvent(synthesis.recipientId, 'telegram');
     }
 
     // 3. Decide action
@@ -454,10 +455,8 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     // Add send_message intent if we have a response
-    if (decision.response && decision.chatId && decision.channel) {
-      result.intents.push(
-        this.buildSendMessageIntent(decision.response, decision.chatId, decision.channel)
-      );
+    if (decision.response && decision.recipientId) {
+      result.intents.push(this.buildSendMessageIntent(decision.response, decision.recipientId));
     }
 
     return result;
@@ -542,13 +541,12 @@ export class CognitionProcessor implements CognitionLayer {
   /**
    * Build a send_message intent.
    */
-  private buildSendMessageIntent(message: string, chatId: string, channel: string): Intent {
+  private buildSendMessageIntent(message: string, recipientId: string): Intent {
     return {
       type: 'SEND_MESSAGE',
       payload: {
+        recipientId,
         text: message,
-        target: chatId,
-        channel,
       },
     };
   }

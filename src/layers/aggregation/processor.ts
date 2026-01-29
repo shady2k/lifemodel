@@ -86,13 +86,13 @@ export class AggregationProcessor implements AggregationLayer {
   updateDeps(deps: {
     conversationManager?: ConversationManager;
     userModel?: UserModel;
-    primaryUserChatId?: string;
+    primaryRecipientId?: string;
     pluginEventValidator?: PluginEventValidator;
   }): void {
     const thresholdDeps: ThresholdEngineDeps = {};
     if (deps.conversationManager) thresholdDeps.conversationManager = deps.conversationManager;
     if (deps.userModel) thresholdDeps.userModel = deps.userModel;
-    if (deps.primaryUserChatId) thresholdDeps.primaryUserChatId = deps.primaryUserChatId;
+    if (deps.primaryRecipientId) thresholdDeps.primaryRecipientId = deps.primaryRecipientId;
     if (deps.pluginEventValidator) thresholdDeps.pluginEventValidator = deps.pluginEventValidator;
     this.thresholdEngine.updateDeps(thresholdDeps);
     this.logger.debug('AGGREGATION dependencies updated');

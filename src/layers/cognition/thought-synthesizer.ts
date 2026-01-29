@@ -65,11 +65,8 @@ export interface SynthesisResult {
   /** Message text (if user_message) */
   messageText?: string;
 
-  /** Chat ID (if user_message) */
-  chatId?: string;
-
-  /** Channel (if user_message) */
-  channel?: string;
+  /** Recipient ID (if user_message) */
+  recipientId?: string;
 
   /** User ID (if available) */
   userId?: string;
@@ -124,18 +121,12 @@ export class ThoughtSynthesizer {
     }
 
     // Check for pattern anomalies
-    if (
-      wakeReason === 'pattern_break' ||
-      triggerSignals.some((s) => s.type === 'pattern_break')
-    ) {
+    if (wakeReason === 'pattern_break' || triggerSignals.some((s) => s.type === 'pattern_break')) {
       return this.synthesizePatternAnomaly(triggerSignals);
     }
 
     // Check for channel issues
-    if (
-      wakeReason === 'channel_error' ||
-      triggerSignals.some((s) => s.type === 'channel_error')
-    ) {
+    if (wakeReason === 'channel_error' || triggerSignals.some((s) => s.type === 'channel_error')) {
       return this.synthesizeChannelIssue(triggerSignals);
     }
 
@@ -162,13 +153,10 @@ export class ThoughtSynthesizer {
   /**
    * Synthesize understanding for user message.
    */
-  private synthesizeUserMessage(
-    signal: Signal,
-    _aggregates: SignalAggregate[]
-  ): SynthesisResult {
+  private synthesizeUserMessage(signal: Signal, _aggregates: SignalAggregate[]): SynthesisResult {
     const data = signal.data as UserMessageData | undefined;
 
-    if (!data || data.kind !== 'user_message') {
+    if (data?.kind !== 'user_message') {
       this.logger.error({ signal }, 'User message signal missing data');
       return {
         situation: 'user_message',
@@ -195,9 +183,8 @@ export class ThoughtSynthesizer {
       requiresResponse: true,
       initiateContact: false,
       messageText: data.text,
-      chatId: data.chatId,
-      channel: data.channel,
-      userId: data.userId ?? data.chatId,
+      recipientId: data.recipientId,
+      userId: data.userId ?? data.recipientId,
       complexity,
       summary: `User message: "${data.text.slice(0, 50)}${data.text.length > 50 ? '...' : ''}"`,
       anomalies: [],
@@ -227,10 +214,7 @@ export class ThoughtSynthesizer {
       contactPressureSignal?.metrics.value ?? contactPressureAgg?.currentValue ?? 0;
     const socialDebt = socialDebtSignal?.metrics.value ?? socialDebtAgg?.currentValue ?? 0;
 
-    this.logger.debug(
-      { contactPressure, socialDebt },
-      'Proactive contact synthesized'
-    );
+    this.logger.debug({ contactPressure, socialDebt }, 'Proactive contact synthesized');
 
     return {
       situation: 'proactive_contact',
@@ -287,9 +271,7 @@ export class ThoughtSynthesizer {
    * Synthesize understanding for time event.
    */
   private synthesizeTimeEvent(signals: Signal[]): SynthesisResult {
-    const timeSignal = signals.find(
-      (s) => s.type === 'time_of_day' || s.type === 'hour_changed'
-    );
+    const timeSignal = signals.find((s) => s.type === 'time_of_day' || s.type === 'hour_changed');
     const data = timeSignal?.data as { timeOfDay?: string } | undefined;
 
     return {
@@ -312,17 +294,24 @@ export class ThoughtSynthesizer {
     let score = 0;
 
     const length = text.length;
-    const hasQuestion = /\?/.test(text);
-    const questionCount = (text.match(/\?/g) || []).length;
-    const hasMultipleSentences = (text.match(/[.!?]+/g) || []).length > 2;
+    const hasQuestion = text.includes('?');
+    const questionCount = (text.match(/\?/g) ?? []).length;
+    const hasMultipleSentences = (text.match(/[.!?]+/g) ?? []).length > 2;
     const hasCodeIndicators = /```|`[^`]+`|function|const |let |var |=>/.test(text);
-    const hasComplexVocabulary = /\b(explain|analyze|compare|evaluate|synthesize|hypothesize)\b/i.test(text);
-    const hasNumbersOrMath = /\d+\s*[\+\-\*\/\=]\s*\d+/.test(text);
+    const hasComplexVocabulary =
+      /\b(explain|analyze|compare|evaluate|synthesize|hypothesize)\b/i.test(text);
+    const hasNumbersOrMath = /\d+\s*[+\-*/=]\s*\d+/.test(text);
 
     // Simple greetings and acknowledgments
-    const isSimpleGreeting = /^(hi|hello|hey|привет|здравствуй|good morning|good evening|доброе утро|добрый день|добрый вечер)[!.,]?\s*$/i.test(text.trim());
-    const isSimpleAcknowledgment = /^(ok|okay|thanks|thank you|спасибо|ок|хорошо|понял|ясно)[!.,]?\s*$/i.test(text.trim());
-    const isSimpleFarewell = /^(bye|goodbye|пока|до свидания|спокойной ночи)[!.,]?\s*$/i.test(text.trim());
+    const isSimpleGreeting =
+      /^(hi|hello|hey|привет|здравствуй|good morning|good evening|доброе утро|добрый день|добрый вечер)[!.,]?\s*$/i.test(
+        text.trim()
+      );
+    const isSimpleAcknowledgment =
+      /^(ok|okay|thanks|thank you|спасибо|ок|хорошо|понял|ясно)[!.,]?\s*$/i.test(text.trim());
+    const isSimpleFarewell = /^(bye|goodbye|пока|до свидания|спокойной ночи)[!.,]?\s*$/i.test(
+      text.trim()
+    );
 
     if (isSimpleGreeting || isSimpleAcknowledgment || isSimpleFarewell) {
       return {

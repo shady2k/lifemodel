@@ -330,11 +330,8 @@ export interface PluginManifestV2 {
  * PluginLoader adds registerEventSchema on top of this.
  */
 export interface BasePluginServices {
-  /**
-   * Get timezone for a chat (IANA name).
-   * Resolution: chat override -> user default -> 'UTC'
-   */
-  getTimezone: (chatId?: string) => string;
+  /** Get timezone for a recipient (IANA name). Returns 'UTC' if not found. */
+  getTimezone: (recipientId?: string) => string;
 }
 
 /**
@@ -363,8 +360,8 @@ export interface PluginPrimitives {
   /** Namespaced storage */
   storage: StoragePrimitive;
 
-  /** Signal emitter for the pipeline */
-  signalEmitter: SignalEmitterPrimitive;
+  /** Intent emitter for sending messages and signals */
+  intentEmitter: IntentEmitterPrimitive;
 
   /** Shared services (timezone, etc.) */
   services: PluginServices;
@@ -408,14 +405,34 @@ export interface StoragePrimitive {
 }
 
 /**
- * Signal emitter primitive interface.
+ * Result of emitting a signal.
  */
-export interface SignalEmitterPrimitive {
+export interface EmitSignalResult {
+  /** Whether the signal was emitted successfully */
+  success: boolean;
+  /** Signal ID if successful */
+  signalId?: string;
+  /** Error message if failed */
+  error?: string;
+}
+
+/**
+ * Intent emitter interface.
+ * Plugins use this to emit intents - core applies them.
+ */
+export interface IntentEmitterPrimitive {
+  /** Emit a SEND_MESSAGE intent. Core resolves recipientId to channel+destination. */
+  emitSendMessage(recipientId: string, text: string, replyTo?: string): void;
+
+  /** Emit an arbitrary intent. */
+  emitIntent(intent: Intent): void;
+
   /**
    * Emit a signal into the pipeline.
-   * @returns signalId - UUID for tracing/logging
+   * Returns result with signalId on success, or error on failure.
+   * Fails soft on rate limit (doesn't throw).
    */
-  emit(signal: PluginSignalInput): string;
+  emitSignal(signal: PluginSignalInput): EmitSignalResult;
 }
 
 /**
@@ -504,10 +521,12 @@ export interface PluginV2 {
  * Contains system information NOT visible to LLM.
  */
 export interface PluginToolContext {
-  /** Current chat ID (for reminders, context-specific actions) */
-  chatId?: string | undefined;
+  /** Opaque recipient identifier. Core resolves to channel+destination. */
+  recipientId: string;
+
   /** Current user ID */
   userId?: string | undefined;
+
   /** Correlation ID for tracing */
   correlationId: string;
 }

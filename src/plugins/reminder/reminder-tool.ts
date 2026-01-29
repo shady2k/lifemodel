@@ -26,10 +26,9 @@ import { resolveSemanticAnchor, formatRecurrence } from './date-parser.js';
 export const REMINDER_PLUGIN_ID = 'com.lifemodel.reminder';
 
 /**
- * Get the user's timezone.
- * Should return a valid IANA timezone (defaults to 'UTC').
+ * Get the user's timezone by recipientId.
  */
-type GetTimezoneFunc = (chatId?: string) => string;
+type GetTimezoneFunc = (recipientId: string) => string;
 
 /**
  * Result type for the unified reminder tool.
@@ -62,7 +61,6 @@ export function createReminderTools(
     const map = new Map<string, Reminder>();
     if (stored) {
       for (const r of stored) {
-        // Convert date strings back to Date objects
         r.triggerAt = new Date(r.triggerAt);
         r.createdAt = new Date(r.createdAt);
         map.set(r.id, r);
@@ -84,24 +82,18 @@ export function createReminderTools(
   async function createReminder(
     content: string,
     anchor: SemanticDateAnchor,
-    chatId: string,
+    recipientId: string,
     tags?: string[]
   ): Promise<ReminderToolResult> {
     try {
-      // Get user's timezone
-      const timezone = getTimezone(chatId);
-
-      // Resolve the semantic anchor to a concrete date
+      const timezone = getTimezone(recipientId);
       const resolved = resolveSemanticAnchor(anchor, new Date(), timezone);
-
-      // Generate reminder ID
       const reminderId = `rem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
-      // Create the reminder
       const reminder: Reminder = {
         id: reminderId,
         content,
-        chatId,
+        recipientId,
         triggerAt: resolved.triggerAt,
         recurrence: resolved.recurrence,
         semanticAnchor: anchor,
@@ -116,11 +108,10 @@ export function createReminderTools(
         reminder.tags = tags;
       }
 
-      // Schedule the reminder
       const scheduleData: Record<string, unknown> = {
         kind: REMINDER_EVENT_KINDS.REMINDER_DUE,
         reminderId,
-        chatId,
+        recipientId,
         content,
         isRecurring: resolved.recurrence !== null,
         fireCount: 0,
@@ -139,10 +130,8 @@ export function createReminderTools(
       }
 
       const scheduleId = await scheduler.schedule(scheduleOptions);
-
       reminder.scheduleId = scheduleId;
 
-      // Save to storage
       const reminders = await loadReminders();
       reminders.set(reminderId, reminder);
       await saveReminders(reminders);
@@ -150,6 +139,7 @@ export function createReminderTools(
       logger.info(
         {
           reminderId,
+          recipientId,
           content,
           triggerAt: resolved.triggerAt,
           isRecurring: resolved.recurrence !== null,
@@ -178,15 +168,14 @@ export function createReminderTools(
   }
 
   /**
-   * List reminders for a chat.
+   * List reminders for a recipient.
    */
-  async function listReminders(chatId: string, limit = 10): Promise<ReminderToolResult> {
+  async function listReminders(recipientId: string, limit = 10): Promise<ReminderToolResult> {
     try {
       const reminders = await loadReminders();
 
-      // Filter by chat and active status
       const filtered = Array.from(reminders.values())
-        .filter((r) => r.chatId === chatId && r.status === 'active')
+        .filter((r) => r.recipientId === recipientId && r.status === 'active')
         .sort((a, b) => a.triggerAt.getTime() - b.triggerAt.getTime())
         .slice(0, limit);
 
@@ -224,12 +213,10 @@ export function createReminderTools(
 
   /**
    * Cancel a reminder.
-   * @param reminderId - The reminder ID to cancel
-   * @param chatId - The chat ID to verify ownership (security: prevent cross-chat cancellation)
    */
   async function cancelReminder(
     reminderId: string,
-    chatId: string | undefined
+    recipientId: string
   ): Promise<ReminderToolResult> {
     try {
       const reminders = await loadReminders();
@@ -243,11 +230,14 @@ export function createReminderTools(
         };
       }
 
-      // Security: verify the reminder belongs to this chat
-      if (chatId && reminder.chatId !== chatId) {
+      if (reminder.recipientId !== recipientId) {
         logger.warn(
-          { reminderId, requestedChatId: chatId, actualChatId: reminder.chatId },
-          'Attempted to cancel reminder from different chat'
+          {
+            reminderId,
+            requestedRecipientId: recipientId,
+            actualRecipientId: reminder.recipientId,
+          },
+          'Attempted to cancel reminder from different recipient'
         );
         return {
           success: false,
@@ -256,12 +246,10 @@ export function createReminderTools(
         };
       }
 
-      // Cancel the schedule
       if (reminder.scheduleId) {
         await scheduler.cancel(reminder.scheduleId);
       }
 
-      // Update status
       reminder.status = 'cancelled';
       await saveReminders(reminders);
 
@@ -285,9 +273,6 @@ export function createReminderTools(
     }
   }
 
-  /**
-   * Unified reminder tool.
-   */
   const reminderTool: PluginTool = {
     name: 'reminder',
     description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
@@ -337,7 +322,6 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
       },
     ],
     execute: async (args, context?: PluginToolContext): Promise<ReminderToolResult> => {
-      // Validate action parameter
       const action = args['action'];
       if (typeof action !== 'string') {
         return {
@@ -347,8 +331,14 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         };
       }
 
-      // Get chatId from execution context (NOT from LLM args)
-      const chatId = context?.chatId;
+      const recipientId = context?.recipientId;
+      if (!recipientId) {
+        return {
+          success: false,
+          action,
+          error: 'No recipient context available',
+        };
+      }
 
       switch (action) {
         case 'create': {
@@ -364,38 +354,16 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
             };
           }
 
-          if (!chatId) {
-            return {
-              success: false,
-              action: 'create',
-              error: 'No chat context available',
-            };
-          }
-
-          return createReminder(content, anchorArg as SemanticDateAnchor, chatId, tags);
+          return createReminder(content, anchorArg as SemanticDateAnchor, recipientId, tags);
         }
 
         case 'list': {
-          if (!chatId) {
-            return {
-              success: false,
-              action: 'list',
-              error: 'No chat context available',
-            };
-          }
           const limitArg = args['limit'];
           const limit = typeof limitArg === 'number' ? limitArg : 10;
-          return listReminders(chatId, limit);
+          return listReminders(recipientId, limit);
         }
 
         case 'cancel': {
-          if (!chatId) {
-            return {
-              success: false,
-              action: 'cancel',
-              error: 'No chat context available',
-            };
-          }
           const reminderId = args['reminderId'];
           if (typeof reminderId !== 'string' || !reminderId) {
             return {
@@ -404,7 +372,7 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
               error: 'Missing required parameter: reminderId',
             };
           }
-          return cancelReminder(reminderId, chatId);
+          return cancelReminder(reminderId, recipientId);
         }
 
         default:
@@ -431,7 +399,7 @@ export async function handleReminderDue(
   logger.info(
     {
       reminderId: data.reminderId,
-      chatId: data.chatId,
+      recipientId: data.recipientId,
       content: data.content,
       isRecurring: data.isRecurring,
       fireCount: data.fireCount,
@@ -439,7 +407,6 @@ export async function handleReminderDue(
     'Reminder due'
   );
 
-  // Update fire count for recurring reminders
   if (data.isRecurring) {
     try {
       const stored = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);

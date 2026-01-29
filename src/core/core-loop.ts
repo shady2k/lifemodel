@@ -56,6 +56,7 @@ import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
 import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
+import type { IRecipientRegistry } from './recipient-registry.js';
 
 /**
  * Core loop configuration.
@@ -111,6 +112,8 @@ export interface CoreLoopDeps {
   memoryProvider?: MemoryProvider | undefined;
   /** Memory consolidator for sleep-cycle consolidation */
   memoryConsolidator?: MemoryConsolidator | undefined;
+  /** Recipient registry for Clean Architecture (recipientId → channel routing) */
+  recipientRegistry?: IRecipientRegistry | undefined;
 }
 
 /**
@@ -159,6 +162,7 @@ export class CoreLoop {
   private readonly userModel: UserModel | undefined;
   private readonly memoryProvider: MemoryProvider | undefined;
   private readonly memoryConsolidator: MemoryConsolidator | undefined;
+  private readonly recipientRegistry: IRecipientRegistry | undefined;
 
   /** Previous alertness mode for detecting transitions */
   private previousAlertnessMode: AlertnessMode | undefined;
@@ -168,7 +172,7 @@ export class CoreLoop {
 
   /** Timestamp of last message sent (for response timing) */
   private lastMessageSentAt: number | null = null;
-  private lastMessageChatId: string | null = null;
+  private lastMessageRecipientId: string | null = null;
 
   /** Pending COGNITION operation (non-blocking) */
   private pendingCognition: PendingCognition | null = null;
@@ -202,6 +206,7 @@ export class CoreLoop {
     this.userModel = deps.userModel;
     this.memoryProvider = deps.memoryProvider;
     this.memoryConsolidator = deps.memoryConsolidator;
+    this.recipientRegistry = deps.recipientRegistry;
 
     // Initialize system health monitor
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
@@ -631,9 +636,10 @@ export class CoreLoop {
 
     // Save to conversation history
     if (this.conversationManager) {
-      const data = signal.data as { text?: string; chatId?: string } | undefined;
-      if (data?.text && data.chatId) {
-        void this.conversationManager.addMessage(data.chatId, {
+      const data = signal.data as { text?: string; recipientId?: string } | undefined;
+      if (data?.text && data.recipientId) {
+        // Use recipientId as conversation key
+        void this.conversationManager.addMessage(data.recipientId, {
           role: 'user',
           content: data.text,
         });
@@ -649,8 +655,8 @@ export class CoreLoop {
       return;
     }
 
-    const data = signal.data as { chatId?: string } | undefined;
-    if (!data?.chatId || data.chatId !== this.lastMessageChatId) {
+    const data = signal.data as { recipientId?: string } | undefined;
+    if (!data?.recipientId || data.recipientId !== this.lastMessageRecipientId) {
       return;
     }
 
@@ -667,7 +673,7 @@ export class CoreLoop {
 
     // Reset tracking
     this.lastMessageSentAt = null;
-    this.lastMessageChatId = null;
+    this.lastMessageRecipientId = null;
 
     this.metrics.histogram('user_response_time_ms', responseTimeMs);
   }
@@ -817,55 +823,73 @@ export class CoreLoop {
           break;
 
         case 'SEND_MESSAGE': {
-          const { channel, text, target, replyTo } = intent.payload;
-          const channelImpl = this.channels.get(channel);
-          if (channelImpl && target) {
-            const sendOptions = replyTo ? { replyTo } : undefined;
-            channelImpl
-              .sendMessage(target, text, sendOptions)
-              .then((success) => {
-                if (success) {
-                  this.lastMessageSentAt = Date.now();
-                  this.lastMessageChatId = target;
-                  this.metrics.counter('messages_sent', { channel });
-                  // Save agent message to history
-                  if (this.conversationManager) {
-                    void this.saveAgentMessage(target, text);
-                  }
-                } else {
-                  this.logger.warn(
-                    { channel, target, textLength: text.length },
-                    'Message send returned false'
-                  );
-                  this.metrics.counter('messages_failed', { channel, reason: 'returned_false' });
-                }
-              })
-              .catch((error: unknown) => {
-                this.logger.error(
-                  {
-                    error: error instanceof Error ? error.message : String(error),
-                    channel,
-                    target,
-                    textLength: text.length,
-                  },
-                  'Message send threw an error'
-                );
-                this.metrics.counter('messages_failed', { channel, reason: 'exception' });
-              });
-          } else {
+          const { recipientId, text, replyTo } = intent.payload;
+
+          if (!this.recipientRegistry) {
+            this.logger.error({ recipientId }, 'RecipientRegistry not configured');
+            this.metrics.counter('messages_failed', { reason: 'no_registry' });
+            break;
+          }
+
+          const route = this.recipientRegistry.resolve(recipientId);
+          if (!route) {
+            this.logger.error({ recipientId }, 'Could not resolve recipientId');
+            this.metrics.counter('messages_failed', { reason: 'unresolved_recipient' });
+            break;
+          }
+
+          const channelImpl = this.channels.get(route.channel);
+          if (!channelImpl) {
             this.logger.error(
               {
-                channel,
-                target,
-                hasChannel: Boolean(channelImpl),
-                hasTarget: Boolean(target),
-                textPreview: text.slice(0, 50),
+                recipientId,
+                channel: route.channel,
                 registeredChannels: Array.from(this.channels.keys()),
               },
-              'Cannot route message: channel not found or no target'
+              'Channel not found'
             );
-            this.metrics.counter('messages_failed', { channel, reason: 'routing' });
+            this.metrics.counter('messages_failed', {
+              channel: route.channel,
+              reason: 'channel_not_found',
+            });
+            break;
           }
+
+          const sendOptions = replyTo ? { replyTo } : undefined;
+          // Wrap in Promise.resolve to catch both sync throws and async rejections
+          Promise.resolve()
+            .then(() => channelImpl.sendMessage(route.destination, text, sendOptions))
+            .then((success) => {
+              if (success) {
+                this.lastMessageSentAt = Date.now();
+                // Use recipientId (not route.destination) for tracking - matches processResponseTiming
+                this.lastMessageRecipientId = recipientId;
+                this.metrics.counter('messages_sent', { channel: route.channel });
+                if (this.conversationManager) {
+                  // Use recipientId as conversation key for consistency
+                  void this.saveAgentMessage(recipientId, text);
+                }
+              } else {
+                this.logger.warn(
+                  { recipientId, channel: route.channel, textLength: text.length },
+                  'Message send returned false'
+                );
+                this.metrics.counter('messages_failed', {
+                  channel: route.channel,
+                  reason: 'returned_false',
+                });
+              }
+            })
+            .catch((error: unknown) => {
+              this.logger.error(
+                { error: error instanceof Error ? error.message : String(error), recipientId },
+                'Message send threw an error'
+              );
+              this.metrics.counter('messages_failed', {
+                channel: route.channel,
+                reason: 'exception',
+              });
+            });
           break;
         }
 
@@ -920,8 +944,8 @@ export class CoreLoop {
           break;
 
         case 'UPDATE_USER_MODEL': {
-          const { chatId, field, value, confidence, source } = intent.payload;
-          if (this.userModel && chatId) {
+          const { recipientId, field, value, confidence, source } = intent.payload;
+          if (this.userModel && recipientId) {
             // Apply update to user model based on field
             let applied = false;
 
@@ -986,7 +1010,7 @@ export class CoreLoop {
             }
 
             this.logger.debug(
-              { chatId, field, value, confidence, source, applied },
+              { recipientId, field, value, confidence, source, applied },
               'User model update from COGNITION'
             );
             this.metrics.counter('user_model_updates', { field, source });
@@ -995,7 +1019,13 @@ export class CoreLoop {
         }
 
         case 'SAVE_TO_MEMORY': {
-          const { type: memoryType, chatId: memoryChatId, content, fact, tags } = intent.payload;
+          const {
+            type: memoryType,
+            recipientId: memoryRecipientId,
+            content,
+            fact,
+            tags,
+          } = intent.payload;
 
           if (this.memoryProvider) {
             // Build memory entry from fact or content
@@ -1013,7 +1043,7 @@ export class CoreLoop {
                 type: memoryType as 'fact' | 'thought' | 'message',
                 content: entryContent,
                 timestamp: new Date(),
-                chatId: memoryChatId,
+                recipientId: memoryRecipientId,
                 tags: tags ?? fact?.tags,
                 confidence: fact?.confidence,
                 metadata: fact ? { subject, predicate, object } : undefined,
@@ -1033,7 +1063,12 @@ export class CoreLoop {
             }
           } else {
             this.logger.debug(
-              { memoryType, chatId: memoryChatId, hasFact: !!fact, hasContent: !!content },
+              {
+                memoryType,
+                recipientId: memoryRecipientId,
+                hasFact: !!fact,
+                hasContent: !!content,
+              },
               'Memory save skipped (no provider)'
             );
           }
