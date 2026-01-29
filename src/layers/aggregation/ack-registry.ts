@@ -101,6 +101,12 @@ export class SignalAckRegistry {
   private readonly logger: Logger;
   private readonly config: AckRegistryConfig;
   private readonly acks = new Map<string, SignalAck>();
+  /** Track handled signal IDs with timestamp for TTL pruning */
+  private readonly handledSignalIds = new Map<string, number>();
+  /** Max handled signal IDs to track (LRU-style cleanup) */
+  private readonly maxHandledIds = 1000;
+  /** TTL for handled IDs in ms (1 hour) */
+  private readonly handledIdsTtlMs = 60 * 60 * 1000;
   private checkCount = 0;
 
   constructor(logger: Logger, config: Partial<AckRegistryConfig> = {}) {
@@ -291,9 +297,11 @@ export class SignalAckRegistry {
    * Clear all acks (e.g., on user message).
    */
   clearAll(): void {
-    const count = this.acks.size;
+    const ackCount = this.acks.size;
+    const handledCount = this.handledSignalIds.size;
     this.acks.clear();
-    this.logger.debug({ clearedCount: count }, 'All signal acks cleared');
+    this.handledSignalIds.clear();
+    this.logger.debug({ ackCount, handledCount }, 'All signal acks cleared');
   }
 
   /**
@@ -302,6 +310,69 @@ export class SignalAckRegistry {
   getAck(signalType: SignalType, source?: SignalSource): SignalAck | undefined {
     const id = this.generateAckId(signalType, source);
     return this.acks.get(id);
+  }
+
+  /**
+   * Check if a specific signal ID has been handled.
+   * Used for thought signals which need per-signal tracking.
+   */
+  isHandled(signalId: string): boolean {
+    const timestamp = this.handledSignalIds.get(signalId);
+    if (!timestamp) return false;
+
+    // Check if TTL expired
+    if (Date.now() - timestamp > this.handledIdsTtlMs) {
+      this.handledSignalIds.delete(signalId);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Mark a specific signal ID as handled.
+   */
+  markHandled(signalId: string): void {
+    // Prune if exceeding max size (simple LRU: remove oldest entries)
+    if (this.handledSignalIds.size >= this.maxHandledIds) {
+      this.pruneHandledIds();
+    }
+
+    this.handledSignalIds.set(signalId, Date.now());
+    this.logger.debug({ signalId }, 'Signal marked as handled');
+  }
+
+  /**
+   * Prune old handled signal IDs (TTL-based + size limit).
+   */
+  private pruneHandledIds(): void {
+    const now = Date.now();
+    let pruned = 0;
+
+    // First pass: remove expired entries
+    for (const [id, timestamp] of this.handledSignalIds) {
+      if (now - timestamp > this.handledIdsTtlMs) {
+        this.handledSignalIds.delete(id);
+        pruned++;
+      }
+    }
+
+    // If still over limit, remove oldest entries
+    if (this.handledSignalIds.size >= this.maxHandledIds) {
+      const entries = Array.from(this.handledSignalIds.entries()).sort((a, b) => a[1] - b[1]); // Sort by timestamp ascending
+
+      const toRemove = this.handledSignalIds.size - this.maxHandledIds + 100; // Remove 100 extra
+      for (let i = 0; i < toRemove && i < entries.length; i++) {
+        const entry = entries[i];
+        if (entry) {
+          this.handledSignalIds.delete(entry[0]);
+          pruned++;
+        }
+      }
+    }
+
+    if (pruned > 0) {
+      this.logger.debug({ pruned }, 'Handled signal IDs pruned');
+    }
   }
 
   /**

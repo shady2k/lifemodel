@@ -590,9 +590,9 @@ Terminal types:
 - "needsToolResult": Waiting for tool to complete
 
 Step type "emitThought": Queue an internal thought for later processing.
-- Use when insight needs more reasoning but doesn't block current response
-- Thought signals wake COGNITION on next tick
-- Prefer ACTION over more thinking when possible
+- Use ONLY when a concrete future action is needed (not just "monitor" or "watch for")
+- When processing a thought trigger and choosing noAction, do NOT emit another thought - end the chain
+- Prefer ACTION over more thinking - if no action needed, just stop
 
 Available tools: ${this.toolRegistry.getToolNames().join(', ') || '(none)'}`;
   }

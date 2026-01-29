@@ -332,6 +332,23 @@ export class CognitionProcessor implements CognitionLayer {
       // TODO: Could escalate or store for later review
     }
 
+    // ACK all processed thought signals to prevent duplicate processing within session
+    // Note: This is in-memory only and won't persist across restarts
+    if (triggerSignal.type === 'thought') {
+      result.intents.push({
+        type: 'ACK_SIGNAL',
+        payload: {
+          signalId: triggerSignal.id,
+          signalType: 'thought',
+          reason: `Thought processed with terminal: ${loopResult.terminal.type}`,
+        },
+      });
+      this.logger.debug(
+        { thoughtId: triggerSignal.id, terminal: loopResult.terminal.type },
+        'Thought processed, marking as handled'
+      );
+    }
+
     // Trigger compaction check (non-blocking, fire-and-forget)
     if (chatId) {
       void this.triggerCompactionIfNeeded(chatId);

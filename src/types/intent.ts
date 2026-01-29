@@ -141,6 +141,8 @@ export interface CancelEventIntent {
 export interface AckSignalIntent {
   type: 'ACK_SIGNAL';
   payload: {
+    /** Specific signal ID being acknowledged (for per-signal tracking) */
+    signalId?: string;
     /** The signal type being acknowledged */
     signalType: string;
     /** Optional: specific source (e.g., neuron.contact_pressure) */

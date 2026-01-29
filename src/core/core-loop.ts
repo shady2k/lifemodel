@@ -1043,9 +1043,20 @@ export class CoreLoop {
         }
 
         case 'ACK_SIGNAL': {
-          const { signalType, source, reason } = intent.payload;
+          const { signalId, signalType, source, reason } = intent.payload;
 
           const ackRegistry = this.layers.aggregation.getAckRegistry();
+
+          // For thought signals, mark the specific signal ID as handled
+          // Note: This is in-memory only (won't persist across restarts)
+          if (signalType === 'thought') {
+            if (signalId) {
+              ackRegistry.markHandled(signalId);
+            } else {
+              this.logger.warn({ signalType }, 'Thought ACK missing signalId');
+            }
+          }
+
           ackRegistry.registerAck({
             signalType: signalType as SignalType,
             source: source as SignalSource | undefined,
@@ -1053,7 +1064,7 @@ export class CoreLoop {
             reason,
           });
 
-          this.logger.debug({ signalType, source, reason }, 'Signal acknowledged');
+          this.logger.debug({ signalId, signalType, source, reason }, 'Signal acknowledged');
           this.metrics.counter('signal_acks', { signalType, ackType: 'handled' });
           break;
         }

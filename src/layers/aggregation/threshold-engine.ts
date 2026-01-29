@@ -192,7 +192,16 @@ export class ThresholdEngine {
 
     // Check for thought signals - bypass energy gate like user_message
     // Thoughts are internal processing that needs prompt handling
-    const thoughtSignals = signals.filter((s) => s.type === 'thought');
+    // Filter out thoughts that have already been handled (ACKed)
+    const thoughtSignals = signals.filter((s) => {
+      if (s.type !== 'thought') return false;
+      // Check if this specific thought was already handled
+      const isHandled = this.ackRegistry.isHandled(s.id);
+      if (isHandled) {
+        this.logger.debug({ thoughtId: s.id }, 'Skipping already-handled thought');
+      }
+      return !isHandled;
+    });
     if (thoughtSignals.length > 0) {
       return {
         shouldWake: true,
