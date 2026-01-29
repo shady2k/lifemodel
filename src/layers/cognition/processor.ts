@@ -258,8 +258,10 @@ export class CognitionProcessor implements CognitionLayer {
     const chatId = signalData?.chatId;
     const channel = signalData?.channel ?? 'telegram';
 
-    // Emit typing indicator
-    if (this.config.emitTypingIndicator && chatId && channel) {
+    // Emit typing indicator only for user messages (not proactive triggers)
+    // For proactive contact, we don't know if we'll respond until LLM decides
+    const isUserMessage = triggerSignal.type === 'user_message';
+    if (this.config.emitTypingIndicator && chatId && channel && isUserMessage) {
       await this.emitTypingIndicatorEvent(chatId, channel);
     }
 
