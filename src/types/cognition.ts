@@ -263,6 +263,9 @@ export interface ToolResult {
   /** ID matching the ToolStep.id */
   stepId: string;
 
+  /** Tool name that was executed */
+  toolName: ToolName;
+
   /** Result ID for parentId linking */
   resultId: string;
 

@@ -107,7 +107,13 @@ export class ToolRegistry {
 
     if (!tool) {
       this.logger.warn({ toolName: request.name }, 'Unknown tool requested');
-      return createToolResult(request.stepId, false, undefined, `Unknown tool: ${request.name}`);
+      return createToolResult(
+        request.stepId,
+        request.name,
+        false,
+        undefined,
+        `Unknown tool: ${request.name}`
+      );
     }
 
     const startTime = Date.now();
@@ -126,7 +132,7 @@ export class ToolRegistry {
         'Tool executed successfully'
       );
 
-      return createToolResult(request.stepId, true, result);
+      return createToolResult(request.stepId, request.name, true, result);
     } catch (error) {
       const duration = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -136,7 +142,7 @@ export class ToolRegistry {
         'Tool execution failed'
       );
 
-      return createToolResult(request.stepId, false, undefined, errorMessage);
+      return createToolResult(request.stepId, request.name, false, undefined, errorMessage);
     }
   }
 

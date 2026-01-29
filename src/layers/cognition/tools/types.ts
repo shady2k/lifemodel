@@ -70,12 +70,14 @@ export interface ToolRequest {
  */
 export function createToolResult(
   stepId: string,
+  toolName: ToolName,
   success: boolean,
   data?: unknown,
   error?: string
 ): ToolResult {
   const result: ToolResult = {
     stepId,
+    toolName,
     resultId: `${stepId}-result`,
     success,
   };

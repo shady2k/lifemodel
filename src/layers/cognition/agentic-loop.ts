@@ -199,9 +199,19 @@ export class AgenticLoop {
           break;
         }
 
-        // Add steps to state (deduplicate by id to prevent double processing)
-        const existingIds = new Set(state.allSteps.map((s) => s.id));
-        const newSteps = output.steps.filter((s) => !existingIds.has(s.id));
+        // Track executed tools by composite key (stepId:toolName) to handle ID reuse
+        // LLM sometimes reuses step IDs across different tools
+        const executedToolKeys = new Set(toolResults.map((r) => `${r.stepId}:${r.toolName}`));
+
+        // Add steps to state (deduplicate by composite key for tools, by id for others)
+        // This allows different tools with same stepId to coexist
+        const existingStepKeys = new Set(
+          state.allSteps.map((s) => (s.type === 'tool' ? `${s.id}:${s.name}` : s.id))
+        );
+        const newSteps = output.steps.filter((s) => {
+          const key = s.type === 'tool' ? `${s.id}:${s.name}` : s.id;
+          return !existingStepKeys.has(key);
+        });
         state.allSteps.push(...newSteps);
 
         // Check for steps needing escalation
@@ -209,36 +219,30 @@ export class AgenticLoop {
         pendingEscalation.push(...escalationSteps);
 
         // Find all pending tool steps (tools that haven't been executed yet)
-        const executedToolIds = new Set(toolResults.map((r) => r.stepId));
         const pendingToolSteps = state.allSteps.filter(
-          (s): s is ToolStep => s.type === 'tool' && !executedToolIds.has(s.id)
+          (s): s is ToolStep => s.type === 'tool' && !executedToolKeys.has(`${s.id}:${s.name}`)
         );
 
         // Handle terminal state
         if (output.terminal.type === 'needsToolResult') {
-          // Execute the specific tool requested
+          // Find the PENDING tool with this stepId (first one not yet executed)
           const needsResultTerminal = output.terminal;
-          const toolStep = state.allSteps.find(
-            (s): s is ToolStep => s.type === 'tool' && s.id === needsResultTerminal.stepId
-          );
+          const toolStep = pendingToolSteps.find((s) => s.id === needsResultTerminal.stepId);
 
           if (toolStep) {
-            // Check if tool was already executed
-            const existingResult = toolResults.find((r) => r.stepId === toolStep.id);
-            if (existingResult) {
-              // LLM is stuck - add explicit instruction to respond
-              this.logger.debug(
-                { stepId: toolStep.id, tool: toolStep.name },
-                'Tool already executed, adding explicit instruction'
-              );
-              state.forceRespond = true;
-              continue;
-            }
-
+            // Tool is pending - execute it
             state.toolCallCount++;
             const result = await this.executeTool(toolStep, context);
             toolResults.push(result);
             state.toolResults.push(result);
+          } else {
+            // No pending tool with this stepId - might be already executed or doesn't exist
+            // Force LLM to respond instead of looping
+            this.logger.debug(
+              { stepId: needsResultTerminal.stepId },
+              'No pending tool found for stepId, forcing response'
+            );
+            state.forceRespond = true;
           }
 
           continue;
@@ -491,7 +495,8 @@ NOTE: Do NOT use the user's name in every message. Check conversation history fi
       if (step.type === 'think') {
         lines.push(`[think] ${step.content}`);
       } else if (step.type === 'tool') {
-        const result = toolResults.find((r) => r.stepId === step.id);
+        // Match by both stepId AND toolName to handle ID reuse
+        const result = toolResults.find((r) => r.stepId === step.id && r.toolName === step.name);
         if (result) {
           // Tool was executed - show as completed with clear instruction
           if (result.success) {
