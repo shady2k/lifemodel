@@ -7,7 +7,12 @@
 
 import { DateTime } from 'luxon';
 import type { Logger } from '../types/logger.js';
-import type { SchedulerPrimitive, ScheduleOptions, ScheduleEntry } from '../types/plugin.js';
+import type {
+  SchedulerPrimitive,
+  ScheduleOptions,
+  ScheduleEntry,
+  RecurrenceConstraint,
+} from '../types/plugin.js';
 import type { StoragePrimitiveImpl } from './storage-primitive.js';
 
 /**
@@ -302,7 +307,15 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
           }
           break;
         case 'monthly':
-          if (recurrence.dayOfMonth) {
+          if (recurrence.anchorDay !== undefined && recurrence.constraint) {
+            // Constraint-based: "weekend after 10th", etc.
+            dt = this.findNextConstrainedMonthDay(
+              dt,
+              recurrence.anchorDay,
+              recurrence.constraint,
+              recurrence.interval
+            );
+          } else if (recurrence.dayOfMonth) {
             dt = this.findNextMonthDay(dt, recurrence.dayOfMonth, recurrence.interval);
           } else {
             dt = dt.plus({ months: recurrence.interval });
@@ -385,6 +398,89 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
     const targetDay = Math.min(dayOfMonth, daysInMonth);
 
     return nextDt.set({ day: targetDay });
+  }
+
+  /**
+   * Find next constrained occurrence (e.g., "weekend after 10th").
+   */
+  private findNextConstrainedMonthDay(
+    dt: DateTime,
+    anchorDay: number,
+    constraint: RecurrenceConstraint,
+    intervalMonths: number
+  ): DateTime {
+    // Move to next interval month
+    const nextDt = dt.plus({ months: intervalMonths });
+
+    // Clamp anchor day to valid range for this month
+    const daysInMonth = nextDt.daysInMonth ?? 28;
+    const clampedAnchorDay = Math.min(anchorDay, daysInMonth);
+
+    // Set to anchor day
+    const anchor = nextDt.set({ day: clampedAnchorDay });
+
+    // Apply constraint
+    return this.applyConstraint(anchor, constraint);
+  }
+
+  /**
+   * Apply a constraint to find the target date from an anchor.
+   */
+  private applyConstraint(anchor: DateTime, constraint: RecurrenceConstraint): DateTime {
+    // Luxon weekday: 1=Monday, 7=Sunday
+    const dayOfWeek = anchor.weekday;
+
+    switch (constraint) {
+      case 'next-weekend': {
+        // Find first Saturday (weekday 6) on or after anchor
+        let daysUntilSaturday: number;
+        if (dayOfWeek === 6) {
+          daysUntilSaturday = 0;
+        } else if (dayOfWeek === 7) {
+          daysUntilSaturday = 6; // Sunday -> next Saturday
+        } else {
+          daysUntilSaturday = 6 - dayOfWeek;
+        }
+        return anchor.plus({ days: daysUntilSaturday });
+      }
+
+      case 'next-saturday': {
+        let daysUntilSaturday: number;
+        if (dayOfWeek === 6) {
+          daysUntilSaturday = 0;
+        } else if (dayOfWeek === 7) {
+          daysUntilSaturday = 6;
+        } else {
+          daysUntilSaturday = 6 - dayOfWeek;
+        }
+        return anchor.plus({ days: daysUntilSaturday });
+      }
+
+      case 'next-sunday': {
+        let daysUntilSunday: number;
+        if (dayOfWeek === 7) {
+          daysUntilSunday = 0;
+        } else {
+          daysUntilSunday = 7 - dayOfWeek;
+        }
+        return anchor.plus({ days: daysUntilSunday });
+      }
+
+      case 'next-weekday': {
+        let daysUntilWeekday: number;
+        if (dayOfWeek <= 5) {
+          daysUntilWeekday = 0;
+        } else if (dayOfWeek === 6) {
+          daysUntilWeekday = 2; // Saturday -> Monday
+        } else {
+          daysUntilWeekday = 1; // Sunday -> Monday
+        }
+        return anchor.plus({ days: daysUntilWeekday });
+      }
+
+      default:
+        return anchor;
+    }
   }
 
   /**

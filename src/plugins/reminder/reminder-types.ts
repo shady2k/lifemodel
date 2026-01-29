@@ -121,6 +121,15 @@ export interface AbsoluteTime {
 }
 
 /**
+ * Constraint for finding dates relative to an anchor day.
+ */
+export type DateConstraint =
+  | 'next-weekend' // First Saturday-Sunday on or after anchor
+  | 'next-weekday' // First Mon-Fri on or after anchor
+  | 'next-saturday' // First Saturday on or after anchor
+  | 'next-sunday'; // First Sunday on or after anchor
+
+/**
  * Recurring time specification.
  */
 export interface RecurringTime {
@@ -133,8 +142,20 @@ export interface RecurringTime {
   /** Days of week for weekly (0=Sunday, 6=Saturday) */
   daysOfWeek?: number[];
 
-  /** Day of month for monthly (1-31) */
+  /** Day of month for monthly (1-31) - fixed day approach */
   dayOfMonth?: number;
+
+  /**
+   * Anchor day for constraint-based scheduling (1-31).
+   * Used with 'constraint' for patterns like "weekend after 10th".
+   */
+  anchorDay?: number;
+
+  /**
+   * Constraint to apply after anchor day.
+   * E.g., anchorDay=10 + constraint='next-weekend' = "first weekend after 10th"
+   */
+  constraint?: DateConstraint;
 
   /** Hour of day (0-23) */
   hour?: number;

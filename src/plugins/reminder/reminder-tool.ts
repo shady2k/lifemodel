@@ -289,7 +289,9 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         description: `Semantic date anchor for create action. Extract the time expression:
 - Relative: { type: "relative", relative: { unit: "minute"|"hour"|"day"|"week"|"month", amount: number }, confidence: 0.9, originalPhrase: "..." }
 - Absolute: { type: "absolute", absolute: { special?: "tomorrow"|"next_week"|"next_month"|"this_evening"|"tonight"|"this_afternoon", year?: number, month?: number, day?: number, hour?: number, minute?: number, dayOfWeek?: 0-6 }, confidence: 0.9, originalPhrase: "..." }
-- Recurring: { type: "recurring", recurring: { frequency: "daily"|"weekly"|"monthly", interval: number, hour?: number, minute?: number, daysOfWeek?: number[], dayOfMonth?: number }, confidence: 0.9, originalPhrase: "..." }`,
+- Recurring (fixed day): { type: "recurring", recurring: { frequency: "daily"|"weekly"|"monthly", interval: number, hour?: number, minute?: number, daysOfWeek?: number[], dayOfMonth?: number }, confidence: 0.9, originalPhrase: "..." }
+- Recurring (constrained): { type: "recurring", recurring: { frequency: "monthly", interval: 1, anchorDay: 10, constraint: "next-weekend"|"next-weekday"|"next-saturday"|"next-sunday", hour?: number, minute?: number }, confidence: 0.9, originalPhrase: "..." }
+  Example: "weekend after 10th each month" -> anchorDay: 10, constraint: "next-weekend"`,
         required: false,
       },
       {

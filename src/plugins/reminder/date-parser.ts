@@ -12,6 +12,7 @@ import type {
   RelativeTime,
   AbsoluteTime,
   RecurringTime,
+  DateConstraint,
 } from './reminder-types.js';
 
 /**
@@ -251,15 +252,23 @@ function resolveRecurring(
       break;
 
     case 'monthly':
-      if (recurring.dayOfMonth !== undefined) {
+      if (recurring.anchorDay !== undefined && recurring.constraint) {
+        // Constraint-based scheduling: "weekend after 10th", etc.
+        firstOccurrence = resolveConstrainedMonthly(
+          baseDt,
+          recurring.anchorDay,
+          recurring.constraint,
+          hour,
+          minute
+        );
+      } else if (recurring.dayOfMonth !== undefined) {
+        // Fixed day of month
         firstOccurrence = firstOccurrence.set({
           day: Math.min(recurring.dayOfMonth, firstOccurrence.daysInMonth ?? 28),
         });
-      }
-      if (firstOccurrence <= baseDt) {
-        firstOccurrence = firstOccurrence.plus({ months: 1 });
-        // Re-adjust day for month with fewer days
-        if (recurring.dayOfMonth !== undefined) {
+        if (firstOccurrence <= baseDt) {
+          firstOccurrence = firstOccurrence.plus({ months: 1 });
+          // Re-adjust day for month with fewer days
           firstOccurrence = firstOccurrence.set({
             day: Math.min(recurring.dayOfMonth, firstOccurrence.daysInMonth ?? 28),
           });
@@ -280,6 +289,12 @@ function resolveRecurring(
   }
   if (recurring.dayOfMonth !== undefined) {
     recurrence.dayOfMonth = recurring.dayOfMonth;
+  }
+  if (recurring.anchorDay !== undefined) {
+    recurrence.anchorDay = recurring.anchorDay;
+  }
+  if (recurring.constraint) {
+    recurrence.constraint = recurring.constraint;
   }
 
   // Store local time for DST-aware scheduling
@@ -330,6 +345,113 @@ function findNextMatchingDay(
 }
 
 /**
+ * Resolve monthly recurrence with constraint (e.g., "weekend after 10th").
+ */
+function resolveConstrainedMonthly(
+  baseDt: DateTime,
+  anchorDay: number,
+  constraint: DateConstraint,
+  hour: number,
+  minute: number
+): DateTime {
+  let targetMonth = baseDt.month;
+  let targetYear = baseDt.year;
+
+  // Helper to create anchor with clamped day
+  const createAnchor = (year: number, month: number): DateTime => {
+    const tempDt = DateTime.fromObject({ year, month, day: 1 }, { zone: baseDt.zone });
+    const daysInMonth = tempDt.daysInMonth ?? 28;
+    const clampedDay = Math.min(anchorDay, daysInMonth);
+    return DateTime.fromObject(
+      { year, month, day: clampedDay, hour, minute, second: 0 },
+      { zone: baseDt.zone }
+    );
+  };
+
+  // Start from anchorDay of current month (clamped to valid range)
+  let anchor = createAnchor(targetYear, targetMonth);
+
+  // Apply constraint to find the target date
+  let result = applyConstraint(anchor, constraint);
+
+  // If the result is in the past, move to next month
+  if (result <= baseDt) {
+    targetMonth += 1;
+    if (targetMonth > 12) {
+      targetYear += 1;
+      targetMonth = 1;
+    }
+    anchor = createAnchor(targetYear, targetMonth);
+    result = applyConstraint(anchor, constraint);
+  }
+
+  return result;
+}
+
+/**
+ * Apply a constraint to find the target date from an anchor.
+ * Ported from harmonytech/src/lib/date-resolver.ts
+ */
+function applyConstraint(anchor: DateTime, constraint: DateConstraint): DateTime {
+  // Luxon weekday: 1=Monday, 7=Sunday
+  const dayOfWeek = anchor.weekday;
+
+  switch (constraint) {
+    case 'next-weekend': {
+      // Find first Saturday (weekday 6) on or after anchor
+      let daysUntilSaturday: number;
+      if (dayOfWeek === 6) {
+        daysUntilSaturday = 0; // Already Saturday
+      } else if (dayOfWeek === 7) {
+        daysUntilSaturday = 6; // Sunday -> next Saturday
+      } else {
+        daysUntilSaturday = 6 - dayOfWeek;
+      }
+      return anchor.plus({ days: daysUntilSaturday });
+    }
+
+    case 'next-saturday': {
+      let daysUntilSaturday: number;
+      if (dayOfWeek === 6) {
+        daysUntilSaturday = 0;
+      } else if (dayOfWeek === 7) {
+        daysUntilSaturday = 6;
+      } else {
+        daysUntilSaturday = 6 - dayOfWeek;
+      }
+      return anchor.plus({ days: daysUntilSaturday });
+    }
+
+    case 'next-sunday': {
+      // Find first Sunday (weekday 7) on or after anchor
+      let daysUntilSunday: number;
+      if (dayOfWeek === 7) {
+        daysUntilSunday = 0; // Already Sunday
+      } else {
+        daysUntilSunday = 7 - dayOfWeek;
+      }
+      return anchor.plus({ days: daysUntilSunday });
+    }
+
+    case 'next-weekday': {
+      // Find first weekday (Mon-Fri, weekdays 1-5) on or after anchor
+      let daysUntilWeekday: number;
+      if (dayOfWeek <= 5) {
+        daysUntilWeekday = 0; // Already a weekday
+      } else if (dayOfWeek === 6) {
+        daysUntilWeekday = 2; // Saturday -> Monday
+      } else {
+        daysUntilWeekday = 1; // Sunday -> Monday
+      }
+      return anchor.plus({ days: daysUntilWeekday });
+    }
+
+    default:
+      return anchor;
+  }
+}
+
+/**
  * Format a recurrence spec for human display.
  */
 export function formatRecurrence(recurrence: RecurrenceSpec): string {
@@ -349,6 +471,13 @@ export function formatRecurrence(recurrence: RecurrenceSpec): string {
       return interval === 1 ? 'weekly' : `every ${String(interval)} weeks`;
 
     case 'monthly':
+      if (recurrence.anchorDay !== undefined && recurrence.constraint) {
+        const anchorStr = getOrdinal(recurrence.anchorDay);
+        const constraintStr = formatConstraint(recurrence.constraint);
+        return interval === 1
+          ? `monthly, ${constraintStr} after the ${anchorStr}`
+          : `every ${String(interval)} months, ${constraintStr} after the ${anchorStr}`;
+      }
       if (recurrence.dayOfMonth !== undefined) {
         const dayStr = getOrdinal(recurrence.dayOfMonth);
         return interval === 1
@@ -373,4 +502,22 @@ function getOrdinal(n: number): string {
   const v = n % 100;
   const suffix = s[(v - 20) % 10] ?? s[v] ?? s[0] ?? 'th';
   return String(n) + suffix;
+}
+
+/**
+ * Format a constraint for human display.
+ */
+function formatConstraint(constraint: string): string {
+  switch (constraint) {
+    case 'next-weekend':
+      return 'first weekend';
+    case 'next-saturday':
+      return 'first Saturday';
+    case 'next-sunday':
+      return 'first Sunday';
+    case 'next-weekday':
+      return 'first weekday';
+    default:
+      return constraint;
+  }
 }

@@ -161,6 +161,15 @@ export interface ScheduleOptions {
 }
 
 /**
+ * Constraint for finding dates relative to an anchor day.
+ */
+export type RecurrenceConstraint =
+  | 'next-weekend' // First Saturday-Sunday on or after anchor
+  | 'next-weekday' // First Mon-Fri on or after anchor
+  | 'next-saturday' // First Saturday on or after anchor
+  | 'next-sunday'; // First Sunday on or after anchor
+
+/**
  * Recurrence specification for scheduled events.
  */
 export interface RecurrenceSpec {
@@ -173,8 +182,20 @@ export interface RecurrenceSpec {
   /** Days of week for weekly recurrence (0=Sunday, 6=Saturday) */
   daysOfWeek?: number[];
 
-  /** Day of month for monthly recurrence */
+  /** Day of month for monthly recurrence (fixed day approach) */
   dayOfMonth?: number;
+
+  /**
+   * Anchor day for constraint-based scheduling (1-31).
+   * Used with 'constraint' for patterns like "weekend after 10th".
+   */
+  anchorDay?: number;
+
+  /**
+   * Constraint to apply after anchor day.
+   * E.g., anchorDay=10 + constraint='next-weekend' = "first weekend after 10th"
+   */
+  constraint?: RecurrenceConstraint;
 
   /** Cron expression for custom recurrence */
   cron?: string;
