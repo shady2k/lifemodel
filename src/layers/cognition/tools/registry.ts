@@ -7,8 +7,18 @@
 
 import type { Logger } from '../../../types/logger.js';
 import type { ToolName, ToolResult } from '../../../types/cognition.js';
-import type { Tool, ToolRequest } from './types.js';
+import type { Tool, ToolRequest, ToolParameter } from './types.js';
 import { createToolResult } from './types.js';
+
+/**
+ * Tool schema for on-demand retrieval.
+ */
+export interface ToolSchema {
+  name: string;
+  description: string;
+  parameters: ToolParameter[];
+  tags: string[];
+}
 
 /**
  * Memory provider interface (abstracts JSON vs vector DB).
@@ -145,6 +155,45 @@ export class ToolRegistry {
   }
 
   /**
+   * Get tool cards for prompt (brief descriptions + capability tags).
+   * Format: "name: description [tag1,tag2]"
+   */
+  getToolCards(): string[] {
+    const cards: string[] = [];
+    // Sort by name for stable ordering
+    const sortedTools = Array.from(this.tools.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+
+    for (const [name, tool] of sortedTools) {
+      // Skip the 'tools' meta-tool itself from the card list
+      if (name === 'tools') continue;
+
+      // Get first sentence of description (brief)
+      const firstLine = tool.description.split('\n')[0] ?? '';
+      const firstSentence = firstLine.split('.')[0] ?? '';
+      const briefDesc = firstSentence.length > 0 ? firstSentence : tool.description;
+      const tags = tool.tags && tool.tags.length > 0 ? ` [${tool.tags.join(', ')}]` : '';
+      cards.push(`- ${name}: ${briefDesc}${tags}`);
+    }
+    return cards;
+  }
+
+  /**
+   * Get full schema for a specific tool.
+   * Used by the 'tools' meta-tool for on-demand schema retrieval.
+   */
+  getToolSchema(name: ToolName): ToolSchema | null {
+    const tool = this.tools.get(name);
+    if (!tool) return null;
+
+    return {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      tags: tool.tags ?? [],
+    };
+  }
+
+  /**
    * Register a new tool dynamically.
    * Used by plugins to add tools at runtime.
    */
@@ -177,9 +226,59 @@ export class ToolRegistry {
     // memory - search and save
     this.tools.set('memory', {
       name: 'memory',
-      description: 'Manage long-term memory (search/save)',
+      description:
+        'Manage long-term memory. Actions: search (find past info), save (store new facts).',
+      tags: ['search', 'save', 'facts', 'history'],
       parameters: [
         { name: 'action', type: 'string', description: 'Action: search or save', required: true },
+        {
+          name: 'query',
+          type: 'string',
+          description: 'Search query (for search)',
+          required: false,
+        },
+        {
+          name: 'content',
+          type: 'string',
+          description: 'Content to save (for save)',
+          required: false,
+        },
+        {
+          name: 'limit',
+          type: 'number',
+          description: 'Max results (for search, default: 5)',
+          required: false,
+        },
+        {
+          name: 'types',
+          type: 'array',
+          description: 'Filter by type: message, thought, fact (for search)',
+          required: false,
+        },
+        {
+          name: 'chatId',
+          type: 'string',
+          description: 'Conversation ID (for search filter or save scope)',
+          required: false,
+        },
+        {
+          name: 'type',
+          type: 'string',
+          description: 'Memory type: fact or thought (for save, default: fact)',
+          required: false,
+        },
+        {
+          name: 'tags',
+          type: 'array',
+          description: 'Tags for categorization (for save)',
+          required: false,
+        },
+        {
+          name: 'confidence',
+          type: 'number',
+          description: 'Confidence 0-1 (for save, default: 0.8)',
+          required: false,
+        },
       ],
       execute: async (args) => {
         const action = args['action'] as string;
@@ -238,12 +337,14 @@ export class ToolRegistry {
             const entryType = (args['type'] as string | undefined) ?? 'fact';
             const tags = (args['tags'] as string[] | undefined) ?? [];
             const confidence = (args['confidence'] as number | undefined) ?? 0.8;
+            const chatId = args['chatId'] as string | undefined;
 
             const entry: MemoryEntry = {
               id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
               type: entryType === 'fact' ? 'fact' : 'thought',
               content,
               timestamp: new Date(),
+              chatId,
               tags,
               confidence,
             };
@@ -265,9 +366,29 @@ export class ToolRegistry {
     // time - now and since
     this.tools.set('time', {
       name: 'time',
-      description: 'Get time information (now/since)',
+      description:
+        'Get time information. Actions: now (current time), since (elapsed time from event).',
+      tags: ['current-time', 'elapsed', 'timezone'],
       parameters: [
         { name: 'action', type: 'string', description: 'Action: now or since', required: true },
+        {
+          name: 'timezone',
+          type: 'string',
+          description: 'IANA timezone (for now)',
+          required: false,
+        },
+        {
+          name: 'event',
+          type: 'string',
+          description: 'Event: lastMessage, lastContact, or ISO timestamp (for since)',
+          required: false,
+        },
+        {
+          name: 'chatId',
+          type: 'string',
+          description: 'Chat ID for chat-specific events (for since)',
+          required: false,
+        },
       ],
       execute: (args) => {
         const action = args['action'] as string;
@@ -374,9 +495,16 @@ export class ToolRegistry {
     // state - agent and user
     this.tools.set('state', {
       name: 'state',
-      description: 'Get state information (agent/user)',
+      description: 'Get current state. Actions: agent (energy, mood), user (beliefs about user).',
+      tags: ['agent-state', 'user-model'],
       parameters: [
         { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
+        {
+          name: 'chatId',
+          type: 'string',
+          description: 'Chat ID (for user action)',
+          required: false,
+        },
       ],
       execute: (args) => {
         const action = args['action'] as string;
@@ -420,6 +548,58 @@ export class ToolRegistry {
               error: `Unknown action: ${action}. Use "agent" or "user".`,
             });
         }
+      },
+    });
+
+    // tools - meta-tool for schema discovery
+    this.tools.set('tools', {
+      name: 'tools',
+      description: 'Get detailed schema for any tool. Use when you need exact parameters.',
+      tags: ['meta', 'schema', 'help'],
+      parameters: [
+        { name: 'action', type: 'string', description: 'Action: describe', required: true },
+        {
+          name: 'name',
+          type: 'string',
+          description: 'Tool name to get schema for',
+          required: true,
+        },
+      ],
+      execute: (args) => {
+        const action = args['action'] as string;
+
+        if (action !== 'describe') {
+          return Promise.resolve({
+            success: false,
+            action,
+            error: `Unknown action: ${action}. Use "describe".`,
+          });
+        }
+
+        const toolName = args['name'] as string | undefined;
+        if (!toolName) {
+          return Promise.resolve({
+            success: false,
+            action: 'describe',
+            error: 'Missing required parameter: name',
+          });
+        }
+
+        const schema = this.getToolSchema(toolName as ToolName);
+        if (!schema) {
+          return Promise.resolve({
+            success: false,
+            action: 'describe',
+            error: `Tool not found: ${toolName}`,
+            availableTools: this.getToolNames(),
+          });
+        }
+
+        return Promise.resolve({
+          success: true,
+          action: 'describe',
+          schema,
+        });
       },
     });
   }

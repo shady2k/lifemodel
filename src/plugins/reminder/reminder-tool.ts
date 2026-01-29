@@ -267,14 +267,9 @@ export function createReminderTools(
    */
   const reminderTool: PluginTool = {
     name: 'reminder',
-    description: `Manage reminders for the user. Actions: create, list, cancel.
-
-Use this when user says things like:
-- "remind me to..." / "напомни мне..." -> action: create
-- "what reminders do I have?" / "какие у меня напоминания?" -> action: list
-- "cancel the reminder" / "отмени напоминание" -> action: cancel
-
-For creating reminders, extract the semantic meaning of WHEN they want to be reminded into the 'anchor' parameter.`,
+    description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
+Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating reminders.`,
+    tags: ['one-time', 'recurring', 'daily', 'weekly', 'monthly', 'create', 'list', 'cancel'],
     parameters: [
       {
         name: 'action',

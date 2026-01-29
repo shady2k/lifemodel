@@ -568,7 +568,7 @@ Respond with valid JSON:
 {
   "steps": [
     { "type": "think", "id": "t1", "parentId": "<signal_id or previous_step_id>", "content": "..." },
-    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "searchMemory", "args": { "query": "..." } },
+    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "memory", "args": { "action": "search", "query": "..." } },
     { "type": "updateUser", "id": "u1", "parentId": "t1", "field": "mood", "value": "happy", "confidence": 0.8, "source": "inferred" },
     { "type": "updateAgent", "id": "a1", "parentId": "t1", "field": "socialDebt", "operation": "delta", "value": -0.1, "confidence": 0.9, "reason": "had conversation" },
     { "type": "saveFact", "id": "f1", "parentId": "t1", "fact": { "subject": "user", "predicate": "name", "object": "Shady", "source": "user_quote", "evidence": "said 'I'm Shady'", "confidence": 0.95, "tags": ["identity"] } },
@@ -594,7 +594,11 @@ Step type "emitThought": Queue an internal thought for later processing.
 - When processing a thought trigger and choosing noAction, do NOT emit another thought - end the chain
 - Prefer ACTION over more thinking - if no action needed, just stop
 
-Available tools: ${this.toolRegistry.getToolNames().join(', ') || '(none)'}`;
+## Available Tools
+${this.toolRegistry.getToolCards().join('\n') || '(none)'}
+
+To get full parameter schema for any tool:
+{ "type": "tool", "id": "help1", "parentId": "t1", "name": "tools", "args": { "action": "describe", "name": "<tool_name>" } }`;
   }
 
   /**

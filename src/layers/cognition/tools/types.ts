@@ -19,6 +19,8 @@ export interface Tool {
   description: string;
   parameters: ToolParameter[];
   execute: ToolExecutor;
+  /** Capability tags for tool discovery (e.g., ['recurring', 'one-time']) */
+  tags?: string[];
 }
 
 /**

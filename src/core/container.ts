@@ -669,6 +669,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         description: tool.description,
         parameters: tool.parameters,
         execute: tool.execute,
+        tags: tool.tags ?? [],
       });
     },
     (toolName) => {

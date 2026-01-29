@@ -488,6 +488,9 @@ export interface PluginTool {
   /** Tool description for LLM */
   description: string;
 
+  /** Capability tags for tool discovery (e.g., ['recurring', 'one-time']) */
+  tags?: string[];
+
   /** Tool parameters */
   parameters: {
     name: string;
