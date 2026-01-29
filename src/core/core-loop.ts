@@ -25,7 +25,9 @@ import type {
   Intent,
   Channel,
   Event,
+  ThoughtData,
 } from '../types/index.js';
+import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -173,6 +175,12 @@ export class CoreLoop {
 
   /** Scheduler service for plugin timers */
   private schedulerService: SchedulerService | null = null;
+
+  /** Track thoughts emitted per tick for budget enforcement */
+  private thoughtsThisTick = 0;
+
+  /** Recent thought deduplication keys with timestamps */
+  private recentThoughtKeys = new Map<string, number>();
 
   constructor(
     agent: Agent,
@@ -371,6 +379,7 @@ export class CoreLoop {
 
     const tickStart = Date.now();
     this.tickCount++;
+    this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const correlationId = `tick-${String(this.tickCount)}-${randomUUID().slice(0, 8)}`;
 
     // Check system health - determines which layers are active
@@ -496,12 +505,30 @@ export class CoreLoop {
               before: result.totalBefore,
               after: result.totalAfter,
               durationMs: result.durationMs,
+              thoughtsGenerated: result.thoughts.length,
             },
             'Memory consolidation complete'
           );
           this.metrics.counter('memory_consolidations');
           this.metrics.gauge('memory_entries_merged', result.merged);
           this.metrics.gauge('memory_entries_forgotten', result.forgotten);
+
+          // Create and queue thought signals from consolidation
+          // Uses shared enqueue logic with budget/dedupe checks
+          let queuedCount = 0;
+          for (const thoughtData of result.thoughts) {
+            if (this.enqueueThoughtSignal(thoughtData, 'memory.thought' as SignalSource)) {
+              queuedCount++;
+            }
+          }
+
+          if (queuedCount > 0) {
+            this.logger.info(
+              { queued: queuedCount, total: result.thoughts.length },
+              'Memory thoughts queued'
+            );
+            this.metrics.gauge('memory_thoughts_queued', queuedCount);
+          }
         });
       }
       this.previousAlertnessMode = currentMode;
@@ -1066,8 +1093,97 @@ export class CoreLoop {
           this.metrics.counter('signal_acks', { signalType, ackType: 'deferred' });
           break;
         }
+
+        case 'EMIT_THOUGHT': {
+          const {
+            content,
+            triggerSource,
+            depth,
+            rootThoughtId,
+            parentThoughtId,
+            dedupeKey,
+            signalSource,
+          } = intent.payload;
+
+          // Build thought data
+          const thoughtData: ThoughtData = {
+            kind: 'thought',
+            content,
+            triggerSource,
+            depth,
+            rootThoughtId,
+            dedupeKey,
+            ...(parentThoughtId !== undefined && { parentThoughtId }),
+          };
+
+          // Use shared enqueue logic with budget/dedupe checks
+          this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
+          break;
+        }
       }
     }
+  }
+
+  /**
+   * Cleanup old thought deduplication keys.
+   */
+  private cleanupOldThoughtKeys(now: number): void {
+    for (const [key, timestamp] of this.recentThoughtKeys) {
+      if (now - timestamp > THOUGHT_LIMITS.DEDUPE_WINDOW_MS) {
+        this.recentThoughtKeys.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Enqueue a thought signal with budget and dedupe checks.
+   * Returns true if the thought was queued, false if rejected.
+   */
+  private enqueueThoughtSignal(thoughtData: ThoughtData, signalSource: SignalSource): boolean {
+    // Budget check - max thoughts per tick
+    if (this.thoughtsThisTick >= THOUGHT_LIMITS.MAX_PER_TICK) {
+      this.logger.warn(
+        { content: thoughtData.content.slice(0, 30) },
+        'Thought rejected: per-tick budget exceeded'
+      );
+      return false;
+    }
+
+    // Dedupe check - clean old entries first
+    const now = Date.now();
+    this.cleanupOldThoughtKeys(now);
+
+    if (this.recentThoughtKeys.has(thoughtData.dedupeKey)) {
+      this.logger.debug({ dedupeKey: thoughtData.dedupeKey }, 'Thought rejected: duplicate');
+      return false;
+    }
+    this.recentThoughtKeys.set(thoughtData.dedupeKey, now);
+
+    // Create and queue thought signal
+    const signal = createSignal(
+      'thought',
+      signalSource,
+      { value: 1 },
+      {
+        priority: 2, // Normal priority
+        data: thoughtData,
+      }
+    );
+
+    this.pushSignal(signal);
+    this.thoughtsThisTick++;
+
+    this.logger.debug(
+      {
+        content: thoughtData.content.slice(0, 30),
+        depth: thoughtData.depth,
+        triggerSource: thoughtData.triggerSource,
+      },
+      'Thought queued'
+    );
+    this.metrics.counter('thoughts_emitted', { triggerSource: thoughtData.triggerSource });
+
+    return true;
   }
 
   /**

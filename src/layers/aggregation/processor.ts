@@ -14,7 +14,13 @@
  * - Decide if COGNITION should be woken
  */
 
-import type { Signal, SignalAggregate, SignalType, SignalSource } from '../../types/signal.js';
+import type {
+  Signal,
+  SignalAggregate,
+  SignalType,
+  SignalSource,
+  ThoughtData,
+} from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { AggregationLayer, AggregationResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
@@ -103,14 +109,17 @@ export class AggregationProcessor implements AggregationLayer {
     const startTime = Date.now();
     this.tickCount++;
 
-    // 1. Add signals to aggregator
-    this.aggregator.addAll(signals);
+    // 1. Merge duplicate thoughts before aggregating
+    const mergedSignals = this.mergeThoughtSignals(signals);
 
-    // 2. Compute aggregates
+    // 2. Add signals to aggregator
+    this.aggregator.addAll(mergedSignals);
+
+    // 3. Compute aggregates
     const aggregates = this.aggregator.getAllAggregates();
 
-    // 3. Detect patterns (may emit additional signals)
-    let allSignals = signals;
+    // 4. Detect patterns (may emit additional signals)
+    let allSignals = mergedSignals;
     if (this.config.enablePatternDetection) {
       const patternSignals = this.patternDetector.detect(aggregates, signals);
       if (patternSignals.length > 0) {
@@ -120,10 +129,10 @@ export class AggregationProcessor implements AggregationLayer {
       }
     }
 
-    // 4. Evaluate wake decision (async for conversation status checks)
+    // 5. Evaluate wake decision (async for conversation status checks)
     const wakeDecision = await this.thresholdEngine.evaluate(allSignals, aggregates, state);
 
-    // 5. Periodic pruning
+    // 6. Periodic pruning
     if (this.tickCount % this.config.pruneIntervalTicks === 0) {
       this.aggregator.prune();
     }
@@ -196,6 +205,40 @@ export class AggregationProcessor implements AggregationLayer {
    */
   getAckRegistry(): SignalAckRegistry {
     return this.thresholdEngine.getAckRegistry();
+  }
+
+  /**
+   * Merge duplicate thought signals before processing.
+   * Groups by dedupeKey and keeps highest priority (lowest number).
+   */
+  private mergeThoughtSignals(signals: Signal[]): Signal[] {
+    const thoughtSignals = signals.filter((s) => s.type === 'thought');
+    const otherSignals = signals.filter((s) => s.type !== 'thought');
+
+    if (thoughtSignals.length <= 1) {
+      return signals;
+    }
+
+    // Group by dedupeKey - keep highest priority (lowest number)
+    const merged = new Map<string, Signal>();
+    for (const thought of thoughtSignals) {
+      const data = thought.data as ThoughtData | undefined;
+      if (!data) continue;
+
+      const key = data.dedupeKey;
+      const existing = merged.get(key);
+
+      if (!existing || thought.priority < existing.priority) {
+        merged.set(key, thought);
+      }
+    }
+
+    const mergedCount = thoughtSignals.length - merged.size;
+    if (mergedCount > 0) {
+      this.logger.debug({ mergedCount }, 'Merged duplicate thought signals');
+    }
+
+    return [...otherSignals, ...merged.values()];
   }
 
   /**

@@ -190,6 +190,18 @@ export class ThresholdEngine {
       };
     }
 
+    // Check for thought signals - bypass energy gate like user_message
+    // Thoughts are internal processing that needs prompt handling
+    const thoughtSignals = signals.filter((s) => s.type === 'thought');
+    if (thoughtSignals.length > 0) {
+      return {
+        shouldWake: true,
+        trigger: 'thought',
+        reason: 'Internal thought requires processing',
+        triggerSignals: thoughtSignals,
+      };
+    }
+
     // Energy gate: if energy is critically low, don't wake for anything else
     if (state.energy < this.config.lowEnergy) {
       this.logger.debug(

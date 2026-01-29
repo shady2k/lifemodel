@@ -18,7 +18,8 @@ export type IntentType =
   | 'ACK_SIGNAL'
   | 'DEFER_SIGNAL'
   | 'LOG'
-  | 'EMIT_METRIC';
+  | 'EMIT_METRIC'
+  | 'EMIT_THOUGHT';
 
 /**
  * Update agent state.
@@ -197,6 +198,30 @@ export interface EmitMetricIntent {
 }
 
 /**
+ * Emit a thought signal for processing.
+ * Used by COGNITION layer to queue internal thoughts.
+ */
+export interface EmitThoughtIntent {
+  type: 'EMIT_THOUGHT';
+  payload: {
+    /** The thought content */
+    content: string;
+    /** What triggered this thought */
+    triggerSource: 'conversation' | 'memory' | 'thought';
+    /** Current depth in thought chain */
+    depth: number;
+    /** ID of root thought in chain */
+    rootThoughtId: string;
+    /** ID of parent thought (if any) */
+    parentThoughtId?: string;
+    /** Deduplication key */
+    dedupeKey: string;
+    /** Signal source for the thought */
+    signalSource: 'cognition.thought' | 'memory.thought';
+  };
+}
+
+/**
  * Union of all intent types.
  */
 export type Intent =
@@ -209,4 +234,5 @@ export type Intent =
   | AckSignalIntent
   | DeferSignalIntent
   | LogIntent
-  | EmitMetricIntent;
+  | EmitMetricIntent
+  | EmitThoughtIntent;

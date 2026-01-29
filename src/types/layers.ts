@@ -256,7 +256,8 @@ export type WakeTrigger =
   | 'pattern_break' // Unusual pattern detected
   | 'channel_error' // Channel reported an error
   | 'scheduled' // Scheduled wake (reminder, follow-up)
-  | 'forced'; // Forced wake (testing, debug)
+  | 'forced' // Forced wake (testing, debug)
+  | 'thought'; // Internal thought requires processing
 
 /**
  * Configuration for wake thresholds.

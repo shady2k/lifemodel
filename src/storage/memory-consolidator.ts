@@ -11,6 +11,7 @@
 
 import type { Logger } from '../types/logger.js';
 import type { MemoryEntry, MemoryProvider } from '../layers/cognition/tools/registry.js';
+import type { ThoughtData } from '../types/signal.js';
 
 /**
  * Configuration for memory consolidation.
@@ -60,6 +61,9 @@ export interface ConsolidationResult {
 
   /** Duration of consolidation in ms */
   durationMs: number;
+
+  /** Thoughts generated from actionable memories (e.g., reminders) */
+  thoughts: ThoughtData[];
 }
 
 // FactKey interface removed - using string key for simplicity
@@ -112,6 +116,7 @@ export class MemoryConsolidator {
         forgotten: 0,
         decayed: 0,
         durationMs: Date.now() - startTime,
+        thoughts: [],
       };
     }
 
@@ -194,6 +199,9 @@ export class MemoryConsolidator {
     const consolidated = [...survivingFacts, ...survivingNonFacts];
     const totalAfter = consolidated.length;
 
+    // Scan for actionable memories (reminders, etc.) and generate thoughts
+    const thoughts = this.scanForActionableMemories(survivingFacts);
+
     // Only update storage if changes were made
     if (merged > 0 || forgotten > 0 || decayed > 0) {
       // Clear and re-save (atomic update)
@@ -210,11 +218,15 @@ export class MemoryConsolidator {
           merged,
           forgotten,
           decayed,
+          thoughtsGenerated: thoughts.length,
         },
         'Memory consolidation complete'
       );
     } else {
-      this.logger.info('No changes needed during consolidation');
+      this.logger.info(
+        { thoughtsGenerated: thoughts.length },
+        'No changes needed during consolidation'
+      );
     }
 
     return {
@@ -224,7 +236,43 @@ export class MemoryConsolidator {
       forgotten,
       decayed,
       durationMs: Date.now() - startTime,
+      thoughts,
     };
+  }
+
+  /**
+   * Scan facts for actionable memories that should generate thoughts.
+   * Looks for reminders, time-based actions, etc.
+   */
+  private scanForActionableMemories(facts: MemoryEntry[]): ThoughtData[] {
+    const thoughts: ThoughtData[] = [];
+
+    for (const fact of facts) {
+      // Check for reminder-like content (Russian and English)
+      const isReminder =
+        (fact.tags?.includes('reminder') ?? false) || /remind|напомн/i.test(fact.content);
+
+      if (isReminder) {
+        const content = `Check if time to remind user: ${fact.content}`;
+        const dedupeKey = content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
+
+        thoughts.push({
+          kind: 'thought',
+          content,
+          triggerSource: 'memory',
+          depth: 0, // Root thought
+          rootThoughtId: `mem_thought_${fact.id}`,
+          dedupeKey,
+        });
+
+        this.logger.debug(
+          { factId: fact.id, content: fact.content.slice(0, 30) },
+          'Generated thought from reminder fact'
+        );
+      }
+    }
+
+    return thoughts;
   }
 
   /**

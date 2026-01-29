@@ -101,6 +101,7 @@ export class CognitionProcessor implements CognitionLayer {
   // Agentic mode components
   private agenticLoop: AgenticLoop | undefined;
   private toolRegistry: ToolRegistry | undefined;
+  private cognitionLLM: CognitionLLM | undefined;
 
   private readonly config: CognitionProcessorConfig;
   private readonly logger: Logger;
@@ -149,6 +150,9 @@ export class CognitionProcessor implements CognitionLayer {
   private setupAgenticLoop(llm: CognitionLLM, memoryProvider?: MemoryProvider): void {
     const agent = this.agent;
     const userModel = this.userModel;
+
+    // Store LLM reference for compaction
+    this.cognitionLLM = llm;
 
     this.toolRegistry = createToolRegistry(this.logger, {
       memoryProvider,
@@ -326,7 +330,44 @@ export class CognitionProcessor implements CognitionLayer {
       // TODO: Could escalate or store for later review
     }
 
+    // Trigger compaction check (non-blocking, fire-and-forget)
+    if (chatId) {
+      void this.triggerCompactionIfNeeded(chatId);
+    }
+
     return result;
+  }
+
+  /**
+   * Check if conversation needs compaction and run if needed.
+   */
+  private async triggerCompactionIfNeeded(chatId: string): Promise<void> {
+    if (!this.conversationManager || !this.cognitionLLM) {
+      return;
+    }
+
+    try {
+      if (!(await this.conversationManager.needsCompaction(chatId))) {
+        return;
+      }
+
+      const toCompact = await this.conversationManager.getMessagesToCompact(chatId);
+      if (toCompact.length === 0) {
+        return;
+      }
+
+      const prompt = `Summarize the key facts from this conversation in 2-3 sentences:\n${toCompact.map((m) => `${m.role}: ${m.content}`).join('\n')}`;
+
+      const summary = await this.cognitionLLM.complete(prompt);
+      await this.conversationManager.compact(chatId, summary);
+
+      this.logger.info({ chatId, messageCount: toCompact.length }, 'Conversation compacted');
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error), chatId },
+        'Compaction failed'
+      );
+    }
   }
 
   /**

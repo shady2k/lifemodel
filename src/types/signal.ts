@@ -53,7 +53,10 @@ export type SignalType =
   | 'novelty' // Something unusual detected
 
   // === PLUGIN (from plugin scheduler/signals) ===
-  | 'plugin_event'; // Generic plugin event with namespaced kind
+  | 'plugin_event' // Generic plugin event with namespaced kind
+
+  // === INTERNAL THOUGHT (from cognition/memory) ===
+  | 'thought'; // Internal thought requiring processing
 
 /**
  * Signal sources - which "organ" emitted the signal.
@@ -87,7 +90,11 @@ export type SignalSource =
 
   // === PLUGIN (from plugin system) ===
   | 'plugin.scheduler'
-  | `plugin.${string}`; // Dynamic plugin sources
+  | `plugin.${string}` // Dynamic plugin sources
+
+  // === THOUGHT (from cognition/memory layers) ===
+  | 'cognition.thought' // From COGNITION layer (emitThought step)
+  | 'memory.thought'; // From memory consolidation
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -140,7 +147,8 @@ export type SignalData =
   | ThresholdData
   | PatternData
   | ContactUrgeData
-  | PluginEventData;
+  | PluginEventData
+  | ThoughtData;
 
 /**
  * Data for user_message signals.
@@ -307,6 +315,50 @@ export interface PluginEventData {
 }
 
 /**
+ * Thought recursion and deduplication limits.
+ */
+export const THOUGHT_LIMITS = {
+  /** Maximum recursion depth for thought chains */
+  MAX_DEPTH: 2,
+  /** Maximum thoughts that can be queued per tick */
+  MAX_PER_TICK: 3,
+  /** Time window for deduplication (15 minutes) */
+  DEDUPE_WINDOW_MS: 15 * 60 * 1000,
+  /** How long thoughts remain valid (24 hours) */
+  TTL_MS: 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Data for thought signals.
+ *
+ * Internal thoughts that need processing by COGNITION.
+ * Can come from:
+ * - COGNITION layer (emitThought step during conversation)
+ * - Memory consolidation (actionable reminders discovered during sleep)
+ */
+export interface ThoughtData {
+  kind: 'thought';
+
+  /** The thought content */
+  content: string;
+
+  /** What triggered this thought */
+  triggerSource: 'conversation' | 'memory' | 'thought';
+
+  /** Current depth in thought chain (0 = root thought) */
+  depth: number;
+
+  /** ID of the original thought that started this chain */
+  rootThoughtId: string;
+
+  /** ID of the direct parent thought (undefined for root) */
+  parentThoughtId?: string;
+
+  /** First 50 chars lowercase for deduplication */
+  dedupeKey: string;
+}
+
+/**
  * Signal metrics - the actual measurements.
  *
  * All values are typically 0-1 normalized, but some can be raw counts or times.
@@ -364,6 +416,9 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
 
   // Plugin signals
   plugin_event: 60_000, // 1 minute - plugin events need processing
+
+  // Thought signals
+  thought: THOUGHT_LIMITS.TTL_MS, // 24 hours
 };
 
 /**

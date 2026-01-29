@@ -31,6 +31,8 @@ import {
   getFieldPolicy,
   COGNITION_SCHEMA_VERSION,
 } from '../../types/cognition.js';
+import { THOUGHT_LIMITS } from '../../types/signal.js';
+import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 
@@ -91,7 +93,7 @@ export interface LoopContext {
 }
 
 export interface ConversationMessage {
-  role: 'user' | 'assistant' | 'thought';
+  role: 'user' | 'assistant' | 'thought' | 'system';
   content: string;
   timestamp?: Date | undefined;
 }
@@ -443,8 +445,10 @@ NOTE: Do NOT use the user's name in every message. Check conversation history fi
 
   private buildHistorySection(history: ConversationMessage[]): string {
     const formatted = history
-      .slice(-10) // Last 10 messages
-      .map((m) => `${m.role}: ${m.content}`)
+      .map((m) => {
+        if (m.role === 'system') return `[context] ${m.content}`;
+        return `${m.role}: ${m.content}`;
+      })
       .join('\n');
 
     return `## Recent Conversation\n${formatted}`;
@@ -568,7 +572,8 @@ Respond with valid JSON:
     { "type": "updateUser", "id": "u1", "parentId": "t1", "field": "mood", "value": "happy", "confidence": 0.8, "source": "inferred" },
     { "type": "updateAgent", "id": "a1", "parentId": "t1", "field": "socialDebt", "operation": "delta", "value": -0.1, "confidence": 0.9, "reason": "had conversation" },
     { "type": "saveFact", "id": "f1", "parentId": "t1", "fact": { "subject": "user", "predicate": "name", "object": "Shady", "source": "user_quote", "evidence": "said 'I'm Shady'", "confidence": 0.95, "tags": ["identity"] } },
-    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } }
+    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } },
+    { "type": "emitThought", "id": "th1", "parentId": "t1", "content": "User mentioned being stressed - follow up later" }
   ],
   "terminal": { "type": "respond", "text": "Hello!", "parentId": "t1" }
   // OR: { "type": "needsToolResult", "stepId": "tool1" }
@@ -583,6 +588,11 @@ Terminal types:
 - "defer": Don't act now, reconsider in deferHours - works for any signal type
 - "escalate": Need deeper reasoning from SMART layer
 - "needsToolResult": Waiting for tool to complete
+
+Step type "emitThought": Queue an internal thought for later processing.
+- Use when insight needs more reasoning but doesn't block current response
+- Thought signals wake COGNITION on next tick
+- Prefer ACTION over more thinking when possible
 
 Available tools: ${this.toolRegistry.getToolNames().join(', ') || '(none)'}`;
   }
@@ -792,6 +802,61 @@ Available tools: ${this.toolRegistry.getToolNames().join(', ') || '(none)'}`;
           },
         };
         return scheduleIntent;
+      }
+
+      case 'emitThought': {
+        const dedupeKey = step.content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
+
+        // SECURITY: Derive depth from actual trigger signal, not LLM-provided data
+        // This prevents the LLM from resetting depth to 0 to bypass recursion limits
+        let depth: number;
+        let rootId: string;
+        let parentId: string | undefined;
+        let triggerSource: 'conversation' | 'memory' | 'thought';
+
+        if (context.triggerSignal.type === 'thought') {
+          // Processing a thought signal - MUST increment from trigger's depth
+          const triggerData = context.triggerSignal.data as ThoughtData | undefined;
+          if (triggerData) {
+            depth = triggerData.depth + 1;
+            rootId = triggerData.rootThoughtId;
+            parentId = context.triggerSignal.id;
+            triggerSource = 'thought';
+          } else {
+            // Malformed thought signal - reject
+            this.logger.warn('Thought signal missing ThoughtData, rejecting emitThought');
+            return null;
+          }
+        } else {
+          // Not triggered by thought - this is a root thought from conversation/other
+          // LLM-provided parentThought is ignored for security
+          depth = 0;
+          rootId = `thought_${step.id}`;
+          parentId = undefined;
+          triggerSource = context.triggerSignal.type === 'user_message' ? 'conversation' : 'memory';
+        }
+
+        // Validate depth limit
+        if (depth > THOUGHT_LIMITS.MAX_DEPTH) {
+          this.logger.warn(
+            { depth, content: step.content.slice(0, 30) },
+            'Thought rejected: max depth exceeded'
+          );
+          return null;
+        }
+
+        return {
+          type: 'EMIT_THOUGHT',
+          payload: {
+            content: step.content,
+            triggerSource,
+            depth,
+            rootThoughtId: rootId,
+            dedupeKey,
+            signalSource: 'cognition.thought',
+            ...(parentId !== undefined && { parentThoughtId: parentId }),
+          },
+        };
       }
 
       case 'think':

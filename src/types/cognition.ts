@@ -100,6 +100,22 @@ export interface ScheduleStep extends BaseStep {
 }
 
 /**
+ * Emit an internal thought for later processing.
+ * Thoughts queue as signals and wake COGNITION on next tick.
+ */
+export interface EmitThoughtStep extends BaseStep {
+  type: 'emitThought';
+  /** The thought content */
+  content: string;
+  /** Parent thought data if this is a follow-up (optional) */
+  parentThought?: {
+    id: string;
+    depth: number;
+    rootThoughtId: string;
+  };
+}
+
+/**
  * All possible step types.
  */
 export type Step =
@@ -108,7 +124,8 @@ export type Step =
   | UpdateUserStep
   | UpdateAgentStep
   | SaveFactStep
-  | ScheduleStep;
+  | ScheduleStep
+  | EmitThoughtStep;
 
 // ============================================================
 // Terminal States

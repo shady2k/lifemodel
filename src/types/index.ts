@@ -39,6 +39,7 @@ export { Priority, PRIORITY_DISTURBANCE_WEIGHT } from './priority.js';
 // Re-export signal utilities
 export {
   SIGNAL_TTL,
+  THOUGHT_LIMITS,
   createSignal,
   createUserMessageSignal,
   isSignalExpired,

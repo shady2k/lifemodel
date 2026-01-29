@@ -11,8 +11,18 @@
 export { CognitionProcessor, createCognitionProcessor } from './processor.js';
 export type { CognitionProcessorConfig, CognitionProcessorDeps } from './processor.js';
 
+// Legacy mode (fallback when agentic loop not available)
 export { ThoughtSynthesizer, createThoughtSynthesizer } from './thought-synthesizer.js';
 export type { ThoughtSynthesizerConfig, SynthesisResult } from './thought-synthesizer.js';
 
 export { ActionDecider, createActionDecider } from './action-decider.js';
 export type { ActionDeciderConfig, ActionDecision } from './action-decider.js';
+
+// Agentic loop types
+export type {
+  CognitionLLM,
+  LLMOptions,
+  LoopContext,
+  LoopResult,
+  ConversationMessage,
+} from './agentic-loop.js';
