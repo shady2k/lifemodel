@@ -254,7 +254,7 @@ export interface ReminderDueData {
  */
 export const REMINDER_EVENT_KINDS = {
   /** Reminder is due and should be delivered */
-  REMINDER_DUE: 'com.lifemodel.reminder:reminder_due',
+  REMINDER_DUE: 'reminder:reminder_due',
 } as const;
 
 /**

@@ -313,9 +313,9 @@ export class ThresholdEngine {
     aggregates: SignalAggregate[],
     state: AgentState
   ): Promise<WakeDecision> {
-    // Need primary user chat ID for proactive contact
+    // Need primaryRecipientId for proactive contact
     if (!this.primaryRecipientId) {
-      this.logger.debug('Skipping proactive contact - no primary user chat ID configured');
+      this.logger.debug('Skipping proactive contact - no primaryRecipientId configured');
       return { shouldWake: false, triggerSignals: [] };
     }
 

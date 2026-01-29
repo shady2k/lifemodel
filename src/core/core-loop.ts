@@ -231,10 +231,19 @@ export class CoreLoop {
 
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
     if ('updateDeps' in this.layers.aggregation) {
+      // Convert primaryUserChatId to recipientId if both registry and chatId are available
+      let primaryRecipientId: string | undefined;
+      if (this.recipientRegistry && config.primaryUserChatId) {
+        primaryRecipientId = this.recipientRegistry.getOrCreate(
+          'telegram',
+          config.primaryUserChatId
+        );
+      }
+
       (this.layers.aggregation as { updateDeps: (deps: unknown) => void }).updateDeps({
         conversationManager: deps.conversationManager,
         userModel: deps.userModel,
-        primaryUserChatId: config.primaryUserChatId,
+        primaryRecipientId,
       });
     }
   }

@@ -493,13 +493,14 @@ export class PluginLoader {
       throw new Error('Plugin manifest must have a valid id');
     }
 
-    // Validate plugin ID format: lowercase alphanumeric with hyphens, no colons or whitespace
-    // This prevents namespace collisions in event kinds and tool names
-    const pluginIdPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+    // Validate plugin ID format: lowercase alphanumeric with hyphens or dots, no colons or whitespace
+    // Allows: my-plugin, com.example.plugin, reminder
+    // Disallows: My-Plugin (uppercase), plugin:name (colons break event namespacing)
+    const pluginIdPattern = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
     if (!pluginIdPattern.test(manifest.id)) {
       throw new Error(
         `Plugin ID '${manifest.id}' is invalid. ` +
-          `Must be lowercase alphanumeric with hyphens (e.g., 'my-plugin'), ` +
+          `Must be lowercase alphanumeric with hyphens or dots (e.g., 'my-plugin', 'com.example.plugin'), ` +
           `no colons, whitespace, or leading numbers.`
       );
     }

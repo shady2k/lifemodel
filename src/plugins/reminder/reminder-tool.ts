@@ -23,7 +23,7 @@ import { resolveSemanticAnchor, formatRecurrence } from './date-parser.js';
 /**
  * Plugin ID for reminder plugin.
  */
-export const REMINDER_PLUGIN_ID = 'com.lifemodel.reminder';
+export const REMINDER_PLUGIN_ID = 'reminder';
 
 /**
  * Get the user's timezone by recipientId.
