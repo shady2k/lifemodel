@@ -52,95 +52,28 @@ export interface DeferPayload {
 export type FinalPayload = RespondPayload | NoActionPayload | DeferPayload;
 
 /**
- * Arguments for core.final tool call.
+ * Arguments for core.final tool call (flat format).
+ * All fields at root level - server validates based on type.
  */
 export interface CoreFinalArgs {
   /** Terminal type: respond, no_action, or defer */
   type: 'respond' | 'no_action' | 'defer';
-  /** Payload specific to the terminal type */
-  payload: FinalPayload;
-}
 
-/**
- * Raw JSON Schema for core.final discriminated union.
- *
- * Uses oneOf at the root level with each branch containing:
- * 1. type: { const: "..." } - the discriminator value
- * 2. payload: { ... } - the corresponding payload schema
- *
- * This ensures type and payload are properly coupled (e.g., type="respond" MUST have respond payload).
- * Note: OpenAI strict mode requires additionalProperties: false at all levels.
- */
-const FINAL_PARAMETER_SCHEMA = {
-  oneOf: [
-    {
-      type: 'object',
-      description: 'Send a message to the user',
-      properties: {
-        type: { type: 'string', const: 'respond' },
-        payload: {
-          type: 'object',
-          properties: {
-            text: { type: 'string', description: 'The message to send to the user' },
-            conversationStatus: {
-              type: 'string',
-              enum: ['active', 'awaiting_answer', 'closed', 'idle'],
-              description:
-                'active = mid-conversation, awaiting_answer = asked question, closed = goodbye, idle = statement made',
-            },
-            confidence: {
-              type: 'number',
-              description: 'Confidence 0-1. Below 0.6 triggers deeper reasoning.',
-            },
-          },
-          required: ['text', 'conversationStatus', 'confidence'],
-          additionalProperties: false,
-        },
-      },
-      required: ['type', 'payload'],
-      additionalProperties: false,
-    },
-    {
-      type: 'object',
-      description: 'No user contact needed',
-      properties: {
-        type: { type: 'string', const: 'no_action' },
-        payload: {
-          type: 'object',
-          properties: {
-            reason: { type: 'string', description: 'Why no action is needed' },
-          },
-          required: ['reason'],
-          additionalProperties: false,
-        },
-      },
-      required: ['type', 'payload'],
-      additionalProperties: false,
-    },
-    {
-      type: 'object',
-      description: 'Defer action for later',
-      properties: {
-        type: { type: 'string', const: 'defer' },
-        payload: {
-          type: 'object',
-          properties: {
-            signalType: {
-              type: 'string',
-              description: 'Signal type being deferred (e.g., "contact_urge")',
-            },
-            reason: { type: 'string', description: 'Why the agent is deferring' },
-            deferHours: { type: 'number', description: 'Hours to defer (2-8 typical)' },
-          },
-          required: ['signalType', 'reason', 'deferHours'],
-          additionalProperties: false,
-        },
-      },
-      required: ['type', 'payload'],
-      additionalProperties: false,
-    },
-  ],
-} as const;
+  // For "respond" type:
+  text?: string;
+  conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle';
+  confidence?: number;
+
+  // For "no_action" and "defer" types:
+  reason?: string;
+
+  // For "defer" type only:
+  signalType?: string;
+  deferHours?: number;
+
+  /** @deprecated Legacy nested payload - use flat fields instead */
+  payload?: FinalPayload;
+}
 
 /**
  * Create the core.final tool definition.
@@ -150,41 +83,64 @@ const FINAL_PARAMETER_SCHEMA = {
  * to build the final result directly.
  */
 export function createFinalTool(): Tool {
-  // Parameters kept for backward compatibility (e.g., tool introspection)
-  // but rawParameterSchema is used for actual schema generation
+  // Flat parameters - all fields at root level
   const parameters: ToolParameter[] = [
     {
       name: 'type',
       type: 'string',
-      description:
-        'Terminal type: "respond" (send message to user), "no_action" (no contact needed), or "defer" (postpone for later)',
+      description: 'Terminal type: respond | no_action | defer',
       required: true,
     },
     {
-      name: 'payload',
-      type: 'object',
-      description: `Payload object based on type:
-- For "respond": { text: string, conversationStatus: "active"|"awaiting_answer"|"closed"|"idle", confidence: number (0-1) }
-- For "no_action": { reason: string }
-- For "defer": { signalType: string, reason: string, deferHours: number }`,
-      required: true,
+      name: 'text',
+      type: 'string',
+      description: 'Message to send (required for respond)',
+      required: false,
+    },
+    {
+      name: 'conversationStatus',
+      type: 'string',
+      description: 'Status: active | awaiting_answer | closed | idle (required for respond)',
+      required: false,
+    },
+    {
+      name: 'confidence',
+      type: 'number',
+      description: 'Confidence 0-1 (required for respond). Below 0.6 triggers retry.',
+      required: false,
+    },
+    {
+      name: 'reason',
+      type: 'string',
+      description: 'Why no action / why deferring (required for no_action and defer)',
+      required: false,
+    },
+    {
+      name: 'signalType',
+      type: 'string',
+      description: 'Signal type being deferred (required for defer)',
+      required: false,
+    },
+    {
+      name: 'deferHours',
+      type: 'number',
+      description: 'Hours to defer (required for defer)',
+      required: false,
     },
   ];
 
   return {
     name: 'core.final',
-    description: `Finalize the agent loop with a structured terminal state. Call this when you're done processing and ready to respond (or explicitly decide not to respond).
+    description: `End the loop with a terminal state. FLAT FORMAT - all fields at root level.
 
-Terminal types:
-- "respond": Send a message to the user. Required payload fields: text, conversationStatus, confidence.
-  - conversationStatus: "active" (mid-conversation), "awaiting_answer" (asked question), "closed" (goodbye), "idle" (statement made)
-  - confidence: 0-1 (below 0.6 triggers deeper reasoning)
-- "no_action": No user contact needed. Required payload fields: reason.
-- "defer": Don't act now, reconsider later. Required payload fields: signalType, reason, deferHours.
+Examples:
+- respond: { type: "respond", text: "Hello!", conversationStatus: "active", confidence: 0.9 }
+- no_action: { type: "no_action", reason: "No response needed" }
+- defer: { type: "defer", reason: "User busy", signalType: "contact_urge", deferHours: 4 }
 
-IMPORTANT: You MUST call this tool to end the loop. The loop will not terminate without it.`,
+IMPORTANT: You MUST call this tool to end the loop.`,
     parameters,
-    rawParameterSchema: FINAL_PARAMETER_SCHEMA as unknown as Record<string, unknown>,
+    // No rawParameterSchema needed - flat parameters are converted automatically
     tags: ['terminal', 'required'],
     hasSideEffects: false, // This tool doesn't execute - it just signals termination
     execute: (args: Record<string, unknown>) => {

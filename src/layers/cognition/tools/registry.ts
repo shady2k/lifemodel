@@ -9,8 +9,8 @@ import type { Logger } from '../../../types/logger.js';
 import type { ToolName, ToolResult } from '../../../types/cognition.js';
 import type { Tool, ToolRequest, ToolParameter } from './types.js';
 import { createToolResult } from './types.js';
-import type { OpenAIChatTool } from '../../../llm/tool-schema.js';
-import { toolToOpenAIFormat } from '../../../llm/tool-schema.js';
+import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../../llm/tool-schema.js';
+import { toolToOpenAIFormat, toolToMinimalFormat } from '../../../llm/tool-schema.js';
 
 // Import core tool factories
 import {
@@ -208,11 +208,38 @@ export class ToolRegistry {
   }
 
   /**
-   * Get all tools in OpenAI Chat Completions format.
+   * Get all tools in OpenAI Chat Completions format (full schemas).
    * Used for native tool calling via the `tools` parameter.
+   * Note: This sends ~3000 tokens per request - consider using getToolsWithLazySchema() instead.
    */
   getToolsAsOpenAIFormat(): OpenAIChatTool[] {
-    return Array.from(this.tools.values()).map(toolToOpenAIFormat);
+    return Array.from(this.tools.values()).map(
+      (tool) => toolToOpenAIFormat(tool) as OpenAIChatTool
+    );
+  }
+
+  /**
+   * Get tools with lazy schema loading (MCP-style).
+   * Only core.tools has full schema - all other tools have name + description only.
+   * This reduces token usage by ~90% (from ~3000 to ~300 tokens).
+   *
+   * LLM must call core.tools({ action: "describe", name: "tool_name" }) before
+   * calling any other tool to get its full schema.
+   */
+  getToolsWithLazySchema(): (OpenAIChatTool | MinimalOpenAIChatTool)[] {
+    const result: (OpenAIChatTool | MinimalOpenAIChatTool)[] = [];
+
+    for (const tool of this.tools.values()) {
+      if (tool.name === 'core.tools') {
+        // Meta-tool gets full schema so LLM knows how to call it
+        result.push(toolToOpenAIFormat(tool) as OpenAIChatTool);
+      } else {
+        // All other tools: name + description only, NO parameters
+        result.push(toolToMinimalFormat(tool));
+      }
+    }
+
+    return result;
   }
 
   /**

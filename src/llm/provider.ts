@@ -5,6 +5,8 @@
  * so the agent can use any provider.
  */
 
+import type { OpenAIChatTool, MinimalOpenAIChatTool } from './tool-schema.js';
+
 /**
  * Tool call from the model (OpenAI Chat Completions format).
  * Used when the model wants to call a function.
@@ -108,7 +110,7 @@ export interface CompletionRequest {
   responseFormat?: ResponseFormat;
 
   /** Tools available for the model to call (native tool calling) */
-  tools?: OpenAIChatTool[];
+  tools?: (OpenAIChatTool | MinimalOpenAIChatTool)[];
 
   /** Tool choice mode: 'auto', 'none', 'required', or specific tool */
   toolChoice?: ToolChoice;
@@ -216,7 +218,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
     const requestId = `req_${String(++this.requestCounter)}`;
     const startTime = Date.now();
 
-    // Log request start
+    // Log request start with full details
     this.logger?.debug(
       {
         requestId,
@@ -226,6 +228,10 @@ export abstract class BaseLLMProvider implements LLMProvider {
         temperature: request.temperature,
         maxTokens: request.maxTokens,
         messageCount: request.messages.length,
+        toolCount: request.tools?.length ?? 0,
+        toolChoice: request.toolChoice,
+        parallelToolCalls: request.parallelToolCalls,
+        tools: request.tools, // Full tool schemas for debugging
       },
       '🤖 LLM request started'
     );

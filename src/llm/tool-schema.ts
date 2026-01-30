@@ -103,12 +103,49 @@ function mapParameterType(param: ToolParameter): OpenAIPropertySchema {
 }
 
 /**
+ * Minimal tool format for MCP-style lazy schema loading.
+ * Only includes name and description - no parameters.
+ * LLM must call core.tools to get full schema before calling.
+ */
+export interface MinimalOpenAIChatTool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+  };
+}
+
+/**
+ * Convert a Tool to minimal format (name + description only).
+ * Used for MCP-style lazy schema loading to reduce token usage.
+ *
+ * @param tool - Internal tool definition
+ * @returns Minimal tool definition (no parameters)
+ */
+export function toolToMinimalFormat(tool: Tool): MinimalOpenAIChatTool {
+  return {
+    type: 'function',
+    function: {
+      name: sanitizeToolName(tool.name),
+      description: tool.description.split('\n')[0] ?? tool.description, // First line only
+    },
+  };
+}
+
+/**
  * Convert a Tool to OpenAI Chat Completions tool format.
  *
  * @param tool - Internal tool definition
+ * @param minimal - If true, only include name and description (no parameters)
  * @returns OpenAI-compatible tool definition (with sanitized name)
  */
-export function toolToOpenAIFormat(tool: Tool): OpenAIChatTool {
+export function toolToOpenAIFormat(
+  tool: Tool,
+  minimal = false
+): OpenAIChatTool | MinimalOpenAIChatTool {
+  if (minimal) {
+    return toolToMinimalFormat(tool);
+  }
   // If tool provides raw JSON Schema, use it directly (for complex schemas like discriminated unions)
   if (tool.rawParameterSchema) {
     return {
@@ -159,11 +196,11 @@ export function toolToOpenAIFormat(tool: Tool): OpenAIChatTool {
 }
 
 /**
- * Convert multiple tools to OpenAI format.
+ * Convert multiple tools to OpenAI format (full schema).
  *
  * @param tools - Array of internal tool definitions
  * @returns Array of OpenAI-compatible tool definitions
  */
 export function toolsToOpenAIFormat(tools: Tool[]): OpenAIChatTool[] {
-  return tools.map(toolToOpenAIFormat);
+  return tools.map((tool) => toolToOpenAIFormat(tool) as OpenAIChatTool);
 }

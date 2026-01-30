@@ -30,15 +30,10 @@ import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
-import type { OpenAIChatTool } from '../../llm/tool-schema.js';
+import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice } from '../../llm/provider.js';
-import type {
-  CoreFinalArgs,
-  RespondPayload,
-  NoActionPayload,
-  DeferPayload,
-} from './tools/core/index.js';
+import type { CoreFinalArgs } from './tools/core/index.js';
 
 /**
  * Request for LLM completion with native tool calling.
@@ -47,8 +42,8 @@ export interface ToolCompletionRequest {
   /** Conversation messages (system, user, assistant, tool) */
   messages: Message[];
 
-  /** Tools available for the model to call */
-  tools: OpenAIChatTool[];
+  /** Tools available for the model to call (full or minimal format) */
+  tools: (OpenAIChatTool | MinimalOpenAIChatTool)[];
 
   /** Tool choice: 'auto', 'required', or force specific tool */
   toolChoice?: ToolChoice;
@@ -344,7 +339,8 @@ export class AgenticLoop {
       this.addPreviousAttemptMessages(messages, context.previousAttempt, state);
     }
 
-    // Get tools in OpenAI format
+    // Get tools with full schemas - LLM knows exact parameters upfront
+    // Uses ~3000 tokens but prevents wasted tool calls from parameter guessing
     const tools = this.toolRegistry.getToolsAsOpenAIFormat();
 
     while (!state.aborted) {
@@ -410,7 +406,9 @@ export class AgenticLoop {
         let args: Record<string, unknown>;
 
         try {
-          args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+          // Handle empty arguments string as empty object
+          const argsString = toolCall.function.arguments.trim();
+          args = argsString === '' ? {} : (JSON.parse(argsString) as Record<string, unknown>);
         } catch {
           this.logger.error(
             { toolName, arguments: toolCall.function.arguments },
@@ -418,11 +416,16 @@ export class AgenticLoop {
           );
           // Count toward tool call limit to prevent infinite loops on malformed JSON
           state.toolCallCount++;
-          // Add error result and continue
+          // Add helpful error - tell LLM to get schema first
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: JSON.stringify({ error: 'Failed to parse arguments as JSON' }),
+            content: JSON.stringify({
+              error:
+                'Invalid arguments. Call core.tools({ action: "describe", name: "' +
+                toolName +
+                '" }) to get the required parameters.',
+            }),
           });
           continue;
         }
@@ -434,11 +437,8 @@ export class AgenticLoop {
             'Agentic loop completed via core.final'
           );
 
-          const finalArgs: CoreFinalArgs = {
-            type: args['type'] as 'respond' | 'no_action' | 'defer',
-            payload: args['payload'] as CoreFinalArgs['payload'],
-          };
-          return this.buildFinalResult(finalArgs, state, context);
+          // Pass args directly - buildTerminalFromFinalArgs handles flat format
+          return this.buildFinalResult(args as unknown as CoreFinalArgs, state, context);
         }
 
         // Track for smart retry
@@ -612,32 +612,43 @@ export class AgenticLoop {
 
   /**
    * Convert core.final args to Terminal type.
+   * Uses flat format (all fields at root level).
    */
   private buildTerminalFromFinalArgs(args: CoreFinalArgs): Terminal {
     switch (args.type) {
       case 'respond': {
-        const payload = args.payload as RespondPayload;
+        if (!args.text) {
+          throw new Error('core.final respond requires "text" field');
+        }
+
         return {
           type: 'respond',
-          text: payload.text,
-          conversationStatus: payload.conversationStatus,
-          confidence: payload.confidence,
+          text: args.text,
+          conversationStatus: args.conversationStatus ?? 'active',
+          confidence: args.confidence ?? 0.8,
         };
       }
       case 'no_action': {
-        const payload = args.payload as NoActionPayload;
+        if (!args.reason) {
+          throw new Error('core.final no_action requires "reason" field');
+        }
         return {
           type: 'noAction',
-          reason: payload.reason,
+          reason: args.reason,
         };
       }
       case 'defer': {
-        const payload = args.payload as DeferPayload;
+        if (!args.signalType || !args.reason || args.deferHours === undefined) {
+          throw new Error(
+            'core.final defer requires "signalType", "reason", and "deferHours" fields'
+          );
+        }
+
         return {
           type: 'defer',
-          signalType: payload.signalType,
-          reason: payload.reason,
-          deferHours: payload.deferHours,
+          signalType: args.signalType,
+          reason: args.reason,
+          deferHours: args.deferHours,
         };
       }
       default:
@@ -725,12 +736,12 @@ Rules:
 - User's name: only on first greeting or after long pauses, not every message
 - Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
 - Set confidence below 0.6 when uncertain about complex/sensitive topics
-- State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.${
+- State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.
+- Tool schemas are provided upfront. Call tools directly with the required parameters.${
       useSmart
         ? ''
         : `
-- If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).
-- Invalid JSON will be rejected; respond with valid JSON only.`
+- If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).`
     }`;
   }
 
