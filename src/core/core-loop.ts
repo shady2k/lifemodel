@@ -776,15 +776,18 @@ export class CoreLoop {
           this.logger.debug({ tickId: pending.tickId, elapsed }, 'COGNITION still processing...');
 
           // Resend typing indicator (Telegram typing expires after ~5 seconds)
-          const chatId = (pending.triggerSignal?.data as Record<string, unknown> | undefined)?.[
-            'chatId'
-          ] as string | undefined;
-          if (chatId) {
-            const channel = this.channels.get('telegram');
-            if (channel?.sendTyping) {
-              channel.sendTyping(chatId).catch(() => {
-                /* ignore typing errors */
-              });
+          const recipientId = (
+            pending.triggerSignal?.data as Record<string, unknown> | undefined
+          )?.['recipientId'] as string | undefined;
+          if (recipientId) {
+            const route = this.recipientRegistry?.resolve(recipientId);
+            if (route) {
+              const channel = this.channels.get(route.channel);
+              if (channel?.sendTyping) {
+                channel.sendTyping(route.destination).catch(() => {
+                  /* ignore typing errors */
+                });
+              }
             }
           }
         }
@@ -1243,14 +1246,18 @@ export class CoreLoop {
    */
   private async handleTypingEvent(event: Event): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
-    const chatId = payload?.['chatId'] as string | undefined;
+    const recipientId = payload?.['chatId'] as string | undefined;
     const channelName = event.channel;
 
-    if (!chatId || !channelName) return;
+    if (!recipientId || !channelName) return;
+
+    // Resolve recipientId to get the actual channel-specific destination (e.g., Telegram chatId)
+    const route = this.recipientRegistry?.resolve(recipientId);
+    if (!route) return;
 
     const channel = this.channels.get(channelName);
     if (channel?.sendTyping) {
-      await channel.sendTyping(chatId);
+      await channel.sendTyping(route.destination);
     }
   }
 
