@@ -53,6 +53,8 @@ export interface ContactTimingConfig {
   cooldownMs: number;
   /** User availability threshold below which we don't contact (0-1) */
   lowAvailabilityThreshold: number;
+  /** How long to defer when user availability is low (ms) - default 15 min */
+  lowAvailabilityDeferMs: number;
 }
 
 const DEFAULT_CONTACT_TIMING: ContactTimingConfig = {
@@ -61,6 +63,7 @@ const DEFAULT_CONTACT_TIMING: ContactTimingConfig = {
   closedDelayMs: 4 * 60 * 60 * 1000, // 4 hours
   cooldownMs: 30 * 60 * 1000, // 30 minutes (safety minimum)
   lowAvailabilityThreshold: 0.25,
+  lowAvailabilityDeferMs: 15 * 60 * 1000, // 15 minutes
 };
 
 /**
@@ -342,12 +345,22 @@ export class ThresholdEngine {
       return { shouldWake: false, triggerSignals: [] };
     }
 
-    // Check user availability
+    // Check user availability - if too low, defer instead of checking every tick
     const userAvailability = this.userModel?.getBeliefs().availability ?? 0.5;
     if (userAvailability < this.contactTiming.lowAvailabilityThreshold) {
+      // Create a time-based deferral - will be checked again after deferral expires
+      const deferMs = this.contactTiming.lowAvailabilityDeferMs;
+      this.ackRegistry.registerAck({
+        signalType: 'contact_urge',
+        ackType: 'deferred',
+        deferUntil: new Date(Date.now() + deferMs),
+        reason: `User availability too low (${userAvailability.toFixed(2)})`,
+        // No valueAtAck/overrideDelta - pure time-based deferral
+      });
+
       this.logger.debug(
-        { availability: userAvailability.toFixed(2) },
-        'Skipping proactive contact - user availability too low'
+        { availability: userAvailability.toFixed(2), deferMinutes: Math.round(deferMs / 60000) },
+        'Deferring proactive contact - user availability too low'
       );
       return { shouldWake: false, triggerSignals: [] };
     }
