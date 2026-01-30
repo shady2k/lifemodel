@@ -72,9 +72,11 @@ export interface OpenAIChatTool {
  * JSON Schema property definition for OpenAI tools.
  */
 export interface OpenAIPropertySchema {
-  /** JSON Schema type (string, number, boolean, object, array) */
-  type?: string;
+  /** JSON Schema type (string, number, boolean, object, array, or array for nullable) */
+  type?: string | string[];
   description?: string;
+  /** Enum constraint for string types */
+  enum?: readonly string[];
   /** Items schema for array types */
   items?: OpenAIPropertySchema;
   /** Properties for object types */
@@ -83,14 +85,22 @@ export interface OpenAIPropertySchema {
 
 /**
  * Map our parameter types to JSON Schema types.
+ * For strict mode compliance, optional parameters use ["type", "null"].
  */
 function mapParameterType(param: ToolParameter): OpenAIPropertySchema {
+  // For strict mode: optional fields must be nullable (type becomes ["type", "null"])
+  // All fields will be marked as required, but nullable fields can receive null
   const schema: OpenAIPropertySchema = {
-    type: param.type,
+    type: param.required ? param.type : [param.type, 'null'],
   };
 
   if (param.description) {
     schema.description = param.description;
+  }
+
+  // Handle enum constraint for string types
+  if (param.enum && param.enum.length > 0) {
+    schema.enum = param.enum;
   }
 
   // Handle array type - use empty object for items to allow any type
@@ -161,15 +171,14 @@ export function toolToOpenAIFormat(
 
   // Otherwise, convert from ToolParameter[] format
   const properties: Record<string, OpenAIPropertySchema> = {};
-  const required: string[] = [];
 
   for (const param of tool.parameters) {
     properties[param.name] = mapParameterType(param);
-
-    if (param.required) {
-      required.push(param.name);
-    }
   }
+
+  // For strict mode: ALL fields must be in required array
+  // Optional fields are handled by making their type nullable (["type", "null"])
+  const allFieldNames = tool.parameters.map((p) => p.name);
 
   // Build the tool definition with sanitized name for API compatibility
   // Include strict: true and additionalProperties: false for schema adherence
@@ -187,9 +196,10 @@ export function toolToOpenAIFormat(
     },
   };
 
-  // Only include required array if non-empty (some providers reject empty required)
-  if (required.length > 0) {
-    result.function.parameters.required = required;
+  // Include all fields in required (strict mode requirement)
+  // Optional fields are nullable, so they can receive null values
+  if (allFieldNames.length > 0) {
+    result.function.parameters.required = allFieldNames;
   }
 
   return result;

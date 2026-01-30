@@ -52,6 +52,8 @@ export interface ToolParameter {
   description: string;
   required: boolean;
   default?: unknown;
+  /** Enum values for string parameters (creates JSON Schema enum constraint) */
+  enum?: readonly string[];
 }
 
 /**

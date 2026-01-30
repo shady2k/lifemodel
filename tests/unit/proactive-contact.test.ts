@@ -9,7 +9,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createAgenticLoop, type CognitionLLM, type LoopContext, type StructuredRequest } from '../../src/layers/cognition/agentic-loop.js';
+import {
+  createAgenticLoop,
+  type CognitionLLM,
+  type LoopContext,
+  type ToolCompletionRequest,
+  type ToolCompletionResponse,
+} from '../../src/layers/cognition/agentic-loop.js';
 import { createToolRegistry } from '../../src/layers/cognition/tools/registry.js';
 import { createSignal } from '../../src/types/signal.js';
 import { Priority } from '../../src/types/priority.js';
@@ -17,24 +23,37 @@ import { createMockLogger, createAgentState } from '../helpers/factories.js';
 
 describe('Proactive Contact', () => {
   let logger: ReturnType<typeof createMockLogger>;
-  let capturedRequests: StructuredRequest[];
+  let capturedRequests: ToolCompletionRequest[];
   let mockLLM: CognitionLLM;
 
   beforeEach(() => {
     logger = createMockLogger();
     capturedRequests = [];
 
-    // Mock LLM that captures requests and returns valid response
+    // Mock LLM that captures requests and returns valid core.final response
     mockLLM = {
-      complete: vi.fn().mockImplementation(async (request: StructuredRequest) => {
+      complete: vi.fn().mockResolvedValue(''),
+      completeWithTools: vi.fn().mockImplementation(async (request: ToolCompletionRequest): Promise<ToolCompletionResponse> => {
         capturedRequests.push(request);
-        // Return a valid "noAction" response to end the loop
-        return JSON.stringify({
-          steps: [
-            { type: 'think', id: 't1', parentId: null, content: 'Deciding what to do' },
+        // Return a tool call to core.final with no_action to end the loop
+        // Uses flat structure: type, reason at top level (not nested under action)
+        return {
+          content: 'Thinking about what to do...',
+          toolCalls: [
+            {
+              id: 'call_test1',
+              type: 'function',
+              function: {
+                name: 'core_final',
+                arguments: JSON.stringify({
+                  type: 'no_action',
+                  reason: 'Testing',
+                }),
+              },
+            },
           ],
-          terminal: { type: 'noAction', reason: 'Testing', parentId: 't1' },
-        });
+          finishReason: 'tool_calls',
+        };
       }),
     };
   });
@@ -84,7 +103,11 @@ describe('Proactive Contact', () => {
 
       expect(capturedRequests.length).toBeGreaterThan(0);
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      // Extract prompt from messages (system + user messages)
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
 
       // Should have proactive contact section
       expect(fullPrompt).toContain('## Proactive Contact Trigger');
@@ -109,7 +132,10 @@ describe('Proactive Contact', () => {
       await loop.run(context);
 
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
       expect(fullPrompt).toContain('Time since last conversation: 3 hour');
     });
 
@@ -132,7 +158,10 @@ describe('Proactive Contact', () => {
       await loop.run(context);
 
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
       expect(fullPrompt).toContain('Do NOT continue or reference the previous conversation');
       expect(fullPrompt).toContain('Start FRESH');
     });
@@ -154,7 +183,10 @@ describe('Proactive Contact', () => {
       await loop.run(context);
 
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
       expect(fullPrompt).toContain('45 minute');
     });
 
@@ -194,7 +226,10 @@ describe('Proactive Contact', () => {
       await loop.run(context);
 
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
       expect(fullPrompt).toContain('Follow-up');
       expect(fullPrompt).toContain('user did not respond');
     });
@@ -233,7 +268,10 @@ describe('Proactive Contact', () => {
       await loop.run(context);
 
       const request = capturedRequests[0];
-      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      const fullPrompt = request.messages
+        .filter((m) => m.role === 'system' || m.role === 'user')
+        .map((m) => (typeof m.content === 'string' ? m.content : ''))
+        .join('\n\n');
       // Should have user input section, NOT proactive contact
       expect(fullPrompt).toContain('## Current Input');
       expect(fullPrompt).toContain('User message: "Hello!"');

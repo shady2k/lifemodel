@@ -3,14 +3,28 @@
  *
  * Unified tool for remembering facts about the user or any subject.
  * Features:
- * - Minimal 3-field schema (subject, attribute, value)
- * - Provenance parsing from natural language in value
+ * - Explicit schema with source and confidence fields
  * - Smart routing: subject="user" → UserModel + Vector, else → Vector only
  * - Field policy enforcement for high-stakes user fields
  */
 
 import { getFieldPolicy, type EvidenceSource } from '../../../../types/cognition.js';
 import type { Tool } from '../types.js';
+
+/**
+ * Valid evidence sources for the tool schema.
+ */
+const EVIDENCE_SOURCES = ['user_quote', 'user_explicit', 'user_implicit', 'inferred'] as const;
+
+/**
+ * Default confidence levels by source type.
+ */
+const SOURCE_DEFAULT_CONFIDENCE: Record<string, number> = {
+  user_quote: 0.98,
+  user_explicit: 0.95,
+  user_implicit: 0.85,
+  inferred: 0.6,
+};
 
 /**
  * Result from core.remember tool execution.
@@ -24,7 +38,6 @@ export interface RememberResult {
   value?: string | undefined;
   confidence?: number | undefined;
   source?: EvidenceSource | undefined;
-  evidence?: string | undefined;
   isUserFact?: boolean | undefined;
 }
 
@@ -34,8 +47,7 @@ export interface RememberResult {
 export function createRememberTool(): Tool {
   return {
     name: 'core.remember',
-    description:
-      'Remember a fact. For important facts, include provenance: "value (user said)" or "(inferred)"',
+    description: 'Remember a fact about the user or any subject.',
     tags: ['memory', 'facts', 'user-model'],
     hasSideEffects: true,
     parameters: [
@@ -55,47 +67,81 @@ export function createRememberTool(): Tool {
         name: 'value',
         type: 'string',
         required: true,
+        description: 'The value to remember (clean, without provenance markers)',
+      },
+      {
+        name: 'source',
+        type: 'string',
+        enum: EVIDENCE_SOURCES,
+        required: true,
         description:
-          'The value. Add provenance when important: "(user said)", "(explicitly stated)", "(inferred)"',
+          'How we learned this: user_quote (direct quote), user_explicit (clearly stated), user_implicit (implied), inferred (deduced)',
+      },
+      {
+        name: 'confidence',
+        type: 'number',
+        required: false,
+        description: 'Confidence level 0-1. If omitted, uses default based on source.',
       },
     ],
     execute: (args): Promise<RememberResult> => {
-      const subject = args['subject'] as string;
-      const attribute = args['attribute'] as string;
-      const rawValue = args['value'] as string;
+      const subject = args['subject'] as string | undefined;
+      const attribute = args['attribute'] as string | undefined;
+      const value = args['value'] as string | undefined;
+      const sourceArg = args['source'] as string | undefined;
+      // Handle both undefined and null (strict mode sends null for optional fields)
+      const confidenceArg = args['confidence'] as number | null | undefined;
 
       // Validate required fields
-      if (!subject || !attribute || !rawValue) {
+      if (!subject || !attribute || !value || !sourceArg) {
         return Promise.resolve({
           success: false,
-          error: 'Missing required fields: subject, attribute, value',
+          error: 'Missing required fields: subject, attribute, value, source',
         });
       }
+
+      // Validate source enum
+      if (!EVIDENCE_SOURCES.includes(sourceArg as (typeof EVIDENCE_SOURCES)[number])) {
+        return Promise.resolve({
+          success: false,
+          error: `Invalid source: ${sourceArg}. Must be one of: ${EVIDENCE_SOURCES.join(', ')}`,
+        });
+      }
+
+      // Now we know source is valid
+      const source = sourceArg as EvidenceSource;
 
       // Normalize subject: "user", "me", "my", "self", "recipient" → "user"
       const normalizedSubject = normalizeSubject(subject);
 
-      // Parse provenance from value
-      const provenance = parseProvenance(rawValue);
+      // Use provided confidence or default based on source
+      const confidence = confidenceArg ?? SOURCE_DEFAULT_CONFIDENCE[source] ?? 0.5;
+
+      // Validate confidence range
+      if (confidence < 0 || confidence > 1) {
+        return Promise.resolve({
+          success: false,
+          error: 'Confidence must be between 0 and 1',
+        });
+      }
 
       // Check field policy for user facts
       const isUserFact = normalizedSubject === 'user';
       if (isUserFact) {
         const policy = getFieldPolicy(`user.${attribute}`);
-        const minConfidence = policy.minConfidence;
 
-        if (provenance.confidence < minConfidence) {
+        if (confidence < policy.minConfidence) {
           return Promise.resolve({
             success: false,
-            error: `user.${attribute} requires confidence >= ${String(minConfidence)}. Add provenance like "(user said)" for higher confidence.`,
+            error: `user.${attribute} requires confidence >= ${String(policy.minConfidence)}. Got: ${String(confidence)}`,
           });
         }
 
         // Check required source if policy specifies it
-        if (policy.requireSource && !policy.requireSource.includes(provenance.source)) {
+        if (policy.requireSource && !policy.requireSource.includes(source)) {
           return Promise.resolve({
             success: false,
-            error: `user.${attribute} requires source from: ${policy.requireSource.join(', ')}. Got: ${provenance.source}. Use "(user said)" for user_quote.`,
+            error: `user.${attribute} requires source from: ${policy.requireSource.join(', ')}. Got: ${source}`,
           });
         }
       }
@@ -105,10 +151,9 @@ export function createRememberTool(): Tool {
         action: 'remember',
         subject: normalizedSubject,
         attribute,
-        value: provenance.cleanValue,
-        confidence: provenance.confidence,
-        source: provenance.source,
-        evidence: provenance.evidence,
+        value,
+        confidence,
+        source,
         isUserFact,
       });
     },
@@ -126,61 +171,4 @@ function normalizeSubject(subject: string): string {
     return 'user';
   }
   return subject.trim();
-}
-
-/**
- * Parse provenance markers from natural language value.
- * Extracts confidence level and evidence source from inline markers.
- *
- * Examples:
- * - "November 9 (user said)" → user_quote, 0.98
- * - "November 9 (explicitly stated)" → user_explicit, 0.95
- * - "likes coffee (mentioned)" → user_implicit, 0.85
- * - "prefers mornings (inferred)" → inferred, 0.6
- * - "dark mode" (no marker) → inferred, 0.8
- */
-function parseProvenance(value: string): {
-  cleanValue: string;
-  source: EvidenceSource;
-  confidence: number;
-  evidence?: string;
-} {
-  const lower = value.toLowerCase();
-
-  // Direct quote (highest confidence) - maps to user_quote
-  if (lower.includes('(user said)') || lower.includes('(said:')) {
-    const clean = value
-      .replace(/\s*\(user said\)\s*/gi, '')
-      .replace(/\s*\(said:[^)]+\)\s*/gi, '')
-      .trim();
-    return { cleanValue: clean, source: 'user_quote', confidence: 0.98, evidence: value };
-  }
-
-  // User explicitly stated - maps to user_explicit
-  if (lower.includes('(user explicitly stated)') || lower.includes('(explicitly stated)')) {
-    const clean = value.replace(/\s*\((user )?explicitly stated\)\s*/gi, '').trim();
-    return { cleanValue: clean, source: 'user_explicit', confidence: 0.95, evidence: value };
-  }
-
-  // User mentioned - maps to user_implicit
-  if (lower.includes('(user mentioned)') || lower.includes('(mentioned)')) {
-    const clean = value.replace(/\s*\((user )?mentioned\)\s*/gi, '').trim();
-    return { cleanValue: clean, source: 'user_implicit', confidence: 0.85, evidence: value };
-  }
-
-  // Observed/noticed - maps to inferred with higher confidence
-  if (lower.includes('(observed)') || lower.includes('(i noticed)')) {
-    const clean = value.replace(/\s*\((observed|i noticed)\)\s*/gi, '').trim();
-    return { cleanValue: clean, source: 'inferred', confidence: 0.7 };
-  }
-
-  // Inferred (lower confidence)
-  if (lower.includes('(inferred)') || lower.includes('(from context)')) {
-    const clean = value.replace(/\s*\((inferred|from context)\)\s*/gi, '').trim();
-    return { cleanValue: clean, source: 'inferred', confidence: 0.6 };
-  }
-
-  // Default: no provenance marker - LOW confidence (safe default)
-  // LLM should add markers for higher confidence facts
-  return { cleanValue: value, source: 'inferred', confidence: 0.5 };
 }
