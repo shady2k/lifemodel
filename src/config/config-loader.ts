@@ -72,6 +72,10 @@ export class ConfigLoader {
         // File doesn't exist - that's OK, use defaults
         return null;
       }
+      // Provide helpful error for malformed JSON
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid JSON in config file ${filePath}: ${error.message}`);
+      }
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to load config file: ${message}`);
     }

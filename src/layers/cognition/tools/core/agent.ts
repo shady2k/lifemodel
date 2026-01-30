@@ -5,46 +5,50 @@
  */
 
 import { getFieldPolicy } from '../../../../types/cognition.js';
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Create the core.agent tool.
  */
 export function createAgentTool(): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: update', required: true },
+    {
+      name: 'field',
+      type: 'string',
+      description: 'Field to update (e.g., socialDebt, energy)',
+      required: true,
+    },
+    {
+      name: 'operation',
+      type: 'string',
+      description: 'Operation: set (absolute) or delta (relative change)',
+      required: true,
+    },
+    {
+      name: 'value',
+      type: 'number',
+      description: 'Value to set or delta to apply',
+      required: true,
+    },
+    {
+      name: 'confidence',
+      type: 'number',
+      description: 'Confidence 0-1 in this update',
+      required: true,
+    },
+    { name: 'reason', type: 'string', description: 'Why this update is needed', required: true },
+  ];
+
   return {
     name: 'core.agent',
     description:
       'Update agent internal state (energy, socialDebt, etc.). Subject to field policies (confidence thresholds, maxDelta). Values may be clamped.',
     tags: ['update', 'agent-state', 'internal'],
     hasSideEffects: true,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: update', required: true },
-      {
-        name: 'field',
-        type: 'string',
-        description: 'Field to update (e.g., socialDebt, energy)',
-        required: true,
-      },
-      {
-        name: 'operation',
-        type: 'string',
-        description: 'Operation: set (absolute) or delta (relative change)',
-        required: true,
-      },
-      {
-        name: 'value',
-        type: 'number',
-        description: 'Value to set or delta to apply',
-        required: true,
-      },
-      {
-        name: 'confidence',
-        type: 'number',
-        description: 'Confidence 0-1 in this update',
-        required: true,
-      },
-      { name: 'reason', type: 'string', description: 'Why this update is needed', required: true },
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args) => {
       const action = args['action'] as string;
 

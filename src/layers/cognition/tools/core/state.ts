@@ -4,7 +4,8 @@
  * Read-only access to agent state and user model.
  */
 
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Agent state provider interface.
@@ -32,15 +33,18 @@ export interface StateToolDeps {
  * Create the core.state tool.
  */
 export function createStateTool(deps: StateToolDeps): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
+    // chatId removed - system uses context.recipientId automatically
+  ];
+
   return {
     name: 'core.state',
     description: 'Get current state. Actions: agent (energy, mood), user (beliefs about user).',
     tags: ['agent-state', 'user-model'],
     hasSideEffects: false,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
-      // chatId removed - system uses context.recipientId automatically
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args, context) => {
       const action = args['action'] as string;
 

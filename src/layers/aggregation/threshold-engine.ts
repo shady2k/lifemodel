@@ -630,7 +630,11 @@ export class ThresholdEngine {
     try {
       const statusInfo = await this.conversationManager.getStatus(this.primaryRecipientId);
       return statusInfo.status as ConversationStatus;
-    } catch {
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get conversation status'
+      );
       return 'unknown';
     }
   }
@@ -649,7 +653,11 @@ export class ThresholdEngine {
         return Date.now() - statusInfo.lastMessageAt.getTime();
       }
       return null;
-    } catch {
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get time since last message'
+      );
       return null;
     }
   }

@@ -4,7 +4,8 @@
  * Get time information: current time and elapsed time since events.
  */
 
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Conversation provider for time-based queries.
@@ -40,23 +41,26 @@ function formatDuration(ms: number): string {
  * Create the core.time tool.
  */
 export function createTimeTool(deps: TimeToolDeps): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: now or since', required: true },
+    { name: 'timezone', type: 'string', description: 'IANA timezone (for now)', required: false },
+    {
+      name: 'event',
+      type: 'string',
+      description: 'Event: lastMessage, lastContact, or ISO timestamp (for since)',
+      required: false,
+    },
+    // chatId removed - system uses context.recipientId automatically
+  ];
+
   return {
     name: 'core.time',
     description:
       'Get time information. Actions: now (current time), since (elapsed time from event).',
     tags: ['current-time', 'elapsed', 'timezone'],
     hasSideEffects: false,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: now or since', required: true },
-      { name: 'timezone', type: 'string', description: 'IANA timezone (for now)', required: false },
-      {
-        name: 'event',
-        type: 'string',
-        description: 'Event: lastMessage, lastContact, or ISO timestamp (for since)',
-        required: false,
-      },
-      // chatId removed - system uses context.recipientId automatically
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args, context) => {
       const action = args['action'] as string;
 

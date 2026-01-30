@@ -213,33 +213,43 @@ export class Agent {
   applyIntent(intent: Intent): void {
     if (intent.type === 'UPDATE_STATE') {
       const { key, value, delta } = intent.payload;
-      if (key in this.state) {
-        const stateKey = key as keyof AgentState;
-        if (delta && typeof value === 'number') {
-          const currentValue = this.state[stateKey];
-          if (typeof currentValue === 'number') {
-            // @ts-expect-error - we've validated the types
-            this.state[stateKey] = round3(Math.max(0, Math.min(1, currentValue + value)));
-          }
-        } else if (typeof value === 'number') {
-          // @ts-expect-error - dynamic state update
-          this.state[stateKey] = round3(value);
+      if (!(key in this.state)) {
+        return;
+      }
+
+      // Type-safe update for numeric state fields (0-1 clamped)
+      if (this.isNumericStateKey(key) && typeof value === 'number') {
+        if (delta) {
+          const currentValue = this.state[key];
+          this.state[key] = round3(Math.max(0, Math.min(1, currentValue + value)));
         } else {
-          // @ts-expect-error - dynamic state update
-          this.state[stateKey] = value;
+          this.state[key] = round3(Math.max(0, Math.min(1, value)));
         }
 
         // Special handling: sync energy state to energy model
         if (key === 'energy') {
-          const newEnergy = this.state.energy;
-          if (typeof newEnergy === 'number') {
-            this.energy.setEnergy(newEnergy);
-          }
+          this.energy.setEnergy(this.state.energy);
         }
 
         this.logger.trace({ key, value, delta }, 'State updated via intent');
+        return;
       }
+
+      // Non-numeric fields (acquaintancePending, lastTickAt, tickInterval)
+      // These are rarely updated via intents, handle explicitly if needed
+      this.logger.trace({ key, value }, 'Non-numeric state update ignored');
     }
+  }
+
+  /**
+   * Type guard for numeric state fields that can be updated via intents.
+   */
+  private isNumericStateKey(
+    key: string
+  ): key is 'energy' | 'socialDebt' | 'taskPressure' | 'curiosity' | 'acquaintancePressure' {
+    return ['energy', 'socialDebt', 'taskPressure', 'curiosity', 'acquaintancePressure'].includes(
+      key
+    );
   }
 
   /**

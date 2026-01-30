@@ -5,6 +5,7 @@
  */
 
 import type { ToolName, ToolResult } from '../../../types/cognition.js';
+import type { ValidationResult } from './validation.js';
 
 /**
  * Tool executor function.
@@ -24,6 +25,12 @@ export interface Tool {
   description: string;
   parameters: ToolParameter[];
   execute: ToolExecutor;
+  /**
+   * Validate arguments before execution.
+   * Returns ValidationResult with data on success, or error message on failure.
+   * Used to catch invalid LLM outputs and enable graceful retry.
+   */
+  validate: (args: unknown) => ValidationResult;
   /** Capability tags for tool discovery (e.g., ['recurring', 'one-time']) */
   tags?: string[];
   /**

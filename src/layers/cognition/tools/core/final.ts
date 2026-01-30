@@ -13,6 +13,7 @@
  */
 
 import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Payload for 'respond' terminal type.
@@ -147,6 +148,7 @@ Examples:
 
 IMPORTANT: You MUST call this tool to end the loop.`,
     parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     // No rawParameterSchema needed - flat parameters are converted automatically
     tags: ['terminal', 'required'],
     hasSideEffects: false, // This tool doesn't execute - it just signals termination

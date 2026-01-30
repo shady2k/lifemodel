@@ -390,6 +390,7 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         type: 'string',
         description: 'Action to perform: "create", "list", or "cancel"',
         required: true,
+        enum: ['create', 'list', 'cancel'],
       },
       {
         name: 'content',
@@ -427,6 +428,17 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
         required: false,
       },
     ],
+    validate: (args) => {
+      // Simple validation for reminder - check action is valid
+      const a = args as Record<string, unknown>;
+      if (!a['action'] || typeof a['action'] !== 'string') {
+        return { success: false, error: 'action: required' };
+      }
+      if (!['create', 'list', 'cancel'].includes(a['action'])) {
+        return { success: false, error: 'action: must be one of [create, list, cancel]' };
+      }
+      return { success: true, data: a };
+    },
     execute: async (args, context?: PluginToolContext): Promise<ReminderToolResult> => {
       const action = args['action'];
       if (typeof action !== 'string') {

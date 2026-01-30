@@ -371,7 +371,11 @@ export class CognitionProcessor implements CognitionLayer {
         role: msg.role as 'user' | 'assistant',
         content: msg.content,
       }));
-    } catch {
+    } catch (error) {
+      this.logger.trace(
+        { chatId, error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get conversation history, using empty'
+      );
       return [];
     }
   }
@@ -390,7 +394,11 @@ export class CognitionProcessor implements CognitionLayer {
         return Date.now() - status.lastMessageAt.getTime();
       }
       return undefined;
-    } catch {
+    } catch (error) {
+      this.logger.trace(
+        { chatId, error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get conversation status for time since'
+      );
       return undefined;
     }
   }

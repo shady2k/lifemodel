@@ -566,6 +566,13 @@ export interface PluginToolContext {
 }
 
 /**
+ * Result of validating tool arguments.
+ */
+export type PluginValidationResult<T = unknown> =
+  | { success: true; data: T }
+  | { success: false; error: string };
+
+/**
  * Tool definition from a plugin.
  */
 export interface PluginTool {
@@ -585,7 +592,15 @@ export interface PluginTool {
     description: string;
     required: boolean;
     default?: unknown;
+    /** Enum values for string parameters */
+    enum?: readonly string[];
   }[];
+
+  /**
+   * Validate arguments before execution.
+   * Returns ValidationResult with data on success, or error message on failure.
+   */
+  validate: (args: unknown) => PluginValidationResult;
 
   /**
    * Tool executor

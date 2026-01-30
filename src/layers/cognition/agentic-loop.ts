@@ -431,6 +431,41 @@ export class AgenticLoop {
           continue;
         }
 
+        // Validate args against tool schema before execution
+        const tool = this.toolRegistry.getTools().find((t) => t.name === toolName);
+        if (tool) {
+          const validation = tool.validate(args);
+          if (!validation.success) {
+            this.logger.warn(
+              { tool: toolName, error: validation.error },
+              'Tool validation failed, sending error to LLM for retry'
+            );
+
+            // Count toward tool call limit to prevent infinite loops
+            state.toolCallCount++;
+
+            // Add error as tool result so LLM can retry
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({
+                success: false,
+                error: `Invalid arguments: ${validation.error}`,
+              }),
+            });
+
+            state.toolResults.push({
+              toolCallId: toolCall.id,
+              toolName,
+              resultId: `${toolCall.id}-validation-error`,
+              success: false,
+              error: validation.error,
+            });
+
+            continue; // Let LLM retry with correct args
+          }
+        }
+
         // Check for terminal tool - DO NOT execute, just parse and return
         if (toolName === 'core.final') {
           this.logger.debug(

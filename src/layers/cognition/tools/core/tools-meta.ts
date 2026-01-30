@@ -5,6 +5,7 @@
  */
 
 import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Tool schema for on-demand retrieval.
@@ -35,15 +36,18 @@ export interface ToolsMetaToolDeps {
  * Create the core.tools meta-tool.
  */
 export function createToolsMetaTool(deps: ToolsMetaToolDeps): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: describe', required: true },
+    { name: 'name', type: 'string', description: 'Tool name to get schema for', required: true },
+  ];
+
   return {
     name: 'core.tools',
     description: 'Get detailed schema for any tool. Use when you need exact parameters.',
     tags: ['meta', 'schema', 'help'],
     hasSideEffects: false,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: describe', required: true },
-      { name: 'name', type: 'string', description: 'Tool name to get schema for', required: true },
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args) => {
       const action = args['action'] as string;
 

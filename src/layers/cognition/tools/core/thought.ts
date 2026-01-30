@@ -4,33 +4,37 @@
  * Queue thoughts for future processing - enables thought cascades.
  */
 
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Create the core.thought tool.
  */
 export function createThoughtTool(): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: emit', required: true },
+    {
+      name: 'content',
+      type: 'string',
+      description: 'The thought to process later',
+      required: true,
+    },
+    {
+      name: 'reason',
+      type: 'string',
+      description: 'Why this thought matters (optional, for observability)',
+      required: false,
+    },
+  ];
+
   return {
     name: 'core.thought',
     description:
       'Queue a thought for future processing. Use only when concrete follow-up or deeper analysis is needed. Do NOT use for vague "monitoring". Example: User says "I have an interview tomorrow" → emit thought to check in later.',
     tags: ['thinking', 'follow-up', 'reflection'],
     hasSideEffects: true,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: emit', required: true },
-      {
-        name: 'content',
-        type: 'string',
-        description: 'The thought to process later',
-        required: true,
-      },
-      {
-        name: 'reason',
-        type: 'string',
-        description: 'Why this thought matters (optional, for observability)',
-        required: false,
-      },
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args) => {
       const action = args['action'] as string;
 

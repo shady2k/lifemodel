@@ -4,7 +4,8 @@
  * Schedule future events for follow-ups, reminders, or delayed processing.
  */
 
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /** Minimum delay: 1 second */
 const MIN_DELAY = 1000;
@@ -16,32 +17,35 @@ const MAX_DELAY = 7 * 24 * 60 * 60 * 1000;
  * Create the core.schedule tool.
  */
 export function createScheduleTool(): Tool {
+  const parameters: ToolParameter[] = [
+    { name: 'action', type: 'string', description: 'Action: create', required: true },
+    {
+      name: 'delayMs',
+      type: 'number',
+      description: 'Delay in milliseconds before event fires',
+      required: true,
+    },
+    {
+      name: 'eventType',
+      type: 'string',
+      description: 'Type of event (e.g., followUp, checkIn)',
+      required: true,
+    },
+    {
+      name: 'eventContext',
+      type: 'object',
+      description: 'Context data for the event',
+      required: false,
+    },
+  ];
+
   return {
     name: 'core.schedule',
     description: 'Schedule a future event. Use for follow-ups, reminders, or delayed processing.',
     tags: ['schedule', 'future', 'events'],
     hasSideEffects: true,
-    parameters: [
-      { name: 'action', type: 'string', description: 'Action: create', required: true },
-      {
-        name: 'delayMs',
-        type: 'number',
-        description: 'Delay in milliseconds before event fires',
-        required: true,
-      },
-      {
-        name: 'eventType',
-        type: 'string',
-        description: 'Type of event (e.g., followUp, checkIn)',
-        required: true,
-      },
-      {
-        name: 'eventContext',
-        type: 'object',
-        description: 'Context data for the event',
-        required: false,
-      },
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args) => {
       const action = args['action'] as string;
 

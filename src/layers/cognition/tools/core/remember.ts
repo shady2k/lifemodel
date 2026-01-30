@@ -9,7 +9,8 @@
  */
 
 import { getFieldPolicy, type EvidenceSource } from '../../../../types/cognition.js';
-import type { Tool } from '../types.js';
+import type { Tool, ToolParameter } from '../types.js';
+import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Valid evidence sources for the tool schema.
@@ -45,45 +46,48 @@ export interface RememberResult {
  * Create the core.remember tool.
  */
 export function createRememberTool(): Tool {
+  const parameters: ToolParameter[] = [
+    {
+      name: 'subject',
+      type: 'string',
+      required: true,
+      description: 'WHO: "user", person name, or topic',
+    },
+    {
+      name: 'attribute',
+      type: 'string',
+      required: true,
+      description: 'WHAT: birthday, preference, relationship, etc.',
+    },
+    {
+      name: 'value',
+      type: 'string',
+      required: true,
+      description: 'The value to remember (clean, without provenance markers)',
+    },
+    {
+      name: 'source',
+      type: 'string',
+      enum: EVIDENCE_SOURCES,
+      required: true,
+      description:
+        'How we learned this: user_quote (direct quote), user_explicit (clearly stated), user_implicit (implied), inferred (deduced)',
+    },
+    {
+      name: 'confidence',
+      type: 'number',
+      required: false,
+      description: 'Confidence level 0-1. If omitted, uses default based on source.',
+    },
+  ];
+
   return {
     name: 'core.remember',
     description: 'Remember a fact about the user or any subject.',
     tags: ['memory', 'facts', 'user-model'],
     hasSideEffects: true,
-    parameters: [
-      {
-        name: 'subject',
-        type: 'string',
-        required: true,
-        description: 'WHO: "user", person name, or topic',
-      },
-      {
-        name: 'attribute',
-        type: 'string',
-        required: true,
-        description: 'WHAT: birthday, preference, relationship, etc.',
-      },
-      {
-        name: 'value',
-        type: 'string',
-        required: true,
-        description: 'The value to remember (clean, without provenance markers)',
-      },
-      {
-        name: 'source',
-        type: 'string',
-        enum: EVIDENCE_SOURCES,
-        required: true,
-        description:
-          'How we learned this: user_quote (direct quote), user_explicit (clearly stated), user_implicit (implied), inferred (deduced)',
-      },
-      {
-        name: 'confidence',
-        type: 'number',
-        required: false,
-        description: 'Confidence level 0-1. If omitted, uses default based on source.',
-      },
-    ],
+    parameters,
+    validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args): Promise<RememberResult> => {
       const subject = args['subject'] as string | undefined;
       const attribute = args['attribute'] as string | undefined;
