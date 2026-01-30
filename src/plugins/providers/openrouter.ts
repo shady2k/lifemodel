@@ -1,56 +1,21 @@
 import type { Logger } from '../../types/index.js';
-import type { CircuitBreaker } from '../../core/circuit-breaker.js';
-import { createCircuitBreaker } from '../../core/circuit-breaker.js';
-import type { CompletionRequest, CompletionResponse } from '../../llm/provider.js';
-import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
+import { OpenAICompatibleProvider } from './openai-compatible.js';
+import type { OpenAICompatibleConfig } from './openai-compatible.js';
 
 /**
- * OpenRouter API response types.
+ * OpenRouter-specific provider configuration.
+ * Extends base OpenAI-compatible config with OpenRouter-specific options.
+ * Note: defaultModel, fastModel, smartModel have sensible defaults for OpenRouter.
  */
-interface OpenRouterResponse {
-  id: string;
-  model: string;
-  choices: {
-    message: {
-      role: string;
-      content: string;
-    };
-    finish_reason: string;
-  }[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
-
-/**
- * OpenRouter provider configuration.
- */
-export interface OpenRouterConfig {
-  /** API key (required) */
+export interface OpenRouterConfig extends Omit<
+  OpenAICompatibleConfig,
+  'baseUrl' | 'name' | 'defaultModel'
+> {
+  /** API key (required for OpenRouter) */
   apiKey: string;
 
-  /** Fast model for classification, yes/no, emotion detection (cheap) */
-  fastModel?: string;
-
-  /** Smart model for composition, reasoning (expensive) */
-  smartModel?: string;
-
-  /** Default model to use when role not specified */
+  /** Default model (optional, defaults to claude-3.5-haiku) */
   defaultModel?: string;
-
-  /** Base URL (default: https://openrouter.ai/api/v1) */
-  baseUrl?: string;
-
-  /** Request timeout in ms (default: 30000) */
-  timeout?: number;
-
-  /** Max retries for retryable errors (default: 2) */
-  maxRetries?: number;
-
-  /** Retry delay in ms (default: 1000) */
-  retryDelay?: number;
 
   /** Site URL for OpenRouter ranking */
   siteUrl?: string;
@@ -59,293 +24,80 @@ export interface OpenRouterConfig {
   siteName?: string;
 }
 
-const DEFAULT_CONFIG = {
+const OPENROUTER_DEFAULTS = {
+  baseUrl: 'https://openrouter.ai/api',
+  name: 'openrouter',
+  defaultModel: 'anthropic/claude-3.5-haiku',
   fastModel: 'anthropic/claude-3.5-haiku',
   smartModel: 'anthropic/claude-sonnet-4',
-  defaultModel: 'anthropic/claude-3.5-haiku',
-  baseUrl: 'https://openrouter.ai/api/v1',
   timeout: 30_000,
-  maxRetries: 2,
-  retryDelay: 1000,
 };
 
 /**
  * OpenRouter LLM provider.
  *
- * Provides access to multiple models via OpenRouter API.
- * Includes circuit breaker and retry logic.
- * Extends BaseLLMProvider for detailed logging.
+ * Extends OpenAICompatibleProvider with OpenRouter-specific headers
+ * for ranking and attribution.
  */
-export class OpenRouterProvider extends BaseLLMProvider {
-  readonly name = 'openrouter';
-
-  private readonly config: Required<
-    Pick<
-      OpenRouterConfig,
-      | 'fastModel'
-      | 'smartModel'
-      | 'defaultModel'
-      | 'baseUrl'
-      | 'timeout'
-      | 'maxRetries'
-      | 'retryDelay'
-    >
-  > &
-    OpenRouterConfig;
-  private readonly providerLogger?: Logger | undefined;
-  private readonly circuitBreaker: CircuitBreaker;
+export class OpenRouterProvider extends OpenAICompatibleProvider {
+  private readonly siteUrl: string | undefined;
+  private readonly siteName: string | undefined;
 
   constructor(config: OpenRouterConfig, logger?: Logger) {
-    super(logger);
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    this.providerLogger = logger?.child({ component: 'openrouter' });
-
-    const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
-      name: 'openrouter',
-      maxFailures: 3,
-      resetTimeout: 60_000, // 1 minute
-      timeout: this.config.timeout,
-    };
-    if (this.providerLogger) {
-      circuitConfig.logger = this.providerLogger;
-    }
-    this.circuitBreaker = createCircuitBreaker(circuitConfig);
-
-    this.providerLogger?.info(
-      { fastModel: this.config.fastModel, smartModel: this.config.smartModel },
-      'OpenRouter provider initialized'
-    );
-  }
-
-  /**
-   * Check if provider is configured.
-   */
-  isAvailable(): boolean {
-    return Boolean(this.config.apiKey);
-  }
-
-  /**
-   * Get the model to use based on role or explicit model.
-   */
-  private getModel(request: CompletionRequest): string {
-    // Explicit model takes precedence
-    if (request.model) {
-      return request.model;
-    }
-
-    // Select based on role
-    switch (request.role) {
-      case 'fast':
-        return this.config.fastModel;
-      case 'smart':
-        return this.config.smartModel;
-      default:
-        return this.config.defaultModel;
-    }
-  }
-
-  /**
-   * Generate a completion (called by BaseLLMProvider.complete with logging).
-   */
-  protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
-    if (!this.isAvailable()) {
-      throw new LLMError('OpenRouter API key not configured', this.name);
-    }
-
-    const model = this.getModel(request);
-
-    return this.circuitBreaker.execute(async () => {
-      return this.executeWithRetry(async () => {
-        return this.executeRequest(request, model);
-      });
-    });
-  }
-
-  /**
-   * Execute with retry logic.
-   */
-  private async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        if (error instanceof LLMError && !error.retryable) {
-          throw error;
-        }
-
-        if (attempt < this.config.maxRetries) {
-          this.providerLogger?.warn(
-            { attempt: attempt + 1, maxRetries: this.config.maxRetries },
-            'Retrying after error'
-          );
-          await this.sleep(this.config.retryDelay * (attempt + 1));
-        }
-      }
-    }
-
-    throw lastError ?? new Error('Unknown error');
-  }
-
-  /**
-   * Perform the actual HTTP request to OpenRouter API.
-   */
-  private async executeRequest(
-    request: CompletionRequest,
-    model: string
-  ): Promise<CompletionResponse> {
-    const url = `${this.config.baseUrl}/chat/completions`;
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.config.apiKey}`,
+    // Build base config with OpenRouter defaults
+    // Only include defined properties to satisfy exactOptionalPropertyTypes
+    const baseConfig: OpenAICompatibleConfig = {
+      baseUrl: OPENROUTER_DEFAULTS.baseUrl,
+      name: OPENROUTER_DEFAULTS.name,
+      defaultModel: config.defaultModel ?? OPENROUTER_DEFAULTS.defaultModel,
+      fastModel: config.fastModel ?? OPENROUTER_DEFAULTS.fastModel,
+      smartModel: config.smartModel ?? OPENROUTER_DEFAULTS.smartModel,
+      timeout: config.timeout ?? OPENROUTER_DEFAULTS.timeout,
+      apiKey: config.apiKey,
     };
 
-    if (this.config.siteUrl) {
-      headers['HTTP-Referer'] = this.config.siteUrl;
+    // Only add optional properties if they are defined
+    if (config.maxRetries !== undefined) {
+      baseConfig.maxRetries = config.maxRetries;
     }
-    if (this.config.siteName) {
-      headers['X-Title'] = this.config.siteName;
+    if (config.retryDelay !== undefined) {
+      baseConfig.retryDelay = config.retryDelay;
     }
-
-    const body: Record<string, unknown> = {
-      model,
-      messages: request.messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
-      max_tokens: request.maxTokens,
-      temperature: request.temperature,
-      stop: request.stop,
-    };
-
-    // Add native tools if provided
-    if (request.tools && request.tools.length > 0) {
-      body['tools'] = request.tools;
-      body['tool_choice'] = request.toolChoice ?? 'auto';
+    if (config.circuitResetTimeout !== undefined) {
+      baseConfig.circuitResetTimeout = config.circuitResetTimeout;
+    }
+    if (config.enableThinking !== undefined) {
+      baseConfig.enableThinking = config.enableThinking;
     }
 
-    // Add response_format if specified (for JSON mode)
-    if (request.responseFormat) {
-      if (request.responseFormat.type === 'json_schema' && request.responseFormat.json_schema) {
-        // Pass full JSON schema for structured output
-        body['response_format'] = {
-          type: 'json_schema',
-          json_schema: request.responseFormat.json_schema,
-        };
-      } else {
-        // Simple json_object or text mode
-        body['response_format'] = { type: request.responseFormat.type };
-      }
-    }
+    super(baseConfig, logger);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, this.config.timeout);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        const retryable = response.status >= 500 || response.status === 429;
-
-        throw new LLMError(
-          `OpenRouter API error: ${String(response.status)} - ${errorText}`,
-          this.name,
-          {
-            statusCode: response.status,
-            retryable,
-          }
-        );
-      }
-
-      const data = (await response.json()) as OpenRouterResponse;
-
-      const firstChoice = data.choices[0];
-      if (!firstChoice) {
-        throw new LLMError('Invalid response from OpenRouter', this.name);
-      }
-
-      const result: CompletionResponse = {
-        content: firstChoice.message.content,
-        model: data.model,
-      };
-
-      const finishReason = this.mapFinishReason(firstChoice.finish_reason);
-      if (finishReason) {
-        result.finishReason = finishReason;
-      }
-
-      if (data.usage) {
-        result.usage = {
-          promptTokens: data.usage.prompt_tokens,
-          completionTokens: data.usage.completion_tokens,
-          totalTokens: data.usage.total_tokens,
-        };
-      }
-
-      return result;
-    } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (error instanceof LLMError) {
-        throw error;
-      }
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new LLMError('Request timed out', this.name, { retryable: true });
-      }
-
-      throw new LLMError(
-        `Network error: ${error instanceof Error ? error.message : String(error)}`,
-        this.name,
-        { retryable: true }
-      );
-    }
+    this.siteUrl = config.siteUrl;
+    this.siteName = config.siteName;
   }
 
   /**
-   * Map OpenRouter finish reason to our format.
+   * Override to add OpenRouter-specific headers.
    */
-  private mapFinishReason(
-    reason: string
-  ): 'stop' | 'length' | 'content_filter' | 'error' | undefined {
-    switch (reason) {
-      case 'stop':
-        return 'stop';
-      case 'length':
-        return 'length';
-      case 'content_filter':
-        return 'content_filter';
-      default:
-        return undefined;
+  protected override buildHeaders(): Record<string, string> {
+    const headers = super.buildHeaders();
+
+    // OpenRouter-specific headers for ranking
+    if (this.siteUrl) {
+      headers['HTTP-Referer'] = this.siteUrl;
     }
+    if (this.siteName) {
+      headers['X-Title'] = this.siteName;
+    }
+
+    return headers;
   }
 
   /**
-   * Sleep for the specified duration.
+   * Override API URL - OpenRouter doesn't need /v1 prefix.
    */
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Get circuit breaker stats.
-   */
-  getCircuitStats(): ReturnType<CircuitBreaker['getStats']> {
-    return this.circuitBreaker.getStats();
+  protected override getApiUrl(): string {
+    return `${this.config.baseUrl}/v1/chat/completions`;
   }
 }
 

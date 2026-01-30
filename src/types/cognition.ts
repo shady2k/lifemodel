@@ -119,18 +119,11 @@ export interface DeferTerminal {
 }
 
 /**
- * Waiting for tool result - loop paused.
- */
-export interface NeedsToolResultTerminal {
-  type: 'needsToolResult';
-  stepId: string;
-}
-
-/**
  * All possible terminal states.
  * Note: EscalateTerminal removed - use low confidence in RespondTerminal instead.
+ * Note: NeedsToolResultTerminal removed - native tool calling handles this automatically.
  */
-export type Terminal = RespondTerminal | NoActionTerminal | DeferTerminal | NeedsToolResultTerminal;
+export type Terminal = RespondTerminal | NoActionTerminal | DeferTerminal;
 
 // ============================================================
 // Main Output
@@ -194,8 +187,8 @@ export interface ParameterDefinition {
  * Tool execution result.
  */
 export interface ToolResult {
-  /** ID matching the ToolStep.id */
-  stepId: string;
+  /** Tool call ID from the API response (links tool call to result) */
+  toolCallId: string;
 
   /** Tool name that was executed */
   toolName: ToolName;
@@ -217,8 +210,8 @@ export interface ToolResult {
  * Executed tool tracking for safe retry detection.
  */
 export interface ExecutedTool {
-  /** Step ID from the tool call */
-  stepId: string;
+  /** Tool call ID from the API response (links tool call to result) */
+  toolCallId: string;
   /** Tool name that was executed */
   name: ToolName;
   /** Tool arguments */
@@ -319,30 +312,10 @@ export function validateNoActionTerminal(terminal: unknown): NoActionTerminal {
 }
 
 /**
- * Validate a NeedsToolResultTerminal at parse time.
- * Throws if required fields are missing.
- */
-export function validateNeedsToolResultTerminal(terminal: unknown): NeedsToolResultTerminal {
-  if (typeof terminal !== 'object' || terminal === null) {
-    throw new Error('NeedsToolResultTerminal must be an object');
-  }
-
-  const t = terminal as Record<string, unknown>;
-
-  if (t['type'] !== 'needsToolResult') {
-    throw new Error('Invalid terminal type');
-  }
-
-  if (typeof t['stepId'] !== 'string') {
-    throw new Error('NeedsToolResultTerminal missing required field: stepId');
-  }
-
-  return terminal as NeedsToolResultTerminal;
-}
-
-/**
  * Validate any terminal at parse time.
  * Throws if required fields are missing.
+ *
+ * Note: NeedsToolResultTerminal removed - native tool calling handles tool results automatically.
  */
 export function validateTerminal(terminal: unknown): Terminal {
   if (typeof terminal !== 'object' || terminal === null) {
@@ -359,8 +332,6 @@ export function validateTerminal(terminal: unknown): Terminal {
       return validateDeferTerminal(terminal);
     case 'noAction':
       return validateNoActionTerminal(terminal);
-    case 'needsToolResult':
-      return validateNeedsToolResultTerminal(terminal);
     default:
       throw new Error(`Unknown terminal type: ${String(terminalType)}`);
   }
@@ -551,8 +522,8 @@ export interface LoopState {
   /** Start time for timeout tracking */
   startTime: number;
 
-  /** All steps from all iterations */
-  allSteps: Step[];
+  /** Chain-of-thought content captured from assistant responses */
+  thoughts: string[];
 
   /** Tool results collected */
   toolResults: ToolResult[];
@@ -578,7 +549,7 @@ export function createLoopState(): LoopState {
     iteration: 0,
     toolCallCount: 0,
     startTime: Date.now(),
-    allSteps: [],
+    thoughts: [],
     toolResults: [],
     executedTools: [],
     aborted: false,

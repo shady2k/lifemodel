@@ -158,7 +158,7 @@ export class MessageComposer {
       });
 
       return {
-        message: response.content.trim(),
+        message: (response.content ?? '').trim(),
         tokensUsed: response.usage?.totalTokens,
         success: true,
       };
@@ -255,7 +255,7 @@ export class MessageComposer {
       });
 
       // Parse JSON response
-      const parsed = this.parseClassificationResponse(response.content);
+      const parsed = this.parseClassificationResponse(response.content ?? '');
 
       return {
         ...parsed,
@@ -334,7 +334,7 @@ Include: topics discussed, user preferences revealed, decisions made, important 
 Keep the summary concise (2-4 sentences) but preserve essential information.
 
 [OLDER CONTEXT - Summarize this:]
-${context.messagesToCompact.map((m) => `${m.role}: ${m.content}`).join('\n')}
+${context.messagesToCompact.map((m) => `${m.role}: ${m.content ?? ''}`).join('\n')}
 [END OLDER CONTEXT]`;
       compactionJsonField =
         ',\n  "contextSummary": "Brief summary of older context (only when compaction requested)"';
@@ -617,7 +617,7 @@ Respond ONLY with valid JSON:
         },
       });
 
-      const parsed = JSON.parse(response.content) as {
+      const parsed = JSON.parse(response.content ?? '{}') as {
         status: 'active' | 'awaiting_answer' | 'closed' | 'idle';
         confidence: number;
         reasoning: string;

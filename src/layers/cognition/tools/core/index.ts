@@ -13,9 +13,17 @@ export { createThoughtTool } from './thought.js';
 export { createUserTool } from './user.js';
 export { createAgentTool } from './agent.js';
 export { createScheduleTool } from './schedule.js';
+export { createFinalTool } from './final.js';
 
 // Types
 export type { MemoryProvider, MemoryEntry, MemorySearchOptions, MemoryToolDeps } from './memory.js';
 export type { ConversationProvider, TimeToolDeps } from './time.js';
 export type { AgentStateProvider, UserModelProvider, StateToolDeps } from './state.js';
 export type { ToolSchema, SchemaProvider, ToolsMetaToolDeps } from './tools-meta.js';
+export type {
+  RespondPayload,
+  NoActionPayload,
+  DeferPayload,
+  FinalPayload,
+  CoreFinalArgs,
+} from './final.js';

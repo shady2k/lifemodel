@@ -269,7 +269,6 @@ export class CognitionProcessor implements CognitionLayer {
       {
         success: loopResult.success,
         terminalType: loopResult.terminal.type,
-        steps: loopResult.steps.length,
         intents: loopResult.intents.length,
         usedSmartRetry: loopResult.usedSmartRetry,
         duration,

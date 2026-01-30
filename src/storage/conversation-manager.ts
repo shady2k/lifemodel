@@ -1,5 +1,4 @@
 import type { Storage } from './storage.js';
-import type { Message } from '../llm/provider.js';
 import type { Logger } from '../types/index.js';
 
 /**
@@ -23,10 +22,15 @@ export const CONVERSATION_TIMEOUTS: Record<ConversationStatus, number> = {
 };
 
 /**
- * Extended message with timestamp for history tracking.
+ * Message in conversation history.
+ * Note: This is separate from the LLM provider's Message type because
+ * conversation history only stores user/assistant/system messages,
+ * not tool messages which are only used during LLM API calls.
  */
-export interface ConversationMessage extends Message {
-  timestamp: Date;
+export interface ConversationMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  timestamp?: Date;
 }
 
 /**
@@ -91,7 +95,10 @@ export class ConversationManager {
   /**
    * Add a message to the conversation history.
    */
-  async addMessage(userId: string, message: Message): Promise<void> {
+  async addMessage(
+    userId: string,
+    message: { role: 'system' | 'user' | 'assistant'; content: string }
+  ): Promise<void> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
@@ -125,13 +132,16 @@ export class ConversationManager {
    * Returns recent messages in full, with optional compacted summary prefix.
    * Always ensures history starts with a user message (not assistant).
    */
-  async getHistory(userId: string, options: GetHistoryOptions = {}): Promise<Message[]> {
+  async getHistory(
+    userId: string,
+    options: GetHistoryOptions = {}
+  ): Promise<ConversationMessage[]> {
     const { maxRecent = 3, includeCompacted = true } = options;
 
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    const result: Message[] = [];
+    const result: ConversationMessage[] = [];
 
     // Add compacted summary if available and requested
     if (includeCompacted && stored.compactedSummary) {
@@ -241,7 +251,7 @@ export class ConversationManager {
   /**
    * Get messages that would be compacted (for generating summary).
    */
-  async getMessagesToCompact(userId: string): Promise<Message[]> {
+  async getMessagesToCompact(userId: string): Promise<ConversationMessage[]> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 

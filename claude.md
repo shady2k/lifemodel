@@ -26,7 +26,7 @@ Everything is a Signal. Unified model for all data flowing through the brain.
 
 ---
 
-## 4-Layer Brain Architecture
+## 3-Layer Brain Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -49,18 +49,15 @@ Everything is a Signal. Unified model for all data flowing through the brain.
 │  └──────────────────┬──────────────────┘                       │
 │                     │ (only if threshold crossed)              │
 │  ┌──────────────────▼──────────────────┐                       │
-│  │         COGNITION LAYER             │  Cheap LLM            │
-│  │  • Fast thinking, simple decisions  │  Like: System 1       │
-│  └──────────────────┬──────────────────┘                       │
-│                     │ (only if uncertain)                      │
-│  ┌──────────────────▼──────────────────┐                       │
-│  │           SMART LAYER               │  Expensive LLM        │
-│  │  • Deep reasoning, complex tasks    │  Like: System 2       │
+│  │         COGNITION LAYER             │  LLM (fast + smart)   │
+│  │  • Fast model first (System 1)      │                       │
+│  │  • Smart retry if uncertain <0.6    │  Like: System 1+2     │
+│  │  • Deep reasoning when needed       │                       │
 │  └─────────────────────────────────────┘                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Most ticks: only AUTONOMIC and AGGREGATION run. COGNITION wakes for user messages or threshold crossings. SMART engages rarely.
+Most ticks: only AUTONOMIC and AGGREGATION run. COGNITION wakes for user messages or threshold crossings. Smart model used only on retry (low confidence + safe to retry).
 
 ---
 
@@ -84,6 +81,29 @@ Layers don't mutate state. They return Intents that CoreLoop applies:
 ### Memory Consolidation
 During sleep mode: merge duplicates, decay old memories, forget weak ones.
 
+### COGNITION Agentic Loop
+Uses **native OpenAI tool calling** per [OpenAI Chat Completions API](https://platform.openai.com/docs/guides/function-calling):
+- Tools registered with `strict: true` and `additionalProperties: false`
+- Terminal via `core.final` tool with discriminated union (`respond | no_action | defer`)
+- Tool results linked via `toolCallId` (OpenAI's `tool_call_id`)
+- Smart retry: if confidence < 0.6 and no side-effect tools ran → retry with expensive model
+
+```
+Request: messages + tools (tool_choice: "required")
+    ↓
+Response: { tool_calls: [...], content: "thinking..." }
+    ↓
+Execute tools → add role: "tool" messages with tool_call_id
+    ↓
+Loop until core.final called → parse args → return intents
+```
+
+**OpenAI API compliance:**
+- `tool_calls[].id` links to `tool_call_id` in tool results
+- `role: "tool"` for tool result messages (Chat Completions format)
+- `parallel_tool_calls: false` for deterministic execution
+- `strict: true` on tools for schema adherence
+
 ---
 
 ## Project Structure
@@ -91,10 +111,13 @@ During sleep mode: merge duplicates, decay old memories, forget weak ones.
 ```
 src/
 ├── core/           # CoreLoop, Agent, energy, event-bus
-├── layers/         # autonomic/, aggregation/, cognition/, smart/
+├── layers/         # autonomic/, aggregation/, cognition/
+├── llm/            # LLM provider interface, tool schema conversion
 ├── plugins/        # neurons/, channels/, providers/
-├── types/          # Signal, Intent, Cognition types
+├── channels/       # Input channels (Telegram, etc.)
+├── ports/          # External service adapters
 ├── storage/        # Persistence, memory, conversations
+├── types/          # Signal, Intent, Cognition types
 └── config/         # Configuration loading
 ```
 

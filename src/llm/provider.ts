@@ -6,11 +6,35 @@
  */
 
 /**
+ * Tool call from the model (OpenAI Chat Completions format).
+ * Used when the model wants to call a function.
+ */
+export interface ToolCall {
+  /** Unique ID for this tool call (links to tool result) */
+  id: string;
+  /** Always 'function' for function tools */
+  type: 'function';
+  /** Function details */
+  function: {
+    /** Tool/function name */
+    name: string;
+    /** JSON-encoded arguments string */
+    arguments: string;
+  };
+}
+
+/**
  * Message in a conversation.
+ * Extended to support tool calling flow.
  */
 export interface Message {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  /** Message content - can be null for assistant messages with only tool_calls */
+  content: string | null;
+  /** Tool calls made by assistant (only for role: 'assistant') */
+  tool_calls?: ToolCall[];
+  /** Tool call ID this message is responding to (only for role: 'tool') */
+  tool_call_id?: string;
 }
 
 /**
@@ -46,26 +70,17 @@ import type { OpenAIChatTool } from './tool-schema.js';
 export type { OpenAIChatTool };
 
 /**
- * Truncate long content for readable logs.
- * Shows first N chars + "..." if truncated. Replaces newlines with ↵ for single-line display.
- */
-const LOG_TRUNCATE_LENGTH = 200;
-function truncateForLog(content: string): string {
-  // Replace newlines with visible marker for single-line readability
-  const singleLine = content.replace(/\n/g, ' ↵ ');
-  if (singleLine.length <= LOG_TRUNCATE_LENGTH) {
-    return singleLine;
-  }
-  return singleLine.slice(0, LOG_TRUNCATE_LENGTH) + '...';
-}
-
-/**
  * Tool choice for controlling tool calling behavior.
  * - 'auto': Model decides whether to call tools
  * - 'none': Model won't call any tools
  * - 'required': Model must call at least one tool
+ * - { type: 'function', function: { name } }: Force a specific tool
  */
-export type ToolChoice = 'auto' | 'none' | 'required';
+export type ToolChoice =
+  | 'auto'
+  | 'none'
+  | 'required'
+  | { type: 'function'; function: { name: string } };
 
 /**
  * Request to generate a completion.
@@ -95,19 +110,25 @@ export interface CompletionRequest {
   /** Tools available for the model to call (native tool calling) */
   tools?: OpenAIChatTool[];
 
-  /** Tool choice mode: 'auto', 'none', or 'required' */
+  /** Tool choice mode: 'auto', 'none', 'required', or specific tool */
   toolChoice?: ToolChoice;
+
+  /** Whether to allow parallel tool calls (default: true, set false for strict mode) */
+  parallelToolCalls?: boolean;
 }
 
 /**
  * Response from a completion request.
  */
 export interface CompletionResponse {
-  /** Generated text */
-  content: string;
+  /** Generated text - can be null when model only returns tool_calls */
+  content: string | null;
 
   /** Model that was used */
   model: string;
+
+  /** Tool calls requested by the model (native tool calling) */
+  toolCalls?: ToolCall[];
 
   /** Token usage */
   usage?:
@@ -119,7 +140,7 @@ export interface CompletionResponse {
     | undefined;
 
   /** Finish reason */
-  finishReason?: 'stop' | 'length' | 'content_filter' | 'error' | undefined;
+  finishReason?: 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'error' | undefined;
 }
 
 /**
@@ -209,7 +230,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       '🤖 LLM request started'
     );
 
-    // Log each message for debugging (truncated for readability)
+    // Log each message for debugging (full content for debugging)
     if (this.logger) {
       for (const [i, msg] of request.messages.entries()) {
         this.logger.debug(
@@ -217,8 +238,10 @@ export abstract class BaseLLMProvider implements LLMProvider {
             requestId,
             index: i,
             role: msg.role,
-            contentLength: msg.content.length,
-            content: truncateForLog(msg.content),
+            contentLength: msg.content?.length ?? 0,
+            content: msg.content,
+            toolCalls: msg.tool_calls,
+            toolCallId: msg.tool_call_id,
           },
           `🤖 LLM message [${String(i)}] ${msg.role}`
         );
@@ -229,7 +252,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       const response = await this.doComplete(request);
       const duration = Date.now() - startTime;
 
-      // Log response (truncated for readability)
+      // Log response (full content for debugging)
       this.logger?.debug(
         {
           requestId,
@@ -240,8 +263,9 @@ export abstract class BaseLLMProvider implements LLMProvider {
           promptTokens: response.usage?.promptTokens,
           completionTokens: response.usage?.completionTokens,
           totalTokens: response.usage?.totalTokens,
-          responseLength: response.content.length,
-          response: truncateForLog(response.content),
+          responseLength: response.content?.length ?? 0,
+          response: response.content,
+          toolCalls: response.toolCalls,
         },
         '🤖 LLM response received'
       );

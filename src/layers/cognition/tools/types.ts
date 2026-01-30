@@ -34,6 +34,13 @@ export interface Tool {
    * Used to determine if smart retry is safe after low confidence response.
    */
   hasSideEffects?: boolean;
+  /**
+   * Raw JSON Schema for complex parameter validation.
+   * When provided, this is used directly instead of converting `parameters`.
+   * Useful for discriminated unions, oneOf, anyOf, etc.
+   * Must include type: 'object', properties, and additionalProperties: false.
+   */
+  rawParameterSchema?: Record<string, unknown>;
 }
 
 /**
@@ -65,8 +72,8 @@ export interface ToolContext {
  * Tool execution request.
  */
 export interface ToolRequest {
-  /** Step ID from CognitionOutput */
-  stepId: string;
+  /** Tool call ID from the API response */
+  toolCallId: string;
 
   /** Tool name */
   name: ToolName;
@@ -82,16 +89,16 @@ export interface ToolRequest {
  * Create a tool result from execution.
  */
 export function createToolResult(
-  stepId: string,
+  toolCallId: string,
   toolName: ToolName,
   success: boolean,
   data?: unknown,
   error?: string
 ): ToolResult {
   const result: ToolResult = {
-    stepId,
+    toolCallId,
     toolName,
-    resultId: `${stepId}-result`,
+    resultId: `${toolCallId}-result`,
     success,
   };
   if (data !== undefined) {

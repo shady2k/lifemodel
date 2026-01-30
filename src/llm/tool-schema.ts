@@ -46,9 +46,14 @@ export function unsanitizeToolName(name: string): string {
 /**
  * OpenAI Chat Completions tool format.
  * Used with the `tools` parameter in chat completions API.
+ *
+ * Note: `strict: true` is placed on the tool object (not inside function)
+ * for OpenRouter compatibility. Some providers may strip this field.
  */
 export interface OpenAIChatTool {
   type: 'function';
+  /** Strict mode for schema adherence. Provider-dependent support. */
+  strict?: boolean;
   function: {
     name: string;
     description: string;
@@ -57,6 +62,8 @@ export interface OpenAIChatTool {
       properties: Record<string, OpenAIPropertySchema>;
       /** Required parameters. Omitted when empty for provider compatibility. */
       required?: string[];
+      /** Disallow additional properties (required for strict mode). */
+      additionalProperties?: boolean;
     };
   };
 }
@@ -102,6 +109,20 @@ function mapParameterType(param: ToolParameter): OpenAIPropertySchema {
  * @returns OpenAI-compatible tool definition (with sanitized name)
  */
 export function toolToOpenAIFormat(tool: Tool): OpenAIChatTool {
+  // If tool provides raw JSON Schema, use it directly (for complex schemas like discriminated unions)
+  if (tool.rawParameterSchema) {
+    return {
+      type: 'function',
+      strict: true,
+      function: {
+        name: sanitizeToolName(tool.name),
+        description: tool.description,
+        parameters: tool.rawParameterSchema as OpenAIChatTool['function']['parameters'],
+      },
+    };
+  }
+
+  // Otherwise, convert from ToolParameter[] format
   const properties: Record<string, OpenAIPropertySchema> = {};
   const required: string[] = [];
 
@@ -114,14 +135,17 @@ export function toolToOpenAIFormat(tool: Tool): OpenAIChatTool {
   }
 
   // Build the tool definition with sanitized name for API compatibility
+  // Include strict: true and additionalProperties: false for schema adherence
   const result: OpenAIChatTool = {
     type: 'function',
+    strict: true, // Enable strict mode for better schema adherence (provider-dependent)
     function: {
       name: sanitizeToolName(tool.name),
       description: tool.description,
       parameters: {
         type: 'object',
         properties,
+        additionalProperties: false, // Required for strict mode
       },
     },
   };

@@ -22,6 +22,7 @@ import {
   createUserTool,
   createAgentTool,
   createScheduleTool,
+  createFinalTool,
 } from './core/index.js';
 
 // Import and re-export types for convenience
@@ -85,7 +86,7 @@ export class ToolRegistry {
     if (!tool) {
       this.logger.warn({ toolName: request.name }, 'Unknown tool requested');
       return createToolResult(
-        request.stepId,
+        request.toolCallId,
         request.name,
         false,
         undefined,
@@ -97,7 +98,7 @@ export class ToolRegistry {
 
     try {
       this.logger.debug(
-        { tool: request.name, args: request.args, stepId: request.stepId },
+        { tool: request.name, args: request.args, toolCallId: request.toolCallId },
         'Executing tool'
       );
 
@@ -105,21 +106,21 @@ export class ToolRegistry {
       const duration = Date.now() - startTime;
 
       this.logger.debug(
-        { tool: request.name, duration, stepId: request.stepId },
+        { tool: request.name, duration, toolCallId: request.toolCallId },
         'Tool executed successfully'
       );
 
-      return createToolResult(request.stepId, request.name, true, result);
+      return createToolResult(request.toolCallId, request.name, true, result);
     } catch (error) {
       const duration = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : String(error);
 
       this.logger.error(
-        { tool: request.name, error: errorMessage, duration, stepId: request.stepId },
+        { tool: request.name, error: errorMessage, duration, toolCallId: request.toolCallId },
         'Tool execution failed'
       );
 
-      return createToolResult(request.stepId, request.name, false, undefined, errorMessage);
+      return createToolResult(request.toolCallId, request.name, false, undefined, errorMessage);
     }
   }
 
@@ -235,8 +236,9 @@ export class ToolRegistry {
 
   /**
    * Generate example tool call JSON for a tool.
+   * Note: This is for documentation purposes. Native tool calling uses OpenAI format.
    */
-  getToolExample(tool: Tool, stepId: string, parentId: string): string {
+  getToolExample(tool: Tool, toolCallId: string): string {
     const exampleArgs: Record<string, unknown> = {};
 
     for (const param of tool.parameters) {
@@ -261,15 +263,17 @@ export class ToolRegistry {
       }
     }
 
+    // Native OpenAI tool call format
     const example = {
-      type: 'tool',
-      id: stepId,
-      parentId,
-      name: tool.name,
-      args: exampleArgs,
+      id: toolCallId,
+      type: 'function',
+      function: {
+        name: tool.name,
+        arguments: JSON.stringify(exampleArgs),
+      },
     };
 
-    return JSON.stringify(example);
+    return JSON.stringify(example, null, 2);
   }
 
   /**
@@ -343,6 +347,9 @@ export class ToolRegistry {
 
     // Schedule tool
     this.tools.set('core.schedule', createScheduleTool());
+
+    // Final tool (terminal - signals end of agentic loop)
+    this.tools.set('core.final', createFinalTool());
   }
 }
 

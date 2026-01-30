@@ -1,19 +1,26 @@
 /**
  * LLM Adapter for Agentic Loop
  *
- * Wraps the application's LLMProvider to provide the simple interface
+ * Wraps the application's LLMProvider to provide the interface
  * needed by the agentic loop. Provider-agnostic: works with OpenRouter,
  * local models, etc.
  *
  * Key features:
- * - Native tool calling via `tools` parameter
- * - Structured outputs via `responseFormat.json_schema`
- * - No prompt splitting - accepts structured requests directly
+ * - Native tool calling via `completeWithTools()`
+ * - Fast/smart model selection
+ * - Automatic tool_calls parsing from provider response
  */
 
 import type { Logger } from '../../types/logger.js';
-import type { CognitionLLM, LLMOptions, StructuredRequest } from './agentic-loop.js';
-import type { LLMProvider as AppLLMProvider, Message, ModelRole } from '../../llm/provider.js';
+import type {
+  CognitionLLM,
+  LLMOptions,
+  SimpleCompletionRequest,
+  ToolCompletionRequest,
+  ToolCompletionResponse,
+} from './agentic-loop.js';
+import type { Message } from '../../llm/provider.js';
+import type { LLMProvider as AppLLMProvider, ModelRole } from '../../llm/provider.js';
 
 /**
  * Configuration for the LLM adapter.
@@ -51,7 +58,7 @@ const DEFAULT_CONFIG: LLMAdapterConfig = {
  * LLM Adapter implementation.
  *
  * Wraps the application's LLMProvider (which uses CompletionRequest/Response)
- * to provide the simpler CognitionLLM interface for the agentic loop.
+ * to provide the CognitionLLM interface for the agentic loop.
  */
 export class LLMAdapter implements CognitionLLM {
   private readonly provider: AppLLMProvider;
@@ -65,46 +72,30 @@ export class LLMAdapter implements CognitionLLM {
   }
 
   /**
-   * Complete a structured request and return the response.
+   * Simple text completion without tools.
+   * Used for summarization, classification, and other non-agentic tasks.
    *
-   * @param request Structured request with system/user prompts, tools, and response format
-   * @param options LLM options including useSmart for smart model retry
+   * @param request Simple request with system/user prompts
+   * @param options LLM options
    */
-  async complete(request: StructuredRequest, options?: LLMOptions): Promise<string> {
+  async complete(request: SimpleCompletionRequest, options?: LLMOptions): Promise<string> {
     const startTime = Date.now();
     const useSmart = options?.useSmart ?? false;
 
-    // Build system prompt with optional prefix
-    let systemPrompt = request.systemPrompt;
-    if (this.config.systemPromptPrefix) {
-      systemPrompt = this.config.systemPromptPrefix + '\n\n' + systemPrompt;
-    }
-
     const messages: Message[] = [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: request.systemPrompt },
       { role: 'user', content: request.userPrompt },
     ];
 
     try {
       const completionRequest: Parameters<typeof this.provider.complete>[0] = {
         messages,
-        maxTokens: options?.maxTokens ?? 2000,
+        maxTokens: options?.maxTokens ?? 1000,
         temperature: options?.temperature ?? this.config.temperature,
       };
 
-      // Add tools if provided (native tool calling)
-      if (request.tools && request.tools.length > 0) {
-        completionRequest.tools = request.tools;
-      }
-
-      // Add response format if provided (structured output)
-      if (request.responseFormat) {
-        completionRequest.responseFormat = request.responseFormat;
-      }
-
       // Select model based on useSmart flag
       if (useSmart) {
-        // Use smart model for retry
         if (this.config.smartModel) {
           completionRequest.model = this.config.smartModel;
         }
@@ -112,7 +103,6 @@ export class LLMAdapter implements CognitionLLM {
           completionRequest.role = this.config.smartRole;
         }
       } else {
-        // Use fast model for initial attempt
         if (this.config.model) {
           completionRequest.model = this.config.model;
         }
@@ -128,20 +118,102 @@ export class LLMAdapter implements CognitionLLM {
         {
           model: response.model,
           useSmart,
-          systemPromptLength: systemPrompt.length,
-          userPromptLength: request.userPrompt.length,
-          toolCount: request.tools?.length ?? 0,
-          responseLength: response.content.length,
+          responseLength: response.content?.length ?? 0,
+          duration,
+        },
+        'LLM simple completion done'
+      );
+
+      return response.content ?? '';
+    } catch (error) {
+      this.logger.error({ error, useSmart }, 'LLM simple completion failed');
+      throw error;
+    }
+  }
+
+  /**
+   * Complete a request with native tool calling support.
+   *
+   * @param request Request with messages, tools, and tool choice
+   * @param options LLM options including useSmart for smart model retry
+   */
+  async completeWithTools(
+    request: ToolCompletionRequest,
+    options?: LLMOptions
+  ): Promise<ToolCompletionResponse> {
+    const startTime = Date.now();
+    const useSmart = options?.useSmart ?? false;
+
+    try {
+      const completionRequest: Parameters<typeof this.provider.complete>[0] = {
+        messages: request.messages,
+        maxTokens: options?.maxTokens ?? 2000,
+        temperature: options?.temperature ?? this.config.temperature,
+        tools: request.tools,
+        toolChoice: request.toolChoice ?? 'required', // Default to required for agentic loop
+        parallelToolCalls: request.parallelToolCalls ?? false, // Default to sequential for determinism
+      };
+
+      // Select model based on useSmart flag
+      if (useSmart) {
+        if (this.config.smartModel) {
+          completionRequest.model = this.config.smartModel;
+        }
+        if (this.config.smartRole) {
+          completionRequest.role = this.config.smartRole;
+        }
+      } else {
+        if (this.config.model) {
+          completionRequest.model = this.config.model;
+        }
+        if (this.config.role) {
+          completionRequest.role = this.config.role;
+        }
+      }
+
+      const response = await this.provider.complete(completionRequest);
+
+      const duration = Date.now() - startTime;
+      this.logger.debug(
+        {
+          model: response.model,
+          useSmart,
+          messageCount: request.messages.length,
+          toolCount: request.tools.length,
+          responseContentLength: response.content?.length ?? 0,
+          toolCallCount: response.toolCalls?.length ?? 0,
+          finishReason: response.finishReason,
           duration,
           usage: response.usage,
         },
-        'LLM completion done'
+        'LLM completion with tools done'
       );
 
-      return response.content;
+      // Map to ToolCompletionResponse
+      return {
+        content: response.content,
+        toolCalls: response.toolCalls ?? [],
+        finishReason: this.mapFinishReason(response.finishReason),
+      };
     } catch (error) {
-      this.logger.error({ error, useSmart }, 'LLM completion failed');
+      this.logger.error({ error, useSmart }, 'LLM completion with tools failed');
       throw error;
+    }
+  }
+
+  /**
+   * Map provider finish reason to our expected values.
+   */
+  private mapFinishReason(reason: string | undefined): 'stop' | 'tool_calls' | 'length' | 'error' {
+    switch (reason) {
+      case 'stop':
+        return 'stop';
+      case 'tool_calls':
+        return 'tool_calls';
+      case 'length':
+        return 'length';
+      default:
+        return 'error';
     }
   }
 

@@ -1,24 +1,35 @@
 import type { Logger } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
-import type { CompletionRequest, CompletionResponse } from '../../llm/provider.js';
+import type { CompletionRequest, CompletionResponse, ToolCall } from '../../llm/provider.js';
 import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
 
 /**
  * OpenAI-compatible API response types.
  */
+interface OpenAIToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 interface OpenAIResponse {
   id: string;
-  object: string;
-  created: number;
+  object?: string;
+  created?: number;
   model: string;
   choices: {
-    index: number;
+    index?: number;
     message: {
       role: string;
-      content: string;
+      content: string | null;
       /** For "thinking" models that separate reasoning from final answer */
       reasoning_content?: string;
+      /** Tool calls requested by the model */
+      tool_calls?: OpenAIToolCall[];
     };
     finish_reason: string;
   }[];
@@ -32,7 +43,8 @@ interface OpenAIResponse {
 /**
  * OpenAI-compatible provider configuration.
  *
- * Works with any server that implements the OpenAI API format:
+ * Base configuration for any server that implements the OpenAI API format:
+ * - OpenRouter
  * - LM Studio
  * - Ollama (with OpenAI compatibility)
  * - LocalAI
@@ -41,54 +53,73 @@ interface OpenAIResponse {
  * - Any other OpenAI-compatible server
  */
 export interface OpenAICompatibleConfig {
-  /** Base URL of the server (e.g., http://localhost:1234) */
+  /** Base URL of the server (e.g., http://localhost:1234 or https://openrouter.ai/api) */
   baseUrl: string;
 
-  /** Model to use (required for most servers) */
-  model: string;
+  /** Default model to use when role not specified */
+  defaultModel: string;
 
-  /** Optional API key (some servers require it) */
+  /** Fast model for classification, yes/no, emotion detection (cheap) */
+  fastModel?: string;
+
+  /** Smart model for composition, reasoning (expensive) */
+  smartModel?: string;
+
+  /** Optional API key */
   apiKey?: string;
 
   /** Provider name for logging (default: 'openai-compatible') */
   name?: string;
 
-  /** Request timeout in ms (default: 60000 for local models) */
+  /** Request timeout in ms (default: 60000) */
   timeout?: number;
 
-  /** Max retries for retryable errors (default: 1) */
+  /** Max retries for retryable errors (default: 2) */
   maxRetries?: number;
 
-  /** Retry delay in ms (default: 500) */
+  /** Retry delay in ms (default: 1000) */
   retryDelay?: number;
 
-  /** Enable thinking/reasoning mode for models that support it (default: true) */
+  /** Circuit breaker reset timeout in ms (default: 60000) */
+  circuitResetTimeout?: number;
+
+  /** Enable thinking/reasoning mode for models that support it (default: false) */
   enableThinking?: boolean;
 }
 
 const DEFAULT_CONFIG = {
   name: 'openai-compatible',
-  timeout: 60_000, // Local models can be slower
-  maxRetries: 1,
-  retryDelay: 500,
-  enableThinking: false, // Disabled by default for fast cognition (saves tokens)
+  timeout: 60_000,
+  maxRetries: 2,
+  retryDelay: 1000,
+  circuitResetTimeout: 60_000,
+  enableThinking: false,
 };
 
 /**
  * OpenAI-compatible LLM provider.
  *
- * Provides access to any server that implements the OpenAI chat completions API.
- * Includes circuit breaker and retry logic.
+ * Base class for all providers that implement the OpenAI chat completions API.
+ * Handles:
+ * - Fast/smart model selection
+ * - Native tool calling (tool_calls parsing)
+ * - Response format (JSON mode, JSON schema)
+ * - Circuit breaker and retry logic
+ *
+ * Extend this class for provider-specific customizations (headers, defaults).
  */
 export class OpenAICompatibleProvider extends BaseLLMProvider {
   readonly name: string;
 
-  private readonly config: Required<
-    Pick<OpenAICompatibleConfig, 'baseUrl' | 'model' | 'timeout' | 'maxRetries' | 'retryDelay'>
+  protected readonly config: Required<
+    Pick<
+      OpenAICompatibleConfig,
+      'baseUrl' | 'defaultModel' | 'timeout' | 'maxRetries' | 'retryDelay' | 'circuitResetTimeout'
+    >
   > &
     OpenAICompatibleConfig;
-  private readonly providerLogger?: Logger | undefined;
-  private readonly circuitBreaker: CircuitBreaker;
+  protected readonly providerLogger?: Logger | undefined;
+  protected readonly circuitBreaker: CircuitBreaker;
 
   constructor(config: OpenAICompatibleConfig, logger?: Logger) {
     super(logger);
@@ -99,7 +130,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
       name: this.name,
       maxFailures: 3,
-      resetTimeout: 30_000, // 30 seconds for local
+      resetTimeout: this.config.circuitResetTimeout,
       timeout: this.config.timeout,
     };
     if (this.providerLogger) {
@@ -108,7 +139,12 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     this.circuitBreaker = createCircuitBreaker(circuitConfig);
 
     this.providerLogger?.info(
-      { baseUrl: this.config.baseUrl, model: this.config.model },
+      {
+        baseUrl: this.config.baseUrl,
+        defaultModel: this.config.defaultModel,
+        fastModel: this.config.fastModel,
+        smartModel: this.config.smartModel,
+      },
       `${this.name} provider initialized`
     );
   }
@@ -117,7 +153,27 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
    * Check if provider is configured.
    */
   isAvailable(): boolean {
-    return Boolean(this.config.baseUrl && this.config.model);
+    return Boolean(this.config.baseUrl && this.config.defaultModel);
+  }
+
+  /**
+   * Get the model to use based on role or explicit model.
+   */
+  protected getModel(request: CompletionRequest): string {
+    // Explicit model takes precedence
+    if (request.model) {
+      return request.model;
+    }
+
+    // Select based on role
+    switch (request.role) {
+      case 'fast':
+        return this.config.fastModel ?? this.config.defaultModel;
+      case 'smart':
+        return this.config.smartModel ?? this.config.defaultModel;
+      default:
+        return this.config.defaultModel;
+    }
   }
 
   /**
@@ -125,11 +181,13 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
    */
   protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
     if (!this.isAvailable()) {
-      throw new LLMError(`${this.name} not configured (missing baseUrl or model)`, this.name);
+      throw new LLMError(
+        `${this.name} not configured (missing baseUrl or defaultModel)`,
+        this.name
+      );
     }
 
-    // Use explicit model from request or configured model
-    const model = request.model ?? this.config.model;
+    const model = this.getModel(request);
 
     return this.circuitBreaker.execute(async () => {
       return this.executeWithRetry(async () => {
@@ -141,7 +199,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
   /**
    * Execute with retry logic.
    */
-  private async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+  protected async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
@@ -168,37 +226,58 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
   }
 
   /**
-   * Perform the actual HTTP request to the OpenAI-compatible API.
+   * Build the API endpoint URL.
+   * Override in subclasses if needed.
    */
-  private async executeRequest(
-    request: CompletionRequest,
-    model: string
-  ): Promise<CompletionResponse> {
-    // Normalize baseUrl (remove trailing slash)
+  protected getApiUrl(): string {
     const baseUrl = this.config.baseUrl.replace(/\/$/, '');
-    const url = `${baseUrl}/v1/chat/completions`;
+    return `${baseUrl}/v1/chat/completions`;
+  }
 
+  /**
+   * Build request headers.
+   * Override in subclasses to add provider-specific headers.
+   */
+  protected buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    // Add API key if provided
     if (this.config.apiKey) {
       headers['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
+    return headers;
+  }
+
+  /**
+   * Build the request body.
+   * Override in subclasses to add provider-specific fields.
+   */
+  protected buildRequestBody(request: CompletionRequest, model: string): Record<string, unknown> {
     const body: Record<string, unknown> = {
       model,
-      messages: request.messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
+      messages: request.messages.map((m) => {
+        const msg: Record<string, unknown> = {
+          role: m.role,
+          content: m.content,
+        };
+        // Include tool_calls for assistant messages
+        if (m.tool_calls && m.tool_calls.length > 0) {
+          msg['tool_calls'] = m.tool_calls;
+        }
+        // Include tool_call_id for tool result messages
+        if (m.tool_call_id) {
+          msg['tool_call_id'] = m.tool_call_id;
+        }
+        return msg;
+      }),
       max_tokens: request.maxTokens,
       temperature: request.temperature,
       stop: request.stop,
     };
 
-    // Disable thinking/reasoning mode if configured (LM Studio, etc.)
+    // Thinking mode (for models that support it)
     if (this.config.enableThinking === false) {
       body['enable_thinking'] = false;
     }
@@ -207,6 +286,8 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     if (request.tools && request.tools.length > 0) {
       body['tools'] = request.tools;
       body['tool_choice'] = request.toolChoice ?? 'auto';
+      // Disable parallel tool calls for deterministic behavior and strict mode compatibility
+      body['parallel_tool_calls'] = request.parallelToolCalls ?? false;
     }
 
     // Add response_format if specified (for JSON mode)
@@ -220,6 +301,20 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         body['response_format'] = { type: request.responseFormat.type };
       }
     }
+
+    return body;
+  }
+
+  /**
+   * Perform the actual HTTP request to the OpenAI-compatible API.
+   */
+  protected async executeRequest(
+    request: CompletionRequest,
+    model: string
+  ): Promise<CompletionResponse> {
+    const url = this.getApiUrl();
+    const headers = this.buildHeaders();
+    const body = this.buildRequestBody(request, model);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
@@ -251,42 +346,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       }
 
       const data = (await response.json()) as OpenAIResponse;
-
-      const firstChoice = data.choices[0];
-      if (!firstChoice) {
-        throw new LLMError(`Invalid response from ${this.name}`, this.name);
-      }
-
-      // For "thinking" models: if content is empty but reasoning_content exists,
-      // use reasoning_content as fallback (the model spent all tokens on reasoning)
-      let content = firstChoice.message.content;
-      if (!content && firstChoice.message.reasoning_content) {
-        this.providerLogger?.warn(
-          { finishReason: firstChoice.finish_reason },
-          'Using reasoning_content as fallback (content was empty)'
-        );
-        content = firstChoice.message.reasoning_content;
-      }
-
-      const result: CompletionResponse = {
-        content,
-        model: data.model,
-      };
-
-      const finishReason = this.mapFinishReason(firstChoice.finish_reason);
-      if (finishReason) {
-        result.finishReason = finishReason;
-      }
-
-      if (data.usage) {
-        result.usage = {
-          promptTokens: data.usage.prompt_tokens,
-          completionTokens: data.usage.completion_tokens,
-          totalTokens: data.usage.total_tokens,
-        };
-      }
-
-      return result;
+      return this.parseResponse(data);
     } catch (error) {
       clearTimeout(timeoutId);
 
@@ -304,21 +364,78 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         errorMessage.includes('ECONNREFUSED') || errorMessage.includes('fetch failed');
 
       throw new LLMError(`Network error: ${errorMessage}`, this.name, {
-        retryable: !isConnectionError, // Don't retry if server is down
+        retryable: !isConnectionError,
       });
     }
   }
 
   /**
+   * Parse the API response into our format.
+   */
+  protected parseResponse(data: OpenAIResponse): CompletionResponse {
+    const firstChoice = data.choices[0];
+    if (!firstChoice) {
+      throw new LLMError(`Invalid response from ${this.name}`, this.name);
+    }
+
+    // For "thinking" models: if content is empty but reasoning_content exists,
+    // use reasoning_content as fallback
+    let content = firstChoice.message.content;
+    if (!content && firstChoice.message.reasoning_content) {
+      this.providerLogger?.warn(
+        { finishReason: firstChoice.finish_reason },
+        'Using reasoning_content as fallback (content was empty)'
+      );
+      content = firstChoice.message.reasoning_content;
+    }
+
+    const result: CompletionResponse = {
+      content,
+      model: data.model,
+    };
+
+    // Parse tool_calls if present (native tool calling)
+    if (firstChoice.message.tool_calls && firstChoice.message.tool_calls.length > 0) {
+      result.toolCalls = firstChoice.message.tool_calls.map(
+        (tc): ToolCall => ({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          },
+        })
+      );
+    }
+
+    const finishReason = this.mapFinishReason(firstChoice.finish_reason);
+    if (finishReason) {
+      result.finishReason = finishReason;
+    }
+
+    if (data.usage) {
+      result.usage = {
+        promptTokens: data.usage.prompt_tokens,
+        completionTokens: data.usage.completion_tokens,
+        totalTokens: data.usage.total_tokens,
+      };
+    }
+
+    return result;
+  }
+
+  /**
    * Map finish reason to our format.
    */
-  private mapFinishReason(
+  protected mapFinishReason(
     reason: string
-  ): 'stop' | 'length' | 'content_filter' | 'error' | undefined {
+  ): 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'error' | undefined {
     switch (reason) {
       case 'stop':
       case 'eos': // Some local models use this
         return 'stop';
+      case 'tool_calls':
+        return 'tool_calls';
       case 'length':
       case 'max_tokens':
         return 'length';
@@ -332,7 +449,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
   /**
    * Sleep for the specified duration.
    */
-  private sleep(ms: number): Promise<void> {
+  protected sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 

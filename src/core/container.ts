@@ -234,7 +234,7 @@ function createLLMProvider(
     localProvider = createOpenAICompatibleProvider(
       {
         baseUrl: localBaseUrl,
-        model: localModel,
+        defaultModel: localModel,
         name: 'local',
         enableThinking: false,
       },

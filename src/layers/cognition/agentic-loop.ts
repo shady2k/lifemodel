@@ -1,15 +1,15 @@
 /**
  * COGNITION Agentic Loop
  *
- * Executes the think → tool → think cycle until natural conclusion.
+ * Executes the think → tool → think cycle until natural conclusion using native OpenAI tool calling.
  * Handles tool execution, state updates, and escalation decisions.
  *
- * Flow:
- * 1. Build prompt with context
- * 2. Call LLM, get CognitionOutput
- * 3. Execute any tool calls
- * 4. If needsToolResult → inject results, go to step 2
- * 5. If respond/noAction/defer → compile to intents, return
+ * Flow (native tool calling):
+ * 1. Build messages with system prompt and user context
+ * 2. Call LLM with tools parameter (tool_choice: "required")
+ * 3. If tool_calls returned → execute tools, add results as tool messages
+ * 4. If core.final called → parse args, compile to intents, return
+ * 5. Loop until core.final or limits reached
  * 6. If low confidence and safe to retry → retry with smart model
  */
 
@@ -18,107 +18,67 @@ import type { Intent } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type {
-  CognitionOutput,
-  Step,
-  ToolStep,
   ToolResult,
   LoopConfig,
   LoopState,
   Terminal,
   StructuredFact,
+  ExecutedTool,
 } from '../../types/cognition.js';
-import {
-  DEFAULT_LOOP_CONFIG,
-  createLoopState,
-  COGNITION_SCHEMA_VERSION,
-  validateTerminal,
-} from '../../types/cognition.js';
+import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
-import type { ResponseFormat, JsonSchemaDefinition } from '../../llm/provider.js';
+import type { Message, ToolCall, ToolChoice } from '../../llm/provider.js';
+import type {
+  CoreFinalArgs,
+  RespondPayload,
+  NoActionPayload,
+  DeferPayload,
+} from './tools/core/index.js';
 
 /**
- * JSON Schema for CognitionOutput structured output.
- *
- * Used with response_format.json_schema to guide LLM output format.
- * This schema provides structure guidance; strict validation of terminal
- * types and required fields happens at parse time via validateTerminal().
- *
- * Note: strict is false for multi-provider compatibility. Some providers
- * don't support strict mode or complex oneOf schemas. Runtime validation
- * in parseOutput() catches any missing required fields.
+ * Request for LLM completion with native tool calling.
  */
-export const COGNITION_OUTPUT_SCHEMA: JsonSchemaDefinition = {
-  name: 'cognition_output',
-  strict: false, // Rely on runtime validation for type-specific required fields
-  schema: {
-    type: 'object',
-    properties: {
-      steps: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            type: { type: 'string', enum: ['think', 'tool'] },
-            id: { type: 'string' },
-            // parentId removed - system auto-assigns based on position
-            // think step fields
-            content: { type: 'string' },
-            // tool step fields
-            name: { type: 'string' },
-            args: { type: 'object', additionalProperties: true },
-          },
-          required: ['type', 'id'],
-        },
-      },
-      terminal: {
-        type: 'object',
-        properties: {
-          type: { type: 'string', enum: ['respond', 'noAction', 'defer', 'needsToolResult'] },
-          // respond fields
-          text: { type: 'string' },
-          // parentId removed - system auto-assigns (last step or trigger signal)
-          conversationStatus: {
-            type: 'string',
-            enum: ['active', 'awaiting_answer', 'closed', 'idle'],
-          },
-          confidence: { type: 'number', minimum: 0, maximum: 1 },
-          // noAction/defer fields
-          reason: { type: 'string' },
-          // defer fields
-          signalType: { type: 'string' },
-          deferHours: { type: 'number', minimum: 0 },
-          // needsToolResult fields
-          stepId: { type: 'string' },
-        },
-        required: ['type'],
-      },
-    },
-    required: ['steps', 'terminal'],
-  },
-};
+export interface ToolCompletionRequest {
+  /** Conversation messages (system, user, assistant, tool) */
+  messages: Message[];
+
+  /** Tools available for the model to call */
+  tools: OpenAIChatTool[];
+
+  /** Tool choice: 'auto', 'required', or force specific tool */
+  toolChoice?: ToolChoice;
+
+  /** Whether to allow parallel tool calls (default: false for deterministic behavior) */
+  parallelToolCalls?: boolean;
+}
 
 /**
- * Structured request for the LLM.
- * Separates system prompt (stable/cacheable) from user prompt (dynamic).
- * Includes native tools and response format for structured output.
+ * Response from LLM with native tool calling.
  */
-export interface StructuredRequest {
-  /** System prompt - stable, cacheable instructions */
+export interface ToolCompletionResponse {
+  /** Text content (chain-of-thought, can be null if only tool_calls) */
+  content: string | null;
+
+  /** Tool calls requested by the model */
+  toolCalls: ToolCall[];
+
+  /** Finish reason */
+  finishReason: 'stop' | 'tool_calls' | 'length' | 'error';
+}
+
+/**
+ * Simple completion request (for non-tool-calling use cases like summarization).
+ */
+export interface SimpleCompletionRequest {
+  /** System prompt */
   systemPrompt: string;
-
-  /** User prompt - dynamic per-request content */
+  /** User prompt */
   userPrompt: string;
-
-  /** Native tools available for the model to call */
-  tools?: OpenAIChatTool[];
-
-  /** Response format for structured output */
-  responseFormat?: ResponseFormat;
 }
 
 /**
@@ -126,11 +86,21 @@ export interface StructuredRequest {
  */
 export interface CognitionLLM {
   /**
-   * Call the LLM with a structured request and get output.
-   * @param request Structured request with system/user prompts, tools, response format
+   * Simple text completion without tools (for summarization, etc.)
+   * @param request Simple request with system/user prompts
+   * @param options LLM options
+   */
+  complete(request: SimpleCompletionRequest, options?: LLMOptions): Promise<string>;
+
+  /**
+   * Call the LLM with native tool calling support.
+   * @param request Request with messages, tools, and tool choice
    * @param options LLM options including useSmart for smart model retry
    */
-  complete(request: StructuredRequest, options?: LLMOptions): Promise<string>;
+  completeWithTools(
+    request: ToolCompletionRequest,
+    options?: LLMOptions
+  ): Promise<ToolCompletionResponse>;
 }
 
 export interface LLMOptions {
@@ -153,10 +123,10 @@ export interface AgentIdentityContext {
  * Previous attempt context for smart retry.
  */
 export interface PreviousAttempt {
-  /** Steps from first attempt */
-  steps: Step[];
   /** Tool results from first attempt (reuse, don't re-execute) */
   toolResults: ToolResult[];
+  /** Executed tools with their call IDs for message reconstruction */
+  executedTools: ExecutedTool[];
   /** Why we're retrying */
   reason: string;
 }
@@ -223,14 +193,8 @@ export interface LoopResult {
   /** Terminal state reached */
   terminal: Terminal;
 
-  /** All steps taken */
-  steps: Step[];
-
   /** Compiled intents to execute */
   intents: Intent[];
-
-  /** Steps that need escalation review (low confidence) */
-  pendingEscalation: Step[];
 
   /** Loop state for debugging */
   state: LoopState;
@@ -272,16 +236,11 @@ export class AgenticLoop {
   private needsDeepThinking(result: LoopResult): boolean {
     // Only respond terminal triggers retry consideration
     if (result.terminal.type !== 'respond') {
-      return false; // noAction, defer, needsToolResult - no retry needed
+      return false; // noAction, defer - no retry needed
     }
 
     // Check terminal confidence (now REQUIRED field)
     if (result.terminal.confidence < SMART_RETRY_CONFIDENCE_THRESHOLD) {
-      return true;
-    }
-
-    // Check for pending low-confidence updates
-    if (result.pendingEscalation.length > 0) {
       return true;
     }
 
@@ -307,7 +266,6 @@ export class AgenticLoop {
       {
         originalConfidence:
           firstResult.terminal.type === 'respond' ? firstResult.terminal.confidence : undefined,
-        pendingEscalation: firstResult.pendingEscalation.length,
       },
       'Retrying with smart model due to low confidence'
     );
@@ -316,8 +274,8 @@ export class AgenticLoop {
     const enrichedContext: LoopContext = {
       ...context,
       previousAttempt: {
-        steps: firstResult.steps,
         toolResults: firstResult.state.toolResults,
+        executedTools: firstResult.state.executedTools,
         reason: 'Low confidence, using deeper reasoning',
       },
     };
@@ -361,14 +319,12 @@ export class AgenticLoop {
   }
 
   /**
-   * Internal run implementation.
+   * Internal run implementation using native tool calling.
    * @param context Loop context
    * @param useSmart Whether to use smart model
    */
   private async runInternal(context: LoopContext, useSmart: boolean): Promise<LoopResult> {
     const state = createLoopState();
-    const toolResults: ToolResult[] = [];
-    const pendingEscalation: Step[] = [];
 
     this.logger.debug(
       {
@@ -380,26 +336,16 @@ export class AgenticLoop {
       'Agentic loop starting'
     );
 
-    // If retrying, pre-populate steps and tool results from previous attempt
-    // This allows the smart model to see what the fast model tried
+    // Build initial messages
+    const messages: Message[] = this.buildInitialMessages(context, useSmart);
+
+    // If retrying, add previous tool results as messages
     if (context.previousAttempt) {
-      // Add previous steps so they appear in the prompt
-      state.allSteps.push(...context.previousAttempt.steps);
-
-      // Add previous tool results (will be shown to LLM)
-      toolResults.push(...context.previousAttempt.toolResults);
-      state.toolResults.push(...context.previousAttempt.toolResults);
-
-      // Mark all previous tools as executed (they won't be re-run)
-      for (const result of context.previousAttempt.toolResults) {
-        state.executedTools.push({
-          stepId: result.stepId,
-          name: result.toolName,
-          args: {}, // Args not available from ToolResult, but not needed for tracking
-          hasSideEffects: this.toolRegistry.hasToolSideEffects(result.toolName),
-        });
-      }
+      this.addPreviousAttemptMessages(messages, context.previousAttempt, state);
     }
+
+    // Get tools in OpenAI format
+    const tools = this.toolRegistry.getToolsAsOpenAIFormat();
 
     while (!state.aborted) {
       // Check limits
@@ -421,148 +367,108 @@ export class AgenticLoop {
         break;
       }
 
-      // Build structured request
-      const request = this.buildRequest(context, state, toolResults, useSmart);
-
-      // Call LLM (use smart model if specified)
+      // Call LLM with native tool calling
       state.iteration++;
-      const rawOutput = await this.llm.complete(request, {
-        maxTokens: this.config.maxOutputTokens,
-        useSmart,
-      });
+      const response = await this.llm.completeWithTools(
+        {
+          messages,
+          tools,
+          toolChoice: state.forceRespond
+            ? { type: 'function', function: { name: 'core_final' } } // Force terminal
+            : 'required', // Always require at least one tool call
+          parallelToolCalls: false, // Sequential for determinism
+        },
+        {
+          maxTokens: this.config.maxOutputTokens,
+          useSmart,
+        }
+      );
 
-      // Parse output
-      const output = this.parseOutput(rawOutput, context.correlationId, context.triggerSignal.id);
-      if (!output) {
+      // Capture chain-of-thought if present
+      if (response.content) {
+        state.thoughts.push(response.content);
+      }
+
+      // No tool calls = error (model MUST use core.final with tool_choice: "required")
+      if (response.toolCalls.length === 0) {
+        this.logger.error({ finishReason: response.finishReason }, 'Model returned no tool calls');
         state.aborted = true;
-        state.abortReason = 'Failed to parse LLM output';
+        state.abortReason = 'Model returned no tool calls - expected core.final';
         break;
       }
 
-      // Track ALL executed tools by composite key (stepId:toolName) to handle ID reuse
-      // LLM sometimes reuses step IDs across different tools
-      // Note: We track all executions (success+failure) because the deduplication logic
-      // filters by (stepId:toolName) only, not args. Allowing "retries" would just
-      // re-execute the same args repeatedly. True retry would need args-aware identity.
-      const executedToolKeys = new Set(toolResults.map((r) => `${r.stepId}:${r.toolName}`));
-
-      // Add steps to state (deduplicate by composite key for tools, by id for others)
-      // This allows different tools with same stepId to coexist
-      const existingStepKeys = new Set(
-        state.allSteps.map((s) => (s.type === 'tool' ? `${s.id}:${s.name}` : s.id))
-      );
-      const newSteps = output.steps.filter((s) => {
-        const key = s.type === 'tool' ? `${s.id}:${s.name}` : s.id;
-        return !existingStepKeys.has(key);
+      // Add assistant message with tool calls to history
+      messages.push({
+        role: 'assistant',
+        content: response.content,
+        tool_calls: response.toolCalls,
       });
-      state.allSteps.push(...newSteps);
 
-      // Check for steps needing escalation
-      const escalationSteps = this.checkEscalation(output.steps);
-      pendingEscalation.push(...escalationSteps);
+      // Process tool calls (only one at a time due to parallel_tool_calls: false)
+      for (const toolCall of response.toolCalls) {
+        const toolName = unsanitizeToolName(toolCall.function.name);
+        let args: Record<string, unknown>;
 
-      // Find all pending tool steps (tools that haven't been executed yet)
-      const pendingToolSteps = state.allSteps.filter(
-        (s): s is ToolStep => s.type === 'tool' && !executedToolKeys.has(`${s.id}:${s.name}`)
-      );
-
-      // Handle terminal state
-      if (output.terminal.type === 'needsToolResult') {
-        // Find the PENDING tool with this stepId (first one not yet executed)
-        const needsResultTerminal = output.terminal;
-        const toolStep = pendingToolSteps.find((s) => s.id === needsResultTerminal.stepId);
-
-        if (toolStep) {
-          // Tool is pending - execute it
-          state.toolCallCount++;
-          const result = await this.executeTool(toolStep, context);
-          toolResults.push(result);
-          state.toolResults.push(result);
-
-          // Track executed tool with side effects info
-          // Use internal (unsanitized) name for registry lookup
-          const internalName = unsanitizeToolName(toolStep.name);
-          state.executedTools.push({
-            stepId: toolStep.id,
-            name: internalName,
-            args: toolStep.args,
-            hasSideEffects: this.toolRegistry.hasToolSideEffects(internalName),
-          });
-        } else {
-          // No pending tool with this stepId - might be already executed or doesn't exist
-          // Force LLM to respond instead of looping
-          this.logger.debug(
-            { stepId: needsResultTerminal.stepId },
-            'No pending tool found for stepId, forcing response'
+        try {
+          args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+        } catch {
+          this.logger.error(
+            { toolName, arguments: toolCall.function.arguments },
+            'Failed to parse tool arguments'
           );
-          state.forceRespond = true;
-        }
-
-        continue;
-      }
-
-      // For non-needsToolResult terminals: execute any pending tools first
-      // This handles the case where LLM returns tool steps with respond/noAction terminal
-      if (pendingToolSteps.length > 0) {
-        const pendingTool = pendingToolSteps[0];
-        if (pendingTool) {
-          this.logger.warn(
-            {
-              terminal: output.terminal.type,
-              pendingTools: pendingToolSteps.map((t) => t.name),
-              executing: pendingTool.name,
-            },
-            'LLM returned terminal with pending tools - executing tools first'
-          );
-
+          // Count toward tool call limit to prevent infinite loops on malformed JSON
           state.toolCallCount++;
-          const result = await this.executeTool(pendingTool, context);
-          toolResults.push(result);
-          state.toolResults.push(result);
-
-          // Track executed tool with side effects info
-          // Use internal (unsanitized) name for registry lookup
-          const internalPendingName = unsanitizeToolName(pendingTool.name);
-          state.executedTools.push({
-            stepId: pendingTool.id,
-            name: internalPendingName,
-            args: pendingTool.args,
-            hasSideEffects: this.toolRegistry.hasToolSideEffects(internalPendingName),
+          // Add error result and continue
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ error: 'Failed to parse arguments as JSON' }),
           });
-
-          // Continue loop so LLM can see tool result and provide proper response
           continue;
         }
+
+        // Check for terminal tool - DO NOT execute, just parse and return
+        if (toolName === 'core.final') {
+          this.logger.debug(
+            { type: args['type'], iterations: state.iteration, toolCalls: state.toolCallCount },
+            'Agentic loop completed via core.final'
+          );
+
+          const finalArgs: CoreFinalArgs = {
+            type: args['type'] as 'respond' | 'no_action' | 'defer',
+            payload: args['payload'] as CoreFinalArgs['payload'],
+          };
+          return this.buildFinalResult(finalArgs, state, context);
+        }
+
+        // Track for smart retry
+        state.executedTools.push({
+          toolCallId: toolCall.id,
+          name: toolName,
+          args,
+          hasSideEffects: this.toolRegistry.hasToolSideEffects(toolName),
+        });
+
+        // Execute non-terminal tool
+        state.toolCallCount++;
+        const result = await this.toolRegistry.execute({
+          toolCallId: toolCall.id,
+          name: toolName,
+          args,
+          context: this.buildToolContext(context),
+        });
+
+        state.toolResults.push(result);
+
+        // Add tool result to message history (OpenAI format)
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result.success ? result.data : { error: result.error }),
+        });
       }
 
-      // Terminal states: respond, noAction, defer (only when no pending tools)
-      this.logger.debug(
-        {
-          terminal: output.terminal.type,
-          iterations: state.iteration,
-          toolCalls: state.toolCallCount,
-          steps: state.allSteps.length,
-        },
-        'Agentic loop completed'
-      );
-
-      // Compile intents (from steps and tool results)
-      const intents = this.compileIntents(
-        state.allSteps,
-        output.terminal,
-        context,
-        state.toolResults
-      );
-
-      return {
-        success: true,
-        terminal: output.terminal,
-        steps: state.allSteps,
-        intents,
-        pendingEscalation,
-        state,
-        usedSmartRetry: useSmart,
-      };
+      // Continue loop - LLM will see tool results in next iteration
     }
 
     // Aborted - throw error to trigger smart retry at run() level
@@ -571,80 +477,229 @@ export class AgenticLoop {
       'Agentic loop aborted'
     );
 
-    // Throw error to let run() handle retry logic
     throw new Error(state.abortReason ?? 'Agentic loop aborted');
   }
 
   /**
-   * Build structured request for LLM.
-   *
-   * Separates system prompt (stable) from user prompt (dynamic) to optimize caching.
-   * Includes native tools and structured output schema.
+   * Build initial messages for the conversation.
    */
-  private buildRequest(
-    context: LoopContext,
-    state: LoopState,
-    toolResults: ToolResult[],
-    useSmart: boolean
-  ): StructuredRequest {
-    // System prompt (stable, cacheable)
+  private buildInitialMessages(context: LoopContext, useSmart: boolean): Message[] {
     const systemPrompt = this.buildSystemPrompt(context, useSmart);
+    const userPrompt = this.buildUserPrompt(context);
 
-    // User prompt sections (dynamic per-request)
-    const userSections: string[] = [];
+    return [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+  }
+
+  /**
+   * Build user prompt from context (trigger, history, etc.)
+   */
+  private buildUserPrompt(context: LoopContext, useSmart = false): string {
+    const sections: string[] = [];
 
     // User profile (stable facts)
     const userProfile = this.buildUserProfileSection(context);
     if (userProfile) {
-      userSections.push(userProfile);
+      sections.push(userProfile);
     }
 
-    // Runtime snapshot (conditional, 1-line)
+    // Runtime snapshot (conditional, for state-related queries)
     const runtimeSnapshot = this.buildRuntimeSnapshotSection(context, useSmart);
     if (runtimeSnapshot) {
-      userSections.push(runtimeSnapshot);
+      sections.push(runtimeSnapshot);
     }
 
     // Conversation history
     if (context.conversationHistory.length > 0) {
-      userSections.push(this.buildHistorySection(context.conversationHistory));
-    }
-
-    // Previous steps (if continuing)
-    if (state.allSteps.length > 0) {
-      userSections.push(this.buildPreviousStepsSection(state.allSteps, toolResults));
+      sections.push(this.buildHistorySection(context.conversationHistory));
     }
 
     // Current trigger
-    userSections.push(this.buildTriggerSection(context.triggerSignal, context));
+    sections.push(this.buildTriggerSection(context.triggerSignal, context));
 
-    // Force respond instruction (if tool already executed but LLM keeps asking)
-    if (state.forceRespond) {
-      userSections.push(this.buildForceRespondSection());
+    return sections.join('\n\n');
+  }
+
+  /**
+   * Add messages from previous attempt for smart retry.
+   * Reconstructs the assistant tool_calls and tool result messages so the
+   * retry model sees the full context of what was already executed.
+   */
+  private addPreviousAttemptMessages(
+    messages: Message[],
+    previousAttempt: PreviousAttempt,
+    state: LoopState
+  ): void {
+    // Add a system note about the retry
+    messages.push({
+      role: 'system',
+      content: `[Previous attempt with fast model - retrying with deeper reasoning. Reason: ${previousAttempt.reason}]`,
+    });
+
+    // Reconstruct tool call messages from previous attempt
+    // This is critical so the retry model sees what tools were called and their results
+    if (previousAttempt.executedTools.length > 0) {
+      // Build tool_calls array for the assistant message
+      const toolCalls: ToolCall[] = previousAttempt.executedTools.map((tool) => ({
+        id: tool.toolCallId,
+        type: 'function' as const,
+        function: {
+          name: tool.name.replace(/\./g, '_'), // Sanitize for API format
+          arguments: JSON.stringify(tool.args),
+        },
+      }));
+
+      // Add assistant message with tool calls
+      messages.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: toolCalls,
+      });
+
+      // Add tool result messages
+      for (const result of previousAttempt.toolResults) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: result.toolCallId,
+          content: JSON.stringify(result.success ? result.data : { error: result.error }),
+        });
+      }
     }
 
-    // Output format instructions (JSON format only, no tool docs)
-    userSections.push(this.buildOutputFormat());
+    // Mark all previous tools as executed (for side effect tracking)
+    for (const tool of previousAttempt.executedTools) {
+      state.executedTools.push(tool);
+    }
+    for (const result of previousAttempt.toolResults) {
+      state.toolResults.push(result);
+    }
+  }
 
+  /**
+   * Build tool context from loop context.
+   */
+  private buildToolContext(context: LoopContext): ToolContext {
     return {
-      systemPrompt,
-      userPrompt: userSections.join('\n\n'),
-      tools: this.toolRegistry.getToolsAsOpenAIFormat(),
-      responseFormat: {
-        type: 'json_schema',
-        json_schema: COGNITION_OUTPUT_SCHEMA,
-      },
+      recipientId: context.recipientId ?? '',
+      userId: context.userId,
+      correlationId: context.correlationId,
     };
   }
 
   /**
-   * Build force respond section.
+   * Build final result from core.final arguments.
    */
-  private buildForceRespondSection(): string {
-    return `## IMPORTANT
-The tool has already been executed and the result is shown above in Previous Steps.
-You MUST now provide a response to the user. Do NOT request the tool again.
-Use terminal type "respond" with your answer based on the tool result.`;
+  private buildFinalResult(
+    args: CoreFinalArgs,
+    state: LoopState,
+    context: LoopContext
+  ): LoopResult {
+    const terminal = this.buildTerminalFromFinalArgs(args);
+
+    // Compile intents from tool results and terminal
+    const intents = this.compileIntentsFromToolResults(terminal, context, state.toolResults);
+
+    return {
+      success: true,
+      terminal,
+      intents,
+      state,
+      usedSmartRetry: state.iteration > 1, // If we retried
+    };
+  }
+
+  /**
+   * Convert core.final args to Terminal type.
+   */
+  private buildTerminalFromFinalArgs(args: CoreFinalArgs): Terminal {
+    switch (args.type) {
+      case 'respond': {
+        const payload = args.payload as RespondPayload;
+        return {
+          type: 'respond',
+          text: payload.text,
+          conversationStatus: payload.conversationStatus,
+          confidence: payload.confidence,
+        };
+      }
+      case 'no_action': {
+        const payload = args.payload as NoActionPayload;
+        return {
+          type: 'noAction',
+          reason: payload.reason,
+        };
+      }
+      case 'defer': {
+        const payload = args.payload as DeferPayload;
+        return {
+          type: 'defer',
+          signalType: payload.signalType,
+          reason: payload.reason,
+          deferHours: payload.deferHours,
+        };
+      }
+      default:
+        throw new Error(`Unknown terminal type: ${String(args.type)}`);
+    }
+  }
+
+  /**
+   * Compile intents from tool results (new method for native tool calling).
+   */
+  private compileIntentsFromToolResults(
+    terminal: Terminal,
+    context: LoopContext,
+    toolResults: ToolResult[]
+  ): Intent[] {
+    const intents: Intent[] = [];
+
+    // Convert tool results to intents
+    for (const result of toolResults) {
+      // Handle core.thought specially (complex depth logic)
+      if (result.toolName === 'core.thought' && result.success) {
+        const thoughtIntent = this.thoughtToolResultToIntent(result, context);
+        if (thoughtIntent) {
+          intents.push(thoughtIntent);
+        }
+        continue;
+      }
+
+      // Handle all other tools via the typed map
+      const toolIntent = this.toolResultToIntent(result, context);
+      if (toolIntent) {
+        intents.push(toolIntent);
+      }
+    }
+
+    // Add response intent if terminal is respond
+    if (terminal.type === 'respond' && context.recipientId) {
+      intents.push({
+        type: 'SEND_MESSAGE',
+        payload: {
+          recipientId: context.recipientId,
+          text: terminal.text,
+          conversationStatus: terminal.conversationStatus,
+        },
+      });
+    }
+
+    // Add deferral intent if terminal is defer
+    if (terminal.type === 'defer') {
+      const deferMs = terminal.deferHours * 60 * 60 * 1000;
+
+      intents.push({
+        type: 'DEFER_SIGNAL',
+        payload: {
+          signalType: terminal.signalType,
+          deferMs,
+          reason: terminal.reason,
+        },
+      });
+    }
+
+    return intents;
   }
 
   private buildSystemPrompt(context: LoopContext, useSmart: boolean): string {
@@ -887,39 +942,6 @@ ${combined}`;
     return `## Recent Conversation\n${formatted}`;
   }
 
-  private buildPreviousStepsSection(steps: Step[], toolResults: ToolResult[]): string {
-    const lines: string[] = ['## Previous Steps (already executed, do not repeat)'];
-
-    for (const step of steps) {
-      if (step.type === 'think') {
-        lines.push(`[think] ${step.content}`);
-      } else {
-        // step.type === 'tool' (TypeScript narrowing)
-        // Match by both stepId AND toolName to handle ID reuse
-        const result = toolResults.find((r) => r.stepId === step.id && r.toolName === step.name);
-        if (result) {
-          // Tool was executed - show as completed with clear instruction
-          if (result.success) {
-            lines.push(`[tool:${step.name}] RESULT: ${JSON.stringify(result.data)}`);
-            lines.push(
-              `  ↳ Tool executed successfully. Use this result to formulate your response. Do NOT call this tool again.`
-            );
-          } else {
-            lines.push(`[tool:${step.name}] FAILED: ${result.error ?? 'Unknown error'}`);
-            lines.push(
-              `  ↳ Tool failed. Respond to user without this information or try a different approach.`
-            );
-          }
-        } else {
-          // Tool pending (shouldn't happen normally)
-          lines.push(`[tool:${step.name}] PENDING args=${JSON.stringify(step.args)}`);
-        }
-      }
-    }
-
-    return lines.join('\n');
-  }
-
   private buildTriggerSection(signal: Signal, context: LoopContext): string {
     const data = signal.data as Record<string, unknown> | undefined;
 
@@ -995,235 +1017,6 @@ Example defer terminal:
     return section;
   }
 
-  private buildOutputFormat(): string {
-    // Tool documentation removed - tools are now passed natively via the `tools` parameter
-    // The LLM will see full tool schemas in the API request
-
-    return `## Output Format
-
-Respond with valid JSON. Only two step types allowed:
-- "think": Chain-of-thought reasoning (observable, no side effects)
-- "tool": ALL mutations via tools (tracked, with feedback)
-
-{
-  "steps": [
-    { "type": "think", "id": "t1", "content": "reasoning..." },
-    { "type": "tool", "id": "tool1", "name": "<tool_name>", "args": { ... } }
-  ],
-  "terminal": { "type": "respond", "text": "...", "conversationStatus": "...", "confidence": 0.85 }
-}
-
-Terminal types:
-- "respond": Send message to user. ALL fields REQUIRED:
-  - text: The message to send
-  - conversationStatus: One of:
-    - "active": Mid-conversation, expect quick reply
-    - "awaiting_answer": Asked a question, waiting for response
-    - "closed": Said goodbye or user is busy - don't follow up
-    - "idle": Statement made, no question asked, OK to reach out later
-  - confidence: 0-1 (how confident you are in this response)
-    - 0.8-1.0: High confidence, proceed normally
-    - 0.6-0.8: Moderate confidence, acceptable
-    - Below 0.6: Uncertain - system will use deeper reasoning
-- "noAction": Internal processing complete, no user contact needed (tools still execute)
-- "defer": Don't act now, reconsider in deferHours - works for any signal type
-- "needsToolResult": Waiting for tool to complete
-
-IMPORTANT: If you include any tool step, use "needsToolResult" terminal to wait for the result before responding.
-
-Tool names are provided in the tools parameter. Use the EXACT tool name as shown (e.g., "core_memory", "core_time").
-If a tool returns an error with a "schema" field, use that schema to correct your parameters.`;
-  }
-
-  /**
-   * Parse LLM output to CognitionOutput.
-   * Throws on validation failure (caller should catch and retry with smart model).
-   */
-  private parseOutput(
-    raw: string,
-    correlationId: string,
-    triggerSignalId: string
-  ): CognitionOutput | null {
-    try {
-      // Extract JSON from response (handle markdown code blocks)
-      let jsonStr = raw;
-      const jsonMatch = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
-      if (jsonMatch?.[1]) {
-        jsonStr = jsonMatch[1];
-      }
-
-      const parsed = JSON.parse(jsonStr.trim()) as {
-        steps?: Step[];
-        terminal?: Terminal;
-      };
-
-      // Validate required fields
-      if (!parsed.terminal) {
-        this.logger.error({ raw: raw.slice(0, 500) }, 'LLM output missing terminal');
-        return null;
-      }
-
-      // Validate terminal has required fields based on type
-      try {
-        validateTerminal(parsed.terminal);
-      } catch (validationError) {
-        this.logger.warn(
-          {
-            error:
-              validationError instanceof Error ? validationError.message : String(validationError),
-            terminalType: (parsed.terminal as unknown as Record<string, unknown>)['type'],
-            terminal: parsed.terminal,
-          },
-          'Terminal validation failed, will retry with smart model'
-        );
-        // Return null to trigger smart retry
-        return null;
-      }
-
-      // Validate steps and auto-assign parentId based on position
-      const validatedSteps = this.validateSteps(parsed.steps ?? [], triggerSignalId);
-      if (validatedSteps === null) {
-        // Validation failed, will trigger smart retry
-        return null;
-      }
-
-      // Cross-validate: if terminal is needsToolResult, verify stepId exists in validated steps
-      if (parsed.terminal.type === 'needsToolResult') {
-        const stepId = parsed.terminal.stepId;
-        const stepExists = validatedSteps.some((s) => s.id === stepId && s.type === 'tool');
-        if (!stepExists) {
-          this.logger.warn(
-            { stepId, validStepIds: validatedSteps.map((s) => s.id) },
-            'needsToolResult references non-existent tool step, will retry with smart model'
-          );
-          return null;
-        }
-      }
-
-      return {
-        schemaVersion: COGNITION_SCHEMA_VERSION,
-        correlationId,
-        triggerSignalId,
-        steps: validatedSteps,
-        terminal: parsed.terminal,
-      };
-    } catch (error) {
-      this.logger.error({ error, raw: raw.slice(0, 500) }, 'Failed to parse LLM output');
-      return null;
-    }
-  }
-
-  /**
-   * Validate steps have required fields based on their type.
-   * Auto-assigns parentId based on position (system knows the chain).
-   *
-   * - think steps: must have id and content (string)
-   * - tool steps: must have id, name (string) and args (object)
-   *
-   * @param steps Raw steps from LLM
-   * @param triggerSignalId The signal that triggered this cognition cycle
-   * @returns Validated steps array or null if validation fails
-   */
-  private validateSteps(steps: unknown[], triggerSignalId: string): Step[] | null {
-    const validated: Step[] = [];
-
-    for (const step of steps) {
-      if (typeof step !== 'object' || step === null) {
-        this.logger.warn({ step }, 'Step is not an object, skipping');
-        continue;
-      }
-
-      const s = step as Record<string, unknown>;
-
-      // All steps must have id
-      if (typeof s['id'] !== 'string') {
-        this.logger.warn({ step }, 'Step missing id, skipping');
-        continue;
-      }
-
-      // Auto-assign parentId: first step → trigger signal, others → previous step
-      const lastValidated = validated[validated.length - 1];
-      const parentId = lastValidated ? lastValidated.id : triggerSignalId;
-
-      if (s['type'] === 'think') {
-        // Think steps must have content (can be empty string)
-        if (typeof s['content'] !== 'string') {
-          this.logger.warn({ step }, 'Think step missing content, adding empty');
-          s['content'] = '';
-        }
-        validated.push({
-          type: 'think',
-          id: s['id'],
-          parentId,
-          content: s['content'] as string,
-        });
-      } else if (s['type'] === 'tool') {
-        // Tool steps must have name and args
-        if (typeof s['name'] !== 'string') {
-          this.logger.warn({ step }, 'Tool step missing name, will retry with smart model');
-          return null; // Critical error - trigger smart retry
-        }
-        if (typeof s['args'] !== 'object' || s['args'] === null) {
-          this.logger.warn({ step }, 'Tool step missing args, defaulting to empty object');
-          s['args'] = {};
-        }
-        validated.push({
-          type: 'tool',
-          id: s['id'],
-          parentId,
-          name: s['name'],
-          args: s['args'] as Record<string, unknown>,
-        });
-      } else {
-        this.logger.warn({ stepType: s['type'] }, 'Unknown step type, skipping');
-        continue;
-      }
-    }
-
-    return validated;
-  }
-
-  /**
-   * Execute a tool step.
-   *
-   * Note: Tool names from the LLM may be sanitized (underscores instead of dots)
-   * because some API providers don't accept dots in tool names.
-   * We unsanitize before looking up in the registry.
-   */
-  private async executeTool(step: ToolStep, context: LoopContext): Promise<ToolResult> {
-    const toolContext: ToolContext = {
-      recipientId: context.recipientId ?? '',
-      userId: context.userId,
-      correlationId: context.correlationId,
-    };
-
-    // Unsanitize tool name: LLM returns "core_memory" but registry has "core.memory"
-    const internalToolName = unsanitizeToolName(step.name);
-
-    return this.toolRegistry.execute({
-      stepId: step.id,
-      name: internalToolName,
-      args: step.args,
-      context: toolContext,
-    });
-  }
-
-  /**
-   * Check which steps need escalation due to low confidence.
-   *
-   * With the two-element architecture, policy checks are done in the tools
-   * themselves. The tools return errors for policy violations, allowing
-   * the LLM to self-correct. Escalation is now triggered by:
-   * 1. Low confidence in the terminal "respond"
-   * 2. Tool policy violation errors (LLM can retry with corrected args)
-   */
-  private checkEscalation(_steps: Step[]): Step[] {
-    // With tool-based mutations, policy enforcement happens in tools.
-    // Tools return errors that the LLM can use to self-correct.
-    // Escalation is triggered by low terminal confidence, not step-level checks.
-    return [];
-  }
-
   /**
    * Typed mapping from tool results to intents.
    * Tools return validated payloads → this map converts them to Intents.
@@ -1285,7 +1078,7 @@ If a tool returns an error with a "schema" field, use that schema to correct you
               payload: data['eventContext'] as Record<string, unknown>,
             },
             delay: data['delayMs'] as number,
-            scheduleId: result.stepId,
+            scheduleId: result.toolCallId,
           },
         };
       }
@@ -1309,67 +1102,6 @@ If a tool returns an error with a "schema" field, use that schema to correct you
       default:
         return null;
     }
-  }
-
-  /**
-   * Compile tool results to intents.
-   *
-   * With the two-element architecture, all mutations go through tools.
-   * This method converts successful tool results into CoreLoop intents.
-   */
-  private compileIntents(
-    _steps: Step[],
-    terminal: Terminal,
-    context: LoopContext,
-    toolResults: ToolResult[]
-  ): Intent[] {
-    const intents: Intent[] = [];
-
-    // Convert tool results to intents
-    for (const result of toolResults) {
-      // Handle core.thought specially (complex depth logic)
-      if (result.toolName === 'core.thought' && result.success) {
-        const thoughtIntent = this.thoughtToolResultToIntent(result, context);
-        if (thoughtIntent) {
-          intents.push(thoughtIntent);
-        }
-        continue;
-      }
-
-      // Handle all other tools via the typed map
-      const toolIntent = this.toolResultToIntent(result, context);
-      if (toolIntent) {
-        intents.push(toolIntent);
-      }
-    }
-
-    // Add response intent if terminal is respond
-    if (terminal.type === 'respond' && context.recipientId) {
-      intents.push({
-        type: 'SEND_MESSAGE',
-        payload: {
-          recipientId: context.recipientId,
-          text: terminal.text,
-          conversationStatus: terminal.conversationStatus,
-        },
-      });
-    }
-
-    // Add deferral intent if terminal is defer
-    if (terminal.type === 'defer') {
-      const deferMs = terminal.deferHours * 60 * 60 * 1000;
-
-      intents.push({
-        type: 'DEFER_SIGNAL',
-        payload: {
-          signalType: terminal.signalType,
-          deferMs,
-          reason: terminal.reason,
-        },
-      });
-    }
-
-    return intents;
   }
 
   /**
@@ -1407,7 +1139,7 @@ If a tool returns an error with a "schema" field, use that schema to correct you
     } else {
       // Not triggered by thought - this is a root thought from conversation/other
       depth = 0;
-      rootId = `thought_${result.stepId}`;
+      rootId = `thought_${result.toolCallId}`;
       parentId = undefined;
       triggerSource = context.triggerSignal.type === 'user_message' ? 'conversation' : 'memory';
     }
