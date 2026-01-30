@@ -620,6 +620,9 @@ export class CoreLoop {
   private processUserMessageSignal(signal: Signal): void {
     // Note: Ack clearing is now handled by ThresholdEngine when it sees user_message
 
+    // User responded - this is positive feedback (recharges energy, reduces social debt)
+    this.agent.onPositiveFeedback();
+
     // Update user model
     if (this.userModel) {
       this.userModel.processSignal('message_received');
@@ -858,6 +861,10 @@ export class CoreLoop {
                 // Use recipientId (not route.destination) for tracking - matches processResponseTiming
                 this.lastMessageRecipientId = recipientId;
                 this.metrics.counter('messages_sent', { channel: route.channel });
+
+                // Notify agent that message was sent (relieves social pressure)
+                this.agent.onMessageSent();
+
                 if (this.conversationManager) {
                   // Use recipientId as conversation key for consistency
                   void this.saveAgentMessage(recipientId, text, conversationStatus);

@@ -259,11 +259,18 @@ export class Agent {
   }
 
   /**
-   * Notify agent of a message sent (drains energy).
+   * Notify agent of a message sent (drains energy, relieves social pressure).
+   * Called when the agent proactively reaches out or responds.
    */
   onMessageSent(): void {
     this.energy.drain('message');
     this.state.energy = this.energy.getEnergy();
+
+    // Sending a message relieves social pressure significantly
+    // Like a human who calls their mom - the guilt is relieved by the act itself
+    this.setStateValue('socialDebt', this.state.socialDebt - 0.4);
+
+    this.logger.debug('Message sent - social debt relieved');
   }
 
   /**

@@ -8,6 +8,8 @@ import type { SignalAggregate, Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
 import { Priority } from '../../src/types/priority.js';
 import type { Logger } from '../../src/types/logger.js';
+import { createAgent, type Agent } from '../../src/core/agent.js';
+import { createMetrics } from '../../src/core/metrics.js';
 
 /**
  * Create a mock logger that captures all log calls.
@@ -163,4 +165,61 @@ export function createMockUserModel(beliefs: {
       mood,
     }),
   };
+}
+
+/**
+ * Create a mock channel for testing message sending.
+ */
+export function createMockChannel(options: {
+  name?: string;
+  sendSuccess?: boolean;
+  isAvailable?: boolean;
+} = {}) {
+  const { name = 'telegram', sendSuccess = true, isAvailable = true } = options;
+
+  return {
+    name,
+    isAvailable: vi.fn().mockReturnValue(isAvailable),
+    sendMessage: vi.fn().mockResolvedValue(sendSuccess),
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+/**
+ * Create a mock recipient registry for testing recipient resolution.
+ */
+export function createMockRecipientRegistry(options: {
+  channel?: string;
+  destination?: string;
+  resolveSuccess?: boolean;
+} = {}) {
+  const { channel = 'telegram', destination = '123456', resolveSuccess = true } = options;
+
+  return {
+    resolve: vi.fn().mockReturnValue(
+      resolveSuccess ? { channel, destination } : null
+    ),
+    register: vi.fn(),
+    unregister: vi.fn(),
+    list: vi.fn().mockReturnValue([]),
+  };
+}
+
+/**
+ * Create a test agent with mocked dependencies.
+ * Returns both the agent and mocked dependencies for verification.
+ */
+export function createTestAgent(options: {
+  initialState?: Partial<AgentState>;
+} = {}): { agent: Agent; logger: ReturnType<typeof createMockLogger>; metrics: ReturnType<typeof createMetrics> } {
+  const logger = createMockLogger();
+  const metrics = createMetrics();
+
+  const agent = createAgent(
+    { logger: logger as any, metrics },
+    { initialState: options.initialState }
+  );
+
+  return { agent, logger, metrics };
 }
