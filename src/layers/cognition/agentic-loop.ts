@@ -738,8 +738,22 @@ export class AgenticLoop {
           ? 'Use masculine grammatical forms in gendered languages (e.g., Russian: "рад", "готов").'
           : 'Use neutral grammatical forms when possible.';
 
+    // Current time for temporal reasoning (age calculations, time-of-day awareness)
+    const now = new Date();
+    const currentDateTime = now.toLocaleString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    });
+
     return `You are ${agentName} (${agentGender}). Values: ${values}
 ${genderNote}
+
+Current time: ${currentDateTime}
 
 Capabilities: think → use tools → update beliefs (with evidence) → respond
 
@@ -757,17 +771,7 @@ Rules:
 - If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).`
     }
 
-REMEMBERING FACTS:
-Use core.remember for all facts. For important facts, include provenance:
-- "November 9 (user said)" → high confidence (user_quote)
-- "November 9 (explicitly stated)" → high confidence (user_explicit)
-- "likes coffee (mentioned)" → medium confidence (user_implicit)
-- "prefers mornings (inferred)" → lower confidence
-
-Examples:
-- core.remember({ subject: "user", attribute: "birthday", value: "November 9 (user said)" })
-- core.remember({ subject: "user", attribute: "preference", value: "dark mode" })
-- core.remember({ subject: "hiking", attribute: "plan", value: "next weekend trip" })`;
+MEMORY: When user shares personal facts (birthday, name, preferences), use core.remember to save them.`;
   }
 
   private buildUserProfileSection(context: LoopContext): string | null {
