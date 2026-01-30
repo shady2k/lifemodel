@@ -739,8 +739,12 @@ export class AgenticLoop {
           : 'Use neutral grammatical forms when possible.';
 
     // Current time for temporal reasoning (age calculations, time-of-day awareness)
+    // Priority: defaultTimezone (IANA) > timezoneOffset > server timezone
+    const userTimezone = context.userModel['defaultTimezone'] as string | undefined;
+    const timezoneOffset = context.userModel['timezoneOffset'] as number | null | undefined;
+
     const now = new Date();
-    const currentDateTime = now.toLocaleString('en-US', {
+    const dateTimeOptions: Intl.DateTimeFormatOptions = {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
@@ -748,7 +752,26 @@ export class AgenticLoop {
       hour: '2-digit',
       minute: '2-digit',
       timeZoneName: 'short',
-    });
+    };
+
+    // Use IANA timezone if available
+    if (userTimezone) {
+      dateTimeOptions.timeZone = userTimezone;
+    }
+
+    let currentDateTime = now.toLocaleString('en-US', dateTimeOptions);
+
+    // If no IANA timezone but we have offset, append user's local time
+    if (!userTimezone && timezoneOffset != null) {
+      const userTime = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1000);
+      const userTimeStr = userTime.toLocaleString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+      const offsetStr = timezoneOffset >= 0 ? `+${String(timezoneOffset)}` : String(timezoneOffset);
+      currentDateTime += ` (user's local time: ${userTimeStr} UTC${offsetStr})`;
+    }
 
     return `You are ${agentName} (${agentGender}). Values: ${values}
 ${genderNote}
