@@ -100,7 +100,13 @@ export function createFinalTool(): Tool {
     {
       name: 'conversationStatus',
       type: 'string',
-      description: 'Status: active | awaiting_answer | closed | idle (required for respond)',
+      enum: ['active', 'awaiting_answer', 'closed', 'idle'],
+      description:
+        'Conversation status for follow-up timing. ' +
+        'awaiting_answer: you asked a question, waiting for reply (follow-up in 3 min). ' +
+        'active: mid-conversation, no specific question (30 min). ' +
+        'idle: natural pause, made a statement (30 min). ' +
+        'closed: farewell or user busy (4 hours).',
       required: false,
     },
     {

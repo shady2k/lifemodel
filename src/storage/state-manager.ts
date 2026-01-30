@@ -136,13 +136,13 @@ export class StateManager {
     const hash = this.computeHash(serialized);
 
     if (hash === this.lastSavedHash) {
-      this.logger.debug('State unchanged, skipping save');
+      this.logger.trace('State unchanged, skipping save');
       return false;
     }
 
     await this.storage.save(this.config.stateKey, JSON.parse(serialized));
     this.lastSavedHash = hash;
-    this.logger.debug({ savedAt: state.savedAt }, 'State saved');
+    this.logger.trace({ savedAt: state.savedAt }, 'State saved (auto)');
     return true;
   }
 
