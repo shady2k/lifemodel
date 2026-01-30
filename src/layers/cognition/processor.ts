@@ -341,9 +341,12 @@ export class CognitionProcessor implements CognitionLayer {
         return;
       }
 
-      const prompt = `Summarize the key facts from this conversation in 2-3 sentences:\n${toCompact.map((m) => `${m.role}: ${m.content}`).join('\n')}`;
+      const conversationText = toCompact.map((m) => `${m.role}: ${m.content}`).join('\n');
 
-      const summary = await this.cognitionLLM.complete(prompt);
+      const summary = await this.cognitionLLM.complete({
+        systemPrompt: 'You are a helpful assistant that summarizes conversations.',
+        userPrompt: `Summarize the key facts from this conversation in 2-3 sentences:\n${conversationText}`,
+      });
       await this.conversationManager.compact(chatId, summary);
 
       this.logger.info({ chatId, messageCount: toCompact.length }, 'Conversation compacted');

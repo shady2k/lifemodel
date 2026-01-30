@@ -25,11 +25,11 @@ import type {
   LoopConfig,
   LoopState,
   Terminal,
+  StructuredFact,
 } from '../../types/cognition.js';
 import {
   DEFAULT_LOOP_CONFIG,
   createLoopState,
-  getFieldPolicy,
   COGNITION_SCHEMA_VERSION,
   validateTerminal,
 } from '../../types/cognition.js';
@@ -37,17 +37,99 @@ import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
+import type { OpenAIChatTool } from '../../llm/tool-schema.js';
+import type { ResponseFormat, JsonSchemaDefinition } from '../../llm/provider.js';
+
+/**
+ * JSON Schema for CognitionOutput structured output.
+ *
+ * Used with response_format.json_schema to guide LLM output format.
+ * This schema provides structure guidance; strict validation of terminal
+ * types and required fields happens at parse time via validateTerminal().
+ *
+ * Note: strict is false for multi-provider compatibility. Some providers
+ * don't support strict mode or complex oneOf schemas. Runtime validation
+ * in parseOutput() catches any missing required fields.
+ */
+export const COGNITION_OUTPUT_SCHEMA: JsonSchemaDefinition = {
+  name: 'cognition_output',
+  strict: false, // Rely on runtime validation for type-specific required fields
+  schema: {
+    type: 'object',
+    properties: {
+      steps: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['think', 'tool'] },
+            id: { type: 'string' },
+            parentId: { type: 'string' },
+            // think step fields
+            content: { type: 'string' },
+            // tool step fields
+            name: { type: 'string' },
+            args: { type: 'object', additionalProperties: true },
+          },
+          required: ['type', 'id', 'parentId'],
+        },
+      },
+      terminal: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['respond', 'noAction', 'defer', 'needsToolResult'] },
+          // respond fields
+          text: { type: 'string' },
+          parentId: { type: 'string' },
+          conversationStatus: {
+            type: 'string',
+            enum: ['active', 'awaiting_answer', 'closed', 'idle'],
+          },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+          // noAction/defer fields
+          reason: { type: 'string' },
+          // defer fields
+          signalType: { type: 'string' },
+          deferHours: { type: 'number', minimum: 0 },
+          // needsToolResult fields
+          stepId: { type: 'string' },
+        },
+        required: ['type'],
+      },
+    },
+    required: ['steps', 'terminal'],
+  },
+};
+
+/**
+ * Structured request for the LLM.
+ * Separates system prompt (stable/cacheable) from user prompt (dynamic).
+ * Includes native tools and response format for structured output.
+ */
+export interface StructuredRequest {
+  /** System prompt - stable, cacheable instructions */
+  systemPrompt: string;
+
+  /** User prompt - dynamic per-request content */
+  userPrompt: string;
+
+  /** Native tools available for the model to call */
+  tools?: OpenAIChatTool[];
+
+  /** Response format for structured output */
+  responseFormat?: ResponseFormat;
+}
 
 /**
  * LLM interface for the agentic loop.
  */
 export interface CognitionLLM {
   /**
-   * Call the LLM with a prompt and get structured output.
-   * @param prompt The prompt to complete
+   * Call the LLM with a structured request and get output.
+   * @param request Structured request with system/user prompts, tools, response format
    * @param options LLM options including useSmart for smart model retry
    */
-  complete(prompt: string, options?: LLMOptions): Promise<string>;
+  complete(request: StructuredRequest, options?: LLMOptions): Promise<string>;
 }
 
 export interface LLMOptions {
@@ -338,12 +420,12 @@ export class AgenticLoop {
         break;
       }
 
-      // Build prompt
-      const prompt = this.buildPrompt(context, state, toolResults);
+      // Build structured request
+      const request = this.buildRequest(context, state, toolResults, useSmart);
 
       // Call LLM (use smart model if specified)
       state.iteration++;
-      const rawOutput = await this.llm.complete(prompt, {
+      const rawOutput = await this.llm.complete(request, {
         maxTokens: this.config.maxOutputTokens,
         useSmart,
       });
@@ -489,45 +571,78 @@ export class AgenticLoop {
   }
 
   /**
-   * Build prompt for LLM.
+   * Build structured request for LLM.
+   *
+   * Separates system prompt (stable) from user prompt (dynamic) to optimize caching.
+   * Includes native tools and structured output schema.
    */
-  private buildPrompt(context: LoopContext, state: LoopState, toolResults: ToolResult[]): string {
-    const sections: string[] = [];
+  private buildRequest(
+    context: LoopContext,
+    state: LoopState,
+    toolResults: ToolResult[],
+    useSmart: boolean
+  ): StructuredRequest {
+    // System prompt (stable, cacheable)
+    const systemPrompt = this.buildSystemPrompt(context, useSmart);
 
-    // System instruction (includes agent identity)
-    sections.push(this.buildSystemPrompt(context));
+    // User prompt sections (dynamic per-request)
+    const userSections: string[] = [];
 
-    // Current state
-    sections.push(this.buildStateSection(context));
+    // User profile (stable facts)
+    const userProfile = this.buildUserProfileSection(context);
+    if (userProfile) {
+      userSections.push(userProfile);
+    }
+
+    // Runtime snapshot (conditional, 1-line)
+    const runtimeSnapshot = this.buildRuntimeSnapshotSection(context, useSmart);
+    if (runtimeSnapshot) {
+      userSections.push(runtimeSnapshot);
+    }
 
     // Conversation history
     if (context.conversationHistory.length > 0) {
-      sections.push(this.buildHistorySection(context.conversationHistory));
+      userSections.push(this.buildHistorySection(context.conversationHistory));
     }
 
     // Previous steps (if continuing)
     if (state.allSteps.length > 0) {
-      sections.push(this.buildPreviousStepsSection(state.allSteps, toolResults));
+      userSections.push(this.buildPreviousStepsSection(state.allSteps, toolResults));
     }
 
     // Current trigger
-    sections.push(this.buildTriggerSection(context.triggerSignal, context));
+    userSections.push(this.buildTriggerSection(context.triggerSignal, context));
 
     // Force respond instruction (if tool already executed but LLM keeps asking)
     if (state.forceRespond) {
-      sections.push(`## IMPORTANT
-The tool has already been executed and the result is shown above in Previous Steps.
-You MUST now provide a response to the user. Do NOT request the tool again.
-Use terminal type "respond" with your answer based on the tool result.`);
+      userSections.push(this.buildForceRespondSection());
     }
 
-    // Output format
-    sections.push(this.buildOutputFormat());
+    // Output format instructions (JSON format only, no tool docs)
+    userSections.push(this.buildOutputFormat());
 
-    return sections.join('\n\n');
+    return {
+      systemPrompt,
+      userPrompt: userSections.join('\n\n'),
+      tools: this.toolRegistry.getToolsAsOpenAIFormat(),
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: COGNITION_OUTPUT_SCHEMA,
+      },
+    };
   }
 
-  private buildSystemPrompt(context: LoopContext): string {
+  /**
+   * Build force respond section.
+   */
+  private buildForceRespondSection(): string {
+    return `## IMPORTANT
+The tool has already been executed and the result is shown above in Previous Steps.
+You MUST now provide a response to the user. Do NOT request the tool again.
+Use terminal type "respond" with your answer based on the tool result.`;
+  }
+
+  private buildSystemPrompt(context: LoopContext, useSmart: boolean): string {
     const agentName = context.agentIdentity?.name ?? 'Life';
     const agentGender = context.agentIdentity?.gender ?? 'neutral';
     const values = context.agentIdentity?.values?.join(', ') ?? 'Be helpful and genuine';
@@ -549,41 +664,211 @@ Rules:
 - Don't re-greet if already greeted
 - User's name: only on first greeting or after long pauses, not every message
 - Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
-- Set confidence below 0.6 when uncertain about complex/sensitive topics`;
+- Set confidence below 0.6 when uncertain about complex/sensitive topics
+- State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.${
+      useSmart
+        ? ''
+        : `
+- If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).
+- Invalid JSON will be rejected; respond with valid JSON only.`
+    }`;
   }
 
-  private buildStateSection(context: LoopContext): string {
+  private buildUserProfileSection(context: LoopContext): string | null {
+    const { userModel } = context;
+
+    const name = typeof userModel['name'] === 'string' ? userModel['name'].trim() : '';
+    const lines: string[] = [];
+
+    if (name.length > 0) {
+      lines.push(`- name: ${name}`);
+    }
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    return `## User Profile (stable facts)
+${lines.join('\n')}
+NOTE: Use the user's name sparingly; check conversation history first.`;
+  }
+
+  private buildRuntimeSnapshotSection(context: LoopContext, useSmart: boolean): string | null {
+    if (!this.shouldIncludeRuntimeSnapshot(context, useSmart)) {
+      return null;
+    }
+
     const { agentState, userModel } = context;
+    const triggerText = this.getTriggerText(context.triggerSignal);
+    const scope = this.getRuntimeSnapshotScope(context, triggerText);
 
-    // Format user model values with explanations
-    const formatUserModelValue = (value: unknown): string => {
-      if (value === null || value === undefined) return 'unknown';
-      if (typeof value === 'number') {
-        // Convert 0-1 values to percentages
-        return `${(value * 100).toFixed(0)}%`;
-      }
-      if (typeof value === 'string') return value;
-      return 'unknown';
+    const agentParts: string[] = [];
+    const userParts: string[] = [];
+
+    if (scope.includeAgentEnergy) {
+      agentParts.push(`energy ${this.describeLevel(agentState.energy)}`);
+    }
+    if (scope.includeSocialDebt) {
+      agentParts.push(`socialDebt ${this.describeLevel(agentState.socialDebt)}`);
+    }
+    if (scope.includeTaskPressure) {
+      agentParts.push(`taskPressure ${this.describeLevel(agentState.taskPressure)}`);
+    }
+    if (scope.includeCuriosity) {
+      agentParts.push(`curiosity ${this.describeLevel(agentState.curiosity)}`);
+    }
+    if (scope.includeAcquaintancePressure) {
+      agentParts.push(
+        `acquaintancePressure ${this.describeLevel(agentState.acquaintancePressure)}`
+      );
+    }
+
+    const userEnergy = this.asNumber(userModel['energy']);
+    if (scope.includeUserEnergy && userEnergy !== null) {
+      userParts.push(`energy ${this.describeLevel(userEnergy)}`);
+    }
+    const userAvailability = this.asNumber(userModel['availability']);
+    if (scope.includeUserAvailability && userAvailability !== null) {
+      userParts.push(`availability ${this.describeLevel(userAvailability)}`);
+    }
+
+    if (agentParts.length === 0 && userParts.length === 0) {
+      return null;
+    }
+
+    const agentChunk = agentParts.length > 0 ? `Agent: ${agentParts.join(', ')}` : '';
+    const userChunk = userParts.length > 0 ? `User: ${userParts.join(', ')}` : '';
+    const combined = [agentChunk, userChunk].filter((part) => part.length > 0).join('; ');
+
+    return `## Runtime Snapshot
+${combined}`;
+  }
+
+  private shouldIncludeRuntimeSnapshot(context: LoopContext, useSmart: boolean): boolean {
+    const { agentState, userModel } = context;
+    const triggerText = this.getTriggerText(context.triggerSignal);
+    const isProactive = this.isProactiveTrigger(context.triggerSignal);
+    const isStateQuery = triggerText ? this.isStateQuery(triggerText) : false;
+
+    const agentExtreme =
+      agentState.energy < 0.35 ||
+      agentState.energy > 0.85 ||
+      agentState.socialDebt > 0.6 ||
+      agentState.taskPressure > 0.6 ||
+      agentState.acquaintancePressure > 0.6;
+
+    const userEnergy = this.asNumber(userModel['energy']);
+    const userAvailability = this.asNumber(userModel['availability']);
+    const userExtreme =
+      (userEnergy !== null && userEnergy < 0.35) ||
+      (userAvailability !== null && userAvailability < 0.35);
+
+    if (isProactive || isStateQuery || agentExtreme || userExtreme) {
+      return true;
+    }
+
+    // Cheap models benefit from more frequent state grounding (lower thresholds).
+    if (!useSmart) {
+      const cheapAgentExtreme =
+        agentState.energy < 0.45 ||
+        agentState.energy > 0.55 ||
+        agentState.socialDebt > 0.45 ||
+        agentState.taskPressure > 0.45;
+      if (cheapAgentExtreme) return true;
+    }
+
+    return false;
+  }
+
+  private getRuntimeSnapshotScope(
+    context: LoopContext,
+    triggerText: string | null
+  ): {
+    includeAgentEnergy: boolean;
+    includeSocialDebt: boolean;
+    includeTaskPressure: boolean;
+    includeCuriosity: boolean;
+    includeAcquaintancePressure: boolean;
+    includeUserEnergy: boolean;
+    includeUserAvailability: boolean;
+  } {
+    const isProactive = this.isProactiveTrigger(context.triggerSignal);
+    const isStateQuery = triggerText ? this.isStateQuery(triggerText) : false;
+    const isUserStateQuery = triggerText ? this.isUserStateQuery(triggerText) : false;
+
+    if (isStateQuery || isProactive) {
+      return {
+        includeAgentEnergy: true,
+        includeSocialDebt: true,
+        includeTaskPressure: true,
+        includeCuriosity: isStateQuery,
+        includeAcquaintancePressure: isProactive,
+        includeUserEnergy: isUserStateQuery,
+        includeUserAvailability: isUserStateQuery,
+      };
+    }
+
+    const userEnergy = this.asNumber(context.userModel['energy']);
+    const userAvailability = this.asNumber(context.userModel['availability']);
+
+    return {
+      includeAgentEnergy: context.agentState.energy < 0.35 || context.agentState.energy > 0.85,
+      includeSocialDebt: context.agentState.socialDebt > 0.6,
+      includeTaskPressure: context.agentState.taskPressure > 0.6,
+      includeCuriosity: context.agentState.curiosity > 0.8,
+      includeAcquaintancePressure: context.agentState.acquaintancePressure > 0.6,
+      includeUserEnergy: userEnergy !== null && userEnergy < 0.35,
+      includeUserAvailability: userAvailability !== null && userAvailability < 0.35,
     };
+  }
 
-    const userModelLines = [
-      `- name: ${formatUserModelValue(userModel['name'])}`,
-      `- energy: ${formatUserModelValue(userModel['energy'])} (estimated user energy level)`,
-      `- availability: ${formatUserModelValue(userModel['availability'])} (how available user seems)`,
-      `- mood: ${formatUserModelValue(userModel['mood'])} (detected from messages)`,
-    ];
+  private isProactiveTrigger(signal: Signal): boolean {
+    if (signal.type !== 'threshold_crossed') return false;
+    const data = signal.data as Record<string, unknown> | undefined;
+    const thresholdName = typeof data?.['thresholdName'] === 'string' ? data['thresholdName'] : '';
+    return thresholdName.includes('proactive') || thresholdName.includes('contact_urge');
+  }
 
-    return `## Current State
+  private getTriggerText(signal: Signal): string | null {
+    if (signal.type !== 'user_message') return null;
+    const data = signal.data as Record<string, unknown> | undefined;
+    const text = typeof data?.['text'] === 'string' ? data['text'] : '';
+    return text.trim().length > 0 ? text : null;
+  }
 
-Agent:
-- Energy: ${(agentState.energy * 100).toFixed(0)}%
-- Social Debt: ${(agentState.socialDebt * 100).toFixed(0)}%
-- Task Pressure: ${(agentState.taskPressure * 100).toFixed(0)}%
-- Curiosity: ${(agentState.curiosity * 100).toFixed(0)}%
+  private isStateQuery(text: string): boolean {
+    return this.matchesAny(text, [
+      /how are you/i,
+      /are you (tired|sleepy|busy|stressed|overwhelmed|okay|ok)/i,
+      /\b(tired|sleepy|energy|burned out|burnt out|overwhelmed|busy|stressed)\b/i,
+      /как ты/i,
+      /ты (устал|устала|уставш|сонн|занят|занята|перегруж|нормально)/i,
+      /силы|энерг/i,
+    ]);
+  }
 
-User Model (your beliefs about the user):
-${userModelLines.join('\n')}
-NOTE: Do NOT use the user's name in every message. Check conversation history first.`;
+  private isUserStateQuery(text: string): boolean {
+    return this.matchesAny(text, [
+      /am i (tired|ok|okay|stressed|overwhelmed)/i,
+      /how am i/i,
+      /do i seem/i,
+      /я (устал|устала|уставш|перегруж|выспал|выспалась)/i,
+      /мне (плохо|тяжело|нормально)/i,
+    ]);
+  }
+
+  private matchesAny(text: string, patterns: RegExp[]): boolean {
+    return patterns.some((pattern) => pattern.test(text));
+  }
+
+  private asNumber(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  private describeLevel(value: number): 'low' | 'medium' | 'high' {
+    if (value <= 0.35) return 'low';
+    if (value >= 0.7) return 'high';
+    return 'medium';
   }
 
   private buildHistorySection(history: ConversationMessage[]): string {
@@ -603,7 +888,8 @@ NOTE: Do NOT use the user's name in every message. Check conversation history fi
     for (const step of steps) {
       if (step.type === 'think') {
         lines.push(`[think] ${step.content}`);
-      } else if (step.type === 'tool') {
+      } else {
+        // step.type === 'tool' (TypeScript narrowing)
         // Match by both stepId AND toolName to handle ID reuse
         const result = toolResults.find((r) => r.stepId === step.id && r.toolName === step.name);
         if (result) {
@@ -705,27 +991,25 @@ Example defer terminal:
   }
 
   private buildOutputFormat(): string {
+    // Tool documentation removed - tools are now passed natively via the `tools` parameter
+    // The LLM will see full tool schemas in the API request
+
     return `## Output Format
 
-Respond with valid JSON:
+Respond with valid JSON. Only two step types allowed:
+- "think": Chain-of-thought reasoning (observable, no side effects)
+- "tool": ALL mutations via tools (tracked, with feedback)
 
 {
   "steps": [
-    { "type": "think", "id": "t1", "parentId": "<signal_id or previous_step_id>", "content": "..." },
-    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "core.memory", "args": { "action": "search", "query": "..." } },
-    { "type": "updateUser", "id": "u1", "parentId": "t1", "field": "mood", "value": "happy", "confidence": 0.8, "source": "inferred" },
-    { "type": "updateAgent", "id": "a1", "parentId": "t1", "field": "socialDebt", "operation": "delta", "value": -0.1, "confidence": 0.9, "reason": "had conversation" },
-    { "type": "saveFact", "id": "f1", "parentId": "t1", "fact": { "subject": "user", "predicate": "name", "object": "Shady", "source": "user_quote", "evidence": "said 'I'm Shady'", "confidence": 0.95, "tags": ["identity"] } },
-    { "type": "schedule", "id": "s1", "parentId": "t1", "delayMs": 3600000, "event": { "type": "followUp", "context": { "topic": "interview" } } }
+    { "type": "think", "id": "t1", "parentId": "<signal_id>", "content": "reasoning..." },
+    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "<tool_name>", "args": { ... } }
   ],
-  "terminal": { "type": "respond", "text": "Hello!", "parentId": "t1", "conversationStatus": "awaiting_answer", "confidence": 0.85 }
-  // OR: { "type": "needsToolResult", "stepId": "tool1" }
-  // OR: { "type": "noAction", "reason": "nothing to do", "parentId": "t1" }
-  // OR: { "type": "defer", "signalType": "contact_urge", "reason": "User seems busy", "deferHours": 4, "parentId": "t1" }
+  "terminal": { "type": "respond", "text": "...", "parentId": "t1", "conversationStatus": "...", "confidence": 0.85 }
 }
 
 Terminal types:
-- "respond": Send message. ALL fields REQUIRED:
+- "respond": Send message to user. ALL fields REQUIRED:
   - text: The message to send
   - conversationStatus: One of:
     - "active": Mid-conversation, expect quick reply
@@ -736,18 +1020,13 @@ Terminal types:
     - 0.8-1.0: High confidence, proceed normally
     - 0.6-0.8: Moderate confidence, acceptable
     - Below 0.6: Uncertain - system will use deeper reasoning
-- "noAction": Do nothing (for internal triggers with nothing to do)
+- "noAction": Internal processing complete, no user contact needed (tools still execute)
 - "defer": Don't act now, reconsider in deferHours - works for any signal type
 - "needsToolResult": Waiting for tool to complete
 
 IMPORTANT: If you include any tool step, use "needsToolResult" terminal to wait for the result before responding.
 
-## Available Tools
-${this.toolRegistry.getToolCards().join('\n') || '(none)'}
-
-IMPORTANT: Tool cards above show only brief descriptions. Before using a plugin.* tool for the first time, get its full schema:
-{ "type": "tool", "id": "help1", "parentId": "t1", "name": "core.tools", "args": { "action": "describe", "name": "plugin.reminder" } }
-Use the EXACT tool name from the cards (e.g., "core.memory", "plugin.reminder", not "memory").
+Tool names are provided in the tools parameter. Use the EXACT tool name (e.g., "core.memory", "core.time").
 If a tool returns an error with a "schema" field, use that schema to correct your parameters.`;
   }
 
@@ -796,17 +1075,99 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         return null;
       }
 
+      // Validate steps have required fields based on type
+      const validatedSteps = this.validateSteps(parsed.steps ?? []);
+      if (validatedSteps === null) {
+        // Validation failed, will trigger smart retry
+        return null;
+      }
+
+      // Cross-validate: if terminal is needsToolResult, verify stepId exists in validated steps
+      if (parsed.terminal.type === 'needsToolResult') {
+        const stepId = parsed.terminal.stepId;
+        const stepExists = validatedSteps.some((s) => s.id === stepId && s.type === 'tool');
+        if (!stepExists) {
+          this.logger.warn(
+            { stepId, validStepIds: validatedSteps.map((s) => s.id) },
+            'needsToolResult references non-existent tool step, will retry with smart model'
+          );
+          return null;
+        }
+      }
+
       return {
         schemaVersion: COGNITION_SCHEMA_VERSION,
         correlationId,
         triggerSignalId,
-        steps: parsed.steps ?? [],
+        steps: validatedSteps,
         terminal: parsed.terminal,
       };
     } catch (error) {
       this.logger.error({ error, raw: raw.slice(0, 500) }, 'Failed to parse LLM output');
       return null;
     }
+  }
+
+  /**
+   * Validate steps have required fields based on their type.
+   * - think steps: must have content (string)
+   * - tool steps: must have name (string) and args (object)
+   *
+   * @returns Validated steps array or null if validation fails
+   */
+  private validateSteps(steps: unknown[]): Step[] | null {
+    const validated: Step[] = [];
+
+    for (const step of steps) {
+      if (typeof step !== 'object' || step === null) {
+        this.logger.warn({ step }, 'Step is not an object, skipping');
+        continue;
+      }
+
+      const s = step as Record<string, unknown>;
+
+      // All steps must have id and parentId
+      if (typeof s['id'] !== 'string' || typeof s['parentId'] !== 'string') {
+        this.logger.warn({ step }, 'Step missing id or parentId, skipping');
+        continue;
+      }
+
+      if (s['type'] === 'think') {
+        // Think steps must have content (can be empty string)
+        if (typeof s['content'] !== 'string') {
+          this.logger.warn({ step }, 'Think step missing content, adding empty');
+          s['content'] = '';
+        }
+        validated.push({
+          type: 'think',
+          id: s['id'],
+          parentId: s['parentId'],
+          content: s['content'] as string,
+        });
+      } else if (s['type'] === 'tool') {
+        // Tool steps must have name and args
+        if (typeof s['name'] !== 'string') {
+          this.logger.warn({ step }, 'Tool step missing name, will retry with smart model');
+          return null; // Critical error - trigger smart retry
+        }
+        if (typeof s['args'] !== 'object' || s['args'] === null) {
+          this.logger.warn({ step }, 'Tool step missing args, defaulting to empty object');
+          s['args'] = {};
+        }
+        validated.push({
+          type: 'tool',
+          id: s['id'],
+          parentId: s['parentId'],
+          name: s['name'],
+          args: s['args'] as Record<string, unknown>,
+        });
+      } else {
+        this.logger.warn({ stepType: s['type'] }, 'Unknown step type, skipping');
+        continue;
+      }
+    }
+
+    return validated;
   }
 
   /**
@@ -829,52 +1190,136 @@ If a tool returns an error with a "schema" field, use that schema to correct you
 
   /**
    * Check which steps need escalation due to low confidence.
+   *
+   * With the two-element architecture, policy checks are done in the tools
+   * themselves. The tools return errors for policy violations, allowing
+   * the LLM to self-correct. Escalation is now triggered by:
+   * 1. Low confidence in the terminal "respond"
+   * 2. Tool policy violation errors (LLM can retry with corrected args)
    */
-  private checkEscalation(steps: Step[]): Step[] {
-    const needsEscalation: Step[] = [];
-
-    for (const step of steps) {
-      if (step.type === 'updateUser') {
-        const policy = getFieldPolicy(`user.${step.field}`);
-        if (step.confidence < policy.minConfidence && policy.escalateIfUncertain) {
-          needsEscalation.push(step);
-        }
-      } else if (step.type === 'updateAgent') {
-        const policy = getFieldPolicy(`agent.${step.field}`);
-        if (step.confidence < policy.minConfidence) {
-          needsEscalation.push(step);
-        }
-      }
-    }
-
-    return needsEscalation;
+  private checkEscalation(_steps: Step[]): Step[] {
+    // With tool-based mutations, policy enforcement happens in tools.
+    // Tools return errors that the LLM can use to self-correct.
+    // Escalation is triggered by low terminal confidence, not step-level checks.
+    return [];
   }
 
   /**
-   * Compile steps and tool results to intents.
+   * Typed mapping from tool results to intents.
+   * Tools return validated payloads → this map converts them to Intents.
+   *
+   * Key design principle: Tools validate and return data, they don't mutate.
+   * This map bridges the gap to CoreLoop which performs actual mutations.
+   */
+  private toolResultToIntent(result: ToolResult, context: LoopContext): Intent | null {
+    // Skip failed tools - they don't produce intents
+    if (!result.success) {
+      return null;
+    }
+
+    const data = result.data as Record<string, unknown> | undefined;
+    if (!data) {
+      return null;
+    }
+
+    switch (result.toolName) {
+      case 'core.user': {
+        // core.user update → UPDATE_USER_MODEL intent
+        if (data['action'] !== 'update') return null;
+        return {
+          type: 'UPDATE_USER_MODEL',
+          payload: {
+            recipientId: context.recipientId,
+            field: data['field'] as string,
+            value: data['value'],
+            confidence: data['confidence'] as number,
+            source: data['source'] as string,
+            evidence: data['evidence'] as string | undefined,
+          },
+        };
+      }
+
+      case 'core.agent': {
+        // core.agent update → UPDATE_STATE intent
+        if (data['action'] !== 'update') return null;
+        return {
+          type: 'UPDATE_STATE',
+          payload: {
+            key: data['field'] as string,
+            value: data['value'] as number,
+            delta: data['operation'] === 'delta',
+          },
+        };
+      }
+
+      case 'core.schedule': {
+        // core.schedule create → SCHEDULE_EVENT intent
+        if (data['action'] !== 'create') return null;
+        return {
+          type: 'SCHEDULE_EVENT',
+          payload: {
+            event: {
+              source: 'cognition',
+              type: data['eventType'] as string,
+              priority: 50,
+              payload: data['eventContext'] as Record<string, unknown>,
+            },
+            delay: data['delayMs'] as number,
+            scheduleId: result.stepId,
+          },
+        };
+      }
+
+      case 'core.memory': {
+        // core.memory saveFact → SAVE_TO_MEMORY intent
+        if (data['action'] !== 'saveFact') return null; // search/save handled differently
+        return {
+          type: 'SAVE_TO_MEMORY',
+          payload: {
+            type: 'fact',
+            recipientId: context.recipientId,
+            fact: data['fact'] as StructuredFact,
+          },
+        };
+      }
+
+      // core.thought is handled separately via thoughtToolResultToIntent
+      // because it has complex depth/recursion logic
+
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Compile tool results to intents.
+   *
+   * With the two-element architecture, all mutations go through tools.
+   * This method converts successful tool results into CoreLoop intents.
    */
   private compileIntents(
-    steps: Step[],
+    _steps: Step[],
     terminal: Terminal,
     context: LoopContext,
     toolResults: ToolResult[]
   ): Intent[] {
     const intents: Intent[] = [];
 
-    for (const step of steps) {
-      const intent = this.stepToIntent(step, context);
-      if (intent) {
-        intents.push(intent);
-      }
-    }
-
-    // Handle core.thought tool results → EMIT_THOUGHT intents
+    // Convert tool results to intents
     for (const result of toolResults) {
+      // Handle core.thought specially (complex depth logic)
       if (result.toolName === 'core.thought' && result.success) {
         const thoughtIntent = this.thoughtToolResultToIntent(result, context);
         if (thoughtIntent) {
           intents.push(thoughtIntent);
         }
+        continue;
+      }
+
+      // Handle all other tools via the typed map
+      const toolIntent = this.toolResultToIntent(result, context);
+      if (toolIntent) {
+        intents.push(toolIntent);
       }
     }
 
@@ -968,100 +1413,6 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         ...(parentId !== undefined && { parentThoughtId: parentId }),
       },
     };
-  }
-
-  /**
-   * Convert a step to an intent.
-   */
-  private stepToIntent(step: Step, context: LoopContext): Intent | null {
-    switch (step.type) {
-      case 'updateUser': {
-        const policy = getFieldPolicy(`user.${step.field}`);
-        if (step.confidence >= policy.minConfidence) {
-          const intent: Intent = {
-            type: 'UPDATE_USER_MODEL',
-            payload: {
-              recipientId: context.recipientId,
-              field: step.field,
-              value: step.value,
-              confidence: step.confidence,
-              source: step.source,
-              evidence: step.evidence,
-            },
-          };
-          return intent;
-        }
-        return null;
-      }
-
-      case 'updateAgent': {
-        const policy = getFieldPolicy(`agent.${step.field}`);
-        if (step.confidence >= policy.minConfidence) {
-          let value = step.value;
-
-          if (step.operation === 'delta') {
-            // Check maxDelta for delta operations only
-            if (policy.maxDelta && Math.abs(value) > policy.maxDelta) {
-              this.logger.warn(
-                { field: step.field, value, maxDelta: policy.maxDelta },
-                'Delta value exceeds maxDelta, clamping'
-              );
-              value = Math.sign(value) * policy.maxDelta;
-            }
-          } else {
-            // For 'set' operations, clamp to valid range [0, 1]
-            value = Math.max(0, Math.min(1, value));
-          }
-
-          return {
-            type: 'UPDATE_STATE',
-            payload: {
-              key: step.field,
-              value,
-              delta: step.operation === 'delta',
-            },
-          };
-        }
-        return null;
-      }
-
-      case 'saveFact': {
-        const saveIntent: Intent = {
-          type: 'SAVE_TO_MEMORY',
-          payload: {
-            type: 'fact',
-            recipientId: context.recipientId,
-            fact: step.fact,
-          },
-        };
-        return saveIntent;
-      }
-
-      case 'schedule': {
-        const scheduleIntent: Intent = {
-          type: 'SCHEDULE_EVENT',
-          payload: {
-            event: {
-              source: 'cognition',
-              type: step.event.type,
-              priority: 50,
-              payload: step.event.context,
-            },
-            delay: step.delayMs,
-            scheduleId: step.id,
-          },
-        };
-        return scheduleIntent;
-      }
-
-      case 'think':
-      case 'tool':
-        // These don't produce intents directly
-        return null;
-
-      default:
-        return null;
-    }
   }
 }
 

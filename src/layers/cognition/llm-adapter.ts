@@ -4,10 +4,15 @@
  * Wraps the application's LLMProvider to provide the simple interface
  * needed by the agentic loop. Provider-agnostic: works with OpenRouter,
  * local models, etc.
+ *
+ * Key features:
+ * - Native tool calling via `tools` parameter
+ * - Structured outputs via `responseFormat.json_schema`
+ * - No prompt splitting - accepts structured requests directly
  */
 
 import type { Logger } from '../../types/logger.js';
-import type { CognitionLLM, LLMOptions } from './agentic-loop.js';
+import type { CognitionLLM, LLMOptions, StructuredRequest } from './agentic-loop.js';
 import type { LLMProvider as AppLLMProvider, Message, ModelRole } from '../../llm/provider.js';
 
 /**
@@ -60,56 +65,72 @@ export class LLMAdapter implements CognitionLLM {
   }
 
   /**
-   * Complete a prompt and return the response.
-   * @param prompt The prompt to complete
+   * Complete a structured request and return the response.
+   *
+   * @param request Structured request with system/user prompts, tools, and response format
    * @param options LLM options including useSmart for smart model retry
    */
-  async complete(prompt: string, options?: LLMOptions & { useSmart?: boolean }): Promise<string> {
+  async complete(request: StructuredRequest, options?: LLMOptions): Promise<string> {
     const startTime = Date.now();
     const useSmart = options?.useSmart ?? false;
 
-    // Split prompt into system and user parts
-    const { systemPrompt, userPrompt } = this.splitPrompt(prompt);
+    // Build system prompt with optional prefix
+    let systemPrompt = request.systemPrompt;
+    if (this.config.systemPromptPrefix) {
+      systemPrompt = this.config.systemPromptPrefix + '\n\n' + systemPrompt;
+    }
 
     const messages: Message[] = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
+      { role: 'user', content: request.userPrompt },
     ];
 
     try {
-      const request: Parameters<typeof this.provider.complete>[0] = {
+      const completionRequest: Parameters<typeof this.provider.complete>[0] = {
         messages,
         maxTokens: options?.maxTokens ?? 2000,
         temperature: options?.temperature ?? this.config.temperature,
       };
 
+      // Add tools if provided (native tool calling)
+      if (request.tools && request.tools.length > 0) {
+        completionRequest.tools = request.tools;
+      }
+
+      // Add response format if provided (structured output)
+      if (request.responseFormat) {
+        completionRequest.responseFormat = request.responseFormat;
+      }
+
       // Select model based on useSmart flag
       if (useSmart) {
         // Use smart model for retry
         if (this.config.smartModel) {
-          request.model = this.config.smartModel;
+          completionRequest.model = this.config.smartModel;
         }
         if (this.config.smartRole) {
-          request.role = this.config.smartRole;
+          completionRequest.role = this.config.smartRole;
         }
       } else {
         // Use fast model for initial attempt
         if (this.config.model) {
-          request.model = this.config.model;
+          completionRequest.model = this.config.model;
         }
         if (this.config.role) {
-          request.role = this.config.role;
+          completionRequest.role = this.config.role;
         }
       }
 
-      const response = await this.provider.complete(request);
+      const response = await this.provider.complete(completionRequest);
 
       const duration = Date.now() - startTime;
       this.logger.debug(
         {
           model: response.model,
           useSmart,
-          promptLength: prompt.length,
+          systemPromptLength: systemPrompt.length,
+          userPromptLength: request.userPrompt.length,
+          toolCount: request.tools?.length ?? 0,
           responseLength: response.content.length,
           duration,
           usage: response.usage,
@@ -122,32 +143,6 @@ export class LLMAdapter implements CognitionLLM {
       this.logger.error({ error, useSmart }, 'LLM completion failed');
       throw error;
     }
-  }
-
-  /**
-   * Split a prompt into system and user parts.
-   * Convention: Everything before "## Current" is system, rest is user.
-   */
-  private splitPrompt(prompt: string): { systemPrompt: string; userPrompt: string } {
-    const splitIndex = prompt.indexOf('## Current State');
-
-    if (splitIndex > 0) {
-      let systemPrompt = prompt.slice(0, splitIndex).trim();
-      const userPrompt = prompt.slice(splitIndex).trim();
-
-      // Add prefix if configured
-      if (this.config.systemPromptPrefix) {
-        systemPrompt = this.config.systemPromptPrefix + '\n\n' + systemPrompt;
-      }
-
-      return { systemPrompt, userPrompt };
-    }
-
-    // Fallback: everything is user prompt
-    return {
-      systemPrompt: this.config.systemPromptPrefix ?? 'You are a helpful AI assistant.',
-      userPrompt: prompt,
-    };
   }
 
   /**

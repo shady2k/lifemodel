@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createAgenticLoop, type CognitionLLM, type LoopContext } from '../../src/layers/cognition/agentic-loop.js';
+import { createAgenticLoop, type CognitionLLM, type LoopContext, type StructuredRequest } from '../../src/layers/cognition/agentic-loop.js';
 import { createToolRegistry } from '../../src/layers/cognition/tools/registry.js';
 import { createSignal } from '../../src/types/signal.js';
 import { Priority } from '../../src/types/priority.js';
@@ -17,17 +17,17 @@ import { createMockLogger, createAgentState } from '../helpers/factories.js';
 
 describe('Proactive Contact', () => {
   let logger: ReturnType<typeof createMockLogger>;
-  let capturedPrompts: string[];
+  let capturedRequests: StructuredRequest[];
   let mockLLM: CognitionLLM;
 
   beforeEach(() => {
     logger = createMockLogger();
-    capturedPrompts = [];
+    capturedRequests = [];
 
-    // Mock LLM that captures prompts and returns valid response
+    // Mock LLM that captures requests and returns valid response
     mockLLM = {
-      complete: vi.fn().mockImplementation(async (prompt: string) => {
-        capturedPrompts.push(prompt);
+      complete: vi.fn().mockImplementation(async (request: StructuredRequest) => {
+        capturedRequests.push(request);
         // Return a valid "noAction" response to end the loop
         return JSON.stringify({
           steps: [
@@ -82,13 +82,14 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      expect(capturedPrompts.length).toBeGreaterThan(0);
-      const prompt = capturedPrompts[0];
+      expect(capturedRequests.length).toBeGreaterThan(0);
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
 
       // Should have proactive contact section
-      expect(prompt).toContain('## Proactive Contact Trigger');
-      expect(prompt).toContain('This is NOT a response to a user message');
-      expect(prompt).toContain('You are INITIATING contact');
+      expect(fullPrompt).toContain('## Proactive Contact Trigger');
+      expect(fullPrompt).toContain('This is NOT a response to a user message');
+      expect(fullPrompt).toContain('You are INITIATING contact');
     });
 
     it('includes time since last message in prompt', async () => {
@@ -107,8 +108,9 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      const prompt = capturedPrompts[0];
-      expect(prompt).toContain('Time since last conversation: 3 hour');
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      expect(fullPrompt).toContain('Time since last conversation: 3 hour');
     });
 
     it('includes instructions to start fresh conversation', async () => {
@@ -129,9 +131,10 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      const prompt = capturedPrompts[0];
-      expect(prompt).toContain('Do NOT continue or reference the previous conversation');
-      expect(prompt).toContain('Start FRESH');
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      expect(fullPrompt).toContain('Do NOT continue or reference the previous conversation');
+      expect(fullPrompt).toContain('Start FRESH');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {
@@ -150,8 +153,9 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      const prompt = capturedPrompts[0];
-      expect(prompt).toContain('45 minute');
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      expect(fullPrompt).toContain('45 minute');
     });
 
     it('identifies follow-up trigger type', async () => {
@@ -189,9 +193,10 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      const prompt = capturedPrompts[0];
-      expect(prompt).toContain('Follow-up');
-      expect(prompt).toContain('user did not respond');
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
+      expect(fullPrompt).toContain('Follow-up');
+      expect(fullPrompt).toContain('user did not respond');
     });
   });
 
@@ -227,11 +232,12 @@ describe('Proactive Contact', () => {
 
       await loop.run(context);
 
-      const prompt = capturedPrompts[0];
+      const request = capturedRequests[0];
+      const fullPrompt = request.systemPrompt + '\n\n' + request.userPrompt;
       // Should have user input section, NOT proactive contact
-      expect(prompt).toContain('## Current Input');
-      expect(prompt).toContain('User message: "Hello!"');
-      expect(prompt).not.toContain('## Proactive Contact Trigger');
+      expect(fullPrompt).toContain('## Current Input');
+      expect(fullPrompt).toContain('User message: "Hello!"');
+      expect(fullPrompt).not.toContain('## Proactive Contact Trigger');
     });
   });
 });

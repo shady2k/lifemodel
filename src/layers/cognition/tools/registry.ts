@@ -2,71 +2,48 @@
  * Tool Registry
  *
  * Manages tool registration and execution.
- * Provider-agnostic: works with JSON storage or vector DB.
+ * Tools are defined in separate files under core/ and plugins/.
  */
 
 import type { Logger } from '../../../types/logger.js';
 import type { ToolName, ToolResult } from '../../../types/cognition.js';
 import type { Tool, ToolRequest, ToolParameter } from './types.js';
 import { createToolResult } from './types.js';
+import type { OpenAIChatTool } from '../../../llm/tool-schema.js';
+import { toolToOpenAIFormat } from '../../../llm/tool-schema.js';
 
-/**
- * Tool schema for on-demand retrieval.
- */
-export interface ToolSchema {
-  name: string;
-  description: string;
-  parameters: ToolParameter[];
-  tags: string[];
-}
+// Import core tool factories
+import {
+  createMemoryTool,
+  createTimeTool,
+  createStateTool,
+  createToolsMetaTool,
+  createThoughtTool,
+  createUserTool,
+  createAgentTool,
+  createScheduleTool,
+} from './core/index.js';
 
-/**
- * Memory provider interface (abstracts JSON vs vector DB).
- */
-export interface MemoryProvider {
-  search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]>;
-  save(entry: MemoryEntry): Promise<void>;
-  getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]>;
-}
+// Import and re-export types for convenience
+import type {
+  MemoryProvider,
+  MemoryEntry,
+  MemorySearchOptions,
+  ConversationProvider,
+  AgentStateProvider,
+  UserModelProvider,
+  ToolSchema,
+} from './core/index.js';
 
-export interface MemorySearchOptions {
-  limit?: number | undefined;
-  types?: ('message' | 'thought' | 'fact')[] | undefined;
-  recipientId?: string | undefined;
-}
-
-export interface MemoryEntry {
-  id: string;
-  type: 'message' | 'thought' | 'fact';
-  content: string;
-  timestamp: Date;
-  recipientId?: string | undefined;
-  tags?: string[] | undefined;
-  confidence?: number | undefined;
-  metadata?: Record<string, unknown> | undefined;
-}
-
-/**
- * Agent state provider interface.
- */
-export interface AgentStateProvider {
-  getState(): Record<string, unknown>;
-}
-
-/**
- * User model provider interface.
- */
-export interface UserModelProvider {
-  getModel(recipientId?: string): Record<string, unknown>;
-}
-
-/**
- * Conversation provider for time-based queries.
- */
-export interface ConversationProvider {
-  getLastMessageTime(recipientId?: string): Date | null;
-  getLastContactTime(recipientId?: string): Date | null;
-}
+export type {
+  MemoryProvider,
+  MemoryEntry,
+  MemorySearchOptions,
+  ConversationProvider,
+  AgentStateProvider,
+  UserModelProvider,
+  ToolSchema,
+};
 
 /**
  * Dependencies for tool registry.
@@ -89,7 +66,7 @@ export class ToolRegistry {
   constructor(logger: Logger, deps: ToolRegistryDeps = {}) {
     this.logger = logger.child({ component: 'tool-registry' });
     this.deps = deps;
-    this.registerDefaultTools();
+    this.registerCoreTools();
   }
 
   /**
@@ -100,19 +77,10 @@ export class ToolRegistry {
   }
 
   /**
-   * Find a tool by name.
-   * Requires exact tool names (e.g., "core.memory", "plugin.reminder").
-   * Short names are NOT supported - LLM should use full names from prompt.
-   */
-  private findTool(name: string): Tool | undefined {
-    return this.tools.get(name);
-  }
-
-  /**
    * Execute a tool request.
    */
   async execute(request: ToolRequest): Promise<ToolResult> {
-    const tool = this.findTool(request.name);
+    const tool = this.tools.get(request.name);
 
     if (!tool) {
       this.logger.warn({ toolName: request.name }, 'Unknown tool requested');
@@ -133,8 +101,6 @@ export class ToolRegistry {
         'Executing tool'
       );
 
-      // Pass context as second parameter - tools can use it for chatId, userId, etc.
-      // This keeps implementation details (like chatId) hidden from the LLM
       const result = await tool.execute(request.args, request.context);
       const duration = Date.now() - startTime;
 
@@ -166,11 +132,9 @@ export class ToolRegistry {
 
   /**
    * Check if a tool has side effects.
-   * Returns true (safe default) if tool not found.
    */
   hasToolSideEffects(name: string): boolean {
-    const tool = this.findTool(name);
-    // Default to true (safe) if tool not found or hasSideEffects not set
+    const tool = this.tools.get(name);
     return tool?.hasSideEffects ?? true;
   }
 
@@ -182,19 +146,22 @@ export class ToolRegistry {
   }
 
   /**
+   * Get all registered tools.
+   */
+  getTools(): Tool[] {
+    return Array.from(this.tools.values());
+  }
+
+  /**
    * Get tool cards for prompt (brief descriptions + capability tags).
-   * Format: "name: description [tag1,tag2]"
    */
   getToolCards(): string[] {
     const cards: string[] = [];
-    // Sort by name for stable ordering
     const sortedTools = Array.from(this.tools.entries()).sort((a, b) => a[0].localeCompare(b[0]));
 
     for (const [name, tool] of sortedTools) {
-      // Skip the meta-tool itself from the card list
-      if (name === 'core.tools') continue;
+      if (name === 'core.tools') continue; // Skip meta-tool from card list
 
-      // Get first sentence of description (brief)
       const firstLine = tool.description.split('\n')[0] ?? '';
       const firstSentence = firstLine.split('.')[0] ?? '';
       const briefDesc = firstSentence.length > 0 ? firstSentence : tool.description;
@@ -206,9 +173,10 @@ export class ToolRegistry {
 
   /**
    * Get full schema for a specific tool.
-   * Used by the 'tools' meta-tool for on-demand schema retrieval.
    */
-  getToolSchema(name: ToolName): ToolSchema | null {
+  getToolSchema(
+    name: ToolName
+  ): { name: string; description: string; parameters: ToolParameter[]; tags: string[] } | null {
     const tool = this.tools.get(name);
     if (!tool) return null;
 
@@ -221,21 +189,102 @@ export class ToolRegistry {
   }
 
   /**
-   * Register a new tool dynamically.
-   * Used by plugins to add tools at runtime.
+   * Get tools grouped by category (core vs plugin).
+   */
+  getToolsByCategory(): { core: Tool[]; plugins: Tool[] } {
+    const core: Tool[] = [];
+    const plugins: Tool[] = [];
+
+    for (const tool of this.tools.values()) {
+      if (tool.name.startsWith('core.')) {
+        core.push(tool);
+      } else {
+        plugins.push(tool);
+      }
+    }
+
+    return { core, plugins };
+  }
+
+  /**
+   * Get all tools in OpenAI Chat Completions format.
+   * Used for native tool calling via the `tools` parameter.
+   */
+  getToolsAsOpenAIFormat(): OpenAIChatTool[] {
+    return Array.from(this.tools.values()).map(toolToOpenAIFormat);
+  }
+
+  /**
+   * Generate documentation for a tool including parameters.
+   */
+  getToolDocumentation(tool: Tool): string {
+    const lines: string[] = [];
+    lines.push(`### ${tool.name}`);
+    lines.push(tool.description);
+
+    if (tool.parameters.length > 0) {
+      lines.push('Parameters:');
+      for (const param of tool.parameters) {
+        const reqMarker = param.required ? '(required)' : '(optional)';
+        lines.push(`  - ${param.name}: ${param.type} ${reqMarker} - ${param.description}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Generate example tool call JSON for a tool.
+   */
+  getToolExample(tool: Tool, stepId: string, parentId: string): string {
+    const exampleArgs: Record<string, unknown> = {};
+
+    for (const param of tool.parameters) {
+      if (param.required) {
+        // Generate example value based on type and name
+        if (param.name === 'action') {
+          // Use first word from description as action
+          const match = /Action: (\w+)/.exec(param.description);
+          exampleArgs[param.name] = match?.[1] ?? 'action';
+        } else if (param.type === 'string') {
+          exampleArgs[param.name] = `<${param.name}>`;
+        } else if (param.type === 'number') {
+          exampleArgs[param.name] = param.name === 'confidence' ? 0.8 : 0;
+        } else if (param.type === 'object') {
+          exampleArgs[param.name] = {};
+        } else if (param.type === 'array') {
+          exampleArgs[param.name] = [];
+        } else {
+          // param.type === 'boolean' (TypeScript narrowing)
+          exampleArgs[param.name] = true;
+        }
+      }
+    }
+
+    const example = {
+      type: 'tool',
+      id: stepId,
+      parentId,
+      name: tool.name,
+      args: exampleArgs,
+    };
+
+    return JSON.stringify(example);
+  }
+
+  /**
+   * Register a new tool dynamically (for plugins).
    */
   registerTool(tool: Tool): void {
     if (this.tools.has(tool.name)) {
       this.logger.warn({ toolName: tool.name }, 'Tool already registered, replacing');
     }
     this.tools.set(tool.name, tool);
-    this.logger.info({ toolName: tool.name }, 'Tool registered dynamically');
+    this.logger.info({ toolName: tool.name }, 'Tool registered');
   }
 
   /**
-   * Unregister a tool.
-   * Used by plugins when being unloaded.
-   * @returns true if tool was removed, false if it didn't exist
+   * Unregister a tool (for plugins).
    */
   unregisterTool(name: ToolName): boolean {
     const existed = this.tools.has(name);
@@ -247,472 +296,53 @@ export class ToolRegistry {
   }
 
   /**
-   * Register default tools (consolidated).
+   * Register all core tools.
    */
-  private registerDefaultTools(): void {
-    // memory - search and save
-    // Note: hasSideEffects depends on action, but we mark as true since save has effects
-    this.tools.set('core.memory', {
-      name: 'core.memory',
-      description:
-        'Manage long-term memory. Actions: search (find past info), save (store new facts).',
-      tags: ['search', 'save', 'facts', 'history'],
-      hasSideEffects: true, // save action has side effects
-      parameters: [
-        { name: 'action', type: 'string', description: 'Action: search or save', required: true },
-        {
-          name: 'query',
-          type: 'string',
-          description: 'Search query (for search)',
-          required: false,
-        },
-        {
-          name: 'content',
-          type: 'string',
-          description: 'Content to save (for save)',
-          required: false,
-        },
-        {
-          name: 'limit',
-          type: 'number',
-          description: 'Max results (for search, default: 5)',
-          required: false,
-        },
-        {
-          name: 'types',
-          type: 'array',
-          description: 'Filter by type: message, thought, fact (for search)',
-          required: false,
-        },
-        {
-          name: 'chatId',
-          type: 'string',
-          description: 'Conversation ID (for search filter or save scope)',
-          required: false,
-        },
-        {
-          name: 'type',
-          type: 'string',
-          description: 'Memory type: fact or thought (for save, default: fact)',
-          required: false,
-        },
-        {
-          name: 'tags',
-          type: 'array',
-          description: 'Tags for categorization (for save)',
-          required: false,
-        },
-        {
-          name: 'confidence',
-          type: 'number',
-          description: 'Confidence 0-1 (for save, default: 0.8)',
-          required: false,
-        },
-      ],
-      execute: async (args) => {
-        const action = args['action'] as string;
+  private registerCoreTools(): void {
+    // Memory tool
+    this.tools.set(
+      'core.memory',
+      createMemoryTool({
+        memoryProvider: this.deps.memoryProvider,
+      })
+    );
 
-        switch (action) {
-          case 'search': {
-            if (!this.deps.memoryProvider) {
-              return { success: false, action: 'search', message: 'Memory provider not available' };
-            }
+    // Time tool
+    this.tools.set(
+      'core.time',
+      createTimeTool({
+        conversationProvider: this.deps.conversationProvider,
+      })
+    );
 
-            const query = args['query'] as string | undefined;
-            if (!query) {
-              return {
-                success: false,
-                action: 'search',
-                error: 'Missing required parameter: query',
-              };
-            }
+    // State tool
+    this.tools.set(
+      'core.state',
+      createStateTool({
+        agentStateProvider: this.deps.agentStateProvider,
+        userModelProvider: this.deps.userModelProvider,
+      })
+    );
 
-            const limit = (args['limit'] as number | undefined) ?? 5;
-            const types = args['types'] as ('message' | 'thought' | 'fact')[] | undefined;
-            const chatId = args['chatId'] as string | undefined;
+    // Meta-tool (needs reference to registry for schema lookup)
+    this.tools.set(
+      'core.tools',
+      createToolsMetaTool({
+        schemaProvider: this,
+      })
+    );
 
-            const options: MemorySearchOptions = { limit };
-            if (types) options.types = types;
-            if (chatId) options.recipientId = chatId;
+    // Thought tool
+    this.tools.set('core.thought', createThoughtTool());
 
-            const results = await this.deps.memoryProvider.search(query, options);
-            return {
-              success: true,
-              action: 'search',
-              results: results.map((r) => ({
-                type: r.type,
-                content: r.content,
-                timestamp: r.timestamp.toISOString(),
-                tags: r.tags,
-              })),
-              count: results.length,
-            };
-          }
+    // User tool
+    this.tools.set('core.user', createUserTool());
 
-          case 'save': {
-            if (!this.deps.memoryProvider) {
-              return { success: false, action: 'save', message: 'Memory provider not available' };
-            }
+    // Agent tool
+    this.tools.set('core.agent', createAgentTool());
 
-            const content = args['content'] as string | undefined;
-            if (!content) {
-              return {
-                success: false,
-                action: 'save',
-                error: 'Missing required parameter: content',
-              };
-            }
-
-            const entryType = (args['type'] as string | undefined) ?? 'fact';
-            const tags = (args['tags'] as string[] | undefined) ?? [];
-            const confidence = (args['confidence'] as number | undefined) ?? 0.8;
-            // Map chatId parameter to recipientId for storage
-            const recipientId = args['chatId'] as string | undefined;
-
-            const entry: MemoryEntry = {
-              id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
-              type: entryType === 'fact' ? 'fact' : 'thought',
-              content,
-              timestamp: new Date(),
-              recipientId,
-              tags,
-              confidence,
-            };
-
-            await this.deps.memoryProvider.save(entry);
-            return { success: true, action: 'save', id: entry.id };
-          }
-
-          default:
-            return {
-              success: false,
-              action,
-              error: `Unknown action: ${action}. Use "search" or "save".`,
-            };
-        }
-      },
-    });
-
-    // time - now and since (read-only, no side effects)
-    this.tools.set('core.time', {
-      name: 'core.time',
-      description:
-        'Get time information. Actions: now (current time), since (elapsed time from event).',
-      tags: ['current-time', 'elapsed', 'timezone'],
-      hasSideEffects: false, // read-only tool
-      parameters: [
-        { name: 'action', type: 'string', description: 'Action: now or since', required: true },
-        {
-          name: 'timezone',
-          type: 'string',
-          description: 'IANA timezone (for now)',
-          required: false,
-        },
-        {
-          name: 'event',
-          type: 'string',
-          description: 'Event: lastMessage, lastContact, or ISO timestamp (for since)',
-          required: false,
-        },
-        {
-          name: 'chatId',
-          type: 'string',
-          description: 'Chat ID for chat-specific events (for since)',
-          required: false,
-        },
-      ],
-      execute: (args) => {
-        const action = args['action'] as string;
-
-        switch (action) {
-          case 'now': {
-            const now = new Date();
-            const timezone = args['timezone'] as string | undefined;
-
-            if (timezone) {
-              try {
-                const formatted = now.toLocaleString('en-US', { timeZone: timezone });
-                return Promise.resolve({
-                  success: true,
-                  action: 'now',
-                  time: formatted,
-                  timezone,
-                  iso: now.toISOString(),
-                });
-              } catch {
-                return Promise.resolve({
-                  success: true,
-                  action: 'now',
-                  time: now.toISOString(),
-                  timezone: 'UTC',
-                  iso: now.toISOString(),
-                });
-              }
-            }
-
-            return Promise.resolve({
-              success: true,
-              action: 'now',
-              time: now.toISOString(),
-              timezone: 'system',
-              iso: now.toISOString(),
-            });
-          }
-
-          case 'since': {
-            const event = args['event'] as string | undefined;
-            if (!event) {
-              return Promise.resolve({
-                success: false,
-                action: 'since',
-                error: 'Missing required parameter: event',
-              });
-            }
-
-            const chatId = args['chatId'] as string | undefined;
-            let eventTime: Date | null = null;
-
-            if (event === 'lastMessage' && this.deps.conversationProvider) {
-              eventTime = this.deps.conversationProvider.getLastMessageTime(chatId);
-            } else if (event === 'lastContact' && this.deps.conversationProvider) {
-              eventTime = this.deps.conversationProvider.getLastContactTime(chatId);
-            } else {
-              const parsed = new Date(event);
-              if (!isNaN(parsed.getTime())) {
-                eventTime = parsed;
-              }
-            }
-
-            if (!eventTime) {
-              return Promise.resolve({
-                success: false,
-                action: 'since',
-                error: `Event not found: ${event}`,
-              });
-            }
-
-            const now = Date.now();
-            const diffMs = now - eventTime.getTime();
-            const diffSeconds = Math.floor(diffMs / 1000);
-            const diffMinutes = Math.floor(diffSeconds / 60);
-            const diffHours = Math.floor(diffMinutes / 60);
-            const diffDays = Math.floor(diffHours / 24);
-
-            return Promise.resolve({
-              success: true,
-              action: 'since',
-              eventTime: eventTime.toISOString(),
-              elapsed: {
-                ms: diffMs,
-                seconds: diffSeconds,
-                minutes: diffMinutes,
-                hours: diffHours,
-                days: diffDays,
-              },
-              human: this.formatDuration(diffMs),
-            });
-          }
-
-          default:
-            return Promise.resolve({
-              success: false,
-              action,
-              error: `Unknown action: ${action}. Use "now" or "since".`,
-            });
-        }
-      },
-    });
-
-    // state - agent and user (read-only, no side effects)
-    this.tools.set('core.state', {
-      name: 'core.state',
-      description: 'Get current state. Actions: agent (energy, mood), user (beliefs about user).',
-      tags: ['agent-state', 'user-model'],
-      hasSideEffects: false, // read-only tool
-      parameters: [
-        { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
-        {
-          name: 'chatId',
-          type: 'string',
-          description: 'Chat ID (for user action)',
-          required: false,
-        },
-      ],
-      execute: (args) => {
-        const action = args['action'] as string;
-
-        switch (action) {
-          case 'agent': {
-            if (!this.deps.agentStateProvider) {
-              return Promise.resolve({
-                success: false,
-                action: 'agent',
-                error: 'Agent state provider not available',
-              });
-            }
-            return Promise.resolve({
-              success: true,
-              action: 'agent',
-              ...this.deps.agentStateProvider.getState(),
-            });
-          }
-
-          case 'user': {
-            if (!this.deps.userModelProvider) {
-              return Promise.resolve({
-                success: false,
-                action: 'user',
-                error: 'User model provider not available',
-              });
-            }
-            const chatId = args['chatId'] as string | undefined;
-            return Promise.resolve({
-              success: true,
-              action: 'user',
-              ...this.deps.userModelProvider.getModel(chatId),
-            });
-          }
-
-          default:
-            return Promise.resolve({
-              success: false,
-              action,
-              error: `Unknown action: ${action}. Use "agent" or "user".`,
-            });
-        }
-      },
-    });
-
-    // tools - meta-tool for schema discovery (read-only, no side effects)
-    this.tools.set('core.tools', {
-      name: 'core.tools',
-      description: 'Get detailed schema for any tool. Use when you need exact parameters.',
-      tags: ['meta', 'schema', 'help'],
-      hasSideEffects: false, // read-only tool
-      parameters: [
-        { name: 'action', type: 'string', description: 'Action: describe', required: true },
-        {
-          name: 'name',
-          type: 'string',
-          description: 'Tool name to get schema for',
-          required: true,
-        },
-      ],
-      execute: (args) => {
-        const action = args['action'] as string;
-
-        if (action !== 'describe') {
-          return Promise.resolve({
-            success: false,
-            action,
-            error: `Unknown action: ${action}. Use "describe".`,
-          });
-        }
-
-        const toolName = args['name'] as string | undefined;
-        if (!toolName) {
-          return Promise.resolve({
-            success: false,
-            action: 'describe',
-            error: 'Missing required parameter: name',
-          });
-        }
-
-        const schema = this.getToolSchema(toolName);
-        if (!schema) {
-          return Promise.resolve({
-            success: false,
-            action: 'describe',
-            error: `Tool not found: ${toolName}`,
-            availableTools: this.getToolNames(),
-          });
-        }
-
-        return Promise.resolve({
-          success: true,
-          action: 'describe',
-          schema,
-        });
-      },
-    });
-
-    // thought - queue thoughts for future processing
-    this.tools.set('core.thought', {
-      name: 'core.thought',
-      description:
-        'Queue a thought for future processing. Use only when concrete follow-up or deeper analysis is needed. Do NOT use for vague "monitoring". Example: User says "I have an interview tomorrow" → emit thought to check in later.',
-      tags: ['thinking', 'follow-up', 'reflection'],
-      hasSideEffects: true, // Creates a signal
-      parameters: [
-        { name: 'action', type: 'string', description: 'Action: emit', required: true },
-        {
-          name: 'content',
-          type: 'string',
-          description: 'The thought to process later',
-          required: true,
-        },
-        {
-          name: 'reason',
-          type: 'string',
-          description: 'Why this thought matters (optional, for observability)',
-          required: false,
-        },
-      ],
-      execute: (args) => {
-        const action = args['action'] as string;
-
-        if (action !== 'emit') {
-          return Promise.resolve({
-            success: false,
-            action,
-            error: `Unknown action: ${action}. Use "emit".`,
-          });
-        }
-
-        const content = args['content'] as string | undefined;
-        if (!content) {
-          return Promise.resolve({
-            success: false,
-            action: 'emit',
-            error: 'Missing required parameter: content',
-          });
-        }
-
-        if (content.length < 5) {
-          return Promise.resolve({
-            success: false,
-            action: 'emit',
-            error: 'Thought content too short (minimum 5 characters)',
-          });
-        }
-
-        const reason = args['reason'] as string | undefined;
-
-        // Return success with thought data - the agentic loop will convert this to EMIT_THOUGHT intent
-        return Promise.resolve({
-          success: true,
-          action: 'emit',
-          content,
-          reason,
-          message: 'Thought queued for future processing',
-        });
-      },
-    });
-  }
-
-  /**
-   * Format duration for human readability.
-   */
-  private formatDuration(ms: number): string {
-    const seconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
-
-    if (days > 0) return `${String(days)} day${days > 1 ? 's' : ''} ago`;
-    if (hours > 0) return `${String(hours)} hour${hours > 1 ? 's' : ''} ago`;
-    if (minutes > 0) return `${String(minutes)} minute${minutes > 1 ? 's' : ''} ago`;
-    return 'just now';
+    // Schedule tool
+    this.tools.set('core.schedule', createScheduleTool());
   }
 }
 

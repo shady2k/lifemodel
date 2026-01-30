@@ -39,6 +39,21 @@ export interface ResponseFormat {
 }
 
 /**
+ * OpenAI Chat Completions tool format.
+ * Re-exported from tool-schema.ts for convenience.
+ */
+import type { OpenAIChatTool } from './tool-schema.js';
+export type { OpenAIChatTool };
+
+/**
+ * Tool choice for controlling tool calling behavior.
+ * - 'auto': Model decides whether to call tools
+ * - 'none': Model won't call any tools
+ * - 'required': Model must call at least one tool
+ */
+export type ToolChoice = 'auto' | 'none' | 'required';
+
+/**
  * Request to generate a completion.
  */
 export interface CompletionRequest {
@@ -62,6 +77,12 @@ export interface CompletionRequest {
 
   /** Response format (e.g., { type: 'json_object' } for JSON output) */
   responseFormat?: ResponseFormat;
+
+  /** Tools available for the model to call (native tool calling) */
+  tools?: OpenAIChatTool[];
+
+  /** Tool choice mode: 'auto', 'none', or 'required' */
+  toolChoice?: ToolChoice;
 }
 
 /**

@@ -203,6 +203,12 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       body['enable_thinking'] = false;
     }
 
+    // Add native tools if provided
+    if (request.tools && request.tools.length > 0) {
+      body['tools'] = request.tools;
+      body['tool_choice'] = request.toolChoice ?? 'auto';
+    }
+
     // Add response_format if specified (for JSON mode)
     if (request.responseFormat) {
       if (request.responseFormat.type === 'json_schema' && request.responseFormat.json_schema) {

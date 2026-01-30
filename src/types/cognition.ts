@@ -53,63 +53,13 @@ export interface ToolStep extends BaseStep {
 }
 
 /**
- * Update user model (beliefs about user).
- * Subject to per-field risk policies.
- */
-export interface UpdateUserStep extends BaseStep {
-  type: 'updateUser';
-  field: string;
-  value: unknown;
-  confidence: number;
-  source: EvidenceSource;
-  evidence?: string;
-}
-
-/**
- * Update agent state.
- * Subject to per-field risk policies.
- */
-export interface UpdateAgentStep extends BaseStep {
-  type: 'updateAgent';
-  field: string;
-  operation: 'set' | 'delta';
-  value: number;
-  confidence: number;
-  reason: string;
-}
-
-/**
- * Save structured fact to memory.
- * Facts are searchable via memory tools.
- */
-export interface SaveFactStep extends BaseStep {
-  type: 'saveFact';
-  fact: StructuredFact;
-}
-
-/**
- * Schedule future event.
- */
-export interface ScheduleStep extends BaseStep {
-  type: 'schedule';
-  delayMs: number;
-  event: {
-    type: string;
-    context: Record<string, unknown>;
-  };
-}
-
-/**
  * All possible step types.
- * Note: EmitThought removed - use core.thought tool instead.
+ *
+ * Two-element architecture:
+ * - think: Chain-of-thought reasoning (observable, no side effects)
+ * - tool: ALL mutations via tools (tracked, with feedback)
  */
-export type Step =
-  | ThinkStep
-  | ToolStep
-  | UpdateUserStep
-  | UpdateAgentStep
-  | SaveFactStep
-  | ScheduleStep;
+export type Step = ThinkStep | ToolStep;
 
 // ============================================================
 // Terminal States
