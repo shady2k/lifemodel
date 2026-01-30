@@ -99,6 +99,8 @@ export interface AgentConfigFile {
     enabled?: string[];
     /** List of plugin IDs to disable (takes precedence over enabled) */
     disabled?: string[];
+    /** Per-plugin configuration (keyed by plugin ID) */
+    configs?: Record<string, unknown>;
   };
 }
 
@@ -186,6 +188,8 @@ export interface MergedConfig {
     enabled: string[];
     /** List of plugin IDs to disable */
     disabled: string[];
+    /** Per-plugin configuration (keyed by plugin ID) */
+    configs: Record<string, unknown>;
   };
 }
 
@@ -267,6 +271,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
     externalDir: 'data/plugins',
     enabled: [], // Empty = all discovered plugins
     disabled: [],
+    configs: {}, // Per-plugin configuration
   },
 };
 

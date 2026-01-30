@@ -79,11 +79,12 @@ export type ConversationStatus = 'active' | 'awaiting_answer' | 'closed' | 'idle
 export interface RespondTerminal {
   type: 'respond';
   text: string;
-  parentId: string;
   /** Conversation status for follow-up timing - REQUIRED */
   conversationStatus: ConversationStatus;
   /** Confidence in response (0-1) - REQUIRED. Below 0.6 triggers smart retry. */
   confidence: number;
+  /** Parent ID - auto-assigned by system (last step or trigger signal) */
+  parentId?: string;
 }
 
 /**
@@ -92,7 +93,8 @@ export interface RespondTerminal {
 export interface NoActionTerminal {
   type: 'noAction';
   reason: string;
-  parentId: string;
+  /** Parent ID - auto-assigned by system */
+  parentId?: string;
 }
 
 /**
@@ -112,8 +114,8 @@ export interface DeferTerminal {
   reason: string;
   /** Hours to defer (2-8 typical) */
   deferHours: number;
-  /** Parent step ID */
-  parentId: string;
+  /** Parent ID - auto-assigned by system */
+  parentId?: string;
 }
 
 /**
@@ -244,9 +246,7 @@ export function validateRespondTerminal(terminal: unknown): RespondTerminal {
     throw new Error('RespondTerminal missing required field: text');
   }
 
-  if (typeof t['parentId'] !== 'string') {
-    throw new Error('RespondTerminal missing required field: parentId');
-  }
+  // parentId is auto-assigned by system, not required from LLM
 
   const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
   if (!validStatuses.includes(t['conversationStatus'] as string)) {
@@ -289,9 +289,7 @@ export function validateDeferTerminal(terminal: unknown): DeferTerminal {
     throw new Error(`DeferTerminal missing/invalid deferHours. Got: ${String(t['deferHours'])}`);
   }
 
-  if (typeof t['parentId'] !== 'string') {
-    throw new Error('DeferTerminal missing required field: parentId');
-  }
+  // parentId is auto-assigned by system, not required from LLM
 
   return terminal as DeferTerminal;
 }
@@ -315,9 +313,7 @@ export function validateNoActionTerminal(terminal: unknown): NoActionTerminal {
     throw new Error('NoActionTerminal missing required field: reason');
   }
 
-  if (typeof t['parentId'] !== 'string') {
-    throw new Error('NoActionTerminal missing required field: parentId');
-  }
+  // parentId is auto-assigned by system, not required from LLM
 
   return terminal as NoActionTerminal;
 }

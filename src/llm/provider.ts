@@ -46,6 +46,20 @@ import type { OpenAIChatTool } from './tool-schema.js';
 export type { OpenAIChatTool };
 
 /**
+ * Truncate long content for readable logs.
+ * Shows first N chars + "..." if truncated. Replaces newlines with ↵ for single-line display.
+ */
+const LOG_TRUNCATE_LENGTH = 200;
+function truncateForLog(content: string): string {
+  // Replace newlines with visible marker for single-line readability
+  const singleLine = content.replace(/\n/g, ' ↵ ');
+  if (singleLine.length <= LOG_TRUNCATE_LENGTH) {
+    return singleLine;
+  }
+  return singleLine.slice(0, LOG_TRUNCATE_LENGTH) + '...';
+}
+
+/**
  * Tool choice for controlling tool calling behavior.
  * - 'auto': Model decides whether to call tools
  * - 'none': Model won't call any tools
@@ -195,7 +209,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       '🤖 LLM request started'
     );
 
-    // Log each message for debugging (full content)
+    // Log each message for debugging (truncated for readability)
     if (this.logger) {
       for (const [i, msg] of request.messages.entries()) {
         this.logger.debug(
@@ -204,7 +218,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
             index: i,
             role: msg.role,
             contentLength: msg.content.length,
-            content: msg.content,
+            content: truncateForLog(msg.content),
           },
           `🤖 LLM message [${String(i)}] ${msg.role}`
         );
@@ -215,7 +229,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       const response = await this.doComplete(request);
       const duration = Date.now() - startTime;
 
-      // Log response (full content)
+      // Log response (truncated for readability)
       this.logger?.debug(
         {
           requestId,
@@ -227,7 +241,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
           completionTokens: response.usage?.completionTokens,
           totalTokens: response.usage?.totalTokens,
           responseLength: response.content.length,
-          response: response.content,
+          response: truncateForLog(response.content),
         },
         '🤖 LLM response received'
       );

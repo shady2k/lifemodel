@@ -55,14 +55,9 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
         description: 'Event: lastMessage, lastContact, or ISO timestamp (for since)',
         required: false,
       },
-      {
-        name: 'chatId',
-        type: 'string',
-        description: 'Chat ID for chat-specific events (for since)',
-        required: false,
-      },
+      // chatId removed - system uses context.recipientId automatically
     ],
-    execute: (args) => {
+    execute: (args, context) => {
       const action = args['action'] as string;
 
       switch (action) {
@@ -110,13 +105,14 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
             });
           }
 
-          const chatId = args['chatId'] as string | undefined;
+          // Use context.recipientId - system knows the current conversation
+          const recipientId = context?.recipientId;
           let eventTime: Date | null = null;
 
           if (event === 'lastMessage' && deps.conversationProvider) {
-            eventTime = deps.conversationProvider.getLastMessageTime(chatId);
+            eventTime = deps.conversationProvider.getLastMessageTime(recipientId);
           } else if (event === 'lastContact' && deps.conversationProvider) {
-            eventTime = deps.conversationProvider.getLastContactTime(chatId);
+            eventTime = deps.conversationProvider.getLastContactTime(recipientId);
           } else {
             const parsed = new Date(event);
             if (!isNaN(parsed.getTime())) {

@@ -176,6 +176,9 @@ export class ConfigLoader {
       if (file.plugins.disabled) {
         config.plugins.disabled = file.plugins.disabled;
       }
+      if (file.plugins.configs) {
+        config.plugins.configs = file.plugins.configs;
+      }
     }
   }
 

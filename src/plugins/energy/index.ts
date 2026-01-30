@@ -1,5 +1,5 @@
 /**
- * Energy Neuron
+ * Energy Neuron Plugin
  *
  * Monitors agent's energy level and emits signals when it changes significantly.
  * Energy affects the agent's capacity to engage - like human tiredness.
@@ -14,6 +14,7 @@ import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../type
 import { createSignal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
+import type { NeuronPluginV2 } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
 import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
@@ -40,14 +41,14 @@ export interface EnergyNeuronConfig {
  */
 export const DEFAULT_ENERGY_CONFIG: EnergyNeuronConfig = {
   changeConfig: {
-    baseThreshold: 0.1, // 10% change is noticeable
-    minAbsoluteChange: 0.03, // Ignore tiny fluctuations
-    maxThreshold: 0.25, // Don't become too insensitive
-    alertnessInfluence: 0.2, // Alertness has mild effect on sensitivity
+    baseThreshold: 0.1,
+    minAbsoluteChange: 0.03,
+    maxThreshold: 0.25,
+    alertnessInfluence: 0.2,
   },
-  refractoryPeriodMs: 3000, // Can emit every 3 seconds
-  lowEnergyThreshold: 0.3, // Below 30% is low
-  criticalEnergyThreshold: 0.1, // Below 10% is critical
+  refractoryPeriodMs: 3000,
+  lowEnergyThreshold: 0.3,
+  criticalEnergyThreshold: 0.1,
 };
 
 /**
@@ -69,22 +70,18 @@ export class EnergyNeuron extends BaseNeuron {
   check(state: AgentState, alertness: number, correlationId: string): Signal | undefined {
     const currentValue = state.energy;
 
-    // First check - establish baseline
     if (this.previousValue === undefined) {
       this.updatePrevious(currentValue);
-      // Emit initial signal if energy is noteworthy
       if (currentValue < this.config.lowEnergyThreshold) {
         return this.createSignal(currentValue, 0, correlationId);
       }
       return undefined;
     }
 
-    // Check refractory period
     if (this.isInRefractoryPeriod(this.config.refractoryPeriodMs)) {
       return undefined;
     }
 
-    // Detect if change is significant
     const changeResult = detectChange(
       currentValue,
       this.previousValue,
@@ -92,7 +89,6 @@ export class EnergyNeuron extends BaseNeuron {
       this.config.changeConfig
     );
 
-    // Also check for threshold crossings (even if change isn't "significant")
     const crossedLowThreshold =
       (this.previousValue >= this.config.lowEnergyThreshold &&
         currentValue < this.config.lowEnergyThreshold) ||
@@ -110,7 +106,6 @@ export class EnergyNeuron extends BaseNeuron {
       return undefined;
     }
 
-    // Change detected - emit signal
     const signal = this.createSignal(currentValue, changeResult.relativeChange, correlationId);
 
     this.updatePrevious(currentValue);
@@ -131,7 +126,6 @@ export class EnergyNeuron extends BaseNeuron {
   }
 
   private createSignal(value: number, rateOfChange: number, correlationId: string): Signal {
-    // Determine priority based on energy level
     let priority: Priority;
     if (value < this.config.criticalEnergyThreshold) {
       priority = Priority.HIGH;
@@ -145,20 +139,15 @@ export class EnergyNeuron extends BaseNeuron {
       value,
       rateOfChange,
       confidence: 1.0,
-      // Additional metrics
       isLow: value < this.config.lowEnergyThreshold ? 1 : 0,
       isCritical: value < this.config.criticalEnergyThreshold ? 1 : 0,
     };
 
-    // Add previousValue only if defined
     if (this.previousValue !== undefined) {
       metrics.previousValue = this.previousValue;
     }
 
-    return createSignal(this.signalType, this.source, metrics, {
-      priority,
-      correlationId,
-    });
+    return createSignal(this.signalType, this.source, metrics, { priority, correlationId });
   }
 }
 
@@ -171,3 +160,30 @@ export function createEnergyNeuron(
 ): EnergyNeuron {
   return new EnergyNeuron(logger, config);
 }
+
+/**
+ * Energy neuron plugin.
+ */
+const plugin: NeuronPluginV2 = {
+  manifest: {
+    manifestVersion: 2,
+    id: 'energy',
+    name: 'Energy Neuron',
+    version: '1.0.0',
+    description: 'Monitors agent energy level',
+    provides: [{ type: 'neuron', id: 'energy' }],
+    requires: [],
+  },
+  lifecycle: {
+    activate: () => {
+      // Neuron plugins don't need activation - neuron is created via factory
+    },
+  },
+  neuron: {
+    create: (logger: Logger, config?: unknown) =>
+      new EnergyNeuron(logger, config as Partial<EnergyNeuronConfig>),
+    defaultConfig: DEFAULT_ENERGY_CONFIG,
+  },
+};
+
+export default plugin;

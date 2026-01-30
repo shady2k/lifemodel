@@ -10,6 +10,11 @@
  * - Monitors vital signs (energy, pressure, alertness)
  * - Responds to external stimuli via sensory signals
  *
+ * Dynamic Registration:
+ * - Neurons can be registered/unregistered at runtime
+ * - Changes are queued and applied at tick boundaries
+ * - AlertnessNeuron is validated after initial plugin loading
+ *
  * Zero LLM cost - pure algorithmic processing.
  */
 
@@ -18,30 +23,14 @@ import type { Intent } from '../../types/intent.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { AutonomicLayer, AutonomicResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
-import type { NeuronRegistry } from './neuron-registry.js';
+import type { Neuron, NeuronRegistry } from './neuron-registry.js';
 import { createNeuronRegistry } from './neuron-registry.js';
-import {
-  createSocialDebtNeuron,
-  createEnergyNeuron,
-  createContactPressureNeuron,
-  createTimeNeuron,
-  createAlertnessNeuron,
-  type AlertnessNeuron,
-} from '../../plugins/neurons/index.js';
+import type { AlertnessNeuron } from '../../plugins/alertness/index.js';
 
 /**
  * Configuration for AUTONOMIC processor.
  */
 export interface AutonomicProcessorConfig {
-  /** Enable/disable specific neurons */
-  enabledNeurons: {
-    socialDebt: boolean;
-    energy: boolean;
-    contactPressure: boolean;
-    time: boolean;
-    alertness: boolean;
-  };
-
   /** Energy drain per incoming signal processed */
   energyDrainPerSignal: number;
 
@@ -53,19 +42,16 @@ export interface AutonomicProcessorConfig {
  * Default configuration.
  */
 const DEFAULT_CONFIG: AutonomicProcessorConfig = {
-  enabledNeurons: {
-    socialDebt: true,
-    energy: true,
-    contactPressure: true,
-    time: true,
-    alertness: true,
-  },
   energyDrainPerSignal: 0.001,
   energyDrainPerNeuron: 0.0005,
 };
 
 /**
  * AUTONOMIC layer processor implementation.
+ *
+ * Supports dynamic neuron registration via registerNeuron/unregisterNeuron.
+ * Changes are queued and applied at the start of each tick to avoid
+ * modifying the registry during iteration.
  */
 export class AutonomicProcessor implements AutonomicLayer {
   readonly name = 'autonomic' as const;
@@ -73,44 +59,127 @@ export class AutonomicProcessor implements AutonomicLayer {
   private readonly registry: NeuronRegistry;
   private readonly logger: Logger;
   private readonly config: AutonomicProcessorConfig;
+
+  /** AlertnessNeuron reference (required, but registered dynamically) */
   private alertnessNeuron: AlertnessNeuron | undefined;
+
+  /** Whether validateRequiredNeurons() has been called */
+  private alertnessValidated = false;
+
+  /** Pending neuron registrations (applied at tick boundary) */
+  private pendingRegistrations: Neuron[] = [];
+
+  /** Pending neuron unregistrations by ID (applied at tick boundary) */
+  private pendingUnregistrations: string[] = [];
 
   constructor(logger: Logger, config: Partial<AutonomicProcessorConfig> = {}) {
     this.logger = logger.child({ layer: 'autonomic' });
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.registry = createNeuronRegistry(this.logger);
 
-    this.initializeNeurons();
+    // No initializeNeurons() - neurons are registered dynamically via callbacks
+    this.logger.info('AUTONOMIC layer created (awaiting neuron registration)');
   }
 
   /**
-   * Initialize all enabled neurons.
+   * Register a neuron dynamically (queued for next tick).
+   * Called by PluginLoader when neuron plugins load.
+   *
+   * @param neuron The neuron instance to register
    */
-  private initializeNeurons(): void {
-    const { enabledNeurons } = this.config;
+  registerNeuron(neuron: Neuron): void {
+    this.pendingRegistrations.push(neuron);
+    this.logger.debug({ neuronId: neuron.id }, 'Neuron queued for registration');
+  }
 
-    if (enabledNeurons.alertness) {
-      this.alertnessNeuron = createAlertnessNeuron(this.logger);
-      this.registry.register(this.alertnessNeuron);
+  /**
+   * Unregister a neuron dynamically (queued for next tick).
+   * Called by PluginLoader when neuron plugins unload/pause.
+   *
+   * @param id The neuron ID to unregister
+   */
+  unregisterNeuron(id: string): void {
+    if (!this.pendingUnregistrations.includes(id)) {
+      this.pendingUnregistrations.push(id);
+      this.logger.debug({ neuronId: id }, 'Neuron queued for unregistration');
+    }
+  }
+
+  /**
+   * Apply pending registrations/unregistrations.
+   * Called at START of process() to avoid mutation during iteration.
+   *
+   * Order: unregistrations first, then registrations (allows replace-in-place).
+   */
+  applyPendingChanges(): void {
+    // FIRST: Process all unregistrations
+    for (const id of this.pendingUnregistrations) {
+      try {
+        this.registry.unregister(id);
+        if (id === 'alertness') {
+          this.alertnessNeuron = undefined;
+          this.logger.warn('AlertnessNeuron unregistered');
+        }
+      } catch (error) {
+        this.logger.error(
+          { neuronId: id, error: error instanceof Error ? error.message : String(error) },
+          'Failed to unregister neuron'
+        );
+      }
+    }
+    this.pendingUnregistrations = [];
+
+    // THEN: Process all registrations
+    for (const neuron of this.pendingRegistrations) {
+      try {
+        this.registry.register(neuron);
+
+        // Track AlertnessNeuron specially
+        if (neuron.id === 'alertness') {
+          this.alertnessNeuron = neuron as AlertnessNeuron;
+          this.logger.info('AlertnessNeuron registered');
+        }
+
+        this.logger.debug({ neuronId: neuron.id }, 'Neuron registered');
+      } catch (error) {
+        this.logger.error(
+          { neuronId: neuron.id, error: error instanceof Error ? error.message : String(error) },
+          'Failed to register neuron'
+        );
+      }
+    }
+    this.pendingRegistrations = [];
+  }
+
+  /**
+   * Validate that required neurons are registered.
+   * Called after initial plugin loading completes.
+   *
+   * @throws Error if AlertnessNeuron is not registered
+   */
+  validateRequiredNeurons(): void {
+    // Apply any pending registrations first
+    this.applyPendingChanges();
+
+    if (!this.alertnessNeuron) {
+      throw new Error(
+        'AlertnessNeuron not registered - this neuron is required. ' +
+          'Ensure the alertness plugin is enabled in plugins configuration.'
+      );
     }
 
-    if (enabledNeurons.socialDebt) {
-      this.registry.register(createSocialDebtNeuron(this.logger));
-    }
+    this.alertnessValidated = true;
+    this.logger.info(
+      { neuronCount: this.registry.size() },
+      'Required neurons validated, AUTONOMIC layer ready'
+    );
+  }
 
-    if (enabledNeurons.energy) {
-      this.registry.register(createEnergyNeuron(this.logger));
-    }
-
-    if (enabledNeurons.contactPressure) {
-      this.registry.register(createContactPressureNeuron(this.logger));
-    }
-
-    if (enabledNeurons.time) {
-      this.registry.register(createTimeNeuron(this.logger));
-    }
-
-    this.logger.info({ neuronCount: this.registry.size() }, 'AUTONOMIC layer initialized');
+  /**
+   * Check if required neurons have been validated.
+   */
+  isValidated(): boolean {
+    return this.alertnessValidated;
   }
 
   /**
@@ -124,16 +193,25 @@ export class AutonomicProcessor implements AutonomicLayer {
   process(state: AgentState, incomingSignals: Signal[], correlationId: string): AutonomicResult {
     const startTime = Date.now();
 
-    // Get current alertness for sensitivity adjustment
-    const alertness = this.alertnessNeuron ? this.alertnessNeuron.getCurrentAlertness(state) : 0.5;
+    // Apply queued changes at start of tick (before any iteration)
+    this.applyPendingChanges();
 
-    // Decay activity in alertness neuron
-    if (this.alertnessNeuron) {
-      this.alertnessNeuron.decayActivity();
+    // AlertnessNeuron must be present after validation
+    if (!this.alertnessNeuron) {
+      throw new Error(
+        'AlertnessNeuron missing - cannot process tick. ' +
+          'Call validateRequiredNeurons() after loading plugins.'
+      );
     }
 
+    // Get current alertness for sensitivity adjustment
+    const alertness = this.alertnessNeuron.getCurrentAlertness(state);
+
+    // Decay activity in alertness neuron
+    this.alertnessNeuron.decayActivity();
+
     // Record activity from incoming signals
-    if (this.alertnessNeuron && incomingSignals.length > 0) {
+    if (incomingSignals.length > 0) {
       // User messages are high activity
       const userMessageCount = incomingSignals.filter((s) => s.type === 'user_message').length;
       if (userMessageCount > 0) {
@@ -207,9 +285,15 @@ export class AutonomicProcessor implements AutonomicLayer {
 
   /**
    * Get current alertness value.
+   * AlertnessNeuron must be registered before calling this method.
+   *
+   * @throws Error if AlertnessNeuron is not registered
    */
   getAlertness(state: AgentState): number {
-    return this.alertnessNeuron ? this.alertnessNeuron.getCurrentAlertness(state) : 0.5;
+    if (!this.alertnessNeuron) {
+      throw new Error('AlertnessNeuron not registered - cannot get alertness');
+    }
+    return this.alertnessNeuron.getCurrentAlertness(state);
   }
 
   /**
@@ -223,6 +307,16 @@ export class AutonomicProcessor implements AutonomicLayer {
 
 /**
  * Create an AUTONOMIC processor.
+ *
+ * The processor starts without any neurons. Register neurons via:
+ * - registerNeuron(neuron) to add neurons
+ * - unregisterNeuron(id) to remove neurons
+ *
+ * After loading plugins, call validateRequiredNeurons() to ensure
+ * the AlertnessNeuron is registered.
+ *
+ * @param logger Logger instance
+ * @param config Optional processor configuration
  */
 export function createAutonomicProcessor(
   logger: Logger,

@@ -3,6 +3,11 @@
  *
  * Manages plugin lifecycle: loading, activation, hot-swap, and deactivation.
  * Validates manifests, checks dependencies, and creates plugin primitives.
+ *
+ * Dynamic Registration:
+ * - Supports runtime load/unload/pause/resume of plugins
+ * - Neuron plugins are registered with AUTONOMIC layer via callbacks
+ * - Required plugins (e.g., alertness) cannot be paused/unloaded
  */
 
 import { randomUUID } from 'node:crypto';
@@ -22,11 +27,21 @@ import type {
   PluginTool,
   MigrationBundle,
   EventSchema,
+  NeuronPluginV2,
+  PluginStateInfo,
 } from '../types/plugin.js';
+import { isNeuronPlugin } from '../types/plugin.js';
 import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
 import { createSchedulerPrimitive, type SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import type { SchedulerService } from './scheduler-service.js';
+import type { Neuron } from '../layers/autonomic/neuron-registry.js';
+import {
+  ValidationError,
+  DependencyError,
+  ActivationError,
+  AlreadyLoadedError,
+} from './plugin-errors.js';
 
 /**
  * Callback type for pushing signals into the pipeline.
@@ -50,6 +65,16 @@ export type ToolUnregisterCallback = (toolName: string) => boolean;
 export type IntentEmitCallback = (intent: Intent) => void;
 
 /**
+ * Callback type for registering neurons with AUTONOMIC layer.
+ */
+export type NeuronRegisterCallback = (neuron: Neuron) => void;
+
+/**
+ * Callback type for unregistering neurons from AUTONOMIC layer.
+ */
+export type NeuronUnregisterCallback = (id: string) => void;
+
+/**
  * Loaded plugin state.
  */
 interface LoadedPluginState {
@@ -57,16 +82,19 @@ interface LoadedPluginState {
   storage: StoragePrimitiveImpl;
   scheduler: SchedulerPrimitiveImpl;
   loadedAt: Date;
-  status: 'active' | 'inactive';
+  status: 'active' | 'paused';
+  /** Unique instance ID (changes on reload for stale reference detection) */
+  instanceId: string;
 }
 
 /**
  * Plugin loader configuration.
- * Reserved for future features (e.g., drain mode TTL).
  */
 export interface PluginLoaderConfig {
   /** Drain mode timeout in ms (default: 5 minutes) - reserved for future use */
   drainTimeoutMs?: number;
+  /** Per-plugin configuration (keyed by plugin ID) */
+  pluginConfigs?: Record<string, unknown>;
 }
 
 /**
@@ -76,51 +104,101 @@ export class PluginLoader {
   private readonly logger: Logger;
   private readonly coreStorage: Storage;
   private readonly schedulerService: SchedulerService;
+  private readonly config: Partial<PluginLoaderConfig>;
 
   private readonly plugins = new Map<string, LoadedPluginState>();
   private readonly eventSchemas = new Map<string, EventSchema>();
   /** Track which schemas each plugin registered (for cleanup) */
   private readonly pluginSchemas = new Map<string, Set<string>>();
+  /** Track neuron plugins separately for AUTONOMIC layer access */
+  private readonly neuronPlugins: NeuronPluginV2[] = [];
 
   private signalCallback: SignalPushCallback | null = null;
   private intentCallback: IntentEmitCallback | null = null;
   private toolRegisterCallback: ToolRegisterCallback | null = null;
   private toolUnregisterCallback: ToolUnregisterCallback | null = null;
   private servicesProvider: (() => BasePluginServices) | null = null;
+  private neuronRegisterCallback: NeuronRegisterCallback | null = null;
+  private neuronUnregisterCallback: NeuronUnregisterCallback | null = null;
+
+  /** Buffer for signals emitted before callback is set (capped at 100) */
+  private signalBuffer: Signal[] = [];
+  /** Buffer for intents emitted before callback is set (capped at 100) */
+  private intentBuffer: Intent[] = [];
+  /** Maximum buffer size to prevent unbounded growth */
+  private static readonly MAX_BUFFER_SIZE = 100;
+
+  /** Plugin state tracking for lifecycle management */
+  private readonly pluginStates = new Map<string, PluginStateInfo>();
+
+  /** Required plugins that cannot be paused/unloaded/restarted */
+  private readonly requiredPlugins = new Set(['alertness']);
+
+  /** Map pluginId to neuron ID (for correct unregistration) */
+  private readonly pluginNeuronIds = new Map<string, string>();
 
   constructor(
     logger: Logger,
     coreStorage: Storage,
     schedulerService: SchedulerService,
-    _config: Partial<PluginLoaderConfig> = {}
+    config: Partial<PluginLoaderConfig> = {}
   ) {
     this.logger = logger.child({ component: 'plugin-loader' });
     this.coreStorage = coreStorage;
     this.schedulerService = schedulerService;
-    // Config reserved for future features (e.g., drain mode TTL)
+    this.config = config;
   }
 
   /**
    * Set the callback for pushing signals into the pipeline.
+   * Flushes any buffered signals from plugin activation.
    */
   setSignalCallback(callback: SignalPushCallback): void {
     this.signalCallback = callback;
+
+    // Flush buffered signals
+    if (this.signalBuffer.length > 0) {
+      this.logger.debug({ count: this.signalBuffer.length }, 'Flushing buffered signals');
+      for (const signal of this.signalBuffer) {
+        callback(signal);
+      }
+      this.signalBuffer = [];
+    }
   }
 
   /**
    * Set the callback for emitting intents.
    * Used by IntentEmitter to route intents to core loop.
+   * Flushes any buffered intents from plugin activation.
    */
   setIntentCallback(callback: IntentEmitCallback): void {
     this.intentCallback = callback;
+
+    // Flush buffered intents
+    if (this.intentBuffer.length > 0) {
+      this.logger.debug({ count: this.intentBuffer.length }, 'Flushing buffered intents');
+      for (const intent of this.intentBuffer) {
+        callback(intent);
+      }
+      this.intentBuffer = [];
+    }
   }
 
   /**
    * Set callbacks for tool registration.
+   * Also registers tools from any already-loaded plugins.
    */
   setToolCallbacks(register: ToolRegisterCallback, unregister: ToolUnregisterCallback): void {
     this.toolRegisterCallback = register;
     this.toolUnregisterCallback = unregister;
+
+    // Register tools from already-loaded plugins (handles case where plugins load before layers)
+    for (const [pluginId, state] of this.plugins) {
+      const tools = state.plugin.tools;
+      if (tools && tools.length > 0) {
+        this.registerPluginTools(pluginId, tools);
+      }
+    }
   }
 
   /**
@@ -133,34 +211,129 @@ export class PluginLoader {
   }
 
   /**
+   * Set callbacks for neuron registration with AUTONOMIC layer.
+   * Must be called before loading any neuron plugins.
+   *
+   * Also registers neurons from any already-loaded plugins (handles startup order).
+   */
+  setNeuronCallbacks(register: NeuronRegisterCallback, unregister: NeuronUnregisterCallback): void {
+    this.neuronRegisterCallback = register;
+    this.neuronUnregisterCallback = unregister;
+
+    // Register neurons from already-loaded plugins (handles case where plugins load before layers)
+    for (const plugin of this.neuronPlugins) {
+      const config = this.getPluginConfig(plugin.manifest.id) ?? plugin.neuron.defaultConfig;
+      const neuron = plugin.neuron.create(this.logger, config);
+      this.neuronRegisterCallback(neuron);
+      // Track neuron ID for correct unregistration
+      this.pluginNeuronIds.set(plugin.manifest.id, neuron.id);
+      this.logger.debug(
+        { pluginId: plugin.manifest.id, neuronId: neuron.id },
+        'Neuron registered from already-loaded plugin'
+      );
+    }
+  }
+
+  /**
+   * Check if a plugin can be removed (paused/unloaded/restarted).
+   * Required plugins cannot be removed.
+   */
+  private canRemove(pluginId: string): boolean {
+    if (this.requiredPlugins.has(pluginId)) {
+      this.logger.error({ pluginId }, 'Cannot remove required plugin');
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Load and activate a plugin.
+   *
+   * @throws ValidationError if manifest is invalid
+   * @throws DependencyError if dependencies are not met
+   * @throws AlreadyLoadedError if plugin is already loaded
+   * @throws ActivationError if activation fails
    */
   async load(pluginModule: { default: PluginV2 }): Promise<void> {
     const plugin = pluginModule.default;
     const { manifest } = plugin;
 
-    // Validate manifest
-    this.validateManifest(manifest);
+    // Update state tracking
+    this.pluginStates.set(manifest.id, {
+      state: 'loading',
+      failureCount: this.pluginStates.get(manifest.id)?.failureCount ?? 0,
+      lastAttemptAt: new Date(),
+    });
+
+    // Validate manifest (throws ValidationError)
+    try {
+      this.validateManifest(manifest);
+    } catch (error) {
+      this.pluginStates.set(manifest.id, {
+        state: 'failed',
+        failureCount: (this.pluginStates.get(manifest.id)?.failureCount ?? 0) + 1,
+        lastError: error instanceof Error ? error.message : String(error),
+        lastAttemptAt: new Date(),
+      });
+      throw error;
+    }
 
     // Check if already loaded
     if (this.plugins.has(manifest.id)) {
-      throw new Error(`Plugin ${manifest.id} is already loaded. Use hotSwap() to update.`);
+      // Don't mark as failed - plugin is loaded, just can't load again
+      throw new AlreadyLoadedError(manifest.id);
     }
 
-    // Check dependencies
-    this.checkDependencies(manifest);
+    // Check dependencies (throws DependencyError)
+    try {
+      this.checkDependencies(manifest);
+    } catch (error) {
+      this.pluginStates.set(manifest.id, {
+        state: 'failed',
+        failureCount: (this.pluginStates.get(manifest.id)?.failureCount ?? 0) + 1,
+        lastError: error instanceof Error ? error.message : String(error),
+        lastAttemptAt: new Date(),
+      });
+      throw error;
+    }
 
     // Create primitives
-    const primitives = await this.createPrimitives(plugin);
+    let primitives: PluginPrimitives;
+    try {
+      primitives = await this.createPrimitives(plugin);
+    } catch (error) {
+      this.pluginStates.set(manifest.id, {
+        state: 'failed',
+        failureCount: (this.pluginStates.get(manifest.id)?.failureCount ?? 0) + 1,
+        lastError: `Primitive creation failed: ${error instanceof Error ? error.message : String(error)}`,
+        lastAttemptAt: new Date(),
+      });
+      throw new ActivationError(
+        manifest.id,
+        `Failed to create primitives: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
 
     // Activate plugin
     try {
       await plugin.lifecycle.activate(primitives);
     } catch (error) {
-      // Clean up on activation failure
+      // Clean up ALL resources on activation failure
       await primitives.storage.clear();
-      throw new Error(
-        `Plugin ${manifest.id} activation failed: ${error instanceof Error ? error.message : String(error)}`
+      this.schedulerService.unregisterScheduler(manifest.id);
+
+      // Update state tracking
+      const prevState = this.pluginStates.get(manifest.id);
+      this.pluginStates.set(manifest.id, {
+        state: 'failed',
+        failureCount: (prevState?.failureCount ?? 0) + 1,
+        lastError: error instanceof Error ? error.message : String(error),
+        lastAttemptAt: new Date(),
+      });
+
+      throw new ActivationError(
+        manifest.id,
+        error instanceof Error ? error.message : String(error)
       );
     }
 
@@ -168,6 +341,22 @@ export class PluginLoader {
     const tools = plugin.tools;
     if (tools && tools.length > 0) {
       this.registerPluginTools(manifest.id, tools);
+    }
+
+    // Track and register neuron plugins
+    if (isNeuronPlugin(plugin)) {
+      this.neuronPlugins.push(plugin);
+
+      // Register neuron with AUTONOMIC layer if callback is set
+      if (this.neuronRegisterCallback) {
+        const config = this.getPluginConfig(manifest.id) ?? plugin.neuron.defaultConfig;
+        const neuron = plugin.neuron.create(this.logger, config);
+        this.neuronRegisterCallback(neuron);
+        // Track neuron ID for correct unregistration (neuron.id may differ from pluginId)
+        this.pluginNeuronIds.set(manifest.id, neuron.id);
+      }
+
+      this.logger.debug({ pluginId: manifest.id }, 'Registered as neuron plugin');
     }
 
     // Store loaded state
@@ -181,8 +370,15 @@ export class PluginLoader {
       scheduler,
       loadedAt: new Date(),
       status: 'active',
+      instanceId: randomUUID(),
     };
     this.plugins.set(manifest.id, state);
+
+    // Update state tracking
+    this.pluginStates.set(manifest.id, {
+      state: 'active',
+      failureCount: 0,
+    });
 
     this.logger.info(
       {
@@ -268,11 +464,11 @@ export class PluginLoader {
       }
     }
 
-    // Unregister old tools
+    // Unregister old tools (use same naming as registerPluginTools: plugin.${name})
     const oldTools = oldState.plugin.tools;
     if (oldTools) {
       for (const tool of oldTools) {
-        this.toolUnregisterCallback?.(`${pluginId}:${tool.name}`);
+        this.toolUnregisterCallback?.(`plugin.${tool.name}`);
       }
     }
 
@@ -320,18 +516,57 @@ export class PluginLoader {
       scheduler: updatedScheduler,
       loadedAt: new Date(),
       status: 'active',
+      instanceId: randomUUID(),
     };
     this.plugins.set(pluginId, newState);
+
+    // Handle neuron plugin updates (unregister old, register new)
+    const oldNeuronIndex = this.neuronPlugins.findIndex((p) => p.manifest.id === pluginId);
+    const wasNeuron = oldNeuronIndex !== -1;
+
+    if (wasNeuron) {
+      this.neuronPlugins.splice(oldNeuronIndex, 1);
+      // Unregister old neuron using tracked ID
+      const oldNeuronId = this.pluginNeuronIds.get(pluginId);
+      if (oldNeuronId) {
+        this.neuronUnregisterCallback?.(oldNeuronId);
+        this.pluginNeuronIds.delete(pluginId);
+      }
+    }
+
+    if (isNeuronPlugin(newPlugin)) {
+      this.neuronPlugins.push(newPlugin);
+      // Register new neuron and track its ID
+      if (this.neuronRegisterCallback) {
+        const config = this.getPluginConfig(pluginId) ?? newPlugin.neuron.defaultConfig;
+        const neuron = newPlugin.neuron.create(this.logger, config);
+        this.neuronRegisterCallback(neuron);
+        this.pluginNeuronIds.set(pluginId, neuron.id);
+      }
+      this.logger.debug({ pluginId }, 'Neuron plugin updated in hot-swap');
+    }
+
+    // Update state tracking
+    this.pluginStates.set(pluginId, { state: 'active', failureCount: 0 });
 
     this.logger.info({ pluginId, oldVersion, newVersion }, 'Hot-swap completed successfully');
   }
 
   /**
-   * Unload a plugin.
+   * Unload a plugin completely.
+   * Clears storage, unregisters all components, removes from registry.
+   *
+   * @returns true if unloaded, false if not loaded or is required plugin
    */
   async unload(pluginId: string): Promise<boolean> {
+    // Block unloading required plugins
+    if (!this.canRemove(pluginId)) {
+      return false;
+    }
+
     const state = this.plugins.get(pluginId);
     if (!state) {
+      this.logger.warn({ pluginId }, 'Cannot unload unknown plugin');
       return false;
     }
 
@@ -350,12 +585,21 @@ export class PluginLoader {
     // Unregister tools
     if (state.plugin.tools) {
       for (const tool of state.plugin.tools) {
-        this.toolUnregisterCallback?.(`${pluginId}:${tool.name}`);
+        this.toolUnregisterCallback?.(`plugin.${tool.name}`);
       }
     }
 
-    // Unregister scheduler
-    this.schedulerService.unregisterScheduler(pluginId);
+    // Unregister neuron from AUTONOMIC layer (use tracked neuron ID, not pluginId)
+    if (isNeuronPlugin(state.plugin)) {
+      const neuronId = this.pluginNeuronIds.get(pluginId);
+      if (neuronId) {
+        this.neuronUnregisterCallback?.(neuronId);
+        this.pluginNeuronIds.delete(pluginId);
+      }
+    }
+
+    // Unregister scheduler (queued for tick boundary in SchedulerService)
+    this.schedulerService.queueUnregister(pluginId);
 
     // Unregister event schemas (using tracked schema keys)
     const schemas = this.pluginSchemas.get(pluginId);
@@ -367,11 +611,279 @@ export class PluginLoader {
       this.pluginSchemas.delete(pluginId);
     }
 
+    // Remove from neuron plugins list
+    const neuronIndex = this.neuronPlugins.findIndex((p) => p.manifest.id === pluginId);
+    if (neuronIndex !== -1) {
+      this.neuronPlugins.splice(neuronIndex, 1);
+      this.logger.debug({ pluginId }, 'Neuron plugin removed from list');
+    }
+
+    // Clear storage (unload is a full removal)
+    await state.storage.clear();
+
     // Remove from loaded plugins
     this.plugins.delete(pluginId);
 
+    // Update state tracking
+    this.pluginStates.delete(pluginId);
+
     this.logger.info({ pluginId }, 'Plugin unloaded');
     return true;
+  }
+
+  /**
+   * Pause a plugin (deactivate but keep state).
+   * Paused plugins can be resumed with their state intact.
+   *
+   * @returns true if paused, false if required plugin, unknown, or already paused
+   */
+  async pause(pluginId: string): Promise<boolean> {
+    // Block pausing required plugins
+    if (!this.canRemove(pluginId)) {
+      return false;
+    }
+
+    const state = this.plugins.get(pluginId);
+    if (!state) {
+      this.logger.warn({ pluginId }, 'Cannot pause unknown plugin');
+      return false;
+    }
+
+    if (state.status !== 'active') {
+      this.logger.warn(
+        { pluginId, status: state.status },
+        'Cannot pause plugin not in active state'
+      );
+      return false;
+    }
+
+    // IMMEDIATE: Mark scheduler as paused (stops firing immediately)
+    this.schedulerService.pausePlugin(pluginId);
+
+    // QUEUED: Unregister neuron (applied at tick boundary, use tracked neuron ID)
+    if (isNeuronPlugin(state.plugin)) {
+      const neuronId = this.pluginNeuronIds.get(pluginId);
+      if (neuronId) {
+        this.neuronUnregisterCallback?.(neuronId);
+        // Don't delete from pluginNeuronIds - we'll re-register on resume
+      }
+    }
+
+    // IMMEDIATE: Unregister tools (safe, no iteration issues)
+    if (state.plugin.tools) {
+      for (const tool of state.plugin.tools) {
+        this.toolUnregisterCallback?.(`plugin.${tool.name}`);
+      }
+    }
+
+    // IMMEDIATE: Unregister event schemas (paused plugin should not process events)
+    const schemas = this.pluginSchemas.get(pluginId);
+    if (schemas) {
+      for (const schemaKey of schemas) {
+        this.eventSchemas.delete(schemaKey);
+      }
+      // Keep the schema keys list for re-registration on resume
+    }
+
+    // Call plugin's deactivate if exists
+    if (state.plugin.lifecycle.deactivate) {
+      try {
+        await state.plugin.lifecycle.deactivate();
+      } catch (error) {
+        this.logger.warn(
+          { pluginId, error: error instanceof Error ? error.message : String(error) },
+          'Plugin deactivation during pause failed'
+        );
+      }
+    }
+
+    // Update state
+    state.status = 'paused';
+    this.pluginStates.set(pluginId, {
+      state: 'paused',
+      failureCount: 0,
+      pausedAt: new Date(),
+    });
+
+    this.logger.info({ pluginId }, 'Plugin paused');
+    return true;
+  }
+
+  /**
+   * Resume a paused plugin.
+   * Re-activates the plugin with its preserved state.
+   *
+   * @returns true if resumed, false if not paused or resume failed
+   */
+  async resume(pluginId: string): Promise<boolean> {
+    const state = this.plugins.get(pluginId);
+    if (!state) {
+      this.logger.warn({ pluginId }, 'Cannot resume unknown plugin');
+      return false;
+    }
+
+    if (state.status !== 'paused') {
+      this.logger.warn(
+        { pluginId, status: state.status },
+        'Cannot resume plugin not in paused state'
+      );
+      return false;
+    }
+
+    // Re-create primitives and reactivate
+    let primitives: PluginPrimitives;
+    try {
+      primitives = await this.createPrimitives(state.plugin);
+      await state.plugin.lifecycle.activate(primitives);
+    } catch (error) {
+      this.logger.error(
+        { pluginId, error: error instanceof Error ? error.message : String(error) },
+        'Plugin resume failed'
+      );
+      return false;
+    }
+
+    // Resume scheduler
+    this.schedulerService.resumePlugin(pluginId);
+
+    // Re-register neuron if applicable
+    if (isNeuronPlugin(state.plugin)) {
+      const config = this.getPluginConfig(pluginId) ?? state.plugin.neuron.defaultConfig;
+      const neuron = state.plugin.neuron.create(this.logger, config);
+      this.neuronRegisterCallback?.(neuron);
+      // Update tracked neuron ID (may have changed if neuron factory changed)
+      this.pluginNeuronIds.set(pluginId, neuron.id);
+    }
+
+    // Re-register tools
+    if (state.plugin.tools) {
+      this.registerPluginTools(pluginId, state.plugin.tools);
+    }
+
+    // Note: Event schemas would need to be re-registered by the plugin in activate()
+
+    // Update state with new primitives references
+    const newScheduler = this.schedulerService.getScheduler(pluginId);
+    if (newScheduler) {
+      state.scheduler = newScheduler;
+    }
+    state.storage = primitives.storage as StoragePrimitiveImpl;
+    state.loadedAt = new Date();
+    state.instanceId = randomUUID();
+    state.status = 'active';
+    this.pluginStates.set(pluginId, { state: 'active', failureCount: 0 });
+
+    this.logger.info({ pluginId }, 'Plugin resumed');
+    return true;
+  }
+
+  /**
+   * Restart a plugin (unload + load with fresh state).
+   *
+   * @returns true if restarted, false if required plugin or restart failed
+   */
+  async restart(pluginId: string): Promise<boolean> {
+    // Block restarting required plugins
+    if (!this.canRemove(pluginId)) {
+      return false;
+    }
+
+    const state = this.plugins.get(pluginId);
+    if (!state) {
+      this.logger.warn({ pluginId }, 'Cannot restart unknown plugin');
+      return false;
+    }
+
+    // Save plugin reference before unload
+    const plugin = state.plugin;
+
+    try {
+      // Full unload (clears storage, unregisters everything)
+      await this.unload(pluginId);
+    } catch (unloadError) {
+      this.logger.error(
+        {
+          pluginId,
+          error: unloadError instanceof Error ? unloadError.message : String(unloadError),
+        },
+        'Restart failed: unload error'
+      );
+      return false;
+    }
+
+    try {
+      // Fresh load with clean state
+      await this.load({ default: plugin });
+      this.logger.info({ pluginId }, 'Plugin restarted');
+      return true;
+    } catch (loadError) {
+      // Load failed after unload - plugin is now inactive
+      this.logger.error(
+        { pluginId, error: loadError instanceof Error ? loadError.message : String(loadError) },
+        'Restart failed: reload error, plugin inactive'
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Load plugin with retry logic for transient failures.
+   * Does not retry validation or dependency errors.
+   *
+   * @param pluginModule The plugin module to load
+   * @param maxRetries Maximum retry attempts (default: 3)
+   * @param baseBackoffMs Base backoff delay in ms (default: 1000)
+   */
+  async loadWithRetry(
+    pluginModule: { default: PluginV2 },
+    maxRetries = 3,
+    baseBackoffMs = 1000
+  ): Promise<void> {
+    const pluginId = pluginModule.default.manifest.id;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this.load(pluginModule);
+        return; // Success
+      } catch (error) {
+        // Don't retry validation, dependency, or already-loaded errors
+        if (
+          error instanceof ValidationError ||
+          error instanceof DependencyError ||
+          error instanceof AlreadyLoadedError
+        ) {
+          throw error;
+        }
+
+        if (attempt === maxRetries) {
+          throw new ActivationError(
+            pluginId,
+            `Failed after ${String(maxRetries)} attempts: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+        // Clean up scheduler before retry (prevents leaks)
+        this.schedulerService.unregisterScheduler(pluginId);
+
+        const delay = baseBackoffMs * Math.pow(2, attempt - 1);
+        this.logger.warn({ pluginId, attempt, nextRetryMs: delay }, 'Retrying plugin load');
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
+  /**
+   * Get the state info for a plugin.
+   */
+  getPluginState(pluginId: string): PluginStateInfo | undefined {
+    return this.pluginStates.get(pluginId);
+  }
+
+  /**
+   * Check if a plugin is a required plugin.
+   */
+  isRequiredPlugin(pluginId: string): boolean {
+    return this.requiredPlugins.has(pluginId);
   }
 
   /**
@@ -436,6 +948,22 @@ export class PluginLoader {
   }
 
   /**
+   * Get all loaded neuron plugins.
+   * Used by AUTONOMIC layer to instantiate neurons from plugins.
+   */
+  getNeuronPlugins(): NeuronPluginV2[] {
+    return [...this.neuronPlugins];
+  }
+
+  /**
+   * Get configuration for a specific plugin.
+   * Returns undefined if no config is set for this plugin.
+   */
+  getPluginConfig(pluginId: string): unknown {
+    return this.config.pluginConfigs?.[pluginId];
+  }
+
+  /**
    * Dispatch an event to a plugin's onEvent handler.
    * Called by scheduler service when events fire.
    */
@@ -482,15 +1010,21 @@ export class PluginLoader {
 
   /**
    * Validate a plugin manifest.
+   * @throws ValidationError if manifest is invalid
    */
   private validateManifest(manifest: PluginManifestV2): void {
     // Runtime check - manifestVersion could be wrong in invalid plugins
     if ((manifest.manifestVersion as number) !== 2) {
-      throw new Error(`Unsupported manifest version: ${String(manifest.manifestVersion)}`);
+      // manifest.id might be missing in truly invalid manifests
+      const pluginId = typeof manifest.id === 'string' ? manifest.id : 'unknown';
+      throw new ValidationError(
+        pluginId,
+        `Unsupported manifest version: ${String(manifest.manifestVersion)}`
+      );
     }
 
     if (!manifest.id || typeof manifest.id !== 'string') {
-      throw new Error('Plugin manifest must have a valid id');
+      throw new ValidationError('unknown', 'Plugin manifest must have a valid id');
     }
 
     // Validate plugin ID format: lowercase alphanumeric with hyphens or dots, no colons or whitespace
@@ -498,32 +1032,36 @@ export class PluginLoader {
     // Disallows: My-Plugin (uppercase), plugin:name (colons break event namespacing)
     const pluginIdPattern = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
     if (!pluginIdPattern.test(manifest.id)) {
-      throw new Error(
-        `Plugin ID '${manifest.id}' is invalid. ` +
+      throw new ValidationError(
+        manifest.id,
+        `Invalid plugin ID format. ` +
           `Must be lowercase alphanumeric with hyphens or dots (e.g., 'my-plugin', 'com.example.plugin'), ` +
           `no colons, whitespace, or leading numbers.`
       );
     }
 
     if (!manifest.version || !semver.valid(manifest.version)) {
-      throw new Error(`Plugin ${manifest.id} has invalid version: ${manifest.version}`);
+      // Use explicit check since TS thinks manifest.version is always defined
+      const versionStr = manifest.version || 'undefined';
+      throw new ValidationError(manifest.id, `Invalid version: ${versionStr}`);
     }
 
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (!manifest.provides || manifest.provides.length === 0) {
-      throw new Error(`Plugin ${manifest.id} must provide at least one component`);
+      throw new ValidationError(manifest.id, 'Must provide at least one component');
     }
 
     // Validate that provides IDs are unique
     const provideIds = manifest.provides.map((p) => `${p.type}:${p.id}`);
     const uniqueIds = new Set(provideIds);
     if (uniqueIds.size !== provideIds.length) {
-      throw new Error(`Plugin ${manifest.id} has duplicate provides entries`);
+      throw new ValidationError(manifest.id, 'Has duplicate provides entries');
     }
   }
 
   /**
    * Check plugin dependencies.
+   * @throws DependencyError if dependencies are not satisfied
    */
   private checkDependencies(manifest: PluginManifestV2): void {
     if (!manifest.dependencies) return;
@@ -532,22 +1070,26 @@ export class PluginLoader {
       const loadedPlugin = this.plugins.get(dep.id);
 
       if (!loadedPlugin) {
-        throw new Error(`Plugin ${manifest.id} requires ${dep.id} which is not loaded`);
+        throw new DependencyError(manifest.id, dep.id);
       }
 
       const loadedVersion = loadedPlugin.plugin.manifest.version;
 
       // Check minVersion (inclusive)
       if (dep.minVersion && semver.lt(loadedVersion, dep.minVersion)) {
-        throw new Error(
-          `Plugin ${manifest.id} requires ${dep.id} >= ${dep.minVersion}, but ${loadedVersion} is loaded`
+        throw new DependencyError(
+          manifest.id,
+          dep.id,
+          `requires ${dep.id} >= ${dep.minVersion}, but ${loadedVersion} is loaded`
         );
       }
 
       // Check maxVersion (exclusive)
       if (dep.maxVersion && semver.gte(loadedVersion, dep.maxVersion)) {
-        throw new Error(
-          `Plugin ${manifest.id} requires ${dep.id} < ${dep.maxVersion}, but ${loadedVersion} is loaded`
+        throw new DependencyError(
+          manifest.id,
+          dep.id,
+          `requires ${dep.id} < ${dep.maxVersion}, but ${loadedVersion} is loaded`
         );
       }
     }
@@ -689,11 +1231,16 @@ export class PluginLoader {
 
       if (this.signalCallback) {
         this.signalCallback(signal);
-        return { success: true, signalId };
       } else {
-        this.logger.warn({ pluginId }, 'Signal emitted but no callback registered');
-        return { success: false, error: 'No signal callback registered' };
+        // Buffer signal until callback is set (during plugin activation)
+        if (this.signalBuffer.length < PluginLoader.MAX_BUFFER_SIZE) {
+          this.signalBuffer.push(signal);
+          this.logger.debug({ pluginId }, 'Signal buffered (callback not yet registered)');
+        } else {
+          this.logger.warn({ pluginId }, 'Signal buffer full, dropping signal');
+        }
       }
+      return { success: true, signalId };
     };
 
     return {
@@ -707,7 +1254,16 @@ export class PluginLoader {
         if (this.intentCallback) {
           this.intentCallback(intent);
         } else {
-          this.logger.warn({ pluginId, recipientId }, 'Intent emitted but no callback registered');
+          // Buffer intent until callback is set (during plugin activation)
+          if (this.intentBuffer.length < PluginLoader.MAX_BUFFER_SIZE) {
+            this.intentBuffer.push(intent);
+            this.logger.debug(
+              { pluginId, recipientId },
+              'Intent buffered (callback not yet registered)'
+            );
+          } else {
+            this.logger.warn({ pluginId, recipientId }, 'Intent buffer full, dropping intent');
+          }
         }
       },
 
@@ -721,10 +1277,19 @@ export class PluginLoader {
         if (this.intentCallback) {
           this.intentCallback(intentWithSource as Intent);
         } else {
-          this.logger.warn(
-            { pluginId, intentType: intent.type },
-            'Intent emitted but no callback registered'
-          );
+          // Buffer intent until callback is set (during plugin activation)
+          if (this.intentBuffer.length < PluginLoader.MAX_BUFFER_SIZE) {
+            this.intentBuffer.push(intentWithSource as Intent);
+            this.logger.debug(
+              { pluginId, intentType: intent.type },
+              'Intent buffered (callback not yet registered)'
+            );
+          } else {
+            this.logger.warn(
+              { pluginId, intentType: intent.type },
+              'Intent buffer full, dropping intent'
+            );
+          }
         }
       },
 

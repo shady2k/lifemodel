@@ -39,9 +39,9 @@ export function createStateTool(deps: StateToolDeps): Tool {
     hasSideEffects: false,
     parameters: [
       { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
-      { name: 'chatId', type: 'string', description: 'Chat ID (for user action)', required: false },
+      // chatId removed - system uses context.recipientId automatically
     ],
-    execute: (args) => {
+    execute: (args, context) => {
       const action = args['action'] as string;
 
       switch (action) {
@@ -68,11 +68,11 @@ export function createStateTool(deps: StateToolDeps): Tool {
               error: 'User model provider not available',
             });
           }
-          const chatId = args['chatId'] as string | undefined;
+          // Use context.recipientId - system knows the current conversation
           return Promise.resolve({
             success: true,
             action: 'user',
-            ...deps.userModelProvider.getModel(chatId),
+            ...deps.userModelProvider.getModel(context?.recipientId),
           });
         }
 

@@ -4,6 +4,14 @@
  * The autonomic layer monitors state and emits signals.
  * Like the biological autonomic nervous system - always running,
  * no conscious control, handles vital functions.
+ *
+ * Dynamic Registration:
+ * - Neurons can be registered/unregistered at runtime via PluginLoader
+ * - AutonomicProcessor exposes registerNeuron/unregisterNeuron methods
+ * - Changes are queued and applied at tick boundaries
+ *
+ * Note: Individual neurons are loaded as plugins via the plugin system.
+ * See src/plugins/alertness/, src/plugins/social-debt/, etc.
  */
 
 // Main processor
@@ -23,6 +31,3 @@ export {
   DEFAULT_CHANGE_CONFIG,
 } from './change-detector.js';
 export type { ChangeDetectorConfig, ChangeResult } from './change-detector.js';
-
-// Individual neurons (from plugins)
-export * from '../../plugins/neurons/index.js';

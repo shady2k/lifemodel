@@ -47,7 +47,6 @@ import { type SchedulerService, createSchedulerService } from './scheduler-servi
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { loadAllPlugins } from './plugin-discovery.js';
 import {
-  createRecipientRegistry,
   createPersistentRecipientRegistry,
   type IRecipientRegistry,
 } from './recipient-registry.js';
@@ -165,6 +164,12 @@ export interface Container {
 /**
  * Create the 3-layer processors.
  * Note: SMART layer merged into COGNITION - smart retry is internal.
+ *
+ * AUTONOMIC layer is created without neurons - they are registered
+ * dynamically via PluginLoader callbacks after this function returns.
+ * Call layers.autonomic.validateRequiredNeurons() after loading plugins.
+ *
+ * @param logger Logger instance
  */
 function createLayers(logger: Logger): CoreLoopLayers {
   return {
@@ -265,181 +270,6 @@ function createLLMProvider(
 
   logger.debug('LLM provider not configured');
   return null;
-}
-
-/**
- * Create the application container with all dependencies wired up.
- *
- * This is the composition root - all dependencies are created here
- * and passed to components via constructor injection.
- *
- * For async initialization (loading config and state), use createContainerAsync.
- */
-export function createContainer(config: AppConfig = {}): Container {
-  // Build logger config
-  const loggerConfig: Partial<LoggerConfig> = {};
-  if (config.logDir !== undefined) loggerConfig.logDir = config.logDir;
-  if (config.maxLogFiles !== undefined) loggerConfig.maxFiles = config.maxLogFiles;
-  if (config.logLevel !== undefined) loggerConfig.level = config.logLevel;
-  if (config.prettyLogs !== undefined) loggerConfig.pretty = config.prettyLogs;
-
-  // Create logger
-  const logger = createLogger(loggerConfig);
-
-  // Create metrics
-  const metrics = createMetrics();
-
-  // Build agent config
-  const agentConfig: AgentConfig = {};
-  if (config.agent?.identity !== undefined) agentConfig.identity = config.agent.identity;
-  if (config.agent?.initialState !== undefined)
-    agentConfig.initialState = config.agent.initialState;
-  if (config.agent?.tickRate !== undefined) agentConfig.tickRate = config.agent.tickRate;
-  if (config.agent?.socialDebtRate !== undefined)
-    agentConfig.socialDebtRate = config.agent.socialDebtRate;
-
-  // Create agent (without eventQueue - CoreLoop doesn't use it)
-  const agent = createAgent({ logger, metrics }, agentConfig);
-
-  // Create event bus
-  const eventBus = createEventBus(logger);
-
-  // Get primary user chat ID
-  const primaryUserChatId =
-    config.primaryUser?.telegramChatId ?? process.env['PRIMARY_USER_CHAT_ID'] ?? null;
-
-  // Create UserModel if primary user configured
-  let userModel: UserModel | null = null;
-  if (primaryUserChatId) {
-    const userName = config.primaryUser?.name ?? null;
-    const timezoneOffset = config.primaryUser?.timezoneOffset ?? null;
-    userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
-    logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
-  }
-
-  // Create LLM provider
-  const llmProvider = createLLMProvider(config.llm, logger);
-
-  // Create MessageComposer if LLM available
-  let messageComposer: MessageComposer | null = null;
-  if (llmProvider) {
-    const identity = agentConfig.identity ?? agent.getIdentity();
-    messageComposer = createMessageComposer(llmProvider, identity);
-    logger.info('MessageComposer configured');
-  }
-
-  // Create COGNITION LLM adapter if LLM available
-  let cognitionLLM: CognitionLLM | null = null;
-  if (llmProvider) {
-    cognitionLLM = createLLMAdapter(llmProvider, logger, { role: 'fast' });
-    logger.info('CognitionLLM adapter configured');
-  }
-
-  // Create memory provider
-  const memoryProvider = createJsonMemoryProvider(logger, {
-    storagePath: './data/memory.json',
-  });
-  logger.info('MemoryProvider configured');
-
-  // Create memory consolidator (for sleep-cycle consolidation)
-  const memoryConsolidator = createMemoryConsolidator(logger);
-  logger.info('MemoryConsolidator configured');
-
-  // Create recipient registry for message routing (in-memory only, no persistence)
-  // For production use createContainerAsync() which uses PersistentRecipientRegistry
-  const recipientRegistry = createRecipientRegistry();
-  logger.info('RecipientRegistry configured (in-memory, not persisted)');
-
-  // Create 4-layer processors
-  const layers = createLayers(logger);
-
-  // Create core loop config
-  const coreLoopConfig: Partial<CoreLoopConfig> = {
-    ...config.coreLoop,
-  };
-  if (primaryUserChatId) {
-    coreLoopConfig.primaryUserChatId = primaryUserChatId;
-  }
-
-  // Create core loop
-  const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
-    messageComposer: messageComposer ?? undefined,
-    userModel: userModel ?? undefined,
-    agent,
-    cognitionLLM: cognitionLLM ?? undefined,
-    memoryProvider,
-    memoryConsolidator,
-    recipientRegistry,
-  });
-
-  // Create channels registry
-  const channels = new Map<string, Channel>();
-
-  // Create Telegram channel if configured
-  let telegramChannel: TelegramChannel | null = null;
-  const telegramConfig = config.telegram ?? {
-    botToken: process.env['TELEGRAM_BOT_TOKEN'] ?? '',
-  };
-
-  if (telegramConfig.botToken) {
-    // Add allowed chat IDs filter if primary user is configured
-    const telegramConfigWithFilter: TelegramConfig = primaryUserChatId
-      ? { ...telegramConfig, allowedChatIds: [primaryUserChatId] }
-      : telegramConfig;
-    // Create telegram channel - it will push signals to coreLoop
-    telegramChannel = createTelegramChannel(telegramConfigWithFilter, logger, recipientRegistry);
-    channels.set('telegram', telegramChannel);
-    coreLoop.registerChannel(telegramChannel);
-
-    // When telegram receives messages, push as signals
-    telegramChannel.setSignalCallback((signal) => {
-      coreLoop.pushSignal(signal);
-    });
-
-    // Wake up core loop immediately when messages arrive
-    telegramChannel.setWakeUpCallback(() => {
-      coreLoop.wakeUp();
-    });
-    logger.info('Telegram channel configured');
-  }
-
-  // Shutdown function
-  const shutdown = async (): Promise<void> => {
-    logger.info('Shutting down...');
-    coreLoop.stop();
-
-    for (const channel of channels.values()) {
-      if (channel.stop) {
-        await channel.stop();
-      }
-    }
-  };
-
-  return {
-    logger,
-    eventBus,
-    metrics,
-    agent,
-    layers,
-    coreLoop,
-    telegramChannel,
-    channels,
-    userModel,
-    llmProvider,
-    messageComposer,
-    cognitionLLM,
-    memoryProvider,
-    memoryConsolidator,
-    primaryUserChatId,
-    storage: null,
-    stateManager: null,
-    conversationManager: null,
-    config: null,
-    schedulerService: null,
-    pluginLoader: null,
-    recipientRegistry,
-    shutdown,
-  };
 }
 
 /**
@@ -606,8 +436,75 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   await recipientRegistry.init();
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
-  // Create 4-layer processors
+  // === PLUGIN SYSTEM INITIALIZATION ===
+  // New architecture: Create layers first, wire callbacks, then load plugins
+
+  // 1. Create scheduler service for plugins
+  const schedulerService = createSchedulerService(logger);
+
+  // 2. Create plugin loader with per-plugin config support
+  const pluginLoader = createPluginLoader(logger, storage, schedulerService, {
+    pluginConfigs: mergedConfig.plugins.configs,
+  });
+
+  // 3. Create layers FIRST (AUTONOMIC works without neurons initially)
   const layers = createLayers(logger);
+
+  // 4. Wire neuron callbacks: PluginLoader → AUTONOMIC
+  // This must happen BEFORE loading any neuron plugins
+  pluginLoader.setNeuronCallbacks(
+    (neuron) => {
+      layers.autonomic.registerNeuron(neuron);
+    },
+    (id) => {
+      layers.autonomic.unregisterNeuron(id);
+    }
+  );
+
+  // 5. Set services provider for plugins
+  // Note: registerEventSchema is added by PluginLoader per-plugin, not here
+  pluginLoader.setServicesProvider(() => ({
+    getTimezone: (chatId?: string) => {
+      if (userModel) {
+        return userModel.getTimezone(chatId) ?? 'UTC';
+      }
+      return 'UTC';
+    },
+  }));
+
+  // 6. Wire scheduler to dispatch events to plugins
+  schedulerService.setPluginEventCallback(async (pluginId, eventKind, payload) => {
+    await pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload);
+  });
+
+  // 7. Discover and load plugins (triggers dynamic neuron registration via callbacks)
+  const pluginConfig = mergedConfig.plugins;
+  const discoveredPlugins = await loadAllPlugins(pluginConfig, logger);
+
+  for (const { plugin } of discoveredPlugins) {
+    try {
+      await pluginLoader.loadWithRetry({ default: plugin });
+      logger.info({ pluginId: plugin.manifest.id }, 'Plugin activated');
+    } catch (error) {
+      logger.error(
+        {
+          pluginId: plugin.manifest.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to activate plugin'
+      );
+    }
+  }
+
+  // 8. Validate required neurons are registered (throws if alertness missing)
+  layers.autonomic.validateRequiredNeurons();
+
+  logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
+
+  // Wire plugin event validator to aggregation layer
+  layers.aggregation.updateDeps({
+    pluginEventValidator: (data: PluginEventData) => pluginLoader.validatePluginEvent(data),
+  });
 
   // Create core loop config
   const coreLoopConfig: Partial<CoreLoopConfig> = {
@@ -628,6 +525,33 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryConsolidator,
     recipientRegistry,
   });
+
+  // Wire signal callbacks now that coreLoop exists
+  schedulerService.setSignalCallback((signal) => {
+    coreLoop.pushSignal(signal);
+  });
+  pluginLoader.setSignalCallback((signal) => {
+    coreLoop.pushSignal(signal);
+  });
+
+  // Set tool registration callbacks now that layers exist
+  pluginLoader.setToolCallbacks(
+    (tool) => {
+      layers.cognition.getToolRegistry().registerTool({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        execute: tool.execute,
+        tags: tool.tags ?? [],
+      });
+    },
+    (toolName) => {
+      return layers.cognition.getToolRegistry().unregisterTool(toolName);
+    }
+  );
+
+  // Set scheduler service on core loop
+  coreLoop.setSchedulerService(schedulerService);
 
   // Create channels registry
   const channels = new Map<string, Channel>();
@@ -673,80 +597,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Start auto-save
   stateManager.startAutoSave();
-
-  // Create scheduler service for plugins
-  const schedulerService = createSchedulerService(logger);
-  schedulerService.setSignalCallback((signal) => {
-    coreLoop.pushSignal(signal);
-  });
-  // Plugin event callback is set after pluginLoader is created (below)
-
-  // Create plugin loader
-  const pluginLoader = createPluginLoader(logger, storage, schedulerService);
-  pluginLoader.setSignalCallback((signal) => {
-    coreLoop.pushSignal(signal);
-  });
-
-  // Set tool registration callbacks
-  pluginLoader.setToolCallbacks(
-    (tool) => {
-      layers.cognition.getToolRegistry().registerTool({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        execute: tool.execute,
-        tags: tool.tags ?? [],
-      });
-    },
-    (toolName) => {
-      return layers.cognition.getToolRegistry().unregisterTool(toolName);
-    }
-  );
-
-  // Set services provider for plugins
-  // Note: registerEventSchema is added by PluginLoader per-plugin, not here
-  pluginLoader.setServicesProvider(() => ({
-    getTimezone: (chatId?: string) => {
-      if (userModel) {
-        return userModel.getTimezone(chatId) ?? 'UTC';
-      }
-      return 'UTC';
-    },
-  }));
-
-  // Wire scheduler to dispatch events to plugins
-  schedulerService.setPluginEventCallback(async (pluginId, eventKind, payload) => {
-    await pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload);
-  });
-
-  // Set scheduler service on core loop
-  coreLoop.setSchedulerService(schedulerService);
-
-  // Wire plugin event validator to aggregation layer
-  layers.aggregation.updateDeps({
-    pluginEventValidator: (data: PluginEventData) => pluginLoader.validatePluginEvent(data),
-  });
-
-  // Discover and load plugins
-  const pluginConfig = mergedConfig.plugins;
-  const discoveredPlugins = await loadAllPlugins(pluginConfig, logger);
-
-  for (const { plugin } of discoveredPlugins) {
-    try {
-      await pluginLoader.load({ default: plugin });
-      logger.info({ pluginId: plugin.manifest.id }, 'Plugin activated');
-    } catch (error) {
-      logger.error(
-        {
-          pluginId: plugin.manifest.id,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to activate plugin'
-      );
-    }
-  }
-
-  logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
 
   // Shutdown function with persistence
   const shutdown = async (): Promise<void> => {

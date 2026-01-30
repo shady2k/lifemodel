@@ -82,12 +82,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
         description: 'Filter by type: message, thought, fact (for search)',
         required: false,
       },
-      {
-        name: 'chatId',
-        type: 'string',
-        description: 'Conversation ID (for search filter or save scope)',
-        required: false,
-      },
+      // chatId removed - system uses context.recipientId automatically
       {
         name: 'type',
         type: 'string',
@@ -114,7 +109,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
         required: false,
       },
     ],
-    execute: async (args) => {
+    execute: async (args, context) => {
       const action = args['action'] as string;
 
       switch (action) {
@@ -130,11 +125,11 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
 
           const limit = (args['limit'] as number | undefined) ?? 5;
           const types = args['types'] as ('message' | 'thought' | 'fact')[] | undefined;
-          const chatId = args['chatId'] as string | undefined;
 
           const options: MemorySearchOptions = { limit };
           if (types) options.types = types;
-          if (chatId) options.recipientId = chatId;
+          // Use context.recipientId - system knows the current conversation
+          if (context?.recipientId) options.recipientId = context.recipientId;
 
           const results = await deps.memoryProvider.search(query, options);
           return {
@@ -163,14 +158,14 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
           const entryType = (args['type'] as string | undefined) ?? 'fact';
           const tags = (args['tags'] as string[] | undefined) ?? [];
           const confidence = (args['confidence'] as number | undefined) ?? 0.8;
-          const recipientId = args['chatId'] as string | undefined;
 
           const entry: MemoryEntry = {
             id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
             type: entryType === 'fact' ? 'fact' : 'thought',
             content,
             timestamp: new Date(),
-            recipientId,
+            // Use context.recipientId - system knows the current conversation
+            recipientId: context?.recipientId,
             tags,
             confidence,
           };

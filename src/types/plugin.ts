@@ -137,6 +137,40 @@ export interface PluginRegistry {
 }
 
 // ============================================================
+// Plugin Lifecycle States
+// ============================================================
+
+/**
+ * Plugin lifecycle state.
+ * - pending: Plugin discovered but not yet loading
+ * - loading: Plugin is being activated
+ * - active: Plugin is running and functional
+ * - paused: Plugin is temporarily disabled (keeps state)
+ * - failed: Plugin failed to load or crashed
+ */
+export type PluginState = 'pending' | 'loading' | 'active' | 'paused' | 'failed';
+
+/**
+ * Plugin state information for tracking lifecycle.
+ */
+export interface PluginStateInfo {
+  /** Current plugin state */
+  state: PluginState;
+
+  /** Number of failed activation attempts */
+  failureCount: number;
+
+  /** Last error message if failed */
+  lastError?: string;
+
+  /** Timestamp of last load attempt */
+  lastAttemptAt?: Date;
+
+  /** Timestamp when plugin was paused */
+  pausedAt?: Date;
+}
+
+// ============================================================
 // V2 Plugin System
 // ============================================================
 
@@ -566,3 +600,38 @@ export interface PluginTool {
  * Uses the signal PluginEventData format from signal.ts.
  */
 export type EventSchema = ZodType<PluginEventData>;
+
+// ============================================================
+// Neuron Plugin Extension
+// ============================================================
+
+import type { Neuron } from '../layers/autonomic/neuron-registry.js';
+
+/**
+ * Extended plugin interface for neuron plugins.
+ * Neurons are state monitors in the AUTONOMIC layer that emit signals
+ * when meaningful changes occur.
+ */
+export interface NeuronPluginV2 extends PluginV2 {
+  /** Neuron factory and configuration */
+  neuron: {
+    /**
+     * Create a neuron instance.
+     * @param logger Scoped logger for the neuron
+     * @param config Optional configuration (from plugins.configs or defaultConfig)
+     */
+    create: (logger: Logger, config?: unknown) => Neuron;
+
+    /** Default configuration if none provided in plugins.configs */
+    defaultConfig?: unknown;
+  };
+}
+
+/**
+ * Type guard to check if a plugin is a neuron plugin.
+ */
+export function isNeuronPlugin(plugin: PluginV2): plugin is NeuronPluginV2 {
+  return (
+    'neuron' in plugin && plugin.manifest.provides.some((component) => component.type === 'neuron')
+  );
+}

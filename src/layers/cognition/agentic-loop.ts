@@ -38,6 +38,7 @@ import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool } from '../../llm/tool-schema.js';
+import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { ResponseFormat, JsonSchemaDefinition } from '../../llm/provider.js';
 
 /**
@@ -64,14 +65,14 @@ export const COGNITION_OUTPUT_SCHEMA: JsonSchemaDefinition = {
           properties: {
             type: { type: 'string', enum: ['think', 'tool'] },
             id: { type: 'string' },
-            parentId: { type: 'string' },
+            // parentId removed - system auto-assigns based on position
             // think step fields
             content: { type: 'string' },
             // tool step fields
             name: { type: 'string' },
             args: { type: 'object', additionalProperties: true },
           },
-          required: ['type', 'id', 'parentId'],
+          required: ['type', 'id'],
         },
       },
       terminal: {
@@ -80,7 +81,7 @@ export const COGNITION_OUTPUT_SCHEMA: JsonSchemaDefinition = {
           type: { type: 'string', enum: ['respond', 'noAction', 'defer', 'needsToolResult'] },
           // respond fields
           text: { type: 'string' },
-          parentId: { type: 'string' },
+          // parentId removed - system auto-assigns (last step or trigger signal)
           conversationStatus: {
             type: 'string',
             enum: ['active', 'awaiting_answer', 'closed', 'idle'],
@@ -479,11 +480,13 @@ export class AgenticLoop {
           state.toolResults.push(result);
 
           // Track executed tool with side effects info
+          // Use internal (unsanitized) name for registry lookup
+          const internalName = unsanitizeToolName(toolStep.name);
           state.executedTools.push({
             stepId: toolStep.id,
-            name: toolStep.name,
+            name: internalName,
             args: toolStep.args,
-            hasSideEffects: this.toolRegistry.hasToolSideEffects(toolStep.name),
+            hasSideEffects: this.toolRegistry.hasToolSideEffects(internalName),
           });
         } else {
           // No pending tool with this stepId - might be already executed or doesn't exist
@@ -518,11 +521,13 @@ export class AgenticLoop {
           state.toolResults.push(result);
 
           // Track executed tool with side effects info
+          // Use internal (unsanitized) name for registry lookup
+          const internalPendingName = unsanitizeToolName(pendingTool.name);
           state.executedTools.push({
             stepId: pendingTool.id,
-            name: pendingTool.name,
+            name: internalPendingName,
             args: pendingTool.args,
-            hasSideEffects: this.toolRegistry.hasToolSideEffects(pendingTool.name),
+            hasSideEffects: this.toolRegistry.hasToolSideEffects(internalPendingName),
           });
 
           // Continue loop so LLM can see tool result and provide proper response
@@ -1002,10 +1007,10 @@ Respond with valid JSON. Only two step types allowed:
 
 {
   "steps": [
-    { "type": "think", "id": "t1", "parentId": "<signal_id>", "content": "reasoning..." },
-    { "type": "tool", "id": "tool1", "parentId": "t1", "name": "<tool_name>", "args": { ... } }
+    { "type": "think", "id": "t1", "content": "reasoning..." },
+    { "type": "tool", "id": "tool1", "name": "<tool_name>", "args": { ... } }
   ],
-  "terminal": { "type": "respond", "text": "...", "parentId": "t1", "conversationStatus": "...", "confidence": 0.85 }
+  "terminal": { "type": "respond", "text": "...", "conversationStatus": "...", "confidence": 0.85 }
 }
 
 Terminal types:
@@ -1026,7 +1031,7 @@ Terminal types:
 
 IMPORTANT: If you include any tool step, use "needsToolResult" terminal to wait for the result before responding.
 
-Tool names are provided in the tools parameter. Use the EXACT tool name (e.g., "core.memory", "core.time").
+Tool names are provided in the tools parameter. Use the EXACT tool name as shown (e.g., "core_memory", "core_time").
 If a tool returns an error with a "schema" field, use that schema to correct your parameters.`;
   }
 
@@ -1075,8 +1080,8 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         return null;
       }
 
-      // Validate steps have required fields based on type
-      const validatedSteps = this.validateSteps(parsed.steps ?? []);
+      // Validate steps and auto-assign parentId based on position
+      const validatedSteps = this.validateSteps(parsed.steps ?? [], triggerSignalId);
       if (validatedSteps === null) {
         // Validation failed, will trigger smart retry
         return null;
@@ -1110,12 +1115,16 @@ If a tool returns an error with a "schema" field, use that schema to correct you
 
   /**
    * Validate steps have required fields based on their type.
-   * - think steps: must have content (string)
-   * - tool steps: must have name (string) and args (object)
+   * Auto-assigns parentId based on position (system knows the chain).
    *
+   * - think steps: must have id and content (string)
+   * - tool steps: must have id, name (string) and args (object)
+   *
+   * @param steps Raw steps from LLM
+   * @param triggerSignalId The signal that triggered this cognition cycle
    * @returns Validated steps array or null if validation fails
    */
-  private validateSteps(steps: unknown[]): Step[] | null {
+  private validateSteps(steps: unknown[], triggerSignalId: string): Step[] | null {
     const validated: Step[] = [];
 
     for (const step of steps) {
@@ -1126,11 +1135,15 @@ If a tool returns an error with a "schema" field, use that schema to correct you
 
       const s = step as Record<string, unknown>;
 
-      // All steps must have id and parentId
-      if (typeof s['id'] !== 'string' || typeof s['parentId'] !== 'string') {
-        this.logger.warn({ step }, 'Step missing id or parentId, skipping');
+      // All steps must have id
+      if (typeof s['id'] !== 'string') {
+        this.logger.warn({ step }, 'Step missing id, skipping');
         continue;
       }
+
+      // Auto-assign parentId: first step → trigger signal, others → previous step
+      const lastValidated = validated[validated.length - 1];
+      const parentId = lastValidated ? lastValidated.id : triggerSignalId;
 
       if (s['type'] === 'think') {
         // Think steps must have content (can be empty string)
@@ -1141,7 +1154,7 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         validated.push({
           type: 'think',
           id: s['id'],
-          parentId: s['parentId'],
+          parentId,
           content: s['content'] as string,
         });
       } else if (s['type'] === 'tool') {
@@ -1157,7 +1170,7 @@ If a tool returns an error with a "schema" field, use that schema to correct you
         validated.push({
           type: 'tool',
           id: s['id'],
-          parentId: s['parentId'],
+          parentId,
           name: s['name'],
           args: s['args'] as Record<string, unknown>,
         });
@@ -1172,6 +1185,10 @@ If a tool returns an error with a "schema" field, use that schema to correct you
 
   /**
    * Execute a tool step.
+   *
+   * Note: Tool names from the LLM may be sanitized (underscores instead of dots)
+   * because some API providers don't accept dots in tool names.
+   * We unsanitize before looking up in the registry.
    */
   private async executeTool(step: ToolStep, context: LoopContext): Promise<ToolResult> {
     const toolContext: ToolContext = {
@@ -1180,9 +1197,12 @@ If a tool returns an error with a "schema" field, use that schema to correct you
       correlationId: context.correlationId,
     };
 
+    // Unsanitize tool name: LLM returns "core_memory" but registry has "core.memory"
+    const internalToolName = unsanitizeToolName(step.name);
+
     return this.toolRegistry.execute({
       stepId: step.id,
-      name: step.name,
+      name: internalToolName,
       args: step.args,
       context: toolContext,
     });

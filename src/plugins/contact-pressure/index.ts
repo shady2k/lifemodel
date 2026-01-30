@@ -1,5 +1,5 @@
 /**
- * Contact Pressure Neuron
+ * Contact Pressure Neuron Plugin
  *
  * Calculates the combined pressure to contact the user using weighted factors.
  * This is a "higher-order" neuron that synthesizes multiple state variables
@@ -15,6 +15,7 @@ import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../type
 import { createSignal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
+import type { NeuronPluginV2 } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
 import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
@@ -47,18 +48,18 @@ export interface ContactPressureNeuronConfig {
  */
 export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
   changeConfig: {
-    baseThreshold: 0.1, // 10% change is noticeable
-    minAbsoluteChange: 0.02, // Ignore tiny changes
-    maxThreshold: 0.4, // Don't become too insensitive
-    alertnessInfluence: 0.3, // Alertness has mild effect
+    baseThreshold: 0.1,
+    minAbsoluteChange: 0.02,
+    maxThreshold: 0.4,
+    alertnessInfluence: 0.3,
   },
   refractoryPeriodMs: 5000,
   highPriorityThreshold: 0.6,
   weights: {
-    socialDebt: 0.4, // Primary driver
+    socialDebt: 0.4,
     taskPressure: 0.2,
     curiosity: 0.1,
-    acquaintancePressure: 0.3, // Want to learn user's name
+    acquaintancePressure: 0.3,
   },
 };
 
@@ -80,15 +81,12 @@ export class ContactPressureNeuron extends BaseNeuron {
   }
 
   check(state: AgentState, alertness: number, correlationId: string): Signal | undefined {
-    // Calculate pressure using weighted neuron
     const result = this.calculatePressure(state);
     const currentValue = result.output;
 
-    // First check - establish baseline
     if (this.previousValue === undefined) {
       this.updatePrevious(currentValue);
       this.lastNeuronResult = result;
-      // Emit initial signal if pressure is significant
       if (currentValue > 0.1) {
         this.recordEmission();
         return this.createSignal(currentValue, result, 0, correlationId);
@@ -96,12 +94,10 @@ export class ContactPressureNeuron extends BaseNeuron {
       return undefined;
     }
 
-    // Check refractory period to avoid signal spam
     if (this.isInRefractoryPeriod(this.config.refractoryPeriodMs)) {
       return undefined;
     }
 
-    // Detect if change is significant using Weber-Fechner law
     const changeResult = detectChange(
       currentValue,
       this.previousValue,
@@ -110,13 +106,11 @@ export class ContactPressureNeuron extends BaseNeuron {
     );
 
     if (!changeResult.isSignificant) {
-      // Still update previous to track gradual changes
       this.updatePrevious(currentValue);
       this.lastNeuronResult = result;
       return undefined;
     }
 
-    // Significant change detected - emit signal
     const signal = this.createSignal(
       currentValue,
       result,
@@ -146,26 +140,11 @@ export class ContactPressureNeuron extends BaseNeuron {
     return signal;
   }
 
-  /**
-   * Calculate pressure using weighted neuron function.
-   */
   private calculatePressure(state: AgentState): NeuronResult {
     return neuron([
-      {
-        name: 'socialDebt',
-        value: state.socialDebt,
-        weight: this.config.weights.socialDebt,
-      },
-      {
-        name: 'taskPressure',
-        value: state.taskPressure,
-        weight: this.config.weights.taskPressure,
-      },
-      {
-        name: 'curiosity',
-        value: state.curiosity,
-        weight: this.config.weights.curiosity,
-      },
+      { name: 'socialDebt', value: state.socialDebt, weight: this.config.weights.socialDebt },
+      { name: 'taskPressure', value: state.taskPressure, weight: this.config.weights.taskPressure },
+      { name: 'curiosity', value: state.curiosity, weight: this.config.weights.curiosity },
       {
         name: 'acquaintancePressure',
         value: state.acquaintancePressure,
@@ -182,32 +161,23 @@ export class ContactPressureNeuron extends BaseNeuron {
   ): Signal {
     const priority = value >= this.config.highPriorityThreshold ? Priority.HIGH : Priority.NORMAL;
 
-    // Include contribution breakdown in metrics
     const metrics: SignalMetrics = {
       value,
       rateOfChange,
       confidence: 1.0,
     };
 
-    // Add previousValue only if defined
     if (this.previousValue !== undefined) {
       metrics.previousValue = this.previousValue;
     }
 
-    // Add individual contributions
     for (const contribution of neuronResult.contributions) {
       metrics[`contrib_${contribution.name}`] = contribution.contribution;
     }
 
-    return createSignal(this.signalType, this.source, metrics, {
-      priority,
-      correlationId,
-    });
+    return createSignal(this.signalType, this.source, metrics, { priority, correlationId });
   }
 
-  /**
-   * Get the last neuron result for debugging.
-   */
   getLastNeuronResult(): NeuronResult | undefined {
     return this.lastNeuronResult;
   }
@@ -222,3 +192,30 @@ export function createContactPressureNeuron(
 ): ContactPressureNeuron {
   return new ContactPressureNeuron(logger, config);
 }
+
+/**
+ * Contact pressure neuron plugin.
+ */
+const plugin: NeuronPluginV2 = {
+  manifest: {
+    manifestVersion: 2,
+    id: 'contact-pressure',
+    name: 'Contact Pressure Neuron',
+    version: '1.0.0',
+    description: 'Calculates combined pressure to contact user',
+    provides: [{ type: 'neuron', id: 'contact-pressure' }],
+    requires: [],
+  },
+  lifecycle: {
+    activate: () => {
+      // Neuron plugins don't need activation - neuron is created via factory
+    },
+  },
+  neuron: {
+    create: (logger: Logger, config?: unknown) =>
+      new ContactPressureNeuron(logger, config as Partial<ContactPressureNeuronConfig>),
+    defaultConfig: DEFAULT_CONTACT_PRESSURE_CONFIG,
+  },
+};
+
+export default plugin;

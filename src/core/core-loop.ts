@@ -387,6 +387,10 @@ export class CoreLoop {
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const correlationId = `tick-${String(this.tickCount)}-${randomUUID().slice(0, 8)}`;
 
+    // Apply pending plugin changes FIRST (before any processing)
+    // This handles queued scheduler unregistrations from pause/unload
+    this.schedulerService?.applyPendingChanges();
+
     // Check system health - determines which layers are active
     const health = this.healthMonitor.getHealth();
     const { activeLayers, stressLevel } = health;

@@ -1,5 +1,5 @@
 /**
- * Time Neuron
+ * Time Neuron Plugin
  *
  * Monitors time-based changes and emits signals for:
  * - Regular tick (heartbeat)
@@ -14,6 +14,7 @@ import type { Signal, SignalSource, SignalType, TimeData } from '../../types/sig
 import { createSignal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
+import type { NeuronPluginV2 } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
 import { Priority } from '../../types/priority.js';
 
@@ -28,10 +29,10 @@ export type TimeOfDay = 'night' | 'morning' | 'afternoon' | 'evening';
 export interface TimeNeuronConfig {
   /** Hour ranges for time of day (inclusive start, exclusive end) */
   timeOfDayRanges: {
-    night: [number, number]; // e.g., [22, 7] wraps around midnight
-    morning: [number, number]; // e.g., [7, 12]
-    afternoon: [number, number]; // e.g., [12, 17]
-    evening: [number, number]; // e.g., [17, 22]
+    night: [number, number];
+    morning: [number, number];
+    afternoon: [number, number];
+    evening: [number, number];
   };
 }
 
@@ -40,10 +41,10 @@ export interface TimeNeuronConfig {
  */
 export const DEFAULT_TIME_CONFIG: TimeNeuronConfig = {
   timeOfDayRanges: {
-    night: [22, 7], // 10 PM to 7 AM
-    morning: [7, 12], // 7 AM to 12 PM
-    afternoon: [12, 17], // 12 PM to 5 PM
-    evening: [17, 22], // 5 PM to 10 PM
+    night: [22, 7],
+    morning: [7, 12],
+    afternoon: [12, 17],
+    evening: [17, 22],
   },
 };
 
@@ -51,8 +52,8 @@ export const DEFAULT_TIME_CONFIG: TimeNeuronConfig = {
  * Time Neuron implementation.
  */
 export class TimeNeuron extends BaseNeuron {
-  readonly id = 'time';
-  readonly signalType: SignalType = 'tick'; // Primary type, emits others too
+  readonly id = 'time-neuron';
+  readonly signalType: SignalType = 'tick';
   readonly source: SignalSource = 'neuron.time';
   readonly description = 'Monitors time passage and transitions';
 
@@ -65,14 +66,8 @@ export class TimeNeuron extends BaseNeuron {
     this.config = { ...DEFAULT_TIME_CONFIG, ...config };
   }
 
-  /**
-   * Check returns multiple signals for different time events.
-   * Since interface expects single signal, we return the most significant one.
-   * Use checkAll() to get all time signals.
-   */
   check(_state: AgentState, _alertness: number, correlationId: string): Signal | undefined {
     const signals = this.checkAll(correlationId);
-    // Return most significant signal (hour_changed > time_of_day > tick)
     return (
       signals.find((s) => s.type === 'hour_changed') ??
       signals.find((s) => s.type === 'time_of_day') ??
@@ -80,19 +75,14 @@ export class TimeNeuron extends BaseNeuron {
     );
   }
 
-  /**
-   * Check and return all time-related signals.
-   */
   checkAll(correlationId: string): Signal[] {
     const now = new Date();
     const currentHour = now.getHours();
     const currentTimeOfDay = this.getTimeOfDay(currentHour);
     const signals: Signal[] = [];
 
-    // Always emit tick signal
     signals.push(this.createTickSignal(currentHour, currentTimeOfDay, correlationId));
 
-    // Check for hour change
     if (this.lastHour !== undefined && this.lastHour !== currentHour) {
       signals.push(
         this.createHourChangedSignal(currentHour, this.lastHour, currentTimeOfDay, correlationId)
@@ -100,7 +90,6 @@ export class TimeNeuron extends BaseNeuron {
       this.logger.debug({ previousHour: this.lastHour, currentHour }, 'Hour changed');
     }
 
-    // Check for time of day transition
     if (this.lastTimeOfDay !== undefined && this.lastTimeOfDay !== currentTimeOfDay) {
       signals.push(
         this.createTimeOfDaySignal(currentTimeOfDay, this.lastTimeOfDay, currentHour, correlationId)
@@ -111,22 +100,16 @@ export class TimeNeuron extends BaseNeuron {
       );
     }
 
-    // Update tracked values
     this.lastHour = currentHour;
     this.lastTimeOfDay = currentTimeOfDay;
 
     return signals;
   }
 
-  /**
-   * Get time of day for a given hour.
-   */
   getTimeOfDay(hour: number): TimeOfDay {
     const { night, morning, afternoon, evening } = this.config.timeOfDayRanges;
 
-    // Night wraps around midnight
     if (night[0] > night[1]) {
-      // e.g., [22, 7] means 22-23 and 0-6
       if (hour >= night[0] || hour < night[1]) return 'night';
     } else {
       if (hour >= night[0] && hour < night[1]) return 'night';
@@ -136,29 +119,17 @@ export class TimeNeuron extends BaseNeuron {
     if (hour >= afternoon[0] && hour < afternoon[1]) return 'afternoon';
     if (hour >= evening[0] && hour < evening[1]) return 'evening';
 
-    // Fallback (shouldn't happen with proper config)
     return 'night';
   }
 
   private createTickSignal(hour: number, timeOfDay: TimeOfDay, correlationId: string): Signal {
-    const data: TimeData = {
-      kind: 'time',
-      hour,
-      timeOfDay,
-    };
+    const data: TimeData = { kind: 'time', hour, timeOfDay };
 
     return createSignal(
       'tick',
       this.source,
-      {
-        value: hour / 24, // Normalize hour to 0-1
-        confidence: 1.0,
-      },
-      {
-        priority: Priority.LOW, // Tick is low priority
-        correlationId,
-        data,
-      }
+      { value: hour / 24, confidence: 1.0 },
+      { priority: Priority.LOW, correlationId, data }
     );
   }
 
@@ -168,26 +139,13 @@ export class TimeNeuron extends BaseNeuron {
     timeOfDay: TimeOfDay,
     correlationId: string
   ): Signal {
-    const data: TimeData = {
-      kind: 'time',
-      hour,
-      timeOfDay,
-      previousHour,
-    };
+    const data: TimeData = { kind: 'time', hour, timeOfDay, previousHour };
 
     return createSignal(
       'hour_changed',
       this.source,
-      {
-        value: hour / 24,
-        previousValue: previousHour / 24,
-        confidence: 1.0,
-      },
-      {
-        priority: Priority.NORMAL,
-        correlationId,
-        data,
-      }
+      { value: hour / 24, previousValue: previousHour / 24, confidence: 1.0 },
+      { priority: Priority.NORMAL, correlationId, data }
     );
   }
 
@@ -197,14 +155,7 @@ export class TimeNeuron extends BaseNeuron {
     hour: number,
     correlationId: string
   ): Signal {
-    const data: TimeData = {
-      kind: 'time',
-      hour,
-      timeOfDay,
-      previousTimeOfDay,
-    };
-
-    // Night transition is more significant (affects availability)
+    const data: TimeData = { kind: 'time', hour, timeOfDay, previousTimeOfDay };
     const priority =
       timeOfDay === 'night' || previousTimeOfDay === 'night' ? Priority.NORMAL : Priority.LOW;
 
@@ -216,17 +167,10 @@ export class TimeNeuron extends BaseNeuron {
         previousValue: this.timeOfDayToValue(previousTimeOfDay),
         confidence: 1.0,
       },
-      {
-        priority,
-        correlationId,
-        data,
-      }
+      { priority, correlationId, data }
     );
   }
 
-  /**
-   * Convert time of day to numeric value for metrics.
-   */
   private timeOfDayToValue(tod: TimeOfDay): number {
     switch (tod) {
       case 'night':
@@ -253,3 +197,30 @@ export class TimeNeuron extends BaseNeuron {
 export function createTimeNeuron(logger: Logger, config?: Partial<TimeNeuronConfig>): TimeNeuron {
   return new TimeNeuron(logger, config);
 }
+
+/**
+ * Time neuron plugin.
+ */
+const plugin: NeuronPluginV2 = {
+  manifest: {
+    manifestVersion: 2,
+    id: 'time-neuron',
+    name: 'Time Neuron',
+    version: '1.0.0',
+    description: 'Monitors time passage and transitions',
+    provides: [{ type: 'neuron', id: 'time-neuron' }],
+    requires: [],
+  },
+  lifecycle: {
+    activate: () => {
+      // Neuron plugins don't need activation - neuron is created via factory
+    },
+  },
+  neuron: {
+    create: (logger: Logger, config?: unknown) =>
+      new TimeNeuron(logger, config as Partial<TimeNeuronConfig>),
+    defaultConfig: DEFAULT_TIME_CONFIG,
+  },
+};
+
+export default plugin;

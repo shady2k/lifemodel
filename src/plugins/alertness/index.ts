@@ -1,5 +1,5 @@
 /**
- * Alertness Neuron
+ * Alertness Neuron Plugin
  *
  * Monitors and calculates the agent's alertness level.
  * Alertness determines:
@@ -17,6 +17,7 @@ import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../type
 import { createSignal } from '../../types/signal.js';
 import type { AgentState, AlertnessMode } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
+import type { NeuronPluginV2 } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
 import { detectTransition } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
@@ -73,9 +74,8 @@ export class AlertnessNeuron extends BaseNeuron {
   private readonly config: AlertnessNeuronConfig;
   private lastMode: AlertnessMode | undefined;
   private lastModeChangeAt: Date | undefined;
-  // Note: lastNeuronResult tracked for debugging but not currently exposed
   private _lastNeuronResult: NeuronResult | undefined;
-  private recentActivityLevel = 0.5; // Track activity between ticks
+  private recentActivityLevel = 0.5;
 
   constructor(logger: Logger, config: Partial<AlertnessNeuronConfig> = {}) {
     super(logger);
@@ -83,12 +83,10 @@ export class AlertnessNeuron extends BaseNeuron {
   }
 
   check(state: AgentState, _alertness: number, correlationId: string): Signal | undefined {
-    // Calculate current alertness
     const result = this.calculateAlertness(state);
     const currentValue = result.output;
     const currentMode = this.valueToMode(currentValue);
 
-    // First check - establish baseline
     if (this.previousValue === undefined) {
       this.updatePrevious(currentValue);
       this.lastMode = currentMode;
@@ -96,10 +94,7 @@ export class AlertnessNeuron extends BaseNeuron {
       return this.createSignal(currentValue, currentMode, result, correlationId);
     }
 
-    // Check for mode transition
     const modeChanged = detectTransition(currentMode, this.lastMode);
-
-    // Check refractory period for mode changes
     const canEmitModeChange =
       !this.lastModeChangeAt ||
       Date.now() - this.lastModeChangeAt.getTime() >= this.config.modeChangeRefractoryMs;
@@ -114,18 +109,13 @@ export class AlertnessNeuron extends BaseNeuron {
       this.recordEmission();
 
       this.logger.info(
-        {
-          previousMode: this.lastMode,
-          currentMode,
-          alertnessValue: currentValue.toFixed(2),
-        },
+        { previousMode: this.lastMode, currentMode, alertnessValue: currentValue.toFixed(2) },
         'Alertness mode changed'
       );
 
       return signal;
     }
 
-    // Update tracking even if no signal emitted
     this.updatePrevious(currentValue);
     this.lastMode = currentMode;
     this._lastNeuronResult = result;
@@ -133,51 +123,31 @@ export class AlertnessNeuron extends BaseNeuron {
     return undefined;
   }
 
-  /**
-   * Calculate alertness using weighted factors.
-   */
   private calculateAlertness(state: AgentState): NeuronResult {
-    // Get time of day factor (0-1)
     const hour = new Date().getHours();
     const timeOfDayFactor = this.getTimeOfDayFactor(hour);
 
     return neuron([
-      {
-        name: 'energy',
-        value: state.energy,
-        weight: this.config.weights.energy,
-      },
+      { name: 'energy', value: state.energy, weight: this.config.weights.energy },
       {
         name: 'recentActivity',
         value: this.recentActivityLevel,
         weight: this.config.weights.recentActivity,
       },
-      {
-        name: 'timeOfDay',
-        value: timeOfDayFactor,
-        weight: this.config.weights.timeOfDay,
-      },
+      { name: 'timeOfDay', value: timeOfDayFactor, weight: this.config.weights.timeOfDay },
     ]);
   }
 
-  /**
-   * Get time of day factor (higher during active hours).
-   */
   private getTimeOfDayFactor(hour: number): number {
-    // Peak alertness around noon, lowest at night
-    // Rough approximation of circadian rhythm
-    if (hour >= 22 || hour < 6) return 0.2; // Night
-    if (hour >= 6 && hour < 9) return 0.6; // Early morning
-    if (hour >= 9 && hour < 12) return 0.9; // Late morning
-    if (hour >= 12 && hour < 14) return 0.8; // Early afternoon
-    if (hour >= 14 && hour < 17) return 0.85; // Afternoon
-    if (hour >= 17 && hour < 20) return 0.7; // Evening
-    return 0.5; // Late evening (20-22)
+    if (hour >= 22 || hour < 6) return 0.2;
+    if (hour >= 6 && hour < 9) return 0.6;
+    if (hour >= 9 && hour < 12) return 0.9;
+    if (hour >= 12 && hour < 14) return 0.8;
+    if (hour >= 14 && hour < 17) return 0.85;
+    if (hour >= 17 && hour < 20) return 0.7;
+    return 0.5;
   }
 
-  /**
-   * Convert alertness value to mode.
-   */
   private valueToMode(value: number): AlertnessMode {
     if (value >= this.config.modeThresholds.alert) return 'alert';
     if (value >= this.config.modeThresholds.normal) return 'normal';
@@ -191,7 +161,6 @@ export class AlertnessNeuron extends BaseNeuron {
     result: NeuronResult,
     correlationId: string
   ): Signal {
-    // Higher priority for significant mode changes
     const priority = mode === 'alert' || mode === 'sleep' ? Priority.NORMAL : Priority.LOW;
 
     const metrics: SignalMetrics = {
@@ -200,25 +169,17 @@ export class AlertnessNeuron extends BaseNeuron {
       modeValue: this.modeToValue(mode),
     };
 
-    // Add previousValue only if defined
     if (this.previousValue !== undefined) {
       metrics.previousValue = this.previousValue;
     }
 
-    // Add contributions
     for (const contribution of result.contributions) {
       metrics[`contrib_${contribution.name}`] = contribution.contribution;
     }
 
-    return createSignal(this.signalType, this.source, metrics, {
-      priority,
-      correlationId,
-    });
+    return createSignal(this.signalType, this.source, metrics, { priority, correlationId });
   }
 
-  /**
-   * Convert mode to numeric value for metrics.
-   */
   private modeToValue(mode: AlertnessMode): number {
     switch (mode) {
       case 'alert':
@@ -233,40 +194,22 @@ export class AlertnessNeuron extends BaseNeuron {
     }
   }
 
-  /**
-   * Update recent activity level.
-   * Call this when events are processed.
-   */
   recordActivity(intensity = 0.1): void {
-    // Activity adds to level, decays over time
     this.recentActivityLevel = Math.min(1, this.recentActivityLevel + intensity);
   }
 
-  /**
-   * Decay activity level.
-   * Call this each tick.
-   */
   decayActivity(decayFactor = 0.95): void {
     this.recentActivityLevel *= decayFactor;
   }
 
-  /**
-   * Get current calculated alertness (without emitting signal).
-   */
   getCurrentAlertness(state: AgentState): number {
     return this.calculateAlertness(state).output;
   }
 
-  /**
-   * Get current mode (without emitting signal).
-   */
   getCurrentMode(state: AgentState): AlertnessMode {
     return this.valueToMode(this.getCurrentAlertness(state));
   }
 
-  /**
-   * Get the last neuron result for debugging.
-   */
   getLastNeuronResult(): NeuronResult | undefined {
     return this._lastNeuronResult;
   }
@@ -289,3 +232,30 @@ export function createAlertnessNeuron(
 ): AlertnessNeuron {
   return new AlertnessNeuron(logger, config);
 }
+
+/**
+ * Alertness neuron plugin.
+ */
+const plugin: NeuronPluginV2 = {
+  manifest: {
+    manifestVersion: 2,
+    id: 'alertness',
+    name: 'Alertness Neuron',
+    version: '1.0.0',
+    description: 'Monitors agent alertness level for sensitivity adjustment',
+    provides: [{ type: 'neuron', id: 'alertness' }],
+    requires: [],
+  },
+  lifecycle: {
+    activate: () => {
+      // Neuron plugins don't need activation - neuron is created via factory
+    },
+  },
+  neuron: {
+    create: (logger: Logger, config?: unknown) =>
+      new AlertnessNeuron(logger, config as Partial<AlertnessNeuronConfig>),
+    defaultConfig: DEFAULT_ALERTNESS_CONFIG,
+  },
+};
+
+export default plugin;

@@ -3,6 +3,10 @@
  *
  * Runs on each CoreLoop tick to check all plugin schedules
  * and fire due events with idempotency guarantees.
+ *
+ * Dynamic Registration:
+ * - Supports pausing plugins (scheduler won't fire while paused)
+ * - Supports queued unregistration (applied at tick boundary)
  */
 
 import { randomUUID } from 'node:crypto';
@@ -38,6 +42,11 @@ const DEFAULT_CONFIG: SchedulerServiceConfig = {
 
 /**
  * Scheduler service - manages all plugin schedulers.
+ *
+ * Supports dynamic plugin management:
+ * - pausePlugin/resumePlugin: Immediately prevent/allow scheduler firing
+ * - queueUnregister: Queue scheduler removal for tick boundary
+ * - applyPendingChanges: Apply queued changes (called at tick start)
  */
 export class SchedulerService {
   private readonly logger: Logger;
@@ -45,6 +54,12 @@ export class SchedulerService {
   private readonly schedulers = new Map<string, SchedulerPrimitiveImpl>();
   private signalCallback: SignalPushCallback | null = null;
   private pluginEventCallback: PluginEventCallback | null = null;
+
+  /** Plugins that are paused (scheduler won't fire for these) */
+  private readonly pausedPlugins = new Set<string>();
+
+  /** Pending unregistrations (applied at tick boundary) */
+  private pendingUnregistrations: string[] = [];
 
   constructor(logger: Logger, config: Partial<SchedulerServiceConfig> = {}) {
     this.logger = logger.child({ component: 'scheduler-service' });
@@ -67,24 +82,101 @@ export class SchedulerService {
 
   /**
    * Register a scheduler primitive for a plugin.
+   * Clears any pending unregistration to prevent stale removal after restart.
    */
   registerScheduler(pluginId: string, scheduler: SchedulerPrimitiveImpl): void {
     if (this.schedulers.has(pluginId)) {
       this.logger.warn({ pluginId }, 'Scheduler already registered, replacing');
     }
+    // Clear any pending unregistration to prevent stale removal after restart
+    this.clearPendingUnregister(pluginId);
     this.schedulers.set(pluginId, scheduler);
     this.logger.debug({ pluginId }, 'Scheduler registered');
   }
 
   /**
-   * Unregister a scheduler for a plugin.
+   * Unregister a scheduler for a plugin immediately.
+   * Use queueUnregister() for tick-boundary safe removal.
    */
   unregisterScheduler(pluginId: string): boolean {
     const removed = this.schedulers.delete(pluginId);
+    // Also remove from paused set if present
+    this.pausedPlugins.delete(pluginId);
     if (removed) {
       this.logger.debug({ pluginId }, 'Scheduler unregistered');
     }
     return removed;
+  }
+
+  /**
+   * Queue a scheduler for unregistration at tick boundary.
+   * Safer than unregisterScheduler() during tick processing.
+   *
+   * Note: If registerScheduler() is called for the same pluginId before
+   * applyPendingChanges(), the pending unregistration is cleared to prevent
+   * accidentally removing the new scheduler.
+   */
+  queueUnregister(pluginId: string): void {
+    if (!this.pendingUnregistrations.includes(pluginId)) {
+      this.pendingUnregistrations.push(pluginId);
+      this.logger.debug({ pluginId }, 'Scheduler queued for unregistration');
+    }
+  }
+
+  /**
+   * Clear pending unregistration for a plugin.
+   * Called when a new scheduler is registered to prevent stale removal after restart.
+   */
+  clearPendingUnregister(pluginId: string): void {
+    const idx = this.pendingUnregistrations.indexOf(pluginId);
+    if (idx !== -1) {
+      this.pendingUnregistrations.splice(idx, 1);
+      this.logger.debug({ pluginId }, 'Pending unregistration cleared');
+    }
+  }
+
+  /**
+   * Mark a plugin as paused (scheduler won't fire).
+   * Takes effect immediately - safe to call during tick.
+   */
+  pausePlugin(pluginId: string): void {
+    this.pausedPlugins.add(pluginId);
+    this.logger.debug({ pluginId }, 'Plugin scheduler paused');
+  }
+
+  /**
+   * Mark a plugin as resumed (scheduler can fire again).
+   * Takes effect immediately.
+   */
+  resumePlugin(pluginId: string): void {
+    this.pausedPlugins.delete(pluginId);
+    this.logger.debug({ pluginId }, 'Plugin scheduler resumed');
+  }
+
+  /**
+   * Check if a plugin's scheduler is paused.
+   */
+  isPluginPaused(pluginId: string): boolean {
+    return this.pausedPlugins.has(pluginId);
+  }
+
+  /**
+   * Apply pending changes at tick boundary.
+   * Called by CoreLoop at START of each tick.
+   */
+  applyPendingChanges(): void {
+    for (const pluginId of this.pendingUnregistrations) {
+      try {
+        this.unregisterScheduler(pluginId);
+      } catch (error) {
+        // Log and continue - don't block other unregistrations
+        this.logger.error(
+          { pluginId, error: error instanceof Error ? error.message : String(error) },
+          'Failed to unregister scheduler'
+        );
+      }
+    }
+    this.pendingUnregistrations = [];
   }
 
   /**
@@ -97,6 +189,9 @@ export class SchedulerService {
   /**
    * Tick - check all schedulers for due events.
    * Called by CoreLoop on each tick.
+   *
+   * Note: applyPendingChanges() is called by CoreLoop before tick(),
+   * so any queued unregistrations are processed first.
    */
   async tick(): Promise<void> {
     if (!this.signalCallback) {
@@ -107,6 +202,11 @@ export class SchedulerService {
     let totalFired = 0;
 
     for (const [pluginId, scheduler] of this.schedulers) {
+      // Skip paused plugins
+      if (this.pausedPlugins.has(pluginId)) {
+        continue;
+      }
+
       if (totalFired >= this.config.maxFiresPerTick) {
         this.logger.debug(
           { maxFires: this.config.maxFiresPerTick },

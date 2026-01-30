@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createContactPressureNeuron } from '../../../src/plugins/neurons/contact-pressure.js';
+import { createContactPressureNeuron } from '../../../src/plugins/contact-pressure/index.js';
 import { Priority } from '../../../src/types/priority.js';
 import { createMockLogger, createAgentState } from '../../helpers/factories.js';
 
