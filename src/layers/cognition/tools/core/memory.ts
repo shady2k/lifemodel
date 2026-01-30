@@ -28,6 +28,10 @@ export interface MemoryEntry {
   tags?: string[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Tick ID for batch grouping in logs (NOT causal - use parentSignalId for that) */
+  tickId?: string | undefined;
+  /** Parent signal ID that led to this memory being created (causal chain) */
+  parentSignalId?: string | undefined;
 }
 
 /**

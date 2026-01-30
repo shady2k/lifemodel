@@ -5,9 +5,10 @@ import {
   createBelief,
   decayBelief,
 } from '../types/index.js';
-import type { User, UserPatterns, UserMood } from '../types/user/user.js';
+import type { User, UserPatterns, UserMood, UserProperty } from '../types/user/user.js';
 import { createUser } from '../types/user/user.js';
 import { isNameKnown as checkNameKnown } from '../types/user/person.js';
+import type { EvidenceSource } from '../types/cognition.js';
 
 /**
  * Configuration for the user model.
@@ -116,6 +117,12 @@ export class UserModel {
    */
   private defaultTimezone: string | null = null;
 
+  /**
+   * Flexible properties for arbitrary user attributes.
+   * Stored via core.remember tool for fields beyond typed properties.
+   */
+  private properties = new Map<string, UserProperty>();
+
   constructor(user: User, logger: Logger, config: Partial<UserModelConfig> = {}) {
     this.user = { ...user };
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -136,6 +143,11 @@ export class UserModel {
       this.defaultTimezone = user.defaultTimezone;
     }
 
+    // Restore flexible properties from persisted state
+    if (user.properties) {
+      this.restoreProperties(user.properties);
+    }
+
     // Adjust energy profile based on user patterns
     this.adjustEnergyProfile();
 
@@ -144,16 +156,20 @@ export class UserModel {
 
   /**
    * Get current user state (readonly copy).
-   * Includes chatTimezones and defaultTimezone for persistence.
+   * Includes chatTimezones, defaultTimezone, and properties for persistence.
    */
   getUser(): Readonly<User> {
-    const user = { ...this.user };
+    const user: User = { ...this.user };
     // Include timezone overrides for persistence
     if (this.chatTimezones.size > 0) {
       user.chatTimezones = Object.fromEntries(this.chatTimezones);
     }
     if (this.defaultTimezone) {
       user.defaultTimezone = this.defaultTimezone;
+    }
+    // Include flexible properties for persistence
+    if (this.properties.size > 0) {
+      user.properties = Object.fromEntries(this.properties);
     }
     return user;
   }
@@ -612,6 +628,99 @@ export class UserModel {
     for (const [chatId, tz] of entries) {
       this.chatTimezones.set(chatId, tz);
     }
+  }
+
+  // === Flexible Properties (via core.remember) ===
+
+  /**
+   * Set a flexible property on the user model.
+   * Routes known fields to typed setters if type matches, otherwise stores in flexible properties.
+   * Implements conflict resolution: higher confidence wins.
+   */
+  setProperty(
+    attribute: string,
+    value: unknown,
+    confidence: number,
+    source: EvidenceSource,
+    evidence?: string
+  ): void {
+    // Route known fields to typed setters if type matches
+    // If type doesn't match, fall through to flexible properties
+    switch (attribute) {
+      case 'name':
+        if (typeof value === 'string') {
+          this.setName(value);
+          return;
+        }
+        break;
+      case 'gender':
+        if (value === 'male' || value === 'female') {
+          this.setGender(value);
+          return;
+        }
+        break;
+      case 'language':
+        if (typeof value === 'string') {
+          this.setLanguage(value);
+          return;
+        }
+        break;
+      case 'timezone':
+        // Accept number offset or string timezone name (e.g., "Europe/Berlin")
+        if (typeof value === 'number') {
+          this.setTimezone(value);
+          return;
+        }
+        if (typeof value === 'string') {
+          // Store IANA timezone name as default timezone
+          this.setDefaultTimezone(value);
+          return;
+        }
+        break;
+    }
+
+    // Conflict resolution: keep higher confidence version
+    const existing = this.properties.get(attribute);
+    if (existing && existing.confidence > confidence) {
+      this.logger.debug(
+        { attribute, existingConf: existing.confidence, newConf: confidence },
+        'Ignoring lower-confidence property update'
+      );
+      return;
+    }
+
+    // Store in flexible properties
+    this.properties.set(attribute, {
+      value,
+      confidence,
+      source,
+      evidence,
+      updatedAt: new Date(),
+    });
+
+    this.logger.info({ attribute, value, confidence, source }, 'User property set');
+  }
+
+  /**
+   * Get a flexible property by attribute name.
+   */
+  getProperty(attribute: string): UserProperty | undefined {
+    return this.properties.get(attribute);
+  }
+
+  /**
+   * Get all flexible properties.
+   */
+  getAllProperties(): Record<string, UserProperty> {
+    return Object.fromEntries(this.properties);
+  }
+
+  /**
+   * Restore properties from persistence.
+   */
+  restoreProperties(properties: Record<string, UserProperty>): void {
+    this.properties = new Map(Object.entries(properties));
+    this.logger.info({ count: this.properties.size }, 'User properties restored');
   }
 
   // === Private signal handlers ===

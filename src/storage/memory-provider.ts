@@ -55,6 +55,10 @@ interface StoredEntry {
   tags?: string[] | undefined;
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Tick ID for batch grouping */
+  tickId?: string | undefined;
+  /** Parent signal ID for causal chain */
+  parentSignalId?: string | undefined;
 }
 
 /**
@@ -259,6 +263,8 @@ export class JsonMemoryProvider implements MemoryProvider {
           tags: e.tags,
           confidence: e.confidence,
           metadata: e.metadata,
+          tickId: e.tickId,
+          parentSignalId: e.parentSignalId,
         })),
       };
 
@@ -295,6 +301,8 @@ export class JsonMemoryProvider implements MemoryProvider {
           tags: e.tags,
           confidence: e.confidence,
           metadata: e.metadata,
+          tickId: e.tickId,
+          parentSignalId: e.parentSignalId,
         }));
 
         this.logger.info({ entries: this.entries.length }, 'Memory loaded from disk');

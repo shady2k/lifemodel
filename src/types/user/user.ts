@@ -1,6 +1,18 @@
 import type { Person } from './person.js';
 import type { Belief } from '../belief.js';
 import { createBelief } from '../belief.js';
+import type { EvidenceSource } from '../cognition.js';
+
+/**
+ * Flexible user property stored via core.remember.
+ */
+export interface UserProperty {
+  value: unknown;
+  confidence: number;
+  source: EvidenceSource;
+  evidence?: string | undefined;
+  updatedAt: Date;
+}
 
 /**
  * User - the primary person the agent interacts with.
@@ -44,6 +56,12 @@ export interface User extends Person {
    * Default IANA timezone name (takes precedence over offset-derived).
    */
   defaultTimezone?: string;
+
+  /**
+   * Flexible properties stored via core.remember tool.
+   * Stores arbitrary attributes like birthday, preferences, etc.
+   */
+  properties?: Record<string, UserProperty>;
 }
 
 /**

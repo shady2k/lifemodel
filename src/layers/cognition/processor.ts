@@ -224,7 +224,7 @@ export class CognitionProcessor implements CognitionLayer {
         : undefined,
       conversationHistory: await this.getConversationHistory(recipientId),
       userModel: this.userModel?.getBeliefs() ?? {},
-      correlationId: context.correlationId,
+      tickId: context.tickId,
       recipientId,
       userId: signalData?.userId,
       timeSinceLastMessageMs,

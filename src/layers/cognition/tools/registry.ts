@@ -19,10 +19,10 @@ import {
   createStateTool,
   createToolsMetaTool,
   createThoughtTool,
-  createUserTool,
   createAgentTool,
   createScheduleTool,
   createFinalTool,
+  createRememberTool,
 } from './core/index.js';
 
 // Import and re-export types for convenience
@@ -366,9 +366,6 @@ export class ToolRegistry {
     // Thought tool
     this.tools.set('core.thought', createThoughtTool());
 
-    // User tool
-    this.tools.set('core.user', createUserTool());
-
     // Agent tool
     this.tools.set('core.agent', createAgentTool());
 
@@ -377,6 +374,9 @@ export class ToolRegistry {
 
     // Final tool (terminal - signals end of agentic loop)
     this.tools.set('core.final', createFinalTool());
+
+    // Remember tool (unified fact storage - replaces core.user)
+    this.tools.set('core.remember', createRememberTool());
   }
 }
 

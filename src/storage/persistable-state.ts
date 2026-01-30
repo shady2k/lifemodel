@@ -129,7 +129,12 @@ export function deserializeState(json: string): PersistableState {
   // Parse as unknown first to handle migrations for legacy data
   const rawState = JSON.parse(json, (key: string, value: unknown) => {
     // Convert ISO date strings back to Date objects for specific fields
-    if (key === 'lastTickAt' || key === 'lastMentioned' || key === 'lastSignalAt') {
+    if (
+      key === 'lastTickAt' ||
+      key === 'lastMentioned' ||
+      key === 'lastSignalAt' ||
+      key === 'updatedAt'
+    ) {
       if (typeof value === 'string') {
         return new Date(value);
       }

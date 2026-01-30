@@ -131,6 +131,9 @@ export interface Signal {
 
   /** Bundle related signals (e.g., all signals from same tick) */
   correlationId?: string;
+
+  /** Parent signal/event ID for causal chain tracking in logs */
+  parentId?: string;
 }
 
 // ============================================================
@@ -476,6 +479,7 @@ export function createSignal(
   options?: {
     priority?: Priority;
     correlationId?: string;
+    parentId?: string;
     data?: SignalData;
   }
 ): Signal {
@@ -492,6 +496,7 @@ export function createSignal(
     ...(options?.data && { data: options.data }),
     ...(ttl !== null && { expiresAt: new Date(now.getTime() + ttl) }),
     ...(options?.correlationId && { correlationId: options.correlationId }),
+    ...(options?.parentId && { parentId: options.parentId }),
   };
 }
 
@@ -503,12 +508,14 @@ export function createUserMessageSignal(
   options?: {
     priority?: Priority;
     correlationId?: string;
+    parentId?: string;
   }
 ): Signal {
   const signalOptions: {
     priority: Priority;
     data: UserMessageData;
     correlationId?: string;
+    parentId?: string;
   } = {
     priority: options?.priority ?? 1, // Priority.HIGH for user messages
     data: { kind: 'user_message', ...data },
@@ -516,6 +523,9 @@ export function createUserMessageSignal(
 
   if (options?.correlationId) {
     signalOptions.correlationId = options.correlationId;
+  }
+  if (options?.parentId) {
+    signalOptions.parentId = options.parentId;
   }
 
   return createSignal(

@@ -103,8 +103,8 @@ export interface CognitionContext {
   /** Current agent state snapshot */
   agentState: AgentState;
 
-  /** Tick correlation ID */
-  correlationId: string;
+  /** Tick ID for batch grouping */
+  tickId: string;
 
   /** Runtime config from CoreLoop */
   runtimeConfig?: {

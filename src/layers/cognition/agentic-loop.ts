@@ -24,6 +24,7 @@ import type {
   Terminal,
   StructuredFact,
   ExecutedTool,
+  EvidenceSource,
 } from '../../types/cognition.js';
 import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
@@ -153,8 +154,8 @@ export interface LoopContext {
   /** User model beliefs */
   userModel: Record<string, unknown>;
 
-  /** Correlation ID */
-  correlationId: string;
+  /** Tick ID for batch grouping (NOT causal - use triggerSignal.id for that) */
+  tickId: string;
 
   /** Opaque recipient identifier */
   recipientId?: string | undefined;
@@ -323,7 +324,7 @@ export class AgenticLoop {
 
     this.logger.debug(
       {
-        correlationId: context.correlationId,
+        correlationId: context.tickId,
         triggerType: context.triggerSignal.type,
         useSmart,
         hasPreviousAttempt: !!context.previousAttempt,
@@ -584,7 +585,7 @@ export class AgenticLoop {
     return {
       recipientId: context.recipientId ?? '',
       userId: context.userId,
-      correlationId: context.correlationId,
+      correlationId: context.tickId,
     };
   }
 
@@ -658,6 +659,7 @@ export class AgenticLoop {
 
   /**
    * Compile intents from tool results (new method for native tool calling).
+   * Includes trace metadata for log analysis.
    */
   private compileIntentsFromToolResults(
     terminal: Terminal,
@@ -666,12 +668,20 @@ export class AgenticLoop {
   ): Intent[] {
     const intents: Intent[] = [];
 
+    // Build base trace from context
+    // tickId = batch grouping, parentSignalId = causal chain
+    const baseTrace = {
+      tickId: context.tickId,
+      parentSignalId: context.triggerSignal.id,
+    };
+
     // Convert tool results to intents
     for (const result of toolResults) {
       // Handle core.thought specially (complex depth logic)
       if (result.toolName === 'core.thought' && result.success) {
         const thoughtIntent = this.thoughtToolResultToIntent(result, context);
         if (thoughtIntent) {
+          thoughtIntent.trace = { ...baseTrace, toolCallId: result.toolCallId };
           intents.push(thoughtIntent);
         }
         continue;
@@ -680,6 +690,7 @@ export class AgenticLoop {
       // Handle all other tools via the typed map
       const toolIntent = this.toolResultToIntent(result, context);
       if (toolIntent) {
+        toolIntent.trace = { ...baseTrace, toolCallId: result.toolCallId };
         intents.push(toolIntent);
       }
     }
@@ -693,6 +704,7 @@ export class AgenticLoop {
           text: terminal.text,
           conversationStatus: terminal.conversationStatus,
         },
+        trace: baseTrace,
       });
     }
 
@@ -707,6 +719,7 @@ export class AgenticLoop {
           deferMs,
           reason: terminal.reason,
         },
+        trace: baseTrace,
       });
     }
 
@@ -742,7 +755,19 @@ Rules:
         ? ''
         : `
 - If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).`
-    }`;
+    }
+
+REMEMBERING FACTS:
+Use core.remember for all facts. For important facts, include provenance:
+- "November 9 (user said)" → high confidence (user_quote)
+- "November 9 (explicitly stated)" → high confidence (user_explicit)
+- "likes coffee (mentioned)" → medium confidence (user_implicit)
+- "prefers mornings (inferred)" → lower confidence
+
+Examples:
+- core.remember({ subject: "user", attribute: "birthday", value: "November 9 (user said)" })
+- core.remember({ subject: "user", attribute: "preference", value: "dark mode" })
+- core.remember({ subject: "hiking", attribute: "plan", value: "next weekend trip" })`;
   }
 
   private buildUserProfileSection(context: LoopContext): string | null {
@@ -1047,22 +1072,6 @@ Example defer terminal:
     }
 
     switch (result.toolName) {
-      case 'core.user': {
-        // core.user update → UPDATE_USER_MODEL intent
-        if (data['action'] !== 'update') return null;
-        return {
-          type: 'UPDATE_USER_MODEL',
-          payload: {
-            recipientId: context.recipientId,
-            field: data['field'] as string,
-            value: data['value'],
-            confidence: data['confidence'] as number,
-            source: data['source'] as string,
-            evidence: data['evidence'] as string | undefined,
-          },
-        };
-      }
-
       case 'core.agent': {
         // core.agent update → UPDATE_STATE intent
         if (data['action'] !== 'update') return null;
@@ -1095,7 +1104,7 @@ Example defer terminal:
       }
 
       case 'core.memory': {
-        // core.memory saveFact → SAVE_TO_MEMORY intent
+        // core.memory saveFact → SAVE_TO_MEMORY intent (deprecated - use core.remember)
         if (data['action'] !== 'saveFact') return null; // search/save handled differently
         return {
           type: 'SAVE_TO_MEMORY',
@@ -1103,6 +1112,24 @@ Example defer terminal:
             type: 'fact',
             recipientId: context.recipientId,
             fact: data['fact'] as StructuredFact,
+          },
+        };
+      }
+
+      case 'core.remember': {
+        // core.remember → REMEMBER intent
+        if (data['action'] !== 'remember') return null;
+        return {
+          type: 'REMEMBER',
+          payload: {
+            subject: data['subject'] as string,
+            attribute: data['attribute'] as string,
+            value: data['value'] as string,
+            confidence: data['confidence'] as number,
+            source: data['source'] as EvidenceSource,
+            evidence: data['evidence'] as string | undefined,
+            isUserFact: data['isUserFact'] as boolean,
+            recipientId: context.recipientId,
           },
         };
       }

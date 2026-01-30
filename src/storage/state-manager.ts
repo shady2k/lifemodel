@@ -22,7 +22,7 @@ export interface StateManagerConfig {
 
 const DEFAULT_CONFIG: Required<StateManagerConfig> = {
   stateKey: 'state',
-  autoSaveInterval: 5 * 60 * 1000, // 5 minutes
+  autoSaveInterval: 2 * 60 * 1000, // 2 minutes
 };
 
 /**

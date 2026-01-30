@@ -130,7 +130,7 @@ interface PendingCognition {
   /** Promise that resolves when COGNITION completes */
   promise: Promise<CognitionResult>;
   /** Correlation ID for logging */
-  correlationId: string;
+  tickId: string;
   /** When the operation started */
   startedAt: number;
   /** Original trigger signal (may be undefined) */
@@ -385,7 +385,8 @@ export class CoreLoop {
     const tickStart = Date.now();
     this.tickCount++;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
-    const correlationId = `tick-${String(this.tickCount)}-${randomUUID().slice(0, 8)}`;
+    // tickId for batch grouping in logs (NOT causal tracing - use parentId for that)
+    const tickId = randomUUID();
 
     // Apply pending plugin changes FIRST (before any processing)
     // This handles queued scheduler unregistrations from pause/unload
@@ -403,7 +404,7 @@ export class CoreLoop {
         socialDebt: state.socialDebt.toFixed(2),
         pendingSignals: this.pendingSignals.length,
         stressLevel,
-        correlationId,
+        tickId,
       },
       '⏱️ Tick starting'
     );
@@ -419,7 +420,7 @@ export class CoreLoop {
       // 2. AUTONOMIC: neurons check state, emit internal signals
       // Always runs - vital signs monitoring
       if (activeLayers.autonomic) {
-        const autonomicResult = await this.processAutonomic(incomingSignals, correlationId);
+        const autonomicResult = await this.processAutonomic(incomingSignals, tickId);
         allIntents.push(...autonomicResult.intents);
         allSignals = autonomicResult.signals;
       } else {
@@ -461,7 +462,7 @@ export class CoreLoop {
         // Pass enableSmartRetry based on activeLayers.smart (reuses health gating)
         const cognitionContext = this.buildCognitionContext(
           aggregationResult,
-          correlationId,
+          tickId,
           activeLayers.smart
         );
 
@@ -674,10 +675,10 @@ export class CoreLoop {
    */
   private processAutonomic(
     incomingSignals: Signal[],
-    correlationId: string
+    tickId: string
   ): AutonomicResult | Promise<AutonomicResult> {
     const state = this.agent.getState();
-    return this.layers.autonomic.process(state, incomingSignals, correlationId);
+    return this.layers.autonomic.process(state, incomingSignals, tickId);
   }
 
   /**
@@ -693,7 +694,7 @@ export class CoreLoop {
    */
   private buildCognitionContext(
     aggregationResult: AggregationResult,
-    correlationId: string,
+    tickId: string,
     enableSmartRetry = true
   ): CognitionContext {
     return {
@@ -701,7 +702,7 @@ export class CoreLoop {
       triggerSignals: aggregationResult.triggerSignals,
       wakeReason: aggregationResult.wakeReason ?? 'unknown',
       agentState: this.agent.getState(),
-      correlationId,
+      tickId,
       runtimeConfig: {
         enableSmartRetry,
       },
@@ -719,7 +720,7 @@ export class CoreLoop {
 
     this.pendingCognition = {
       promise,
-      correlationId: context.correlationId,
+      tickId: context.tickId,
       startedAt,
       triggerSignal: triggerSignal ?? context.triggerSignals[0] ?? undefined,
     };
@@ -729,7 +730,7 @@ export class CoreLoop {
       .then(() => {
         this.logger.debug(
           {
-            correlationId: context.correlationId,
+            tickId: context.tickId,
             duration: Date.now() - startedAt,
           },
           'COGNITION completed (async)'
@@ -739,7 +740,7 @@ export class CoreLoop {
         this.logger.error(
           {
             error: error instanceof Error ? error.message : String(error),
-            correlationId: context.correlationId,
+            tickId: context.tickId,
           },
           'COGNITION failed (async)'
         );
@@ -772,10 +773,7 @@ export class CoreLoop {
         const elapsed = Date.now() - pending.startedAt;
         if (elapsed > 5000 && elapsed % 5000 < 1000) {
           // Log every ~5 seconds
-          this.logger.debug(
-            { correlationId: pending.correlationId, elapsed },
-            'COGNITION still processing...'
-          );
+          this.logger.debug({ tickId: pending.tickId, elapsed }, 'COGNITION still processing...');
 
           // Resend typing indicator (Telegram typing expires after ~5 seconds)
           const chatId = (pending.triggerSignal?.data as Record<string, unknown> | undefined)?.[
@@ -799,10 +797,7 @@ export class CoreLoop {
     } catch (error) {
       // COGNITION rejected - clear pending and log error
       this.pendingCognition = null;
-      this.logger.error(
-        { error, correlationId: pending.correlationId },
-        'COGNITION rejected unexpectedly'
-      );
+      this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
       return null;
     }
   }
@@ -937,81 +932,6 @@ export class CoreLoop {
         case 'CANCEL_EVENT':
           this.logger.debug({ intent }, 'CANCEL_EVENT not yet implemented');
           break;
-
-        case 'UPDATE_USER_MODEL': {
-          const { recipientId, field, value, confidence, source } = intent.payload;
-          if (this.userModel && recipientId) {
-            // Apply update to user model based on field
-            let applied = false;
-
-            switch (field) {
-              case 'name':
-                if (typeof value === 'string' && value.length > 0) {
-                  this.userModel.setName(value);
-                  applied = true;
-                }
-                break;
-
-              case 'gender':
-                if (value === 'male' || value === 'female') {
-                  this.userModel.setGender(value);
-                  applied = true;
-                }
-                break;
-
-              case 'mood':
-                if (typeof value === 'string') {
-                  this.userModel.setMood(
-                    value as
-                      | 'positive'
-                      | 'neutral'
-                      | 'negative'
-                      | 'stressed'
-                      | 'tired'
-                      | 'excited'
-                      | 'unknown'
-                  );
-                  applied = true;
-                }
-                break;
-
-              case 'energy':
-                if (typeof value === 'number') {
-                  this.userModel.updateEnergy(value);
-                  applied = true;
-                }
-                break;
-
-              case 'availability':
-                if (typeof value === 'number') {
-                  this.userModel.updateAvailability(value);
-                  applied = true;
-                }
-                break;
-
-              case 'language':
-                if (typeof value === 'string') {
-                  this.userModel.setLanguage(value);
-                  applied = true;
-                }
-                break;
-
-              case 'timezone':
-                if (typeof value === 'number') {
-                  this.userModel.setTimezone(value);
-                  applied = true;
-                }
-                break;
-            }
-
-            this.logger.debug(
-              { recipientId, field, value, confidence, source, applied },
-              'User model update from COGNITION'
-            );
-            this.metrics.counter('user_model_updates', { field, source });
-          }
-          break;
-        }
 
         case 'SAVE_TO_MEMORY': {
           const {
@@ -1159,6 +1079,65 @@ export class CoreLoop {
 
           // Use shared enqueue logic with budget/dedupe checks
           this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
+          break;
+        }
+
+        case 'REMEMBER': {
+          const {
+            subject,
+            attribute,
+            value,
+            confidence,
+            source,
+            evidence,
+            isUserFact,
+            recipientId: rememberRecipientId,
+          } = intent.payload;
+          const trace = intent.trace;
+
+          // 1. If user fact → update UserModel flexible properties
+          if (isUserFact && this.userModel) {
+            this.userModel.setProperty(attribute, value, confidence, source, evidence);
+            this.logger.debug(
+              {
+                attribute,
+                value,
+                confidence,
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
+              },
+              'User property stored'
+            );
+          }
+
+          // 2. Always store in memory for semantic search
+          if (this.memoryProvider) {
+            const memoryEntry = {
+              id: `mem_${randomUUID()}`,
+              type: 'fact' as const,
+              content: `${subject}.${attribute}: ${value}`,
+              timestamp: new Date(),
+              recipientId: rememberRecipientId,
+              confidence,
+              metadata: { subject, attribute, source, evidence, isUserFact },
+              tickId: trace?.tickId,
+              parentSignalId: trace?.parentSignalId,
+            };
+
+            this.memoryProvider.save(memoryEntry).catch((err: unknown) => {
+              this.logger.error(
+                { error: err instanceof Error ? err.message : String(err) },
+                'Failed to save remembered fact to memory'
+              );
+            });
+
+            this.logger.debug(
+              { subject, attribute, tickId: trace?.tickId, parentSignalId: trace?.parentSignalId },
+              'Memory stored'
+            );
+          }
+
+          this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
           break;
         }
       }

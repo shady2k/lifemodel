@@ -5,12 +5,13 @@
  * that the core collects, validates, and applies.
  */
 
+import type { EvidenceSource } from './cognition.js';
+
 /**
  * All possible intent types.
  */
 export type IntentType =
   | 'UPDATE_STATE'
-  | 'UPDATE_USER_MODEL'
   | 'SAVE_TO_MEMORY'
   | 'SCHEDULE_EVENT'
   | 'SEND_MESSAGE'
@@ -19,7 +20,21 @@ export type IntentType =
   | 'DEFER_SIGNAL'
   | 'LOG'
   | 'EMIT_METRIC'
-  | 'EMIT_THOUGHT';
+  | 'EMIT_THOUGHT'
+  | 'REMEMBER';
+
+/**
+ * Trace metadata for intent tracking in logs.
+ * Allows reconstructing causal chains from log analysis.
+ */
+export interface IntentTrace {
+  /** Tick ID for batch grouping in logs (NOT causal - use parentSignalId for that) */
+  tickId?: string | undefined;
+  /** Parent signal ID that triggered this intent (causal chain) */
+  parentSignalId?: string | undefined;
+  /** Tool call ID that produced this intent (if from tool execution) */
+  toolCallId?: string | undefined;
+}
 
 /**
  * Update agent state.
@@ -34,27 +49,8 @@ export interface UpdateStateIntent {
     /** If true, value is added to current (for numbers) */
     delta?: boolean;
   };
-}
-
-/**
- * Update user model (beliefs about user).
- */
-export interface UpdateUserModelIntent {
-  type: 'UPDATE_USER_MODEL';
-  payload: {
-    /** Recipient identifier */
-    recipientId?: string | undefined;
-    /** Field to update */
-    field: string;
-    /** New value */
-    value: unknown;
-    /** Confidence in this update (0-1) */
-    confidence: number;
-    /** Source of evidence */
-    source: string;
-    /** Supporting evidence */
-    evidence?: string | undefined;
-  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -83,6 +79,8 @@ export interface SaveToMemoryIntent {
     /** Tags for search */
     tags?: string[] | undefined;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -104,6 +102,8 @@ export interface ScheduleEventIntent {
     /** Optional: unique ID to prevent duplicates */
     scheduleId?: string;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -128,6 +128,8 @@ export interface SendMessageIntent {
   };
   /** Source that emitted this intent (for attribution/auditing) */
   source?: string;
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -139,6 +141,8 @@ export interface CancelEventIntent {
     /** Schedule ID to cancel */
     scheduleId: string;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -157,6 +161,8 @@ export interface AckSignalIntent {
     /** Why it's being acknowledged */
     reason: string;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -179,6 +185,8 @@ export interface DeferSignalIntent {
     /** Why the agent is deferring */
     reason: string;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -191,6 +199,8 @@ export interface LogIntent {
     message: string;
     context?: Record<string, unknown>;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -204,6 +214,8 @@ export interface EmitMetricIntent {
     value: number;
     labels?: Record<string, string>;
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -228,6 +240,36 @@ export interface EmitThoughtIntent {
     /** Signal source for the thought */
     signalSource: 'cognition.thought' | 'memory.thought';
   };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
+}
+
+/**
+ * Remember a fact about the user or any subject.
+ * Routes to UserModel for user facts and memory for all facts.
+ */
+export interface RememberIntent {
+  type: 'REMEMBER';
+  payload: {
+    /** Subject: "user", person name, or topic */
+    subject: string;
+    /** Attribute/field name (e.g., birthday, preference) */
+    attribute: string;
+    /** The value to remember */
+    value: string;
+    /** Confidence level 0-1 */
+    confidence: number;
+    /** Evidence source */
+    source: EvidenceSource;
+    /** Supporting evidence/quote */
+    evidence?: string | undefined;
+    /** Whether this is a user fact (routes to UserModel) */
+    isUserFact: boolean;
+    /** Recipient context */
+    recipientId?: string | undefined;
+  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
 }
 
 /**
@@ -235,7 +277,6 @@ export interface EmitThoughtIntent {
  */
 export type Intent =
   | UpdateStateIntent
-  | UpdateUserModelIntent
   | SaveToMemoryIntent
   | ScheduleEventIntent
   | SendMessageIntent
@@ -244,4 +285,5 @@ export type Intent =
   | DeferSignalIntent
   | LogIntent
   | EmitMetricIntent
-  | EmitThoughtIntent;
+  | EmitThoughtIntent
+  | RememberIntent;

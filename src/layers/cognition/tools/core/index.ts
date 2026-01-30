@@ -10,10 +10,10 @@ export { createTimeTool } from './time.js';
 export { createStateTool } from './state.js';
 export { createToolsMetaTool } from './tools-meta.js';
 export { createThoughtTool } from './thought.js';
-export { createUserTool } from './user.js';
 export { createAgentTool } from './agent.js';
 export { createScheduleTool } from './schedule.js';
 export { createFinalTool } from './final.js';
+export { createRememberTool } from './remember.js';
 
 // Types
 export type { MemoryProvider, MemoryEntry, MemorySearchOptions, MemoryToolDeps } from './memory.js';

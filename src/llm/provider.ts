@@ -68,7 +68,6 @@ export interface ResponseFormat {
  * OpenAI Chat Completions tool format.
  * Re-exported from tool-schema.ts for convenience.
  */
-import type { OpenAIChatTool } from './tool-schema.js';
 export type { OpenAIChatTool };
 
 /**

@@ -136,8 +136,8 @@ export interface CognitionOutput {
   /** Schema version for forward compatibility */
   schemaVersion: typeof COGNITION_SCHEMA_VERSION;
 
-  /** Correlation ID from the tick */
-  correlationId: string;
+  /** Tick ID for batch grouping (NOT causal - use triggerSignalId for that) */
+  tickId: string;
 
   /** ID of the signal that triggered this loop */
   triggerSignalId: string;
@@ -412,6 +412,11 @@ export const FIELD_POLICIES: Record<string, FieldPolicy> = {
     requireSource: ['user_quote', 'user_explicit'],
     escalateIfUncertain: true,
   },
+  'user.birthday': {
+    minConfidence: 0.9,
+    requireSource: ['user_quote', 'user_explicit'],
+    escalateIfUncertain: true,
+  },
   'user.language': {
     minConfidence: 0.85,
     requireSource: ['user_quote', 'user_explicit', 'user_implicit'],
@@ -456,14 +461,30 @@ export const FIELD_POLICIES: Record<string, FieldPolicy> = {
 
 /**
  * Get policy for a field, with fallback default.
+ * User fields without explicit policies require higher confidence
+ * to prevent junk accumulation in the user model.
  */
 export function getFieldPolicy(field: string): FieldPolicy {
-  return (
-    FIELD_POLICIES[field] ?? {
-      minConfidence: 0.8,
+  // Check for explicit policy first
+  if (FIELD_POLICIES[field]) {
+    return FIELD_POLICIES[field];
+  }
+
+  // User fields without explicit policy: require higher confidence
+  // and disallow pure inference without provenance markers
+  if (field.startsWith('user.')) {
+    return {
+      minConfidence: 0.7,
+      requireSource: ['user_quote', 'user_explicit', 'user_implicit'],
       escalateIfUncertain: false,
-    }
-  );
+    };
+  }
+
+  // Non-user fields: more permissive default
+  return {
+    minConfidence: 0.5,
+    escalateIfUncertain: false,
+  };
 }
 
 // ============================================================
