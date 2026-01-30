@@ -88,6 +88,7 @@ export function createFinalTool(): Tool {
     {
       name: 'type',
       type: 'string',
+      enum: ['respond', 'no_action', 'defer'],
       description: 'Terminal type: respond | no_action | defer',
       required: true,
     },
