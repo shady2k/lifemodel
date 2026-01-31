@@ -172,32 +172,45 @@ interface FilteredTopic {
 
 ---
 
-## Configuration: Tick-Based (Option B)
+## Configuration: Direct UserModel Injection ✅
 
-Config flows with the "blood" each tick - simple, testable, no event complexity.
+**Implementation Decision**: Instead of passing interests as tick parameters, we inject `userModel` directly into the autonomic processor. This is cleaner and more extensible.
 
 ```typescript
-// In CoreLoop.tick()
-const newsInterests = this.userModel?.getNewsInterests() ?? null;
+// In container.ts (one-time setup)
+layers.autonomic.setUserModel(userModel);
 
-const autonomicResult = this.layers.autonomic.process(
-  state,
-  signals,
-  tickId,
-  { newsInterests }  // Passed as context
-);
+// In FilterContext (available to all filters)
+interface FilterContext {
+  state: AgentState;
+  alertness: number;
+  correlationId: string;
+  userModel: FilterUserModel | null;  // Direct access
+}
+
+// FilterUserModel is a minimal interface
+interface FilterUserModel {
+  getInterests(): Interests | null;
+}
+
+// In NewsSignalFilter
+const interests = context.userModel?.getInterests() ?? null;
 ```
 
-The NewsSignalFilter receives config as a parameter, no external lookups needed.
+**Benefits over tick-based approach:**
+- Single wiring point (container setup, not every tick)
+- Interface segregation (filters see `FilterUserModel`, not full `UserModel`)
+- Extensible (add methods to interface without changing tick signature)
 
 ---
 
-## User Model: Interest Storage (Simplified)
+## User Model: Interest Storage ✅
 
-Interests are beliefs about the user → stored in user model.
+**Implementation Decision**: Renamed `NewsInterests` → `Interests` and moved to `src/types/user/interests.ts`. This is generic user model data, not news-specific. Any plugin can use it.
 
 ```typescript
-interface NewsInterests {
+// Located in: src/types/user/interests.ts
+interface Interests {
   // Topic weights (learned) - weight > 0 means interested
   // weight === 0 means suppressed/blocked
   weights: Record<string, number>;
@@ -215,8 +228,14 @@ interface NewsInterests {
   }>;
 }
 
+// UserModel methods:
+userModel.getInterests(): Interests | null;
+userModel.updateInterests(updates: Partial<Interests>): void;
+userModel.setTopicWeight(topic: string, weight: number): void;
+userModel.setTopicUrgency(topic: string, urgency: number): void;
+
 // Example:
-newsInterests: {
+interests: {
   weights: {
     crypto: 0.9,
     AI: 0.85,
@@ -259,25 +278,39 @@ interface UrgentDeliveryTracker {
 
 ---
 
-## Share Queue (In AgentState)
+## Share Queue (Dedicated Class in Aggregation Layer)
 
-Interesting articles waiting to be mentioned. In-memory, not persisted (news is time-sensitive).
+**Implementation Decision**: ShareQueue is a dedicated class in aggregation layer, NOT in AgentState.
+
+**Rationale:**
+- AgentState = mental state (energy, socialDebt) - continuous values affecting behavior
+- ShareQueue = operational state with its own lifecycle (TTL, drain mechanics)
+- Separation of concerns: queue has complex operations (add, drain, prune, group)
 
 ```typescript
-// In AgentState
-newsShareQueue: {
-  items: ShareQueueItem[];
-  lastDrained: Date;
-}
-
+// Located in: src/layers/aggregation/share-queue.ts
 interface ShareQueueItem {
   article: ScoredArticle;
   addedAt: Date;
   priority: number;  // Higher = more interesting
 }
 
-// Cleanup: Remove items older than 24 hours
-// Delivery: During proactive contact, COGNITION sees queue and can mention items
+class ShareQueue {
+  private items: ShareQueueItem[] = [];
+
+  add(scored: ScoredArticle[]): void;
+  drain(): ShareQueueItem[];      // Returns and clears
+  peek(): ShareQueueItem[];       // Returns without clearing
+  prune(maxAgeMs: number): number; // Remove old items, returns count removed
+  size(): number;
+  groupByTopic(): string;         // "3 crypto articles, 2 AI articles"
+}
+
+// Lifecycle:
+// - news:interesting_articles → aggregation adds to queue
+// - Proactive contact wake → COGNITION sees queue via trigger context
+// - After mention → drain() clears queue
+// - Every tick → prune(24h) removes stale items
 ```
 
 ---
@@ -475,44 +508,46 @@ Summarizes and responds
 
 ## Implementation Phases
 
-### Phase 0: Infrastructure (3-4 days)
+### Phase 0: Infrastructure ✅ COMPLETE
 
 **0.1 Signal handling for news batches**
-- [ ] Define `NewsArticle` interface
-- [ ] Update news plugin to emit `plugin_event` with `eventKind: 'news:article_batch'`
+- [x] Define `NewsArticle` interface in `src/types/news.ts`
+- [x] Update news plugin to emit `plugin_event` with `eventKind: 'news:article_batch'`
 
 **0.2 User model schema**
-- [ ] Add `NewsInterests` interface
-- [ ] Add `newsInterests` to user model
-- [ ] Add persistence migration if needed
+- [x] Add `Interests` interface (renamed from NewsInterests) in `src/types/user/interests.ts`
+- [x] Add `interests` field to User type
+- [x] Add `getInterests()`, `updateInterests()` methods to UserModel
 
-**0.3 Tick-based config passing**
-- [ ] CoreLoop reads `userModel.newsInterests`
-- [ ] Passes to autonomic layer as context
-- [ ] Autonomic layer passes to filters
+**0.3 FilterContext with UserModel** (revised approach)
+- [x] Create `FilterUserModel` interface in `src/layers/autonomic/filter-registry.ts`
+- [x] Add `userModel` to `FilterContext`
+- [x] Wire via `layers.autonomic.setUserModel(userModel)` in container
 
-### Phase 1: NewsSignalFilter (3-4 days)
+### Phase 1: NewsSignalFilter ✅ COMPLETE
 
-- [ ] Create `NewsSignalFilter` in `src/layers/autonomic/filters/`
-- [ ] Implement interest scoring algorithm
-- [ ] Implement urgency scoring algorithm
-- [ ] Filtered topic storage (in-memory, 48h decay)
-- [ ] Unit tests for scoring edge cases
+- [x] Create `FilterRegistry` in `src/layers/autonomic/filter-registry.ts`
+- [x] Create `NewsSignalFilter` in `src/plugins/news/news-signal-filter.ts`
+- [x] Implement interest scoring algorithm
+- [x] Implement urgency scoring algorithm
+- [x] Signal transformation: `news:article_batch` → `news:urgent_articles` / `news:interesting_articles`
+- [x] Novelty tracking (seenTopics set)
+- [ ] Filtered topic storage (in-memory, 48h decay) - deferred to Phase 5
 
-### Phase 2: Aggregation Layer Updates (2-3 days)
+### Phase 2: Aggregation Layer Updates (IN PROGRESS)
 
-- [ ] Add share queue to AgentState
-- [ ] Add rate limiting for urgent notifications
+- [ ] **Fix ThresholdEngine** - Only wake for `news:urgent_articles`, not interesting
+- [ ] Create `ShareQueue` class in `src/layers/aggregation/share-queue.ts`
+- [ ] Integrate ShareQueue into AggregationProcessor
+- [ ] Add rate limiting for urgent notifications (max 1/topic/30min)
 - [ ] Article grouping logic ("3 crypto articles")
-- [ ] Urgent article → wake decision in threshold engine
 - [ ] Integration tests
 
-### Phase 3: News Plugin Simplification (2-3 days)
+### Phase 3: News Plugin Simplification
 
-- [ ] Remove thought-based emission
-- [ ] Emit structured `plugin_event` signals
+- [x] Emit structured `plugin_event` signals (done in Phase 0)
 - [ ] Add source health monitoring
-- [ ] Update scheduler integration
+- [ ] Register event schemas for validation
 
 ### Phase 4: COGNITION Integration (3-4 days)
 
@@ -544,23 +579,26 @@ Summarizes and responds
 
 ### New Files
 
-| File | Purpose |
-|------|---------|
-| `src/layers/autonomic/filters/news-signal-filter.ts` | NewsSignalFilter implementation |
-| `src/layers/autonomic/filters/index.ts` | Filter exports |
-| `src/types/news.ts` | NewsArticle, NewsInterests interfaces |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/types/user/interests.ts` | Generic `Interests` interface | ✅ Done |
+| `src/layers/autonomic/filter-registry.ts` | FilterRegistry, FilterContext, SignalFilter | ✅ Done |
+| `src/plugins/news/news-signal-filter.ts` | NewsSignalFilter implementation | ✅ Done |
+| `src/layers/aggregation/share-queue.ts` | ShareQueue class | Phase 2 |
 
 ### Modified Files
 
-| File | Change |
-|------|--------|
-| `src/models/user-model.ts` | Add `newsInterests` field and methods |
-| `src/layers/autonomic/processor.ts` | Integrate NewsSignalFilter, pass config |
-| `src/layers/aggregation/processor.ts` | Add share queue handling, rate limiting |
-| `src/layers/aggregation/threshold-engine.ts` | Add urgent news wake trigger |
-| `src/core/core-loop.ts` | Pass newsInterests to autonomic layer |
-| `src/types/agent/state.ts` | Add `newsShareQueue` to AgentState |
-| `src/plugins/news/index.ts` | Emit structured signals, add health tracking |
+| File | Change | Status |
+|------|--------|--------|
+| `src/types/news.ts` | NewsArticle, NewsArticleBatchPayload | ✅ Done |
+| `src/types/user/user.ts` | Add `interests` field | ✅ Done |
+| `src/models/user-model.ts` | Add `getInterests()`, `updateInterests()` methods | ✅ Done |
+| `src/layers/autonomic/processor.ts` | Add setUserModel(), filter integration | ✅ Done |
+| `src/layers/autonomic/index.ts` | Export filter types | ✅ Done |
+| `src/core/container.ts` | Wire userModel to autonomic layer | ✅ Done |
+| `src/plugins/news/index.ts` | Emit structured signals, FilterPluginV2 | ✅ Done |
+| `src/layers/aggregation/processor.ts` | Add share queue handling, rate limiting | Phase 2 |
+| `src/layers/aggregation/threshold-engine.ts` | Filter news events by urgency | Phase 2 |
 
 ---
 
@@ -570,10 +608,11 @@ Summarizes and responds
 |----------|--------|-----------|
 | Signal type | `plugin_event` with eventKind | No core type changes needed |
 | Component name | NewsSignalFilter | It filters signals, not generates them |
-| Config mechanism | Tick-based | Simpler, testable, fits current arch |
+| Config mechanism | **Direct UserModel injection** | Single wiring point, interface segregation, extensible |
+| Interest type | **`Interests` (generic)** | Renamed from NewsInterests - any plugin can use |
 | Interest vs Urgency | Separate scores | Different questions, different answers |
 | User model | Weights only (no allow list) | weight > 0 = allowed, simpler |
-| Share queue | In AgentState, in-memory | News is time-sensitive, no persist needed |
+| Share queue | **Dedicated class in aggregation** | Operational state, not mental state (AgentState) |
 | Rate limiting | Max 1 urgent/topic/30min | Prevent notification spam |
 | Learning (Phase 1) | Explicit reactions only | Implicit is too ambiguous |
 | Cold start | Explicit onboarding recommended | Bonuses alone insufficient |
