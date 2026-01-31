@@ -505,6 +505,33 @@ Summarizes and responds
 
 ---
 
+## Security
+
+### SSRF Protection (`src/plugins/news/url-validator.ts`)
+
+Validates URLs to prevent Server-Side Request Forgery attacks:
+
+| Protection | Details |
+|------------|---------|
+| **Private IP ranges** | Blocks 10.x, 192.168.x, 172.16-31.x, 127.x |
+| **Cloud metadata** | Blocks 169.254.169.254, metadata.google.internal |
+| **Protocols** | Only http/https allowed (blocks file://, javascript:, data:) |
+| **Blocked ports** | SSH(22), Redis(6379), MySQL(3306), PostgreSQL(5432), etc. |
+| **Internal hostnames** | Blocks .local, .internal, .corp, localhost |
+| **Credentials** | Rejects URLs with embedded username/password |
+
+### XSS Protection (`src/plugins/news/fetchers/rss.ts`)
+
+- `stripHtml()` removes HTML tags from article titles and summaries
+- Prevents malicious content injection from untrusted RSS feeds
+
+### XML Security
+
+- RSS parser uses safe defaults (external entities disabled)
+- Content size limits prevent memory exhaustion attacks
+
+---
+
 ## Out of Scope
 
 | Request | Response |

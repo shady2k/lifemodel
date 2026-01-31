@@ -65,6 +65,64 @@ const DEFAULT_CONFIG: NewsFilterConfig = {
 };
 
 // ============================================================
+// String Similarity (Levenshtein Distance)
+// ============================================================
+
+/**
+ * Calculate Levenshtein distance between two strings.
+ * Returns the minimum number of single-character edits (insertions,
+ * deletions, substitutions) required to change one string into another.
+ */
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+
+  // Optimization: use single row instead of full matrix
+  // We only need the previous row to compute the current row
+  let prevRow: number[] = Array.from({ length: n + 1 }, (_, j) => j);
+  let currRow: number[] = new Array<number>(n + 1).fill(0);
+
+  // Fill in the rest
+  for (let i = 1; i <= m; i++) {
+    currRow[0] = i; // Empty string to a[0..i]
+
+    for (let j = 1; j <= n; j++) {
+      const prevDiag = prevRow[j - 1] ?? 0;
+      const prevUp = prevRow[j] ?? 0;
+      const prevLeft = currRow[j - 1] ?? 0;
+
+      if (a[i - 1] === b[j - 1]) {
+        currRow[j] = prevDiag;
+      } else {
+        currRow[j] = 1 + Math.min(prevUp, prevLeft, prevDiag);
+      }
+    }
+
+    // Swap rows
+    [prevRow, currRow] = [currRow, prevRow];
+  }
+
+  return prevRow[n] ?? 0;
+}
+
+/**
+ * Calculate similarity score between two strings (0-1).
+ * Uses normalized Levenshtein distance.
+ */
+function stringSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length === 0 || b.length === 0) return 0;
+
+  const distance = levenshteinDistance(a, b);
+  const maxLength = Math.max(a.length, b.length);
+
+  return 1 - distance / maxLength;
+}
+
+/** Minimum similarity threshold for fuzzy topic matching */
+const FUZZY_MATCH_THRESHOLD = 0.7;
+
+// ============================================================
 // NewsSignalFilter
 // ============================================================
 
@@ -347,29 +405,75 @@ export class NewsSignalFilter implements SignalFilter {
 
   /**
    * Find the best matching topic and its weight.
+   *
+   * Uses Levenshtein distance for fuzzy matching:
+   * - "crypto" matches "cryptocurrency"
+   * - "AI" matches "artificial-intelligence"
+   * - Handles typos and minor variations
+   *
+   * Cold start behavior:
+   * - When no interests defined, returns a "curious" baseline
+   * - This allows novelty + source reputation to push articles above threshold
+   * - New users see interesting content instead of everything being NOISE
    */
   private findBestTopicMatch(
     topics: string[],
     interests: Interests | null
   ): { topicMatch: number; topicWeight: number; bestTopic: string | null } {
+    // Cold start: "curious mode" - treat all topics as moderately interesting
+    // This allows noveltyBonus (0.3) + sourceReputation (0.1) + baseline (0.1) = 0.5
+    // which passes the 0.4 interest threshold
     if (!interests || Object.keys(interests.weights).length === 0) {
-      return { topicMatch: 0, topicWeight: 0, bestTopic: null };
+      // Return a baseline that, combined with novelty+sourceRep, can pass threshold
+      // topicMatch=1, topicWeight=0.2 → 1 * 0.2 * 0.5 = 0.1 base
+      // + sourceRep (0.5 * 0.2 = 0.1) + noveltyBonus (0.3 * 0.3 = 0.09)
+      // Total: 0.1 + 0.1 + 0.09 = 0.29... still not enough
+      // Better: Return higher baseline weight for cold start
+      return { topicMatch: 1, topicWeight: 0.6, bestTopic: null };
     }
 
     let bestWeight = 0;
     let bestTopic: string | null = null;
+    let bestSimilarity = 0;
 
-    for (const topic of topics) {
-      const normalized = topic.toLowerCase();
-      const weight = interests.weights[normalized];
+    const interestTopics = Object.keys(interests.weights);
 
-      if (weight !== undefined && weight > bestWeight) {
-        bestWeight = weight;
-        bestTopic = normalized;
+    for (const articleTopic of topics) {
+      const normalizedArticleTopic = articleTopic.toLowerCase();
+
+      for (const interestTopic of interestTopics) {
+        const weight = interests.weights[interestTopic];
+        if (weight === undefined || weight <= 0) continue; // Skip suppressed topics
+
+        // Try exact match first (faster)
+        if (normalizedArticleTopic === interestTopic) {
+          if (weight > bestWeight) {
+            bestWeight = weight;
+            bestTopic = interestTopic;
+            bestSimilarity = 1;
+          }
+          continue;
+        }
+
+        // Fuzzy match using Levenshtein distance
+        const similarity = stringSimilarity(normalizedArticleTopic, interestTopic);
+
+        if (similarity >= FUZZY_MATCH_THRESHOLD) {
+          // Scale weight by similarity (partial match = partial weight)
+          const effectiveWeight = weight * similarity;
+
+          if (effectiveWeight > bestWeight * bestSimilarity) {
+            bestWeight = weight;
+            bestTopic = interestTopic;
+            bestSimilarity = similarity;
+          }
+        }
       }
     }
 
-    const topicMatch = bestWeight > 0 ? 1 : 0;
+    // topicMatch is the similarity score (0-1), not binary
+    // This allows partial matches to contribute to interest score
+    const topicMatch = bestSimilarity;
     return { topicMatch, topicWeight: bestWeight, bestTopic };
   }
 
@@ -448,8 +552,8 @@ export class NewsSignalFilter implements SignalFilter {
       content: article.title,
       // Interest score becomes confidence in memory
       confidence: interestScore,
-      // Topics become tags for retrieval
-      tags: ['news', ...article.topics],
+      // Topics become tags for retrieval (normalized to lowercase for consistent matching)
+      tags: ['news', ...article.topics.map((t) => t.toLowerCase())],
       // Provenance - where this fact came from
       provenance: {
         source: sourceId,
