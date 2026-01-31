@@ -1214,7 +1214,6 @@ Example defer terminal:
     }
 
     const content = data.content;
-    const dedupeKey = content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
 
     // SECURITY: Derive depth from actual trigger signal, not LLM-provided data
     // This prevents the LLM from resetting depth to 0 to bypass recursion limits
@@ -1260,7 +1259,6 @@ Example defer terminal:
         triggerSource,
         depth,
         rootThoughtId: rootId,
-        dedupeKey,
         signalSource: 'cognition.thought',
         ...(parentId !== undefined && { parentThoughtId: parentId }),
       },

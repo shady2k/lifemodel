@@ -14,7 +14,12 @@ import { randomUUID } from 'node:crypto';
 import * as semver from 'semver';
 import type { Logger } from '../types/logger.js';
 import type { Storage } from '../storage/storage.js';
-import type { Signal, PluginEventData as SignalPluginEventData } from '../types/signal.js';
+import type {
+  Signal,
+  PluginEventData as SignalPluginEventData,
+  ThoughtData,
+} from '../types/signal.js';
+import { createSignal } from '../types/signal.js';
 import type {
   PluginV2,
   PluginManifestV2,
@@ -1294,6 +1299,85 @@ export class PluginLoader {
       },
 
       emitSignal: emitSignalImpl,
+
+      emitThought: (content: string): EmitSignalResult => {
+        // Rate limiting applies to thoughts as well
+        const now = Date.now();
+        if (now - lastMinuteStart > 60_000) {
+          emitCount = 0;
+          lastMinuteStart = now;
+          warningLogged = false;
+        }
+
+        emitCount++;
+
+        if (!warningLogged && emitCount >= warningThreshold) {
+          this.logger.warn(
+            { pluginId, emitCount, threshold: warningThreshold },
+            'Plugin signal rate approaching limit'
+          );
+          warningLogged = true;
+        }
+
+        if (signalRateLimit && emitCount > signalRateLimit) {
+          const error = `Signal rate limit exceeded for plugin ${pluginId}: ${String(signalRateLimit)}/minute`;
+          this.logger.error({ pluginId, emitCount, limit: signalRateLimit }, error);
+          return { success: false, error };
+        }
+
+        // Validate content
+        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+          const error = 'emitThought requires non-empty content string';
+          this.logger.error({ pluginId }, error);
+          return { success: false, error };
+        }
+
+        const signalId = randomUUID();
+        const rootThoughtId = `plugin_thought_${signalId}`;
+
+        // Build thought data - plugins always emit root thoughts (depth=0)
+        const thoughtData: ThoughtData = {
+          kind: 'thought',
+          content: content.trim(),
+          triggerSource: 'plugin',
+          depth: 0,
+          rootThoughtId,
+        };
+
+        // Create thought signal
+        const signal = createSignal(
+          'thought',
+          'plugin.thought',
+          { value: 1 },
+          {
+            priority: 2, // Normal priority
+            data: thoughtData,
+          }
+        );
+
+        if (this.signalCallback) {
+          this.signalCallback(signal);
+        } else {
+          // Buffer signal until callback is set (during plugin activation)
+          if (this.signalBuffer.length < PluginLoader.MAX_BUFFER_SIZE) {
+            this.signalBuffer.push(signal);
+            this.logger.debug(
+              { pluginId },
+              'Thought signal buffered (callback not yet registered)'
+            );
+          } else {
+            this.logger.warn({ pluginId }, 'Signal buffer full, dropping thought signal');
+            return { success: false, error: 'Signal buffer full' };
+          }
+        }
+
+        this.logger.debug(
+          { pluginId, content: content.slice(0, 30), signalId },
+          'Plugin emitted thought signal'
+        );
+
+        return { success: true, signalId };
+      },
     };
   }
 

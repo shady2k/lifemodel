@@ -228,17 +228,15 @@ export interface EmitThoughtIntent {
     /** The thought content */
     content: string;
     /** What triggered this thought */
-    triggerSource: 'conversation' | 'memory' | 'thought';
+    triggerSource: 'conversation' | 'memory' | 'thought' | 'plugin';
     /** Current depth in thought chain */
     depth: number;
     /** ID of root thought in chain */
     rootThoughtId: string;
     /** ID of parent thought (if any) */
     parentThoughtId?: string;
-    /** Deduplication key */
-    dedupeKey: string;
     /** Signal source for the thought */
-    signalSource: 'cognition.thought' | 'memory.thought';
+    signalSource: 'cognition.thought' | 'memory.thought' | 'plugin.thought';
   };
   /** Trace metadata for log analysis */
   trace?: IntentTrace | undefined;

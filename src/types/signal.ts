@@ -94,7 +94,8 @@ export type SignalSource =
 
   // === THOUGHT (from cognition/memory layers) ===
   | 'cognition.thought' // From COGNITION layer (emitThought step)
-  | 'memory.thought'; // From memory consolidation
+  | 'memory.thought' // From memory consolidation
+  | 'plugin.thought'; // From plugin emitThought() API
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -340,7 +341,7 @@ export interface ThoughtData {
   content: string;
 
   /** What triggered this thought */
-  triggerSource: 'conversation' | 'memory' | 'thought';
+  triggerSource: 'conversation' | 'memory' | 'thought' | 'plugin';
 
   /** Current depth in thought chain (0 = root thought) */
   depth: number;
@@ -350,9 +351,6 @@ export interface ThoughtData {
 
   /** ID of the direct parent thought (undefined for root) */
   parentThoughtId?: string;
-
-  /** First 50 chars lowercase for deduplication */
-  dedupeKey: string;
 }
 
 /**

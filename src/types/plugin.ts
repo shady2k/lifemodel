@@ -467,6 +467,16 @@ export interface IntentEmitterPrimitive {
    * Fails soft on rate limit (doesn't throw).
    */
   emitSignal(signal: PluginSignalInput): EmitSignalResult;
+
+  /**
+   * Emit a thought signal for COGNITION to process.
+   * Thoughts bypass energy gate and wake COGNITION immediately.
+   * Core handles deduplication via similarity matching.
+   *
+   * @param content The thought content for COGNITION to process
+   * @returns Result with signalId on success, or error on failure (e.g., rate limit, budget exceeded)
+   */
+  emitThought(content: string): EmitSignalResult;
 }
 
 /**

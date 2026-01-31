@@ -21,6 +21,13 @@ import type {
   SignalSource,
   ThoughtData,
 } from '../../types/signal.js';
+import { THOUGHT_LIMITS } from '../../types/signal.js';
+import {
+  tokenize,
+  findSimilarThought,
+  DEFAULT_SIMILARITY_THRESHOLD,
+  type RecentThoughtEntry,
+} from '../../core/utils/text-similarity.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { AggregationLayer, AggregationResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
@@ -48,6 +55,9 @@ export interface AggregationProcessorConfig {
 
   /** Prune expired signals every N ticks */
   pruneIntervalTicks: number;
+
+  /** Similarity threshold for thought deduplication (0-1, default 0.85) */
+  thoughtSimilarityThreshold: number;
 }
 
 /**
@@ -56,6 +66,7 @@ export interface AggregationProcessorConfig {
 const DEFAULT_CONFIG: AggregationProcessorConfig = {
   enablePatternDetection: true,
   pruneIntervalTicks: 10,
+  thoughtSimilarityThreshold: DEFAULT_SIMILARITY_THRESHOLD,
 };
 
 /**
@@ -70,6 +81,9 @@ export class AggregationProcessor implements AggregationLayer {
   private readonly config: AggregationProcessorConfig;
   private readonly logger: Logger;
   private tickCount = 0;
+
+  /** Recent thoughts for similarity-based deduplication (cross-tick) */
+  private recentThoughts: RecentThoughtEntry[] = [];
 
   constructor(logger: Logger, config: Partial<AggregationProcessorConfig> = {}) {
     this.logger = logger.child({ layer: 'aggregation' });
@@ -208,37 +222,113 @@ export class AggregationProcessor implements AggregationLayer {
   }
 
   /**
-   * Merge duplicate thought signals before processing.
-   * Groups by dedupeKey and keeps highest priority (lowest number).
+   * Cleanup old thought entries from the deduplication cache.
+   */
+  private cleanupOldThoughts(now: number): void {
+    const cutoff = now - THOUGHT_LIMITS.DEDUPE_WINDOW_MS;
+    const before = this.recentThoughts.length;
+    this.recentThoughts = this.recentThoughts.filter((entry) => entry.timestamp > cutoff);
+    const pruned = before - this.recentThoughts.length;
+    if (pruned > 0) {
+      this.logger.debug({ pruned }, 'Pruned old thought entries');
+    }
+  }
+
+  /**
+   * Deduplicate thought signals using similarity-based matching.
+   *
+   * This is the brain stem's habituation mechanism - filtering out
+   * thoughts we've already seen (or very similar ones) within the
+   * deduplication window.
+   *
+   * Two-phase deduplication:
+   * 1. Cross-tick: Check against recentThoughts cache (15-min window)
+   * 2. Same-tick: Merge similar thoughts within current batch
    */
   private mergeThoughtSignals(signals: Signal[]): Signal[] {
     const thoughtSignals = signals.filter((s) => s.type === 'thought');
     const otherSignals = signals.filter((s) => s.type !== 'thought');
 
-    if (thoughtSignals.length <= 1) {
+    if (thoughtSignals.length === 0) {
       return signals;
     }
 
-    // Group by dedupeKey - keep highest priority (lowest number)
-    const merged = new Map<string, Signal>();
+    const now = Date.now();
+    this.cleanupOldThoughts(now);
+
+    const uniqueThoughts: Signal[] = [];
+    let dedupedCount = 0;
+
     for (const thought of thoughtSignals) {
       const data = thought.data as ThoughtData | undefined;
-      if (!data) continue;
-
-      const key = data.dedupeKey;
-      const existing = merged.get(key);
-
-      if (!existing || thought.priority < existing.priority) {
-        merged.set(key, thought);
+      if (!data) {
+        uniqueThoughts.push(thought);
+        continue;
       }
+
+      const tokens = tokenize(data.content);
+
+      // Phase 1: Check against cross-tick cache
+      const existingMatch = findSimilarThought(
+        tokens,
+        this.recentThoughts,
+        this.config.thoughtSimilarityThreshold
+      );
+
+      if (existingMatch) {
+        this.logger.debug(
+          {
+            content: data.content.slice(0, 30),
+            matchedContent: existingMatch.content.slice(0, 30),
+          },
+          'Thought deduplicated (similar to recent)'
+        );
+        dedupedCount++;
+        continue;
+      }
+
+      // Phase 2: Check against same-tick thoughts (already added to uniqueThoughts)
+      const sameBatchMatch = uniqueThoughts.find((existing) => {
+        const existingData = existing.data as ThoughtData | undefined;
+        if (!existingData) return false;
+        const existingTokens = tokenize(existingData.content);
+        const similarity = findSimilarThought(
+          tokens,
+          [{ tokens: existingTokens, content: existingData.content, timestamp: now }],
+          this.config.thoughtSimilarityThreshold
+        );
+        return similarity !== undefined;
+      });
+
+      if (sameBatchMatch) {
+        // Keep higher priority (lower number)
+        if (thought.priority < sameBatchMatch.priority) {
+          // Replace with higher priority thought
+          const idx = uniqueThoughts.indexOf(sameBatchMatch);
+          uniqueThoughts[idx] = thought;
+        }
+        this.logger.debug(
+          { content: data.content.slice(0, 30) },
+          'Thought deduplicated (similar in same batch)'
+        );
+        dedupedCount++;
+        continue;
+      }
+
+      // Not a duplicate - add to both unique list and cache
+      uniqueThoughts.push(thought);
+      this.recentThoughts.push({
+        tokens,
+        content: data.content,
+        timestamp: now,
+      });
     }
 
-    const mergedCount = thoughtSignals.length - merged.size;
-    if (mergedCount > 0) {
-      this.logger.debug({ mergedCount }, 'Merged duplicate thought signals');
+    if (dedupedCount > 0) {
+      this.logger.debug({ dedupedCount }, 'Thoughts deduplicated via similarity');
     }
 
-    return [...otherSignals, ...merged.values()];
+    return [...otherSignals, ...uniqueThoughts];
   }
 
   /**
@@ -246,6 +336,7 @@ export class AggregationProcessor implements AggregationLayer {
    */
   clear(): void {
     this.aggregator.clear();
+    this.recentThoughts = [];
     this.logger.debug('AGGREGATION layer cleared');
   }
 }

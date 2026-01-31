@@ -254,7 +254,6 @@ export class MemoryConsolidator {
 
       if (isReminder) {
         const content = `Check if time to remind user: ${fact.content}`;
-        const dedupeKey = content.toLowerCase().slice(0, 50).replace(/\s+/g, ' ');
 
         thoughts.push({
           kind: 'thought',
@@ -262,7 +261,6 @@ export class MemoryConsolidator {
           triggerSource: 'memory',
           depth: 0, // Root thought
           rootThoughtId: `mem_thought_${fact.id}`,
-          dedupeKey,
         });
 
         this.logger.debug(

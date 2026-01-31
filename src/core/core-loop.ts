@@ -182,9 +182,6 @@ export class CoreLoop {
   /** Track thoughts emitted per tick for budget enforcement */
   private thoughtsThisTick = 0;
 
-  /** Recent thought deduplication keys with timestamps */
-  private recentThoughtKeys = new Map<string, number>();
-
   constructor(
     agent: Agent,
     eventBus: EventBus,
@@ -1066,15 +1063,8 @@ export class CoreLoop {
         }
 
         case 'EMIT_THOUGHT': {
-          const {
-            content,
-            triggerSource,
-            depth,
-            rootThoughtId,
-            parentThoughtId,
-            dedupeKey,
-            signalSource,
-          } = intent.payload;
+          const { content, triggerSource, depth, rootThoughtId, parentThoughtId, signalSource } =
+            intent.payload;
 
           // Build thought data
           const thoughtData: ThoughtData = {
@@ -1083,11 +1073,11 @@ export class CoreLoop {
             triggerSource,
             depth,
             rootThoughtId,
-            dedupeKey,
             ...(parentThoughtId !== undefined && { parentThoughtId }),
           };
 
-          // Use shared enqueue logic with budget/dedupe checks
+          // Use shared enqueue logic with budget check
+          // Deduplication handled by AGGREGATION layer
           this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
           break;
         }
@@ -1155,22 +1145,12 @@ export class CoreLoop {
   }
 
   /**
-   * Cleanup old thought deduplication keys.
-   */
-  private cleanupOldThoughtKeys(now: number): void {
-    for (const [key, timestamp] of this.recentThoughtKeys) {
-      if (now - timestamp > THOUGHT_LIMITS.DEDUPE_WINDOW_MS) {
-        this.recentThoughtKeys.delete(key);
-      }
-    }
-  }
-
-  /**
-   * Enqueue a thought signal with budget and dedupe checks.
+   * Enqueue a thought signal with budget check.
+   * Deduplication is handled by AGGREGATION layer (brain stem).
    * Returns true if the thought was queued, false if rejected.
    */
   private enqueueThoughtSignal(thoughtData: ThoughtData, signalSource: SignalSource): boolean {
-    // Budget check - max thoughts per tick
+    // Budget check - max thoughts per tick (prevents runaway thought loops)
     if (this.thoughtsThisTick >= THOUGHT_LIMITS.MAX_PER_TICK) {
       this.logger.warn(
         { content: thoughtData.content.slice(0, 30) },
@@ -1179,17 +1159,8 @@ export class CoreLoop {
       return false;
     }
 
-    // Dedupe check - clean old entries first
-    const now = Date.now();
-    this.cleanupOldThoughtKeys(now);
-
-    if (this.recentThoughtKeys.has(thoughtData.dedupeKey)) {
-      this.logger.debug({ dedupeKey: thoughtData.dedupeKey }, 'Thought rejected: duplicate');
-      return false;
-    }
-    this.recentThoughtKeys.set(thoughtData.dedupeKey, now);
-
     // Create and queue thought signal
+    // Deduplication happens in AGGREGATION layer's mergeThoughtSignals()
     const signal = createSignal(
       'thought',
       signalSource,
