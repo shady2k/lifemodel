@@ -328,6 +328,7 @@ export class ThresholdEngine {
         }
 
         // Urgent news wakes COGNITION immediately
+        // Note: fetch interval (~2h) serves as natural rate limit
         if (urgentNews.length > 0) {
           return {
             shouldWake: true,

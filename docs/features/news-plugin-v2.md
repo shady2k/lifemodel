@@ -34,9 +34,9 @@ A news monitoring system that processes articles like the human brain processes 
 │  │  AGGREGATION LAYER                                             │     │
 │  │                                                                │     │
 │  │  • Groups related articles ("3 crypto articles today")         │     │
-│  │  • Rate limiting (max 1 urgent per topic per 30 min)           │     │
 │  │  • URGENT articles → wake COGNITION immediately                │     │
-│  │  • INTERESTING articles → add to share queue in AgentState     │     │
+│  │  • INTERESTING articles → saved as facts to memory             │     │
+│  │  • (Fetch interval ~2h serves as natural rate limit)           │     │
 │  │                                                                │     │
 │  └────────────────────────────────────────────────────────────────┘     │
 │       ↓                                                                 │
