@@ -57,13 +57,15 @@ export function createRememberTool(): Tool {
       name: 'attribute',
       type: 'string',
       required: true,
-      description: 'WHAT: birthday, preference, relationship, etc.',
+      description:
+        'WHAT: birthday, preference, relationship, etc. Special: interest_<topic> or urgency_<topic> for news preferences.',
     },
     {
       name: 'value',
       type: 'string',
       required: true,
-      description: 'The value to remember (clean, without provenance markers)',
+      description:
+        'The value. For numeric properties: use delta like "+0.2" or "-0.1" to adjust (clamped to 0-1).',
     },
     {
       name: 'source',

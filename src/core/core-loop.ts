@@ -1131,19 +1131,70 @@ export class CoreLoop {
           } = intent.payload;
           const trace = intent.trace;
 
-          // 1. If user fact → update UserModel flexible properties
+          // 1. If user fact → update UserModel
           if (isUserFact && this.userModel) {
-            this.userModel.setProperty(attribute, value, confidence, source, evidence);
-            this.logger.debug(
-              {
-                attribute,
-                value,
-                confidence,
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              },
-              'User property stored'
-            );
+            // Route interest_* and urgency_* to specialized methods (delta-based)
+            if (attribute.startsWith('interest_')) {
+              const topic = attribute.slice('interest_'.length);
+              const delta = this.parseDelta(value);
+              if (delta !== null) {
+                const current = this.userModel.getInterests()?.weights[topic.toLowerCase()] ?? 0.5;
+                const newWeight = Math.max(0, Math.min(1, current + delta));
+                this.userModel.setTopicWeight(topic, newWeight);
+                this.logger.debug(
+                  { topic, delta, current, newWeight, tickId: trace?.tickId },
+                  'Topic interest weight updated'
+                );
+              }
+            } else if (attribute.startsWith('urgency_')) {
+              const topic = attribute.slice('urgency_'.length);
+              const delta = this.parseDelta(value);
+              if (delta !== null) {
+                const current = this.userModel.getInterests()?.urgency[topic.toLowerCase()] ?? 0.5;
+                const newUrgency = Math.max(0, Math.min(1, current + delta));
+                this.userModel.setTopicUrgency(topic, newUrgency);
+                this.logger.debug(
+                  { topic, delta, current, newUrgency, tickId: trace?.tickId },
+                  'Topic urgency updated'
+                );
+              }
+            } else {
+              // Check if value is a delta for numeric properties
+              const strValue = value.trim();
+              const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
+              const deltaNum = isDelta ? this.parseDelta(value) : null;
+
+              if (isDelta && deltaNum !== null) {
+                // Apply delta to current value
+                const currentProp = this.userModel.getProperty(attribute);
+                const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
+                const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
+                this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
+                this.logger.debug(
+                  {
+                    attribute,
+                    delta: deltaNum,
+                    current: currentNum,
+                    newValue,
+                    tickId: trace?.tickId,
+                  },
+                  'User property updated (delta)'
+                );
+              } else {
+                // Store as-is (string or absolute value)
+                this.userModel.setProperty(attribute, value, confidence, source, evidence);
+                this.logger.debug(
+                  {
+                    attribute,
+                    value,
+                    confidence,
+                    tickId: trace?.tickId,
+                    parentSignalId: trace?.parentSignalId,
+                  },
+                  'User property stored'
+                );
+              }
+            }
           }
 
           // 2. Always store in memory for semantic search
@@ -1221,6 +1272,19 @@ export class CoreLoop {
     this.metrics.counter('thoughts_emitted', { triggerSource: thoughtData.triggerSource });
 
     return true;
+  }
+
+  /**
+   * Parse a delta value from string.
+   * Accepts formats: "+0.2", "-0.1", "0.3" (treated as +0.3)
+   * Returns null if parsing fails.
+   */
+  private parseDelta(value: unknown): number | null {
+    const str = String(value).trim();
+    const num = parseFloat(str);
+    if (Number.isNaN(num)) return null;
+    // Clamp delta to reasonable range (-1 to +1)
+    return Math.max(-1, Math.min(1, num));
   }
 
   /**

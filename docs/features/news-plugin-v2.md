@@ -589,12 +589,30 @@ COGNITION sees Fact[] (generic, no plugin types)
 - [ ] Test: User asks "what did I miss?" → COGNITION searches memory
 - [ ] Test: Proactive contact → COGNITION finds news facts in memory
 
-### Phase 5: Learning Loop (3-4 days)
+### Phase 5: Learning Loop ✅ COMPLETE
 
-- [ ] Detect explicit preference statements
-- [ ] Update weights in user model via intent
-- [ ] Filtered topic mention detection
-- [ ] "I saw something about X" response
+**Delta-based updates via `core.remember`:**
+```
+User: "I love crypto news!"
+→ COGNITION calls: core.remember(subject="user", attribute="interest_crypto", value="+0.2", source="user_explicit")
+→ CoreLoop detects interest_* attribute
+→ Applies delta to current weight (clamped 0-1)
+→ UserModel.setTopicWeight("crypto", newWeight)
+```
+
+**Attribute patterns:**
+- `interest_<topic>` → routes to `setTopicWeight(topic, delta)`
+- `urgency_<topic>` → routes to `setTopicUrgency(topic, delta)`
+- Other numeric properties → delta applied if value starts with +/-
+
+**Checklist:**
+- [x] Delta parsing in CoreLoop (`parseDelta` method)
+- [x] Routing `interest_*` to `setTopicWeight`
+- [x] Routing `urgency_*` to `setTopicUrgency`
+- [x] General delta support for all numeric properties
+- [x] Updated tool description in `core.remember`
+- [ ] Filtered topic mention detection (Phase 5.2 - future)
+- [ ] "I saw something about X" response (Phase 5.2 - future)
 - [ ] Integration tests for learning
 
 ### Phase 6: Telegram Channels (Future)
