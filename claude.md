@@ -24,6 +24,12 @@ State accumulates → pressure crosses threshold → action emerges naturally. N
 ### 3. Signals, Not Events
 Everything is a Signal. Unified model for all data flowing through the brain.
 
+### 4. Plugin Isolation
+Core and plugins are strictly decoupled. Core NEVER imports plugin types. Plugins interact with core ONLY via PluginPrimitives API. No direct calls between them.
+
+### 5. No Backward Compatibility
+Remove old, dead, and unused code. Avoid fallbacks. Clean breaks over compatibility shims.
+
 ---
 
 ## 3-Layer Brain Architecture
