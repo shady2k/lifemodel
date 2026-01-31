@@ -3,6 +3,9 @@
  *
  * Unified tool for managing news sources with action pattern.
  * Actions: add_source, remove_source, list_sources
+ *
+ * Fetch-on-add: When a source is added, it's immediately fetched and
+ * initial articles are emitted as a thought for COGNITION to evaluate.
  */
 
 import type {
@@ -10,11 +13,21 @@ import type {
   PluginTool,
   PluginToolContext,
   StoragePrimitive,
+  IntentEmitterPrimitive,
 } from '../../../types/plugin.js';
 import type { Logger } from '../../../types/logger.js';
-import type { NewsSource, SourceState, NewsToolResult, NewsSummary } from '../types.js';
+import type {
+  NewsSource,
+  SourceState,
+  NewsToolResult,
+  NewsSummary,
+  FetchedArticle,
+} from '../types.js';
 import { NEWS_STORAGE_KEYS, NEWS_PLUGIN_ID } from '../types.js';
 import { validateUrl, validateTelegramHandle } from '../url-validator.js';
+import { fetchRssFeed } from '../fetchers/rss.js';
+import { fetchTelegramChannel } from '../fetchers/telegram.js';
+import { extractBatchTopics, formatTopicList } from '../topic-extractor.js';
 
 /**
  * Schema definitions for error responses.
@@ -107,11 +120,66 @@ async function loadSourceState(
 }
 
 /**
- * Add a new news source.
+ * Save source state to storage.
+ */
+async function saveSourceState(storage: StoragePrimitive, state: SourceState): Promise<void> {
+  await storage.set(`${NEWS_STORAGE_KEYS.SOURCE_STATE_PREFIX}${state.sourceId}`, state);
+}
+
+/**
+ * Format a single article for thought output.
+ */
+function formatArticle(article: FetchedArticle): string {
+  let line = `• **${article.sourceName}**: ${article.title}`;
+
+  if (article.summary) {
+    const shortSummary =
+      article.summary.length > 150 ? article.summary.slice(0, 147) + '...' : article.summary;
+    line += `\n  ${shortSummary}`;
+  }
+
+  if (article.url) {
+    line += `\n  Link: ${article.url}`;
+  }
+
+  return line;
+}
+
+/**
+ * Format initial fetch articles into a thought string.
+ */
+function formatInitialFetchThought(articles: FetchedArticle[], sourceName: string): string {
+  const topics = extractBatchTopics(articles);
+  const topicStr = formatTopicList(topics);
+
+  const articleLines = articles.slice(0, 5).map(formatArticle); // Limit to 5 for initial fetch
+  const moreCount = articles.length > 5 ? articles.length - 5 : 0;
+
+  const thought = [
+    `I just added "${sourceName}" as a news source and fetched ${String(articles.length)} article${articles.length > 1 ? 's' : ''} covering ${topicStr}:`,
+    '',
+    ...articleLines,
+    ...(moreCount > 0 ? [`\n...and ${String(moreCount)} more articles.`] : []),
+    '',
+    '---',
+    'To evaluate these articles, I should:',
+    '1. Check if the user has expressed interest in these topics (use core.memory to search for "interested_in" or "not_interested_in" preferences)',
+    '2. For topics with no known preference, consider asking the user if they want to track this topic',
+    '3. Important/urgent news → notify the user directly',
+    '4. Interesting but not urgent → save to memory for "what did I miss?" queries (use core.remember)',
+    '5. Uninteresting or topics user dislikes → skip without action',
+  ].join('\n');
+
+  return thought;
+}
+
+/**
+ * Add a new news source and immediately fetch initial articles.
  */
 async function addSource(
   storage: StoragePrimitive,
   logger: Logger,
+  intentEmitter: IntentEmitterPrimitive,
   type: 'rss' | 'telegram',
   url: string,
   name: string
@@ -144,11 +212,12 @@ async function addSource(
 
   // Create new source
   const sourceId = generateSourceId();
+  const trimmedName = name.trim();
   const newSource: NewsSource = {
     id: sourceId,
     type,
     url: normalizedUrl,
-    name: name.trim(),
+    name: trimmedName,
     enabled: true,
     createdAt: new Date(),
   };
@@ -161,15 +230,84 @@ async function addSource(
       sourceId,
       type,
       url: normalizedUrl,
-      name: newSource.name,
+      name: trimmedName,
     },
     'News source added'
   );
+
+  // Fetch initial articles immediately (non-blocking for tool response)
+  let initialArticleCount = 0;
+  let fetchError: string | undefined;
+
+  try {
+    logger.debug({ sourceId, type, url: normalizedUrl }, 'Fetching initial articles');
+
+    const fetchResult =
+      type === 'rss'
+        ? await fetchRssFeed(normalizedUrl, sourceId, trimmedName)
+        : await fetchTelegramChannel(normalizedUrl, trimmedName);
+
+    if (fetchResult.success && fetchResult.articles.length > 0) {
+      initialArticleCount = fetchResult.articles.length;
+
+      // Save source state with lastSeenId for future deduplication
+      const state: SourceState = {
+        sourceId,
+        lastFetchedAt: new Date(),
+        consecutiveFailures: 0,
+        lastSeenId: fetchResult.latestId,
+      };
+      await saveSourceState(storage, state);
+
+      // Emit thought with initial articles for COGNITION to evaluate
+      const thought = formatInitialFetchThought(fetchResult.articles, trimmedName);
+      const emitResult = intentEmitter.emitThought(thought);
+
+      if (!emitResult.success) {
+        logger.warn({ error: emitResult.error }, 'Failed to emit initial fetch thought');
+      } else {
+        logger.info(
+          { sourceId, articleCount: initialArticleCount, signalId: emitResult.signalId },
+          'Emitted initial fetch thought'
+        );
+      }
+    } else if (!fetchResult.success) {
+      fetchError = fetchResult.error;
+      logger.warn({ sourceId, error: fetchResult.error }, 'Initial fetch failed');
+
+      // Save failed state
+      const state: SourceState = {
+        sourceId,
+        lastFetchedAt: new Date(),
+        consecutiveFailures: 1,
+        lastError: fetchResult.error,
+      };
+      await saveSourceState(storage, state);
+    } else {
+      // Success but no articles
+      logger.debug({ sourceId }, 'Initial fetch returned no articles');
+
+      const state: SourceState = {
+        sourceId,
+        lastFetchedAt: new Date(),
+        consecutiveFailures: 0,
+      };
+      await saveSourceState(storage, state);
+    }
+  } catch (error) {
+    fetchError = error instanceof Error ? error.message : String(error);
+    logger.error({ sourceId, error: fetchError }, 'Unexpected error during initial fetch');
+  }
 
   return {
     success: true,
     action: 'add_source',
     sourceId,
+    // Include fetch info in response
+    ...(initialArticleCount > 0 && { initialArticleCount }),
+    ...(fetchError && {
+      fetchWarning: `Initial fetch failed: ${fetchError}. Will retry on next poll.`,
+    }),
   };
 }
 
@@ -250,7 +388,7 @@ async function listSources(storage: StoragePrimitive): Promise<NewsToolResult> {
  * Create the news tool.
  */
 export function createNewsTool(primitives: PluginPrimitives): PluginTool {
-  const { storage, logger } = primitives;
+  const { storage, logger, intentEmitter } = primitives;
 
   const newsTool: PluginTool = {
     name: 'news',
@@ -360,7 +498,7 @@ The agent monitors these sources and notifies you about important news.`,
             };
           }
 
-          return addSource(storage, logger, type, url, name);
+          return addSource(storage, logger, intentEmitter, type, url, name);
         }
 
         case 'remove_source': {

@@ -28,7 +28,7 @@ import {
 } from './types.js';
 import { createNewsTool } from './tools/news-tool.js';
 import { fetchRssFeed } from './fetchers/rss.js';
-import { fetchTelegramChannel } from './fetchers/telegram.js';
+import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
 import { extractBatchTopics, formatTopicList } from './topic-extractor.js';
 
 /**
@@ -359,11 +359,17 @@ async function fetchSingleTelegramSource(
   const state = await loadSourceState(storage, source.id);
 
   logger.debug(
-    { sourceId: source.id, sourceName: source.name, handle: source.url },
+    {
+      sourceId: source.id,
+      sourceName: source.name,
+      handle: source.url,
+      lastSeenId: state?.lastSeenId,
+    },
     'Fetching Telegram channel'
   );
 
-  const result = await fetchTelegramChannel(source.url, source.name);
+  // Use pagination to fetch all new messages since lastSeenId
+  const result = await fetchTelegramChannelUntil(source.url, source.name, state?.lastSeenId);
 
   if (!result.success) {
     // Track failure

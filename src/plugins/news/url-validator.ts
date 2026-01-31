@@ -218,45 +218,105 @@ export function validateUrl(input: string): UrlValidationResult {
 }
 
 /**
- * Validate a Telegram channel handle.
+ * Extract channel handle from a Telegram URL.
+ * Supports: https://t.me/channel, https://t.me/s/channel, http://t.me/channel
  *
- * @param handle - The channel handle (with or without @)
- * @returns Validation result with normalized handle or error
+ * @param url - The URL to parse
+ * @returns Channel handle without @ prefix, or null if not a valid t.me URL
  */
-export function validateTelegramHandle(handle: string): UrlValidationResult {
-  const trimmed = handle.trim();
+function extractTelegramHandleFromUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  // Check if it's a t.me URL
+  if (parsed.hostname !== 't.me' && parsed.hostname !== 'www.t.me') {
+    return null;
+  }
+
+  // Only allow http/https
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null;
+  }
+
+  // Extract path segments: /channel or /s/channel
+  const pathParts = parsed.pathname.split('/').filter(Boolean);
+
+  if (pathParts.length === 0) {
+    return null;
+  }
+
+  // Handle /s/channel format (web preview URL)
+  const firstPart = pathParts[0];
+  if (firstPart === 's' && pathParts.length >= 2) {
+    const channelPart = pathParts[1];
+    return channelPart ?? null;
+  }
+
+  // Handle /channel format
+  return firstPart ?? null;
+}
+
+/**
+ * Validate a Telegram channel handle or URL.
+ *
+ * Accepts:
+ * - @channel_name
+ * - channel_name
+ * - https://t.me/channel_name
+ * - https://t.me/s/channel_name
+ *
+ * @param input - The channel handle or URL
+ * @returns Validation result with normalized handle (@channel) or error
+ */
+export function validateTelegramHandle(input: string): UrlValidationResult {
+  const trimmed = input.trim();
 
   if (!trimmed) {
     return { valid: false, error: 'Channel handle cannot be empty' };
   }
 
-  // Remove leading @ if present
-  const normalized = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+  // Check if it's a t.me URL
+  let handle: string;
+  if (trimmed.includes('://') || trimmed.startsWith('t.me/')) {
+    // Normalize t.me/ without protocol
+    const urlToCheck = trimmed.startsWith('t.me/') ? `https://${trimmed}` : trimmed;
+    const extracted = extractTelegramHandleFromUrl(urlToCheck);
+
+    if (!extracted) {
+      return {
+        valid: false,
+        error: 'Invalid Telegram URL. Expected format: https://t.me/channel_name',
+      };
+    }
+    handle = extracted;
+  } else {
+    // It's a handle, remove leading @ if present
+    handle = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+  }
 
   // Telegram usernames: 5-32 characters, alphanumeric and underscores
-  // Must start with letter, can't end with underscore
-  if (normalized.length < 5 || normalized.length > 32) {
+  // Must start with letter
+  if (handle.length < 5 || handle.length > 32) {
     return {
       valid: false,
       error: 'Telegram channel handle must be 5-32 characters',
     };
   }
 
-  if (!/^[a-zA-Z][a-zA-Z0-9_]*[a-zA-Z0-9]$/.test(normalized) && normalized.length > 1) {
-    // Handle single valid character case differently
-    if (normalized.length === 5 && /^[a-zA-Z][a-zA-Z0-9_]{3}[a-zA-Z0-9]$/.test(normalized)) {
-      // Valid 5 char handle
-    } else if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(normalized)) {
-      return {
-        valid: false,
-        error:
-          'Telegram channel handle must start with a letter and contain only letters, numbers, and underscores',
-      };
-    }
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(handle)) {
+    return {
+      valid: false,
+      error:
+        'Telegram channel handle must start with a letter and contain only letters, numbers, and underscores',
+    };
   }
 
   // Check for consecutive underscores (not allowed in Telegram)
-  if (normalized.includes('__')) {
+  if (handle.includes('__')) {
     return {
       valid: false,
       error: 'Telegram channel handle cannot contain consecutive underscores',
@@ -265,6 +325,6 @@ export function validateTelegramHandle(handle: string): UrlValidationResult {
 
   return {
     valid: true,
-    url: `@${normalized}`,
+    url: `@${handle}`,
   };
 }

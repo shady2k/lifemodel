@@ -243,6 +243,57 @@ describe('Telegram Handle Validator', () => {
     });
   });
 
+  describe('t.me URL format', () => {
+    it('should accept https://t.me/channel URL', () => {
+      const result = validateTelegramHandle('https://t.me/techcrunch');
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('@techcrunch');
+    });
+
+    it('should accept http://t.me/channel URL', () => {
+      const result = validateTelegramHandle('http://t.me/bbcnews');
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('@bbcnews');
+    });
+
+    it('should accept https://t.me/s/channel URL (web preview format)', () => {
+      const result = validateTelegramHandle('https://t.me/s/example_channel');
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('@example_channel');
+    });
+
+    it('should accept t.me/channel without protocol', () => {
+      const result = validateTelegramHandle('t.me/cnnbrk');
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('@cnnbrk');
+    });
+
+    it('should accept https://www.t.me/channel URL', () => {
+      const result = validateTelegramHandle('https://www.t.me/reuters');
+      expect(result.valid).toBe(true);
+      expect(result.url).toBe('@reuters');
+    });
+
+    it('should reject invalid t.me URL (no channel)', () => {
+      const result = validateTelegramHandle('https://t.me/');
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('Invalid Telegram URL');
+    });
+
+    it('should reject non-t.me URLs', () => {
+      const result = validateTelegramHandle('https://telegram.org/channel');
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('Invalid Telegram URL');
+    });
+
+    it('should validate extracted handle from URL', () => {
+      // Handle too short
+      const result = validateTelegramHandle('https://t.me/abc');
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('5-32');
+    });
+  });
+
   describe('invalid handles', () => {
     it('should reject empty handle', () => {
       const result = validateTelegramHandle('');

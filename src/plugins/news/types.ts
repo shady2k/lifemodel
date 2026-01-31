@@ -124,6 +124,10 @@ export interface NewsToolResult {
   error?: string | undefined;
   receivedParams?: string[] | undefined;
   schema?: Record<string, unknown> | undefined;
+  /** Number of articles found on initial fetch (add_source only) */
+  initialArticleCount?: number | undefined;
+  /** Warning if initial fetch failed (source still added, will retry on poll) */
+  fetchWarning?: string | undefined;
 }
 
 /**
