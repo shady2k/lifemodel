@@ -134,14 +134,17 @@ function createMockScheduler(): SchedulerPrimitive & { schedules: Map<string, un
 function createMockIntentEmitter(): IntentEmitterPrimitive & {
   thoughts: string[];
   messages: Array<{ recipientId: string; text: string }>;
+  signals: Array<{ priority: number; data: Record<string, unknown> }>;
 } {
   const thoughts: string[] = [];
   const messages: Array<{ recipientId: string; text: string }> = [];
+  const signals: Array<{ priority: number; data: Record<string, unknown> }> = [];
   let signalIdCounter = 0;
 
   return {
     thoughts,
     messages,
+    signals,
     emitThought: vi.fn((content: string): { success: boolean; signalId?: string; error?: string } => {
       thoughts.push(content);
       return { success: true, signalId: `sig_${++signalIdCounter}` };
@@ -150,9 +153,15 @@ function createMockIntentEmitter(): IntentEmitterPrimitive & {
       messages.push({ recipientId, text });
       return { success: true };
     }),
-    emitSignal: vi.fn((): { success: boolean; signalId?: string; error?: string } => {
-      return { success: true, signalId: `sig_${++signalIdCounter}` };
-    }),
+    emitSignal: vi.fn(
+      (signal: {
+        priority: number;
+        data: Record<string, unknown>;
+      }): { success: boolean; signalId?: string; error?: string } => {
+        signals.push(signal);
+        return { success: true, signalId: `sig_${++signalIdCounter}` };
+      }
+    ),
   };
 }
 
@@ -416,7 +425,7 @@ describe('News Plugin Integration', () => {
       await newsPlugin.lifecycle.deactivate?.();
     });
 
-    it('should emit thought when new articles are found', async () => {
+    it('should emit article_batch signal when new articles are found', async () => {
       // Mock fetch to return RSS feed with proper streaming response
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse(SAMPLE_RSS_FEED, {
@@ -437,15 +446,14 @@ describe('News Plugin Integration', () => {
       // Trigger poll event
       await newsPlugin.lifecycle.onEvent?.(NEWS_EVENT_KINDS.POLL_FEEDS, {});
 
-      // Should have emitted thoughts about new articles (fetch-on-add)
-      expect(intentEmitter.emitThought).toHaveBeenCalled();
-      expect(intentEmitter.thoughts.length).toBeGreaterThan(0);
+      // Should have emitted article_batch signals (initial fetch + poll)
+      expect(intentEmitter.emitSignal).toHaveBeenCalled();
+      expect(intentEmitter.signals.length).toBeGreaterThan(0);
 
-      // Check thought content includes article info (fetch-on-add format)
-      const thought = intentEmitter.thoughts[0];
-      expect(thought).toContain('added');
-      expect(thought).toContain('Tech News');
-      expect(thought).toContain('article');
+      // Check signal contains article data
+      const signal = intentEmitter.signals[0];
+      expect(signal.data.kind).toBe(NEWS_EVENT_KINDS.ARTICLE_BATCH);
+      expect(signal.data.articles).toBeDefined();
     });
 
     it('should not emit thoughts when no new articles', async () => {
@@ -527,7 +535,7 @@ describe('News Plugin Integration', () => {
     });
   });
 
-  describe('Topic Extraction in Thoughts', () => {
+  describe('Article Batch Signals', () => {
     beforeEach(async () => {
       await newsPlugin.lifecycle.activate(primitives);
     });
@@ -536,10 +544,53 @@ describe('News Plugin Integration', () => {
       await newsPlugin.lifecycle.deactivate?.();
     });
 
-    it('should include topic categories in thoughts', async () => {
+    it('should emit article_batch signal with topics on initial fetch', async () => {
       // Mock fetch to return RSS feed with AI-related content
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse(SAMPLE_RSS_FEED, {
+          headers: { 'content-type': 'application/rss+xml' },
+        })
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      // Add source - should emit article_batch signal
+      const tool = newsPlugin.tools[0];
+      await tool.execute({
+        action: 'add_source',
+        type: 'rss',
+        url: 'https://example.com/feed.xml',
+        name: 'Tech News',
+      });
+
+      // Check signal was emitted with article data
+      expect(intentEmitter.signals.length).toBeGreaterThan(0);
+      const signal = intentEmitter.signals[0];
+      expect(signal.data.kind).toBe(NEWS_EVENT_KINDS.ARTICLE_BATCH);
+      expect(signal.data.articles).toBeDefined();
+      expect(signal.data.articles.length).toBeGreaterThan(0);
+      // Articles should have topics extracted
+      const hasTopics = signal.data.articles.some(
+        (a: { topics: string[] }) => a.topics && a.topics.length > 0
+      );
+      expect(hasTopics).toBe(true);
+    });
+
+    it('should include breaking pattern detection in articles', async () => {
+      // Create feed with breaking news pattern
+      const breakingFeed = `<?xml version="1.0"?>
+        <rss version="2.0">
+          <channel>
+            <title>Breaking News</title>
+            <item>
+              <title>BREAKING: Major AI breakthrough announced</title>
+              <link>https://example.com/breaking</link>
+              <pubDate>${new Date().toUTCString()}</pubDate>
+            </item>
+          </channel>
+        </rss>`;
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        createMockResponse(breakingFeed, {
           headers: { 'content-type': 'application/rss+xml' },
         })
       );
@@ -550,41 +601,16 @@ describe('News Plugin Integration', () => {
       await tool.execute({
         action: 'add_source',
         type: 'rss',
-        url: 'https://example.com/feed.xml',
-        name: 'Tech News',
+        url: 'https://example.com/breaking.xml',
+        name: 'Breaking News',
       });
 
-      // Poll
-      await newsPlugin.lifecycle.onEvent?.(NEWS_EVENT_KINDS.POLL_FEEDS, {});
-
-      // Check thought includes topic context
-      const thought = intentEmitter.thoughts[0];
-      expect(thought).toContain('covering'); // "covering [topics]"
-    });
-
-    it('should include self-learning guidance in thoughts', async () => {
-      // Mock fetch with proper streaming response
-      const mockFetch = vi.fn().mockResolvedValue(
-        createMockResponse(SAMPLE_RSS_FEED, {
-          headers: { 'content-type': 'application/rss+xml' },
-        })
+      // Check signal contains article with breaking pattern detected
+      const signal = intentEmitter.signals[0];
+      const breakingArticle = signal.data.articles.find(
+        (a: { hasBreakingPattern: boolean }) => a.hasBreakingPattern === true
       );
-      vi.stubGlobal('fetch', mockFetch);
-
-      // Add source and poll
-      const tool = newsPlugin.tools[0];
-      await tool.execute({
-        action: 'add_source',
-        type: 'rss',
-        url: 'https://example.com/feed.xml',
-        name: 'Tech News',
-      });
-      await newsPlugin.lifecycle.onEvent?.(NEWS_EVENT_KINDS.POLL_FEEDS, {});
-
-      // Check thought includes COGNITION guidance
-      const thought = intentEmitter.thoughts[0];
-      expect(thought).toContain('core.memory'); // Guidance to use memory tool
-      expect(thought).toContain('USE YOUR JUDGMENT'); // Let COGNITION decide what's interesting
+      expect(breakingArticle).toBeDefined();
     });
   });
 });

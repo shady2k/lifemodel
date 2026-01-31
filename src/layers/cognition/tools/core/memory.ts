@@ -100,7 +100,8 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     {
       name: 'status',
       type: 'string',
-      description: 'Filter by status: pending, completed (for searching intentions)',
+      description:
+        'ONLY for intentions: pending or completed. Ignored for facts/thoughts/messages.',
       required: false,
     },
     // chatId removed - system uses context.recipientId automatically

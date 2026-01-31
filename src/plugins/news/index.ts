@@ -32,7 +32,7 @@ import {
 import { createNewsTool } from './tools/news-tool.js';
 import { fetchRssFeed } from './fetchers/rss.js';
 import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
-import { extractArticleTopics, hasBreakingPattern } from './topic-extractor.js';
+import { convertToNewsArticle } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
 
 /**
@@ -201,24 +201,7 @@ function filterNewArticles(
   return newArticles;
 }
 
-/**
- * Convert a FetchedArticle to a NewsArticle for signal emission.
- * Enriches with topic extraction and breaking pattern detection.
- */
-function convertToNewsArticle(article: FetchedArticle): NewsArticle {
-  const combinedText = article.summary ? `${article.title} ${article.summary}` : article.title;
-
-  return {
-    id: article.id,
-    title: article.title,
-    source: article.sourceId, // e.g., 'rss:techcrunch'
-    topics: extractArticleTopics(article.title, article.summary),
-    url: article.url,
-    summary: article.summary,
-    publishedAt: article.publishedAt,
-    hasBreakingPattern: hasBreakingPattern(combinedText),
-  };
-}
+// convertToNewsArticle is imported from topic-extractor.ts
 
 /**
  * Result from fetching a single source.

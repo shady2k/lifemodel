@@ -104,7 +104,7 @@ export class JsonMemoryProvider implements MemoryProvider {
 
     // Normalize query for matching
     const queryLower = trimmedQuery.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter((t) => t.length > 2);
+    const queryTerms = queryLower.split(/\s+/).filter((t) => t.length >= 2);
 
     // Score and filter entries
     const scored = this.entries
@@ -113,12 +113,12 @@ export class JsonMemoryProvider implements MemoryProvider {
         if (types && !types.includes(entry.type)) {
           return false;
         }
-        // Filter by recipientId
-        if (recipientId && entry.recipientId !== recipientId) {
+        // Filter by recipientId (entries without recipientId are global, always visible)
+        if (recipientId && entry.recipientId && entry.recipientId !== recipientId) {
           return false;
         }
-        // Filter by status (for intentions)
-        if (status && entry.status !== status) {
+        // Filter by status (for intentions only - facts/thoughts don't have status)
+        if (status && entry.status !== undefined && entry.status !== status) {
           return false;
         }
         return true;

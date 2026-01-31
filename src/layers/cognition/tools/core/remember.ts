@@ -58,14 +58,14 @@ export function createRememberTool(): Tool {
       type: 'string',
       required: true,
       description:
-        'WHAT: birthday, preference, relationship, etc. Special: interest_<topic> or urgency_<topic> for news preferences.',
+        'WHAT: birthday, preference, relationship, etc. Special: interest_<topic> or urgency_<topic> for topic preferences (use delta values like "+0.3" for interested, "-0.2" for not interested).',
     },
     {
       name: 'value',
       type: 'string',
       required: true,
       description:
-        'The value. For numeric properties: use delta like "+0.2" or "-0.1" to adjust (clamped to 0-1).',
+        'The value. For interest_*/urgency_* attributes: MUST use delta like "+0.3" (interested) or "-0.2" (not interested). For other numeric properties: use delta to adjust (clamped to 0-1).',
     },
     {
       name: 'source',

@@ -5,7 +5,7 @@
  * Actions: add_source, remove_source, list_sources
  *
  * Fetch-on-add: When a source is added, it's immediately fetched and
- * initial articles are emitted as a thought for COGNITION to evaluate.
+ * articles are emitted as article_batch signal for NewsSignalFilter to score.
  */
 
 import type {
@@ -16,18 +16,12 @@ import type {
   IntentEmitterPrimitive,
 } from '../../../types/plugin.js';
 import type { Logger } from '../../../types/logger.js';
-import type {
-  NewsSource,
-  SourceState,
-  NewsToolResult,
-  NewsSummary,
-  FetchedArticle,
-} from '../types.js';
-import { NEWS_STORAGE_KEYS, NEWS_PLUGIN_ID } from '../types.js';
+import type { NewsSource, SourceState, NewsToolResult, NewsSummary } from '../types.js';
+import { NEWS_STORAGE_KEYS, NEWS_PLUGIN_ID, NEWS_EVENT_KINDS } from '../types.js';
 import { validateUrl, validateTelegramHandle } from '../url-validator.js';
 import { fetchRssFeed } from '../fetchers/rss.js';
 import { fetchTelegramChannel } from '../fetchers/telegram.js';
-import { extractBatchTopics, formatTopicList } from '../topic-extractor.js';
+import { convertToNewsArticle } from '../topic-extractor.js';
 
 /**
  * Schema definitions for error responses.
@@ -127,67 +121,6 @@ async function saveSourceState(storage: StoragePrimitive, state: SourceState): P
 }
 
 /**
- * Format a single article for thought output.
- */
-function formatArticle(article: FetchedArticle): string {
-  let line = `• **${article.sourceName}**: ${article.title}`;
-
-  if (article.summary) {
-    const shortSummary =
-      article.summary.length > 150 ? article.summary.slice(0, 147) + '...' : article.summary;
-    line += `\n  ${shortSummary}`;
-  }
-
-  if (article.url) {
-    line += `\n  Link: ${article.url}`;
-  }
-
-  return line;
-}
-
-/**
- * Format initial fetch articles into a thought string.
- */
-function formatInitialFetchThought(articles: FetchedArticle[], sourceName: string): string {
-  const topics = extractBatchTopics(articles);
-  const topicStr = formatTopicList(topics);
-
-  const articleLines = articles.slice(0, 5).map(formatArticle); // Limit to 5 for initial fetch
-  const moreCount = articles.length > 5 ? articles.length - 5 : 0;
-
-  const thought = [
-    `I just added "${sourceName}" as a news source and fetched ${String(articles.length)} article${articles.length > 1 ? 's' : ''} covering ${topicStr}:`,
-    '',
-    ...articleLines,
-    ...(moreCount > 0 ? [`\n...and ${String(moreCount)} more articles.`] : []),
-    '',
-    '---',
-    'How to process these articles:',
-    '',
-    '1. USE YOUR JUDGMENT to decide which articles are worth saving:',
-    '   - Consider what you know about the user (profession, interests, location, past conversations)',
-    '   - If you know nothing, use general relevance (important news, useful content, trending topics)',
-    '   - Breaking/urgent news → always save',
-    '   - Niche content with no user context → skip',
-    '',
-    '2. SAVE interesting articles to memory (use core.memory with action "save"):',
-    '   - type: "fact"',
-    '   - content: Brief summary of the article',
-    '   - tags: ["news", source name, topic tags]',
-    '   - Include the link in content for reference',
-    '',
-    '3. If you are UNCERTAIN about user preferences:',
-    '   - Save an intention to ask later (type: "intention", trigger: "next_conversation")',
-    '   - Example: "Ask user which news topics interest them"',
-    '   - Do NOT try to respond directly (this is internal processing)',
-    '',
-    'Remember: You are processing internally. Save to memory, do not send messages.',
-  ].join('\n');
-
-  return thought;
-}
-
-/**
  * Add a new news source and immediately fetch initial articles.
  */
 async function addSource(
@@ -273,16 +206,27 @@ async function addSource(
       };
       await saveSourceState(storage, state);
 
-      // Emit thought with initial articles for COGNITION to evaluate
-      const thought = formatInitialFetchThought(fetchResult.articles, trimmedName);
-      const emitResult = intentEmitter.emitThought(thought);
+      // Convert to NewsArticle format and emit as article_batch signal
+      // NewsSignalFilter will score these articles (same flow as scheduled polls)
+      const newsArticles = fetchResult.articles.map(convertToNewsArticle);
+
+      const emitResult = intentEmitter.emitSignal({
+        priority: 2, // Normal priority - autonomic layer will assess urgency
+        data: {
+          kind: NEWS_EVENT_KINDS.ARTICLE_BATCH,
+          pluginId: NEWS_PLUGIN_ID,
+          articles: newsArticles,
+          sourceId,
+          fetchedAt: new Date(),
+        },
+      });
 
       if (!emitResult.success) {
-        logger.warn({ error: emitResult.error }, 'Failed to emit initial fetch thought');
+        logger.warn({ error: emitResult.error }, 'Failed to emit article batch signal');
       } else {
         logger.info(
           { sourceId, articleCount: initialArticleCount, signalId: emitResult.signalId },
-          'Emitted initial fetch thought'
+          'Emitted article batch signal for initial fetch'
         );
       }
     } else if (!fetchResult.success) {
@@ -318,7 +262,12 @@ async function addSource(
     action: 'add_source',
     sourceId,
     // Include fetch info in response
-    ...(initialArticleCount > 0 && { initialArticleCount }),
+    ...(initialArticleCount > 0 && {
+      initialArticleCount,
+      // Tell COGNITION where articles went
+      articlesStatus:
+        'Articles have been scored and saved to memory. Use core.memory to search for them with tags like "news" or specific topics.',
+    }),
     ...(fetchError && {
       fetchWarning: `Initial fetch failed: ${fetchError}. Will retry on next poll.`,
     }),
@@ -395,6 +344,11 @@ async function listSources(storage: StoragePrimitive): Promise<NewsToolResult> {
     action: 'list_sources',
     sources: summaries,
     total: summaries.length,
+    // Help agent find articles
+    hint:
+      summaries.length > 0
+        ? 'To find articles, use core.memory with action "search" and query for topics or "news" tag.'
+        : undefined,
   };
 }
 
@@ -408,7 +362,7 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
     name: 'news',
     description: `Manage news sources (RSS feeds and Telegram channels).
 Actions: add_source, remove_source, list_sources.
-The agent monitors these sources and notifies you about important news.`,
+Articles are automatically scored and saved to memory (search with core.memory using "news" tag or topic keywords).`,
     tags: ['rss', 'telegram', 'news', 'feed', 'add', 'remove', 'list'],
     parameters: [
       {

@@ -8,6 +8,9 @@
  * Topics align with common user interest categories.
  */
 
+import type { NewsArticle } from '../../types/news.js';
+import type { FetchedArticle } from './types.js';
+
 /**
  * Topic definition with keywords that trigger it.
  */
@@ -440,4 +443,23 @@ export function hasBreakingPattern(text: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Convert a FetchedArticle to a NewsArticle for signal emission.
+ * Enriches with topic extraction and breaking pattern detection.
+ */
+export function convertToNewsArticle(article: FetchedArticle): NewsArticle {
+  const combinedText = article.summary ? `${article.title} ${article.summary}` : article.title;
+
+  return {
+    id: article.id,
+    title: article.title,
+    source: article.sourceId,
+    topics: extractArticleTopics(article.title, article.summary),
+    url: article.url,
+    summary: article.summary,
+    publishedAt: article.publishedAt,
+    hasBreakingPattern: hasBreakingPattern(combinedText),
+  };
 }

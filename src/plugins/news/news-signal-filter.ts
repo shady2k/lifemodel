@@ -547,9 +547,12 @@ export class NewsSignalFilter implements SignalFilter {
   private toFact(scored: ScoredArticle, sourceId: string): Fact {
     const { article, interestScore } = scored;
 
+    // Combine title and summary for richer fact content
+    const content = article.summary ? `${article.title}\n\n${article.summary}` : article.title;
+
     return {
-      // The fact is the headline - what the brain remembers
-      content: article.title,
+      // The fact includes headline + summary for context
+      content,
       // Interest score becomes confidence in memory
       confidence: interestScore,
       // Topics become tags for retrieval (normalized to lowercase for consistent matching)

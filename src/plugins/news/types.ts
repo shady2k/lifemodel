@@ -133,6 +133,10 @@ export interface NewsToolResult {
   initialArticleCount?: number | undefined;
   /** Warning if initial fetch failed (source still added, will retry on poll) */
   fetchWarning?: string | undefined;
+  /** Status message about where articles went (add_source only) */
+  articlesStatus?: string | undefined;
+  /** Hint for agent about how to access articles */
+  hint?: string | undefined;
 }
 
 /**
