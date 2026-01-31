@@ -278,40 +278,65 @@ interface UrgentDeliveryTracker {
 
 ---
 
-## Share Queue (Dedicated Class in Aggregation Layer)
+## Interesting News → Facts in Memory ✅
 
-**Implementation Decision**: ShareQueue is a dedicated class in aggregation layer, NOT in AgentState.
+**Implementation Decision**: No ShareQueue. Interesting articles become **facts** in memory.
 
-**Rationale:**
-- AgentState = mental state (energy, socialDebt) - continuous values affecting behavior
-- ShareQueue = operational state with its own lifecycle (TTL, drain mechanics)
-- Separation of concerns: queue has complex operations (add, drain, prune, group)
+**Biological rationale:**
+- The brain doesn't have a "share queue" - it has memory
+- When you read something interesting, you remember the **fact**, not the article
+- Later, during conversation, relevant facts surface naturally via memory retrieval
 
-```typescript
-// Located in: src/layers/aggregation/share-queue.ts
-interface ShareQueueItem {
-  article: ScoredArticle;
-  addedAt: Date;
-  priority: number;  // Higher = more interesting
-}
-
-class ShareQueue {
-  private items: ShareQueueItem[] = [];
-
-  add(scored: ScoredArticle[]): void;
-  drain(): ShareQueueItem[];      // Returns and clears
-  peek(): ShareQueueItem[];       // Returns without clearing
-  prune(maxAgeMs: number): number; // Remove old items, returns count removed
-  size(): number;
-  groupByTopic(): string;         // "3 crypto articles, 2 AI articles"
-}
-
-// Lifecycle:
-// - news:interesting_articles → aggregation adds to queue
-// - Proactive contact wake → COGNITION sees queue via trigger context
-// - After mention → drain() clears queue
-// - Every tick → prune(24h) removes stale items
+**Signal flow:**
 ```
+news:interesting articles
+         ↓
+NewsSignalFilter transforms ScoredArticle → Fact (generic type)
+         ↓
+Emits signal with FactBatchData { kind: 'fact_batch', facts: Fact[] }
+         ↓
+Aggregation layer saves to memory as type='fact'
+         ↓
+Later: COGNITION searches memory during proactive contact
+```
+
+**Types (in core - plugin-agnostic):**
+```typescript
+// src/types/signal.ts
+interface Fact {
+  content: string;      // "Bitcoin dropped 15%" - what the brain remembers
+  confidence: number;   // Interest score → memory confidence
+  tags: string[];       // Topics → retrieval tags
+  provenance: {
+    source: string;
+    url?: string;
+    originalId?: string;
+    timestamp?: Date;
+  };
+}
+
+interface FactBatchData {
+  kind: 'fact_batch';
+  pluginId: string;
+  eventKind: string;  // For logging, e.g., 'news:interesting'
+  facts: Fact[];
+}
+```
+
+**Plugin transforms its own types:**
+```typescript
+// In NewsSignalFilter (plugin code)
+private toFact(scored: ScoredArticle, sourceId: string): Fact {
+  return {
+    content: scored.article.title,  // The fact
+    confidence: scored.interestScore,
+    tags: ['news', ...scored.article.topics],
+    provenance: { source: sourceId, url: scored.article.url, ... }
+  };
+}
+```
+
+**Key benefit**: Core never imports plugin types. Plugin transforms ScoredArticle → Fact internally.
 
 ---
 
@@ -584,12 +609,12 @@ Summarizes and responds
 | `src/types/user/interests.ts` | Generic `Interests` interface | ✅ Done |
 | `src/layers/autonomic/filter-registry.ts` | FilterRegistry, FilterContext, SignalFilter | ✅ Done |
 | `src/plugins/news/news-signal-filter.ts` | NewsSignalFilter implementation | ✅ Done |
-| `src/layers/aggregation/share-queue.ts` | ShareQueue class | Phase 2 |
 
 ### Modified Files
 
 | File | Change | Status |
 |------|--------|--------|
+| `src/types/signal.ts` | Add `Fact`, `FactBatchData` interfaces | ✅ Done |
 | `src/types/news.ts` | NewsArticle, NewsArticleBatchPayload | ✅ Done |
 | `src/types/user/user.ts` | Add `interests` field | ✅ Done |
 | `src/models/user-model.ts` | Add `getInterests()`, `updateInterests()` methods | ✅ Done |
@@ -597,8 +622,8 @@ Summarizes and responds
 | `src/layers/autonomic/index.ts` | Export filter types | ✅ Done |
 | `src/core/container.ts` | Wire userModel to autonomic layer | ✅ Done |
 | `src/plugins/news/index.ts` | Emit structured signals, FilterPluginV2 | ✅ Done |
-| `src/layers/aggregation/processor.ts` | Add share queue handling, rate limiting | Phase 2 |
-| `src/layers/aggregation/threshold-engine.ts` | Filter news events by urgency | Phase 2 |
+| `src/layers/aggregation/threshold-engine.ts` | Handle fact_batch signals, filter urgent news | ✅ Done |
+| `src/layers/aggregation/processor.ts` | Save facts to memory, rate limiting | In Progress |
 
 ---
 
@@ -606,13 +631,14 @@ Summarizes and responds
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Signal type | `plugin_event` with eventKind | No core type changes needed |
+| Signal type | `plugin_event` / `fact_batch` | Facts use generic FactBatchData, urgent uses PluginEventData |
 | Component name | NewsSignalFilter | It filters signals, not generates them |
 | Config mechanism | **Direct UserModel injection** | Single wiring point, interface segregation, extensible |
 | Interest type | **`Interests` (generic)** | Renamed from NewsInterests - any plugin can use |
 | Interest vs Urgency | Separate scores | Different questions, different answers |
 | User model | Weights only (no allow list) | weight > 0 = allowed, simpler |
-| Share queue | **Dedicated class in aggregation** | Operational state, not mental state (AgentState) |
+| Interesting news | **Facts in memory** | Brain stores facts, not queues. Natural retrieval via memory search |
+| Generic fact type | **`Fact` interface in core** | Plugin transforms ScoredArticle → Fact. Core never imports plugin types |
 | Rate limiting | Max 1 urgent/topic/30min | Prevent notification spam |
 | Learning (Phase 1) | Explicit reactions only | Implicit is too ambiguous |
 | Cold start | Explicit onboarding recommended | Bonuses alone insufficient |
@@ -621,10 +647,12 @@ Summarizes and responds
 
 ## Verification Checklist
 
-- [ ] NewsSignalFilter correctly scores articles
-- [ ] Interest and urgency scores computed independently
+- [x] NewsSignalFilter correctly scores articles
+- [x] Interest and urgency scores computed independently
 - [ ] Rate limiting prevents urgent spam
-- [ ] Share queue items decay after 24h
+- [x] Interesting articles transformed to generic Fact type
+- [x] Facts saved to memory (not a queue)
+- [ ] Memory search retrieves recent news facts
 - [ ] Filtered topics decay after 48h
 - [ ] Source health disables failing sources
 - [ ] COGNITION wakes for urgent articles

@@ -3,11 +3,15 @@
  *
  * This filter runs in the AUTONOMIC layer and classifies articles into:
  * - URGENT (urgency > 0.8): Wake COGNITION immediately
- * - INTERESTING (interest 0.4-1.0): Add to share queue
+ * - INTERESTING (interest 0.4-1.0): Emit as extractable content → stored as facts in memory
  * - NOISE (interest < 0.4): Filter out
  *
  * The filter receives user Interests via context.userModel.getInterests(),
  * populated by core from UserModel. This keeps the plugin decoupled from core.
+ *
+ * Interesting articles are transformed to ExtractableItem format (generic)
+ * so the aggregation layer can save them as facts without knowing about
+ * news-specific types like ScoredArticle.
  *
  * Scoring algorithms per spec:
  * - Interest: topicMatch × topicWeight × 0.5 + sourceReputation × 0.2 + noveltyBonus × 0.3
@@ -15,7 +19,13 @@
  */
 
 import type { SignalFilter, FilterContext } from '../../layers/autonomic/filter-registry.js';
-import type { Signal, PluginEventData, SignalType } from '../../types/signal.js';
+import type {
+  Signal,
+  PluginEventData,
+  SignalType,
+  Fact,
+  FactBatchData,
+} from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import type { NewsArticle } from '../../types/news.js';
 import type { Interests } from '../../types/user/interests.js';
@@ -214,25 +224,27 @@ export class NewsSignalFilter implements SignalFilter {
     }
 
     if (interestingArticles.length > 0) {
+      // Transform to generic Fact format
+      // This allows core to save as facts without knowing about ScoredArticle
+      const facts = interestingArticles.map((scored) => this.toFact(scored, sourceId));
+
+      const factBatchData: FactBatchData = {
+        kind: 'fact_batch',
+        pluginId: NEWS_PLUGIN_ID,
+        eventKind: 'news:interesting',
+        facts,
+      };
+
       outputSignals.push(
         createSignal(
           'plugin_event',
           `plugin.${NEWS_PLUGIN_ID}`,
           { value: interestingArticles.length },
           {
-            priority: 3, // LOW priority - queue for later
+            priority: 3, // LOW priority - saved to memory, not wake
             correlationId: context.correlationId,
             parentId: originalSignal.id,
-            data: {
-              kind: 'plugin_event',
-              eventKind: 'news:interesting_articles',
-              pluginId: NEWS_PLUGIN_ID,
-              payload: {
-                articles: interestingArticles,
-                sourceId,
-                fetchedAt: payload.fetchedAt,
-              },
-            },
+            data: factBatchData,
           }
         )
       );
@@ -372,6 +384,34 @@ export class NewsSignalFilter implements SignalFilter {
       return 0.5;
     }
     return interests.urgency[topic] ?? 0.5;
+  }
+
+  /**
+   * Transform a ScoredArticle into a generic Fact.
+   *
+   * This is where plugin-specific types (ScoredArticle) are converted
+   * to the generic format that core understands. The brain stores facts,
+   * not articles - this method extracts the fact from the article.
+   */
+  private toFact(scored: ScoredArticle, sourceId: string): Fact {
+    const { article, interestScore } = scored;
+
+    return {
+      // The fact is the headline - what the brain remembers
+      content: article.title,
+      // Interest score becomes confidence in memory
+      confidence: interestScore,
+      // Topics become tags for retrieval
+      tags: ['news', ...article.topics],
+      // Provenance - where this fact came from
+      provenance: {
+        source: sourceId,
+        url: article.url,
+        originalId: article.id,
+        timestamp: article.publishedAt,
+        hasBreakingPattern: article.hasBreakingPattern,
+      },
+    };
   }
 }
 

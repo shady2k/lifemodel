@@ -152,7 +152,8 @@ export type SignalData =
   | PatternData
   | ContactUrgeData
   | PluginEventData
-  | ThoughtData;
+  | ThoughtData
+  | FactBatchData;
 
 /**
  * Data for user_message signals.
@@ -351,6 +352,61 @@ export interface ThoughtData {
 
   /** ID of the direct parent thought (undefined for root) */
   parentThoughtId?: string;
+}
+
+/**
+ * A fact to be stored in memory.
+ *
+ * Plugins transform their domain-specific types (e.g., ScoredArticle)
+ * into this generic format. The brain stores facts - the original
+ * carrier (article, tweet, etc.) is just the source.
+ *
+ * Biological analogy: The brain remembers "Bitcoin dropped 15%",
+ * not "I read an article from TechCrunch about Bitcoin dropping."
+ */
+export interface Fact {
+  /** The fact content - what the brain remembers */
+  content: string;
+
+  /** Confidence/relevance (0-1) - maps to memory confidence */
+  confidence: number;
+
+  /** Tags for retrieval */
+  tags: string[];
+
+  /** Provenance - where this fact came from */
+  provenance: {
+    /** Original source (e.g., 'techcrunch', 'telegram:@channel') */
+    source: string;
+    /** URL for reference */
+    url?: string | undefined;
+    /** Original item ID for deduplication */
+    originalId?: string | undefined;
+    /** When the information was created/published */
+    timestamp?: Date | undefined;
+    /** Additional plugin-specific data */
+    [key: string]: unknown;
+  };
+}
+
+/**
+ * Signal data carrying facts to be stored in memory.
+ *
+ * Any plugin can emit this - news, research, social feeds, etc.
+ * The aggregation layer saves these as MemoryEntry with type='fact'
+ * without knowing the original plugin-specific types.
+ */
+export interface FactBatchData {
+  kind: 'fact_batch';
+
+  /** Plugin that produced these facts */
+  pluginId: string;
+
+  /** Event kind for logging (e.g., 'news:interesting') */
+  eventKind: string;
+
+  /** Facts to be stored */
+  facts: Fact[];
 }
 
 /**

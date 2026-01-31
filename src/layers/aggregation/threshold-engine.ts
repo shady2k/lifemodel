@@ -285,13 +285,65 @@ export class ThresholdEngine {
       }
 
       if (validEvents.length > 0) {
-        const firstEvent = validEvents[0]?.data as PluginEventData | undefined;
-        return {
-          shouldWake: true,
-          trigger: 'scheduled',
-          reason: `Plugin event: ${firstEvent?.eventKind ?? 'unknown'}`,
-          triggerSignals: validEvents,
-        };
+        // Separate by signal kind:
+        // - fact_batch: facts to save to memory (no wake)
+        // - news:urgent_articles: wake COGNITION immediately
+        // - other plugin events: wake COGNITION (reminders, etc.)
+        const urgentNews: Signal[] = [];
+        const factBatches: Signal[] = [];
+        const otherEvents: Signal[] = [];
+
+        for (const event of validEvents) {
+          const data = event.data;
+          if (!data) {
+            otherEvents.push(event);
+            continue;
+          }
+
+          // Check for fact_batch signals (interesting content → memory)
+          if (data.kind === 'fact_batch') {
+            factBatches.push(event);
+          } else if (data.kind === 'plugin_event') {
+            const pluginData = data;
+            if (pluginData.eventKind === 'news:urgent_articles') {
+              urgentNews.push(event);
+            } else {
+              otherEvents.push(event);
+            }
+          } else {
+            otherEvents.push(event);
+          }
+        }
+
+        // Fact batches are saved to memory, no wake needed
+        if (factBatches.length > 0) {
+          this.logger.debug(
+            { count: factBatches.length },
+            'Fact batches received (saving to memory, no wake)'
+          );
+          // TODO: Save facts to memory here (task #13)
+        }
+
+        // Urgent news wakes COGNITION immediately
+        if (urgentNews.length > 0) {
+          return {
+            shouldWake: true,
+            trigger: 'scheduled',
+            reason: `Urgent news: ${String(urgentNews.length)} article(s)`,
+            triggerSignals: urgentNews,
+          };
+        }
+
+        // Other plugin events (reminders, etc.) wake COGNITION
+        if (otherEvents.length > 0) {
+          const firstEvent = otherEvents[0]?.data as PluginEventData | undefined;
+          return {
+            shouldWake: true,
+            trigger: 'scheduled',
+            reason: `Plugin event: ${firstEvent?.eventKind ?? 'unknown'}`,
+            triggerSignals: otherEvents,
+          };
+        }
       }
     }
 
