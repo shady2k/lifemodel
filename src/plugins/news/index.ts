@@ -34,9 +34,42 @@ import { extractArticleTopics, hasBreakingPattern } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
 
 /**
- * Maximum consecutive failures before alerting user about broken source.
+ * Source health policy thresholds.
  */
-const MAX_CONSECUTIVE_FAILURES = 3;
+const SOURCE_HEALTH_POLICY = {
+  /** Disable for 1 hour after this many failures */
+  DISABLE_1H_THRESHOLD: 3,
+  /** Disable for 6 hours after this many failures */
+  DISABLE_6H_THRESHOLD: 5,
+  /** Emit thought to inform user after this many failures */
+  ALERT_USER_THRESHOLD: 10,
+  /** 1 hour in milliseconds */
+  ONE_HOUR_MS: 60 * 60 * 1000,
+  /** 6 hours in milliseconds */
+  SIX_HOURS_MS: 6 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Calculate disable duration based on consecutive failures.
+ * Returns null if no disable needed, otherwise returns disabledUntil date.
+ */
+function calculateDisableUntil(consecutiveFailures: number): Date | null {
+  if (consecutiveFailures >= SOURCE_HEALTH_POLICY.DISABLE_6H_THRESHOLD) {
+    return new Date(Date.now() + SOURCE_HEALTH_POLICY.SIX_HOURS_MS);
+  }
+  if (consecutiveFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD) {
+    return new Date(Date.now() + SOURCE_HEALTH_POLICY.ONE_HOUR_MS);
+  }
+  return null;
+}
+
+/**
+ * Check if a source is currently disabled.
+ */
+function isSourceDisabled(state: SourceState | null): boolean {
+  if (!state?.disabledUntil) return false;
+  return new Date(state.disabledUntil) > new Date();
+}
 
 /**
  * Plugin state (set during activation).
@@ -159,14 +192,44 @@ function convertToNewsArticle(article: FetchedArticle): NewsArticle {
 }
 
 /**
+ * Result from fetching a single source.
+ */
+interface FetchSourceResult {
+  articles: FetchedArticle[];
+  failed: boolean;
+  sourceName: string;
+  skipped: boolean;
+  shouldAlertUser: boolean;
+}
+
+/**
  * Fetch a single RSS source (used for parallel fetching).
  */
 async function fetchSingleSource(
   source: NewsSource,
   storage: StoragePrimitive,
   logger: Logger
-): Promise<{ articles: FetchedArticle[]; failed: boolean; sourceName: string }> {
+): Promise<FetchSourceResult> {
   const state = await loadSourceState(storage, source.id);
+
+  // Check if source is temporarily disabled
+  if (isSourceDisabled(state)) {
+    logger.debug(
+      {
+        sourceId: source.id,
+        sourceName: source.name,
+        disabledUntil: state?.disabledUntil,
+      },
+      'Skipping disabled source'
+    );
+    return {
+      articles: [],
+      failed: false,
+      sourceName: source.name,
+      skipped: true,
+      shouldAlertUser: false,
+    };
+  }
 
   logger.debug(
     { sourceId: source.id, sourceName: source.name, url: source.url },
@@ -176,14 +239,18 @@ async function fetchSingleSource(
   const result = await fetchRssFeed(source.url, source.id, source.name);
 
   if (!result.success) {
-    // Track failure
+    // Track failure and apply disable policy
+    const newFailures = (state?.consecutiveFailures ?? 0) + 1;
+    const disableUntil = calculateDisableUntil(newFailures);
+
     const newState: SourceState = {
       sourceId: source.id,
       lastFetchedAt: state?.lastFetchedAt ?? new Date(),
-      consecutiveFailures: (state?.consecutiveFailures ?? 0) + 1,
+      consecutiveFailures: newFailures,
       lastError: result.error,
       lastSeenId: state?.lastSeenId,
       lastSeenHash: state?.lastSeenHash,
+      disabledUntil: disableUntil ?? undefined,
     };
 
     await saveSourceState(storage, newState);
@@ -193,16 +260,21 @@ async function fetchSingleSource(
         sourceId: source.id,
         sourceName: source.name,
         error: result.error,
-        consecutiveFailures: newState.consecutiveFailures,
+        consecutiveFailures: newFailures,
+        disabledUntil: disableUntil,
       },
       'Failed to fetch RSS feed'
     );
 
-    // Return as failed if too many consecutive failures
+    // Alert user when hitting threshold
+    const shouldAlert = newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD;
+
     return {
       articles: [],
-      failed: newState.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES,
+      failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
       sourceName: source.name,
+      skipped: false,
+      shouldAlertUser: shouldAlert,
     };
   }
 
@@ -219,18 +291,34 @@ async function fetchSingleSource(
     'Fetched RSS feed'
   );
 
-  // Update state with latest article ID
+  // Update state - success resets failures and clears disable
   const newState: SourceState = {
     sourceId: source.id,
     lastFetchedAt: new Date(),
     consecutiveFailures: 0,
     lastSeenId: result.latestId ?? state?.lastSeenId,
     lastSeenHash: state?.lastSeenHash,
+    disabledUntil: undefined,
   };
 
   await saveSourceState(storage, newState);
 
-  return { articles: newArticles, failed: false, sourceName: source.name };
+  return {
+    articles: newArticles,
+    failed: false,
+    sourceName: source.name,
+    skipped: false,
+    shouldAlertUser: false,
+  };
+}
+
+/**
+ * Result from fetching all sources of a type.
+ */
+interface FetchAllResult {
+  newArticles: FetchedArticle[];
+  failedSources: string[];
+  sourcesToAlert: string[];
 }
 
 /**
@@ -240,14 +328,14 @@ async function fetchSingleSource(
 async function fetchAllRssSources(
   storage: StoragePrimitive,
   logger: Logger
-): Promise<{ newArticles: FetchedArticle[]; failedSources: string[] }> {
+): Promise<FetchAllResult> {
   const sources = await loadSources(storage);
   const enabledRssSources = sources.filter((s) => s.enabled && s.type === 'rss');
 
   logger.info({ count: enabledRssSources.length }, 'Fetching RSS sources in parallel');
 
   if (enabledRssSources.length === 0) {
-    return { newArticles: [], failedSources: [] };
+    return { newArticles: [], failedSources: [], sourcesToAlert: [] };
   }
 
   // Fetch all sources in parallel (non-blocking)
@@ -257,12 +345,16 @@ async function fetchAllRssSources(
 
   const allNewArticles: FetchedArticle[] = [];
   const failedSources: string[] = [];
+  const sourcesToAlert: string[] = [];
 
   for (const result of results) {
     if (result.status === 'fulfilled') {
       allNewArticles.push(...result.value.articles);
       if (result.value.failed) {
         failedSources.push(result.value.sourceName);
+      }
+      if (result.value.shouldAlertUser) {
+        sourcesToAlert.push(result.value.sourceName);
       }
     } else {
       // Promise rejected - unexpected error
@@ -271,7 +363,7 @@ async function fetchAllRssSources(
     }
   }
 
-  return { newArticles: allNewArticles, failedSources };
+  return { newArticles: allNewArticles, failedSources, sourcesToAlert };
 }
 
 /**
@@ -281,8 +373,27 @@ async function fetchSingleTelegramSource(
   source: NewsSource,
   storage: StoragePrimitive,
   logger: Logger
-): Promise<{ articles: FetchedArticle[]; failed: boolean; sourceName: string }> {
+): Promise<FetchSourceResult> {
   const state = await loadSourceState(storage, source.id);
+
+  // Check if source is temporarily disabled
+  if (isSourceDisabled(state)) {
+    logger.debug(
+      {
+        sourceId: source.id,
+        sourceName: source.name,
+        disabledUntil: state?.disabledUntil,
+      },
+      'Skipping disabled Telegram source'
+    );
+    return {
+      articles: [],
+      failed: false,
+      sourceName: source.name,
+      skipped: true,
+      shouldAlertUser: false,
+    };
+  }
 
   logger.debug(
     {
@@ -298,14 +409,18 @@ async function fetchSingleTelegramSource(
   const result = await fetchTelegramChannelUntil(source.url, source.name, state?.lastSeenId);
 
   if (!result.success) {
-    // Track failure
+    // Track failure and apply disable policy
+    const newFailures = (state?.consecutiveFailures ?? 0) + 1;
+    const disableUntil = calculateDisableUntil(newFailures);
+
     const newState: SourceState = {
       sourceId: source.id,
       lastFetchedAt: state?.lastFetchedAt ?? new Date(),
-      consecutiveFailures: (state?.consecutiveFailures ?? 0) + 1,
+      consecutiveFailures: newFailures,
       lastError: result.error,
       lastSeenId: state?.lastSeenId,
       lastSeenHash: state?.lastSeenHash,
+      disabledUntil: disableUntil ?? undefined,
     };
 
     await saveSourceState(storage, newState);
@@ -315,15 +430,21 @@ async function fetchSingleTelegramSource(
         sourceId: source.id,
         sourceName: source.name,
         error: result.error,
-        consecutiveFailures: newState.consecutiveFailures,
+        consecutiveFailures: newFailures,
+        disabledUntil: disableUntil,
       },
       'Failed to fetch Telegram channel'
     );
 
+    // Alert user when hitting threshold
+    const shouldAlert = newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD;
+
     return {
       articles: [],
-      failed: newState.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES,
+      failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
       sourceName: source.name,
+      skipped: false,
+      shouldAlertUser: shouldAlert,
     };
   }
 
@@ -340,18 +461,25 @@ async function fetchSingleTelegramSource(
     'Fetched Telegram channel'
   );
 
-  // Update state with latest message ID
+  // Update state - success resets failures and clears disable
   const newState: SourceState = {
     sourceId: source.id,
     lastFetchedAt: new Date(),
     consecutiveFailures: 0,
     lastSeenId: result.latestId ?? state?.lastSeenId,
     lastSeenHash: state?.lastSeenHash,
+    disabledUntil: undefined,
   };
 
   await saveSourceState(storage, newState);
 
-  return { articles: newArticles, failed: false, sourceName: source.name };
+  return {
+    articles: newArticles,
+    failed: false,
+    sourceName: source.name,
+    skipped: false,
+    shouldAlertUser: false,
+  };
 }
 
 /**
@@ -361,14 +489,14 @@ async function fetchSingleTelegramSource(
 async function fetchAllTelegramSources(
   storage: StoragePrimitive,
   logger: Logger
-): Promise<{ newArticles: FetchedArticle[]; failedSources: string[] }> {
+): Promise<FetchAllResult> {
   const sources = await loadSources(storage);
   const enabledTelegramSources = sources.filter((s) => s.enabled && s.type === 'telegram');
 
   logger.info({ count: enabledTelegramSources.length }, 'Fetching Telegram sources in parallel');
 
   if (enabledTelegramSources.length === 0) {
-    return { newArticles: [], failedSources: [] };
+    return { newArticles: [], failedSources: [], sourcesToAlert: [] };
   }
 
   // Fetch all sources in parallel (non-blocking)
@@ -378,6 +506,7 @@ async function fetchAllTelegramSources(
 
   const allNewArticles: FetchedArticle[] = [];
   const failedSources: string[] = [];
+  const sourcesToAlert: string[] = [];
 
   for (const result of results) {
     if (result.status === 'fulfilled') {
@@ -385,13 +514,16 @@ async function fetchAllTelegramSources(
       if (result.value.failed) {
         failedSources.push(result.value.sourceName);
       }
+      if (result.value.shouldAlertUser) {
+        sourcesToAlert.push(result.value.sourceName);
+      }
     } else {
       const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
       logger.error({ error: reason }, 'Unexpected error fetching Telegram source');
     }
   }
 
-  return { newArticles: allNewArticles, failedSources };
+  return { newArticles: allNewArticles, failedSources, sourcesToAlert };
 }
 
 /**
@@ -410,15 +542,30 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   // Combine results
   const fetchedArticles = [...rssResult.newArticles, ...telegramResult.newArticles];
   const failedSources = [...rssResult.failedSources, ...telegramResult.failedSources];
+  const sourcesToAlert = [...rssResult.sourcesToAlert, ...telegramResult.sourcesToAlert];
 
   logger.info(
-    { newArticleCount: fetchedArticles.length, failedSourceCount: failedSources.length },
+    {
+      newArticleCount: fetchedArticles.length,
+      failedSourceCount: failedSources.length,
+      alertCount: sourcesToAlert.length,
+    },
     'Feed poll completed'
   );
 
-  // Log failed sources (source health monitoring - Phase 0.3)
+  // Log failed sources
   if (failedSources.length > 0) {
     logger.warn({ failedSources }, 'Sources with consecutive failures');
+  }
+
+  // Emit thought to inform user about persistently broken sources
+  if (sourcesToAlert.length > 0) {
+    const sourceList = sourcesToAlert.join(', ');
+    intentEmitter.emitThought(
+      `News source health alert: ${sourceList} has failed ${String(SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD)} times in a row. ` +
+        `The source is temporarily disabled. Consider checking if the source URL is still valid or removing it.`
+    );
+    logger.warn({ sourcesToAlert }, 'Emitted thought about broken sources');
   }
 
   // If no new articles, nothing more to do

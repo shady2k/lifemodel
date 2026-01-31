@@ -82,6 +82,9 @@ export interface SourceState {
 
   /** Last error message if in failed state */
   lastError?: string | undefined;
+
+  /** Temporary disable until this time (source health policy) */
+  disabledUntil?: Date | undefined;
 }
 
 /**
