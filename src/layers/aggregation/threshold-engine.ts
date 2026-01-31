@@ -22,6 +22,8 @@ import type {
   SignalAggregate,
   ContactUrgeData,
   PluginEventData,
+  Fact,
+  FactBatchData,
 } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import { Priority } from '../../types/priority.js';
@@ -34,7 +36,6 @@ import type { UserModel } from '../../models/user-model.js';
 import type { SignalAckRegistry } from './ack-registry.js';
 import { createAckRegistry } from './ack-registry.js';
 import type { MemoryProvider, MemoryEntry } from '../cognition/tools/core/memory.js';
-import type { Fact, FactBatchData } from '../../types/signal.js';
 
 /**
  * Conversation status for proactive contact decisions.
@@ -293,11 +294,10 @@ export class ThresholdEngine {
 
       if (validEvents.length > 0) {
         // Separate by signal kind:
-        // - fact_batch: facts to save to memory (no wake)
-        // - news:urgent_articles: wake COGNITION immediately
+        // - fact_batch: facts to save to memory (urgent=true also wakes COGNITION)
         // - other plugin events: wake COGNITION (reminders, etc.)
-        const urgentNews: Signal[] = [];
-        const factBatches: Signal[] = [];
+        const urgentFactBatches: Signal[] = [];
+        const normalFactBatches: Signal[] = [];
         const otherEvents: Signal[] = [];
 
         for (const event of validEvents) {
@@ -307,34 +307,39 @@ export class ThresholdEngine {
             continue;
           }
 
-          // Check for fact_batch signals (interesting content → memory)
+          // Check for fact_batch signals
           if (data.kind === 'fact_batch') {
-            factBatches.push(event);
-          } else if (data.kind === 'plugin_event') {
-            const pluginData = data;
-            if (pluginData.eventKind === 'news:urgent_articles') {
-              urgentNews.push(event);
+            const factData = data;
+            if (factData.urgent) {
+              urgentFactBatches.push(event);
             } else {
-              otherEvents.push(event);
+              normalFactBatches.push(event);
             }
+          } else if (data.kind === 'plugin_event') {
+            otherEvents.push(event);
           } else {
             otherEvents.push(event);
           }
         }
 
-        // Fact batches are saved to memory, no wake needed
-        if (factBatches.length > 0) {
-          await this.saveFactsToMemory(factBatches);
+        // Save all fact batches to memory (both urgent and normal)
+        const allFactBatches = [...urgentFactBatches, ...normalFactBatches];
+        if (allFactBatches.length > 0) {
+          await this.saveFactsToMemory(allFactBatches);
         }
 
-        // Urgent news wakes COGNITION immediately
+        // Urgent facts wake COGNITION immediately after saving
         // Note: fetch interval (~2h) serves as natural rate limit
-        if (urgentNews.length > 0) {
+        if (urgentFactBatches.length > 0) {
+          const totalFacts = urgentFactBatches.reduce((sum, sig) => {
+            const data = sig.data as FactBatchData;
+            return sum + data.facts.length;
+          }, 0);
           return {
             shouldWake: true,
             trigger: 'scheduled',
-            reason: `Urgent news: ${String(urgentNews.length)} article(s)`,
-            triggerSignals: urgentNews,
+            reason: `Urgent facts: ${String(totalFacts)} fact(s)`,
+            triggerSignals: urgentFactBatches,
           };
         }
 

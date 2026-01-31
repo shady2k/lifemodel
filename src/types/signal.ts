@@ -402,11 +402,14 @@ export interface FactBatchData {
   /** Plugin that produced these facts */
   pluginId: string;
 
-  /** Event kind for logging (e.g., 'news:interesting') */
+  /** Event kind for logging (e.g., 'news:interesting', 'news:urgent') */
   eventKind: string;
 
   /** Facts to be stored */
   facts: Fact[];
+
+  /** If true, wake COGNITION immediately after saving to memory */
+  urgent?: boolean;
 }
 
 /**

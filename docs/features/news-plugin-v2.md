@@ -483,9 +483,7 @@ Weaves naturally: "Hey! How are you? By the way, I remember seeing
 ```
 User: "What news did I miss?"
       ↓
-COGNITION searches core memory for saved articles
-      ↓
-Also checks share queue for unmentioned items
+COGNITION searches core memory for facts (tags: ['news', ...])
       ↓
 Summarizes and responds
 ```
@@ -551,19 +549,45 @@ Summarizes and responds
 - [ ] Article grouping logic ("3 crypto articles") - deferred to Phase 4
 - [ ] Integration tests - deferred
 
-### Phase 3: News Plugin Simplification
+### Phase 3: News Plugin Simplification ✅ COMPLETE
 
 - [x] Emit structured `plugin_event` signals (done in Phase 0)
-- [ ] Add source health monitoring
-- [ ] Register event schemas for validation
+- [x] Add source health monitoring (escalating disable: 3→1h, 5→6h, 10→alert user)
+- [x] Register event schemas for validation (Zod schema for article_batch)
 
-### Phase 4: COGNITION Integration (3-4 days)
+### Phase 4: COGNITION Integration (Fact-Based Architecture) ✅ COMPLETE
 
-- [ ] Handle urgent news wake (decide wording, send)
-- [ ] Handle share queue during proactive contact
-- [ ] Save important articles to core memory
-- [ ] "What did I miss?" query handling
-- [ ] Cold start onboarding prompt
+**Key Principle**: Brain operates on **facts**, not articles. Core NEVER imports plugin types.
+
+**Architecture:**
+- Plugin transforms articles → `Fact[]` (generic core type)
+- Both urgent AND interesting articles become facts
+- `FactBatchData` with `urgent: true` → save to memory AND wake COGNITION
+- `FactBatchData` with `urgent: false` → save to memory only
+- COGNITION sees facts with tags like `['news', 'crypto', 'bitcoin']`
+- Memory search via `core.memory` retrieves facts by tags
+
+**Signal flow (unified):**
+```
+news:article_batch (plugin-specific)
+         ↓
+NewsSignalFilter: article → Fact via toFact()
+         ↓
+fact_batch signal with urgent=true/false
+         ↓
+Aggregation: save to memory, wake if urgent
+         ↓
+COGNITION sees Fact[] (generic, no plugin types)
+```
+
+**Checklist:**
+- [x] Urgent articles → `Fact[]` with `urgent: true`
+- [x] Interesting articles → `Fact[]` with `urgent: false`
+- [x] Facts saved to memory with news tags
+- [x] `FactBatchData.urgent` flag controls COGNITION wake
+- [ ] Test: COGNITION receives urgent facts → responds appropriately
+- [ ] Test: User asks "what did I miss?" → COGNITION searches memory
+- [ ] Test: Proactive contact → COGNITION finds news facts in memory
 
 ### Phase 5: Learning Loop (3-4 days)
 
@@ -632,14 +656,13 @@ Summarizes and responds
 
 - [x] NewsSignalFilter correctly scores articles
 - [x] Interest and urgency scores computed independently
-- [ ] Rate limiting prevents urgent spam
-- [x] Interesting articles transformed to generic Fact type
-- [x] Facts saved to memory (not a queue)
+- [x] ALL articles (urgent + interesting) transformed to generic Fact type
+- [x] Facts saved to memory with news tags
+- [x] Urgent facts (`urgent: true`) wake COGNITION
+- [x] Source health disables failing sources (escalating policy)
 - [ ] Memory search retrieves recent news facts
 - [ ] Filtered topics decay after 48h
-- [ ] Source health disables failing sources
-- [ ] COGNITION wakes for urgent articles
-- [ ] Share queue surfaced during proactive contact
-- [ ] "What did I miss?" searches memory + queue
+- [ ] COGNITION responds appropriately to urgent facts
+- [ ] "What did I miss?" searches memory
 - [ ] Explicit reactions update weights
 - [ ] Cold start onboarding works

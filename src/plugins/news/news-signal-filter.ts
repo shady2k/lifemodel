@@ -199,6 +199,17 @@ export class NewsSignalFilter implements SignalFilter {
     const outputSignals: Signal[] = [];
 
     if (urgentArticles.length > 0) {
+      // Transform urgent articles to facts - brain operates on facts, not articles
+      const urgentFacts = urgentArticles.map((scored) => this.toFact(scored, sourceId));
+
+      const urgentFactBatchData: FactBatchData = {
+        kind: 'fact_batch',
+        pluginId: NEWS_PLUGIN_ID,
+        eventKind: 'news:urgent',
+        facts: urgentFacts,
+        urgent: true, // Wake COGNITION immediately
+      };
+
       outputSignals.push(
         createSignal(
           'plugin_event',
@@ -208,16 +219,7 @@ export class NewsSignalFilter implements SignalFilter {
             priority: 1, // HIGH priority - wake COGNITION
             correlationId: context.correlationId,
             parentId: originalSignal.id,
-            data: {
-              kind: 'plugin_event',
-              eventKind: 'news:urgent_articles',
-              pluginId: NEWS_PLUGIN_ID,
-              payload: {
-                articles: urgentArticles,
-                sourceId,
-                fetchedAt: payload.fetchedAt,
-              },
-            },
+            data: urgentFactBatchData,
           }
         )
       );
