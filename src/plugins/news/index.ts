@@ -8,6 +8,7 @@
  * No direct imports from core modules.
  */
 
+import { z } from 'zod';
 import type {
   PluginManifestV2,
   PluginLifecycleV2,
@@ -16,6 +17,7 @@ import type {
   MigrationBundle,
   StoragePrimitive,
   FilterPluginV2,
+  EventSchema,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
 import type { NewsArticle } from '../../types/news.js';
@@ -32,6 +34,33 @@ import { fetchRssFeed } from './fetchers/rss.js';
 import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
 import { extractArticleTopics, hasBreakingPattern } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
+
+/**
+ * Zod schema for news:article_batch event validation.
+ * Validates the signal emitted when articles are fetched.
+ */
+const articleBatchSchema = z.object({
+  kind: z.literal('plugin_event'),
+  eventKind: z.literal(NEWS_EVENT_KINDS.ARTICLE_BATCH),
+  pluginId: z.literal(NEWS_PLUGIN_ID),
+  fireId: z.string().optional(),
+  payload: z.object({
+    articles: z.array(
+      z.object({
+        id: z.string(),
+        title: z.string(),
+        source: z.string(),
+        topics: z.array(z.string()),
+        url: z.string().optional(),
+        summary: z.string().optional(),
+        publishedAt: z.date().optional(),
+        hasBreakingPattern: z.boolean(),
+      })
+    ),
+    sourceId: z.string(),
+    fetchedAt: z.date(),
+  }),
+});
 
 /**
  * Source health policy thresholds.
@@ -623,6 +652,13 @@ const lifecycle: PluginLifecycleV2 = {
   activate(primitives: PluginPrimitives): void {
     pluginPrimitives = primitives;
     primitives.logger.info('News plugin activating');
+
+    // Register event schemas for validation
+    primitives.services.registerEventSchema(
+      NEWS_EVENT_KINDS.ARTICLE_BATCH,
+      articleBatchSchema as unknown as EventSchema
+    );
+    primitives.logger.debug('Registered event schema for article_batch');
 
     // Create tools
     pluginTools = [createNewsTool(primitives)];
