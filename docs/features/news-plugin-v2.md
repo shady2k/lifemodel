@@ -256,25 +256,11 @@ interests: {
 
 ---
 
-## Rate Limiting (Aggregation Layer)
+## Rate Limiting (Not Needed)
 
-Prevent urgent notification spam:
+**Decision**: No artificial rate limiting required.
 
-```typescript
-interface UrgentDeliveryTracker {
-  recentDeliveries: Map<string, Date>;  // topic → lastDeliveredAt
-
-  canDeliverUrgent(topic: string): boolean {
-    const last = this.recentDeliveries.get(topic);
-    if (!last) return true;
-
-    const thirtyMinutesAgo = Date.now() - 30 * 60 * 1000;
-    return last.getTime() < thirtyMinutesAgo;
-  }
-}
-
-// Exception: urgencyScore > 0.95 bypasses rate limit (true emergency)
-```
+The news plugin fetches sources every ~2 hours. Each fetch batches all urgent articles into a single signal. This natural fetch interval prevents notification fatigue without additional code complexity.
 
 ---
 
@@ -470,9 +456,7 @@ First 48-72 hours: observe only, no proactive notifications.
 ```
 Urgent article detected (urgencyScore > 0.8)
       ↓
-Rate limit check (max 1 per topic per 30 min)
-      ↓
-COGNITION wakes immediately
+COGNITION wakes immediately (fetch interval ~2h is natural throttle)
       ↓
 Evaluates: Is user available? Is it really urgent?
       ↓
@@ -482,16 +466,16 @@ SEND_MESSAGE: "🚨 Bitcoin dropped 15%! Given your interest in crypto..."
 ### Interesting News (Opportunistic)
 
 ```
-Interesting article detected (interestScore 0.4-0.8)
+Interesting article detected (interestScore 0.4-1.0)
       ↓
-Added to share queue in AgentState
+Saved as fact to memory (type='fact', tags=['news', ...topics])
       ↓
 Later: proactive contact fires (social debt) OR user messages
       ↓
-COGNITION sees: "You have 3 items in share queue"
+COGNITION searches memory for relevant facts
       ↓
-Weaves naturally: "Hey! How are you? By the way, saw something
-                   interesting about AI research..."
+Weaves naturally: "Hey! How are you? By the way, I remember seeing
+                   something about AI research..."
 ```
 
 ### On-Demand ("What did I miss?")
@@ -514,8 +498,7 @@ Summarizes and responds
 |---------|-------|----------|
 | **Plugin storage** | News plugin | Source configs, fetch state, source health |
 | **User model** | Core | Interest weights, urgency weights, topic baselines |
-| **Core memory** | COGNITION | Saved articles (user asked to remember) |
-| **AgentState** | Core | Share queue (in-memory, not persisted) |
+| **Core memory** | Aggregation/COGNITION | Facts from interesting articles, user-saved articles |
 | **Autonomic state** | Autonomic | Filtered topics (in-memory, 48h decay) |
 
 ---
@@ -559,14 +542,14 @@ Summarizes and responds
 - [x] Novelty tracking (seenTopics set)
 - [ ] Filtered topic storage (in-memory, 48h decay) - deferred to Phase 5
 
-### Phase 2: Aggregation Layer Updates (IN PROGRESS)
+### Phase 2: Aggregation Layer Updates ✅ COMPLETE
 
-- [ ] **Fix ThresholdEngine** - Only wake for `news:urgent_articles`, not interesting
-- [ ] Create `ShareQueue` class in `src/layers/aggregation/share-queue.ts`
-- [ ] Integrate ShareQueue into AggregationProcessor
-- [ ] Add rate limiting for urgent notifications (max 1/topic/30min)
-- [ ] Article grouping logic ("3 crypto articles")
-- [ ] Integration tests
+- [x] **Fix ThresholdEngine** - Only wake for `news:urgent_articles`, not interesting
+- [x] Interesting articles → facts in memory (no ShareQueue needed)
+- [x] Wire memoryProvider to aggregation layer for fact storage
+- [x] Rate limiting: Not needed (fetch interval ~2h is natural throttle)
+- [ ] Article grouping logic ("3 crypto articles") - deferred to Phase 4
+- [ ] Integration tests - deferred
 
 ### Phase 3: News Plugin Simplification
 
@@ -622,8 +605,8 @@ Summarizes and responds
 | `src/layers/autonomic/index.ts` | Export filter types | ✅ Done |
 | `src/core/container.ts` | Wire userModel to autonomic layer | ✅ Done |
 | `src/plugins/news/index.ts` | Emit structured signals, FilterPluginV2 | ✅ Done |
-| `src/layers/aggregation/threshold-engine.ts` | Handle fact_batch signals, filter urgent news | ✅ Done |
-| `src/layers/aggregation/processor.ts` | Save facts to memory, rate limiting | In Progress |
+| `src/layers/aggregation/threshold-engine.ts` | Handle fact_batch signals, save facts to memory | ✅ Done |
+| `src/layers/aggregation/processor.ts` | Wire memoryProvider to threshold engine | ✅ Done |
 
 ---
 
