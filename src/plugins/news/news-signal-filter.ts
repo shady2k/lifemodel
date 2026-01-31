@@ -420,15 +420,16 @@ export class NewsSignalFilter implements SignalFilter {
     topics: string[],
     interests: Interests | null
   ): { topicMatch: number; topicWeight: number; bestTopic: string | null } {
-    // Cold start: "curious mode" - treat all topics as moderately interesting
-    // This allows noveltyBonus (0.3) + sourceReputation (0.1) + baseline (0.1) = 0.5
-    // which passes the 0.4 interest threshold
-    if (!interests || Object.keys(interests.weights).length === 0) {
-      // Return a baseline that, combined with novelty+sourceRep, can pass threshold
-      // topicMatch=1, topicWeight=0.2 → 1 * 0.2 * 0.5 = 0.1 base
+    // "Curious mode" baseline - used when:
+    // 1. No user interests defined (cold start)
+    // 2. No topic tags on article (LLM handles content understanding)
+    // This ensures articles pass threshold and get saved to memory
+    // where LLM can search them by content.
+    if (!interests || Object.keys(interests.weights).length === 0 || topics.length === 0) {
+      // Return baseline that passes 0.4 interest threshold:
+      // topicMatch=1, topicWeight=0.6 → 1 * 0.6 * 0.5 = 0.3 base
       // + sourceRep (0.5 * 0.2 = 0.1) + noveltyBonus (0.3 * 0.3 = 0.09)
-      // Total: 0.1 + 0.1 + 0.09 = 0.29... still not enough
-      // Better: Return higher baseline weight for cold start
+      // Total: 0.3 + 0.1 + 0.09 = 0.49 > 0.4 threshold ✓
       return { topicMatch: 1, topicWeight: 0.6, bestTopic: null };
     }
 

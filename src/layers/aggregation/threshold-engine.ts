@@ -851,8 +851,16 @@ export class ThresholdEngine {
    * - provenance → metadata (origin information)
    */
   private factToMemoryEntry(fact: Fact, signal: Signal, batchData: FactBatchData): MemoryEntry {
+    // Generate deterministic ID for deduplication
+    // Priority: originalId (most stable) -> url (unique per article) -> content hash (last resort)
+    const uniqueKey =
+      fact.provenance.originalId ?? fact.provenance.url ?? this.hashContent(fact.content);
+
+    // Hash the full key instead of base64-truncating (truncation causes collisions for same-domain URLs)
+    const id = `fact-${batchData.pluginId}-${this.hashContent(uniqueKey)}`;
+
     return {
-      id: `fact-${signal.id}-${crypto.randomUUID().slice(0, 8)}`,
+      id,
       type: 'fact',
       content: fact.content,
       timestamp: fact.provenance.timestamp ?? new Date(),
@@ -865,6 +873,22 @@ export class ThresholdEngine {
       },
       parentSignalId: signal.id,
     };
+  }
+
+  /**
+   * Hash content for deterministic ID generation.
+   * Normalizes content to handle minor variations (whitespace, case).
+   */
+  private hashContent(content: string): string {
+    // Normalize: lowercase, collapse whitespace
+    const normalized = content.toLowerCase().replace(/\s+/g, ' ').trim();
+    // Simple hash - just need determinism, not cryptographic security
+    let hash = 0;
+    for (const char of normalized) {
+      hash = (hash << 5) - hash + char.charCodeAt(0);
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36);
   }
 }
 

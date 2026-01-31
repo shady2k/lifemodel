@@ -88,7 +88,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     {
       name: 'limit',
       type: 'number',
-      description: 'Max results (for search, default: 5)',
+      description: 'Max results (for search, default: 10)',
       required: false,
     },
     {
@@ -162,7 +162,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
             return { success: false, action: 'search', error: 'Missing required parameter: query' };
           }
 
-          const limit = (args['limit'] as number | undefined) ?? 5;
+          const limit = (args['limit'] as number | undefined) ?? 10;
           const types = args['types'] as
             | ('message' | 'thought' | 'fact' | 'intention')[]
             | undefined;
@@ -185,6 +185,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
               tags: r.tags,
               status: r.status,
               trigger: r.trigger,
+              metadata: r.metadata,
             })),
             count: results.length,
           };

@@ -822,7 +822,9 @@ Rules:
 - Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
 - Set confidence below 0.6 when uncertain about complex/sensitive topics
 - State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.
-- Tool schemas are provided upfront. Call tools directly with the required parameters.${
+- Tool schemas are provided upfront. Call tools directly with the required parameters.
+- HONESTY: If search results don't contain what user asked for, say "nothing found" - don't make excuses or claim to see things not in results.
+- LINKS: When mentioning articles/news from memory, include the URL from metadata.url if available.${
       useSmart
         ? ''
         : `

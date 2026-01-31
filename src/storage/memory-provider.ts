@@ -133,9 +133,17 @@ export class JsonMemoryProvider implements MemoryProvider {
           score += 10;
         }
 
-        // Term matches
+        // Term matches (with word boundary for short terms to avoid false positives)
         for (const term of queryTerms) {
-          if (contentLower.includes(term)) {
+          if (term.length < 4) {
+            // Short terms require word boundaries (e.g., "ai" shouldn't match "Yo-Kai")
+            // Unicode-aware: \p{L} = letter, \p{N} = number
+            const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+            if (pattern.test(contentLower)) {
+              score += 2;
+            }
+          } else if (contentLower.includes(term)) {
             score += 2;
           }
         }
