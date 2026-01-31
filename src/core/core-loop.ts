@@ -48,7 +48,10 @@ import type { AutonomicProcessor } from '../layers/autonomic/processor.js';
 import type { AggregationProcessor } from '../layers/aggregation/processor.js';
 import type { CognitionProcessor } from '../layers/cognition/processor.js';
 import type { MessageComposer } from '../llm/composer.js';
-import type { ConversationManager } from '../storage/conversation-manager.js';
+import {
+  type ConversationManager,
+  CONVERSATION_TIMEOUTS,
+} from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
@@ -182,6 +185,9 @@ export class CoreLoop {
   /** Track thoughts emitted per tick for budget enforcement */
   private thoughtsThisTick = 0;
 
+  /** Primary recipient ID for proactive features */
+  private primaryRecipientId: string | undefined;
+
   constructor(
     agent: Agent,
     eventBus: EventBus,
@@ -220,9 +226,8 @@ export class CoreLoop {
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
     if ('updateDeps' in this.layers.aggregation) {
       // Convert primaryUserChatId to recipientId if both registry and chatId are available
-      let primaryRecipientId: string | undefined;
       if (this.recipientRegistry && config.primaryUserChatId) {
-        primaryRecipientId = this.recipientRegistry.getOrCreate(
+        this.primaryRecipientId = this.recipientRegistry.getOrCreate(
           'telegram',
           config.primaryUserChatId
         );
@@ -231,7 +236,7 @@ export class CoreLoop {
       (this.layers.aggregation as { updateDeps: (deps: unknown) => void }).updateDeps({
         conversationManager: deps.conversationManager,
         userModel: deps.userModel,
-        primaryRecipientId,
+        primaryRecipientId: this.primaryRecipientId,
       });
     }
   }
@@ -558,7 +563,12 @@ export class CoreLoop {
         this.userModel.updateTimeBasedBeliefs();
       }
 
-      // 7b. Check plugin schedulers for due events
+      // 7b. Check conversation status decay (active/awaiting_answer → idle after timeout)
+      if (this.conversationManager && this.primaryRecipientId) {
+        await this.checkConversationDecay();
+      }
+
+      // 7c. Check plugin schedulers for due events
       if (this.schedulerService) {
         try {
           await this.schedulerService.tick();
@@ -1308,6 +1318,55 @@ export class CoreLoop {
   setSchedulerService(service: SchedulerService): void {
     this.schedulerService = service;
     this.logger.debug('Scheduler service configured');
+  }
+
+  /**
+   * Check if conversation status should decay due to inactivity.
+   *
+   * Decay rules (based on CONVERSATION_TIMEOUTS):
+   * - awaiting_answer → idle after 10 minutes
+   * - active → idle after 30 minutes
+   * - closed → idle after 4 hours
+   * - idle → stays idle (already decayed)
+   */
+  private async checkConversationDecay(): Promise<void> {
+    if (!this.conversationManager || !this.primaryRecipientId) return;
+
+    try {
+      const { status, lastMessageAt } = await this.conversationManager.getStatus(
+        this.primaryRecipientId
+      );
+
+      // Can't decay if no messages or already idle
+      if (!lastMessageAt || status === 'idle') {
+        return;
+      }
+
+      const timeSinceMessage = Date.now() - lastMessageAt.getTime();
+      const timeout = CONVERSATION_TIMEOUTS[status];
+
+      if (timeSinceMessage >= timeout) {
+        // Decay to idle
+        await this.conversationManager.setStatus(this.primaryRecipientId, 'idle');
+
+        this.logger.info(
+          {
+            previousStatus: status,
+            newStatus: 'idle',
+            timeSinceMessageMin: Math.round(timeSinceMessage / 60000),
+            timeoutMin: Math.round(timeout / 60000),
+          },
+          'Conversation status decayed due to inactivity'
+        );
+
+        this.metrics.counter('conversation_decay', { from: status });
+      }
+    } catch (error) {
+      this.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to check conversation decay'
+      );
+    }
   }
 }
 

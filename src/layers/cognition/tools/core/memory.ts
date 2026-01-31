@@ -13,8 +13,20 @@ import { validateAgainstParameters } from '../validation.js';
  */
 export interface MemorySearchOptions {
   limit?: number | undefined;
-  types?: ('message' | 'thought' | 'fact')[] | undefined;
+  types?: ('message' | 'thought' | 'fact' | 'intention')[] | undefined;
   recipientId?: string | undefined;
+  /** Filter by status (for intentions) */
+  status?: 'pending' | 'completed' | undefined;
+}
+
+/**
+ * Trigger condition for intentions (prospective memory).
+ */
+export interface IntentionTrigger {
+  /** When should this intention surface? */
+  condition: 'next_conversation' | 'idle_moment' | 'topic_match';
+  /** Surface when discussing these topics (for topic_match) */
+  keywords?: string[] | undefined;
 }
 
 /**
@@ -22,7 +34,7 @@ export interface MemorySearchOptions {
  */
 export interface MemoryEntry {
   id: string;
-  type: 'message' | 'thought' | 'fact';
+  type: 'message' | 'thought' | 'fact' | 'intention';
   content: string;
   timestamp: Date;
   recipientId?: string | undefined;
@@ -33,6 +45,10 @@ export interface MemoryEntry {
   tickId?: string | undefined;
   /** Parent signal ID that led to this memory being created (causal chain) */
   parentSignalId?: string | undefined;
+  /** Trigger condition for intentions (when should this surface?) */
+  trigger?: IntentionTrigger | undefined;
+  /** Status for intentions */
+  status?: 'pending' | 'completed' | undefined;
 }
 
 /**
@@ -78,14 +94,28 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     {
       name: 'types',
       type: 'array',
-      description: 'Filter by type: message, thought, fact (for search)',
+      description: 'Filter by type: message, thought, fact, intention (for search)',
+      required: false,
+    },
+    {
+      name: 'status',
+      type: 'string',
+      description: 'Filter by status: pending, completed (for searching intentions)',
       required: false,
     },
     // chatId removed - system uses context.recipientId automatically
     {
       name: 'type',
       type: 'string',
-      description: 'Memory type: fact or thought (for save, default: fact)',
+      description:
+        'Memory type: fact, thought, or intention (for save, default: fact). Use intention for things to do/ask later.',
+      required: false,
+    },
+    {
+      name: 'trigger',
+      type: 'string',
+      description:
+        'Trigger condition for intentions: next_conversation, idle_moment, or topic_match (for save with type=intention)',
       required: false,
     },
     {
@@ -132,10 +162,14 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
           }
 
           const limit = (args['limit'] as number | undefined) ?? 5;
-          const types = args['types'] as ('message' | 'thought' | 'fact')[] | undefined;
+          const types = args['types'] as
+            | ('message' | 'thought' | 'fact' | 'intention')[]
+            | undefined;
+          const status = args['status'] as 'pending' | 'completed' | undefined;
 
           const options: MemorySearchOptions = { limit };
           if (types) options.types = types;
+          if (status) options.status = status;
           // Use context.recipientId - system knows the current conversation
           if (context?.recipientId) options.recipientId = context.recipientId;
 
@@ -148,6 +182,8 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
               content: r.content,
               timestamp: r.timestamp.toISOString(),
               tags: r.tags,
+              status: r.status,
+              trigger: r.trigger,
             })),
             count: results.length,
           };
@@ -166,10 +202,16 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
           const entryType = (args['type'] as string | undefined) ?? 'fact';
           const tags = (args['tags'] as string[] | undefined) ?? [];
           const confidence = (args['confidence'] as number | undefined) ?? 0.8;
+          const triggerStr = args['trigger'] as string | undefined;
+
+          // Determine memory type
+          let memoryType: 'fact' | 'thought' | 'intention' = 'fact';
+          if (entryType === 'thought') memoryType = 'thought';
+          if (entryType === 'intention') memoryType = 'intention';
 
           const entry: MemoryEntry = {
             id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
-            type: entryType === 'fact' ? 'fact' : 'thought',
+            type: memoryType,
             content,
             timestamp: new Date(),
             // Use context.recipientId - system knows the current conversation
@@ -177,6 +219,18 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
             tags,
             confidence,
           };
+
+          // Add intention-specific fields
+          if (memoryType === 'intention') {
+            entry.status = 'pending';
+            if (triggerStr) {
+              entry.trigger = {
+                condition: triggerStr as 'next_conversation' | 'idle_moment' | 'topic_match',
+              };
+            } else {
+              entry.trigger = { condition: 'next_conversation' };
+            }
+          }
 
           await deps.memoryProvider.save(entry);
           return { success: true, action: 'save', id: entry.id };

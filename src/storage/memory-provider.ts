@@ -48,7 +48,7 @@ interface MemoryStore {
 
 interface StoredEntry {
   id: string;
-  type: 'message' | 'thought' | 'fact';
+  type: 'message' | 'thought' | 'fact' | 'intention';
   content: string;
   timestamp: string;
   recipientId?: string | undefined;
@@ -59,6 +59,10 @@ interface StoredEntry {
   tickId?: string | undefined;
   /** Parent signal ID for causal chain */
   parentSignalId?: string | undefined;
+  /** Trigger condition for intentions */
+  trigger?: { condition: string; keywords?: string[] | undefined } | undefined;
+  /** Status for intentions */
+  status?: 'pending' | 'completed' | undefined;
 }
 
 /**
@@ -96,6 +100,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     const limit = options?.limit ?? 10;
     const types = options?.types;
     const recipientId = options?.recipientId;
+    const status = options?.status;
 
     // Normalize query for matching
     const queryLower = trimmedQuery.toLowerCase();
@@ -110,6 +115,10 @@ export class JsonMemoryProvider implements MemoryProvider {
         }
         // Filter by recipientId
         if (recipientId && entry.recipientId !== recipientId) {
+          return false;
+        }
+        // Filter by status (for intentions)
+        if (status && entry.status !== status) {
           return false;
         }
         return true;
@@ -265,6 +274,8 @@ export class JsonMemoryProvider implements MemoryProvider {
           metadata: e.metadata,
           tickId: e.tickId,
           parentSignalId: e.parentSignalId,
+          trigger: e.trigger,
+          status: e.status,
         })),
       };
 
@@ -303,6 +314,8 @@ export class JsonMemoryProvider implements MemoryProvider {
           metadata: e.metadata,
           tickId: e.tickId,
           parentSignalId: e.parentSignalId,
+          trigger: e.trigger as MemoryEntry['trigger'],
+          status: e.status,
         }));
 
         this.logger.info({ entries: this.entries.length }, 'Memory loaded from disk');

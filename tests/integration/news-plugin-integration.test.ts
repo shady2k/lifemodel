@@ -585,7 +585,7 @@ describe('News Plugin Integration', () => {
       // Check thought includes COGNITION guidance
       const thought = intentEmitter.thoughts[0];
       expect(thought).toContain('core.memory'); // Guidance to use memory tool
-      expect(thought).toContain('interested_in'); // Look for user preferences
+      expect(thought).toContain('USE YOUR JUDGMENT'); // Let COGNITION decide what's interesting
     });
   });
 });

@@ -520,7 +520,7 @@ export interface LoopConfig {
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   maxIterations: 10,
   maxToolCalls: 5,
-  timeoutMs: 30000,
+  timeoutMs: 120000,
   abortOnNewMessage: true,
   maxInputTokens: 10000,
   maxOutputTokens: 5000,
