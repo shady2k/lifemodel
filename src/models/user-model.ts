@@ -6,6 +6,8 @@ import {
   decayBelief,
 } from '../types/index.js';
 import type { User, UserPatterns, UserMood, UserProperty } from '../types/user/user.js';
+import type { NewsInterests } from '../types/news.js';
+import { createDefaultNewsInterests } from '../types/news.js';
 import { createUser } from '../types/user/user.js';
 import { isNameKnown as checkNameKnown } from '../types/user/person.js';
 import type { EvidenceSource } from '../types/cognition.js';
@@ -146,6 +148,11 @@ export class UserModel {
     // Restore flexible properties from persisted state
     if (user.properties) {
       this.restoreProperties(user.properties);
+    }
+
+    // Rehydrate newsInterests dates from persistence
+    if (user.newsInterests) {
+      this.rehydrateNewsInterests(user.newsInterests);
     }
 
     // Adjust energy profile based on user patterns
@@ -721,6 +728,89 @@ export class UserModel {
   restoreProperties(properties: Record<string, UserProperty>): void {
     this.properties = new Map(Object.entries(properties));
     this.logger.info({ count: this.properties.size }, 'User properties restored');
+  }
+
+  // === News Interests ===
+
+  /**
+   * Get user's news interests configuration.
+   * Returns null if not yet configured (cold start).
+   */
+  getNewsInterests(): NewsInterests | null {
+    return this.user.newsInterests ?? null;
+  }
+
+  /**
+   * Update user's news interests.
+   * Merges with existing interests (doesn't replace entirely).
+   */
+  updateNewsInterests(updates: Partial<NewsInterests>): void {
+    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+
+    // Merge sourceReputation if either current or updates has values
+    let mergedSourceReputation: Record<string, number> | undefined;
+    if (updates.sourceReputation || current.sourceReputation) {
+      mergedSourceReputation = {
+        ...(current.sourceReputation ?? {}),
+        ...(updates.sourceReputation ?? {}),
+      };
+    }
+
+    this.user.newsInterests = {
+      weights: { ...current.weights, ...updates.weights },
+      urgency: { ...current.urgency, ...updates.urgency },
+      sourceReputation: mergedSourceReputation,
+      topicBaselines: { ...current.topicBaselines, ...updates.topicBaselines },
+    };
+
+    this.logger.info(
+      { weightCount: Object.keys(this.user.newsInterests.weights).length },
+      'News interests updated'
+    );
+  }
+
+  /**
+   * Update a single topic weight.
+   * Convenience method for learning loop.
+   */
+  setTopicWeight(topic: string, weight: number): void {
+    const normalized = topic.toLowerCase();
+    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+
+    this.user.newsInterests = {
+      ...current,
+      weights: { ...current.weights, [normalized]: Math.max(0, Math.min(1, weight)) },
+    };
+
+    this.logger.debug({ topic: normalized, weight }, 'Topic weight updated');
+  }
+
+  /**
+   * Update a single topic urgency multiplier.
+   */
+  setTopicUrgency(topic: string, urgency: number): void {
+    const normalized = topic.toLowerCase();
+    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+
+    this.user.newsInterests = {
+      ...current,
+      urgency: { ...current.urgency, [normalized]: Math.max(0, Math.min(1, urgency)) },
+    };
+
+    this.logger.debug({ topic: normalized, urgency }, 'Topic urgency updated');
+  }
+
+  /**
+   * Rehydrate Date objects in newsInterests from persistence.
+   * JSON serialization converts Dates to strings, so we need to restore them.
+   */
+  private rehydrateNewsInterests(interests: NewsInterests): void {
+    for (const baseline of Object.values(interests.topicBaselines)) {
+      // When loaded from JSON, lastUpdated is a string, not a Date
+      if (!(baseline.lastUpdated instanceof Date)) {
+        baseline.lastUpdated = new Date(baseline.lastUpdated as unknown as string);
+      }
+    }
   }
 
   // === Private signal handlers ===

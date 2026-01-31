@@ -364,11 +364,14 @@ export class PluginLoader {
       this.logger.debug({ pluginId: manifest.id }, 'Registered as neuron plugin');
     }
 
-    // Store loaded state
+    // Create manifest-declared schedules (managed by core)
     const scheduler = this.schedulerService.getScheduler(manifest.id);
     if (!scheduler) {
       throw new Error(`Scheduler not registered for plugin ${manifest.id}`);
     }
+    const manifestScheduleIds = await this.createManifestSchedules(manifest, scheduler);
+
+    // Store loaded state
     const state: LoadedPluginState = {
       plugin,
       storage: primitives.storage as StoragePrimitiveImpl,
@@ -379,10 +382,11 @@ export class PluginLoader {
     };
     this.plugins.set(manifest.id, state);
 
-    // Update state tracking
+    // Update state tracking (include manifest schedule IDs for visibility)
     this.pluginStates.set(manifest.id, {
       state: 'active',
       failureCount: 0,
+      manifestScheduleIds: manifestScheduleIds.length > 0 ? manifestScheduleIds : undefined,
     });
 
     this.logger.info(
@@ -1403,6 +1407,80 @@ export class PluginLoader {
       this.toolRegisterCallback(prefixedTool);
       this.logger.debug({ pluginId, toolName: prefixedTool.name }, 'Tool registered');
     }
+  }
+
+  /**
+   * Create schedules declared in plugin manifest.
+   *
+   * Manifest schedules are managed by core - created on load, cancelled on unload.
+   * This gives core visibility and control over all plugin schedules.
+   *
+   * @returns Array of created schedule IDs
+   */
+  private async createManifestSchedules(
+    manifest: PluginManifestV2,
+    scheduler: SchedulerPrimitiveImpl
+  ): Promise<string[]> {
+    const schedules = manifest.schedules;
+    if (!schedules || schedules.length === 0) {
+      return [];
+    }
+
+    const createdIds: string[] = [];
+
+    for (const scheduleDef of schedules) {
+      // Skip disabled schedules
+      if (scheduleDef.enabled === false) {
+        this.logger.debug(
+          { pluginId: manifest.id, scheduleId: scheduleDef.id },
+          'Skipping disabled manifest schedule'
+        );
+        continue;
+      }
+
+      try {
+        // Calculate initial fire time
+        const initialDelay = scheduleDef.initialDelayMs ?? 0;
+        const fireAt = new Date(Date.now() + initialDelay);
+
+        const scheduleId = await scheduler.schedule({
+          id: `manifest:${scheduleDef.id}`,
+          fireAt,
+          recurrence: {
+            frequency: 'custom',
+            interval: 1,
+            cron: scheduleDef.cron,
+          },
+          data: {
+            kind: scheduleDef.eventKind,
+          },
+        });
+
+        createdIds.push(scheduleId);
+
+        this.logger.info(
+          {
+            pluginId: manifest.id,
+            scheduleId,
+            cron: scheduleDef.cron,
+            eventKind: scheduleDef.eventKind,
+          },
+          'Created manifest schedule'
+        );
+      } catch (error) {
+        this.logger.error(
+          {
+            pluginId: manifest.id,
+            scheduleId: scheduleDef.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Failed to create manifest schedule'
+        );
+        // Continue with other schedules - don't fail entire plugin load
+      }
+    }
+
+    return createdIds;
   }
 }
 

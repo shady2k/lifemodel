@@ -168,6 +168,9 @@ export interface PluginStateInfo {
 
   /** Timestamp when plugin was paused */
   pausedAt?: Date;
+
+  /** Schedule IDs created from manifest (for cleanup on unload) */
+  manifestScheduleIds?: string[] | undefined;
 }
 
 // ============================================================
@@ -357,6 +360,36 @@ export interface PluginManifestV2 {
 
   /** Description of what this plugin does */
   description?: string;
+
+  /**
+   * Declarative schedules managed by core.
+   * Core creates these on plugin load and cancels on unload.
+   */
+  schedules?: PluginScheduleDefinition[];
+}
+
+/**
+ * Declarative schedule definition in plugin manifest.
+ *
+ * Schedules declared here are created by core during plugin load
+ * and automatically cancelled on unload. This gives core visibility
+ * and control over all plugin schedules.
+ */
+export interface PluginScheduleDefinition {
+  /** Unique schedule ID within this plugin (e.g., "poll_feeds") */
+  id: string;
+
+  // Cron expression (e.g., "0 */2 * * *" for every 2 hours)
+  cron: string;
+
+  /** Event kind to emit when schedule fires (e.g., "news:poll_feeds") */
+  eventKind: string;
+
+  /** Whether this schedule is enabled (default: true) */
+  enabled?: boolean;
+
+  /** Initial delay before first fire in ms (default: interval-based) */
+  initialDelayMs?: number;
 }
 
 /**

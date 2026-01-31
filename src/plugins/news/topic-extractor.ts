@@ -398,3 +398,46 @@ export function formatTopicList(topics: string[]): string {
   const last = formatted.pop() ?? '';
   return `${formatted.join(', ')}, and ${last}`;
 }
+
+/**
+ * Patterns that indicate urgent/breaking news.
+ * Case-insensitive matching. Supports English and Russian.
+ */
+const BREAKING_PATTERNS = [
+  // English
+  'breaking',
+  'urgent',
+  'just in',
+  'developing',
+  'alert',
+  'emergency',
+  'crisis',
+  'breaking news',
+  'just announced',
+  // Russian
+  'срочно',
+  'молния',
+  'экстренно',
+  'важно',
+  'внимание',
+  'чрезвычайное',
+  'тревога',
+  'только что',
+];
+
+/**
+ * Check if text contains breaking/urgent patterns.
+ */
+export function hasBreakingPattern(text: string): boolean {
+  if (!text) return false;
+
+  const lowerText = text.toLowerCase();
+
+  for (const pattern of BREAKING_PATTERNS) {
+    if (lowerText.includes(pattern)) {
+      return true;
+    }
+  }
+
+  return false;
+}

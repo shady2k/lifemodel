@@ -22,6 +22,7 @@ export type * from './metrics.js';
 export type * from './thought.js';
 export type * from './logger.js';
 export type * from './rule.js';
+export type * from './news.js';
 
 // 4-layer architecture types
 export type * from './signal.js';
@@ -66,6 +67,9 @@ export {
 
 // Re-export rule factory functions
 export { createRule } from './rule.js';
+
+// Re-export news factory functions
+export { createDefaultNewsInterests } from './news.js';
 
 // Channel types (re-exported from channels module)
 export type { Channel, CircuitStats, SendOptions } from '../channels/channel.js';

@@ -18,6 +18,7 @@ import type {
   StoragePrimitive,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
+import type { NewsArticle } from '../../types/news.js';
 import {
   NEWS_PLUGIN_ID,
   NEWS_EVENT_KINDS,
@@ -29,7 +30,7 @@ import {
 import { createNewsTool } from './tools/news-tool.js';
 import { fetchRssFeed } from './fetchers/rss.js';
 import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
-import { extractBatchTopics, formatTopicList } from './topic-extractor.js';
+import { extractArticleTopics, hasBreakingPattern } from './topic-extractor.js';
 
 /**
  * Maximum consecutive failures before alerting user about broken source.
@@ -37,17 +38,10 @@ import { extractBatchTopics, formatTopicList } from './topic-extractor.js';
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
- * Character limit for batching articles into thoughts.
- */
-const THOUGHT_CHAR_LIMIT = 4000;
-
-/**
  * Plugin state (set during activation).
  */
 let pluginPrimitives: PluginPrimitives | null = null;
 let pluginTools: PluginTool[] = [];
-let pollScheduleId: string | null = null;
-
 /**
  * News plugin manifest.
  */
@@ -64,6 +58,15 @@ const manifest: PluginManifestV2 = {
     maxSchedules: 10, // Max 10 scheduled poll events (one per source type batch)
     maxStorageMB: 50, // 50MB for source configs and state
   },
+  // Declarative schedules - managed by core
+  schedules: [
+    {
+      id: 'poll_feeds',
+      cron: '0 */2 * * *', // Every 2 hours
+      eventKind: NEWS_EVENT_KINDS.POLL_FEEDS,
+      initialDelayMs: 2 * 60 * 60 * 1000, // First poll after 2 hours (don't flood on startup)
+    },
+  ],
 };
 
 /**
@@ -133,117 +136,22 @@ function filterNewArticles(
 }
 
 /**
- * Estimate the character size of an article in the thought format.
+ * Convert a FetchedArticle to a NewsArticle for signal emission.
+ * Enriches with topic extraction and breaking pattern detection.
  */
-function estimateArticleSize(article: FetchedArticle): number {
-  let size = article.title.length + article.sourceName.length + 20; // Base: title, source, formatting
+function convertToNewsArticle(article: FetchedArticle): NewsArticle {
+  const combinedText = article.summary ? `${article.title} ${article.summary}` : article.title;
 
-  if (article.summary) {
-    // Summary is truncated to ~150 chars
-    size += Math.min(article.summary.length, 150) + 10;
-  }
-
-  if (article.url) {
-    size += article.url.length + 10;
-  }
-
-  return size;
-}
-
-/**
- * Batch articles into thought-sized chunks (~4000 chars each).
- * Accounts for full article format including summaries and URLs.
- */
-function batchArticles(articles: FetchedArticle[]): FetchedArticle[][] {
-  // Reserve space for thought header/footer (~500 chars)
-  const effectiveLimit = THOUGHT_CHAR_LIMIT - 500;
-
-  const batches: FetchedArticle[][] = [];
-  let currentBatch: FetchedArticle[] = [];
-  let currentSize = 0;
-
-  for (const article of articles) {
-    const articleSize = estimateArticleSize(article);
-
-    if (currentSize + articleSize > effectiveLimit && currentBatch.length > 0) {
-      batches.push(currentBatch);
-      currentBatch = [];
-      currentSize = 0;
-    }
-
-    currentBatch.push(article);
-    currentSize += articleSize;
-  }
-
-  if (currentBatch.length > 0) {
-    batches.push(currentBatch);
-  }
-
-  return batches;
-}
-
-/**
- * Format a single article for thought output.
- */
-function formatArticle(article: FetchedArticle): string {
-  let line = `• **${article.sourceName}**: ${article.title}`;
-
-  if (article.summary) {
-    // Truncate summary to ~150 chars for thought brevity
-    const shortSummary =
-      article.summary.length > 150 ? article.summary.slice(0, 147) + '...' : article.summary;
-    line += `\n  ${shortSummary}`;
-  }
-
-  if (article.url) {
-    line += `\n  Link: ${article.url}`;
-  }
-
-  return line;
-}
-
-/**
- * Format a batch of articles into a thought string.
- * Includes rich context for COGNITION to evaluate importance.
- */
-function formatThought(articles: FetchedArticle[]): string {
-  // Extract topics for context
-  const topics = extractBatchTopics(articles);
-  const topicStr = formatTopicList(topics);
-
-  // Format each article with details
-  const articleLines = articles.map(formatArticle);
-
-  // Build the thought with COGNITION guidance
-  const thought = [
-    `I just fetched ${String(articles.length)} new article${articles.length > 1 ? 's' : ''} covering ${topicStr}:`,
-    '',
-    ...articleLines,
-    '',
-    '---',
-    'How to process these articles:',
-    '',
-    '1. USE YOUR JUDGMENT to decide which articles are worth saving:',
-    '   - Consider what you know about the user (profession, interests, location, past conversations)',
-    '   - If you know nothing, use general relevance (important news, useful content, trending topics)',
-    '   - Breaking/urgent news → always save',
-    '   - Niche content with no user context → skip',
-    '',
-    '2. SAVE interesting articles to memory (use core.memory with action "save"):',
-    '   - type: "fact"',
-    '   - content: Brief summary of the article',
-    '   - tags: ["news", source name, topic tags]',
-    '   - Include the link in content for reference',
-    '',
-    '3. If you are UNCERTAIN about user preferences:',
-    '   - Save an intention to ask later (type: "intention", trigger: "next_conversation")',
-    '   - Example: "Ask user which news topics interest them"',
-    '   - Do NOT try to respond directly (this is internal processing)',
-    '',
-    'Remember: You are processing internally. Save to memory, do not send messages.',
-  ].join('\n');
-
-  return thought;
+  return {
+    id: article.id,
+    title: article.title,
+    source: article.sourceId, // e.g., 'rss:techcrunch'
+    topics: extractArticleTopics(article.title, article.summary),
+    url: article.url,
+    summary: article.summary,
+    publishedAt: article.publishedAt,
+    hasBreakingPattern: hasBreakingPattern(combinedText),
+  };
 }
 
 /**
@@ -496,54 +404,59 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   ]);
 
   // Combine results
-  const newArticles = [...rssResult.newArticles, ...telegramResult.newArticles];
+  const fetchedArticles = [...rssResult.newArticles, ...telegramResult.newArticles];
   const failedSources = [...rssResult.failedSources, ...telegramResult.failedSources];
 
   logger.info(
-    { newArticleCount: newArticles.length, failedSourceCount: failedSources.length },
+    { newArticleCount: fetchedArticles.length, failedSourceCount: failedSources.length },
     'Feed poll completed'
   );
 
-  // Emit thought for failed sources that need attention
+  // Log failed sources (source health monitoring - Phase 0.3)
   if (failedSources.length > 0) {
-    const failureThought =
-      `Some of my news sources have been failing repeatedly:\n` +
-      failedSources.map((name) => `- ${name}`).join('\n') +
-      `\n\nI should let the user know these sources might need attention.`;
-
-    const result = intentEmitter.emitThought(failureThought);
-    if (!result.success) {
-      logger.warn({ error: result.error }, 'Failed to emit thought for source failures');
-    }
+    logger.warn({ failedSources }, 'Sources with consecutive failures');
   }
 
   // If no new articles, nothing more to do
-  if (newArticles.length === 0) {
+  if (fetchedArticles.length === 0) {
     logger.debug('No new articles found');
     return;
   }
 
-  // Batch articles and emit thoughts
-  const batches = batchArticles(newArticles);
+  // Convert to NewsArticle format with topic extraction and breaking detection
+  const newsArticles = fetchedArticles.map(convertToNewsArticle);
 
-  logger.debug(
-    { articleCount: newArticles.length, batchCount: batches.length },
-    'Emitting thoughts for new articles'
-  );
+  // Group articles by source for the signal payload
+  const articlesBySource = new Map<string, NewsArticle[]>();
+  for (const article of newsArticles) {
+    const existing = articlesBySource.get(article.source) ?? [];
+    existing.push(article);
+    articlesBySource.set(article.source, existing);
+  }
 
-  for (const batch of batches) {
-    const thought = formatThought(batch);
-    const result = intentEmitter.emitThought(thought);
+  // Emit plugin_event signal for each source batch
+  // (NewsSignalFilter in autonomic layer will process these)
+  for (const [sourceId, articles] of articlesBySource) {
+    const result = intentEmitter.emitSignal({
+      priority: 2, // Normal priority - autonomic layer will assess urgency
+      data: {
+        kind: NEWS_EVENT_KINDS.ARTICLE_BATCH,
+        pluginId: NEWS_PLUGIN_ID,
+        articles,
+        sourceId,
+        fetchedAt: new Date(),
+      },
+    });
 
     if (!result.success) {
       logger.warn(
-        { error: result.error, articleCount: batch.length },
-        'Failed to emit thought for news batch'
+        { error: result.error, sourceId, articleCount: articles.length },
+        'Failed to emit article batch signal'
       );
     } else {
       logger.debug(
-        { signalId: result.signalId, articleCount: batch.length },
-        'Emitted thought for news batch'
+        { signalId: result.signalId, sourceId, articleCount: articles.length },
+        'Emitted article batch signal'
       );
     }
   }
@@ -556,45 +469,24 @@ const lifecycle: PluginLifecycleV2 = {
   /**
    * Activate the plugin.
    */
-  async activate(primitives: PluginPrimitives): Promise<void> {
+  activate(primitives: PluginPrimitives): void {
     pluginPrimitives = primitives;
     primitives.logger.info('News plugin activating');
 
     // Create tools
     pluginTools = [createNewsTool(primitives)];
 
-    // Schedule periodic polling (every 2 hours)
-    const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
-    pollScheduleId = await primitives.scheduler.schedule({
-      fireAt: twoHoursFromNow,
-      recurrence: {
-        frequency: 'custom',
-        interval: 2,
-        cron: '0 */2 * * *', // Every 2 hours
-      },
-      data: {
-        kind: NEWS_EVENT_KINDS.POLL_FEEDS,
-      },
-    });
-
-    primitives.logger.info(
-      { scheduleId: pollScheduleId },
-      'News plugin activated with polling schedule'
-    );
+    // Polling schedule is declared in manifest - core manages it
+    primitives.logger.info('News plugin activated');
   },
 
   /**
    * Deactivate the plugin.
    */
-  async deactivate(): Promise<void> {
+  deactivate(): void {
     if (pluginPrimitives) {
       pluginPrimitives.logger.info('News plugin deactivating');
-
-      // Cancel polling schedule
-      if (pollScheduleId) {
-        await pluginPrimitives.scheduler.cancel(pollScheduleId);
-        pollScheduleId = null;
-      }
+      // Manifest schedules are cancelled by core on unload
     }
     pluginPrimitives = null;
     pluginTools = [];

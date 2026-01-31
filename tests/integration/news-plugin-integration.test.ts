@@ -227,19 +227,20 @@ describe('News Plugin Integration', () => {
       expect(newsPlugin.manifest.provides).toContainEqual({ type: 'tool', id: 'news' });
     });
 
-    it('should activate and set up poll schedule', async () => {
+    it('should declare poll schedule in manifest', () => {
+      // Schedules are now declared in manifest, created by core (not plugin)
+      const schedules = newsPlugin.manifest.schedules;
+      expect(schedules).toBeDefined();
+      expect(schedules?.length).toBe(1);
+      expect(schedules?.[0].id).toBe('poll_feeds');
+      expect(schedules?.[0].cron).toBe('0 */2 * * *'); // Every 2 hours
+      expect(schedules?.[0].eventKind).toBe(NEWS_EVENT_KINDS.POLL_FEEDS);
+    });
+
+    it('should activate and register tool', async () => {
       await newsPlugin.lifecycle.activate(primitives);
 
-      // Should have scheduled poll event
-      expect(scheduler.schedule).toHaveBeenCalledTimes(1);
-      const scheduleCall = (scheduler.schedule as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
-        recurrence?: { cron?: string };
-        data?: { kind?: string };
-      };
-      expect(scheduleCall.recurrence?.cron).toBe('0 */2 * * *'); // Every 2 hours
-      expect(scheduleCall.data?.kind).toBe(NEWS_EVENT_KINDS.POLL_FEEDS);
-
-      // Should register tool
+      // Should register tool (schedules are managed by core now)
       expect(newsPlugin.tools.length).toBe(1);
       expect(newsPlugin.tools[0].name).toBe('news');
 
@@ -247,11 +248,11 @@ describe('News Plugin Integration', () => {
       await newsPlugin.lifecycle.deactivate?.();
     });
 
-    it('should deactivate and cancel schedule', async () => {
+    it('should deactivate and cleanup tools', async () => {
       await newsPlugin.lifecycle.activate(primitives);
       await newsPlugin.lifecycle.deactivate?.();
 
-      expect(scheduler.cancel).toHaveBeenCalled();
+      // Manifest schedules are cancelled by core, not plugin
       expect(newsPlugin.tools.length).toBe(0);
     });
 
@@ -499,7 +500,7 @@ describe('News Plugin Integration', () => {
       expect(logger.calls.warn.length + logger.calls.error.length).toBeGreaterThan(0);
     });
 
-    it('should emit thought about failing sources after consecutive failures', async () => {
+    it('should log warning about failing sources after consecutive failures', async () => {
       // Mock fetch to fail with proper Response structure
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse('', { ok: false, status: 500, statusText: 'Internal Server Error' })
@@ -520,11 +521,9 @@ describe('News Plugin Integration', () => {
       await newsPlugin.lifecycle.onEvent?.(NEWS_EVENT_KINDS.POLL_FEEDS, {});
       await newsPlugin.lifecycle.onEvent?.(NEWS_EVENT_KINDS.POLL_FEEDS, {});
 
-      // Should emit thought about failing sources
-      const failureThoughts = intentEmitter.thoughts.filter(
-        (t) => t.includes('failing') || t.includes('need attention')
-      );
-      expect(failureThoughts.length).toBeGreaterThan(0);
+      // In v2 architecture, failed sources are logged (source health monitoring)
+      // instead of emitting thoughts. Verify warnings were logged.
+      expect(logger.calls.warn.length).toBeGreaterThan(0);
     });
   });
 

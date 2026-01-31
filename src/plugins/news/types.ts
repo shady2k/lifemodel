@@ -21,6 +21,8 @@ export const NEWS_STORAGE_KEYS = {
 export const NEWS_EVENT_KINDS = {
   /** Scheduled poll event - triggers feed fetching */
   POLL_FEEDS: 'news:poll_feeds',
+  /** Article batch ready for processing by brain layers */
+  ARTICLE_BATCH: 'news:article_batch',
 } as const;
 
 /**
