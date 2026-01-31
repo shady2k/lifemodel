@@ -326,23 +326,27 @@ private toFact(scored: ScoredArticle, sourceId: string): Fact {
 
 ---
 
-## Filtered Topics Storage (Brief)
+## Filtered Topics Storage (Simplified)
 
-Store topics of filtered articles for learning (when user mentions them later).
+Filtered topics are stored as **low-confidence facts** in memory - no separate registry needed.
 
 ```typescript
-// In autonomic layer state (in-memory)
-filteredTopics: Map<string, {
-  topic: string;
-  firstSeen: Date;
-  lastSeen: Date;
-  count: number;
-  mentionDetected: boolean;
-}>;
-
-// Cleanup: Remove topics older than 48 hours where mentionDetected === false
-// Purpose: If user mentions a filtered topic, we can boost its weight
+// Filtered article → minimal fact
+{
+  content: "crypto",           // Just the topic
+  confidence: 0.2,             // Low confidence - was filtered
+  tags: ['news', 'filtered', 'crypto'],
+  provenance: { source: sourceId, timestamp: Date }
+}
 ```
+
+**How it works:**
+1. NewsSignalFilter emits filtered topics as `fact_batch` with low confidence
+2. Aggregation layer saves to memory (same as interesting facts)
+3. When user mentions "crypto", COGNITION searches memory
+4. Finds low-confidence fact → "I saw something about crypto recently..."
+
+No cleanup needed - memory consolidation handles expiry naturally.
 
 ---
 
@@ -611,8 +615,8 @@ User: "I love crypto news!"
 - [x] Routing `urgency_*` to `setTopicUrgency`
 - [x] General delta support for all numeric properties
 - [x] Updated tool description in `core.remember`
-- [ ] Filtered topic mention detection (Phase 5.2 - future)
-- [ ] "I saw something about X" response (Phase 5.2 - future)
+- [x] Filtered topics emitted as low-confidence facts (tag: 'filtered')
+- [ ] "I saw something about X" - COGNITION searches memory, finds filtered facts
 - [ ] Integration tests for learning
 
 ### Phase 6: Telegram Channels (Future)

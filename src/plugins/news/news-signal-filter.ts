@@ -161,6 +161,7 @@ export class NewsSignalFilter implements SignalFilter {
 
     const urgentArticles: ScoredArticle[] = [];
     const interestingArticles: ScoredArticle[] = [];
+    const filteredTopics = new Set<string>();
 
     // Score and classify each article
     for (const article of articles) {
@@ -172,8 +173,12 @@ export class NewsSignalFilter implements SignalFilter {
         urgentArticles.push(scored);
       } else if (interestScore >= this.config.interestThreshold) {
         interestingArticles.push(scored);
+      } else {
+        // NOISE: collect topics for low-confidence facts
+        for (const topic of article.topics) {
+          filteredTopics.add(topic.toLowerCase());
+        }
       }
-      // NOISE: articles below interest threshold are dropped
 
       // Mark topics as seen
       for (const topic of article.topics) {
@@ -249,6 +254,46 @@ export class NewsSignalFilter implements SignalFilter {
             data: factBatchData,
           }
         )
+      );
+    }
+
+    // Emit filtered topics as low-confidence facts
+    // These can be found later if user mentions the topic
+    if (filteredTopics.size > 0) {
+      const filteredFacts: Fact[] = Array.from(filteredTopics).map((topic) => ({
+        content: topic,
+        confidence: 0.2, // Low confidence - was filtered out
+        tags: ['news', 'filtered', topic],
+        provenance: {
+          source: sourceId,
+          timestamp: payload.fetchedAt,
+        },
+      }));
+
+      const filteredFactBatchData: FactBatchData = {
+        kind: 'fact_batch',
+        pluginId: NEWS_PLUGIN_ID,
+        eventKind: 'news:filtered',
+        facts: filteredFacts,
+      };
+
+      outputSignals.push(
+        createSignal(
+          'plugin_event',
+          `plugin.${NEWS_PLUGIN_ID}`,
+          { value: filteredTopics.size },
+          {
+            priority: 4, // LOWEST priority - just for mention detection
+            correlationId: context.correlationId,
+            parentId: originalSignal.id,
+            data: filteredFactBatchData,
+          }
+        )
+      );
+
+      this.logger.debug(
+        { topics: Array.from(filteredTopics), count: filteredTopics.size },
+        'Filtered topics emitted as low-confidence facts'
       );
     }
 
