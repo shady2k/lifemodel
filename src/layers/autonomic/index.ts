@@ -7,6 +7,7 @@
  *
  * Dynamic Registration:
  * - Neurons can be registered/unregistered at runtime via PluginLoader
+ * - Filters can be registered to transform/classify incoming signals
  * - AutonomicProcessor exposes registerNeuron/unregisterNeuron methods
  * - Changes are queued and applied at tick boundaries
  *
@@ -31,3 +32,7 @@ export {
   DEFAULT_CHANGE_CONFIG,
 } from './change-detector.js';
 export type { ChangeDetectorConfig, ChangeResult } from './change-detector.js';
+
+// Signal filters
+export { FilterRegistry, createFilterRegistry } from './filter-registry.js';
+export type { SignalFilter, FilterContext, FilterUserModel } from './filter-registry.js';

@@ -6,8 +6,8 @@ import {
   decayBelief,
 } from '../types/index.js';
 import type { User, UserPatterns, UserMood, UserProperty } from '../types/user/user.js';
-import type { NewsInterests } from '../types/news.js';
-import { createDefaultNewsInterests } from '../types/news.js';
+import type { Interests } from '../types/user/interests.js';
+import { createDefaultInterests } from '../types/user/interests.js';
 import { createUser } from '../types/user/user.js';
 import { isNameKnown as checkNameKnown } from '../types/user/person.js';
 import type { EvidenceSource } from '../types/cognition.js';
@@ -150,9 +150,9 @@ export class UserModel {
       this.restoreProperties(user.properties);
     }
 
-    // Rehydrate newsInterests dates from persistence
-    if (user.newsInterests) {
-      this.rehydrateNewsInterests(user.newsInterests);
+    // Rehydrate interests dates from persistence
+    if (user.interests) {
+      this.rehydrateInterests(user.interests);
     }
 
     // Adjust energy profile based on user patterns
@@ -730,22 +730,22 @@ export class UserModel {
     this.logger.info({ count: this.properties.size }, 'User properties restored');
   }
 
-  // === News Interests ===
+  // === User Interests ===
 
   /**
-   * Get user's news interests configuration.
+   * Get user's interests configuration (topic weights, urgency).
    * Returns null if not yet configured (cold start).
    */
-  getNewsInterests(): NewsInterests | null {
-    return this.user.newsInterests ?? null;
+  getInterests(): Interests | null {
+    return this.user.interests ?? null;
   }
 
   /**
-   * Update user's news interests.
+   * Update user's interests.
    * Merges with existing interests (doesn't replace entirely).
    */
-  updateNewsInterests(updates: Partial<NewsInterests>): void {
-    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+  updateInterests(updates: Partial<Interests>): void {
+    const current = this.user.interests ?? createDefaultInterests();
 
     // Merge sourceReputation if either current or updates has values
     let mergedSourceReputation: Record<string, number> | undefined;
@@ -756,7 +756,7 @@ export class UserModel {
       };
     }
 
-    this.user.newsInterests = {
+    this.user.interests = {
       weights: { ...current.weights, ...updates.weights },
       urgency: { ...current.urgency, ...updates.urgency },
       sourceReputation: mergedSourceReputation,
@@ -764,8 +764,8 @@ export class UserModel {
     };
 
     this.logger.info(
-      { weightCount: Object.keys(this.user.newsInterests.weights).length },
-      'News interests updated'
+      { weightCount: Object.keys(this.user.interests.weights).length },
+      'User interests updated'
     );
   }
 
@@ -775,9 +775,9 @@ export class UserModel {
    */
   setTopicWeight(topic: string, weight: number): void {
     const normalized = topic.toLowerCase();
-    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+    const current = this.user.interests ?? createDefaultInterests();
 
-    this.user.newsInterests = {
+    this.user.interests = {
       ...current,
       weights: { ...current.weights, [normalized]: Math.max(0, Math.min(1, weight)) },
     };
@@ -790,9 +790,9 @@ export class UserModel {
    */
   setTopicUrgency(topic: string, urgency: number): void {
     const normalized = topic.toLowerCase();
-    const current = this.user.newsInterests ?? createDefaultNewsInterests();
+    const current = this.user.interests ?? createDefaultInterests();
 
-    this.user.newsInterests = {
+    this.user.interests = {
       ...current,
       urgency: { ...current.urgency, [normalized]: Math.max(0, Math.min(1, urgency)) },
     };
@@ -801,10 +801,10 @@ export class UserModel {
   }
 
   /**
-   * Rehydrate Date objects in newsInterests from persistence.
+   * Rehydrate Date objects in interests from persistence.
    * JSON serialization converts Dates to strings, so we need to restore them.
    */
-  private rehydrateNewsInterests(interests: NewsInterests): void {
+  private rehydrateInterests(interests: Interests): void {
     for (const baseline of Object.values(interests.topicBaselines)) {
       // When loaded from JSON, lastUpdated is a string, not a Date
       if (!(baseline.lastUpdated instanceof Date)) {

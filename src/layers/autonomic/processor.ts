@@ -26,6 +26,13 @@ import type { Logger } from '../../types/logger.js';
 import type { Neuron, NeuronRegistry } from './neuron-registry.js';
 import { createNeuronRegistry } from './neuron-registry.js';
 import type { AlertnessNeuron } from '../../plugins/alertness/index.js';
+import type { FilterRegistry } from './filter-registry.js';
+import {
+  createFilterRegistry,
+  type SignalFilter,
+  type FilterContext,
+  type FilterUserModel,
+} from './filter-registry.js';
 
 /**
  * Configuration for AUTONOMIC processor.
@@ -57,6 +64,7 @@ export class AutonomicProcessor implements AutonomicLayer {
   readonly name = 'autonomic' as const;
 
   private readonly registry: NeuronRegistry;
+  private readonly filterRegistry: FilterRegistry;
   private readonly logger: Logger;
   private readonly config: AutonomicProcessorConfig;
 
@@ -72,13 +80,17 @@ export class AutonomicProcessor implements AutonomicLayer {
   /** Pending neuron unregistrations by ID (applied at tick boundary) */
   private pendingUnregistrations: string[] = [];
 
+  /** User model for filter context (injected via setUserModel) */
+  private userModel: FilterUserModel | null = null;
+
   constructor(logger: Logger, config: Partial<AutonomicProcessorConfig> = {}) {
     this.logger = logger.child({ layer: 'autonomic' });
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.registry = createNeuronRegistry(this.logger);
+    this.filterRegistry = createFilterRegistry(this.logger);
 
     // No initializeNeurons() - neurons are registered dynamically via callbacks
-    this.logger.info('AUTONOMIC layer created (awaiting neuron registration)');
+    this.logger.info('AUTONOMIC layer created (awaiting neuron/filter registration)');
   }
 
   /**
@@ -103,6 +115,39 @@ export class AutonomicProcessor implements AutonomicLayer {
       this.pendingUnregistrations.push(id);
       this.logger.debug({ neuronId: id }, 'Neuron queued for unregistration');
     }
+  }
+
+  // ============================================================
+  // Signal Filter Registration
+  // ============================================================
+
+  /**
+   * Register a signal filter.
+   * Called by plugins to add signal transformation/classification.
+   *
+   * @param filter The filter to register
+   * @param priority Optional priority (lower = runs first)
+   */
+  registerFilter(filter: SignalFilter, priority?: number): void {
+    this.filterRegistry.register(filter, priority);
+  }
+
+  /**
+   * Unregister a signal filter.
+   */
+  unregisterFilter(id: string): boolean {
+    return this.filterRegistry.unregister(id);
+  }
+
+  /**
+   * Set the user model for filter context.
+   * Called by container after creation to wire up dependencies.
+   *
+   * @param userModel The user model (or null if not configured)
+   */
+  setUserModel(userModel: FilterUserModel | null): void {
+    this.userModel = userModel;
+    this.logger.debug({ hasUserModel: !!userModel }, 'User model set for filters');
   }
 
   /**
@@ -227,8 +272,19 @@ export class AutonomicProcessor implements AutonomicLayer {
     // Check all neurons
     const neuronSignals = this.registry.checkAll(state, alertness, correlationId);
 
-    // Combine with incoming sensory signals
-    const allSignals = [...incomingSignals, ...neuronSignals];
+    // Build filter context with user model
+    const filterContext: FilterContext = {
+      state,
+      alertness,
+      correlationId,
+      userModel: this.userModel,
+    };
+
+    // Run incoming signals through filters (transform/classify)
+    const filteredSignals = this.filterRegistry.process(incomingSignals, filterContext);
+
+    // Combine filtered incoming signals with neuron signals
+    const allSignals = [...filteredSignals, ...neuronSignals];
 
     // Generate state update intents (e.g., energy drain from processing)
     const intents = this.generateIntents(incomingSignals.length, neuronSignals.length);
@@ -238,6 +294,7 @@ export class AutonomicProcessor implements AutonomicLayer {
     this.logger.trace(
       {
         incomingSignals: incomingSignals.length,
+        filteredSignals: filteredSignals.length,
         neuronSignals: neuronSignals.length,
         totalSignals: allSignals.length,
         alertness: alertness.toFixed(2),
@@ -281,6 +338,13 @@ export class AutonomicProcessor implements AutonomicLayer {
    */
   getRegistry(): NeuronRegistry {
     return this.registry;
+  }
+
+  /**
+   * Get the filter registry (for testing/debugging).
+   */
+  getFilterRegistry(): FilterRegistry {
+    return this.filterRegistry;
   }
 
   /**

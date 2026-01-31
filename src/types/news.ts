@@ -3,7 +3,9 @@
  *
  * Type definitions for the news processing pipeline.
  * NewsArticle is the structured data flowing through brain layers.
- * NewsInterests stores user preferences for scoring.
+ *
+ * Note: User interest configuration (topic weights, urgency) is defined
+ * in src/types/user/interests.ts as generic user model data, not news-specific.
  */
 
 /**
@@ -52,59 +54,4 @@ export interface NewsArticleBatchPayload {
 
   /** When the fetch occurred */
   fetchedAt: Date;
-}
-
-/**
- * User's news interest configuration.
- *
- * Stored in user model - beliefs about what the user cares about.
- * Used by NewsSignalFilter to score articles.
- */
-export interface NewsInterests {
-  /**
-   * Topic weights (learned).
-   * - weight > 0 means interested (higher = more interested)
-   * - weight === 0 means suppressed/blocked
-   * Keys are lowercase topic names.
-   */
-  weights: Record<string, number>;
-
-  /**
-   * Per-topic urgency multiplier.
-   * Determines how aggressively to interrupt for this topic.
-   * Range: 0-1 (0 = never interrupt, 1 = always interrupt if interesting)
-   */
-  urgency: Record<string, number>;
-
-  /**
-   * Source reputation scores.
-   * Default 0.5 if not specified.
-   * Range: 0-1 (0 = untrusted, 1 = highly trusted)
-   */
-  sourceReputation?: Record<string, number> | undefined;
-
-  /**
-   * Topic baselines for volume anomaly detection.
-   * Used to detect unusual spikes in article volume.
-   */
-  topicBaselines: Record<
-    string,
-    {
-      /** Average articles per fetch for this topic */
-      avgVolume: number;
-      /** When baseline was last updated */
-      lastUpdated: Date;
-    }
-  >;
-}
-
-/**
- * Create default empty news interests.
- */
-export function createDefaultNewsInterests(): NewsInterests {
-  return {
-    weights: {},
-    urgency: {},
-    topicBaselines: {},
-  };
 }

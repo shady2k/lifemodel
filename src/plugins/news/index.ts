@@ -9,13 +9,13 @@
  */
 
 import type {
-  PluginV2,
   PluginManifestV2,
   PluginLifecycleV2,
   PluginPrimitives,
   PluginTool,
   MigrationBundle,
   StoragePrimitive,
+  FilterPluginV2,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
 import type { NewsArticle } from '../../types/news.js';
@@ -31,6 +31,7 @@ import { createNewsTool } from './tools/news-tool.js';
 import { fetchRssFeed } from './fetchers/rss.js';
 import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
 import { extractArticleTopics, hasBreakingPattern } from './topic-extractor.js';
+import { createNewsSignalFilter } from './news-signal-filter.js';
 
 /**
  * Maximum consecutive failures before alerting user about broken source.
@@ -52,7 +53,10 @@ const manifest: PluginManifestV2 = {
   version: '1.0.0',
   description:
     'Monitor RSS feeds and Telegram channels, filter by importance, and notify about relevant news',
-  provides: [{ type: 'tool', id: 'news' }],
+  provides: [
+    { type: 'tool', id: 'news' },
+    { type: 'filter', id: 'news-signal-filter' },
+  ],
   requires: ['scheduler', 'storage', 'signalEmitter', 'logger'],
   limits: {
     maxSchedules: 10, // Max 10 scheduled poll events (one per source type batch)
@@ -546,13 +550,20 @@ export function getTools(): PluginTool[] {
 /**
  * The news plugin instance.
  * Tools are created during activation and accessed via the getter.
+ * Filter is created by core via the filter factory.
  */
-const newsPlugin: PluginV2 = {
+const newsPlugin: FilterPluginV2 = {
   manifest,
   lifecycle,
   // Tools getter - returns tools created during activation
   get tools() {
     return pluginTools;
+  },
+  // Filter factory - core creates and registers the filter
+  filter: {
+    create: (logger) => createNewsSignalFilter(logger),
+    handles: ['plugin_event'],
+    priority: 100,
   },
 };
 

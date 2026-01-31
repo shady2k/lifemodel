@@ -68,8 +68,8 @@ export {
 // Re-export rule factory functions
 export { createRule } from './rule.js';
 
-// Re-export news factory functions
-export { createDefaultNewsInterests } from './news.js';
+// Re-export user interests factory functions
+export { createDefaultInterests } from './user/interests.js';
 
 // Channel types (re-exported from channels module)
 export type { Channel, CircuitStats, SendOptions } from '../channels/channel.js';

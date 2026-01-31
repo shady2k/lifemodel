@@ -35,7 +35,9 @@ import type {
   NeuronPluginV2,
   PluginStateInfo,
 } from '../types/plugin.js';
-import { isNeuronPlugin } from '../types/plugin.js';
+import { isNeuronPlugin, isFilterPlugin } from '../types/plugin.js';
+import type { FilterPluginV2 } from '../types/plugin.js';
+import type { SignalFilter } from '../layers/autonomic/filter-registry.js';
 import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
 import { createSchedulerPrimitive, type SchedulerPrimitiveImpl } from './scheduler-primitive.js';
@@ -80,6 +82,16 @@ export type NeuronRegisterCallback = (neuron: Neuron) => void;
 export type NeuronUnregisterCallback = (id: string) => void;
 
 /**
+ * Callback type for registering filters with AUTONOMIC layer.
+ */
+export type FilterRegisterCallback = (filter: SignalFilter, priority?: number) => void;
+
+/**
+ * Callback type for unregistering filters from AUTONOMIC layer.
+ */
+export type FilterUnregisterCallback = (id: string) => boolean;
+
+/**
  * Loaded plugin state.
  */
 interface LoadedPluginState {
@@ -117,6 +129,8 @@ export class PluginLoader {
   private readonly pluginSchemas = new Map<string, Set<string>>();
   /** Track neuron plugins separately for AUTONOMIC layer access */
   private readonly neuronPlugins: NeuronPluginV2[] = [];
+  /** Track filter plugins separately for AUTONOMIC layer access */
+  private readonly filterPlugins: FilterPluginV2[] = [];
 
   private signalCallback: SignalPushCallback | null = null;
   private intentCallback: IntentEmitCallback | null = null;
@@ -125,6 +139,8 @@ export class PluginLoader {
   private servicesProvider: (() => BasePluginServices) | null = null;
   private neuronRegisterCallback: NeuronRegisterCallback | null = null;
   private neuronUnregisterCallback: NeuronUnregisterCallback | null = null;
+  private filterRegisterCallback: FilterRegisterCallback | null = null;
+  private filterUnregisterCallback: FilterUnregisterCallback | null = null;
 
   /** Buffer for signals emitted before callback is set (capped at 100) */
   private signalBuffer: Signal[] = [];
@@ -141,6 +157,8 @@ export class PluginLoader {
 
   /** Map pluginId to neuron ID (for correct unregistration) */
   private readonly pluginNeuronIds = new Map<string, string>();
+  /** Map pluginId to filter ID (for correct unregistration) */
+  private readonly pluginFilterIds = new Map<string, string>();
 
   constructor(
     logger: Logger,
@@ -235,6 +253,30 @@ export class PluginLoader {
       this.logger.debug(
         { pluginId: plugin.manifest.id, neuronId: neuron.id },
         'Neuron registered from already-loaded plugin'
+      );
+    }
+  }
+
+  /**
+   * Set callbacks for filter registration with AUTONOMIC layer.
+   * Must be called before loading any filter plugins.
+   *
+   * Also registers filters from any already-loaded plugins (handles startup order).
+   */
+  setFilterCallbacks(register: FilterRegisterCallback, unregister: FilterUnregisterCallback): void {
+    this.filterRegisterCallback = register;
+    this.filterUnregisterCallback = unregister;
+
+    // Register filters from already-loaded plugins (handles case where plugins load before layers)
+    for (const plugin of this.filterPlugins) {
+      const filter = plugin.filter.create(this.logger);
+      const priority = plugin.filter.priority;
+      this.filterRegisterCallback(filter, priority);
+      // Track filter ID for correct unregistration
+      this.pluginFilterIds.set(plugin.manifest.id, filter.id);
+      this.logger.debug(
+        { pluginId: plugin.manifest.id, filterId: filter.id },
+        'Filter registered from already-loaded plugin'
       );
     }
   }
@@ -362,6 +404,22 @@ export class PluginLoader {
       }
 
       this.logger.debug({ pluginId: manifest.id }, 'Registered as neuron plugin');
+    }
+
+    // Track and register filter plugins
+    if (isFilterPlugin(plugin)) {
+      this.filterPlugins.push(plugin);
+
+      // Register filter with AUTONOMIC layer if callback is set
+      if (this.filterRegisterCallback) {
+        const filter = plugin.filter.create(this.logger);
+        const priority = plugin.filter.priority;
+        this.filterRegisterCallback(filter, priority);
+        // Track filter ID for correct unregistration
+        this.pluginFilterIds.set(manifest.id, filter.id);
+      }
+
+      this.logger.debug({ pluginId: manifest.id }, 'Registered as filter plugin');
     }
 
     // Create manifest-declared schedules (managed by core)
@@ -555,6 +613,32 @@ export class PluginLoader {
       this.logger.debug({ pluginId }, 'Neuron plugin updated in hot-swap');
     }
 
+    // Handle filter plugin updates (unregister old, register new)
+    const oldFilterIndex = this.filterPlugins.findIndex((p) => p.manifest.id === pluginId);
+    const wasFilter = oldFilterIndex !== -1;
+
+    if (wasFilter) {
+      this.filterPlugins.splice(oldFilterIndex, 1);
+      // Unregister old filter using tracked ID
+      const oldFilterId = this.pluginFilterIds.get(pluginId);
+      if (oldFilterId) {
+        this.filterUnregisterCallback?.(oldFilterId);
+        this.pluginFilterIds.delete(pluginId);
+      }
+    }
+
+    if (isFilterPlugin(newPlugin)) {
+      this.filterPlugins.push(newPlugin);
+      // Register new filter and track its ID
+      if (this.filterRegisterCallback) {
+        const filter = newPlugin.filter.create(this.logger);
+        const priority = newPlugin.filter.priority;
+        this.filterRegisterCallback(filter, priority);
+        this.pluginFilterIds.set(pluginId, filter.id);
+      }
+      this.logger.debug({ pluginId }, 'Filter plugin updated in hot-swap');
+    }
+
     // Update state tracking
     this.pluginStates.set(pluginId, { state: 'active', failureCount: 0 });
 
@@ -607,6 +691,15 @@ export class PluginLoader {
       }
     }
 
+    // Unregister filter from AUTONOMIC layer
+    if (isFilterPlugin(state.plugin)) {
+      const filterId = this.pluginFilterIds.get(pluginId);
+      if (filterId) {
+        this.filterUnregisterCallback?.(filterId);
+        this.pluginFilterIds.delete(pluginId);
+      }
+    }
+
     // Unregister scheduler (queued for tick boundary in SchedulerService)
     this.schedulerService.queueUnregister(pluginId);
 
@@ -625,6 +718,13 @@ export class PluginLoader {
     if (neuronIndex !== -1) {
       this.neuronPlugins.splice(neuronIndex, 1);
       this.logger.debug({ pluginId }, 'Neuron plugin removed from list');
+    }
+
+    // Remove from filter plugins list
+    const filterIndex = this.filterPlugins.findIndex((p) => p.manifest.id === pluginId);
+    if (filterIndex !== -1) {
+      this.filterPlugins.splice(filterIndex, 1);
+      this.logger.debug({ pluginId }, 'Filter plugin removed from list');
     }
 
     // Clear storage (unload is a full removal)
@@ -675,6 +775,15 @@ export class PluginLoader {
       if (neuronId) {
         this.neuronUnregisterCallback?.(neuronId);
         // Don't delete from pluginNeuronIds - we'll re-register on resume
+      }
+    }
+
+    // QUEUED: Unregister filter (applied at tick boundary)
+    if (isFilterPlugin(state.plugin)) {
+      const filterId = this.pluginFilterIds.get(pluginId);
+      if (filterId) {
+        this.filterUnregisterCallback?.(filterId);
+        // Don't delete from pluginFilterIds - we'll re-register on resume
       }
     }
 
@@ -762,6 +871,15 @@ export class PluginLoader {
       this.neuronRegisterCallback?.(neuron);
       // Update tracked neuron ID (may have changed if neuron factory changed)
       this.pluginNeuronIds.set(pluginId, neuron.id);
+    }
+
+    // Re-register filter if applicable
+    if (isFilterPlugin(state.plugin)) {
+      const filter = state.plugin.filter.create(this.logger);
+      const priority = state.plugin.filter.priority;
+      this.filterRegisterCallback?.(filter, priority);
+      // Update tracked filter ID
+      this.pluginFilterIds.set(pluginId, filter.id);
     }
 
     // Re-register tools
@@ -962,6 +1080,14 @@ export class PluginLoader {
    */
   getNeuronPlugins(): NeuronPluginV2[] {
     return [...this.neuronPlugins];
+  }
+
+  /**
+   * Get all loaded filter plugins.
+   * Used by AUTONOMIC layer to instantiate filters from plugins.
+   */
+  getFilterPlugins(): FilterPluginV2[] {
+    return [...this.filterPlugins];
   }
 
   /**

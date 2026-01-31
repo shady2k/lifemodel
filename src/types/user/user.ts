@@ -2,7 +2,7 @@ import type { Person } from './person.js';
 import type { Belief } from '../belief.js';
 import { createBelief } from '../belief.js';
 import type { EvidenceSource } from '../cognition.js';
-import type { NewsInterests } from '../news.js';
+import type { Interests } from './interests.js';
 
 /**
  * Flexible user property stored via core.remember.
@@ -65,10 +65,10 @@ export interface User extends Person {
   properties?: Record<string, UserProperty>;
 
   /**
-   * News interest configuration for article scoring.
-   * Used by NewsSignalFilter to prioritize articles.
+   * User's interest configuration (topic weights, urgency).
+   * Used by signal filters to prioritize content.
    */
-  newsInterests?: NewsInterests;
+  interests?: Interests;
 }
 
 /**

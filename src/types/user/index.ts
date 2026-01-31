@@ -4,6 +4,7 @@
 
 export type * from './person.js';
 export type * from './user.js';
+export type * from './interests.js';
 
 // Re-export factory functions
 export { createPerson, isNameKnown } from './person.js';
@@ -13,3 +14,4 @@ export {
   createDefaultPreferences,
   createDefaultBeliefs,
 } from './user.js';
+export { createDefaultInterests } from './interests.js';

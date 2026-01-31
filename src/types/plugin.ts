@@ -18,7 +18,7 @@ export type PluginType = 'rule' | 'llm-provider' | 'channel' | 'storage';
 /**
  * Plugin component types for V2 manifest.
  */
-export type PluginComponentType = 'neuron' | 'channel' | 'tool' | 'provider';
+export type PluginComponentType = 'neuron' | 'channel' | 'tool' | 'provider' | 'filter';
 
 /**
  * Plugin primitives that can be requested.
@@ -691,5 +691,50 @@ export interface NeuronPluginV2 extends PluginV2 {
 export function isNeuronPlugin(plugin: PluginV2): plugin is NeuronPluginV2 {
   return (
     'neuron' in plugin && plugin.manifest.provides.some((component) => component.type === 'neuron')
+  );
+}
+
+// ============================================================
+// Filter Plugin Extension
+// ============================================================
+
+import type { SignalFilter } from '../layers/autonomic/filter-registry.js';
+import type { SignalType } from './signal.js';
+
+/**
+ * Extended plugin interface for filter plugins.
+ * Filters are signal processors in the AUTONOMIC layer that transform
+ * or classify incoming signals.
+ *
+ * Unlike neurons (which monitor state), filters react to incoming signals.
+ * Example: NewsSignalFilter processes article batches and classifies them
+ * as urgent/interesting/noise.
+ */
+export interface FilterPluginV2 extends PluginV2 {
+  /** Filter factory and configuration */
+  filter: {
+    /**
+     * Create a signal filter instance.
+     * @param logger Scoped logger for the filter
+     */
+    create: (logger: Logger) => SignalFilter;
+
+    /**
+     * Signal types this filter handles (for validation).
+     * Must match what the created filter returns in its `handles` property.
+     */
+    handles: SignalType[];
+
+    /** Priority for filter ordering (lower = runs first, default 100) */
+    priority?: number;
+  };
+}
+
+/**
+ * Type guard to check if a plugin is a filter plugin.
+ */
+export function isFilterPlugin(plugin: PluginV2): plugin is FilterPluginV2 {
+  return (
+    'filter' in plugin && plugin.manifest.provides.some((component) => component.type === 'filter')
   );
 }

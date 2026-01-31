@@ -461,6 +461,21 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     }
   );
 
+  // 4b. Wire filter callbacks: PluginLoader → AUTONOMIC
+  // This must happen BEFORE loading any filter plugins
+  pluginLoader.setFilterCallbacks(
+    (filter, priority) => {
+      layers.autonomic.registerFilter(filter, priority);
+    },
+    (id) => {
+      return layers.autonomic.unregisterFilter(id);
+    }
+  );
+
+  // 4c. Wire user model to AUTONOMIC for filter context
+  // Filters can access user interests via context.userModel
+  layers.autonomic.setUserModel(userModel);
+
   // 5. Set services provider for plugins
   // Note: registerEventSchema is added by PluginLoader per-plugin, not here
   pluginLoader.setServicesProvider(() => ({
