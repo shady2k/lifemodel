@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Tech Blog - Top Articles</title>
+    <link>https://techblog.example.com/</link>
+    <description>Popular articles from Tech Blog community</description>
+    <language>en</language>
+    <lastBuildDate>Mon, 27 Jan 2026 12:00:00 GMT</lastBuildDate>
+
+    <item>
+      <title>Building a Custom IoT Controller with ESP32</title>
+      <link>https://techblog.example.com/articles/12345/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12345/</guid>
+      <author>maker_dev</author>
+      <pubDate>Mon, 27 Jan 2026 10:30:00 GMT</pubDate>
+      <description><![CDATA[<p>In this article, I'll share my experience building a custom IoT controller using the ESP32 microcontroller. The project started when I needed to automate my home workshop...</p><p>Key challenges included handling sensor noise and optimizing power consumption.</p>]]></description>
+      <category>esp32</category>
+      <category>iot</category>
+      <category>arduino</category>
+      <category>embedded</category>
+    </item>
+
+    <item>
+      <title>How I Dealt with Banking Regulations: A Developer's Story</title>
+      <link>https://techblog.example.com/articles/12340/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12340/</guid>
+      <author>fintech_guy</author>
+      <pubDate>Sun, 26 Jan 2026 15:20:00 GMT</pubDate>
+      <description><![CDATA[<p>Last month I promised to share how I resolved issues with account freezes related to anti-money laundering regulations. Here's the full story with practical advice for developers working in fintech.</p>]]></description>
+      <category>fintech</category>
+      <category>banking</category>
+      <category>regulations</category>
+    </item>
+
+    <item>
+      <title>Setting Up Satellite Internet: Adventures and Challenges</title>
+      <link>https://techblog.example.com/articles/12335/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12335/</guid>
+      <author>network_enthusiast</author>
+      <pubDate>Sat, 25 Jan 2026 08:45:00 GMT</pubDate>
+      <description><![CDATA[<p>I attempted to set up satellite internet connectivity in a remote area. The official service isn't available in my region, but I wanted to explore if it's truly impossible or just "officially impossible".</p><p>This article covers VPN configurations, hardware setup, and lessons learned.</p>]]></description>
+      <category>networking</category>
+      <category>satellite</category>
+      <category>vpn</category>
+    </item>
+
+    <item>
+      <title>Optimizing React Performance: Practical Tips</title>
+      <link>https://techblog.example.com/articles/12330/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12330/</guid>
+      <author>frontend_pro</author>
+      <pubDate>Fri, 24 Jan 2026 14:00:00 GMT</pubDate>
+      <description><![CDATA[<p>After working on several large-scale React applications, I've compiled a list of practical performance optimization techniques. This guide covers memo, useMemo, useCallback, and virtual scrolling implementations.</p>]]></description>
+      <category>react</category>
+      <category>javascript</category>
+      <category>performance</category>
+      <category>frontend</category>
+    </item>
+
+    <item>
+      <title>Understanding Kubernetes Networking</title>
+      <link>https://techblog.example.com/articles/12325/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12325/</guid>
+      <author>devops_master</author>
+      <pubDate>Thu, 23 Jan 2026 09:15:00 GMT</pubDate>
+      <description><![CDATA[<p>Kubernetes networking can be confusing. In this deep dive, I explain how pods communicate, how services work, and common pitfalls to avoid when setting up your cluster networking.</p>]]></description>
+      <category>kubernetes</category>
+      <category>devops</category>
+      <category>networking</category>
+      <category>containers</category>
+    </item>
+
+    <item>
+      <title><![CDATA[Why I Switched from VS Code to Neovim (And Back)]]></title>
+      <link>https://techblog.example.com/articles/12320/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12320/</guid>
+      <author>editor_warrior</author>
+      <pubDate>Wed, 22 Jan 2026 11:30:00 GMT</pubDate>
+      <description><![CDATA[A tale of two editors: my journey through Vim motions, LSP configuration, and ultimately finding the right balance between productivity and customization. Includes my dotfiles!]]></description>
+      <category>editors</category>
+      <category>neovim</category>
+      <category>vscode</category>
+      <category>productivity</category>
+    </item>
+
+    <item>
+      <title>Machine Learning Model Deployment: From Notebook to Production</title>
+      <link>https://techblog.example.com/articles/12315/</link>
+      <guid isPermaLink="true">https://techblog.example.com/articles/12315/</guid>
+      <author>ml_engineer</author>
+      <pubDate>Tue, 21 Jan 2026 16:45:00 GMT</pubDate>
+      <description><![CDATA[<p>Training a model is just the beginning. This article covers the entire deployment pipeline: model serialization, API design, containerization, and monitoring in production.</p>]]></description>
+      <category>machine-learning</category>
+      <category>mlops</category>
+      <category>python</category>
+      <category>docker</category>
+    </item>
+
+    <item>
+      <title>The Art of Code Review: Best Practices for Teams</title>
+      <link>https://techblog.example.com/articles/12310/</link>
+      <guid>article-12310-v2</guid>
+      <author>team_lead</author>
+      <pubDate>Mon, 20 Jan 2026 13:00:00 GMT</pubDate>
+      <description><![CDATA[<p>Good code reviews improve code quality and team knowledge sharing. Here's what I've learned about conducting effective reviews that don't slow down development.</p>]]></description>
+      <category>best-practices</category>
+      <category>teamwork</category>
+      <category>code-review</category>
+    </item>
+
+  </channel>
+</rss>
