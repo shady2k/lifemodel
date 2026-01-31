@@ -426,6 +426,31 @@ export class CoreLoop {
         this.logger.warn({ stressLevel }, 'AUTONOMIC layer disabled due to stress');
       }
 
+      // 2b. Defer thought signals if COGNITION is busy
+      // Thought signals need COGNITION to process them, so if COGNITION is busy,
+      // re-queue them for the next tick rather than losing them in AGGREGATION
+      const hasThoughtSignals = allSignals.some((s) => s.type === 'thought');
+      if (this.pendingCognition && hasThoughtSignals) {
+        const thoughtSignals = allSignals.filter((s) => s.type === 'thought');
+        const otherSignals = allSignals.filter((s) => s.type !== 'thought');
+
+        this.logger.debug(
+          { pendingThoughts: thoughtSignals.length },
+          'COGNITION busy, deferring thought signals to next tick'
+        );
+
+        // Re-queue thoughts at the front for next tick (FIFO order preserved)
+        for (let i = thoughtSignals.length - 1; i >= 0; i--) {
+          const signal = thoughtSignals[i];
+          if (signal) {
+            this.pendingSignals.unshift({ signal, timestamp: new Date() });
+          }
+        }
+
+        // Continue with non-thought signals only
+        allSignals = otherSignals;
+      }
+
       // 3. AGGREGATION: collect signals, decide if COGNITION should wake
       let aggregationResult: AggregationResult | null = null;
 
@@ -466,8 +491,9 @@ export class CoreLoop {
         // Start COGNITION in background (non-blocking)
         this.startCognitionAsync(cognitionContext, aggregationResult.triggerSignals[0]);
       } else if (this.pendingCognition && shouldWakeCognition) {
-        // Already processing, log that we're queueing
-        this.logger.debug('COGNITION already processing, new wake request queued');
+        // Already processing - thought signals were already re-queued in step 2b above
+        // This path handles user_message signals which can overlap with pending COGNITION
+        this.logger.debug('COGNITION already processing, waiting for completion');
       }
 
       if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
