@@ -619,11 +619,13 @@ User: "I love crypto news!"
 - [ ] "I saw something about X" - COGNITION searches memory, finds filtered facts
 - [ ] Integration tests for learning
 
-### Phase 6: Telegram Channels (Future)
+### Phase 6: Telegram Channels ✅ COMPLETE
 
-- [ ] Telegram public channel fetcher
-- [ ] Message pagination/history
-- [ ] Rate limiting
+- [x] Telegram public channel fetcher (`fetchTelegramChannel`)
+- [x] Message pagination/history (`fetchTelegramChannelUntil` with `beforeId`)
+- [x] Rate limiting (`MIN_REQUEST_DELAY_MS = 2000ms`)
+- [x] Full message type support (text, photo, video, voice, sticker, poll, etc.)
+- [x] Wired into `handlePollFeeds()` - fetches in parallel with RSS
 
 **Total estimate**: 17-22 days
 
