@@ -33,6 +33,8 @@ import type { ConversationManager } from '../../storage/conversation-manager.js'
 import type { UserModel } from '../../models/user-model.js';
 import type { SignalAckRegistry } from './ack-registry.js';
 import { createAckRegistry } from './ack-registry.js';
+import type { MemoryProvider, MemoryEntry } from '../cognition/tools/core/memory.js';
+import type { Fact, FactBatchData } from '../../types/signal.js';
 
 /**
  * Conversation status for proactive contact decisions.
@@ -109,6 +111,7 @@ export interface ThresholdEngineDeps {
   primaryRecipientId?: string;
   ackRegistry?: SignalAckRegistry;
   pluginEventValidator?: PluginEventValidator;
+  memoryProvider?: MemoryProvider;
 }
 
 /**
@@ -129,6 +132,9 @@ export class ThresholdEngine {
 
   // Plugin event validator (optional)
   private pluginEventValidator: PluginEventValidator | undefined;
+
+  // Memory provider for saving facts
+  private memoryProvider: MemoryProvider | undefined;
 
   // Cooldown tracking
   private lastProactiveContact: Date | null = null;
@@ -156,6 +162,7 @@ export class ThresholdEngine {
     if (deps.primaryRecipientId) this.primaryRecipientId = deps.primaryRecipientId;
     if (deps.ackRegistry) this.ackRegistry = deps.ackRegistry;
     if (deps.pluginEventValidator) this.pluginEventValidator = deps.pluginEventValidator;
+    if (deps.memoryProvider) this.memoryProvider = deps.memoryProvider;
   }
 
   /**
@@ -317,11 +324,7 @@ export class ThresholdEngine {
 
         // Fact batches are saved to memory, no wake needed
         if (factBatches.length > 0) {
-          this.logger.debug(
-            { count: factBatches.length },
-            'Fact batches received (saving to memory, no wake)'
-          );
-          // TODO: Save facts to memory here (task #13)
+          await this.saveFactsToMemory(factBatches);
         }
 
         // Urgent news wakes COGNITION immediately
@@ -781,6 +784,81 @@ export class ThresholdEngine {
    */
   getContactTiming(): ContactTimingConfig {
     return { ...this.contactTiming };
+  }
+
+  /**
+   * Save facts from fact_batch signals to memory.
+   *
+   * Facts are stored with type='fact' and can be queried later by COGNITION.
+   * This happens silently without waking COGNITION - like forming memories
+   * in the background while the conscious mind is occupied elsewhere.
+   */
+  private async saveFactsToMemory(factBatchSignals: Signal[]): Promise<void> {
+    if (!this.memoryProvider) {
+      this.logger.debug(
+        { count: factBatchSignals.length },
+        'Fact batches received but no memoryProvider configured, skipping'
+      );
+      return;
+    }
+
+    let savedCount = 0;
+    let errorCount = 0;
+
+    for (const signal of factBatchSignals) {
+      const data = signal.data as FactBatchData | undefined;
+      if (!data) {
+        continue;
+      }
+
+      for (const fact of data.facts) {
+        try {
+          const entry = this.factToMemoryEntry(fact, signal, data);
+          await this.memoryProvider.save(entry);
+          savedCount++;
+        } catch (error) {
+          errorCount++;
+          this.logger.warn(
+            {
+              factContent: fact.content.slice(0, 50),
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Failed to save fact to memory'
+          );
+        }
+      }
+    }
+
+    this.logger.debug(
+      { saved: savedCount, errors: errorCount, batches: factBatchSignals.length },
+      'Facts saved to memory'
+    );
+  }
+
+  /**
+   * Convert a generic Fact to a MemoryEntry.
+   *
+   * Maps plugin-agnostic Fact fields to memory storage format:
+   * - content → content (the fact itself)
+   * - confidence → confidence (relevance score)
+   * - tags → tags (for search/retrieval)
+   * - provenance → metadata (origin information)
+   */
+  private factToMemoryEntry(fact: Fact, signal: Signal, batchData: FactBatchData): MemoryEntry {
+    return {
+      id: `fact-${signal.id}-${crypto.randomUUID().slice(0, 8)}`,
+      type: 'fact',
+      content: fact.content,
+      timestamp: fact.provenance.timestamp ?? new Date(),
+      tags: fact.tags,
+      confidence: fact.confidence,
+      metadata: {
+        pluginId: batchData.pluginId,
+        eventKind: batchData.eventKind,
+        ...fact.provenance,
+      },
+      parentSignalId: signal.id,
+    };
   }
 }
 

@@ -516,9 +516,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
 
-  // Wire plugin event validator to aggregation layer
+  // Wire plugin event validator and memory provider to aggregation layer
+  // Memory provider is needed for fact storage (fact_batch signals → memory)
   layers.aggregation.updateDeps({
     pluginEventValidator: (data: PluginEventData) => pluginLoader.validatePluginEvent(data),
+    memoryProvider,
   });
 
   // Create core loop config

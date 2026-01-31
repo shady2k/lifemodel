@@ -45,6 +45,7 @@ import { createPatternDetector } from './pattern-detector.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { SignalAckRegistry } from './ack-registry.js';
+import type { MemoryProvider } from '../cognition/tools/core/memory.js';
 
 /**
  * Configuration for AGGREGATION processor.
@@ -102,12 +103,14 @@ export class AggregationProcessor implements AggregationLayer {
     userModel?: UserModel;
     primaryRecipientId?: string;
     pluginEventValidator?: PluginEventValidator;
+    memoryProvider?: MemoryProvider;
   }): void {
     const thresholdDeps: ThresholdEngineDeps = {};
     if (deps.conversationManager) thresholdDeps.conversationManager = deps.conversationManager;
     if (deps.userModel) thresholdDeps.userModel = deps.userModel;
     if (deps.primaryRecipientId) thresholdDeps.primaryRecipientId = deps.primaryRecipientId;
     if (deps.pluginEventValidator) thresholdDeps.pluginEventValidator = deps.pluginEventValidator;
+    if (deps.memoryProvider) thresholdDeps.memoryProvider = deps.memoryProvider;
     this.thresholdEngine.updateDeps(thresholdDeps);
     this.logger.debug('AGGREGATION dependencies updated');
   }
