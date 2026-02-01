@@ -77,6 +77,7 @@ export class CognitionProcessor implements CognitionLayer {
   private agent: Agent | undefined;
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
+  private memoryProvider: MemoryProvider | undefined;
 
   constructor(
     logger: Logger,
@@ -94,6 +95,7 @@ export class CognitionProcessor implements CognitionLayer {
     this.agent = deps?.agent;
     this.conversationManager = deps?.conversationManager;
     this.userModel = deps?.userModel;
+    this.memoryProvider = deps?.memoryProvider;
 
     // Setup agentic loop if LLM available
     if (deps?.cognitionLLM) {
@@ -144,6 +146,9 @@ export class CognitionProcessor implements CognitionLayer {
     }
     if (deps.userModel) {
       this.userModel = deps.userModel;
+    }
+    if (deps.memoryProvider) {
+      this.memoryProvider = deps.memoryProvider;
     }
 
     // Setup agentic loop if we have LLM now
@@ -218,6 +223,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get completed actions (for autonomous triggers to prevent re-execution)
     const completedActions = await this.getCompletedActions(recipientId, triggerSignal.type);
 
+    // Get recent thoughts for context priming
+    const recentThoughts = await this.getRecentThoughts(recipientId);
+
     // Build loop context with runtime config
     const loopContext: LoopContext = {
       triggerSignal,
@@ -232,6 +240,7 @@ export class CognitionProcessor implements CognitionLayer {
       userId: signalData?.userId,
       timeSinceLastMessageMs,
       completedActions,
+      recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
@@ -449,6 +458,38 @@ export class CognitionProcessor implements CognitionLayer {
         'Failed to get completed actions'
       );
       return undefined;
+    }
+  }
+
+  /**
+   * Get recent thoughts for context priming.
+   * Returns thoughts from the last 30 minutes for the agent to consider.
+   */
+  private async getRecentThoughts(
+    recipientId?: string
+  ): Promise<{ id: string; type: 'thought'; content: string; timestamp: Date }[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      const thoughts = await this.memoryProvider.getRecentByType('thought', {
+        recipientId,
+        windowMs: 30 * 60 * 1000, // 30 minutes
+        limit: 10,
+      });
+      return thoughts.map((t) => ({
+        id: t.id,
+        type: 'thought' as const,
+        content: t.content,
+        timestamp: t.timestamp,
+      }));
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get recent thoughts'
+      );
+      return [];
     }
   }
 

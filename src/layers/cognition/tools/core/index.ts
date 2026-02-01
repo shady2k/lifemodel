@@ -17,7 +17,13 @@ export { createRememberTool } from './remember.js';
 export { createInterestTool } from './interest.js';
 
 // Types
-export type { MemoryProvider, MemoryEntry, MemorySearchOptions, MemoryToolDeps } from './memory.js';
+export type {
+  MemoryProvider,
+  MemoryEntry,
+  MemorySearchOptions,
+  RecentByTypeOptions,
+  MemoryToolDeps,
+} from './memory.js';
 export type { ConversationProvider, TimeToolDeps } from './time.js';
 export type { AgentStateProvider, UserModelProvider, StateToolDeps } from './state.js';
 export type { ToolSchema, SchemaProvider, ToolsMetaToolDeps } from './tools-meta.js';

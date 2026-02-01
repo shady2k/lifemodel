@@ -30,7 +30,7 @@ import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { ThoughtData } from '../../types/signal.js';
-import type { ToolRegistry } from './tools/registry.js';
+import type { ToolRegistry, MemoryEntry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
@@ -175,6 +175,9 @@ export interface LoopContext {
 
   /** Completed actions from previous sessions (to prevent re-execution) */
   completedActions?: CompletedAction[] | undefined;
+
+  /** Recent thoughts for context priming (internal context) */
+  recentThoughts?: MemoryEntry[] | undefined;
 }
 
 /**
@@ -586,7 +589,7 @@ export class AgenticLoop {
 
   /**
    * Build trigger prompt for current context.
-   * Contains: user profile, runtime snapshot, completed actions, current trigger.
+   * Contains: user profile, recent thoughts, runtime snapshot, completed actions, current trigger.
    * Conversation history is injected as proper OpenAI messages separately.
    */
   private buildTriggerPrompt(context: LoopContext, useSmart = false): string {
@@ -596,6 +599,12 @@ export class AgenticLoop {
     const userProfile = this.buildUserProfileSection(context);
     if (userProfile) {
       sections.push(userProfile);
+    }
+
+    // Recent thoughts (internal context) - after user profile, before runtime snapshot
+    const thoughtsSection = this.buildRecentThoughtsSection(context);
+    if (thoughtsSection) {
+      sections.push(thoughtsSection);
     }
 
     // Runtime snapshot (conditional, for state-related queries)
@@ -964,6 +973,28 @@ Example: "warn me about outages on Kobtsevoy street" → call twice:
     return `## User Profile (stable facts)
 ${lines.join('\n')}
 NOTE: Use the user's name sparingly; check conversation history first.`;
+  }
+
+  /**
+   * Build recent thoughts section for context priming.
+   * Shows what the agent was thinking about recently (internal context).
+   */
+  private buildRecentThoughtsSection(context: LoopContext): string | null {
+    const thoughts = context.recentThoughts;
+    if (!thoughts || thoughts.length === 0) {
+      return null;
+    }
+
+    const now = Date.now();
+    const lines = thoughts.map((thought) => {
+      const ageMs = now - thought.timestamp.getTime();
+      const ageStr = this.formatAge(ageMs);
+      return `- [${ageStr} ago] ${thought.content}`;
+    });
+
+    return `## Recent Thoughts
+${lines.join('\n')}
+NOTE: Your recent internal thoughts. Background context, not visible to user.`;
   }
 
   private buildRuntimeSnapshotSection(context: LoopContext, useSmart: boolean): string | null {

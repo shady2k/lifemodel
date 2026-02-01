@@ -31,6 +31,19 @@ export interface AgentState {
    */
   acquaintancePending: boolean;
 
+  /**
+   * Pressure from unprocessed thoughts (0-1).
+   * Increases with thought count and age. Like mental load - unresolved
+   * thoughts create cognitive pressure until processed (Zeigarnik Effect).
+   */
+  thoughtPressure: number;
+
+  /**
+   * Count of recent thoughts (for neuron calculation).
+   * Tracks thoughts within the working memory window (30 min).
+   */
+  pendingThoughtCount: number;
+
   /** Timestamp of last tick. */
   lastTickAt: Date;
 
@@ -73,6 +86,8 @@ export function createDefaultAgentState(): AgentState {
     curiosity: 0.5,
     acquaintancePressure: 0.0,
     acquaintancePending: false,
+    thoughtPressure: 0.0,
+    pendingThoughtCount: 0,
     lastTickAt: new Date(),
     tickInterval: 30_000, // 30 seconds default
   };

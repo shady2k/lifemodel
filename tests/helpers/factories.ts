@@ -58,6 +58,8 @@ export function createAgentState(overrides: Partial<AgentState> = {}): AgentStat
     curiosity: 0.5,
     acquaintancePressure: 0,
     acquaintancePending: false,
+    thoughtPressure: 0,
+    pendingThoughtCount: 0,
     lastTickAt: new Date(),
     tickInterval: 1000,
     ...overrides,

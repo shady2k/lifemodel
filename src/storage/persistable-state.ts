@@ -76,6 +76,8 @@ export function createEmptyPersistableState(): PersistableState {
         curiosity: 0.5,
         acquaintancePressure: 0.0,
         acquaintancePending: false,
+        thoughtPressure: 0.0,
+        pendingThoughtCount: 0,
         lastTickAt: new Date(),
         tickInterval: 30_000,
       },

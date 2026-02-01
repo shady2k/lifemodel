@@ -40,6 +40,7 @@ export type SignalType =
   | 'acquaintance' // Pressure to learn user's name
   | 'alertness' // Agent's alertness mode changed
   | 'contact_pressure' // Combined pressure to contact user
+  | 'thought_pressure' // Pressure from accumulated unprocessed thoughts
 
   // === TIME (from time-monitoring neuron) ===
   | 'tick' // Regular heartbeat
@@ -82,6 +83,7 @@ export type SignalSource =
   | 'neuron.acquaintance'
   | 'neuron.alertness'
   | 'neuron.contact_pressure'
+  | 'neuron.thought_pressure'
   | 'neuron.time'
 
   // === META (aggregation) ===
@@ -456,6 +458,7 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
   acquaintance: null, // no expiry, accumulates
   alertness: 10_000, // 10 seconds - mode changes are transient
   contact_pressure: 30_000, // 30 seconds
+  thought_pressure: 30_000, // 30 seconds
 
   // Time signals - very transient
   tick: 1_000, // 1 second - each tick replaces the last

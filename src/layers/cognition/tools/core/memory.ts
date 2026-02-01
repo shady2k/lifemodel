@@ -52,12 +52,33 @@ export interface MemoryEntry {
 }
 
 /**
+ * Options for getRecentByType.
+ */
+export interface RecentByTypeOptions {
+  recipientId?: string | undefined;
+  /** Time window in milliseconds (default: 30 min) */
+  windowMs?: number | undefined;
+  /** Maximum entries to return (default: 10) */
+  limit?: number | undefined;
+  /** Entry IDs to exclude from results */
+  excludeIds?: string[] | undefined;
+}
+
+/**
  * Memory provider interface.
  */
 export interface MemoryProvider {
   search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]>;
   save(entry: MemoryEntry): Promise<void>;
   getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]>;
+  /**
+   * Get recent entries of a specific type within a time window.
+   * Used for context priming (recent thoughts) and neuron calculations.
+   */
+  getRecentByType(
+    type: 'thought' | 'fact' | 'intention',
+    options?: RecentByTypeOptions
+  ): Promise<MemoryEntry[]>;
 }
 
 /**

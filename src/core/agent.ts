@@ -246,10 +246,21 @@ export class Agent {
    */
   private isNumericStateKey(
     key: string
-  ): key is 'energy' | 'socialDebt' | 'taskPressure' | 'curiosity' | 'acquaintancePressure' {
-    return ['energy', 'socialDebt', 'taskPressure', 'curiosity', 'acquaintancePressure'].includes(
-      key
-    );
+  ): key is
+    | 'energy'
+    | 'socialDebt'
+    | 'taskPressure'
+    | 'curiosity'
+    | 'acquaintancePressure'
+    | 'thoughtPressure' {
+    return [
+      'energy',
+      'socialDebt',
+      'taskPressure',
+      'curiosity',
+      'acquaintancePressure',
+      'thoughtPressure',
+    ].includes(key);
   }
 
   /**
@@ -400,6 +411,19 @@ export class Agent {
    */
   private setStateValue(key: 'socialDebt' | 'taskPressure' | 'curiosity', value: number): void {
     this.state[key] = round3(Math.max(0, Math.min(1, value)));
+  }
+
+  /**
+   * Update specific state fields.
+   * Used by CoreLoop to set thought pressure before neurons run.
+   */
+  updateState(updates: Partial<Pick<AgentState, 'thoughtPressure' | 'pendingThoughtCount'>>): void {
+    if (updates.thoughtPressure !== undefined) {
+      this.state.thoughtPressure = round3(Math.max(0, Math.min(1, updates.thoughtPressure)));
+    }
+    if (updates.pendingThoughtCount !== undefined) {
+      this.state.pendingThoughtCount = Math.max(0, Math.floor(updates.pendingThoughtCount));
+    }
   }
 
   /**

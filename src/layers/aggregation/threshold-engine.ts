@@ -260,6 +260,25 @@ export class ThresholdEngine {
       };
     }
 
+    // Check for high thought pressure - agent has a lot on their mind
+    // This allows proactive thought processing when pressure accumulates
+    const thoughtPressureSignals = signals.filter((s) => {
+      if (s.type !== 'thought_pressure') return false;
+      // Only wake for high pressure (0.7+)
+      return s.metrics.value >= 0.7;
+    });
+    if (thoughtPressureSignals.length > 0) {
+      const maxPressure = Math.max(...thoughtPressureSignals.map((s) => s.metrics.value));
+      return {
+        shouldWake: true,
+        trigger: 'threshold_crossed',
+        reason: `High thought pressure (${(maxPressure * 100).toFixed(0)}%)`,
+        triggerSignals: thoughtPressureSignals,
+        value: maxPressure,
+        threshold: 0.7,
+      };
+    }
+
     // Check for plugin events (scheduled reminders, etc.)
     const pluginEvents = signals.filter((s) => s.type === 'plugin_event');
     if (pluginEvents.length > 0) {

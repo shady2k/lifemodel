@@ -13,6 +13,7 @@ import type {
   MemoryProvider,
   MemoryEntry,
   MemorySearchOptions,
+  RecentByTypeOptions,
 } from '../layers/cognition/tools/registry.js';
 
 /**
@@ -210,6 +211,39 @@ export class JsonMemoryProvider implements MemoryProvider {
 
     return this.entries
       .filter((e) => e.recipientId === recipientId)
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      .slice(0, limit);
+  }
+
+  /**
+   * Get recent entries of a specific type within a time window.
+   * Used for context priming (recent thoughts) and neuron calculations.
+   */
+  async getRecentByType(
+    type: 'thought' | 'fact' | 'intention',
+    options?: RecentByTypeOptions
+  ): Promise<MemoryEntry[]> {
+    await this.ensureLoaded();
+
+    const windowMs = options?.windowMs ?? 30 * 60 * 1000; // 30 min default
+    const limit = options?.limit ?? 10;
+    const excludeIds = new Set(options?.excludeIds ?? []);
+    const cutoff = new Date(Date.now() - windowMs);
+
+    return this.entries
+      .filter((e) => {
+        // Filter by type
+        if (e.type !== type) return false;
+        // Filter by time window
+        if (e.timestamp < cutoff) return false;
+        // Filter by recipientId if specified (otherwise include global entries)
+        if (options?.recipientId && e.recipientId && e.recipientId !== options.recipientId) {
+          return false;
+        }
+        // Exclude specific IDs
+        if (excludeIds.has(e.id)) return false;
+        return true;
+      })
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       .slice(0, limit);
   }

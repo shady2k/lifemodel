@@ -420,6 +420,10 @@ export class CoreLoop {
       // 1. Collect incoming signals from channels (sensory input)
       const incomingSignals = this.collectIncomingSignals();
 
+      // 1b. Update thought pressure before neurons run
+      // This allows ThoughtsNeuron to see current pressure
+      await this.updateThoughtPressure();
+
       // 2. AUTONOMIC: neurons check state, emit internal signals
       // Always runs - vital signs monitoring
       if (activeLayers.autonomic) {
@@ -711,6 +715,66 @@ export class CoreLoop {
     this.lastMessageRecipientId = null;
 
     this.metrics.histogram('user_response_time_ms', responseTimeMs);
+  }
+
+  /**
+   * Update thought pressure in agent state.
+   *
+   * Thought pressure is calculated from:
+   * - Count of recent thoughts (more thoughts = more pressure)
+   * - Age of oldest thought (older thoughts = more pressure, Zeigarnik Effect)
+   * - Energy amplifier (low energy = thoughts feel heavier)
+   */
+  private async updateThoughtPressure(): Promise<void> {
+    if (!this.memoryProvider) {
+      return;
+    }
+
+    try {
+      // Get recent thoughts from the last 30 minutes (working memory window)
+      const windowMs = 30 * 60 * 1000;
+      const recentThoughts = await this.memoryProvider.getRecentByType('thought', {
+        windowMs,
+        limit: 20, // Get enough to calculate accurately
+      });
+
+      const thoughtCount = recentThoughts.length;
+
+      // Calculate oldest thought age (for pressure calculation)
+      let oldestAgeMs = 0;
+      if (thoughtCount > 0) {
+        const now = Date.now();
+        const timestamps = recentThoughts.map((t) => t.timestamp.getTime());
+        const oldest = Math.min(...timestamps);
+        oldestAgeMs = now - oldest;
+      }
+
+      // Pressure formula:
+      // - More thoughts = more pressure (capped at 5 for full effect)
+      // - Older thoughts = more pressure (max at 2 hours)
+      const countFactor = Math.min(1, thoughtCount / 5);
+      const twoHoursMs = 2 * 60 * 60 * 1000;
+      const ageFactor = Math.min(1, oldestAgeMs / twoHoursMs);
+
+      // Energy amplifier: low energy = thoughts feel heavier
+      const state = this.agent.getState();
+      const energyAmplifier = 1 + (1 - state.energy) * 0.3;
+
+      // Combined pressure (60% count, 40% age)
+      const rawPressure = (countFactor * 0.6 + ageFactor * 0.4) * energyAmplifier;
+      const pressure = Math.min(1, rawPressure);
+
+      // Update agent state
+      this.agent.updateState({
+        thoughtPressure: pressure,
+        pendingThoughtCount: thoughtCount,
+      });
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to update thought pressure'
+      );
+    }
   }
 
   /**
