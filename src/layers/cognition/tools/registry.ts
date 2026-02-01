@@ -23,6 +23,7 @@ import {
   createScheduleTool,
   createFinalTool,
   createRememberTool,
+  createInterestTool,
 } from './core/index.js';
 
 // Import and re-export types for convenience
@@ -377,6 +378,9 @@ export class ToolRegistry {
 
     // Remember tool (unified fact storage - replaces core.user)
     this.tools.set('core.remember', createRememberTool());
+
+    // Interest tool (dedicated topic interest tracking)
+    this.tools.set('core.setInterest', createInterestTool());
   }
 }
 

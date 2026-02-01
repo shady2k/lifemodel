@@ -119,6 +119,56 @@ function stringSimilarity(a: string, b: string): number {
   return 1 - distance / maxLength;
 }
 
+/**
+ * Normalize Unicode string for comparison.
+ * Handles Cyrillic combining characters and other edge cases.
+ */
+function normalizeUnicode(s: string): string {
+  return s.normalize('NFC').toLowerCase().trim();
+}
+
+/**
+ * Check if one string meaningfully contains another.
+ * Returns a containment score (0-1) based on how much of the shorter string
+ * is covered by the containment. Returns 0 if no meaningful containment.
+ *
+ * This handles cases where:
+ * - Article topic "отключения" is contained in interest "отключения газа, воды..."
+ * - Interest keyword "crypto" is contained in article topic "cryptocurrency news"
+ */
+function containmentScore(articleTopic: string, interestTopic: string): number {
+  // Minimum length for meaningful containment (avoid matching 2-char words everywhere)
+  const MIN_CONTAINMENT_LENGTH = 4;
+
+  // Normalize both strings for comparison
+  const normArticle = normalizeUnicode(articleTopic);
+  const normInterest = normalizeUnicode(interestTopic);
+
+  const shorter = normArticle.length <= normInterest.length ? normArticle : normInterest;
+  const longer = normArticle.length <= normInterest.length ? normInterest : normArticle;
+
+  if (shorter.length < MIN_CONTAINMENT_LENGTH) return 0;
+
+  // Check word-boundary containment (more accurate than substring)
+  // Split by common delimiters and check if shorter matches any word/phrase
+  const words = longer.split(/[\s,;.!?]+/);
+
+  // Exact word match
+  if (words.some((word) => word === shorter)) {
+    return 0.95; // High score for exact word match
+  }
+
+  // Substring containment (for compound words, phrases)
+  if (longer.includes(shorter)) {
+    // Score based on coverage ratio (shorter/longer)
+    // "отключения" in "отключения газа" = 10/15 = 0.67 * 0.9 = 0.6
+    const coverage = shorter.length / longer.length;
+    return Math.min(0.9, coverage + 0.3); // Boost but cap at 0.9
+  }
+
+  return 0;
+}
+
 /** Minimum similarity threshold for fuzzy topic matching */
 const FUZZY_MATCH_THRESHOLD = 0.7;
 
@@ -440,7 +490,7 @@ export class NewsSignalFilter implements SignalFilter {
     const interestTopics = Object.keys(interests.weights);
 
     for (const articleTopic of topics) {
-      const normalizedArticleTopic = articleTopic.toLowerCase();
+      const normalizedArticleTopic = normalizeUnicode(articleTopic);
 
       for (const interestTopic of interestTopics) {
         const weight = interests.weights[interestTopic];
@@ -456,7 +506,20 @@ export class NewsSignalFilter implements SignalFilter {
           continue;
         }
 
-        // Fuzzy match using Levenshtein distance
+        // Try containment match (handles long phrases containing keywords)
+        // e.g., article "отключения" matches interest "отключения газа, воды..."
+        const containment = containmentScore(normalizedArticleTopic, interestTopic);
+        if (containment >= FUZZY_MATCH_THRESHOLD) {
+          const effectiveWeight = weight * containment;
+          if (effectiveWeight > bestWeight * bestSimilarity) {
+            bestWeight = weight;
+            bestTopic = interestTopic;
+            bestSimilarity = containment;
+          }
+          continue;
+        }
+
+        // Fuzzy match using Levenshtein distance (for typos, variations)
         const similarity = stringSimilarity(normalizedArticleTopic, interestTopic);
 
         if (similarity >= FUZZY_MATCH_THRESHOLD) {

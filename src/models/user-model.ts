@@ -805,6 +805,13 @@ export class UserModel {
    * JSON serialization converts Dates to strings, so we need to restore them.
    */
   private rehydrateInterests(interests: Interests): void {
+    // Guard against missing topicBaselines (older persisted state)
+    // Cast to unknown to bypass TypeScript's type check - runtime data may not match schema
+    if (!(interests as unknown as Record<string, unknown>)['topicBaselines']) {
+      interests.topicBaselines = {};
+      return;
+    }
+
     for (const baseline of Object.values(interests.topicBaselines)) {
       // When loaded from JSON, lastUpdated is a string, not a Date
       if (!(baseline.lastUpdated instanceof Date)) {

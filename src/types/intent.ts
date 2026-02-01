@@ -21,7 +21,8 @@ export type IntentType =
   | 'LOG'
   | 'EMIT_METRIC'
   | 'EMIT_THOUGHT'
-  | 'REMEMBER';
+  | 'REMEMBER'
+  | 'SET_INTEREST';
 
 /**
  * Trace metadata for intent tracking in logs.
@@ -271,6 +272,36 @@ export interface RememberIntent {
 }
 
 /**
+ * Intensity level for interest changes.
+ * Maps to numeric deltas in CoreLoop.
+ */
+export type InterestIntensity =
+  | 'strong_positive'
+  | 'weak_positive'
+  | 'weak_negative'
+  | 'strong_negative';
+
+/**
+ * Set user interest in a topic.
+ * Uses semantic enum for intensity instead of free-form delta strings.
+ */
+export interface SetInterestIntent {
+  type: 'SET_INTEREST';
+  payload: {
+    /** Topic name in natural language */
+    topic: string;
+    /** Interest intensity level */
+    intensity: InterestIntensity;
+    /** Whether user wants urgent alerts on this topic */
+    urgent: boolean;
+    /** Evidence source */
+    source: EvidenceSource;
+  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
+}
+
+/**
  * Union of all intent types.
  */
 export type Intent =
@@ -284,4 +315,5 @@ export type Intent =
   | LogIntent
   | EmitMetricIntent
   | EmitThoughtIntent
-  | RememberIntent;
+  | RememberIntent
+  | SetInterestIntent;

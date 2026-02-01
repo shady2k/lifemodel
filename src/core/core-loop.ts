@@ -27,6 +27,7 @@ import type {
   Channel,
   Event,
   ThoughtData,
+  InterestIntensity,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import type {
@@ -618,7 +619,13 @@ export class CoreLoop {
       // Schedule next tick
       this.scheduleTick();
     } catch (error) {
-      this.logger.error({ error, tick: this.tickCount }, 'Tick failed');
+      // Serialize error properly for logging (pino doesn't serialize all error types well)
+      const errorDetails =
+        error instanceof Error
+          ? { message: error.message, stack: error.stack, name: error.name }
+          : { raw: String(error), type: typeof error };
+
+      this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
 
       // Continue running despite error
       this.scheduleTick();
@@ -1133,67 +1140,40 @@ export class CoreLoop {
 
           // 1. If user fact → update UserModel
           if (isUserFact && this.userModel) {
-            // Route interest_* and urgency_* to specialized methods (delta-based)
-            if (attribute.startsWith('interest_')) {
-              const topic = attribute.slice('interest_'.length);
-              const delta = this.parseDelta(value);
-              if (delta !== null) {
-                const current = this.userModel.getInterests()?.weights[topic.toLowerCase()] ?? 0.5;
-                const newWeight = Math.max(0, Math.min(1, current + delta));
-                this.userModel.setTopicWeight(topic, newWeight);
-                this.logger.debug(
-                  { topic, delta, current, newWeight, tickId: trace?.tickId },
-                  'Topic interest weight updated'
-                );
-              }
-            } else if (attribute.startsWith('urgency_')) {
-              const topic = attribute.slice('urgency_'.length);
-              const delta = this.parseDelta(value);
-              if (delta !== null) {
-                const current = this.userModel.getInterests()?.urgency[topic.toLowerCase()] ?? 0.5;
-                const newUrgency = Math.max(0, Math.min(1, current + delta));
-                this.userModel.setTopicUrgency(topic, newUrgency);
-                this.logger.debug(
-                  { topic, delta, current, newUrgency, tickId: trace?.tickId },
-                  'Topic urgency updated'
-                );
-              }
-            } else {
-              // Check if value is a delta for numeric properties
-              const strValue = value.trim();
-              const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
-              const deltaNum = isDelta ? this.parseDelta(value) : null;
+            // Check if value is a delta for numeric properties
+            const strValue = value.trim();
+            const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
+            const deltaNum = isDelta ? this.parseDelta(value) : null;
 
-              if (isDelta && deltaNum !== null) {
-                // Apply delta to current value
-                const currentProp = this.userModel.getProperty(attribute);
-                const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
-                const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
-                this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
-                this.logger.debug(
-                  {
-                    attribute,
-                    delta: deltaNum,
-                    current: currentNum,
-                    newValue,
-                    tickId: trace?.tickId,
-                  },
-                  'User property updated (delta)'
-                );
-              } else {
-                // Store as-is (string or absolute value)
-                this.userModel.setProperty(attribute, value, confidence, source, evidence);
-                this.logger.debug(
-                  {
-                    attribute,
-                    value,
-                    confidence,
-                    tickId: trace?.tickId,
-                    parentSignalId: trace?.parentSignalId,
-                  },
-                  'User property stored'
-                );
-              }
+            if (isDelta && deltaNum !== null) {
+              // Apply delta to current value
+              const currentProp = this.userModel.getProperty(attribute);
+              const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
+              const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
+              this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
+              this.logger.debug(
+                {
+                  attribute,
+                  delta: deltaNum,
+                  current: currentNum,
+                  newValue,
+                  tickId: trace?.tickId,
+                },
+                'User property updated (delta)'
+              );
+            } else {
+              // Store as-is (string or absolute value)
+              this.userModel.setProperty(attribute, value, confidence, source, evidence);
+              this.logger.debug(
+                {
+                  attribute,
+                  value,
+                  confidence,
+                  tickId: trace?.tickId,
+                  parentSignalId: trace?.parentSignalId,
+                },
+                'User property stored'
+              );
             }
           }
 
@@ -1225,6 +1205,67 @@ export class CoreLoop {
           }
 
           this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
+          break;
+        }
+
+        case 'SET_INTEREST': {
+          const { topic, intensity, urgent, source } = intent.payload;
+          const trace = intent.trace;
+
+          if (!this.userModel) {
+            this.logger.warn({ topic }, 'SET_INTEREST skipped: no UserModel');
+            break;
+          }
+
+          // Validate topic is a string
+          if (typeof topic !== 'string' || topic.length === 0) {
+            this.logger.error({ topic, intensity }, 'SET_INTEREST: invalid topic');
+            break;
+          }
+
+          // Split comma-separated keywords into individual entries
+          // "отключения,газ,вода" → ["отключения", "газ", "вода"]
+          const keywords = topic
+            .split(',')
+            .map((kw) => kw.trim().toLowerCase())
+            .filter((kw) => kw.length >= 2); // Skip empty or single-char
+
+          if (keywords.length === 0) {
+            this.logger.error({ topic, intensity }, 'SET_INTEREST: no valid keywords');
+            break;
+          }
+
+          // Get delta from intensity enum
+          const delta = CoreLoop.INTENSITY_DELTAS[intensity];
+          const interests = this.userModel.getInterests();
+
+          // Store each keyword as a separate interest entry
+          for (const keyword of keywords) {
+            const currentWeight = interests?.weights[keyword] ?? 0.5;
+            const newWeight = Math.max(0, Math.min(1, currentWeight + delta));
+            this.userModel.setTopicWeight(keyword, newWeight);
+
+            if (urgent) {
+              const currentUrgency = interests?.urgency[keyword] ?? 0.5;
+              const newUrgency = Math.max(0, Math.min(1, currentUrgency + 0.5));
+              this.userModel.setTopicUrgency(keyword, newUrgency);
+            }
+          }
+
+          this.logger.debug(
+            {
+              originalTopic: topic,
+              keywords,
+              intensity,
+              delta,
+              urgent,
+              source,
+              tickId: trace?.tickId,
+            },
+            'Topic interests updated'
+          );
+
+          this.metrics.counter('interests_set', { intensity, urgent: String(urgent) });
           break;
         }
       }
@@ -1286,6 +1327,16 @@ export class CoreLoop {
     // Clamp delta to reasonable range (-1 to +1)
     return Math.max(-1, Math.min(1, num));
   }
+
+  /**
+   * Intensity-to-delta mapping for SET_INTEREST intent.
+   */
+  private static readonly INTENSITY_DELTAS: Record<InterestIntensity, number> = {
+    strong_positive: 0.5,
+    weak_positive: 0.2,
+    weak_negative: -0.2,
+    strong_negative: -0.5,
+  };
 
   /**
    * Save agent message to conversation history.

@@ -14,6 +14,7 @@ export { createAgentTool } from './agent.js';
 export { createScheduleTool } from './schedule.js';
 export { createFinalTool } from './final.js';
 export { createRememberTool } from './remember.js';
+export { createInterestTool } from './interest.js';
 
 // Types
 export type { MemoryProvider, MemoryEntry, MemorySearchOptions, MemoryToolDeps } from './memory.js';

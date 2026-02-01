@@ -622,26 +622,26 @@ COGNITION sees Fact[] (generic, no plugin types)
 
 ### Phase 5: Learning Loop ✅ COMPLETE
 
-**Delta-based updates via `core.remember`:**
+**Dedicated `core.setInterest` tool:**
 ```
 User: "I love crypto news!"
-→ COGNITION calls: core.remember(subject="user", attribute="interest_crypto", value="+0.2", source="user_explicit")
-→ CoreLoop detects interest_* attribute
-→ Applies delta to current weight (clamped 0-1)
+→ COGNITION calls: core.setInterest(topic="crypto", intensity="strong_positive", urgent=false, source="user_explicit")
+→ CoreLoop applies SET_INTEREST intent
 → UserModel.setTopicWeight("crypto", newWeight)
 ```
 
-**Attribute patterns:**
-- `interest_<topic>` → routes to `setTopicWeight(topic, delta)`
-- `urgency_<topic>` → routes to `setTopicUrgency(topic, delta)`
-- Other numeric properties → delta applied if value starts with +/-
+**Intensity levels:**
+- `strong_positive` (+0.5) - explicit interest
+- `weak_positive` (+0.2) - implicit/inferred interest
+- `weak_negative` (-0.2) - mild disinterest
+- `strong_negative` (-0.5) - explicit disinterest
 
 **Checklist:**
-- [x] Delta parsing in CoreLoop (`parseDelta` method)
-- [x] Routing `interest_*` to `setTopicWeight`
-- [x] Routing `urgency_*` to `setTopicUrgency`
-- [x] General delta support for all numeric properties
-- [x] Updated tool description in `core.remember`
+- [x] Dedicated `core.setInterest` tool (clean topic names, no underscore encoding)
+- [x] SET_INTEREST intent type and handler
+- [x] Intensity enum mapped to deltas in CoreLoop
+- [x] Boolean `urgent` flag for immediate alerts
+- [x] General delta support for all numeric properties via `core.remember`
 - [x] Filtered topics emitted as low-confidence facts (tag: 'filtered')
 - [ ] "I saw something about X" - COGNITION searches memory, finds filtered facts
 - [ ] Integration tests for learning

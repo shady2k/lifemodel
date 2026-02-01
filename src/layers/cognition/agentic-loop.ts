@@ -831,7 +831,17 @@ Rules:
 - If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).`
     }
 
-MEMORY: When user shares personal facts (birthday, name, preferences), use core.remember to save them.`;
+MEMORY: When user shares personal facts (birthday, name, preferences), use core.remember to save them.
+TOPIC INTERESTS: Use core.setInterest to track what user cares about:
+- Use SHORT KEYWORDS only (1-3 words), not full sentences
+- Extract ALL keywords from request: topic + location + street name + specific terms
+- Call MULTIPLE TIMES for distinct topics (e.g., "outages" + "Kobtsevoy street" = 2 calls)
+- Explicit ("warn me", "interested in") → intensity="strong_positive", urgent=true if alerts wanted
+- Implicit (repeated questions) → intensity="weak_positive"
+- Negative ("don't care") → intensity="strong_negative"
+Example: "warn me about outages on Kobtsevoy street" → call twice:
+  1. core.setInterest(topic="outages,electricity", intensity="strong_positive", urgent=true)
+  2. core.setInterest(topic="Kobtsevoy", intensity="strong_positive", urgent=true)`;
   }
 
   private buildUserProfileSection(context: LoopContext): string | null {
@@ -1194,6 +1204,24 @@ Example defer terminal:
             evidence: data['evidence'] as string | undefined,
             isUserFact: data['isUserFact'] as boolean,
             recipientId: context.recipientId,
+          },
+        };
+      }
+
+      case 'core.setInterest': {
+        // core.setInterest → SET_INTEREST intent
+        if (data['action'] !== 'setInterest') return null;
+        return {
+          type: 'SET_INTEREST',
+          payload: {
+            topic: data['topic'] as string,
+            intensity: data['intensity'] as
+              | 'strong_positive'
+              | 'weak_positive'
+              | 'weak_negative'
+              | 'strong_negative',
+            urgent: data['urgent'] as boolean,
+            source: data['source'] as EvidenceSource,
           },
         };
       }

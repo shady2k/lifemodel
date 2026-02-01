@@ -30,6 +30,18 @@ Core and plugins are strictly decoupled. Core NEVER imports plugin types. Plugin
 ### 5. No Backward Compatibility
 Remove old, dead, and unused code. Avoid fallbacks. Clean breaks over compatibility shims.
 
+### 6. No Attribute Prefix Routing
+Never encode behavior in attribute names via prefixes (e.g., `interest_crypto`, `urgency_news`).
+This forces LLMs to use identifier-style naming with underscores instead of natural language.
+
+**Bad:** `core.remember(attribute="interest_локальные_модели", value="+0.5")`
+**Good:** `core.setInterest(topic="локальные модели", intensity="strong_positive")`
+
+Create dedicated tools with explicit fields instead.
+
+Note: ID prefixes (`mem_`, `rcpt_`, `src_`) and namespace prefixes (`core.*`, `plugin.*`) are fine -
+they identify entity types, not encode behavior.
+
 ---
 
 ## 3-Layer Brain Architecture
