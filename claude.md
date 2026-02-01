@@ -42,6 +42,12 @@ Create dedicated tools with explicit fields instead.
 Note: ID prefixes (`mem_`, `rcpt_`, `src_`) and namespace prefixes (`core.*`, `plugin.*`) are fine -
 they identify entity types, not encode behavior.
 
+### 7. Restart-Safe Scheduling
+Scheduled events must not be lost due to downtime. On restart:
+- Preserve existing schedules (don't overwrite with new `fireAt`)
+- Past-due schedules fire immediately (catch-up behavior)
+- This ensures reliability without requiring 24/7 uptime
+
 ---
 
 ## 3-Layer Brain Architecture

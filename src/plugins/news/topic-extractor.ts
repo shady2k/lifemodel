@@ -56,16 +56,19 @@ export function hasBreakingPattern(text: string): boolean {
 
 /**
  * Convert a FetchedArticle to a NewsArticle for signal emission.
- * Topics are empty - LLM understands content via memory search.
+ * Uses tags from RSS/Atom feeds if available, otherwise empty.
  */
 export function convertToNewsArticle(article: FetchedArticle): NewsArticle {
   const combinedText = article.summary ? `${article.title} ${article.summary}` : article.title;
+
+  // Use tags from feed if available (normalized to lowercase)
+  const topics = article.tags?.map((tag) => tag.toLowerCase()) ?? [];
 
   return {
     id: article.id,
     title: article.title,
     source: article.sourceId,
-    topics: [], // LLM handles topic understanding
+    topics,
     url: article.url,
     summary: article.summary,
     publishedAt: article.publishedAt,

@@ -176,23 +176,39 @@ async function saveSourceState(storage: StoragePrimitive, state: SourceState): P
 
 /**
  * Filter out articles that have already been seen.
- * Uses lastSeenId or lastSeenHash for deduplication.
+ * Uses timestamp-based filtering (primary) and ID matching (fallback).
+ *
+ * Important: RSS feeds may be sorted by popularity, not date.
+ * We can't assume "stop at lastSeenId" works for all feeds.
+ * Instead, filter by publishedAt > lastFetchedAt for reliable deduplication.
  */
 function filterNewArticles(
   articles: FetchedArticle[],
   state: SourceState | null
 ): FetchedArticle[] {
-  if (!state || (!state.lastSeenId && !state.lastSeenHash)) {
+  if (!state) {
     // No previous state - all articles are new
     return articles;
   }
 
+  const seenIds = new Set<string>();
+  if (state.lastSeenId) {
+    seenIds.add(state.lastSeenId);
+  }
+
   const newArticles: FetchedArticle[] = [];
+  const lastFetchedAt = state.lastFetchedAt;
 
   for (const article of articles) {
-    // Stop at the last seen article
-    if (state.lastSeenId && article.id === state.lastSeenId) {
-      break;
+    // Skip exact ID matches (handles duplicates in popularity-sorted feeds)
+    if (seenIds.has(article.id)) {
+      continue;
+    }
+
+    // Primary filter: timestamp-based (articles published after last fetch)
+    if (article.publishedAt && article.publishedAt <= lastFetchedAt) {
+      // Article is older than last fetch - skip it
+      continue;
     }
 
     newArticles.push(article);

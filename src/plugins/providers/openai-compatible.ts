@@ -316,6 +316,19 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     const headers = this.buildHeaders();
     const body = this.buildRequestBody(request, model);
 
+    // Trace-level logging of full request body for debugging
+    // This helps diagnose issues with tool_calls not appearing in history
+    this.providerLogger?.debug(
+      {
+        url,
+        model,
+        messageCount: request.messages.length,
+        toolCount: request.tools?.length ?? 0,
+        requestBody: body,
+      },
+      'Full OpenAI request body'
+    );
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();

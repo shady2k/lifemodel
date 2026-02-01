@@ -859,7 +859,8 @@ export class CoreLoop {
           break;
 
         case 'SEND_MESSAGE': {
-          const { recipientId, text, replyTo, conversationStatus } = intent.payload;
+          const { recipientId, text, replyTo, conversationStatus, toolCalls, toolResults } =
+            intent.payload;
 
           if (!this.recipientRegistry) {
             this.logger.error({ recipientId }, 'RecipientRegistry not configured');
@@ -907,7 +908,14 @@ export class CoreLoop {
 
                 if (this.conversationManager) {
                   // Use recipientId as conversation key for consistency
-                  void this.saveAgentMessage(recipientId, text, conversationStatus);
+                  // Pass tool call data for full turn preservation
+                  void this.saveAgentMessage(
+                    recipientId,
+                    text,
+                    conversationStatus,
+                    toolCalls,
+                    toolResults
+                  );
                 }
               } else {
                 this.logger.warn(
@@ -1204,12 +1212,34 @@ export class CoreLoop {
             );
           }
 
+          // 3. Record completed action to prevent LLM re-execution
+          if (rememberRecipientId && this.conversationManager) {
+            const summary = `${subject}.${attribute}="${value}"`;
+            this.conversationManager
+              .addCompletedAction(rememberRecipientId, {
+                tool: 'core.remember',
+                summary,
+              })
+              .catch((err: unknown) => {
+                this.logger.warn(
+                  { error: err instanceof Error ? err.message : String(err) },
+                  'Failed to record completed action for remember'
+                );
+              });
+          }
+
           this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
           break;
         }
 
         case 'SET_INTEREST': {
-          const { topic, intensity, urgent, source } = intent.payload;
+          const {
+            topic,
+            intensity,
+            urgent,
+            source,
+            recipientId: interestRecipientId,
+          } = intent.payload;
           const trace = intent.trace;
 
           if (!this.userModel) {
@@ -1250,6 +1280,22 @@ export class CoreLoop {
               const newUrgency = Math.max(0, Math.min(1, currentUrgency + 0.5));
               this.userModel.setTopicUrgency(keyword, newUrgency);
             }
+          }
+
+          // Record completed action to prevent LLM re-execution
+          if (interestRecipientId && this.conversationManager) {
+            const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
+            this.conversationManager
+              .addCompletedAction(interestRecipientId, {
+                tool: 'core.setInterest',
+                summary,
+              })
+              .catch((err: unknown) => {
+                this.logger.warn(
+                  { error: err instanceof Error ? err.message : String(err) },
+                  'Failed to record completed action for setInterest'
+                );
+              });
           }
 
           this.logger.debug(
@@ -1340,19 +1386,42 @@ export class CoreLoop {
 
   /**
    * Save agent message to conversation history.
+   * When tool call data is present, saves as a full turn (assistant + tool results).
    */
   private async saveAgentMessage(
     chatId: string,
     text: string,
-    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle'
+    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle',
+    toolCalls?: {
+      id: string;
+      type: 'function';
+      function: { name: string; arguments: string };
+    }[],
+    toolResults?: {
+      tool_call_id: string;
+      content: string;
+    }[]
   ): Promise<void> {
     if (!this.conversationManager) return;
 
     try {
-      await this.conversationManager.addMessage(chatId, {
-        role: 'assistant',
-        content: text,
-      });
+      // Use addTurn when we have tool call data (preserves OpenAI format)
+      if (toolCalls && toolCalls.length > 0) {
+        await this.conversationManager.addTurn(
+          chatId,
+          {
+            content: text,
+            tool_calls: toolCalls,
+          },
+          toolResults
+        );
+      } else {
+        // Simple message without tool calls
+        await this.conversationManager.addMessage(chatId, {
+          role: 'assistant',
+          content: text,
+        });
+      }
 
       // Use inline status if provided, otherwise fall back to LLM classification
       if (conversationStatus) {

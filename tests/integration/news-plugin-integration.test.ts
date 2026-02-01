@@ -64,6 +64,8 @@ const SAMPLE_RSS_FEED = `<?xml version="1.0" encoding="UTF-8"?>
       <description>Major tech announcement about artificial intelligence developments.</description>
       <guid>article-123</guid>
       <pubDate>Sat, 01 Jan 2025 12:00:00 GMT</pubDate>
+      <category>AI</category>
+      <category>Technology</category>
     </item>
     <item>
       <title>Security Update for Popular Framework</title>
@@ -71,6 +73,7 @@ const SAMPLE_RSS_FEED = `<?xml version="1.0" encoding="UTF-8"?>
       <description>Important security patch released for widely-used framework.</description>
       <guid>article-122</guid>
       <pubDate>Sat, 01 Jan 2025 10:00:00 GMT</pubDate>
+      <category>Security</category>
     </item>
   </channel>
 </rss>`;

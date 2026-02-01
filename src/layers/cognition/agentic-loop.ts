@@ -14,7 +14,7 @@
  */
 
 import type { Logger } from '../../types/logger.js';
-import type { Intent } from '../../types/intent.js';
+import type { Intent, IntentToolCall, IntentToolResult } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type {
@@ -28,6 +28,7 @@ import type {
 } from '../../types/cognition.js';
 import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
+import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { ThoughtData } from '../../types/signal.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
@@ -171,12 +172,34 @@ export interface LoopContext {
 
   /** Runtime config from processor */
   runtimeConfig?: RuntimeConfig | undefined;
+
+  /** Completed actions from previous sessions (to prevent re-execution) */
+  completedActions?: CompletedAction[] | undefined;
 }
 
+/**
+ * Tool call in conversation history (mirrors OpenAI format).
+ */
+export interface ConversationToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+/**
+ * Conversation message supporting full OpenAI format.
+ */
 export interface ConversationMessage {
-  role: 'user' | 'assistant' | 'thought' | 'system';
-  content: string;
+  role: 'user' | 'assistant' | 'tool' | 'system';
+  content: string | null;
   timestamp?: Date | undefined;
+  /** Tool calls made by assistant (only for role: 'assistant') */
+  tool_calls?: ConversationToolCall[];
+  /** Tool call ID this message is responding to (only for role: 'tool') */
+  tool_call_id?: string;
 }
 
 /**
@@ -518,21 +541,55 @@ export class AgenticLoop {
 
   /**
    * Build initial messages for the conversation.
+   * Injects conversation history as proper OpenAI messages with tool_calls visible.
    */
   private buildInitialMessages(context: LoopContext, useSmart: boolean): Message[] {
     const systemPrompt = this.buildSystemPrompt(context, useSmart);
-    const userPrompt = this.buildUserPrompt(context);
+    const messages: Message[] = [{ role: 'system', content: systemPrompt }];
 
-    return [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ];
+    // Inject conversation history as proper messages (not flattened text)
+    // This allows the LLM to see previous tool_calls and avoid re-execution
+    if (context.conversationHistory.length > 0) {
+      for (const histMsg of context.conversationHistory) {
+        const msg: Message = {
+          role: histMsg.role,
+          content: histMsg.content,
+        };
+
+        // Include tool_calls for assistant messages
+        if (histMsg.tool_calls && histMsg.tool_calls.length > 0) {
+          msg.tool_calls = histMsg.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+            },
+          }));
+        }
+
+        // Include tool_call_id for tool messages
+        if (histMsg.tool_call_id) {
+          msg.tool_call_id = histMsg.tool_call_id;
+        }
+
+        messages.push(msg);
+      }
+    }
+
+    // Add current trigger as user message (without history section since it's already in messages)
+    const triggerPrompt = this.buildTriggerPrompt(context, useSmart);
+    messages.push({ role: 'user', content: triggerPrompt });
+
+    return messages;
   }
 
   /**
-   * Build user prompt from context (trigger, history, etc.)
+   * Build trigger prompt for current context.
+   * Contains: user profile, runtime snapshot, completed actions, current trigger.
+   * Conversation history is injected as proper OpenAI messages separately.
    */
-  private buildUserPrompt(context: LoopContext, useSmart = false): string {
+  private buildTriggerPrompt(context: LoopContext, useSmart = false): string {
     const sections: string[] = [];
 
     // User profile (stable facts)
@@ -547,9 +604,10 @@ export class AgenticLoop {
       sections.push(runtimeSnapshot);
     }
 
-    // Conversation history
-    if (context.conversationHistory.length > 0) {
-      sections.push(this.buildHistorySection(context.conversationHistory));
+    // Completed actions (for non-user-message triggers to prevent re-execution)
+    const actionsSection = this.buildCompletedActionsSection(context);
+    if (actionsSection) {
+      sections.push(actionsSection);
     }
 
     // Current trigger
@@ -635,7 +693,8 @@ export class AgenticLoop {
     const terminal = this.buildTerminalFromFinalArgs(args);
 
     // Compile intents from tool results and terminal
-    const intents = this.compileIntentsFromToolResults(terminal, context, state.toolResults);
+    // Pass full state so we can include tool_calls in SEND_MESSAGE for conversation history
+    const intents = this.compileIntentsFromToolResults(terminal, context, state);
 
     return {
       success: true,
@@ -694,14 +753,15 @@ export class AgenticLoop {
 
   /**
    * Compile intents from tool results (new method for native tool calling).
-   * Includes trace metadata for log analysis.
+   * Includes trace metadata for log analysis and tool call data for conversation history.
    */
   private compileIntentsFromToolResults(
     terminal: Terminal,
     context: LoopContext,
-    toolResults: ToolResult[]
+    state: LoopState
   ): Intent[] {
     const intents: Intent[] = [];
+    const toolResults = state.toolResults;
 
     // Build base trace from context
     // tickId = batch grouping, parentSignalId = causal chain
@@ -732,13 +792,56 @@ export class AgenticLoop {
 
     // Add response intent if terminal is respond
     if (terminal.type === 'respond' && context.recipientId) {
+      // Build tool_calls and tool_results for conversation history
+      // This allows CoreLoop to save the full turn with tool call data
+      const intentToolCalls: IntentToolCall[] | undefined =
+        state.executedTools.length > 0
+          ? state.executedTools.map(
+              (tool): IntentToolCall => ({
+                id: tool.toolCallId,
+                type: 'function',
+                function: {
+                  // Sanitize tool name for API format (core.setInterest → core_setInterest)
+                  name: tool.name.replace(/\./g, '_'),
+                  arguments: JSON.stringify(tool.args),
+                },
+              })
+            )
+          : undefined;
+
+      const intentToolResults: IntentToolResult[] | undefined =
+        toolResults.length > 0
+          ? toolResults.map(
+              (result): IntentToolResult => ({
+                tool_call_id: result.toolCallId,
+                content: JSON.stringify(result.success ? result.data : { error: result.error }),
+              })
+            )
+          : undefined;
+
+      // Build payload - only include optional fields when present (exactOptionalPropertyTypes)
+      const sendPayload: {
+        recipientId: string;
+        text: string;
+        conversationStatus?: typeof terminal.conversationStatus;
+        toolCalls?: IntentToolCall[];
+        toolResults?: IntentToolResult[];
+      } = {
+        recipientId: context.recipientId,
+        text: terminal.text,
+        conversationStatus: terminal.conversationStatus,
+      };
+
+      if (intentToolCalls) {
+        sendPayload.toolCalls = intentToolCalls;
+      }
+      if (intentToolResults) {
+        sendPayload.toolResults = intentToolResults;
+      }
+
       intents.push({
         type: 'SEND_MESSAGE',
-        payload: {
-          recipientId: context.recipientId,
-          text: terminal.text,
-          conversationStatus: terminal.conversationStatus,
-        },
+        payload: sendPayload,
         trace: baseTrace,
       });
     }
@@ -1041,15 +1144,55 @@ ${combined}`;
     return 'medium';
   }
 
-  private buildHistorySection(history: ConversationMessage[]): string {
-    const formatted = history
-      .map((m) => {
-        if (m.role === 'system') return `[context] ${m.content}`;
-        return `${m.role}: ${m.content}`;
-      })
-      .join('\n');
+  /**
+   * Build completed actions section to prevent LLM re-execution.
+   * Only included for non-user-message triggers (autonomous events).
+   *
+   * When the LLM sees conversation history like "user: warn me about crypto"
+   * it might try to call setInterest again. This section explicitly lists
+   * what was already done.
+   */
+  private buildCompletedActionsSection(context: LoopContext): string | null {
+    // Only include for non-user-message triggers
+    // User messages start fresh - the LLM should respond to what the user just said
+    if (context.triggerSignal.type === 'user_message') {
+      return null;
+    }
 
-    return `## Recent Conversation\n${formatted}`;
+    const actions = context.completedActions;
+    if (!actions || actions.length === 0) {
+      return null;
+    }
+
+    // Format actions with relative timestamps
+    const now = Date.now();
+    const formatted = actions.map((action) => {
+      const ageMs = now - new Date(action.timestamp).getTime();
+      const ageStr = this.formatAge(ageMs);
+      // Simplify tool name (core.setInterest -> setInterest)
+      const toolShort = action.tool.replace('core.', '');
+      return `- ${toolShort}: ${action.summary} (${ageStr} ago)`;
+    });
+
+    return `## Actions Already Completed (DO NOT repeat these)
+${formatted.join('\n')}
+IMPORTANT: These actions were already executed in previous sessions. Do NOT call these tools again for the same data.`;
+  }
+
+  /**
+   * Format age in human-readable form.
+   */
+  private formatAge(ms: number): string {
+    const minutes = Math.floor(ms / (1000 * 60));
+    if (minutes < 60) {
+      return `${String(minutes)} min`;
+    }
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      return `${String(hours)} hr`;
+    }
+    const days = Math.floor(hours / 24);
+    return `${String(days)} day${days > 1 ? 's' : ''}`;
   }
 
   private buildTriggerSection(signal: Signal, context: LoopContext): string {
@@ -1222,6 +1365,7 @@ Example defer terminal:
               | 'strong_negative',
             urgent: data['urgent'] as boolean,
             source: data['source'] as EvidenceSource,
+            recipientId: context.recipientId,
           },
         };
       }

@@ -114,6 +114,9 @@ export interface FetchedArticle {
 
   /** Publication date if available */
   publishedAt?: Date | undefined;
+
+  /** Tags/categories from the feed */
+  tags?: string[] | undefined;
 }
 
 /**

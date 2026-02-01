@@ -264,6 +264,34 @@ The news plugin fetches sources every ~2 hours. Each fetch batches all urgent ar
 
 ---
 
+## Scheduler Catch-Up Behavior
+
+**Problem**: If the bot isn't running continuously, scheduled events can be missed.
+
+**Solution**: The scheduler preserves existing schedules on restart and fires past-due events immediately.
+
+**How it works:**
+1. Plugin manifests declare schedules (e.g., `cron: '0 */2 * * *'` for every 2 hours)
+2. Schedules are persisted to `plugin:news:schedules.json`
+3. On restart, core checks if schedules already exist:
+   - **Exists + past due** → Scheduler fires on next tick (catch-up)
+   - **Exists + future** → Schedule continues as planned
+   - **Doesn't exist** → Create new schedule with `fireAt = now + initialDelay`
+
+**Example:**
+```
+Day 1, 09:00: Bot starts, creates schedule with nextFireAt = 11:00
+Day 1, 10:30: Bot stops
+Day 1, 12:30: Bot restarts
+  → Schedule exists with nextFireAt = 11:00 (past due)
+  → On next tick, scheduler fires the missed event
+  → nextFireAt advances to 13:00 (next 2-hour mark)
+```
+
+This ensures no scheduled events are lost due to downtime.
+
+---
+
 ## Interesting News → Facts in Memory ✅
 
 **Implementation Decision**: No ShareQueue. Interesting articles become **facts** in memory.

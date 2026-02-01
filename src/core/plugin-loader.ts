@@ -1541,7 +1541,11 @@ export class PluginLoader {
    * Manifest schedules are managed by core - created on load, cancelled on unload.
    * This gives core visibility and control over all plugin schedules.
    *
-   * @returns Array of created schedule IDs
+   * Important: Preserves existing schedules to handle missed events after restart.
+   * If a schedule exists with nextFireAt in the past, the scheduler will fire it
+   * on the next tick (catch-up behavior).
+   *
+   * @returns Array of schedule IDs (created or existing)
    */
   private async createManifestSchedules(
     manifest: PluginManifestV2,
@@ -1552,7 +1556,9 @@ export class PluginLoader {
       return [];
     }
 
-    const createdIds: string[] = [];
+    const scheduleIds: string[] = [];
+    const existingSchedules = scheduler.getSchedules();
+    const existingById = new Map(existingSchedules.map((s) => [s.id, s]));
 
     for (const scheduleDef of schedules) {
       // Skip disabled schedules
@@ -1564,13 +1570,35 @@ export class PluginLoader {
         continue;
       }
 
+      const scheduleId = `manifest:${scheduleDef.id}`;
+
       try {
-        // Calculate initial fire time
+        // Check if schedule already exists (persisted from previous run)
+        const existing = existingById.get(scheduleId);
+        if (existing) {
+          // Keep existing schedule - if nextFireAt is in the past, scheduler will catch up
+          const isPast = existing.nextFireAt <= new Date();
+          this.logger.info(
+            {
+              pluginId: manifest.id,
+              scheduleId,
+              nextFireAt: existing.nextFireAt.toISOString(),
+              isPastDue: isPast,
+            },
+            isPast
+              ? 'Existing schedule is past due, will fire on next tick'
+              : 'Preserving existing schedule'
+          );
+          scheduleIds.push(scheduleId);
+          continue;
+        }
+
+        // Create new schedule (first run or after schedule was cancelled)
         const initialDelay = scheduleDef.initialDelayMs ?? 0;
         const fireAt = new Date(Date.now() + initialDelay);
 
-        const scheduleId = await scheduler.schedule({
-          id: `manifest:${scheduleDef.id}`,
+        await scheduler.schedule({
+          id: scheduleId,
           fireAt,
           recurrence: {
             frequency: 'custom',
@@ -1582,7 +1610,7 @@ export class PluginLoader {
           },
         });
 
-        createdIds.push(scheduleId);
+        scheduleIds.push(scheduleId);
 
         this.logger.info(
           {
@@ -1606,7 +1634,7 @@ export class PluginLoader {
       }
     }
 
-    return createdIds;
+    return scheduleIds;
   }
 }
 

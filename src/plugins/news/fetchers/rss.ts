@@ -121,6 +121,67 @@ function extractText(node: unknown): string {
 }
 
 /**
+ * Extract categories/tags from RSS feed items.
+ * Handles both single category and array of categories.
+ */
+function extractCategories(categoryNode: unknown): string[] {
+  if (!categoryNode) return [];
+
+  const categories: string[] = [];
+
+  // Handle array of categories
+  if (Array.isArray(categoryNode)) {
+    for (const cat of categoryNode) {
+      const text = stripHtml(extractText(cat));
+      if (text) categories.push(text);
+    }
+  } else {
+    // Single category
+    const text = stripHtml(extractText(categoryNode));
+    if (text) categories.push(text);
+  }
+
+  return categories;
+}
+
+/**
+ * Extract categories/tags from Atom feed entries.
+ * Atom uses term attribute: <category term="tag" />
+ */
+function extractAtomCategories(categoryNode: unknown): string[] {
+  if (!categoryNode) return [];
+
+  const categories: string[] = [];
+
+  const processCat = (cat: unknown) => {
+    if (typeof cat !== 'object' || cat === null) {
+      // Might be plain text
+      const text = extractText(cat);
+      if (text) categories.push(text);
+      return;
+    }
+
+    const catObj = cat as Record<string, unknown>;
+    // Atom category uses @_term or term attribute
+    const term = catObj['@_term'] ?? catObj['term'] ?? catObj['@_label'] ?? catObj['label'];
+    if (term) {
+      const text = stripHtml(extractText(term));
+      if (text) categories.push(text);
+    }
+  };
+
+  if (Array.isArray(categoryNode)) {
+    for (const cat of categoryNode) {
+      processCat(cat);
+    }
+  } else {
+    processCat(categoryNode);
+  }
+
+  return categories;
+}
+
+/**
  * Parse RSS 2.0 feed format.
  */
 function parseRss2(
@@ -151,6 +212,9 @@ function parseRss2(
     const guid = extractText(item['guid']);
     const pubDate = extractText(item['pubDate'] ?? item['dc:date']);
 
+    // Extract tags from category elements
+    const tags = extractCategories(item['category']);
+
     // Skip items without title
     if (!title) continue;
 
@@ -165,6 +229,7 @@ function parseRss2(
       sourceId,
       sourceName,
       publishedAt: parseDate(pubDate),
+      tags: tags.length > 0 ? tags : undefined,
     });
   }
 
@@ -220,6 +285,9 @@ function parseAtom(
     const id = extractText(entry['id']);
     const published = extractText(entry['published'] ?? entry['updated']);
 
+    // Extract tags from category elements (Atom uses term attribute)
+    const tags = extractAtomCategories(entry['category']);
+
     // Skip items without title
     if (!title) continue;
 
@@ -234,6 +302,7 @@ function parseAtom(
       sourceId,
       sourceName,
       publishedAt: parseDate(published),
+      tags: tags.length > 0 ? tags : undefined,
     });
   }
 

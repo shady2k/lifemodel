@@ -215,6 +215,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get time since last message (for proactive contact context)
     const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(recipientId);
 
+    // Get completed actions (for autonomous triggers to prevent re-execution)
+    const completedActions = await this.getCompletedActions(recipientId, triggerSignal.type);
+
     // Build loop context with runtime config
     const loopContext: LoopContext = {
       triggerSignal,
@@ -228,6 +231,7 @@ export class CognitionProcessor implements CognitionLayer {
       recipientId,
       userId: signalData?.userId,
       timeSinceLastMessageMs,
+      completedActions,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
@@ -340,7 +344,7 @@ export class CognitionProcessor implements CognitionLayer {
         return;
       }
 
-      const conversationText = toCompact.map((m) => `${m.role}: ${m.content}`).join('\n');
+      const conversationText = toCompact.map((m) => `${m.role}: ${m.content ?? ''}`).join('\n');
 
       const summary = await this.cognitionLLM.complete({
         systemPrompt: 'You are a helpful assistant that summarizes conversations.',
@@ -359,6 +363,7 @@ export class CognitionProcessor implements CognitionLayer {
 
   /**
    * Get conversation history for context.
+   * Returns proper OpenAI format with tool_calls preserved.
    */
   private async getConversationHistory(chatId?: string): Promise<ConversationMessage[]> {
     if (!chatId || !this.conversationManager) {
@@ -367,10 +372,20 @@ export class CognitionProcessor implements CognitionLayer {
 
     try {
       const history = await this.conversationManager.getHistory(chatId, { maxRecent: 10 });
-      return history.map((msg) => ({
-        role: msg.role as 'user' | 'assistant',
-        content: msg.content,
-      }));
+      return history.map((msg): ConversationMessage => {
+        const convMsg: ConversationMessage = {
+          role: msg.role,
+          content: msg.content,
+        };
+        // Only include optional fields when they have values (TypeScript exactOptionalPropertyTypes)
+        if (msg.tool_calls && msg.tool_calls.length > 0) {
+          convMsg.tool_calls = msg.tool_calls;
+        }
+        if (msg.tool_call_id) {
+          convMsg.tool_call_id = msg.tool_call_id;
+        }
+        return convMsg;
+      });
     } catch (error) {
       this.logger.trace(
         { chatId, error: error instanceof Error ? error.message : 'Unknown' },
@@ -398,6 +413,40 @@ export class CognitionProcessor implements CognitionLayer {
       this.logger.trace(
         { chatId, error: error instanceof Error ? error.message : 'Unknown' },
         'Failed to get conversation status for time since'
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Get completed actions for preventing LLM re-execution.
+   * Only fetched for non-user-message triggers (autonomous events).
+   *
+   * @param chatId Conversation ID
+   * @param triggerType Type of trigger signal
+   * @returns List of recent completed actions, or undefined
+   */
+  private async getCompletedActions(
+    chatId?: string,
+    triggerType?: string
+  ): Promise<{ tool: string; summary: string; timestamp: string }[] | undefined> {
+    // Only fetch for non-user-message triggers
+    // User messages start fresh conversation turns
+    if (triggerType === 'user_message') {
+      return undefined;
+    }
+
+    if (!chatId || !this.conversationManager) {
+      return undefined;
+    }
+
+    try {
+      const actions = await this.conversationManager.getRecentActions(chatId);
+      return actions.length > 0 ? actions : undefined;
+    } catch (error) {
+      this.logger.trace(
+        { chatId, error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get completed actions'
       );
       return undefined;
     }
