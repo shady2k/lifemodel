@@ -47,3 +47,13 @@ Scheduled events must not be lost due to downtime. On restart:
 - Preserve existing schedules (don't overwrite with new `fireAt`)
 - Past-due schedules fire immediately (catch-up behavior)
 - This ensures reliability without requiring 24/7 uptime
+
+---
+
+## Documentation
+
+Project documentation is in the `docs/` folder:
+- `docs/architecture.md` - 3-layer brain, CoreLoop, project structure
+- `docs/concepts/` - Signals, intents, energy model, memory
+- `docs/features/` - Thinking, news, reminders, social debt
+- `docs/plugins/` - Neurons, channels, plugin overview
