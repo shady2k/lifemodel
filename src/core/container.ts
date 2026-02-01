@@ -32,6 +32,7 @@ import {
   type StateManager,
   type ConversationManager,
   createJSONStorage,
+  createDeferredStorage,
   createStateManager,
   createConversationManager,
 } from '../storage/index.js';
@@ -297,9 +298,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const logger = createLogger(loggerConfig);
   logger.info('Loaded configuration');
 
-  // Create storage
+  // Create storage with deferred writes (batches disk I/O, prevents race conditions)
   const storagePath = mergedConfig.paths.state;
-  const storage = createJSONStorage(storagePath);
+  const jsonStorage = createJSONStorage(storagePath);
+  const storage = createDeferredStorage(jsonStorage, logger, {
+    flushIntervalMs: 30_000, // Flush every 30 seconds
+  });
+  storage.startAutoFlush();
   logger.info({ storagePath }, 'Storage initialized');
 
   // Create state manager
@@ -626,6 +631,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
     // Flush recipient registry
     await recipientRegistry.flush();
+
+    // Flush deferred storage (ensures all pending writes are persisted)
+    await storage.shutdown();
 
     // Stop all channels
     for (const channel of channels.values()) {
