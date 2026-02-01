@@ -684,6 +684,30 @@ export class UserModel {
           return;
         }
         break;
+      case 'wake_hour':
+      case 'wakeHour': {
+        // Accept numeric string or number
+        const parsed = typeof value === 'number' ? value : parseInt(String(value), 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 23) {
+          this.user.patterns.wakeHour = parsed;
+          this.adjustEnergyProfile();
+          this.logger.info({ wakeHour: parsed }, 'Wake hour updated');
+          return;
+        }
+        break;
+      }
+      case 'sleep_hour':
+      case 'sleepHour': {
+        // Accept numeric string or number
+        const parsed = typeof value === 'number' ? value : parseInt(String(value), 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 23) {
+          this.user.patterns.sleepHour = parsed;
+          this.adjustEnergyProfile();
+          this.logger.info({ sleepHour: parsed }, 'Sleep hour updated');
+          return;
+        }
+        break;
+      }
     }
 
     // Conflict resolution: keep higher confidence version

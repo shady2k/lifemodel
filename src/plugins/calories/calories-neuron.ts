@@ -24,6 +24,7 @@ import { Priority } from '../../types/priority.js';
 import { DateTime } from 'luxon';
 import type { FoodEntry } from './calories-types.js';
 import { CALORIES_STORAGE_KEYS } from './calories-types.js';
+import { getCurrentFoodDate } from './calories-tool.js';
 
 /**
  * Configuration for calories deficit neuron.
@@ -70,6 +71,7 @@ export const DEFAULT_CALORIES_DEFICIT_CONFIG: CaloriesDeficitNeuronConfig = {
  */
 interface UserPatterns {
   wakeHour?: number;
+  sleepHour?: number;
 }
 
 /**
@@ -86,24 +88,6 @@ type GetUserPatternsFunc = () => UserPatterns | null;
  * Function type for getting calorie goal.
  */
 type GetCalorieGoalFunc = () => Promise<number | null>;
-
-/**
- * Get the current "food day" based on user's sleep patterns.
- */
-function getCurrentFoodDate(timezone: string, userPatterns: UserPatterns | null): string {
-  const now = DateTime.now().setZone(timezone);
-  const hour = now.hour;
-
-  // Default wake hour is 6 AM
-  const wakeHour = userPatterns?.wakeHour ?? 6;
-
-  if (hour < wakeHour) {
-    // Still "yesterday" - user hasn't slept yet
-    return now.minus({ days: 1 }).toFormat('yyyy-MM-dd');
-  }
-
-  return now.toFormat('yyyy-MM-dd');
-}
 
 /**
  * Get the current local hour in user's timezone.

@@ -79,15 +79,18 @@ const manifest: PluginManifestV2 = {
 function createGetUserPatterns(
   primitives: PluginPrimitives,
   recipientId: string
-): () => { wakeHour?: number } | null {
+): () => { wakeHour?: number; sleepHour?: number } | null {
   return () => {
     const patterns = primitives.services.getUserPatterns(recipientId);
     if (!patterns) return null;
-    // Only include wakeHour if it's actually a number
+    const result: { wakeHour?: number; sleepHour?: number } = {};
     if (patterns.wakeHour !== null) {
-      return { wakeHour: patterns.wakeHour };
+      result.wakeHour = patterns.wakeHour;
     }
-    return {};
+    if (patterns.sleepHour !== null) {
+      result.sleepHour = patterns.sleepHour;
+    }
+    return result;
   };
 }
 
@@ -296,7 +299,7 @@ const lifecycle: PluginLifecycleV2 = {
 
   deactivate(): void {
     if (pluginPrimitives) {
-      pluginPrimitives.logger.info('Calories plugin deactivating');
+      pluginPrimitives.logger.info({}, 'Calories plugin deactivating');
     }
     pluginPrimitives = null;
     pluginTools = [];

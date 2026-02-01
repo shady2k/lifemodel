@@ -76,6 +76,8 @@ User: "calculate my goal"
 | `activity_level` | string | sedentary, light, moderate, active, very_active |
 | `calorie_goal` | number | Daily target (manual or calculated) |
 | `target_weight_kg` | number | Goal weight for TDEE adjustment |
+| `sleep_hour` | number | Typical bedtime hour (0-23), e.g., 23 for 11 PM |
+| `wake_hour` | number | Typical wake hour (0-23), e.g., 7 for 7 AM |
 
 Existing fields used:
 - `gender` - for BMR calculation
@@ -101,11 +103,30 @@ calories:summary:YYYY-MM-DD → DailySummary   # Cached daily summaries
 
 ### Sleep-Aware Day Boundary
 
-Food logging uses user's sleep cycle, not calendar midnight:
-- 1:30 AM with wakeHour=7 → logs to previous date
-- 8:00 AM with wakeHour=7 → logs to current date
+Food logging uses the **midpoint of the sleep period** as the day boundary, not calendar midnight. This handles both late-night eating and early morning scenarios correctly.
 
-This ensures late-night eating counts toward the correct day.
+**How it works:**
+
+The cutoff is calculated as the midpoint between `sleepHour` and `wakeHour`:
+
+| sleepHour | wakeHour | Cutoff | Example |
+|-----------|----------|--------|---------|
+| 23 (11 PM) | 7 AM | 3 AM | 2 AM → yesterday, 4 AM → today |
+| 2 AM | 8 AM | 5 AM | 3 AM → yesterday, 6 AM → today |
+| 0 (midnight) | 8 AM | 4 AM | 2 AM → yesterday, 5 AM → today |
+
+**Setting sleep patterns:**
+
+Set via conversation when user mentions their schedule:
+```
+core.remember(subject="user", attribute="sleep_hour", value="23", source="user_explicit")
+core.remember(subject="user", attribute="wake_hour", value="7", source="user_explicit")
+```
+
+The LLM should ask about sleep patterns when:
+- User first sets up calorie tracking
+- User reports food was assigned to wrong day
+- User mentions irregular sleep schedule
 
 ### TDEE Calculation
 

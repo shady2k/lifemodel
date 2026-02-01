@@ -33,9 +33,11 @@ import { DateTime } from 'luxon';
 type GetTimezoneFunc = (recipientId: string) => string;
 
 /**
- * Get user patterns (wake hour, etc.) by recipientId.
+ * Get user patterns (wake/sleep hours) by recipientId.
  */
-type GetUserPatternsFunc = (recipientId: string) => { wakeHour?: number } | null;
+type GetUserPatternsFunc = (
+  recipientId: string
+) => { wakeHour?: number; sleepHour?: number } | null;
 
 /**
  * Get user model data for TDEE calculation.
@@ -120,18 +122,38 @@ const SCHEMA_DELETE = {
 
 /**
  * Get the current "food day" based on user's sleep patterns.
- * If it's after midnight but before the user's typical wake time,
- * the food day is still "yesterday" (user hasn't slept yet).
+ *
+ * Uses the midpoint of the sleep period as the day boundary cutoff.
+ * Example: sleepHour=2, wakeHour=8 → cutoff=5 AM
+ * - 3 AM → before cutoff → yesterday
+ * - 6 AM → after cutoff → today
  */
-function getCurrentFoodDate(timezone: string, userPatterns: { wakeHour?: number } | null): string {
+function getCurrentFoodDate(
+  timezone: string,
+  userPatterns: { wakeHour?: number; sleepHour?: number } | null
+): string {
   const now = DateTime.now().setZone(timezone);
   const hour = now.hour;
 
-  // Default wake hour is 6 AM
-  const wakeHour = userPatterns?.wakeHour ?? 6;
+  // Default: sleep at 23 (11 PM), wake at 7 AM
+  const sleepHour = userPatterns?.sleepHour ?? 23;
+  const wakeHour = userPatterns?.wakeHour ?? 7;
 
-  if (hour < wakeHour) {
-    // Still "yesterday" - user hasn't slept yet
+  // Calculate midpoint of sleep period as day boundary cutoff
+  let cutoff: number;
+  if (sleepHour < wakeHour) {
+    // Sleep doesn't cross midnight (e.g., 2 AM to 8 AM)
+    cutoff = Math.floor((sleepHour + wakeHour) / 2);
+  } else {
+    // Sleep crosses midnight (e.g., 23 to 7)
+    // Normalize wake to next day, find midpoint, wrap back
+    const wakeNormalized = wakeHour + 24;
+    const midpoint = (sleepHour + wakeNormalized) / 2;
+    cutoff = Math.floor(midpoint % 24);
+  }
+
+  // Between midnight and cutoff = still "yesterday"
+  if (hour < cutoff) {
     return now.minus({ days: 1 }).toFormat('yyyy-MM-dd');
   }
 
