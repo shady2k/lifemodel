@@ -29,3 +29,13 @@ What plugins can use:
 ## Registration
 
 Plugins declare capabilities via manifest. Core loads and wires them at startup.
+
+## Available Plugins
+
+| Plugin | Type | Description |
+|--------|------|-------------|
+| `reminder` | tool | Create and manage reminders with natural language and recurrence |
+| `thoughts` | neuron | Monitor thought pressure from accumulated unprocessed thoughts |
+| `social-debt` | neuron | Monitor social pressure from lack of interaction |
+| `calories` | tool + neuron | Track food intake, calories, and body weight with proactive deficit monitoring |
+| `news` | tool + filter | Fetch and filter news articles by user interests |

@@ -1264,6 +1264,8 @@ export class PluginLoader {
     // Get base services from provider (registerEventSchema added below)
     const baseServices = this.servicesProvider?.() ?? {
       getTimezone: () => 'UTC',
+      getUserPatterns: () => null,
+      getUserProperty: () => null,
     };
 
     // Create services with schema registration bound to this plugin

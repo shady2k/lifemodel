@@ -393,12 +393,49 @@ export interface PluginScheduleDefinition {
 }
 
 /**
+ * Snapshot of user's behavioral patterns.
+ * Null values indicate pattern not yet learned.
+ */
+export interface UserPatternsSnapshot {
+  /** Typical wake time (hour, 0-23) */
+  wakeHour: number | null;
+  /** Typical sleep time (hour, 0-23) */
+  sleepHour: number | null;
+}
+
+/**
+ * Snapshot of a user property with metadata.
+ */
+export interface UserPropertySnapshot {
+  /** The property value */
+  value: unknown;
+  /** Confidence in this value (0-1) */
+  confidence: number;
+  /** How the value was determined */
+  source: 'explicit' | 'inferred' | 'default';
+  /** When the property was last updated */
+  updatedAt: Date;
+}
+
+/**
  * Base services provided to plugins (from container).
  * PluginLoader adds registerEventSchema on top of this.
  */
 export interface BasePluginServices {
   /** Get timezone for a recipient (IANA name). Returns 'UTC' if not found. */
   getTimezone: (recipientId?: string) => string;
+
+  /**
+   * Get user's behavioral patterns (wake/sleep hours).
+   * Returns null if no user model exists or patterns not yet learned.
+   */
+  getUserPatterns: (recipientId?: string) => UserPatternsSnapshot | null;
+
+  /**
+   * Get a specific user property by attribute name.
+   * Returns null if property doesn't exist or no user model.
+   */
+  getUserProperty: (attribute: string, recipientId?: string) => UserPropertySnapshot | null;
 }
 
 /**

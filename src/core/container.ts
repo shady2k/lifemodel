@@ -490,6 +490,61 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       }
       return 'UTC';
     },
+    getUserPatterns: (_recipientId?: string) => {
+      if (!userModel) return null;
+      const user = userModel.getUser();
+      const patterns = user.patterns;
+      return {
+        wakeHour: patterns.wakeHour,
+        sleepHour: patterns.sleepHour,
+      };
+    },
+    getUserProperty: (attribute: string, _recipientId?: string) => {
+      if (!userModel) return null;
+      const user = userModel.getUser();
+      // Check typed fields from User/Person first
+      if (attribute === 'name' && user.name !== null) {
+        return {
+          value: user.name,
+          confidence: 1.0,
+          source: 'explicit' as const,
+          updatedAt: new Date(),
+        };
+      }
+      // Check preferences for gender and language
+      if (attribute === 'gender' && user.preferences.gender !== 'unknown') {
+        return {
+          value: user.preferences.gender,
+          confidence: 1.0,
+          source: 'explicit' as const,
+          updatedAt: new Date(),
+        };
+      }
+      if (attribute === 'language' && user.preferences.language !== null) {
+        return {
+          value: user.preferences.language,
+          confidence: 1.0,
+          source: 'explicit' as const,
+          updatedAt: new Date(),
+        };
+      }
+      // Check flexible properties
+      const prop = userModel.getProperty(attribute);
+      if (!prop) return null;
+      // Map EvidenceSource to simpler source type
+      const sourceMap: Record<string, 'explicit' | 'inferred' | 'default'> = {
+        explicit: 'explicit',
+        inferred: 'inferred',
+        observation: 'inferred',
+        default: 'default',
+      };
+      return {
+        value: prop.value,
+        confidence: prop.confidence,
+        source: sourceMap[prop.source] ?? 'inferred',
+        updatedAt: prop.updatedAt,
+      };
+    },
   }));
 
   // 6. Wire scheduler to dispatch events to plugins
