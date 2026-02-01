@@ -87,13 +87,14 @@ export class SocialDebtNeuron extends BaseNeuron {
     }
 
     const signal = this.createSignal(currentValue, changeResult.relativeChange, correlationId);
+    const previousForLog = this.previousValue;
 
     this.updatePrevious(currentValue);
     this.recordEmission();
 
     this.logger.debug(
       {
-        previous: this.previousValue,
+        previous: previousForLog,
         current: currentValue,
         change: changeResult.relativeChange,
         reason: changeResult.reason,

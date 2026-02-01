@@ -117,6 +117,7 @@ export class ContactPressureNeuron extends BaseNeuron {
       changeResult.relativeChange,
       correlationId
     );
+    const previousForLog = this.previousValue;
 
     this.updatePrevious(currentValue);
     this.lastNeuronResult = result;
@@ -124,7 +125,7 @@ export class ContactPressureNeuron extends BaseNeuron {
 
     this.logger.debug(
       {
-        previous: this.previousValue,
+        previous: previousForLog,
         current: currentValue.toFixed(2),
         change: changeResult.relativeChange.toFixed(2),
         reason: changeResult.reason,
