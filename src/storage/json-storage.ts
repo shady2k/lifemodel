@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile, unlink, access, rename, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Storage } from './storage.js';
+import type { Logger } from '../types/logger.js';
 
 /**
  * Configuration for JSONStorage.
@@ -12,6 +13,8 @@ export interface JSONStorageConfig {
   createBackup?: boolean;
   /** File extension (default: '.json') */
   extension?: string;
+  /** Logger for warnings/errors (optional) */
+  logger?: Logger;
 }
 
 /**
@@ -26,11 +29,13 @@ export class JSONStorage implements Storage {
   private readonly basePath: string;
   private readonly createBackup: boolean;
   private readonly extension: string;
+  private readonly logger: Logger | undefined;
 
   constructor(config: JSONStorageConfig) {
     this.basePath = config.basePath;
     this.createBackup = config.createBackup ?? true;
     this.extension = config.extension ?? '.json';
+    this.logger = config.logger;
   }
 
   /**
@@ -71,7 +76,103 @@ export class JSONStorage implements Storage {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return null;
       }
+
+      // Try self-healing for JSON syntax errors
+      if (error instanceof SyntaxError) {
+        const recovered = await this.tryRecoverCorruptedFile(key, path);
+        if (recovered !== null) {
+          return recovered;
+        }
+
+        // Recovery failed, try backup
+        const backup = await this.loadBackup(key);
+        if (backup !== null) {
+          this.logger?.warn({ key }, 'Loaded from backup after corruption recovery failed');
+          return backup;
+        }
+      }
+
       throw error;
+    }
+  }
+
+  /**
+   * Try to recover data from a corrupted JSON file.
+   * Handles the }{ concatenation pattern from race conditions.
+   */
+  private async tryRecoverCorruptedFile(key: string, path: string): Promise<unknown> {
+    try {
+      const content = await readFile(path, 'utf-8');
+
+      // Look for }{ pattern (two JSON objects concatenated)
+      const corruptionIdx = content.indexOf('}{');
+      if (corruptionIdx === -1) {
+        // Try }]{ pattern (array end + new object)
+        const arrayCorruptionIdx = content.indexOf(']{');
+        if (arrayCorruptionIdx === -1) {
+          this.logger?.error({ key }, 'Cannot find corruption pattern for recovery');
+          return null;
+        }
+        // Truncate after the ]
+        const truncated = content.slice(0, arrayCorruptionIdx + 1) + '}';
+        return await this.parseAndSaveRecovered(key, path, content, truncated);
+      }
+
+      // Truncate at }{ keeping the first }
+      const truncated = content.slice(0, corruptionIdx + 1);
+      return await this.parseAndSaveRecovered(key, path, content, truncated);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Parse recovered content and save it back to fix the file.
+   */
+  private async parseAndSaveRecovered(
+    key: string,
+    path: string,
+    originalContent: string,
+    truncatedContent: string
+  ): Promise<unknown> {
+    try {
+      const data = JSON.parse(truncatedContent) as unknown;
+
+      // Save corrupted file for debugging
+      const corruptedPath = path + '.corrupted';
+      await writeFile(corruptedPath, originalContent, 'utf-8');
+
+      // Save recovered data back to original path (atomic write)
+      await this.save(key, data);
+
+      this.logger?.warn(
+        {
+          key,
+          originalSize: originalContent.length,
+          recoveredSize: truncatedContent.length,
+          bytesLost: originalContent.length - truncatedContent.length,
+          corruptedBackup: corruptedPath,
+        },
+        'Self-healed corrupted JSON file'
+      );
+
+      return data;
+    } catch {
+      this.logger?.error({ key }, 'Failed to parse recovered content');
+      return null;
+    }
+  }
+
+  /**
+   * Load from backup file.
+   */
+  private async loadBackup(key: string): Promise<unknown> {
+    const backupPath = this.getBackupPath(key);
+    try {
+      const content = await readFile(backupPath, 'utf-8');
+      return JSON.parse(content) as unknown;
+    } catch {
+      return null;
     }
   }
 
@@ -149,6 +250,7 @@ export class JSONStorage implements Storage {
 
   /**
    * Load from backup if primary file is corrupted.
+   * Note: load() now includes self-healing, so this is mainly for explicit backup loading.
    */
   async loadWithFallback(key: string): Promise<unknown> {
     try {
@@ -157,17 +259,10 @@ export class JSONStorage implements Storage {
         return data;
       }
     } catch {
-      // Primary load failed, try backup
+      // Primary load failed (including self-healing), try backup
     }
 
-    // Try backup
-    const backupPath = this.getBackupPath(key);
-    try {
-      const content = await readFile(backupPath, 'utf-8');
-      return JSON.parse(content) as unknown;
-    } catch {
-      return null;
-    }
+    return this.loadBackup(key);
   }
 }
 
@@ -176,7 +271,7 @@ export class JSONStorage implements Storage {
  */
 export function createJSONStorage(
   basePath: string,
-  options?: Partial<JSONStorageConfig>
+  options?: Partial<Omit<JSONStorageConfig, 'basePath'>>
 ): JSONStorage {
   return new JSONStorage({
     basePath,

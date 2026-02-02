@@ -71,6 +71,13 @@ If an error is deterministic (same input → same error), fix the root cause. Do
 
 **Example:** Snapshot + rollback for tool_call_id mismatches was rejected - the error is caused by bad slicing, which retry won't fix.
 
+### 4. Unified Storage Path
+All persistent data must use the same storage infrastructure. Never bypass DeferredStorage with direct file I/O - it causes race conditions and file corruption.
+
+**Pattern:** Component → Storage interface → DeferredStorage → JSONStorage (atomic writes)
+
+**Example:** MemoryProvider used direct `writeFile` with `autoSave: true`. Multiple concurrent saves corrupted the file with `}{` pattern.
+
 ---
 
 ## Documentation

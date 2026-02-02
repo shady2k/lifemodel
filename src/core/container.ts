@@ -301,7 +301,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create storage with deferred writes (batches disk I/O, prevents race conditions)
   const storagePath = mergedConfig.paths.state;
-  const jsonStorage = createJSONStorage(storagePath);
+  const jsonStorage = createJSONStorage(storagePath, { logger });
   const storage = createDeferredStorage(jsonStorage, logger, {
     flushIntervalMs: 30_000, // Flush every 30 seconds
   });
@@ -427,9 +427,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
-  // Create memory provider
+  // Create memory provider (uses unified storage)
   const memoryProvider = createJsonMemoryProvider(logger, {
-    storagePath: mergedConfig.paths.state.replace('state', 'memory.json') || './data/memory.json',
+    storage,
+    storageKey: 'memory',
+    maxEntries: 10000,
   });
   logger.info('MemoryProvider configured');
 

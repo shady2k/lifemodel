@@ -2,12 +2,10 @@
  * Memory Provider
  *
  * Abstracts memory storage for the COGNITION layer.
- * Currently uses JSON files, can be swapped for vector DB later.
+ * Uses the unified Storage interface for persistence (DeferredStorage).
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import type { Storage } from './storage.js';
 import type { Logger } from '../types/logger.js';
 import type {
   MemoryProvider,
@@ -20,23 +18,22 @@ import type {
  * Configuration for JSON memory provider.
  */
 export interface JsonMemoryProviderConfig {
-  /** Path to memory storage file */
-  storagePath: string;
+  /** Storage interface for persistence (DeferredStorage recommended) */
+  storage: Storage;
+
+  /** Storage key for memory data */
+  storageKey: string;
 
   /** Maximum entries to keep (older entries pruned) */
   maxEntries: number;
-
-  /** Auto-save after each write */
-  autoSave: boolean;
 }
 
 /**
- * Default configuration.
+ * Default configuration (storage must be provided).
  */
-const DEFAULT_CONFIG: JsonMemoryProviderConfig = {
-  storagePath: './data/memory.json',
+const DEFAULT_CONFIG: Omit<JsonMemoryProviderConfig, 'storage'> = {
+  storageKey: 'memory',
   maxEntries: 10000,
-  autoSave: true,
 };
 
 /**
@@ -69,7 +66,7 @@ interface StoredEntry {
 /**
  * JSON-based Memory Provider.
  *
- * Simple implementation using JSON file storage.
+ * Simple implementation using Storage interface for persistence.
  * Search is basic string matching (will be replaced with vector search later).
  */
 export class JsonMemoryProvider implements MemoryProvider {
@@ -77,9 +74,8 @@ export class JsonMemoryProvider implements MemoryProvider {
   private readonly logger: Logger;
   private entries: MemoryEntry[] = [];
   private loaded = false;
-  private dirty = false;
 
-  constructor(logger: Logger, config: Partial<JsonMemoryProviderConfig> = {}) {
+  constructor(logger: Logger, config: JsonMemoryProviderConfig) {
     this.logger = logger.child({ component: 'memory-provider' });
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -189,16 +185,13 @@ export class JsonMemoryProvider implements MemoryProvider {
       this.entries.push(entry);
     }
 
-    this.dirty = true;
-
     // Prune if over limit
     if (this.entries.length > this.config.maxEntries) {
       this.prune();
     }
 
-    if (this.config.autoSave) {
-      await this.persist();
-    }
+    // Persist via Storage (DeferredStorage will batch writes)
+    await this.persist();
 
     this.logger.debug({ entryId: entry.id, type: entry.type }, 'Memory entry saved');
   }
@@ -265,12 +258,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     const index = this.entries.findIndex((e) => e.id === id);
     if (index >= 0) {
       this.entries.splice(index, 1);
-      this.dirty = true;
-
-      if (this.config.autoSave) {
-        await this.persist();
-      }
-
+      await this.persist();
       return true;
     }
 
@@ -282,69 +270,49 @@ export class JsonMemoryProvider implements MemoryProvider {
    */
   async clear(): Promise<void> {
     this.entries = [];
-    this.dirty = true;
-
-    if (this.config.autoSave) {
-      await this.persist();
-    }
-
+    await this.persist();
     this.logger.info('Memory cleared');
   }
 
   /**
-   * Force save to disk.
+   * Persist memory to storage.
+   * DeferredStorage will batch writes automatically.
    */
   async persist(): Promise<void> {
-    if (!this.dirty) return;
+    const store: MemoryStore = {
+      version: 1,
+      entries: this.entries.map((e) => ({
+        id: e.id,
+        type: e.type,
+        content: e.content,
+        timestamp: e.timestamp.toISOString(),
+        recipientId: e.recipientId,
+        tags: e.tags,
+        confidence: e.confidence,
+        metadata: e.metadata,
+        tickId: e.tickId,
+        parentSignalId: e.parentSignalId,
+        trigger: e.trigger,
+        status: e.status,
+      })),
+    };
 
-    try {
-      const dir = dirname(this.config.storagePath);
-      if (!existsSync(dir)) {
-        await mkdir(dir, { recursive: true });
-      }
+    await this.config.storage.save(this.config.storageKey, store);
 
-      const store: MemoryStore = {
-        version: 1,
-        entries: this.entries.map((e) => ({
-          id: e.id,
-          type: e.type,
-          content: e.content,
-          timestamp: e.timestamp.toISOString(),
-          recipientId: e.recipientId,
-          tags: e.tags,
-          confidence: e.confidence,
-          metadata: e.metadata,
-          tickId: e.tickId,
-          parentSignalId: e.parentSignalId,
-          trigger: e.trigger,
-          status: e.status,
-        })),
-      };
-
-      await writeFile(this.config.storagePath, JSON.stringify(store, null, 2), 'utf-8');
-      this.dirty = false;
-
-      this.logger.debug(
-        { path: this.config.storagePath, entries: this.entries.length },
-        'Memory persisted'
-      );
-    } catch (error) {
-      this.logger.error({ error }, 'Failed to persist memory');
-      throw error;
-    }
+    this.logger.debug({ entries: this.entries.length }, 'Memory persisted');
   }
 
   /**
-   * Ensure memory is loaded from disk.
+   * Ensure memory is loaded from storage.
    */
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
 
     try {
-      if (existsSync(this.config.storagePath)) {
-        const content = await readFile(this.config.storagePath, 'utf-8');
-        const store = JSON.parse(content) as MemoryStore;
+      const data = await this.config.storage.load(this.config.storageKey);
 
+      if (data) {
+        const store = data as MemoryStore;
         this.entries = store.entries.map((e) => ({
           id: e.id,
           type: e.type,
@@ -359,16 +327,18 @@ export class JsonMemoryProvider implements MemoryProvider {
           trigger: e.trigger as MemoryEntry['trigger'],
           status: e.status,
         }));
-
-        this.logger.info({ entries: this.entries.length }, 'Memory loaded from disk');
+        this.logger.info({ entries: this.entries.length }, 'Memory loaded from storage');
       } else {
         this.entries = [];
-        this.logger.info('No existing memory file, starting fresh');
+        this.logger.info('No existing memory, starting fresh');
       }
 
       this.loaded = true;
     } catch (error) {
-      this.logger.error({ error }, 'Failed to load memory');
+      this.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to load memory'
+      );
       this.entries = [];
       this.loaded = true;
     }
@@ -426,10 +396,13 @@ export class JsonMemoryProvider implements MemoryProvider {
 
 /**
  * Create a JSON memory provider.
+ *
+ * @param logger Logger instance
+ * @param config Configuration (storage is required)
  */
 export function createJsonMemoryProvider(
   logger: Logger,
-  config?: Partial<JsonMemoryProviderConfig>
+  config: JsonMemoryProviderConfig
 ): JsonMemoryProvider {
   return new JsonMemoryProvider(logger, config);
 }
