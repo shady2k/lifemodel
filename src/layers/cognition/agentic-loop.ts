@@ -1168,7 +1168,7 @@ Rules:
 - Optional params: pass null, not placeholders
 - Tool requiresUserInput=true → ask user via core.final, don't retry
 - Search yields nothing → say "nothing found"
-- Include metadata.url for articles/news${
+- Articles/news: always include URL inline with each item. Never defer links to follow-up.${
       useSmart
         ? ''
         : `
