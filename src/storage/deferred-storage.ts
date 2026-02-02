@@ -232,7 +232,12 @@ export class DeferredStorage implements Storage {
 
       if (this.config.logFlush && (dirtyEntries.length > 0 || keysToDelete.length > 0)) {
         this.logger.debug(
-          { written: dirtyEntries.length, deleted: keysToDelete.length },
+          {
+            written: dirtyEntries.length,
+            writtenKeys: dirtyEntries.map((e) => e.key),
+            deleted: keysToDelete.length,
+            deletedKeys: keysToDelete,
+          },
           'Storage flushed'
         );
       }
