@@ -30,6 +30,37 @@ What plugins can use:
 
 Plugins declare capabilities via manifest. Core loads and wires them at startup.
 
+## Advanced Tool Features
+
+### rawParameterSchema
+
+For tools with complex nested parameters (discriminated unions, nested objects), use `rawParameterSchema` instead of the simple `parameters` array:
+
+```typescript
+const myTool: PluginTool = {
+  name: 'myTool',
+  description: '...',
+  rawParameterSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['create', 'delete'] },
+      config: {
+        type: ['object', 'null'],
+        properties: { /* nested props */ },
+        additionalProperties: false
+      }
+    },
+    required: ['action', 'config'],
+    additionalProperties: false
+  },
+  parameters: [...],  // Keep for documentation
+  validate: ...,
+  execute: ...
+};
+```
+
+This ensures OpenAI's strict mode enforces the nested structure at generation time, rather than relying on description text.
+
 ## Available Plugins
 
 | Plugin | Type | Description |

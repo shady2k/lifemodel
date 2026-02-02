@@ -151,6 +151,156 @@ const SCHEMA_LIST = {
 };
 
 /**
+ * OpenAI-compatible JSON Schema for the reminder tool.
+ * Uses proper nested properties so OpenAI strict mode enforces structure.
+ *
+ * Key requirements for OpenAI strict mode:
+ * - All fields in `required` array (optional fields use type: ["type", "null"])
+ * - `additionalProperties: false` on all object types
+ */
+const REMINDER_RAW_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: {
+      type: 'string',
+      enum: ['create', 'list', 'cancel'],
+      description: 'Action to perform',
+    },
+    content: {
+      type: ['string', 'null'],
+      description: 'What to remind about (required for create)',
+    },
+    anchor: {
+      type: ['object', 'null'],
+      description: 'Semantic date anchor (required for create). Extract time from user message.',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['relative', 'absolute', 'recurring'],
+          description: 'Type of time expression',
+        },
+        confidence: {
+          type: 'number',
+          description: 'Confidence score 0-1',
+        },
+        originalPhrase: {
+          type: 'string',
+          description: 'Original time expression from user (e.g., "завтра", "in 2 hours")',
+        },
+        relative: {
+          type: ['object', 'null'],
+          description: 'For type="relative" (e.g., "in 30 minutes")',
+          properties: {
+            unit: {
+              type: 'string',
+              enum: ['minute', 'hour', 'day', 'week', 'month'],
+            },
+            amount: {
+              type: 'number',
+              description: 'Number of units',
+            },
+          },
+          required: ['unit', 'amount'],
+          additionalProperties: false,
+        },
+        absolute: {
+          type: ['object', 'null'],
+          description: 'For type="absolute" (e.g., "tomorrow", "next Monday at 3pm")',
+          properties: {
+            special: {
+              type: ['string', 'null'],
+              enum: [
+                'tomorrow',
+                'next_week',
+                'next_month',
+                'this_evening',
+                'tonight',
+                'this_afternoon',
+                null,
+              ],
+              description: 'Named time shortcut',
+            },
+            year: { type: ['number', 'null'] },
+            month: { type: ['number', 'null'], description: '1-12' },
+            day: { type: ['number', 'null'], description: '1-31' },
+            hour: { type: ['number', 'null'], description: '0-23' },
+            minute: { type: ['number', 'null'], description: '0-59' },
+            dayOfWeek: {
+              type: ['number', 'null'],
+              description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
+            },
+          },
+          required: ['special', 'year', 'month', 'day', 'hour', 'minute', 'dayOfWeek'],
+          additionalProperties: false,
+        },
+        recurring: {
+          type: ['object', 'null'],
+          description: 'For type="recurring" (e.g., "every day at 9am")',
+          properties: {
+            frequency: {
+              type: 'string',
+              enum: ['daily', 'weekly', 'monthly'],
+            },
+            interval: {
+              type: 'number',
+              description: 'Every N periods (default: 1)',
+            },
+            hour: { type: ['number', 'null'], description: '0-23' },
+            minute: { type: ['number', 'null'], description: '0-59' },
+            daysOfWeek: {
+              type: ['array', 'null'],
+              items: { type: 'number' },
+              description: 'For weekly: days of week (0=Sun, 6=Sat)',
+            },
+            dayOfMonth: {
+              type: ['number', 'null'],
+              description: 'For monthly: fixed day (1-31)',
+            },
+            anchorDay: {
+              type: ['number', 'null'],
+              description: 'For monthly with constraint: anchor day (1-31)',
+            },
+            constraint: {
+              type: ['string', 'null'],
+              enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday', null],
+              description: 'Constraint to apply after anchorDay',
+            },
+          },
+          required: [
+            'frequency',
+            'interval',
+            'hour',
+            'minute',
+            'daysOfWeek',
+            'dayOfMonth',
+            'anchorDay',
+            'constraint',
+          ],
+          additionalProperties: false,
+        },
+      },
+      required: ['type', 'confidence', 'originalPhrase', 'relative', 'absolute', 'recurring'],
+      additionalProperties: false,
+    },
+    reminderId: {
+      type: ['string', 'null'],
+      description: 'Reminder ID (required for cancel)',
+    },
+    tags: {
+      type: ['array', 'null'],
+      items: { type: 'string' },
+      description: 'Optional tags for organizing',
+    },
+    limit: {
+      type: ['number', 'null'],
+      description: 'Max reminders to return (list only, default: 10)',
+    },
+  },
+  required: ['action', 'content', 'anchor', 'reminderId', 'tags', 'limit'],
+  additionalProperties: false,
+};
+
+/**
  * Create the unified reminder tool.
  */
 export function createReminderTools(
@@ -384,6 +534,7 @@ export function createReminderTools(
     description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
 Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating reminders.`,
     tags: ['one-time', 'recurring', 'daily', 'weekly', 'monthly', 'create', 'list', 'cancel'],
+    rawParameterSchema: REMINDER_RAW_SCHEMA,
     parameters: [
       {
         name: 'action',
@@ -465,7 +616,7 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
       switch (action) {
         case 'create': {
           const content = args['content'] as string | undefined;
-          const anchorArg = args['anchor'];
+          const anchorArg = args['anchor'] as Record<string, unknown> | undefined;
           const tags = args['tags'] as string[] | undefined;
 
           if (!content || !anchorArg) {
@@ -478,7 +629,24 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
             };
           }
 
-          return createReminder(content, anchorArg as SemanticDateAnchor, recipientId, tags);
+          // Validate anchor.type is present and valid
+          const validAnchorTypes = ['relative', 'absolute', 'recurring'];
+          if (!anchorArg['type'] || !validAnchorTypes.includes(anchorArg['type'] as string)) {
+            return {
+              success: false,
+              action: 'create',
+              error: `Invalid anchor: missing or invalid "type" field. Must be one of: ${validAnchorTypes.join(', ')}. For "tomorrow", use: { type: "absolute", absolute: { special: "tomorrow" }, confidence: 0.9, originalPhrase: "завтра" }`,
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_CREATE,
+            };
+          }
+
+          return createReminder(
+            content,
+            anchorArg as unknown as SemanticDateAnchor,
+            recipientId,
+            tags
+          );
         }
 
         case 'list': {

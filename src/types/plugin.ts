@@ -684,6 +684,14 @@ export interface PluginTool {
   }[];
 
   /**
+   * Raw JSON Schema for complex parameter validation.
+   * When provided, this is used directly instead of converting `parameters`.
+   * Useful for nested objects, discriminated unions, oneOf, anyOf, etc.
+   * Must include type: 'object', properties, required, and additionalProperties: false.
+   */
+  rawParameterSchema?: Record<string, unknown>;
+
+  /**
    * Validate arguments before execution.
    * Returns ValidationResult with data on success, or error message on failure.
    */
