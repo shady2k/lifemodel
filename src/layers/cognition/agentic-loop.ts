@@ -359,12 +359,15 @@ export class AgenticLoop {
     );
 
     // Build initial messages
-    const messages: Message[] = this.buildInitialMessages(context, useSmart);
+    let messages: Message[] = this.buildInitialMessages(context, useSmart);
 
     // If retrying, add previous tool results as messages
     if (context.previousAttempt) {
       this.addPreviousAttemptMessages(messages, context.previousAttempt, state);
     }
+
+    // Validate tool_call/result pair integrity (safety net for history slicing bugs)
+    messages = this.validateToolCallPairs(messages);
 
     // Get tools with full schemas - LLM knows exact parameters upfront
     // Uses ~3000 tokens but prevents wasted tool calls from parameter guessing
@@ -1468,6 +1471,54 @@ Example defer terminal:
         ...(parentId !== undefined && { parentThoughtId: parentId }),
       },
     };
+  }
+
+  /**
+   * Validate tool_call/tool_result pair integrity in messages.
+   * Filters out orphaned tool results that would cause API errors.
+   * This is a safety net - the primary fix is in conversation-manager slicing.
+   *
+   * @param messages Messages to validate
+   * @returns Validated messages with orphans removed
+   */
+  private validateToolCallPairs(messages: Message[]): Message[] {
+    // Collect all tool_call IDs from assistant messages
+    const toolCallIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          toolCallIds.add(tc.id);
+        }
+      }
+    }
+
+    // Filter out orphaned tool results
+    const validatedMessages: Message[] = [];
+    let orphanCount = 0;
+
+    for (const msg of messages) {
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        if (!toolCallIds.has(msg.tool_call_id)) {
+          // Orphaned tool result - no matching tool_call
+          orphanCount++;
+          this.logger.warn(
+            { tool_call_id: msg.tool_call_id },
+            'Filtering orphaned tool result before LLM call'
+          );
+          continue; // Skip this message
+        }
+      }
+      validatedMessages.push(msg);
+    }
+
+    if (orphanCount > 0) {
+      this.logger.error(
+        { orphanCount, totalMessages: messages.length },
+        'Orphaned tool results detected - this indicates a bug in history slicing'
+      );
+    }
+
+    return validatedMessages;
   }
 }
 

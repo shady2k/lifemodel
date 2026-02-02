@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
+import type { EvidenceSource } from '../types/cognition.js';
 import { createLogger, type LoggerConfig } from './logger.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
@@ -544,6 +545,17 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         source: sourceMap[prop.source] ?? 'inferred',
         updatedAt: prop.updatedAt,
       };
+    },
+    setUserProperty: (attribute: string, value: unknown, _recipientId?: string): Promise<void> => {
+      if (!userModel) {
+        logger.warn({ attribute }, 'Cannot set user property: no user model');
+        return Promise.resolve();
+      }
+      // Use high confidence for tool-driven writes (user explicitly set value)
+      const source: EvidenceSource = 'user_explicit';
+      userModel.setProperty(attribute, value, 0.95, source);
+      logger.debug({ attribute, value }, 'User property set via plugin');
+      return Promise.resolve();
     },
   }));
 

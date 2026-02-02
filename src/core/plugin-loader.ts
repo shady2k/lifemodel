@@ -1266,6 +1266,7 @@ export class PluginLoader {
       getTimezone: () => 'UTC',
       getUserPatterns: () => null,
       getUserProperty: () => null,
+      setUserProperty: () => Promise.resolve(),
     };
 
     // Create services with schema registration bound to this plugin

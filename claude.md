@@ -50,10 +50,33 @@ Scheduled events must not be lost due to downtime. On restart:
 
 ---
 
+## Lessons Learned
+
+Architectural insights from past bugs. These are requirements, not suggestions.
+
+### 1. Read-Write Symmetry in Plugin APIs
+If plugins can READ a capability, they likely need to WRITE it too. Design plugin service interfaces with read-write symmetry from the start.
+
+**Example:** `getUserProperty` without `setUserProperty` caused silent data loss - tools reported success but changes weren't persisted.
+
+### 2. Atomic Units in Conversation History
+Tool calls and their results are **atomic units**. History management (slicing, compaction, retrieval) must NEVER separate them.
+
+**Invariant:** Every `tool` message's `tool_call_id` must have a matching `tool_calls[].id` in a preceding `assistant` message.
+
+**Example:** History slicing cut between a tool call and its result, causing API errors on the next LLM request.
+
+### 3. Deterministic Errors Need Prevention, Not Recovery
+If an error is deterministic (same input → same error), fix the root cause. Don't add retry/recovery infrastructure for errors that will just fail again.
+
+**Example:** Snapshot + rollback for tool_call_id mismatches was rejected - the error is caused by bad slicing, which retry won't fix.
+
+---
+
 ## Documentation
 
 Project documentation is in the `docs/` folder:
 - `docs/architecture.md` - 3-layer brain, CoreLoop, project structure
-- `docs/concepts/` - Signals, intents, energy model, memory
+- `docs/concepts/` - Signals, intents, energy model, memory, conversation history
 - `docs/features/` - Thinking, news, reminders, social debt
 - `docs/plugins/` - Neurons, channels, plugin overview

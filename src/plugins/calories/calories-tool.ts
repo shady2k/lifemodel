@@ -504,7 +504,7 @@ export function createCaloriesTool(
   ): Promise<CaloriesToolResult> {
     const userModel = await getUserModel(recipientId);
 
-    if (dailyTarget !== undefined) {
+    if (dailyTarget != null) {
       // Manual target validation
       const validation = validateCalories(dailyTarget);
       if (!validation.valid) {
@@ -515,6 +515,10 @@ export function createCaloriesTool(
           schema: SCHEMA_GOAL,
         };
       }
+
+      // Persist the goal to UserModel
+      await primitives.services.setUserProperty('calorie_goal', dailyTarget, recipientId);
+      logger.info({ dailyTarget, recipientId }, 'Calorie goal persisted to user model');
 
       return {
         success: true,

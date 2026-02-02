@@ -282,7 +282,7 @@ export class ConversationManager {
     // Look for a user message or standalone assistant message to start from
     while (sliceStart > 0 && sliceStart < stored.messages.length) {
       const msg = stored.messages[sliceStart];
-      // Safe starting points: user message, system message, or assistant without pending tool_calls
+      // Safe starting points: user message, system message
       if (msg?.role === 'user' || msg?.role === 'system') {
         break;
       }
@@ -291,8 +291,21 @@ export class ConversationManager {
         sliceStart--;
         continue;
       }
-      // Assistant message is a valid start point
+      // Assistant message - but only safe if its tool_calls have ALL results in the slice
       if (msg?.role === 'assistant') {
+        if (msg.tool_calls && msg.tool_calls.length > 0) {
+          // Check if all tool_call IDs have matching results after this point
+          const requiredIds = new Set(msg.tool_calls.map((tc) => tc.id));
+          const foundIds = this.collectToolResultIds(stored.messages, sliceStart + 1);
+
+          if (!this.setContainsAll(requiredIds, foundIds)) {
+            // Incomplete tool results - this assistant's tool_calls would be orphaned
+            // Walk back to find a safer boundary
+            sliceStart--;
+            continue;
+          }
+        }
+        // Safe: no tool_calls OR all results present
         break;
       }
       sliceStart--;
@@ -624,6 +637,33 @@ export class ConversationManager {
 
       this.logger.debug({ userId, clearedCount: count }, 'Completed actions cleared');
     }
+  }
+
+  /**
+   * Collect all tool_call_ids from tool messages starting at a given index.
+   * Used to verify tool_call/result pair integrity during slicing.
+   */
+  private collectToolResultIds(messages: StoredMessage[], startIndex: number): Set<string> {
+    const ids = new Set<string>();
+    for (let i = startIndex; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg?.role === 'tool' && msg.tool_call_id) {
+        ids.add(msg.tool_call_id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Check if all elements of 'required' are present in 'found'.
+   */
+  private setContainsAll(required: Set<string>, found: Set<string>): boolean {
+    for (const id of required) {
+      if (!found.has(id)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

@@ -436,6 +436,13 @@ export interface BasePluginServices {
    * Returns null if property doesn't exist or no user model.
    */
   getUserProperty: (attribute: string, recipientId?: string) => UserPropertySnapshot | null;
+
+  /**
+   * Set a user property atomically.
+   * Use this for tool-driven writes when the user explicitly sets a value.
+   * Properties are stored with confidence and source for conflict resolution.
+   */
+  setUserProperty: (attribute: string, value: unknown, recipientId?: string) => Promise<void>;
 }
 
 /**
