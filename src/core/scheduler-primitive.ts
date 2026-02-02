@@ -6,6 +6,7 @@
  */
 
 import { DateTime } from 'luxon';
+import { CronExpressionParser } from 'cron-parser';
 import type { Logger } from '../types/logger.js';
 import type {
   SchedulerPrimitive,
@@ -71,6 +72,43 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   }
 
   /**
+   * Validate a cron expression. Throws if invalid.
+   */
+  static validateCron(cronExpr: string): void {
+    const fields = cronExpr.trim().split(/\s+/);
+    if (fields.length < 5 || fields.length > 6) {
+      throw new Error(`Invalid cron expression: expected 5-6 fields, got ${String(fields.length)}`);
+    }
+    // Let cron-parser validate the actual syntax
+    CronExpressionParser.parse(cronExpr);
+  }
+
+  /**
+   * Parse cron and get next occurrence.
+   * Returns DateTime or null if parsing fails (with warning log).
+   */
+  private parseCronNext(
+    cronExpr: string,
+    currentDate: Date,
+    timezone: string | null
+  ): DateTime | null {
+    try {
+      const cron = CronExpressionParser.parse(cronExpr, {
+        currentDate,
+        tz: timezone ?? 'UTC',
+      });
+      return DateTime.fromJSDate(cron.next().toDate(), { zone: timezone ?? 'utc' });
+    } catch (error) {
+      // This shouldn't happen if validation passed at creation time
+      this.logger.warn(
+        { cron: cronExpr, error: error instanceof Error ? error.message : String(error) },
+        'Cron parse failed unexpectedly'
+      );
+      return null;
+    }
+  }
+
+  /**
    * Initialize scheduler - load schedules from storage.
    */
   async initialize(): Promise<void> {
@@ -107,6 +145,11 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
         'Plugin schedule count approaching warning threshold'
       );
       this.countWarningLogged = true;
+    }
+
+    // Validate cron expression at creation time (fail-fast per CLAUDE.md)
+    if (options.recurrence?.cron) {
+      SchedulerPrimitiveImpl.validateCron(options.recurrence.cron);
     }
 
     const id = options.id ?? this.generateScheduleId();
@@ -286,7 +329,7 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
     }
 
     // Use Luxon for DST-aware calculations if timezone is set
-    let nextFire: DateTime;
+    let nextFire: DateTime | undefined;
 
     if (entry.timezone && entry.localTime) {
       // Parse local time
@@ -322,13 +365,21 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
           }
           break;
         case 'custom':
-          // Cron not implemented yet - fall back to daily
+          if (recurrence.cron) {
+            const cronResult = this.parseCronNext(recurrence.cron, dt.toJSDate(), entry.timezone);
+            if (cronResult) {
+              // Cron provides complete time - return early, skip localTime adjustment
+              nextFire = cronResult;
+              break;
+            }
+            // Fallback only if cron unexpectedly fails (shouldn't happen with validation)
+          }
           dt = dt.plus({ days: recurrence.interval });
           break;
       }
 
-      // Set the local time (DST-aware)
-      nextFire = dt.set({ hour, minute, second: 0, millisecond: 0 });
+      // Set the local time (DST-aware) - skip for cron (already has correct time)
+      nextFire ??= dt.set({ hour, minute, second: 0, millisecond: 0 });
     } else {
       // UTC calculation
       const dt = DateTime.fromJSDate(entry.nextFireAt, { zone: 'utc' });
@@ -344,6 +395,13 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
           nextFire = dt.plus({ months: recurrence.interval });
           break;
         case 'custom':
+          if (recurrence.cron) {
+            const cronResult = this.parseCronNext(recurrence.cron, dt.toJSDate(), null);
+            if (cronResult) {
+              nextFire = cronResult;
+              break;
+            }
+          }
           nextFire = dt.plus({ days: recurrence.interval });
           break;
         default:

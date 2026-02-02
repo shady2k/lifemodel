@@ -42,7 +42,7 @@ import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
 import { validateAgainstParameters } from '../layers/cognition/tools/validation.js';
 import type { ToolParameter } from '../layers/cognition/tools/types.js';
-import { createSchedulerPrimitive, type SchedulerPrimitiveImpl } from './scheduler-primitive.js';
+import { createSchedulerPrimitive, SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { Neuron } from '../layers/autonomic/neuron-registry.js';
 import {
@@ -1595,6 +1595,19 @@ export class PluginLoader {
       }
 
       const scheduleId = `manifest:${scheduleDef.id}`;
+
+      // Validate cron at manifest load time (fail-fast)
+      if (scheduleDef.cron) {
+        try {
+          SchedulerPrimitiveImpl.validateCron(scheduleDef.cron);
+        } catch (error) {
+          this.logger.error(
+            { pluginId: manifest.id, scheduleId: scheduleDef.id, cron: scheduleDef.cron },
+            `Invalid cron expression in manifest: ${error instanceof Error ? error.message : String(error)}`
+          );
+          throw error; // Fail plugin load - don't silently continue
+        }
+      }
 
       try {
         // Check if schedule already exists (persisted from previous run)

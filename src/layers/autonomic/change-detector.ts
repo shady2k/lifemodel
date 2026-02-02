@@ -33,9 +33,9 @@ export interface ChangeDetectorConfig {
  * Default configuration.
  */
 export const DEFAULT_CHANGE_CONFIG: ChangeDetectorConfig = {
-  baseThreshold: 0.10, // 10% relative change
+  baseThreshold: 0.1, // 10% relative change
   minAbsoluteChange: 0.01, // Ignore changes smaller than 0.01
-  maxThreshold: 0.50, // Cap at 50% (don't become too insensitive)
+  maxThreshold: 0.5, // Cap at 50% (don't become too insensitive)
   alertnessInfluence: 0.5, // Alertness has moderate effect
 };
 
@@ -71,7 +71,7 @@ export interface ChangeResult {
 export function detectChange(
   current: number,
   previous: number,
-  alertness: number = 0.5,
+  alertness = 0.5,
   config: ChangeDetectorConfig = DEFAULT_CHANGE_CONFIG
 ): ChangeResult {
   const absoluteChange = current - previous;
@@ -110,10 +110,7 @@ export function detectChange(
   // At alertness 1.0, influence 0.5: threshold = base * 1.0 (full sensitivity)
   // At alertness 0.0, influence 0.5: threshold = base * 1.5 (reduced sensitivity)
   const alertnessFactor = 1 + config.alertnessInfluence * (1 - alertness);
-  const adjustedThreshold = Math.min(
-    config.baseThreshold * alertnessFactor,
-    config.maxThreshold
-  );
+  const adjustedThreshold = Math.min(config.baseThreshold * alertnessFactor, config.maxThreshold);
 
   // Check if change is significant
   if (absoluteChangeMagnitude < config.minAbsoluteChange) {
@@ -122,7 +119,7 @@ export function detectChange(
       absoluteChange,
       relativeChange,
       threshold: adjustedThreshold,
-      reason: `Absolute change ${absoluteChangeMagnitude.toFixed(4)} below minimum ${config.minAbsoluteChange}`,
+      reason: `Absolute change ${absoluteChangeMagnitude.toFixed(4)} below minimum ${String(config.minAbsoluteChange)}`,
     };
   }
 
@@ -190,7 +187,7 @@ export function calculateRateOfChange(
 export function detectAcceleration(
   currentRate: number,
   previousRate: number,
-  threshold: number = 0.1
+  threshold = 0.1
 ): { isSignificant: boolean; direction: 'accelerating' | 'decelerating' | 'stable' } {
   const rateDiff = currentRate - previousRate;
 

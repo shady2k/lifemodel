@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   createSchedulerPrimitive,
-  type SchedulerPrimitiveImpl,
+  SchedulerPrimitiveImpl,
 } from '../../../src/core/scheduler-primitive.js';
 import { createStoragePrimitive } from '../../../src/core/storage-primitive.js';
 import type { Storage } from '../../../src/storage/storage.js';
@@ -223,6 +223,39 @@ describe('SchedulerPrimitive', () => {
       expect(schedules).toHaveLength(1);
       // Next fire should be in the future
       expect(schedules[0]?.nextFireAt.getTime()).toBeGreaterThan(now.getTime());
+    });
+  });
+
+  describe('cron recurrence', () => {
+    it('calculates next occurrence from cron expression', async () => {
+      const now = new Date('2024-01-15T10:30:00Z');
+      await scheduler.schedule({
+        id: 'cron-test',
+        fireAt: now,
+        recurrence: { frequency: 'custom', interval: 1, cron: '0 */2 * * *' },
+        data: {},
+      });
+
+      // Fire and advance
+      const due = await scheduler.checkDueSchedules(now);
+      await scheduler.markFired('cron-test', due[0]!.fireId, now);
+
+      const schedules = scheduler.getSchedules();
+      expect(schedules[0]?.nextFireAt.getUTCHours()).toBe(12); // 10:30 → 12:00
+      expect(schedules[0]?.nextFireAt.getUTCMinutes()).toBe(0);
+    });
+
+    it('throws on invalid cron at creation time', async () => {
+      await expect(scheduler.schedule({
+        id: 'bad-cron',
+        fireAt: new Date(),
+        recurrence: { frequency: 'custom', interval: 1, cron: 'invalid' },
+        data: {},
+      })).rejects.toThrow();
+    });
+
+    it('validates cron field count', () => {
+      expect(() => SchedulerPrimitiveImpl.validateCron('* * *')).toThrow('expected 5-6 fields');
     });
   });
 });
