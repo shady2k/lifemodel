@@ -11,6 +11,21 @@
 import type { ToolParameter } from './types.js';
 
 /**
+ * Patterns that indicate placeholder values from LLM output.
+ * Some LLMs (e.g., Haiku) fill optional parameters with placeholders instead of omitting them.
+ */
+const PLACEHOLDER_PATTERNS = ['<UNKNOWN>', '<VALUE>', '<TODO>', '<MISSING>', '<N/A>'];
+
+/**
+ * Check if a value looks like a placeholder that should be omitted.
+ */
+function looksLikePlaceholder(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const upper = value.toUpperCase();
+  return PLACEHOLDER_PATTERNS.some((p) => upper.includes(p));
+}
+
+/**
  * Result of validating tool arguments.
  */
 export type ValidationResult<T = unknown> =
@@ -46,6 +61,16 @@ export function validateAgainstParameters(
 
     // Skip validation if not provided (optional field)
     if (value === undefined || value === null) continue;
+
+    // Detect placeholder values (e.g., "<UNKNOWN>" from some LLMs)
+    // These should be treated as if the parameter wasn't provided
+    if (looksLikePlaceholder(value)) {
+      const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+      errors.push(
+        `${param.name}: received placeholder "${valueStr}" - omit optional parameters you don't need`
+      );
+      continue;
+    }
 
     // Check type
     const actualType = Array.isArray(value) ? 'array' : typeof value;

@@ -122,6 +122,19 @@ interface UserModelData {
 }
 
 /**
+ * Parse a value as a number, handling both number and string types.
+ * core.remember stores values as strings, so we need to parse them.
+ */
+function parseNumber(val: unknown): number | undefined {
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') {
+    const parsed = parseFloat(val);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+/**
  * Get user model data for TDEE calculation via plugin services.
  */
 function createGetUserModel(
@@ -147,9 +160,16 @@ function createGetUserModel(
     }
 
     // Build result only with defined values (exactOptionalPropertyTypes)
+    // Note: core.remember stores values as strings, so we parse numeric fields
     const result: UserModelData = {};
-    if (typeof weight === 'number') result.weight_kg = weight;
-    if (typeof height === 'number') result.height_cm = height;
+
+    const parsedWeight = parseNumber(weight);
+    const parsedHeight = parseNumber(height);
+    const parsedGoal = parseNumber(goal);
+    const parsedTarget = parseNumber(target);
+
+    if (parsedWeight !== undefined) result.weight_kg = parsedWeight;
+    if (parsedHeight !== undefined) result.height_cm = parsedHeight;
     if (typeof birthday === 'string') result.birthday = birthday;
     if (typeof gender === 'string') result.gender = gender;
     if (
@@ -161,8 +181,8 @@ function createGetUserModel(
     ) {
       result.activity_level = activity;
     }
-    if (typeof goal === 'number') result.calorie_goal = goal;
-    if (typeof target === 'number') result.target_weight_kg = target;
+    if (parsedGoal !== undefined) result.calorie_goal = parsedGoal;
+    if (parsedTarget !== undefined) result.target_weight_kg = parsedTarget;
 
     return Promise.resolve(result);
   };

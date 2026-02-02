@@ -125,6 +125,21 @@ export interface WeightEntry {
 }
 
 /**
+ * Goal validation status included in summary response.
+ * Helps LLM understand if the goal is appropriate and what data is missing.
+ */
+export interface GoalValidation {
+  /** Missing stats needed for TDEE calculation (present when data is incomplete) */
+  missingStats?: string[];
+
+  /** Calculated TDEE for comparison (present when all stats available) */
+  calculatedTDEE?: number;
+
+  /** Human-readable explanation for LLM context */
+  hint: string;
+}
+
+/**
  * Daily calorie summary.
  */
 export interface DailySummary {
@@ -148,6 +163,9 @@ export interface DailySummary {
 
   /** When the summary was computed (ISO timestamp UTC) */
   computedAt: string;
+
+  /** Goal validation status - helps LLM understand if goal is appropriate */
+  goalValidation?: GoalValidation;
 }
 
 /**
@@ -199,6 +217,53 @@ export const weightCheckinSchema = z.object({
 export type WeightCheckinData = z.infer<typeof weightCheckinSchema>['payload'];
 
 /**
+ * Error type for tool errors.
+ * Helps LLM understand what action to take:
+ * - validation_error: LLM can fix arguments and retry
+ * - missing_data: Needs user input, do NOT retry
+ * - not_found: Resource doesn't exist
+ * - permission_denied: No access rights
+ */
+export type ToolErrorType = 'validation_error' | 'missing_data' | 'not_found' | 'permission_denied';
+
+/**
+ * Structured field error for machine-readable validation feedback.
+ */
+export interface FieldError {
+  /** JSON path to the field (e.g., "user.weight_kg") */
+  path: string;
+  /** What was expected */
+  expected: string;
+  /** What was received */
+  received: string;
+  /** Optional additional detail */
+  detail?: string;
+}
+
+/**
+ * Structured error object following ChatGPT best practices.
+ */
+export interface StructuredToolError {
+  type: ToolErrorType;
+  message: string;
+  fields?: FieldError[];
+  /** Whether the LLM should retry the same call */
+  retryable: boolean;
+}
+
+/**
+ * Hint object with examples and notes.
+ */
+export interface ToolErrorHint {
+  /** Example of correct call */
+  example?: Record<string, unknown>;
+  /** Additional notes for the LLM */
+  notes?: string[];
+  /** Schema fragment if helpful */
+  schema?: Record<string, unknown>;
+}
+
+/**
  * Tool result interface for consistent responses.
  */
 export interface CaloriesToolResult {
@@ -219,10 +284,16 @@ export interface CaloriesToolResult {
     tdee?: number;
   };
   warning?: string;
-  error?: string;
-  hint?: string;
+  /** Simple error string (for backwards compat) or structured error object */
+  error?: string | StructuredToolError;
+  /** Structured hint with example and notes */
+  hint?: string | ToolErrorHint;
   receivedParams?: string[];
   schema?: Record<string, unknown>;
+  /** If true, LLM must ask user instead of retrying */
+  requiresUserInput?: boolean;
+  /** Suggested prompt to ask the user */
+  userPrompt?: string;
 }
 
 /**

@@ -40,6 +40,8 @@ import type { FilterPluginV2 } from '../types/plugin.js';
 import type { SignalFilter } from '../layers/autonomic/filter-registry.js';
 import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
+import { validateAgainstParameters } from '../layers/cognition/tools/validation.js';
+import type { ToolParameter } from '../layers/cognition/tools/types.js';
 import { createSchedulerPrimitive, type SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { Neuron } from '../layers/autonomic/neuron-registry.js';
@@ -1516,6 +1518,14 @@ export class PluginLoader {
 
   /**
    * Register tools from a plugin.
+   *
+   * Wraps plugin tool validation with schema validation to ensure all parameters
+   * are type-checked before execution. This prevents infinite retry loops when
+   * LLMs send invalid placeholder values like "<UNKNOWN>" for optional parameters.
+   *
+   * Validation order:
+   * 1. Plugin's custom validation (semantic checks like valid action values)
+   * 2. Schema validation (type checking, required fields, enum values)
    */
   private registerPluginTools(pluginId: string, tools: PluginTool[]): void {
     if (!this.toolRegisterCallback) {
@@ -1532,6 +1542,17 @@ export class PluginLoader {
       const prefixedTool: PluginTool = {
         ...tool,
         name: `plugin.${tool.name}`,
+        // Wrap validation to enforce schema validation on all plugin tools
+        validate: (args) => {
+          // First run plugin's custom validation (semantic checks)
+          const customResult = tool.validate(args);
+          if (!customResult.success) return customResult;
+
+          // Then run schema validation (type/required checks)
+          // This catches invalid placeholder values like "<UNKNOWN>" for number params
+          const parameters = tool.parameters as ToolParameter[];
+          return validateAgainstParameters(args as Record<string, unknown>, parameters);
+        },
       };
       this.toolRegisterCallback(prefixedTool);
       this.logger.debug({ pluginId, toolName: prefixedTool.name }, 'Tool registered');

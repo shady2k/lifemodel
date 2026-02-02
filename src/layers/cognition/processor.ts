@@ -19,13 +19,14 @@ import type { Agent } from '../../core/agent.js';
 import type { LoopConfig } from '../../types/cognition.js';
 import { emitTypingIndicator } from '../shared/index.js';
 
-import type { AgenticLoop } from './agentic-loop.js';
+import type { AgenticLoop, LoopCallbacks } from './agentic-loop.js';
 import {
   createAgenticLoop,
   type CognitionLLM,
   type LoopContext,
   type ConversationMessage,
 } from './agentic-loop.js';
+import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { createToolRegistry, type MemoryProvider } from './tools/registry.js';
 
@@ -58,6 +59,11 @@ export interface CognitionProcessorDeps {
   agent?: Agent | undefined;
   memoryProvider?: MemoryProvider | undefined;
   cognitionLLM?: CognitionLLM | undefined;
+  /**
+   * Callback for immediate intent application during loop execution.
+   * Used for REMEMBER and SET_INTEREST so data is visible to subsequent tools.
+   */
+  immediateIntentCallback?: ((intent: Intent) => void) | undefined;
 }
 
 /**
@@ -78,6 +84,7 @@ export class CognitionProcessor implements CognitionLayer {
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
   private memoryProvider: MemoryProvider | undefined;
+  private immediateIntentCallback: ((intent: Intent) => void) | undefined;
 
   constructor(
     logger: Logger,
@@ -121,11 +128,17 @@ export class CognitionProcessor implements CognitionLayer {
       userModelProvider: userModel ? { getModel: () => userModel.getBeliefs() } : undefined,
     });
 
+    // Build callbacks for immediate intent processing
+    const callbacks: LoopCallbacks | undefined = this.immediateIntentCallback
+      ? { onImmediateIntent: this.immediateIntentCallback }
+      : undefined;
+
     this.agenticLoop = createAgenticLoop(
       this.logger,
       llm,
       this.toolRegistry,
-      this.config.loopConfig
+      this.config.loopConfig,
+      callbacks
     );
 
     this.logger.info('Agentic loop initialized');
@@ -151,8 +164,16 @@ export class CognitionProcessor implements CognitionLayer {
       this.memoryProvider = deps.memoryProvider;
     }
 
-    // Setup agentic loop if we have LLM now
-    if (deps.cognitionLLM && !this.agenticLoop) {
+    // Store immediate intent callback if provided
+    const callbackChanged =
+      deps.immediateIntentCallback !== undefined &&
+      deps.immediateIntentCallback !== this.immediateIntentCallback;
+    if (deps.immediateIntentCallback !== undefined) {
+      this.immediateIntentCallback = deps.immediateIntentCallback;
+    }
+
+    // Setup agentic loop if we have LLM now, or recreate if callback changed
+    if (deps.cognitionLLM && (!this.agenticLoop || callbackChanged)) {
       this.setupAgenticLoop(deps.cognitionLLM, deps.memoryProvider);
     }
 
@@ -380,7 +401,7 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     try {
-      const history = await this.conversationManager.getHistory(chatId, { maxRecent: 10 });
+      const history = await this.conversationManager.getHistory(chatId, { maxRecentTurns: 10 });
       return history.map((msg): ConversationMessage => {
         const convMsg: ConversationMessage = {
           role: msg.role,

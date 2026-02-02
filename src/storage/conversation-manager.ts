@@ -99,8 +99,12 @@ interface StoredConversation {
  * Options for retrieving conversation history.
  */
 export interface GetHistoryOptions {
-  /** Maximum number of recent messages to return in full (default: 3) */
-  maxRecent?: number;
+  /**
+   * Maximum number of recent turns to return in full (default: 10).
+   * A turn is a user message plus assistant response (including tool calls/results).
+   * This ensures tool-heavy conversations get enough context.
+   */
+  maxRecentTurns?: number;
   /** Whether to include compacted summary as first message (default: true) */
   includeCompacted?: boolean;
 }
@@ -119,11 +123,18 @@ export class ConversationManager {
   private readonly storage: Storage;
   private readonly logger: Logger;
 
-  /** Maximum messages before auto-compaction */
-  private readonly maxMessagesBeforeCompaction = 10;
+  /**
+   * Maximum turns before auto-compaction.
+   * A "turn" is a user message plus the assistant's response (including tool calls/results).
+   * This ensures we count meaningful exchanges, not individual tool messages.
+   */
+  private readonly maxTurnsBeforeCompaction = 10;
 
-  /** Number of recent messages to keep in full during compaction */
-  private readonly recentMessagesToKeep = 3;
+  /**
+   * Number of recent turns to keep in full during compaction.
+   * Each turn may contain multiple messages (assistant + tool results).
+   */
+  private readonly recentTurnsToKeep = 3;
 
   /** Maximum completed actions to track (prevents unbounded growth) */
   private readonly maxCompletedActions = 20;
@@ -141,6 +152,66 @@ export class ConversationManager {
    */
   private getKey(userId: string): string {
     return `conversation:${userId}`;
+  }
+
+  /**
+   * Count the number of turns in a message array.
+   * A turn = user message (+ assistant response with optional tool calls).
+   * Tool results are part of the preceding assistant's turn, not separate turns.
+   * This gives us a consistent count that doesn't inflate with tool-heavy interactions.
+   */
+  private countTurns(messages: StoredMessage[]): number {
+    // Count user messages as turn starts (most reliable metric)
+    return messages.filter((msg) => msg.role === 'user').length;
+  }
+
+  /**
+   * Find the message index where the Nth turn from the end starts.
+   * Returns the start index of recent turns to keep.
+   */
+  private findTurnStartIndex(messages: StoredMessage[], turnsToKeep: number): number {
+    if (messages.length === 0 || turnsToKeep <= 0) {
+      return messages.length;
+    }
+
+    // Walk backwards counting turns
+    let turnsFound = 0;
+    let turnStartIndex = messages.length;
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+
+      // User message marks the start of a turn
+      if (msg?.role === 'user') {
+        turnsFound++;
+        turnStartIndex = i;
+
+        if (turnsFound >= turnsToKeep) {
+          break;
+        }
+      }
+    }
+
+    // Ensure we don't start in the middle of a tool call group
+    // If turnStartIndex points to a tool result, walk back to find the assistant
+    while (turnStartIndex > 0) {
+      const msg = messages[turnStartIndex];
+      if (msg?.role === 'tool') {
+        turnStartIndex--;
+      } else if (msg?.role === 'assistant' && turnStartIndex > 0) {
+        // Check if there's a user message before this assistant
+        const prevMsg = messages[turnStartIndex - 1];
+        if (prevMsg?.role === 'tool') {
+          turnStartIndex--;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    return turnStartIndex;
   }
 
   /**
@@ -175,9 +246,10 @@ export class ConversationManager {
       'Message added to conversation history'
     );
 
-    // Check if compaction needed
-    if (stored.messages.length > this.maxMessagesBeforeCompaction) {
-      this.logger.debug({ userId }, 'Conversation needs compaction');
+    // Check if compaction needed (count turns, not individual messages)
+    const turnCount = this.countTurns(stored.messages);
+    if (turnCount > this.maxTurnsBeforeCompaction) {
+      this.logger.debug({ userId, turnCount }, 'Conversation needs compaction');
     }
   }
 
@@ -241,9 +313,10 @@ export class ConversationManager {
       'Turn added to conversation history'
     );
 
-    // Check if compaction needed
-    if (stored.messages.length > this.maxMessagesBeforeCompaction) {
-      this.logger.debug({ userId }, 'Conversation needs compaction');
+    // Check if compaction needed (count turns, not individual messages)
+    const turnCount = this.countTurns(stored.messages);
+    if (turnCount > this.maxTurnsBeforeCompaction) {
+      this.logger.debug({ userId, turnCount }, 'Conversation needs compaction');
     }
   }
 
@@ -259,7 +332,7 @@ export class ConversationManager {
     userId: string,
     options: GetHistoryOptions = {}
   ): Promise<ConversationMessage[]> {
-    const { maxRecent = 10, includeCompacted = true } = options;
+    const { maxRecentTurns = 10, includeCompacted = true } = options;
 
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
@@ -274,43 +347,8 @@ export class ConversationManager {
       });
     }
 
-    // Get recent messages - but we need to keep tool_call groups together
-    // Find a safe slice point that doesn't break tool_call/tool pairs
-    let sliceStart = Math.max(0, stored.messages.length - maxRecent);
-
-    // If we're slicing, make sure we don't start in the middle of a tool_call group
-    // Look for a user message or standalone assistant message to start from
-    while (sliceStart > 0 && sliceStart < stored.messages.length) {
-      const msg = stored.messages[sliceStart];
-      // Safe starting points: user message, system message
-      if (msg?.role === 'user' || msg?.role === 'system') {
-        break;
-      }
-      // If it's a tool result, we need to go back to include the assistant message with tool_calls
-      if (msg?.role === 'tool') {
-        sliceStart--;
-        continue;
-      }
-      // Assistant message - but only safe if its tool_calls have ALL results in the slice
-      if (msg?.role === 'assistant') {
-        if (msg.tool_calls && msg.tool_calls.length > 0) {
-          // Check if all tool_call IDs have matching results after this point
-          const requiredIds = new Set(msg.tool_calls.map((tc) => tc.id));
-          const foundIds = this.collectToolResultIds(stored.messages, sliceStart + 1);
-
-          if (!this.setContainsAll(requiredIds, foundIds)) {
-            // Incomplete tool results - this assistant's tool_calls would be orphaned
-            // Walk back to find a safer boundary
-            sliceStart--;
-            continue;
-          }
-        }
-        // Safe: no tool_calls OR all results present
-        break;
-      }
-      sliceStart--;
-    }
-
+    // Get recent turns (not just messages) - this ensures tool call groups stay together
+    const sliceStart = this.findTurnStartIndex(stored.messages, maxRecentTurns);
     const recentMessages = stored.messages.slice(sliceStart);
 
     // Convert stored messages to ConversationMessage format
@@ -380,8 +418,10 @@ export class ConversationManager {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    // Keep only recent messages
-    const recentMessages = stored.messages.slice(-this.recentMessagesToKeep);
+    // Keep only recent turns (not just recent messages)
+    // This ensures we don't break up tool call groups
+    const keepStartIndex = this.findTurnStartIndex(stored.messages, this.recentTurnsToKeep);
+    const recentMessages = stored.messages.slice(keepStartIndex);
     const compactedCount = stored.messages.length - recentMessages.length;
 
     if (compactedCount <= 0) {
@@ -409,11 +449,13 @@ export class ConversationManager {
 
   /**
    * Check if conversation needs compaction.
+   * Uses turn counting, not raw message count, so tool-heavy conversations don't trigger early.
    */
   async needsCompaction(userId: string): Promise<boolean> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
-    return stored.messages.length > this.maxMessagesBeforeCompaction;
+    const turnCount = this.countTurns(stored.messages);
+    return turnCount > this.maxTurnsBeforeCompaction;
   }
 
   /**
@@ -424,8 +466,10 @@ export class ConversationManager {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    // All messages except recent ones
-    const toCompact = stored.messages.slice(0, -this.recentMessagesToKeep);
+    // Find where to start keeping recent turns
+    const keepStartIndex = this.findTurnStartIndex(stored.messages, this.recentTurnsToKeep);
+    // All messages before the recent turns
+    const toCompact = stored.messages.slice(0, keepStartIndex);
 
     // Filter to only user/assistant messages for summarization (skip tool results)
     return toCompact
@@ -637,33 +681,6 @@ export class ConversationManager {
 
       this.logger.debug({ userId, clearedCount: count }, 'Completed actions cleared');
     }
-  }
-
-  /**
-   * Collect all tool_call_ids from tool messages starting at a given index.
-   * Used to verify tool_call/result pair integrity during slicing.
-   */
-  private collectToolResultIds(messages: StoredMessage[], startIndex: number): Set<string> {
-    const ids = new Set<string>();
-    for (let i = startIndex; i < messages.length; i++) {
-      const msg = messages[i];
-      if (msg?.role === 'tool' && msg.tool_call_id) {
-        ids.add(msg.tool_call_id);
-      }
-    }
-    return ids;
-  }
-
-  /**
-   * Check if all elements of 'required' are present in 'found'.
-   */
-  private setContainsAll(required: Set<string>, found: Set<string>): boolean {
-    for (const id of required) {
-      if (!found.has(id)) {
-        return false;
-      }
-    }
-    return true;
   }
 
   /**

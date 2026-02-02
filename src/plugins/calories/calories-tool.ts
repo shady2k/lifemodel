@@ -14,6 +14,7 @@ import type {
   MealType,
   ActivityLevel,
   CaloriesToolResult,
+  GoalValidation,
 } from './calories-types.js';
 import {
   CALORIES_STORAGE_KEYS,
@@ -477,6 +478,47 @@ export function createCaloriesTool(
     const userModel = await getUserModel(recipientId);
     const goal = userModel?.calorie_goal ?? null;
 
+    // Build goal validation info when a goal exists
+    let goalValidation: GoalValidation | undefined;
+    if (goal !== null) {
+      const requiredStats = ['weight_kg', 'height_cm', 'birthday', 'gender'] as const;
+      const missingStats = requiredStats.filter((stat) => !userModel?.[stat]);
+
+      if (missingStats.length > 0) {
+        goalValidation = {
+          missingStats,
+          hint: `Goal cannot be validated without user stats. DO NOT call calories goal until ALL missing stats are remembered: ${missingStats.join(', ')}`,
+        };
+      } else if (
+        userModel?.birthday &&
+        userModel.gender &&
+        userModel.weight_kg &&
+        userModel.height_cm
+      ) {
+        // All stats available - calculate TDEE for comparison
+        const age = calculateAge(userModel.birthday);
+        const isMale = userModel.gender === 'male';
+        const bmr = calculateBMR(userModel.weight_kg, userModel.height_cm, age, isMale);
+        const tdee = calculateTDEE(bmr, userModel.activity_level ?? 'moderate');
+        const deficit = tdee - goal;
+
+        let hint: string;
+        if (deficit > 0) {
+          const deficitType = deficit < 500 ? 'moderate' : 'aggressive';
+          hint = `Goal ${String(goal)} is ${String(deficit)} below TDEE (${deficitType} deficit for weight loss)`;
+        } else if (deficit < 0) {
+          hint = `Goal ${String(goal)} is ${String(-deficit)} above TDEE (surplus for muscle gain)`;
+        } else {
+          hint = `Goal ${String(goal)} matches TDEE (maintenance)`;
+        }
+
+        goalValidation = {
+          calculatedTDEE: Math.round(tdee),
+          hint,
+        };
+      }
+    }
+
     const summary: DailySummary = {
       date: effectiveDate,
       totalCalories,
@@ -485,13 +527,22 @@ export function createCaloriesTool(
       entryCount: filtered.length,
       byMealType,
       computedAt: new Date().toISOString(),
+      ...(goalValidation && { goalValidation }),
     };
 
-    return {
+    const result: CaloriesToolResult = {
       success: true,
       action: 'summary',
       summary,
     };
+
+    // Signal that user input is needed before goal validation can work
+    if (goalValidation?.missingStats && goalValidation.missingStats.length > 0) {
+      result.requiresUserInput = true;
+      result.userPrompt = `To validate your calorie goal, I need: ${goalValidation.missingStats.join(', ')}`;
+    }
+
+    return result;
   }
 
   /**
@@ -538,12 +589,45 @@ export function createCaloriesTool(
         !userModel.birthday ||
         !userModel.gender
       ) {
+        // Build structured field errors for machine-readability
+        const fields: { path: string; expected: string; received: string }[] = [];
+        if (!userModel?.weight_kg) {
+          fields.push({ path: 'user.weight_kg', expected: 'number', received: 'missing' });
+        }
+        if (!userModel?.height_cm) {
+          fields.push({ path: 'user.height_cm', expected: 'number', received: 'missing' });
+        }
+        if (!userModel?.birthday) {
+          fields.push({
+            path: 'user.birthday',
+            expected: 'string (YYYY-MM-DD)',
+            received: 'missing',
+          });
+        }
+        if (!userModel?.gender) {
+          fields.push({ path: 'user.gender', expected: '"male" | "female"', received: 'missing' });
+        }
+
+        const missingList = fields.map((f) => f.path.replace('user.', '')).join(', ');
+
         return {
           success: false,
           action: 'goal',
-          error: 'Missing required user stats for TDEE calculation',
-          hint: 'Need weight, height, birthday, and gender. Ask user to provide these.',
-          schema: SCHEMA_GOAL,
+          error: {
+            type: 'missing_data',
+            message: 'Cannot calculate TDEE - user profile data is missing',
+            fields,
+            retryable: false, // KEY: Do NOT retry with same params
+          },
+          hint: {
+            notes: [
+              'This data must come from the user, not from tool parameters.',
+              'Ask the user to provide their stats, then use core.remember to save them.',
+            ],
+            example: { action: 'goal', daily_target: 2000 },
+          },
+          requiresUserInput: true,
+          userPrompt: `To calculate your calorie goal, I need: ${missingList}.`,
         };
       }
 
@@ -757,19 +841,11 @@ export function createCaloriesTool(
 
 Actions: log, list, summary, goal, update, delete
 
-CALORIE ESTIMATION PROTOCOL:
-- YOU estimate calories for common foods (banana=105, pizza slice=285, coffee=5)
-- Include estimate_confidence: 0.9+=common food, 0.7=uncertain portion
-- If confidence < 0.5, ASK user instead of guessing
-- When user states calories ("about 500"), use their value with is_user_override=true
+LOG: entry_type="food"|"weight". For food: description, calories (you estimate), estimate_confidence (0.9=certain, <0.5=ask user). If user provides calories: is_user_override=true.
 
-EXAMPLES:
-"I had oatmeal" → log, entry_type="food", description="oatmeal", calories=150, estimate_confidence=0.9
-"burger and fries" → log, entry_type="food", description="burger and fries", calories=850, estimate_confidence=0.8
-"my pasta, about 600 cal" → log, entry_type="food", description="pasta", calories=600, is_user_override=true
-"what did I eat today?" → summary
-"I weigh 75kg" → log, entry_type="weight", weight=75
-"set my goal to 2000" → goal, daily_target=2000`,
+GOAL: daily_target=N for manual, OR calculate_from_stats=true for auto (returns what to ask user if stats missing).
+
+SUMMARY/LIST: View intake for date.`,
     tags: ['food', 'calories', 'weight', 'nutrition', 'diet', 'health', 'tracking'],
     parameters: [
       {

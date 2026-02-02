@@ -53,6 +53,42 @@ When summarizing old messages:
 - Summarize user/assistant exchanges (skip tool details)
 - The summary goes into a system message, not inline
 
+## Turn-Based Counting
+
+History limits are based on **turns**, not individual messages.
+
+### Why Turns?
+
+A single user interaction can generate many messages:
+```
+user: "Log my lunch"           ← 1 message
+assistant: [tool_calls: 3]     ← 1 message
+tool: {result 1}               ← 1 message
+tool: {result 2}               ← 1 message
+tool: {result 3}               ← 1 message
+                               ─────────────
+                               5 messages for 1 turn!
+```
+
+With message-based counting (limit=10), just 2 tool-heavy turns would trigger compaction. With turn-based counting, we preserve the full context of meaningful exchanges.
+
+### What Is a Turn?
+
+A **turn** = user message + assistant response (including all tool calls/results).
+
+```typescript
+// Count turns by counting user messages
+const turnCount = messages.filter(m => m.role === 'user').length;
+```
+
+### Configuration
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `maxTurnsBeforeCompaction` | 10 | Triggers summary generation |
+| `recentTurnsToKeep` | 3 | Kept in full after compaction |
+| `maxRecentTurns` | 10 | Returned by `getHistory()` |
+
 ## Storage
 
 - Key format: `conversation:{recipientId}`

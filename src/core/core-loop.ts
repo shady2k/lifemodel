@@ -215,6 +215,8 @@ export class CoreLoop {
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
 
     // Set dependencies on layers
+    // Include callback for immediate intent application (REMEMBER, SET_INTEREST)
+    // so data is visible to subsequent tools in the same agentic loop
     this.layers.cognition.setDependencies({
       conversationManager: deps.conversationManager,
       userModel: deps.userModel,
@@ -222,6 +224,9 @@ export class CoreLoop {
       agent: deps.agent,
       cognitionLLM: deps.cognitionLLM,
       memoryProvider: deps.memoryProvider,
+      immediateIntentCallback: (intent) => {
+        this.applyImmediateIntent(intent);
+      },
     });
 
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
@@ -910,6 +915,24 @@ export class CoreLoop {
       this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
       return null;
     }
+  }
+
+  /**
+   * Apply a single intent immediately.
+   * Used as callback for AgenticLoop to apply REMEMBER and SET_INTEREST intents
+   * during loop execution so subsequent tools can see the data.
+   */
+  applyImmediateIntent(intent: Intent): void {
+    // Only apply REMEMBER and SET_INTEREST immediately
+    // Other intents should wait for normal intent processing
+    if (intent.type !== 'REMEMBER' && intent.type !== 'SET_INTEREST') {
+      this.logger.warn(
+        { intentType: intent.type },
+        'applyImmediateIntent called with non-immediate intent type, ignoring'
+      );
+      return;
+    }
+    this.applyIntents([intent]);
   }
 
   /**

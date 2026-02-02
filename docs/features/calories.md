@@ -128,6 +128,19 @@ The LLM should ask about sleep patterns when:
 - User reports food was assigned to wrong day
 - User mentions irregular sleep schedule
 
+### Goal Validation Flow
+
+When user asks to validate or calculate their calorie goal:
+
+1. **Summary** returns `goalValidation.missingStats` if user data incomplete
+2. LLM asks user for missing stats (weight, height, gender, birthday)
+3. LLM saves stats via `core.remember` with `source: "user_explicit"`
+4. **Immediate intent processing** makes data visible to subsequent tools
+5. LLM calls `calculate_from_stats=true` to compute TDEE
+6. Goal is validated against calculated TDEE
+
+Without immediate intent processing, step 4-5 would fail because `core.remember` batches intents until loop end. See [Intents - Immediate Processing](../concepts/intents.md#immediate-intent-processing).
+
 ### TDEE Calculation
 
 Uses Mifflin-St Jeor equation:

@@ -204,6 +204,13 @@ export interface ToolResult {
 
   /** Error message (if failed) */
   error?: string;
+
+  /**
+   * Whether this result's intent was already applied immediately.
+   * Used to skip REMEMBER/SET_INTEREST in final intent compilation
+   * since they were applied during loop execution for immediate visibility.
+   */
+  immediatelyApplied?: boolean;
 }
 
 /**
@@ -519,7 +526,7 @@ export interface LoopConfig {
  */
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   maxIterations: 10,
-  maxToolCalls: 5,
+  maxToolCalls: 10,
   timeoutMs: 120000,
   abortOnNewMessage: true,
   maxInputTokens: 10000,
@@ -560,6 +567,15 @@ export interface LoopState {
 
   /** Force LLM to respond (tool already executed but LLM keeps asking) */
   forceRespond?: boolean;
+
+  /** Track failed tool call signatures to detect retry loops */
+  failedCallCounts: Map<string, number>;
+
+  /** Track all identical tool call signatures to detect loops (successful or failed) */
+  identicalCallCounts: Map<string, number>;
+
+  /** Track consecutive memory searches to detect search loops */
+  consecutiveSearches: number;
 }
 
 /**
@@ -574,5 +590,22 @@ export function createLoopState(): LoopState {
     toolResults: [],
     executedTools: [],
     aborted: false,
+    failedCallCounts: new Map<string, number>(),
+    identicalCallCounts: new Map<string, number>(),
+    consecutiveSearches: 0,
   };
 }
+
+/** Threshold for consecutive searches before nudging LLM to try tools or respond */
+export const MAX_CONSECUTIVE_SEARCHES = 3;
+
+/**
+ * Maximum times the same failing tool call can be retried before forcing response.
+ */
+export const MAX_REPEATED_FAILED_CALLS = 2;
+
+/**
+ * Maximum times the exact same tool call (same name + args) can be made before forcing response.
+ * Prevents infinite loops where LLM repeatedly calls the same tool expecting different results.
+ */
+export const MAX_REPEATED_IDENTICAL_CALLS = 2;

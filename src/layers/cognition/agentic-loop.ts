@@ -26,7 +26,13 @@ import type {
   ExecutedTool,
   EvidenceSource,
 } from '../../types/cognition.js';
-import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
+import {
+  DEFAULT_LOOP_CONFIG,
+  createLoopState,
+  MAX_REPEATED_FAILED_CALLS,
+  MAX_CONSECUTIVE_SEARCHES,
+  MAX_REPEATED_IDENTICAL_CALLS,
+} from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
 import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { ThoughtData } from '../../types/signal.js';
@@ -36,6 +42,14 @@ import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schem
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice } from '../../llm/provider.js';
 import type { CoreFinalArgs } from './tools/core/index.js';
+
+/**
+ * Tools whose intents should be applied immediately during loop execution.
+ * This allows subsequent tools in the same loop to see the data.
+ * - core.remember: User facts should be immediately queryable
+ * - core.setInterest: Topic interests should be immediately visible
+ */
+const IMMEDIATE_INTENT_TOOLS = ['core.remember', 'core.setInterest'] as const;
 
 /**
  * Request for LLM completion with native tool calling.
@@ -232,6 +246,19 @@ export interface LoopResult {
 const SMART_RETRY_CONFIDENCE_THRESHOLD = 0.6;
 
 /**
+ * Callbacks for immediate intent processing during loop execution.
+ * Some intents (REMEMBER, SET_INTEREST) should be applied immediately
+ * so subsequent tool calls in the same loop can see the data.
+ */
+export interface LoopCallbacks {
+  /**
+   * Called when an intent should be applied immediately during loop execution.
+   * Used for REMEMBER and SET_INTEREST so data is visible to subsequent tools.
+   */
+  onImmediateIntent?: (intent: Intent) => void;
+}
+
+/**
  * Agentic Loop implementation.
  */
 export class AgenticLoop {
@@ -239,17 +266,20 @@ export class AgenticLoop {
   private readonly llm: CognitionLLM;
   private readonly toolRegistry: ToolRegistry;
   private readonly config: LoopConfig;
+  private readonly callbacks: LoopCallbacks | undefined;
 
   constructor(
     logger: Logger,
     llm: CognitionLLM,
     toolRegistry: ToolRegistry,
-    config: Partial<LoopConfig> = {}
+    config: Partial<LoopConfig> = {},
+    callbacks?: LoopCallbacks
   ) {
     this.logger = logger.child({ component: 'agentic-loop' });
     this.llm = llm;
     this.toolRegistry = toolRegistry;
     this.config = { ...DEFAULT_LOOP_CONFIG, ...config };
+    this.callbacks = callbacks;
   }
 
   /**
@@ -465,22 +495,50 @@ export class AgenticLoop {
         if (tool) {
           const validation = tool.validate(args);
           if (!validation.success) {
+            // Track repeated failed calls to detect loops
+            const callSignature = this.getCallSignature(toolName, args);
+            const failCount = (state.failedCallCounts.get(callSignature) ?? 0) + 1;
+            state.failedCallCounts.set(callSignature, failCount);
+
+            const isRepeatedFailure = failCount >= MAX_REPEATED_FAILED_CALLS;
+
             this.logger.warn(
-              { tool: toolName, error: validation.error },
-              'Tool validation failed, sending error to LLM for retry'
+              { tool: toolName, error: validation.error, failCount, isRepeatedFailure },
+              isRepeatedFailure
+                ? 'Tool validation failed repeatedly - forcing response'
+                : 'Tool validation failed, sending error to LLM for retry'
             );
 
             // Count toward tool call limit to prevent infinite loops
             state.toolCallCount++;
 
-            // Add error as tool result so LLM can retry
+            // Build structured error following ChatGPT best practices
+            // Machine-readable: type, message, retryable, hint with example
+            const errorContent = {
+              success: false,
+              error: {
+                type: 'validation_error',
+                message: validation.error,
+                retryable: !isRepeatedFailure,
+              },
+              hint: isRepeatedFailure
+                ? {
+                    notes: [
+                      `STOP: This exact call has failed ${String(failCount)} times.`,
+                      'Do NOT retry with same parameters.',
+                      'Use core.final to respond to user or ask for missing information.',
+                    ],
+                  }
+                : {
+                    notes: ['Check parameter types and required fields.'],
+                  },
+            };
+
+            // Add error as tool result so LLM can retry (or stop if repeated)
             messages.push({
               role: 'tool',
               tool_call_id: toolCall.id,
-              content: JSON.stringify({
-                success: false,
-                error: `Invalid arguments: ${validation.error}`,
-              }),
+              content: JSON.stringify(errorContent),
             });
 
             state.toolResults.push({
@@ -491,7 +549,12 @@ export class AgenticLoop {
               error: validation.error,
             });
 
-            continue; // Let LLM retry with correct args
+            // Force LLM to respond on next iteration if repeated failures
+            if (isRepeatedFailure) {
+              state.forceRespond = true;
+            }
+
+            continue; // Let LLM retry with correct args (or respond if forced)
           }
         }
 
@@ -525,12 +588,149 @@ export class AgenticLoop {
 
         state.toolResults.push(result);
 
-        // Add tool result to message history (OpenAI format)
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result.success ? result.data : { error: result.error }),
-        });
+        // Apply REMEMBER and SET_INTEREST intents immediately so subsequent tools can see the data
+        // This fixes the timing bug where core.remember returns success but data isn't visible
+        // to following tool calls in the same loop iteration
+        if (result.success && this.callbacks?.onImmediateIntent) {
+          if (
+            IMMEDIATE_INTENT_TOOLS.includes(toolName as (typeof IMMEDIATE_INTENT_TOOLS)[number])
+          ) {
+            const intent = this.toolResultToIntent(result, context);
+            if (intent) {
+              // Add trace for debugging
+              intent.trace = {
+                tickId: context.tickId,
+                parentSignalId: context.triggerSignal.id,
+                toolCallId: result.toolCallId,
+              };
+              this.callbacks.onImmediateIntent(intent);
+              result.immediatelyApplied = true;
+              this.logger.debug(
+                { tool: toolName, intentType: intent.type },
+                'Intent applied immediately for visibility to subsequent tools'
+              );
+            } else {
+              this.logger.warn(
+                { tool: toolName, resultData: result.data },
+                'Failed to convert tool result to intent for immediate processing'
+              );
+            }
+          }
+        }
+
+        // Track ALL identical tool calls to detect loops (successful or failed)
+        const callSignature = this.getCallSignature(toolName, args);
+        const identicalCount = (state.identicalCallCounts.get(callSignature) ?? 0) + 1;
+        state.identicalCallCounts.set(callSignature, identicalCount);
+
+        if (identicalCount >= MAX_REPEATED_IDENTICAL_CALLS) {
+          this.logger.warn(
+            { tool: toolName, identicalCount },
+            'Identical tool call repeated - forcing response'
+          );
+
+          // Add warning to the response
+          const loopWarning = {
+            ...(result.data as Record<string, unknown>),
+            _identicalCallWarning: {
+              count: identicalCount,
+              message: `STOP: You called ${toolName} with identical parameters ${String(identicalCount)} times.`,
+              action:
+                'Do NOT call this tool again with the same parameters. Use core.final to respond to user.',
+            },
+          };
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(loopWarning),
+          });
+
+          state.forceRespond = true;
+          continue; // Skip normal result handling
+        }
+
+        // Track consecutive memory searches to detect search loops
+        const isMemorySearch =
+          toolName === 'core.memory' && (args['action'] as string | undefined) === 'search';
+
+        if (isMemorySearch) {
+          state.consecutiveSearches++;
+        } else {
+          state.consecutiveSearches = 0; // Reset on non-search tool
+        }
+
+        // Detect search loop - LLM keeps searching but not making progress
+        const isSearchLoop = state.consecutiveSearches >= MAX_CONSECUTIVE_SEARCHES;
+        if (isSearchLoop && result.success) {
+          this.logger.warn(
+            { consecutiveSearches: state.consecutiveSearches, tool: toolName },
+            'Detected memory search loop - nudging LLM to try tools or respond'
+          );
+
+          // Add nudge to the successful response
+          const searchNudge = {
+            ...(result.data as Record<string, unknown>),
+            _searchLoopWarning: {
+              consecutiveSearches: state.consecutiveSearches,
+              message:
+                'You have searched memory multiple times without finding what you need. ' +
+                'STOP searching. Either: (1) Try the actual tool that needs this data - it will tell you what is missing, ' +
+                'or (2) Use core.final to ask the user for the information.',
+            },
+          };
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(searchNudge),
+          });
+          continue; // Skip normal result handling
+        }
+
+        // Track repeated failed tool calls to detect loops
+        if (!result.success) {
+          const callSignature = this.getCallSignature(toolName, args);
+          const failCount = (state.failedCallCounts.get(callSignature) ?? 0) + 1;
+          state.failedCallCounts.set(callSignature, failCount);
+
+          const isRepeatedFailure = failCount >= MAX_REPEATED_FAILED_CALLS;
+
+          if (isRepeatedFailure) {
+            this.logger.warn(
+              { tool: toolName, error: result.error, failCount },
+              'Tool execution failed repeatedly - forcing response'
+            );
+            state.forceRespond = true;
+          }
+
+          // Pass through the tool's error response (which may already be structured)
+          // but add repeated-failure hints if needed
+          const toolErrorData = result.data ?? { error: result.error };
+          const errorContent = isRepeatedFailure
+            ? {
+                ...toolErrorData,
+                _repeatWarning: {
+                  failCount,
+                  message: `STOP: This exact call has failed ${String(failCount)} times.`,
+                  action: 'Do NOT retry. Use core.final to respond to user.',
+                },
+              }
+            : toolErrorData;
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(errorContent),
+          });
+        } else {
+          // Success - add result to message history (OpenAI format)
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result.data),
+          });
+        }
       }
 
       // Continue loop - LLM will see tool results in next iteration
@@ -695,6 +895,29 @@ export class AgenticLoop {
   }
 
   /**
+   * Create a signature for a tool call to detect repeated identical calls.
+   * Filters out null values to normalize different ways LLMs pass "not provided".
+   */
+  private getCallSignature(toolName: string, args: Record<string, unknown>): string {
+    // Filter out null/undefined values - LLMs may pass them differently
+    const normalizedArgs: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (value !== null && value !== undefined) {
+        normalizedArgs[key] = value;
+      }
+    }
+
+    // Sort keys for consistent ordering
+    const sortedKeys = Object.keys(normalizedArgs).sort();
+    const sortedArgs: Record<string, unknown> = {};
+    for (const key of sortedKeys) {
+      sortedArgs[key] = normalizedArgs[key];
+    }
+
+    return `${toolName}:${JSON.stringify(sortedArgs)}`;
+  }
+
+  /**
    * Build final result from core.final arguments.
    */
   private buildFinalResult(
@@ -784,6 +1007,12 @@ export class AgenticLoop {
 
     // Convert tool results to intents
     for (const result of toolResults) {
+      // Skip results whose intents were already applied immediately during loop execution
+      // (REMEMBER and SET_INTEREST are applied immediately for visibility to subsequent tools)
+      if (result.immediatelyApplied) {
+        continue;
+      }
+
       // Handle core.thought specially (complex depth logic)
       if (result.toolName === 'core.thought' && result.success) {
         const thoughtIntent = this.thoughtToolResultToIntent(result, context);
@@ -937,7 +1166,9 @@ Rules:
 - Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
 - Set confidence below 0.6 when uncertain about complex/sensitive topics
 - State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.
-- Tool schemas are provided upfront. Call tools directly with the required parameters.
+- Tool schemas are provided upfront. Call tools directly with required parameters.
+- TOOL PARAMS: For optional parameters you don't need, pass null (NOT placeholder strings like "<UNKNOWN>").
+- TOOL ERRORS: When a tool returns requiresUserInput: true, DO NOT retry with same/similar parameters. Instead, use core.final to ask the user for the missing information.
 - HONESTY: If search results don't contain what user asked for, say "nothing found" - don't make excuses or claim to see things not in results.
 - LINKS: When mentioning articles/news from memory, include the URL from metadata.url if available.${
       useSmart
@@ -1529,7 +1760,8 @@ export function createAgenticLoop(
   logger: Logger,
   llm: CognitionLLM,
   toolRegistry: ToolRegistry,
-  config?: Partial<LoopConfig>
+  config?: Partial<LoopConfig>,
+  callbacks?: LoopCallbacks
 ): AgenticLoop {
-  return new AgenticLoop(logger, llm, toolRegistry, config);
+  return new AgenticLoop(logger, llm, toolRegistry, config, callbacks);
 }
