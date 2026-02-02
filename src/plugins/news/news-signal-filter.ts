@@ -620,7 +620,7 @@ export class NewsSignalFilter implements SignalFilter {
       // Interest score becomes confidence in memory
       confidence: interestScore,
       // Topics become tags for retrieval (normalized to lowercase for consistent matching)
-      tags: ['news', ...article.topics.map((t) => t.toLowerCase())],
+      tags: [...new Set(['news', ...article.topics.map((t) => t.toLowerCase())])],
       // Provenance - where this fact came from
       provenance: {
         source: sourceId,

@@ -17,6 +17,22 @@ export interface MemorySearchOptions {
   recipientId?: string | undefined;
   /** Filter by status (for intentions) */
   status?: 'pending' | 'completed' | undefined;
+  /** Minimum confidence threshold (0-1) */
+  minConfidence?: number | undefined;
+}
+
+/**
+ * Search result with metadata.
+ */
+export interface SearchResult {
+  entries: MemoryEntry[];
+  metadata: {
+    totalMatched: number;
+    highConfidence: number;
+    mediumConfidence: number;
+    lowConfidence: number;
+    hasMoreResults: boolean;
+  };
 }
 
 /**
@@ -68,7 +84,7 @@ export interface RecentByTypeOptions {
  * Memory provider interface.
  */
 export interface MemoryProvider {
-  search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]>;
+  search(query: string, options?: MemorySearchOptions): Promise<SearchResult>;
   save(entry: MemoryEntry): Promise<void>;
   getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]>;
   /**
@@ -129,11 +145,22 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
       description: '{subject, predicate, object, source, confidence, tags}',
       required: false,
     },
+    {
+      name: 'minConfidence',
+      type: 'number',
+      description: 'Min confidence 0-1 (default: 0.3)',
+      required: false,
+    },
   ];
 
   return {
     name: 'core.memory',
-    description: 'Long-term memory: search, save, or saveFact.',
+    description: `Long-term memory: search, save, or saveFact.
+
+Search returns high-confidence results (relevance + recency + confidence).
+Use minConfidence (0-1) to filter. Default: 0.3.
+
+Response includes summary. Mention available low-confidence matches to user only if explicitly relevant or they ask for "more".`,
     tags: ['search', 'save', 'facts', 'history'],
     hasSideEffects: true,
     parameters,
@@ -157,18 +184,26 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
             | ('message' | 'thought' | 'fact' | 'intention')[]
             | undefined;
           const status = args['status'] as 'pending' | 'completed' | undefined;
+          const minConfidence = (args['minConfidence'] as number | undefined) ?? 0.3;
 
-          const options: MemorySearchOptions = { limit };
+          const options: MemorySearchOptions = { limit, minConfidence };
           if (types) options.types = types;
           if (status) options.status = status;
           // Use context.recipientId - system knows the current conversation
           if (context?.recipientId) options.recipientId = context.recipientId;
 
-          const results = await deps.memoryProvider.search(query, options);
+          const searchResult = await deps.memoryProvider.search(query, options);
+
+          // Generate LLM-friendly summary
+          let summary = `Found ${String(searchResult.entries.length)} relevant results.`;
+          if (searchResult.metadata.hasMoreResults) {
+            summary += ` Use more specific terms to filter ${String(searchResult.metadata.totalMatched - searchResult.entries.length)} additional matches.`;
+          }
+
           return {
             success: true,
             action: 'search',
-            results: results.map((r) => ({
+            results: searchResult.entries.map((r) => ({
               type: r.type,
               content: r.content,
               timestamp: r.timestamp.toISOString(),
@@ -177,7 +212,15 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
               trigger: r.trigger,
               metadata: r.metadata,
             })),
-            count: results.length,
+            count: searchResult.entries.length,
+            summary,
+            searchMetadata: {
+              totalMatched: searchResult.metadata.totalMatched,
+              highConfidence: searchResult.metadata.highConfidence,
+              mediumConfidence: searchResult.metadata.mediumConfidence,
+              lowConfidence: searchResult.metadata.lowConfidence,
+              hasMoreResults: searchResult.metadata.hasMoreResults,
+            },
           };
         }
 

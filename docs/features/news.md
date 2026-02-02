@@ -17,7 +17,8 @@ Articles flow through brain layers as signals:
 2. **AGGREGATION** - Decides what to do
    - URGENT → wake COGNITION immediately
    - INTERESTING → save as fact to memory
-   - NOISE → filter out
+   - FILTERED → save topic mention as low-confidence fact (peripheral awareness)
+   - NOISE → filter out completely
 
 3. **COGNITION** - When woken
    - Decides how to share urgent news
@@ -26,11 +27,27 @@ Articles flow through brain layers as signals:
 
 ## Classification
 
-| Interest | Urgency | Result |
-|----------|---------|--------|
-| any | > 0.8 | URGENT - notify immediately |
-| 0.4 - 1.0 | ≤ 0.8 | INTERESTING - save to memory |
-| < 0.4 | any | NOISE - filter out |
+| Interest | Urgency | Result | Confidence |
+|----------|---------|--------|------------|
+| any | > 0.8 | URGENT - notify immediately | - |
+| 0.4 - 1.0 | ≤ 0.8 | INTERESTING - save full article to memory | 0.4 |
+| 0.2 - 0.4 | ≤ 0.8 | FILTERED - save topic mention only | 0.2 |
+| < 0.2 | any | NOISE - filter out completely | - |
+
+## Search Behavior
+
+When asking about news ("есть интересные новости?"):
+
+1. **Default search** (`minConfidence: 0.3`) returns:
+   - Full articles (confidence 0.4) with full content
+   - Filtered topics (confidence 0.2) are **excluded** by default
+
+2. **Filtered topics** serve as "peripheral awareness":
+   - They're stored but ranked lower due to low confidence
+   - LLM gets metadata about hidden results
+   - Can be accessed with `minConfidence: 0` if needed
+
+This preserves the "topic mention" design pattern while preventing 850 filtered facts from overwhelming 72 real articles.
 
 ## Learning
 

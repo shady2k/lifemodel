@@ -21,9 +21,33 @@ Memories have:
 ## Retrieval
 
 COGNITION searches memory by:
-- Tags (topic matching)
-- Recency (recent memories prioritized)
-- Confidence (high confidence first)
+- **Relevance** (query matching in content/tags)
+- **Recency** (recent memories get a boost, decaying over 1 week)
+- **Confidence** (additive boost: `score += confidence * 3`)
+
+### Search Features
+
+The `core.memory` tool supports:
+
+- **`minConfidence`** parameter (default: 0.3) - Filters out low-confidence matches
+- **Search metadata** returned with results:
+  - `totalMatched` - Total matching entries
+  - `highConfidence` / `mediumConfidence` / `lowConfidence` - Count by confidence tier
+  - `hasMoreResults` - Whether more matches exist beyond the limit
+
+### Confidence Thresholds
+
+| Tier | Range | Use Case |
+|------|-------|----------|
+| High | ≥0.5 | User facts, important observations |
+| Medium | 0.3-0.5 | Real news articles (0.4), recent thoughts |
+| Low | <0.3 | Filtered topic mentions (0.2), peripheral awareness |
+
+### Design Philosophy
+
+**Peripheral awareness**: Low-confidence entries (like filtered news topics) are kept in memory but ranked lower. This allows the system to maintain "background awareness" of topics without cluttering primary results.
+
+The LLM receives metadata about hidden results and can explicitly search with `minConfidence: 0` to access peripheral information when needed.
 
 ## Consolidation
 

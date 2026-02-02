@@ -12,6 +12,7 @@ import type {
   MemoryEntry,
   MemorySearchOptions,
   RecentByTypeOptions,
+  SearchResult,
 } from '../layers/cognition/tools/registry.js';
 
 /**
@@ -84,20 +85,30 @@ export class JsonMemoryProvider implements MemoryProvider {
    * Search memory entries.
    * Currently uses simple string matching. Will be replaced with vector search.
    */
-  async search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]> {
+  async search(query: string, options?: MemorySearchOptions): Promise<SearchResult> {
     await this.ensureLoaded();
 
     // Reject empty or too short queries
     const trimmedQuery = query.trim();
     if (trimmedQuery.length < 2) {
       this.logger.debug({ query }, 'Search query too short, returning empty');
-      return [];
+      return {
+        entries: [],
+        metadata: {
+          totalMatched: 0,
+          highConfidence: 0,
+          mediumConfidence: 0,
+          lowConfidence: 0,
+          hasMoreResults: false,
+        },
+      };
     }
 
     const limit = options?.limit ?? 10;
     const types = options?.types;
     const recipientId = options?.recipientId;
     const status = options?.status;
+    const minConfidence = options?.minConfidence ?? 0;
 
     // Normalize query for matching
     const queryLower = trimmedQuery.toLowerCase();
@@ -116,6 +127,10 @@ export class JsonMemoryProvider implements MemoryProvider {
         }
         // Filter by status (for intentions only - facts/thoughts don't have status)
         if (status && entry.status !== undefined && entry.status !== status) {
+          return false;
+        }
+        // Filter by minimum confidence
+        if (minConfidence > 0 && (entry.confidence ?? 0.5) < minConfidence) {
           return false;
         }
         return true;
@@ -159,16 +174,43 @@ export class JsonMemoryProvider implements MemoryProvider {
         const recencyBoost = Math.max(0, 1 - ageHours / 168); // Decay over 1 week
         score += recencyBoost;
 
+        // Confidence boost - additive to avoid over-penalizing low-confidence entries
+        // Real articles (0.4) get +1.2 boost vs filtered facts (0.2) get +0.6 boost
+        const confidence = entry.confidence ?? 0.5;
+        score += confidence * 3;
+
         return { entry, score };
       })
       .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((item) => item.entry);
+      .sort((a, b) => b.score - a.score);
 
-    this.logger.debug({ query, results: scored.length, limit }, 'Memory search completed');
+    // Calculate metadata before slicing to limit
+    const totalMatched = scored.length;
+    // Thresholds matched to our data: articles are 0.4, filtered are 0.2
+    const highConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) >= 0.5).length;
+    const mediumConfidence = scored.filter((s) => {
+      const c = s.entry.confidence ?? 0.5;
+      return c >= 0.3 && c < 0.5;
+    }).length;
+    const lowConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) < 0.3).length;
 
-    return scored;
+    const limited = scored.slice(0, limit).map((item) => item.entry);
+
+    this.logger.debug(
+      { query, results: limited.length, totalMatched, limit },
+      'Memory search completed'
+    );
+
+    return {
+      entries: limited,
+      metadata: {
+        totalMatched,
+        highConfidence,
+        mediumConfidence,
+        lowConfidence,
+        hasMoreResults: totalMatched > limit,
+      },
+    };
   }
 
   /**

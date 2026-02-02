@@ -21,6 +21,7 @@ export type {
   MemoryProvider,
   MemoryEntry,
   MemorySearchOptions,
+  SearchResult,
   RecentByTypeOptions,
   MemoryToolDeps,
 } from './memory.js';
