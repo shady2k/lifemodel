@@ -62,41 +62,34 @@ export function createInterestTool(): Tool {
       name: 'topic',
       type: 'string',
       required: true,
-      description:
-        'Topic keyword(s) for matching. Use 1-3 short terms, comma-separated if multiple. ' +
-        'Examples: "crypto", "outages,electricity", "AI,LLM", "отключения". ' +
-        'Extract ALL relevant keywords from user request - location names, street names, specific terms. ' +
-        'Call this tool MULTIPLE TIMES if user mentions several distinct topics. ' +
-        'DO NOT write full sentences - only keywords.',
+      description: '1-3 keywords, comma-separated. Call multiple times for distinct topics.',
     },
     {
       name: 'intensity',
       type: 'string',
       enum: INTENSITY_VALUES,
       required: true,
-      description:
-        'Interest level: strong_positive (+0.5), weak_positive (+0.2), weak_negative (-0.2), strong_negative (-0.5)',
+      description: 'strong_positive|weak_positive|weak_negative|strong_negative',
     },
     {
       name: 'urgent',
       type: 'boolean',
       required: false,
-      description: 'Set true if user wants immediate alerts on this topic',
+      description: 'True for immediate alerts',
     },
     {
       name: 'source',
       type: 'string',
       enum: EVIDENCE_SOURCES,
       required: true,
-      description:
-        'How we learned this: user_explicit (clearly stated), user_implicit (behavioral signal), inferred (deduced)',
+      description: 'user_explicit|user_implicit|inferred',
     },
   ];
 
   return {
     name: 'core.setInterest',
     description:
-      'Record user interest in a topic. Use when user says "warn me about", "interested in", "notify me about", "don\'t care about". Do NOT use for one-time questions or mid-conversation clarifications.',
+      'Track ongoing topic interests. For "warn me", "interested in", "notify me". Not for one-time questions.',
     tags: ['preferences', 'user-model', 'interests'],
     hasSideEffects: true,
     parameters,

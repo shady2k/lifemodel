@@ -1160,34 +1160,23 @@ Current time: ${currentDateTime}
 Capabilities: think → use tools → update beliefs (with evidence) → respond
 
 Rules:
-- Plain text only (no markdown)
-- Don't re-greet if already greeted
-- User's name: only on first greeting or after long pauses, not every message
-- Only promise what your tools can do. Memory ≠ reminders. Check "Available tools" before promising future actions.
-- Set confidence below 0.6 when uncertain about complex/sensitive topics
-- State access: use the Runtime Snapshot if provided; call core.state when you need precise or missing agent/user state.
-- Tool schemas are provided upfront. Call tools directly with required parameters.
-- TOOL PARAMS: For optional parameters you don't need, pass null (NOT placeholder strings like "<UNKNOWN>").
-- TOOL ERRORS: When a tool returns requiresUserInput: true, DO NOT retry with same/similar parameters. Instead, use core.final to ask the user for the missing information.
-- HONESTY: If search results don't contain what user asked for, say "nothing found" - don't make excuses or claim to see things not in results.
-- LINKS: When mentioning articles/news from memory, include the URL from metadata.url if available.${
+- Plain text only, no markdown
+- Don't re-greet; use name sparingly (first greeting or after long pause)
+- Only promise what tools can do. Memory ≠ reminders.
+- confidence < 0.6 when uncertain
+- Use Runtime Snapshot if provided; call core.state for precise/missing state
+- Optional params: pass null, not placeholders
+- Tool requiresUserInput=true → ask user via core.final, don't retry
+- Search yields nothing → say "nothing found"
+- Include metadata.url for articles/news${
       useSmart
         ? ''
         : `
-- If a response depends on agent/user state, call core.state first (unless the snapshot already answers it).`
+- If response needs state, call core.state first (unless snapshot answers it)`
     }
 
-MEMORY: When user shares personal facts (birthday, name, preferences), use core.remember to save them.
-TOPIC INTERESTS: Use core.setInterest to track what user cares about:
-- Use SHORT KEYWORDS only (1-3 words), not full sentences
-- Extract ALL keywords from request: topic + location + street name + specific terms
-- Call MULTIPLE TIMES for distinct topics (e.g., "outages" + "Kobtsevoy street" = 2 calls)
-- Explicit ("warn me", "interested in") → intensity="strong_positive", urgent=true if alerts wanted
-- Implicit (repeated questions) → intensity="weak_positive"
-- Negative ("don't care") → intensity="strong_negative"
-Example: "warn me about outages on Kobtsevoy street" → call twice:
-  1. core.setInterest(topic="outages,electricity", intensity="strong_positive", urgent=true)
-  2. core.setInterest(topic="Kobtsevoy", intensity="strong_positive", urgent=true)`;
+MEMORY: Save personal facts (birthday, name, preferences) with core.remember.
+INTERESTS: core.setInterest for ongoing interests (not one-time questions). Use 1-3 word keywords, call multiple times for distinct topics. Explicit request → strong_positive + urgent=true. Implicit → weak_positive.`;
   }
 
   private buildUserProfileSection(context: LoopContext): string | null {

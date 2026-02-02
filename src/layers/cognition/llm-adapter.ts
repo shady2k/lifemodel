@@ -171,6 +171,13 @@ export class LLMAdapter implements CognitionLLM {
         }
       }
 
+      // Estimate input tokens (rough: ~4 chars per token for English/mixed content)
+      const requestPayload = JSON.stringify({
+        messages: completionRequest.messages,
+        tools: completionRequest.tools,
+      });
+      const estimatedInputTokens = Math.ceil(requestPayload.length / 4);
+
       const response = await this.provider.complete(completionRequest);
 
       const duration = Date.now() - startTime;
@@ -180,6 +187,7 @@ export class LLMAdapter implements CognitionLLM {
           useSmart,
           messageCount: request.messages.length,
           toolCount: request.tools.length,
+          estimatedInputTokens,
           responseContentLength: response.content?.length ?? 0,
           toolCallCount: response.toolCalls?.length ?? 0,
           finishReason: response.finishReason,

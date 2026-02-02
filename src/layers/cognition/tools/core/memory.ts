@@ -93,78 +93,47 @@ export interface MemoryToolDeps {
  */
 export function createMemoryTool(deps: MemoryToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    {
-      name: 'action',
-      type: 'string',
-      description: 'Action: search, save, or saveFact',
-      required: true,
-    },
-    { name: 'query', type: 'string', description: 'Search query (for search)', required: false },
-    {
-      name: 'content',
-      type: 'string',
-      description: 'Content to save (for save)',
-      required: false,
-    },
-    {
-      name: 'limit',
-      type: 'number',
-      description: 'Max results (for search, default: 10)',
-      required: false,
-    },
+    { name: 'action', type: 'string', description: 'search|save|saveFact', required: true },
+    { name: 'query', type: 'string', description: 'Search query', required: false },
+    { name: 'content', type: 'string', description: 'Content to save', required: false },
+    { name: 'limit', type: 'number', description: 'Max results (default: 10)', required: false },
     {
       name: 'types',
       type: 'array',
-      description: 'Filter by type: message, thought, fact, intention (for search)',
+      description: 'Filter: message|thought|fact|intention',
       required: false,
     },
     {
       name: 'status',
       type: 'string',
-      description:
-        'ONLY for intentions: pending or completed. Ignored for facts/thoughts/messages.',
+      description: 'For intentions only: pending|completed',
       required: false,
     },
-    // chatId removed - system uses context.recipientId automatically
     {
       name: 'type',
       type: 'string',
-      description:
-        'Memory type: fact, thought, or intention (for save, default: fact). Use intention for things to do/ask later.',
+      description: 'fact|thought|intention (default: fact)',
       required: false,
     },
     {
       name: 'trigger',
       type: 'string',
-      description:
-        'Trigger condition for intentions: next_conversation, idle_moment, or topic_match (for save with type=intention)',
+      description: 'For intentions: next_conversation|idle_moment|topic_match',
       required: false,
     },
-    {
-      name: 'tags',
-      type: 'array',
-      description: 'Tags for categorization (for save)',
-      required: false,
-    },
-    {
-      name: 'confidence',
-      type: 'number',
-      description: 'Confidence 0-1 (for save, default: 0.8)',
-      required: false,
-    },
+    { name: 'tags', type: 'array', description: 'Categorization tags', required: false },
+    { name: 'confidence', type: 'number', description: '0-1 (default: 0.8)', required: false },
     {
       name: 'fact',
       type: 'object',
-      description:
-        'Structured fact object (for saveFact): { subject, predicate, object, source, evidence?, confidence, ttl?, tags }',
+      description: '{subject, predicate, object, source, confidence, tags}',
       required: false,
     },
   ];
 
   return {
     name: 'core.memory',
-    description:
-      'Manage long-term memory. Actions: search (find past info), save (store text), saveFact (store structured fact).',
+    description: 'Long-term memory: search, save, or saveFact.',
     tags: ['search', 'save', 'facts', 'history'],
     hasSideEffects: true,
     parameters,

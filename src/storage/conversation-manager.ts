@@ -332,7 +332,7 @@ export class ConversationManager {
     userId: string,
     options: GetHistoryOptions = {}
   ): Promise<ConversationMessage[]> {
-    const { maxRecentTurns = 10, includeCompacted = true } = options;
+    const { maxRecentTurns = 8, includeCompacted = true } = options;
 
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);

@@ -84,69 +84,47 @@ export interface CoreFinalArgs {
  * to build the final result directly.
  */
 export function createFinalTool(): Tool {
-  // Flat parameters - all fields at root level
   const parameters: ToolParameter[] = [
     {
       name: 'type',
       type: 'string',
       enum: ['respond', 'no_action', 'defer'],
-      description: 'Terminal type: respond | no_action | defer',
+      description: 'respond|no_action|defer',
       required: true,
     },
-    {
-      name: 'text',
-      type: 'string',
-      description: 'Message to send (required for respond)',
-      required: false,
-    },
+    { name: 'text', type: 'string', description: 'Message (for respond)', required: false },
     {
       name: 'conversationStatus',
       type: 'string',
       enum: ['active', 'awaiting_answer', 'closed', 'idle'],
-      description:
-        'Conversation status for follow-up timing. ' +
-        'awaiting_answer: you asked a question, waiting for reply (follow-up in 3 min). ' +
-        'active: mid-conversation, no specific question (30 min). ' +
-        'idle: natural pause, made a statement (30 min). ' +
-        'closed: farewell or user busy (4 hours).',
+      description: 'awaiting_answer→3min, active/idle→30min, closed→4hr',
       required: false,
     },
     {
       name: 'confidence',
       type: 'number',
-      description: 'Confidence 0-1 (required for respond). Below 0.6 triggers retry.',
+      description: '0-1, <0.6 triggers retry (for respond)',
       required: false,
     },
     {
       name: 'reason',
       type: 'string',
-      description: 'Why no action / why deferring (required for no_action and defer)',
+      description: 'Why (for no_action/defer)',
       required: false,
     },
     {
       name: 'signalType',
       type: 'string',
-      description: 'Signal type being deferred (required for defer)',
+      description: 'Signal deferred (for defer)',
       required: false,
     },
-    {
-      name: 'deferHours',
-      type: 'number',
-      description: 'Hours to defer (required for defer)',
-      required: false,
-    },
+    { name: 'deferHours', type: 'number', description: 'Hours (for defer)', required: false },
   ];
 
   return {
     name: 'core.final',
-    description: `End the loop with a terminal state. FLAT FORMAT - all fields at root level.
-
-Examples:
-- respond: { type: "respond", text: "Hello!", conversationStatus: "active", confidence: 0.9 }
-- no_action: { type: "no_action", reason: "No response needed" }
-- defer: { type: "defer", reason: "User busy", signalType: "contact_urge", deferHours: 4 }
-
-IMPORTANT: You MUST call this tool to end the loop.`,
+    description:
+      'End loop. MUST call to finish. Examples: {type:"respond",text:"Hi",conversationStatus:"active",confidence:0.9} or {type:"no_action",reason:"..."}',
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     // No rawParameterSchema needed - flat parameters are converted automatically

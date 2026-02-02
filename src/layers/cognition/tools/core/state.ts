@@ -34,13 +34,12 @@ export interface StateToolDeps {
  */
 export function createStateTool(deps: StateToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: agent or user', required: true },
-    // chatId removed - system uses context.recipientId automatically
+    { name: 'action', type: 'string', description: 'agent|user', required: true },
   ];
 
   return {
     name: 'core.state',
-    description: 'Get current state. Actions: agent (energy, mood), user (beliefs about user).',
+    description: 'Get agent state (energy, mood) or user model.',
     tags: ['agent-state', 'user-model'],
     hasSideEffects: false,
     parameters,

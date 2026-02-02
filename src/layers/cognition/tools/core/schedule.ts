@@ -18,30 +18,15 @@ const MAX_DELAY = 7 * 24 * 60 * 60 * 1000;
  */
 export function createScheduleTool(): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: create', required: true },
-    {
-      name: 'delayMs',
-      type: 'number',
-      description: 'Delay in milliseconds before event fires',
-      required: true,
-    },
-    {
-      name: 'eventType',
-      type: 'string',
-      description: 'Type of event (e.g., followUp, checkIn)',
-      required: true,
-    },
-    {
-      name: 'eventContext',
-      type: 'object',
-      description: 'Context data for the event',
-      required: false,
-    },
+    { name: 'action', type: 'string', description: 'create', required: true },
+    { name: 'delayMs', type: 'number', description: 'Delay in ms (1s-7d)', required: true },
+    { name: 'eventType', type: 'string', description: 'followUp, checkIn, etc.', required: true },
+    { name: 'eventContext', type: 'object', description: 'Event data', required: false },
   ];
 
   return {
     name: 'core.schedule',
-    description: 'Schedule a future event. Use for follow-ups, reminders, or delayed processing.',
+    description: 'Schedule future events (follow-ups, reminders).',
     tags: ['schedule', 'future', 'events'],
     hasSideEffects: true,
     parameters,
