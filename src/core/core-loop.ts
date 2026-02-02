@@ -245,6 +245,14 @@ export class CoreLoop {
         primaryRecipientId: this.primaryRecipientId,
       });
     }
+
+    // Set primary recipient ID on AUTONOMIC for filter context
+    // This allows filters (e.g., NewsSignalFilter) to set recipientId on urgent signals
+    if ('setPrimaryRecipientId' in this.layers.autonomic) {
+      (
+        this.layers.autonomic as { setPrimaryRecipientId: (id: string | undefined) => void }
+      ).setPrimaryRecipientId(this.primaryRecipientId);
+    }
   }
 
   /**

@@ -58,6 +58,12 @@ export interface FilterContext {
    * Null if user model is not configured.
    */
   userModel: FilterUserModel | null;
+
+  /**
+   * Primary recipient ID for routing proactive messages.
+   * Used by filters that need to set recipientId on urgent signals.
+   */
+  primaryRecipientId?: string | undefined;
 }
 
 // ============================================================

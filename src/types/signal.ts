@@ -411,7 +411,10 @@ export interface FactBatchData {
   facts: Fact[];
 
   /** If true, wake COGNITION immediately after saving to memory */
-  urgent?: boolean;
+  urgent?: boolean | undefined;
+
+  /** Target recipient for urgent notifications (used for routing COGNITION responses) */
+  recipientId?: string | undefined;
 }
 
 /**

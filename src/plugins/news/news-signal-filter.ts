@@ -312,6 +312,14 @@ export class NewsSignalFilter implements SignalFilter {
     const outputSignals: Signal[] = [];
 
     if (urgentArticles.length > 0) {
+      // Warn if urgent facts won't be routed (helps debug missing notifications)
+      if (!context.primaryRecipientId) {
+        this.logger.warn(
+          { urgentCount: urgentArticles.length },
+          'Urgent facts generated but no primaryRecipientId - responses will not be routed'
+        );
+      }
+
       // Transform urgent articles to facts - brain operates on facts, not articles
       const urgentFacts = urgentArticles.map((scored) => this.toFact(scored, sourceId));
 
@@ -321,6 +329,7 @@ export class NewsSignalFilter implements SignalFilter {
         eventKind: 'news:urgent',
         facts: urgentFacts,
         urgent: true, // Wake COGNITION immediately
+        recipientId: context.primaryRecipientId, // Route response to primary user
       };
 
       outputSignals.push(

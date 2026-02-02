@@ -83,6 +83,9 @@ export class AutonomicProcessor implements AutonomicLayer {
   /** User model for filter context (injected via setUserModel) */
   private userModel: FilterUserModel | null = null;
 
+  /** Primary recipient ID for filter context (used for routing urgent signals) */
+  private primaryRecipientId: string | undefined;
+
   constructor(logger: Logger, config: Partial<AutonomicProcessorConfig> = {}) {
     this.logger = logger.child({ layer: 'autonomic' });
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -148,6 +151,17 @@ export class AutonomicProcessor implements AutonomicLayer {
   setUserModel(userModel: FilterUserModel | null): void {
     this.userModel = userModel;
     this.logger.debug({ hasUserModel: !!userModel }, 'User model set for filters');
+  }
+
+  /**
+   * Set the primary recipient ID for filter context.
+   * Used by filters to set recipientId on urgent signals for routing.
+   *
+   * @param recipientId The primary recipient ID (or undefined if not configured)
+   */
+  setPrimaryRecipientId(recipientId: string | undefined): void {
+    this.primaryRecipientId = recipientId;
+    this.logger.debug({ primaryRecipientId: recipientId }, 'Primary recipient ID set for filters');
   }
 
   /**
@@ -272,12 +286,13 @@ export class AutonomicProcessor implements AutonomicLayer {
     // Check all neurons
     const neuronSignals = this.registry.checkAll(state, alertness, correlationId);
 
-    // Build filter context with user model
+    // Build filter context with user model and primary recipient
     const filterContext: FilterContext = {
       state,
       alertness,
       correlationId,
       userModel: this.userModel,
+      primaryRecipientId: this.primaryRecipientId,
     };
 
     // Run incoming signals through filters (transform/classify)
