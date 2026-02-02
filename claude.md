@@ -78,6 +78,20 @@ All persistent data must use the same storage infrastructure. Never bypass Defer
 
 **Example:** MemoryProvider used direct `writeFile` with `autoSave: true`. Multiple concurrent saves corrupted the file with `}{` pattern.
 
+### 5. Timestamp Filtering Must Use Content Timestamps
+When filtering polling results to avoid duplicates, use the newest item's actual timestamp, not the fetch time.
+
+**Invariant:** `lastFetchedAt = max(item.publishedAt)`, NOT `new Date()`
+
+**Example:** Fetched at 13:01:31, newest article at 12:55:00. Using fetch time as `lastFetchedAt` caused articles published at 13:00:00 to be filtered on the next poll—they were never seen but appeared "old" compared to 13:01:31.
+
+### 6. Stop Conditions Must Handle Gaps
+When stopping pagination at a "last seen" ID, use exact match (`===`), not less-than-or-equal (`<=`). IDs may have gaps due to deletions.
+
+**Invariant:** Stop on `id === lastSeenId`, not `id <= lastSeenId`
+
+**Example:** `lastSeenId=26580` but posts 26574-26580 were deleted. Max current ID is 26573. Using `<=` stopped immediately on the first post (26573 <= 26580), returning 0 articles instead of the expected posts.
+
 ---
 
 ## Documentation

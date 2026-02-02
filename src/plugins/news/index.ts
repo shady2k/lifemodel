@@ -36,6 +36,24 @@ import { convertToNewsArticle } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
 
 /**
+ * Get the maximum publishedAt timestamp from articles.
+ * Articles may not be sorted by date (e.g., popularity-sorted feeds),
+ * so we must iterate to find the true maximum.
+ *
+ * @param articles - Array of fetched articles
+ * @returns The maximum publishedAt Date, or null if no articles have timestamps
+ */
+function getMaxPublishedAt(articles: FetchedArticle[]): Date | null {
+  let max: Date | null = null;
+  for (const article of articles) {
+    if (article.publishedAt && (!max || article.publishedAt > max)) {
+      max = article.publishedAt;
+    }
+  }
+  return max;
+}
+
+/**
  * Zod schema for news:article_batch event validation.
  * Validates the signal emitted when articles are fetched.
  */
@@ -309,6 +327,19 @@ async function fetchSingleSource(
   // Filter to only new articles
   const newArticles = filterNewArticles(result.articles, state);
 
+  // Use MAX timestamp from fetched articles (not current time).
+  // Articles may be sorted by popularity, not date, so we find the true max.
+  // This prevents missing articles published between newest article time and fetch time.
+  const maxPublishedAt = getMaxPublishedAt(result.articles);
+
+  // Log warning if no timestamps found (helps identify problematic feeds)
+  if (!maxPublishedAt && result.articles.length > 0) {
+    logger.debug(
+      { sourceId: source.id, articleCount: result.articles.length },
+      'No publishedAt timestamps in fetched RSS articles, using fallback'
+    );
+  }
+
   logger.debug(
     {
       sourceId: source.id,
@@ -320,9 +351,10 @@ async function fetchSingleSource(
   );
 
   // Update state - success resets failures and clears disable
+  // Use max article timestamp, falling back to previous state or current time
   const newState: SourceState = {
     sourceId: source.id,
-    lastFetchedAt: new Date(),
+    lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
     consecutiveFailures: 0,
     lastSeenId: result.latestId ?? state?.lastSeenId,
     lastSeenHash: state?.lastSeenHash,
@@ -479,6 +511,18 @@ async function fetchSingleTelegramSource(
   // Filter to only new articles
   const newArticles = filterNewArticles(result.articles, state);
 
+  // Use MAX timestamp from fetched articles (same fix as RSS).
+  // This ensures consistent timestamp-based filtering across source types.
+  const maxPublishedAt = getMaxPublishedAt(result.articles);
+
+  // Log warning if no timestamps found
+  if (!maxPublishedAt && result.articles.length > 0) {
+    logger.debug(
+      { sourceId: source.id, articleCount: result.articles.length },
+      'No publishedAt timestamps in fetched Telegram messages, using fallback'
+    );
+  }
+
   logger.debug(
     {
       sourceId: source.id,
@@ -490,9 +534,10 @@ async function fetchSingleTelegramSource(
   );
 
   // Update state - success resets failures and clears disable
+  // Use max article timestamp, falling back to previous state or current time
   const newState: SourceState = {
     sourceId: source.id,
-    lastFetchedAt: new Date(),
+    lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
     consecutiveFailures: 0,
     lastSeenId: result.latestId ?? state?.lastSeenId,
     lastSeenHash: state?.lastSeenHash,

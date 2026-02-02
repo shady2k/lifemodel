@@ -699,8 +699,11 @@ export async function fetchTelegramChannelUntil(
     for (const article of result.articles) {
       const articleNumericId = parseInt(article.id.split('_').pop() ?? '0', 10);
 
-      // Stop if we've reached the last seen article
-      if (lastSeenNumericId > 0 && articleNumericId <= lastSeenNumericId) {
+      // Stop only if we find the EXACT lastSeenId.
+      // Using === instead of <= because deleted messages can leave lastSeenId
+      // higher than the current max ID (e.g., lastSeenId=26580 but max post is 26573).
+      // The MAX_POLL_PAGES limit prevents infinite pagination in edge cases.
+      if (lastSeenNumericId > 0 && articleNumericId === lastSeenNumericId) {
         foundLastSeen = true;
         break;
       }

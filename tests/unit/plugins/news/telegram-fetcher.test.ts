@@ -11,6 +11,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   fetchTelegramChannel,
+  fetchTelegramChannelUntil,
   clearRateLimitTracking,
   parseHtml,
 } from '../../../../src/plugins/news/fetchers/telegram.js';
@@ -255,6 +256,99 @@ describe('Telegram Fetcher', () => {
 
       expect(result.success).toBe(true);
       expect(result.articles).toEqual([]);
+    });
+  });
+
+  describe('fetchTelegramChannelUntil - message gap handling', () => {
+    it('should return articles when lastSeenId is higher than all current post IDs (deleted messages)', async () => {
+      // This test verifies the fix for message gaps caused by deleted posts.
+      // When lastSeenId (e.g., 26580) > all current post IDs (max: 26573),
+      // we should still return the current posts, not 0 articles.
+      const gapHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Gap Channel</title></head>
+        <body>
+        <div class="tgme_channel_info">
+          <div class="tgme_page_title">Gap Test Channel</div>
+        </div>
+        <div class="tgme_widget_message" data-post="gap_channel/26573">
+          <div class="tgme_widget_message_text">Post 26573</div>
+          <div class="tgme_widget_message_date"><time datetime="2025-01-15T12:00:00Z"></time></div>
+        </div>
+        <div class="tgme_widget_message" data-post="gap_channel/26570">
+          <div class="tgme_widget_message_text">Post 26570</div>
+          <div class="tgme_widget_message_date"><time datetime="2025-01-15T11:00:00Z"></time></div>
+        </div>
+        </body>
+        </html>
+      `;
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(gapHtml),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // lastSeenId is 26580, which is HIGHER than max post ID (26573)
+      // This can happen when posts 26574-26580 were deleted
+      const result = await fetchTelegramChannelUntil(
+        '@gap_channel',
+        'Gap Test Channel',
+        'tg_gap_channel_26580' // Higher than max post ID
+      );
+
+      expect(result.success).toBe(true);
+      // Should get both posts despite lastSeenId being higher
+      expect(result.articles.length).toBe(2);
+      expect(result.articles[0].id).toBe('tg_gap_channel_26573');
+      expect(result.articles[1].id).toBe('tg_gap_channel_26570');
+    });
+
+    it('should stop at exact lastSeenId match', async () => {
+      // Normal case: stop when we find the exact lastSeenId
+      const normalHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Normal Channel</title></head>
+        <body>
+        <div class="tgme_channel_info">
+          <div class="tgme_page_title">Normal Test Channel</div>
+        </div>
+        <div class="tgme_widget_message" data-post="normal_channel/103">
+          <div class="tgme_widget_message_text">Post 103</div>
+          <div class="tgme_widget_message_date"><time datetime="2025-01-15T14:00:00Z"></time></div>
+        </div>
+        <div class="tgme_widget_message" data-post="normal_channel/102">
+          <div class="tgme_widget_message_text">Post 102</div>
+          <div class="tgme_widget_message_date"><time datetime="2025-01-15T13:00:00Z"></time></div>
+        </div>
+        <div class="tgme_widget_message" data-post="normal_channel/101">
+          <div class="tgme_widget_message_text">Post 101</div>
+          <div class="tgme_widget_message_date"><time datetime="2025-01-15T12:00:00Z"></time></div>
+        </div>
+        </body>
+        </html>
+      `;
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(normalHtml),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      // lastSeenId is 102 - should only return post 103
+      const result = await fetchTelegramChannelUntil(
+        '@normal_channel',
+        'Normal Test Channel',
+        'tg_normal_channel_102'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.articles.length).toBe(1);
+      expect(result.articles[0].id).toBe('tg_normal_channel_103');
     });
   });
 
