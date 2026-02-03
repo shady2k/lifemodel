@@ -52,6 +52,10 @@ export interface ConversationMessage {
   tool_calls?: StoredToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */
   tool_call_id?: string;
+  /** Channel-specific message ID (e.g., Telegram message ID) for sent messages */
+  channelMessageId?: string;
+  /** Which channel sent this message */
+  channel?: string;
 }
 
 /**
@@ -78,6 +82,10 @@ interface StoredMessage {
   tool_calls?: StoredToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */
   tool_call_id?: string;
+  /** Channel-specific message ID (e.g., Telegram message ID) for sent messages */
+  channelMessageId?: string;
+  /** Which channel sent this message */
+  channel?: string;
 }
 
 /**
@@ -223,16 +231,30 @@ export class ConversationManager {
     message: {
       role: 'system' | 'user' | 'assistant';
       content: string;
+    },
+    channelMeta?: {
+      channelMessageId?: string;
+      channel?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    stored.messages.push({
+    const storedMsg: StoredMessage = {
       role: message.role,
       content: message.content,
       timestamp: new Date().toISOString(),
-    });
+    };
+    // Add channel metadata for reaction lookup (only for assistant messages)
+    if (message.role === 'assistant') {
+      if (channelMeta?.channelMessageId) {
+        storedMsg.channelMessageId = channelMeta.channelMessageId;
+      }
+      if (channelMeta?.channel) {
+        storedMsg.channel = channelMeta.channel;
+      }
+    }
+    stored.messages.push(storedMsg);
 
     await this.storage.save(key, stored);
 
@@ -261,6 +283,7 @@ export class ConversationManager {
    * @param userId User/conversation ID
    * @param assistantMessage The assistant's message (may include tool_calls)
    * @param toolResults Array of tool result messages (linked via tool_call_id)
+   * @param channelMeta Optional channel metadata (for reaction lookup)
    */
   async addTurn(
     userId: string,
@@ -271,7 +294,11 @@ export class ConversationManager {
     toolResults?: {
       tool_call_id: string;
       content: string;
-    }[]
+    }[],
+    channelMeta?: {
+      channelMessageId?: string;
+      channel?: string;
+    }
   ): Promise<void> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
@@ -285,6 +312,13 @@ export class ConversationManager {
     };
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
       assistantMsg.tool_calls = assistantMessage.tool_calls;
+    }
+    // Add channel metadata for reaction lookup
+    if (channelMeta?.channelMessageId) {
+      assistantMsg.channelMessageId = channelMeta.channelMessageId;
+    }
+    if (channelMeta?.channel) {
+      assistantMsg.channel = channelMeta.channel;
     }
     stored.messages.push(assistantMsg);
 
@@ -404,8 +438,47 @@ export class ConversationManager {
       if (msg.tool_call_id) {
         convMsg.tool_call_id = msg.tool_call_id;
       }
+      if (msg.channelMessageId) {
+        convMsg.channelMessageId = msg.channelMessageId;
+      }
+      if (msg.channel) {
+        convMsg.channel = msg.channel;
+      }
       return convMsg;
     });
+  }
+
+  /**
+   * Look up a message by channel-specific message ID.
+   * Used for enriching reaction signals with the original message content.
+   *
+   * @param recipientId The recipient (conversation) ID
+   * @param channel Which channel (e.g., 'telegram')
+   * @param channelMessageId The channel-specific message ID
+   * @returns The message if found, null otherwise
+   */
+  async getMessageByChannelId(
+    recipientId: string,
+    channel: string,
+    channelMessageId: string
+  ): Promise<ConversationMessage | null> {
+    const key = this.getKey(recipientId);
+    const stored = await this.loadConversation(key);
+
+    // Search from newest to oldest (most recent messages more likely to get reactions)
+    for (const msg of stored.messages.slice().reverse()) {
+      if (msg.channelMessageId === channelMessageId && msg.channel === channel) {
+        return {
+          role: msg.role,
+          content: msg.content,
+          timestamp: new Date(msg.timestamp),
+          channelMessageId: msg.channelMessageId,
+          channel: msg.channel,
+        };
+      }
+    }
+
+    return null;
   }
 
   /**

@@ -14,6 +14,16 @@
 import type { Signal } from '../types/signal.js';
 
 /**
+ * Result of sending a message.
+ */
+export interface ChannelSendResult {
+  /** Whether the message was sent successfully */
+  success: boolean;
+  /** Channel-specific message ID (e.g., Telegram message ID) */
+  messageId?: string;
+}
+
+/**
  * Options for sending messages through a channel.
  */
 export interface ChannelSendOptions {
@@ -89,9 +99,13 @@ export interface IChannel {
    * @param destination - Target identifier (chat ID, user ID, channel ID, etc.)
    * @param text - Message content
    * @param options - Optional send options
-   * @returns true if sent successfully, false otherwise
+   * @returns Result with success status and optional messageId
    */
-  sendMessage(destination: string, text: string, options?: ChannelSendOptions): Promise<boolean>;
+  sendMessage(
+    destination: string,
+    text: string,
+    options?: ChannelSendOptions
+  ): Promise<ChannelSendResult>;
 
   /**
    * Send typing indicator (optional).

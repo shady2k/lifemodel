@@ -13,6 +13,16 @@ export interface CircuitStats {
 }
 
 /**
+ * Result of sending a message.
+ */
+export interface SendResult {
+  /** Whether the message was sent successfully */
+  success: boolean;
+  /** Channel-specific message ID (e.g., Telegram message ID) */
+  messageId?: string;
+}
+
+/**
  * Options for sending messages.
  */
 export interface SendOptions {
@@ -49,9 +59,9 @@ export interface Channel {
    * @param target - Target identifier (user ID, chat ID, etc.)
    * @param text - Message content
    * @param options - Optional send options
-   * @returns true if sent successfully, false otherwise
+   * @returns Result with success status and optional messageId
    */
-  sendMessage(target: string, text: string, options?: SendOptions): Promise<boolean>;
+  sendMessage(target: string, text: string, options?: SendOptions): Promise<SendResult>;
 
   /**
    * Send typing indicator to show the bot is preparing a response.

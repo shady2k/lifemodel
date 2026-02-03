@@ -142,29 +142,30 @@ describe('TelegramChannel', () => {
   });
 
   describe('sendMessage', () => {
-    it('returns false when not configured', async () => {
+    it('returns { success: false } when not configured', async () => {
       const noTokenChannel = new TelegramChannel(
         { botToken: '' },
         mockLogger as any,
         mockRegistry
       );
       const result = await noTokenChannel.sendMessage('123', 'test');
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(mockLogger.warn).toHaveBeenCalledWith('Cannot send message: Telegram not configured');
     });
 
-    it('returns false when bot not started', async () => {
+    it('returns { success: false } when bot not started', async () => {
       const result = await channel.sendMessage('123', 'test');
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(mockLogger.warn).toHaveBeenCalledWith('Cannot send message: Telegram bot not started');
     });
 
-    it('sends message successfully after starting', async () => {
+    it('sends message successfully after starting and returns messageId', async () => {
       await channel.start();
       const result = await channel.sendMessage('123456', 'Hello world');
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
+      expect(result.messageId).toBe('123'); // Mock returns message_id: 123
       expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.objectContaining({ chatId: '123456', textLength: 11 }),
+        expect.objectContaining({ chatId: '123456', textLength: 11, messageId: '123' }),
         'Message sent'
       );
     });

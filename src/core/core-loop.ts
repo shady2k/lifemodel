@@ -28,6 +28,7 @@ import type {
   Event,
   ThoughtData,
   InterestIntensity,
+  MessageReactionData,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import type {
@@ -431,7 +432,8 @@ export class CoreLoop {
       let allSignals: Signal[] = [];
 
       // 1. Collect incoming signals from channels (sensory input)
-      const incomingSignals = this.collectIncomingSignals();
+      // Enriches reaction signals with message previews (async)
+      const incomingSignals = await this.collectIncomingSignals();
 
       // 1b. Update thought pressure before neurons run
       // This allows ThoughtsNeuron to see current pressure
@@ -651,24 +653,71 @@ export class CoreLoop {
 
   /**
    * Collect incoming signals from pending queue.
+   * Enriches reaction signals with message previews asynchronously.
    */
-  private collectIncomingSignals(): Signal[] {
+  private async collectIncomingSignals(): Promise<Signal[]> {
     const signals: Signal[] = [];
     const maxSignals = this.config.maxSignalsPerTick;
 
     while (this.pendingSignals.length > 0 && signals.length < maxSignals) {
       const pending = this.pendingSignals.shift();
       if (pending) {
-        signals.push(pending.signal);
+        let signal = pending.signal;
 
         // Special handling for user messages
-        if (pending.signal.type === 'user_message') {
-          this.processUserMessageSignal(pending.signal);
+        if (signal.type === 'user_message') {
+          this.processUserMessageSignal(signal);
         }
+
+        // Enrich reaction signals with message preview (async lookup)
+        if (signal.type === 'message_reaction') {
+          signal = await this.enrichReactionSignal(signal);
+        }
+
+        signals.push(signal);
       }
     }
 
     return signals;
+  }
+
+  /**
+   * Enrich a reaction signal with the original message preview.
+   * Looks up the message in conversation history by channel message ID.
+   */
+  private async enrichReactionSignal(signal: Signal): Promise<Signal> {
+    const data = signal.data as MessageReactionData;
+    if (data.reactedMessagePreview) return signal; // Already enriched
+
+    if (!this.conversationManager) {
+      return signal;
+    }
+
+    try {
+      const message = await this.conversationManager.getMessageByChannelId(
+        data.recipientId,
+        data.channel,
+        data.reactedMessageId
+      );
+
+      if (message?.content) {
+        // Clone signal with enriched data (sanitize preview)
+        return {
+          ...signal,
+          data: {
+            ...data,
+            reactedMessagePreview: message.content.slice(0, 100).replace(/[\n\r]/g, ' '),
+          },
+        };
+      }
+    } catch (error) {
+      this.logger.debug(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to enrich reaction signal with message preview'
+      );
+    }
+
+    return signal;
   }
 
   /**
@@ -991,8 +1040,8 @@ export class CoreLoop {
           // Wrap in Promise.resolve to catch both sync throws and async rejections
           Promise.resolve()
             .then(() => channelImpl.sendMessage(route.destination, text, sendOptions))
-            .then((success) => {
-              if (success) {
+            .then((result) => {
+              if (result.success) {
                 this.lastMessageSentAt = Date.now();
                 // Use recipientId (not route.destination) for tracking - matches processResponseTiming
                 this.lastMessageRecipientId = recipientId;
@@ -1004,12 +1053,16 @@ export class CoreLoop {
                 if (this.conversationManager) {
                   // Use recipientId as conversation key for consistency
                   // Pass tool call data for full turn preservation
+                  // Include channel metadata for reaction lookup
                   void this.saveAgentMessage(
                     recipientId,
                     text,
                     conversationStatus,
                     toolCalls,
-                    toolResults
+                    toolResults,
+                    result.messageId
+                      ? { channelMessageId: result.messageId, channel: route.channel }
+                      : undefined
                   );
                 }
               } else {
@@ -1495,7 +1548,11 @@ export class CoreLoop {
     toolResults?: {
       tool_call_id: string;
       content: string;
-    }[]
+    }[],
+    channelMeta?: {
+      channelMessageId?: string;
+      channel?: string;
+    }
   ): Promise<void> {
     if (!this.conversationManager) return;
 
@@ -1508,14 +1565,19 @@ export class CoreLoop {
             content: text,
             tool_calls: toolCalls,
           },
-          toolResults
+          toolResults,
+          channelMeta
         );
       } else {
         // Simple message without tool calls
-        await this.conversationManager.addMessage(chatId, {
-          role: 'assistant',
-          content: text,
-        });
+        await this.conversationManager.addMessage(
+          chatId,
+          {
+            role: 'assistant',
+            content: text,
+          },
+          channelMeta
+        );
       }
 
       // Use inline status if provided, otherwise fall back to LLM classification

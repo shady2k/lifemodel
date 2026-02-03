@@ -28,6 +28,7 @@ import type { Priority } from './priority.js';
 export type SignalType =
   // === SENSORY (from channels - our "senses") ===
   | 'user_message' // User sent a message (the "sound" we heard)
+  | 'message_reaction' // User reacted to a message (non-verbal feedback)
   | 'channel_connected' // Channel came online (sense is working)
   | 'channel_disconnected' // Channel went offline (sense stopped)
   | 'channel_error' // Channel had an error (sense malfunction)
@@ -72,6 +73,7 @@ export type SignalType =
 export type SignalSource =
   // === SENSORY ORGANS (channels) ===
   | 'sense.telegram'
+  | 'sense.telegram.reaction'
   | 'sense.discord'
   | 'sense.system' // System-level events (startup, shutdown)
 
@@ -148,6 +150,7 @@ export interface Signal {
  */
 export type SignalData =
   | UserMessageData
+  | MessageReactionData
   | ChannelStatusData
   | TimeData
   | ThresholdData
@@ -184,6 +187,43 @@ export interface UserMessageData {
 
   /** Detected language (if available) */
   language?: string;
+}
+
+/**
+ * Data for message_reaction signals.
+ * Carries reaction data for non-verbal feedback on agent messages.
+ *
+ * NOTE: No isPositive/isNegative - let COGNITION (LLM) interpret emoji sentiment naturally.
+ */
+export interface MessageReactionData {
+  kind: 'message_reaction';
+
+  /** The reaction emoji (👍, ❤️, etc.) - LLM interprets sentiment */
+  emoji: string;
+
+  /** Telegram message ID that was reacted to */
+  reactedMessageId: string;
+
+  /** First ~100 chars of the message (enriched by CoreLoop) */
+  reactedMessagePreview?: string;
+
+  /** Who reacted (optional - absent for anonymous reactions) */
+  userId?: string;
+
+  /** Present for anonymous admin reactions */
+  actorChatId?: string;
+
+  /** Opaque recipient ID */
+  recipientId: string;
+
+  /** Which channel this came from */
+  channel: 'telegram';
+
+  /** True if reaction was removed */
+  isRemoval?: boolean;
+
+  /** Derived: !userId && !!actorChatId */
+  isAnonymous?: boolean;
 }
 
 /**
@@ -449,6 +489,7 @@ export interface SignalMetrics {
 export const SIGNAL_TTL: Record<SignalType, number | null> = {
   // Sensory signals - need quick processing
   user_message: 60_000, // 1 minute - user messages are important
+  message_reaction: 60_000, // 1 minute - reactions are feedback (aligned with user_message)
   channel_connected: 10_000, // 10 seconds - transient status
   channel_disconnected: 30_000, // 30 seconds - might need attention
   channel_error: 60_000, // 1 minute - errors need handling
@@ -596,6 +637,50 @@ export function createUserMessageSignal(
     'sense.telegram', // Default to telegram, can be overridden
     { value: 1, confidence: 1 }, // Message exists = value 1
     signalOptions
+  );
+}
+
+/**
+ * Create a message reaction signal (convenience function).
+ * NOTE: No isPositive field - LLM interprets emoji sentiment from the thought content.
+ */
+export function createMessageReactionSignal(data: {
+  emoji: string;
+  reactedMessageId: string;
+  reactedMessagePreview?: string;
+  userId?: string;
+  actorChatId?: string;
+  recipientId: string;
+  isRemoval?: boolean;
+}): Signal {
+  return createSignal(
+    'message_reaction',
+    'sense.telegram.reaction',
+    { value: 1, confidence: 1 },
+    {
+      priority: 2, // Priority.NORMAL - not as urgent as user_message
+      data: {
+        kind: 'message_reaction',
+        channel: 'telegram',
+        isAnonymous: !data.userId && !!data.actorChatId,
+        ...data,
+      } satisfies MessageReactionData,
+    }
+  );
+}
+
+/**
+ * Create a thought signal (convenience function).
+ */
+export function createThoughtSignal(data: Omit<ThoughtData, 'kind'>): Signal {
+  return createSignal(
+    'thought',
+    'cognition.thought',
+    { value: 1, confidence: 1 },
+    {
+      priority: 2, // Priority.NORMAL
+      data: { kind: 'thought', ...data },
+    }
   );
 }
 

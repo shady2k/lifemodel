@@ -1,9 +1,11 @@
 import { Bot } from 'grammy';
+import type { Context } from 'grammy';
+import type { MessageReactionUpdated } from 'grammy/types';
 import type { Logger, Signal } from '../../types/index.js';
-import { createUserMessageSignal } from '../../types/index.js';
+import { createUserMessageSignal, createMessageReactionSignal } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
-import type { Channel, CircuitStats, SendOptions } from '../../channels/channel.js';
+import type { Channel, CircuitStats, SendOptions, SendResult } from '../../channels/channel.js';
 import type { IRecipientRegistry } from '../../core/recipient-registry.js';
 
 /**
@@ -160,14 +162,21 @@ export class TelegramChannel implements Channel {
       this.onMessage(ctx);
     });
 
+    // Handle message reactions (non-verbal feedback)
+    this.bot.on('message_reaction', (ctx: Context) => {
+      this.onReaction(ctx);
+    });
+
     // Handle errors
     this.bot.catch((err) => {
       this.logger?.error({ error: err }, 'Telegram bot error');
     });
 
     // Start polling (non-blocking)
+    // CRITICAL: Enable message_reaction in allowed_updates for reaction events
     this.running = true;
     void this.bot.start({
+      allowed_updates: ['message', 'message_reaction'],
       onStart: () => {
         this.logger?.info('Telegram channel started');
       },
@@ -198,31 +207,37 @@ export class TelegramChannel implements Channel {
    * @param target - Chat ID to send to
    * @param text - Message text
    * @param options - Send options
-   * @returns true if sent successfully
+   * @returns Result with success status and message ID
    */
-  async sendMessage(target: string, text: string, options?: SendOptions): Promise<boolean> {
+  async sendMessage(target: string, text: string, options?: SendOptions): Promise<SendResult> {
     if (!this.isAvailable()) {
       this.logger?.warn('Cannot send message: Telegram not configured');
-      return false;
+      return { success: false };
     }
 
     if (!this.bot) {
       this.logger?.warn('Cannot send message: Telegram bot not started');
-      return false;
+      return { success: false };
     }
 
     try {
+      let messageId: string | undefined;
       await this.circuitBreaker.execute(async () => {
         await this.executeWithRetry(async () => {
-          await this.doSendMessage(target, text, options);
+          messageId = await this.doSendMessage(target, text, options);
         });
       });
 
-      this.logger?.debug({ chatId: target, textLength: text.length }, 'Message sent');
-      return true;
+      this.logger?.debug({ chatId: target, textLength: text.length, messageId }, 'Message sent');
+      // Only include messageId if it was successfully captured
+      const result: SendResult = { success: true };
+      if (messageId) {
+        result.messageId = messageId;
+      }
+      return result;
     } catch (error) {
       this.logger?.error({ error, chatId: target }, 'Failed to send message');
-      return false;
+      return { success: false };
     }
   }
 
@@ -310,6 +325,82 @@ export class TelegramChannel implements Channel {
   }
 
   /**
+   * Handle incoming reaction using grammy's ctx.reactions() helper.
+   */
+  private onReaction(ctx: Context): void {
+    const update: MessageReactionUpdated | undefined = ctx.messageReaction;
+    if (!update) return;
+
+    const chatId = update.chat.id.toString();
+
+    // Apply allowedChatIds filter (same as onMessage)
+    if (this.config.allowedChatIds?.length && !this.config.allowedChatIds.includes(chatId)) {
+      this.logger?.debug({ chatId }, 'Ignoring reaction from non-allowed chat');
+      return;
+    }
+
+    // Use grammy's diff helper (handles arrays internally)
+    // Note: We only process emojiAdded - removals don't provide useful feedback
+    const { emojiAdded } = ctx.reactions();
+
+    // Process added emoji reactions (custom emoji and paid skipped in MVP)
+    for (const emoji of emojiAdded) {
+      this.processReaction(
+        chatId,
+        update.message_id,
+        emoji,
+        update.user?.id,
+        update.actor_chat?.id
+      );
+    }
+  }
+
+  /**
+   * Process a single reaction and emit signal.
+   */
+  private processReaction(
+    chatId: string,
+    messageId: number,
+    emoji: string,
+    fromUserId?: number,
+    actorChatId?: number
+  ): void {
+    const recipientId = this.recipientRegistry.getOrCreate(this.name, chatId);
+
+    // Create signal - preview will be enriched by CoreLoop via conversation history lookup
+    // No sentiment classification - LLM interprets emoji naturally
+    // Build params object to avoid passing undefined for optional fields
+    const signalParams: Parameters<typeof createMessageReactionSignal>[0] = {
+      emoji,
+      reactedMessageId: messageId.toString(),
+      recipientId,
+    };
+    // Only add optional fields if they have values (exactOptionalPropertyTypes)
+    if (fromUserId !== undefined) {
+      signalParams.userId = fromUserId.toString();
+    }
+    if (actorChatId !== undefined) {
+      signalParams.actorChatId = actorChatId.toString();
+    }
+
+    const signal = createMessageReactionSignal(signalParams);
+
+    this.signalCallback?.(signal);
+    this.wakeUpCallback?.();
+
+    this.logger?.debug(
+      {
+        signalId: signal.id,
+        emoji,
+        messageId,
+        recipientId,
+        isAnonymous: !fromUserId && !!actorChatId,
+      },
+      'Reaction received as Signal'
+    );
+  }
+
+  /**
    * Execute with retry logic.
    */
   private async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
@@ -381,8 +472,13 @@ export class TelegramChannel implements Channel {
 
   /**
    * Perform the actual send message request.
+   * @returns The Telegram message ID as a string
    */
-  private async doSendMessage(target: string, text: string, options?: SendOptions): Promise<void> {
+  private async doSendMessage(
+    target: string,
+    text: string,
+    options?: SendOptions
+  ): Promise<string> {
     if (!this.bot) {
       throw new TelegramError('Bot not initialized');
     }
@@ -414,9 +510,10 @@ export class TelegramChannel implements Channel {
         sendOptions.disable_notification = options.silent;
       }
 
-      await this.bot.api.sendMessage(chatId, text, sendOptions);
+      const result = await this.bot.api.sendMessage(chatId, text, sendOptions);
 
       clearTimeout(timeoutId);
+      return result.message_id.toString();
     } catch (error) {
       clearTimeout(timeoutId);
 
