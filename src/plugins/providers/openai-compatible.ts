@@ -71,6 +71,12 @@ export interface OpenAICompatibleConfig {
   /** Provider name for logging (default: 'openai-compatible') */
   name?: string;
 
+  /** App name for API tracking (shows in provider dashboards like OpenRouter) */
+  appName?: string;
+
+  /** Site URL for API tracking */
+  siteUrl?: string;
+
   /** Request timeout in ms (default: 60000) */
   timeout?: number;
 

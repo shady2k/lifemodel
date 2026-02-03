@@ -6,6 +6,8 @@ import type { OpenAICompatibleConfig } from './openai-compatible.js';
  * OpenRouter-specific provider configuration.
  * Extends base OpenAI-compatible config with OpenRouter-specific options.
  * Note: defaultModel, fastModel, smartModel have sensible defaults for OpenRouter.
+ *
+ * App identification uses inherited appName/siteUrl from base config.
  */
 export interface OpenRouterConfig extends Omit<
   OpenAICompatibleConfig,
@@ -16,12 +18,6 @@ export interface OpenRouterConfig extends Omit<
 
   /** Default model (optional, defaults to claude-3.5-haiku) */
   defaultModel?: string;
-
-  /** Site URL for OpenRouter ranking */
-  siteUrl?: string;
-
-  /** Site name for OpenRouter ranking */
-  siteName?: string;
 }
 
 const OPENROUTER_DEFAULTS = {
@@ -37,12 +33,9 @@ const OPENROUTER_DEFAULTS = {
  * OpenRouter LLM provider.
  *
  * Extends OpenAICompatibleProvider with OpenRouter-specific headers
- * for ranking and attribution.
+ * for ranking and attribution. Uses inherited appName/siteUrl from base config.
  */
 export class OpenRouterProvider extends OpenAICompatibleProvider {
-  private readonly siteUrl: string | undefined;
-  private readonly siteName: string | undefined;
-
   constructor(config: OpenRouterConfig, logger?: Logger) {
     // Build base config with OpenRouter defaults
     // Only include defined properties to satisfy exactOptionalPropertyTypes
@@ -69,25 +62,29 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     if (config.enableThinking !== undefined) {
       baseConfig.enableThinking = config.enableThinking;
     }
+    if (config.appName !== undefined) {
+      baseConfig.appName = config.appName;
+    }
+    if (config.siteUrl !== undefined) {
+      baseConfig.siteUrl = config.siteUrl;
+    }
 
     super(baseConfig, logger);
-
-    this.siteUrl = config.siteUrl;
-    this.siteName = config.siteName;
   }
 
   /**
    * Override to add OpenRouter-specific headers.
+   * Maps appName → X-Title and siteUrl → HTTP-Referer for OpenRouter ranking.
    */
   protected override buildHeaders(): Record<string, string> {
     const headers = super.buildHeaders();
 
-    // OpenRouter-specific headers for ranking
-    if (this.siteUrl) {
-      headers['HTTP-Referer'] = this.siteUrl;
+    // OpenRouter-specific headers for ranking (using inherited config)
+    if (this.config.siteUrl) {
+      headers['HTTP-Referer'] = this.config.siteUrl;
     }
-    if (this.siteName) {
-      headers['X-Title'] = this.siteName;
+    if (this.config.appName) {
+      headers['X-Title'] = this.config.appName;
     }
 
     return headers;

@@ -188,6 +188,8 @@ interface LLMProviderConfig {
   openRouterApiKey?: string | null | undefined;
   fastModel?: string | undefined;
   smartModel?: string | undefined;
+  appName?: string | undefined;
+  siteUrl?: string | null | undefined;
   local?:
     | {
         baseUrl?: string | null | undefined;
@@ -218,12 +220,16 @@ function createLLMProvider(
   if (openRouterApiKey) {
     const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
     const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
+    const appName = config?.appName ?? process.env['LLM_APP_NAME'];
+    const siteUrl = config?.siteUrl ?? process.env['LLM_SITE_URL'];
 
     openRouterProvider = createOpenRouterProvider(
       {
         apiKey: openRouterApiKey,
         ...(fastModel && { fastModel }),
         ...(smartModel && { smartModel }),
+        ...(appName && { appName }),
+        ...(siteUrl && { siteUrl }),
       },
       logger
     );
@@ -408,6 +414,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? undefined,
     fastModel: configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel,
     smartModel: configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel,
+    appName: mergedConfig.llm.appName,
+    siteUrl: mergedConfig.llm.siteUrl,
     local: configOverrides.llm?.local ?? mergedConfig.llm.local,
   };
   const llmProvider = createLLMProvider(llmConfig, logger);

@@ -152,6 +152,10 @@ export interface MergedConfig {
     openRouterApiKey: string | null;
     fastModel: string;
     smartModel: string;
+    /** App name for API tracking (shows in provider dashboards) */
+    appName: string;
+    /** Site URL for API tracking */
+    siteUrl: string | null;
     /** Local model configuration (OpenAI-compatible API) */
     local: {
       baseUrl: string | null;
@@ -247,6 +251,8 @@ export const DEFAULT_CONFIG: MergedConfig = {
     openRouterApiKey: null,
     fastModel: 'anthropic/claude-haiku-4.5',
     smartModel: 'anthropic/claude-sonnet-4.5',
+    appName: 'Lifemodel',
+    siteUrl: null,
     local: {
       baseUrl: null,
       model: null,
