@@ -260,6 +260,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get soul state for identity awareness
     const soulState = await this.getSoulState();
 
+    // Get unresolved soul tensions (for visibility in system prompt)
+    const unresolvedTensions = await this.getUnresolvedTensions(recipientId);
+
     // Build loop context with runtime config
     const loopContext: LoopContext = {
       triggerSignal,
@@ -276,6 +279,7 @@ export class CognitionProcessor implements CognitionLayer {
       completedActions,
       recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
       soulState,
+      unresolvedTensions: unresolvedTensions.length > 0 ? unresolvedTensions : undefined,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
@@ -535,6 +539,50 @@ export class CognitionProcessor implements CognitionLayer {
       this.logger.trace(
         { error: error instanceof Error ? error.message : 'Unknown' },
         'Failed to get recent thoughts'
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Get unresolved soul tensions (soul:reflection + state:unresolved thoughts).
+   * Returns thoughts sorted by dissonance (highest first), limited to 3.
+   */
+  private async getUnresolvedTensions(
+    recipientId?: string
+  ): Promise<{ id: string; content: string; dissonance: number; timestamp: Date }[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      // Get recent thoughts (1 week window for unresolved tensions)
+      const thoughts = await this.memoryProvider.getRecentByType('thought', {
+        recipientId,
+        windowMs: 7 * 24 * 60 * 60 * 1000, // 1 week
+        limit: 50,
+      });
+
+      // Filter for soul:reflection + state:unresolved
+      const unresolvedTensions = thoughts.filter((t) => {
+        if (!t.tags) return false;
+        return t.tags.includes('soul:reflection') && t.tags.includes('state:unresolved');
+      });
+
+      // Sort by dissonance (highest first) and limit to 3
+      return unresolvedTensions
+        .map((t) => ({
+          id: t.id,
+          content: t.content,
+          dissonance: (t.metadata?.['dissonance'] as number | undefined) ?? 7,
+          timestamp: t.timestamp,
+        }))
+        .sort((a, b) => b.dissonance - a.dissonance)
+        .slice(0, 3);
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get unresolved tensions'
       );
       return [];
     }

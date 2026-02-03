@@ -196,6 +196,11 @@ export interface LoopContext {
 
   /** Soul state for identity awareness (who I am, what I care about) */
   soulState?: FullSoulState | undefined;
+
+  /** Unresolved soul tensions (soul:reflection + state:unresolved thoughts) */
+  unresolvedTensions?:
+    | { id: string; content: string; dissonance: number; timestamp: Date }[]
+    | undefined;
 }
 
 /**
@@ -827,10 +832,16 @@ export class AgenticLoop {
       sections.push(thoughtsSection);
     }
 
-    // Soul section (identity awareness) - after thoughts, before runtime snapshot
+    // Soul section (identity awareness) - after thoughts, before tensions
     const soulSection = this.buildSoulSection(context);
     if (soulSection) {
       sections.push(soulSection);
+    }
+
+    // Unresolved soul tensions (Zeigarnik pressure) - after soul, before runtime
+    const tensionsSection = this.buildUnresolvedTensionsSection(context);
+    if (tensionsSection) {
+      sections.push(tensionsSection);
     }
 
     // Runtime snapshot (conditional, for state-related queries)
@@ -1242,6 +1253,31 @@ NOTE: Use the user's name sparingly; check conversation history first.`;
     return `## Recent Thoughts
 ${lines.join('\n')}
 NOTE: Your recent internal thoughts. Background context, not visible to user.`;
+  }
+
+  /**
+   * Build unresolved soul tensions section.
+   * Shows dissonant reflections that need processing (Zeigarnik pressure).
+   * Limited to 2-3 highest dissonance items.
+   */
+  private buildUnresolvedTensionsSection(context: LoopContext): string | null {
+    const tensions = context.unresolvedTensions;
+    if (!tensions || tensions.length === 0) {
+      return null;
+    }
+
+    const lines = tensions.map((t) => {
+      // Extract first ~100 chars of content, truncate if needed
+      const preview = t.content.length > 100 ? t.content.slice(0, 100) + '...' : t.content;
+      return `- [${String(t.dissonance)}/10] ${preview}`;
+    });
+
+    return `## Unresolved Soul Tensions
+${lines.join('\n')}
+
+These are reflections creating internal pressure. They represent moments where
+your response felt misaligned with who you are. Consider processing them when
+appropriate, or use \`core.memory\` to search for more context.`;
   }
 
   /**
