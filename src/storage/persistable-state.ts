@@ -95,7 +95,7 @@ export function createEmptyPersistableState(): PersistableState {
         socialDebt: 0.4,
         taskPressure: 0.2,
         curiosity: 0.1,
-        userAvailability: 0.3,
+        acquaintancePressure: 0.3,
       },
       alertness: {
         energy: 0.4,

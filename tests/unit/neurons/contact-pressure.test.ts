@@ -76,9 +76,52 @@ describe('ContactPressureNeuron', () => {
       expect(second).toBeUndefined();
     });
 
-    it('emits on significant change after refractory period (Weber-Fechner)', async () => {
+    it('emits continuously while above emitThreshold (new behavior)', async () => {
       const neuron = createContactPressureNeuron(logger, {
         refractoryPeriodMs: 10, // 10ms for testing
+      });
+      const state = createAgentState({ socialDebt: 0.5 }); // pressure = 0.25 > emitThreshold 0.2
+
+      const first = neuron.check(state, 0.5, 'tick-1');
+      expect(first).toBeDefined();
+
+      // Wait for refractory to expire
+      await new Promise((r) => setTimeout(r, 15));
+
+      // Same state - still above threshold, so still emits (emitWhileAbove: true)
+      const sameState = neuron.check(state, 0.5, 'tick-2');
+      expect(sameState).toBeDefined(); // Now emits continuously while above threshold
+    });
+
+    it('does not emit below emitThreshold (Weber-Fechner for change detection)', async () => {
+      const neuron = createContactPressureNeuron(logger, {
+        refractoryPeriodMs: 10, // 10ms for testing
+        emitThreshold: 0.2,
+        changeConfig: {
+          baseThreshold: 0.10, // 10% change is noticeable
+          minAbsoluteChange: 0.02,
+          maxThreshold: 0.4,
+          alertnessInfluence: 0.3,
+        },
+      });
+      // socialDebt=0.3 -> pressure = 0.3 * 0.4 = 0.12 (below emitThreshold 0.2)
+      const lowState = createAgentState({ socialDebt: 0.3 });
+
+      const first = neuron.check(lowState, 0.5, 'tick-1');
+      expect(first).toBeUndefined(); // Below emitThreshold, no emission
+
+      // Wait for refractory
+      await new Promise((r) => setTimeout(r, 15));
+
+      // Same low state - still below threshold, no emission
+      const sameState = neuron.check(lowState, 0.5, 'tick-2');
+      expect(sameState).toBeUndefined();
+    });
+
+    it('emits on significant change when emitWhileAbove is disabled', async () => {
+      const neuron = createContactPressureNeuron(logger, {
+        refractoryPeriodMs: 10, // 10ms for testing
+        emitWhileAbove: false, // Disable continuous emission
         changeConfig: {
           baseThreshold: 0.10, // 10% change is noticeable
           minAbsoluteChange: 0.02,
@@ -95,7 +138,7 @@ describe('ContactPressureNeuron', () => {
       // Wait for refractory to expire
       await new Promise((r) => setTimeout(r, 15));
 
-      // Same state - no change, no signal (Weber-Fechner)
+      // Same state - no change, no signal (emitWhileAbove=false, Weber-Fechner applies)
       const sameState = neuron.check(state1, 0.5, 'tick-2');
       expect(sameState).toBeUndefined();
 

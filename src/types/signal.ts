@@ -504,7 +504,7 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
   curiosity: 60_000, // 1 minute
   acquaintance: null, // no expiry, accumulates
   alertness: 10_000, // 10 seconds - mode changes are transient
-  contact_pressure: 30_000, // 30 seconds
+  contact_pressure: 180_000, // 3 minutes - shorter than aggregator window but long enough between emissions
   thought_pressure: 30_000, // 30 seconds
 
   // Time signals - very transient

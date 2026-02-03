@@ -125,14 +125,24 @@ export function createNeuron(
  * - socialDebt: How long since last interaction (weight: 0.4)
  * - taskPressure: Pending things to discuss (weight: 0.2)
  * - curiosity: Agent's desire to engage (weight: 0.1)
- * - userAvailability: Belief about user being free (weight: 0.3)
+ * - acquaintancePressure: Pressure to learn user's name (weight: 0.3)
  */
-export const contactPressureNeuron = createNeuron({
+const contactPressureNeuronBase = createNeuron({
   socialDebt: 0.4,
   taskPressure: 0.2,
   curiosity: 0.1,
-  userAvailability: 0.3,
+  acquaintancePressure: 0.3,
 });
+
+export function contactPressureNeuron(values: Record<string, number>): NeuronResult {
+  if (values.acquaintancePressure === undefined && values.userAvailability !== undefined) {
+    return contactPressureNeuronBase({
+      ...values,
+      acquaintancePressure: values.userAvailability,
+    });
+  }
+  return contactPressureNeuronBase(values);
+}
 
 /**
  * Pre-configured neuron for determining agent's alertness.
@@ -323,7 +333,7 @@ export function createConfigurableContactPressureNeuron(): ConfigurableNeuron {
       socialDebt: 0.4,
       taskPressure: 0.2,
       curiosity: 0.1,
-      userAvailability: 0.3,
+      acquaintancePressure: 0.3,
     },
     { name: 'contactPressure' }
   );

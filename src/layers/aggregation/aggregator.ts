@@ -37,7 +37,7 @@ export interface AggregatorConfig {
  * Default configuration.
  */
 export const DEFAULT_AGGREGATOR_CONFIG: AggregatorConfig = {
-  windowMs: 60_000, // 1 minute window
+  windowMs: 300_000, // 5 minute window - smoother trend detection across signal types
   maxSignalsPerBucket: 100,
   volatilityThreshold: 0.3, // 30% variance = volatile
   trendThreshold: 0.05, // 5% change = trending

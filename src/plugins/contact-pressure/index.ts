@@ -34,6 +34,12 @@ export interface ContactPressureNeuronConfig {
   /** Threshold for high priority (pressure is significant) */
   highPriorityThreshold: number;
 
+  /** Minimum pressure to emit signals (0-1). Below this, no signals are emitted. */
+  emitThreshold: number;
+
+  /** If true, continuously emit while pressure is above emitThreshold (respecting refractory period) */
+  emitWhileAbove: boolean;
+
   /** Weights for pressure calculation */
   weights: {
     socialDebt: number;
@@ -55,6 +61,8 @@ export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
   },
   refractoryPeriodMs: 5000,
   highPriorityThreshold: 0.6,
+  emitThreshold: 0.2,
+  emitWhileAbove: true,
   weights: {
     socialDebt: 0.4,
     taskPressure: 0.2,
@@ -77,27 +85,81 @@ export class ContactPressureNeuron extends BaseNeuron {
 
   constructor(logger: Logger, config: Partial<ContactPressureNeuronConfig> = {}) {
     super(logger);
-    this.config = { ...DEFAULT_CONTACT_PRESSURE_CONFIG, ...config };
+    // Deep merge config to handle partial weights objects
+    // Also handle backward compatibility: userAvailability → acquaintancePressure
+    const mergedWeights = {
+      ...DEFAULT_CONTACT_PRESSURE_CONFIG.weights,
+      ...config.weights,
+    };
+    // Backward compat: if old key exists and new key doesn't, migrate
+    if (
+      'userAvailability' in mergedWeights &&
+      !(config.weights && 'acquaintancePressure' in config.weights)
+    ) {
+      mergedWeights.acquaintancePressure = (mergedWeights as Record<string, number>)[
+        'userAvailability'
+      ];
+    }
+    this.config = {
+      ...DEFAULT_CONTACT_PRESSURE_CONFIG,
+      ...config,
+      weights: mergedWeights,
+    };
   }
 
   check(state: AgentState, alertness: number, correlationId: string): Signal | undefined {
     const result = this.calculatePressure(state);
     const currentValue = result.output;
 
+    // Store result for debugging/observability
+    this.lastNeuronResult = result;
+
+    // First check: emit if above emit threshold (initial state)
     if (this.previousValue === undefined) {
       this.updatePrevious(currentValue);
-      this.lastNeuronResult = result;
-      if (currentValue > 0.1) {
+      if (currentValue >= this.config.emitThreshold) {
         this.recordEmission();
         return this.createSignal(currentValue, result, 0, correlationId);
       }
       return undefined;
     }
 
+    // Refractory period check - prevents signal spam
     if (this.isInRefractoryPeriod(this.config.refractoryPeriodMs)) {
       return undefined;
     }
 
+    // Continuous emission: emit while above threshold (desire exists)
+    // This keeps aggregates fresh so ThresholdEngine always sees current pressure
+    if (this.config.emitWhileAbove && currentValue >= this.config.emitThreshold) {
+      // Compute actual rate of change for trend detection in aggregator
+      // Note: previousValue is guaranteed defined here (checked above)
+      const rateOfChange = currentValue - this.previousValue;
+      const signal = this.createSignal(currentValue, result, rateOfChange, correlationId);
+      const previousForLog = this.previousValue;
+
+      this.updatePrevious(currentValue);
+      this.recordEmission();
+
+      this.logger.debug(
+        {
+          previous: previousForLog,
+          current: currentValue.toFixed(2),
+          emitReason: 'above_threshold',
+          contributions: result.contributions.map((c) => ({
+            name: c.name,
+            value: c.value.toFixed(2),
+            contribution: c.contribution.toFixed(2),
+          })),
+        },
+        'Contact pressure emitting (above threshold)'
+      );
+
+      return signal;
+    }
+
+    // Also emit on significant change (Weber-Fechner for observability)
+    // This catches rapid changes even when below emitThreshold
     const changeResult = detectChange(
       currentValue,
       this.previousValue,
@@ -105,40 +167,35 @@ export class ContactPressureNeuron extends BaseNeuron {
       this.config.changeConfig
     );
 
-    if (!changeResult.isSignificant) {
+    if (changeResult.isSignificant) {
+      // Note: previousValue is guaranteed defined here (checked above)
+      const rateOfChange = currentValue - this.previousValue;
+      const signal = this.createSignal(currentValue, result, rateOfChange, correlationId);
+      const previousForLog = this.previousValue;
+
       this.updatePrevious(currentValue);
-      this.lastNeuronResult = result;
-      return undefined;
+      this.recordEmission();
+
+      this.logger.debug(
+        {
+          previous: previousForLog,
+          current: currentValue.toFixed(2),
+          change: changeResult.relativeChange.toFixed(2),
+          emitReason: changeResult.reason,
+          contributions: result.contributions.map((c) => ({
+            name: c.name,
+            value: c.value.toFixed(2),
+            contribution: c.contribution.toFixed(2),
+          })),
+        },
+        'Contact pressure change detected'
+      );
+
+      return signal;
     }
 
-    const signal = this.createSignal(
-      currentValue,
-      result,
-      changeResult.relativeChange,
-      correlationId
-    );
-    const previousForLog = this.previousValue;
-
     this.updatePrevious(currentValue);
-    this.lastNeuronResult = result;
-    this.recordEmission();
-
-    this.logger.debug(
-      {
-        previous: previousForLog,
-        current: currentValue.toFixed(2),
-        change: changeResult.relativeChange.toFixed(2),
-        reason: changeResult.reason,
-        contributions: result.contributions.map((c) => ({
-          name: c.name,
-          value: c.value.toFixed(2),
-          contribution: c.contribution.toFixed(2),
-        })),
-      },
-      'Contact pressure change detected'
-    );
-
-    return signal;
+    return undefined;
   }
 
   private calculatePressure(state: AgentState): NeuronResult {
