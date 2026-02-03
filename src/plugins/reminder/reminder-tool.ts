@@ -27,8 +27,9 @@ export const REMINDER_PLUGIN_ID = 'reminder';
 
 /**
  * Get the user's timezone by recipientId.
+ * Returns null if timezone is not configured.
  */
-type GetTimezoneFunc = (recipientId: string) => string;
+type GetTimezoneFunc = (recipientId: string) => string | null;
 
 /**
  * Result type for the unified reminder tool.
@@ -342,7 +343,9 @@ export function createReminderTools(
     tags?: string[]
   ): Promise<ReminderToolResult> {
     try {
-      const timezone = getTimezone(recipientId);
+      // Get user timezone, fall back to server timezone if not configured
+      const userTimezone = getTimezone(recipientId);
+      const timezone = userTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
       const resolved = resolveSemanticAnchor(anchor, new Date(), timezone);
       const reminderId = `rem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
