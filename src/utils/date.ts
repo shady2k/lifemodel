@@ -34,6 +34,7 @@ export const DATE_FIELD_NAMES = [
   'refreshAt',
   'resetAt',
   'lastMismatchCheckAt',
+  'lastReflectionAt', // Renamed from lastMismatchCheckAt in Phase 1.5
   'lastAuditAt',
   'lastSavedAt',
   'lastPeriodicCheck',
@@ -43,6 +44,9 @@ export const DATE_FIELD_NAMES = [
   'updatedAt',
   'start',
   'end',
+  // Soft learning fields (Phase 3.5)
+  'lastTouchedAt',
+  'expiresAt',
 ] as const;
 
 /**

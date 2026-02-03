@@ -388,17 +388,91 @@ export class JsonMemoryProvider implements MemoryProvider {
 
   /**
    * Prune old entries to stay under limit.
+   *
+   * Retention rule: Unresolved soul:reflection thoughts are protected from pruning.
+   * - Protects entries with type='thought', tags include 'soul:reflection' AND 'state:unresolved'
+   * - Max protected = min(10, floor(maxEntries/2)), at least 1
+   * - If protected exceeds limit, oldest expires with `state:expired`
+   * - maxEntries is always honored (protected entries count toward limit)
    */
   private prune(): void {
     if (this.entries.length <= this.config.maxEntries) return;
 
-    // Sort by timestamp (oldest first) and remove oldest
-    this.entries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    // Max protected entries: min(10, half of maxEntries), but at least 1
+    const MAX_PROTECTED_SOUL_THOUGHTS = Math.max(
+      1,
+      Math.min(10, Math.floor(this.config.maxEntries / 2))
+    );
 
-    const toRemove = this.entries.length - this.config.maxEntries;
-    const removed = this.entries.splice(0, toRemove);
+    // Separate protected (unresolved soul:reflection thoughts) from pruneable entries
+    const protectedEntries: MemoryEntry[] = [];
+    const pruneableEntries: MemoryEntry[] = [];
 
-    this.logger.debug({ removed: removed.length }, 'Pruned old memory entries');
+    for (const entry of this.entries) {
+      if (this.isProtectedSoulThought(entry)) {
+        protectedEntries.push(entry);
+      } else {
+        pruneableEntries.push(entry);
+      }
+    }
+
+    // Sort protected by timestamp (oldest first) for expiration
+    protectedEntries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    // Expire oldest protected entries if exceeding limit
+    while (protectedEntries.length > MAX_PROTECTED_SOUL_THOUGHTS) {
+      const entry = protectedEntries.shift();
+      if (entry?.tags) {
+        // Replace state:unresolved with state:expired
+        entry.tags = entry.tags.filter((t) => t !== 'state:unresolved');
+        entry.tags.push('state:expired');
+        this.logger.debug({ entryId: entry.id }, 'Soul thought expired due to limit');
+      }
+      // Expired entries become pruneable
+      if (entry) pruneableEntries.push(entry);
+    }
+
+    // Calculate how many pruneable entries to remove to honor maxEntries
+    const targetTotal = this.config.maxEntries;
+    const currentTotal = protectedEntries.length + pruneableEntries.length;
+
+    if (currentTotal <= targetTotal) {
+      // Reconstruct entries array
+      this.entries = [...protectedEntries, ...pruneableEntries];
+      return;
+    }
+
+    const toRemove = currentTotal - targetTotal;
+
+    // Sort pruneable by timestamp (oldest first) and remove oldest
+    pruneableEntries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    const removed = pruneableEntries.splice(0, Math.min(toRemove, pruneableEntries.length));
+
+    // Reconstruct entries array - maxEntries is now honored
+    this.entries = [...protectedEntries, ...pruneableEntries];
+
+    this.logger.debug(
+      { removed: removed.length, protected: protectedEntries.length },
+      'Pruned old memory entries'
+    );
+  }
+
+  /**
+   * Check if an entry is a protected unresolved soul:reflection thought.
+   *
+   * Only protects:
+   * - type: 'thought'
+   * - tags include 'soul:reflection'
+   * - tags include 'state:unresolved'
+   */
+  private isProtectedSoulThought(entry: MemoryEntry): boolean {
+    if (entry.type !== 'thought') return false;
+    if (!entry.tags || entry.tags.length === 0) return false;
+
+    const hasUnresolved = entry.tags.includes('state:unresolved');
+    const hasSoulReflection = entry.tags.includes('soul:reflection');
+
+    return hasUnresolved && hasSoulReflection;
   }
 
   /**

@@ -62,8 +62,8 @@ export interface VoiceBudget {
  * Ledger entry - tracks when a voice was right or wrong.
  */
 export interface LedgerEntry {
-  /** Related mismatch ticket */
-  ticketId: string;
+  /** Related soul:reflection thought that triggered this deliberation */
+  sourceThoughtId?: string;
   /** What the voice recommended */
   recommendation: string;
   /** What happened as a result */

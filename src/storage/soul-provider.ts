@@ -330,6 +330,48 @@ export class SoulProvider {
   }
 
   /**
+   * Compute health metrics from memory.
+   *
+   * Updates openWoundCount and coherence based on unresolved soul:reflection thoughts.
+   *
+   * **When to call:**
+   * - From CoreLoop after loading providers (on startup)
+   * - Periodically during maintenance (e.g., every hour or on sleep cycle)
+   * - After Parliament deliberation resolves thoughts
+   *
+   * @param getUnresolvedCount Function that returns count of unresolved soul:reflection thoughts
+   * @param persist Whether to persist state after updating (default: true)
+   */
+  async computeHealthFromMemory(
+    getUnresolvedCount: () => Promise<number>,
+    persist = true
+  ): Promise<void> {
+    await this.ensureLoaded();
+
+    const unresolvedCount = await getUnresolvedCount();
+    const state = this.getLoadedState();
+
+    // Update open wound count
+    state.health.openWoundCount = unresolvedCount;
+
+    // Update coherence based on wound count
+    // More wounds = lower coherence
+    // 0 wounds = 0.9 coherence (leave room for narrative consistency)
+    // 5+ wounds = 0.4 coherence (significant internal tension)
+    const woundPenalty = Math.min(0.5, unresolvedCount * 0.1);
+    state.health.coherence = Math.max(0.4, 0.9 - woundPenalty);
+
+    this.logger.debug(
+      { openWoundCount: unresolvedCount, coherence: state.health.coherence },
+      'Health metrics updated from memory'
+    );
+
+    if (persist) {
+      await this.persist();
+    }
+  }
+
+  /**
    * Persist soul state to storage.
    */
   async persist(): Promise<void> {
