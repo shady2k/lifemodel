@@ -595,25 +595,38 @@ export class AgenticLoop {
           if (
             IMMEDIATE_INTENT_TOOLS.includes(toolName as (typeof IMMEDIATE_INTENT_TOOLS)[number])
           ) {
-            const intent = this.toolResultToIntent(result, context);
-            if (intent) {
-              // Add trace for debugging
-              intent.trace = {
-                tickId: context.tickId,
-                parentSignalId: context.triggerSignal.id,
-                toolCallId: result.toolCallId,
-              };
-              this.callbacks.onImmediateIntent(intent);
-              result.immediatelyApplied = true;
+            // Check semantic success (result.data.success) not just execution success (result.success)
+            // Tools like core.remember can execute successfully but return { success: false, error: "..." }
+            // when validation fails (e.g., wrong source type for user facts)
+            const data = result.data as Record<string, unknown> | undefined;
+            if (data?.['success'] === false) {
+              // Operation failed - no intent to apply, this is expected behavior
               this.logger.debug(
-                { tool: toolName, intentType: intent.type },
-                'Intent applied immediately for visibility to subsequent tools'
+                { tool: toolName, error: data['error'] },
+                'Tool operation failed, skipping intent conversion'
               );
             } else {
-              this.logger.warn(
-                { tool: toolName, resultData: result.data },
-                'Failed to convert tool result to intent for immediate processing'
-              );
+              const intent = this.toolResultToIntent(result, context);
+              if (intent) {
+                // Add trace for debugging
+                intent.trace = {
+                  tickId: context.tickId,
+                  parentSignalId: context.triggerSignal.id,
+                  toolCallId: result.toolCallId,
+                };
+                this.callbacks.onImmediateIntent(intent);
+                result.immediatelyApplied = true;
+                this.logger.debug(
+                  { tool: toolName, intentType: intent.type },
+                  'Intent applied immediately for visibility to subsequent tools'
+                );
+              } else {
+                // This is unexpected - execution and operation succeeded but we couldn't convert
+                this.logger.warn(
+                  { tool: toolName, resultData: result.data },
+                  'Failed to convert tool result to intent for immediate processing'
+                );
+              }
             }
           }
         }

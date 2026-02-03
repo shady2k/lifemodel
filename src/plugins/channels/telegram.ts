@@ -321,21 +321,62 @@ export class TelegramChannel implements Channel {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
 
+        // Extract error details for logging
+        const errorInfo = this.extractErrorInfo(error);
+
         if (error instanceof TelegramError && !error.retryable) {
+          this.logger?.error(errorInfo, 'Non-retryable Telegram error');
           throw error;
         }
 
         if (attempt < this.config.maxRetries) {
           this.logger?.warn(
-            { attempt: attempt + 1, maxRetries: this.config.maxRetries },
-            'Retrying after error'
+            {
+              attempt: attempt + 1,
+              maxRetries: this.config.maxRetries,
+              ...errorInfo,
+            },
+            'Retrying after transient error'
           );
           await this.sleep(this.config.retryDelay * (attempt + 1));
+        } else {
+          // Final attempt failed
+          this.logger?.error(
+            {
+              attempts: this.config.maxRetries + 1,
+              ...errorInfo,
+            },
+            'All retry attempts exhausted'
+          );
         }
       }
     }
 
     throw lastError ?? new Error('Unknown error');
+  }
+
+  /**
+   * Extract error information for logging.
+   */
+  private extractErrorInfo(error: unknown): Record<string, unknown> {
+    if (error instanceof TelegramError) {
+      return {
+        errorType: 'TelegramError',
+        message: error.message,
+        statusCode: error.statusCode,
+        retryable: error.retryable,
+      };
+    }
+    if (error instanceof Error) {
+      return {
+        errorType: error.name,
+        message: error.message,
+      };
+    }
+    return {
+      errorType: 'unknown',
+      message: String(error),
+    };
   }
 
   /**

@@ -208,21 +208,62 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
 
+        // Extract error details for logging
+        const errorInfo = this.extractErrorInfo(error);
+
         if (error instanceof LLMError && !error.retryable) {
+          this.providerLogger?.error(errorInfo, 'Non-retryable LLM error');
           throw error;
         }
 
         if (attempt < this.config.maxRetries) {
           this.providerLogger?.warn(
-            { attempt: attempt + 1, maxRetries: this.config.maxRetries },
-            'Retrying after error'
+            {
+              attempt: attempt + 1,
+              maxRetries: this.config.maxRetries,
+              ...errorInfo,
+            },
+            'Retrying after transient error'
           );
           await this.sleep(this.config.retryDelay * (attempt + 1));
+        } else {
+          // Final attempt failed
+          this.providerLogger?.error(
+            {
+              attempts: this.config.maxRetries + 1,
+              ...errorInfo,
+            },
+            'All retry attempts exhausted'
+          );
         }
       }
     }
 
     throw lastError ?? new Error('Unknown error');
+  }
+
+  /**
+   * Extract error information for logging.
+   */
+  private extractErrorInfo(error: unknown): Record<string, unknown> {
+    if (error instanceof LLMError) {
+      return {
+        errorType: 'LLMError',
+        message: error.message,
+        statusCode: error.statusCode,
+        retryable: error.retryable,
+      };
+    }
+    if (error instanceof Error) {
+      return {
+        errorType: error.name,
+        message: error.message,
+      };
+    }
+    return {
+      errorType: 'unknown',
+      message: String(error),
+    };
   }
 
   /**

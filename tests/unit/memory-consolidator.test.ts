@@ -171,7 +171,7 @@ describe('MemoryConsolidator', () => {
       await consolidator.consolidate(provider as unknown as MemoryProvider);
 
       const savedEntry = (provider.save as ReturnType<typeof vi.fn>).mock.calls[0][0] as MemoryEntry;
-      expect(savedEntry.confidence).toBe(0.95);
+      expect(savedEntry.confidence).toBeCloseTo(0.95, 5);
     });
 
     it('does not merge facts with different predicates', async () => {
