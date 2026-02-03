@@ -58,6 +58,7 @@ import type { UserModel } from '../models/user-model.js';
 import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
+import type { SoulProvider } from '../storage/soul-provider.js';
 import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
@@ -118,6 +119,8 @@ export interface CoreLoopDeps {
   memoryConsolidator?: MemoryConsolidator | undefined;
   /** Recipient registry for Clean Architecture (recipientId → channel routing) */
   recipientRegistry?: IRecipientRegistry | undefined;
+  /** Soul provider for identity awareness */
+  soulProvider?: SoulProvider | undefined;
 }
 
 /**
@@ -225,6 +228,7 @@ export class CoreLoop {
       agent: deps.agent,
       cognitionLLM: deps.cognitionLLM,
       memoryProvider: deps.memoryProvider,
+      soulProvider: deps.soulProvider,
       immediateIntentCallback: (intent) => {
         this.applyImmediateIntent(intent);
       },

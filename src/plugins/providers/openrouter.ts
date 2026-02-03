@@ -26,7 +26,6 @@ const OPENROUTER_DEFAULTS = {
   defaultModel: 'anthropic/claude-3.5-haiku',
   fastModel: 'anthropic/claude-3.5-haiku',
   smartModel: 'anthropic/claude-sonnet-4',
-  timeout: 30_000,
 };
 
 /**
@@ -45,11 +44,13 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
       defaultModel: config.defaultModel ?? OPENROUTER_DEFAULTS.defaultModel,
       fastModel: config.fastModel ?? OPENROUTER_DEFAULTS.fastModel,
       smartModel: config.smartModel ?? OPENROUTER_DEFAULTS.smartModel,
-      timeout: config.timeout ?? OPENROUTER_DEFAULTS.timeout,
       apiKey: config.apiKey,
     };
 
     // Only add optional properties if they are defined
+    if (config.timeout !== undefined) {
+      baseConfig.timeout = config.timeout;
+    }
     if (config.maxRetries !== undefined) {
       baseConfig.maxRetries = config.maxRetries;
     }

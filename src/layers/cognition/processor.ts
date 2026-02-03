@@ -11,6 +11,7 @@
  */
 
 import type { CognitionLayer, CognitionContext, CognitionResult } from '../../types/layers.js';
+import type { Signal } from '../../types/signal.js';
 import type { Logger } from '../../types/logger.js';
 import type { ConversationManager } from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
@@ -29,6 +30,8 @@ import {
 import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { createToolRegistry, type MemoryProvider } from './tools/registry.js';
+import type { SoulProvider, FullSoulState } from '../../storage/soul-provider.js';
+import { performReflection, type ReflectionContext } from './soul/index.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -59,6 +62,8 @@ export interface CognitionProcessorDeps {
   agent?: Agent | undefined;
   memoryProvider?: MemoryProvider | undefined;
   cognitionLLM?: CognitionLLM | undefined;
+  /** Soul provider for identity awareness in system prompt */
+  soulProvider?: SoulProvider | undefined;
   /**
    * Callback for immediate intent application during loop execution.
    * Used for REMEMBER and SET_INTEREST so data is visible to subsequent tools.
@@ -84,6 +89,7 @@ export class CognitionProcessor implements CognitionLayer {
   private conversationManager: ConversationManager | undefined;
   private userModel: UserModel | undefined;
   private memoryProvider: MemoryProvider | undefined;
+  private soulProvider: SoulProvider | undefined;
   private immediateIntentCallback: ((intent: Intent) => void) | undefined;
 
   constructor(
@@ -103,6 +109,7 @@ export class CognitionProcessor implements CognitionLayer {
     this.conversationManager = deps?.conversationManager;
     this.userModel = deps?.userModel;
     this.memoryProvider = deps?.memoryProvider;
+    this.soulProvider = deps?.soulProvider;
 
     // Setup agentic loop if LLM available
     if (deps?.cognitionLLM) {
@@ -162,6 +169,9 @@ export class CognitionProcessor implements CognitionLayer {
     }
     if (deps.memoryProvider) {
       this.memoryProvider = deps.memoryProvider;
+    }
+    if (deps.soulProvider) {
+      this.soulProvider = deps.soulProvider;
     }
 
     // Store immediate intent callback if provided
@@ -247,6 +257,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get recent thoughts for context priming
     const recentThoughts = await this.getRecentThoughts(recipientId);
 
+    // Get soul state for identity awareness
+    const soulState = await this.getSoulState();
+
     // Build loop context with runtime config
     const loopContext: LoopContext = {
       triggerSignal,
@@ -262,6 +275,7 @@ export class CognitionProcessor implements CognitionLayer {
       timeSinceLastMessageMs,
       completedActions,
       recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
+      soulState,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
@@ -329,6 +343,18 @@ export class CognitionProcessor implements CognitionLayer {
 
     if (loopResult.terminal.type === 'respond') {
       result.response = loopResult.terminal.text;
+
+      // Trigger post-response reflection (non-blocking, fire-and-forget)
+      // This checks if the response aligned with our self-model
+      // Skip if no recipientId - thoughts need routing
+      if (recipientId) {
+        this.triggerReflectionIfEnabled(
+          loopResult.terminal.text,
+          triggerSignal,
+          recipientId,
+          context.tickId
+        );
+      }
     }
 
     // ACK all processed thought signals to prevent duplicate processing within session
@@ -512,6 +538,97 @@ export class CognitionProcessor implements CognitionLayer {
       );
       return [];
     }
+  }
+
+  /**
+   * Get soul state for identity awareness in system prompt.
+   * Returns undefined if soul provider not configured (graceful degradation).
+   */
+  private async getSoulState(): Promise<FullSoulState | undefined> {
+    if (!this.soulProvider) {
+      return undefined;
+    }
+
+    try {
+      return await this.soulProvider.getState();
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get soul state'
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Trigger post-response reflection if soul system is enabled.
+   * Non-blocking - runs in background and logs any errors.
+   *
+   * This checks whether the response aligned with our self-model (identity).
+   * If dissonance is detected (score >= 7), creates a soul:reflection thought.
+   */
+  private triggerReflectionIfEnabled(
+    responseText: string,
+    triggerSignal: Signal,
+    recipientId: string,
+    tickId: string
+  ): void {
+    // Skip if soul system not configured
+    if (!this.soulProvider || !this.cognitionLLM || !this.memoryProvider) {
+      return;
+    }
+
+    // Build trigger summary for context
+    const triggerSummary = this.buildTriggerSummary(triggerSignal);
+
+    const reflectionContext: ReflectionContext = {
+      responseText,
+      triggerSummary,
+      recipientId,
+      tickId,
+    };
+
+    // Fire and forget - don't await, don't block the response
+    performReflection(
+      {
+        logger: this.logger,
+        soulProvider: this.soulProvider,
+        memoryProvider: this.memoryProvider,
+        llm: this.cognitionLLM,
+      },
+      reflectionContext
+    ).catch((error: unknown) => {
+      // This shouldn't happen as performReflection catches its own errors,
+      // but just in case
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Reflection trigger failed unexpectedly'
+      );
+    });
+  }
+
+  /**
+   * Build a human-readable summary of the trigger signal.
+   */
+  private buildTriggerSummary(signal: Signal): string {
+    const data = signal.data as Record<string, unknown> | undefined;
+
+    if (signal.type === 'user_message' && data) {
+      const text = (data['text'] as string | undefined) ?? '';
+      return `User message: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`;
+    }
+
+    if (signal.type === 'thought' && data) {
+      const content = (data['content'] as string | undefined) ?? '';
+      return `Thought: "${content.slice(0, 100)}${content.length > 100 ? '...' : ''}"`;
+    }
+
+    if (signal.type === 'threshold_crossed' && data) {
+      const thresholdName = (data['thresholdName'] as string | undefined) ?? 'unknown';
+      return `Threshold crossed: ${thresholdName}`;
+    }
+
+    return `Signal: ${signal.type}`;
   }
 
   /**

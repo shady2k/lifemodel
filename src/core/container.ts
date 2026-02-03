@@ -45,6 +45,7 @@ import {
   type MemoryConsolidator,
   createMemoryConsolidator,
 } from '../storage/memory-consolidator.js';
+import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -143,6 +144,8 @@ export interface Container {
   memoryProvider: JsonMemoryProvider | null;
   /** Memory consolidator (for sleep-cycle consolidation) */
   memoryConsolidator: MemoryConsolidator | null;
+  /** Soul provider (for identity awareness) */
+  soulProvider: SoulProvider | null;
   /** Primary user's Telegram chat ID (for proactive messages) */
   primaryUserChatId: string | null;
   /** Storage backend */
@@ -447,6 +450,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const memoryConsolidator = createMemoryConsolidator(logger);
   logger.info('MemoryConsolidator configured');
 
+  // Create soul provider (for identity awareness in system prompt)
+  const soulProvider = createSoulProvider(logger, {
+    storage,
+    storageKey: 'soul',
+  });
+  logger.info('SoulProvider configured');
+
   // Create recipient registry for message routing (with persistence)
   const recipientRegistry = createPersistentRecipientRegistry(storage, logger);
   await recipientRegistry.init();
@@ -623,6 +633,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryProvider,
     memoryConsolidator,
     recipientRegistry,
+    soulProvider,
   });
 
   // Wire signal callbacks now that coreLoop exists
@@ -738,6 +749,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     cognitionLLM,
     memoryProvider,
     memoryConsolidator,
+    soulProvider,
     primaryUserChatId,
     storage,
     stateManager,

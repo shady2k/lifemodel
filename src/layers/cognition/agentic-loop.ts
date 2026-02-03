@@ -17,6 +17,7 @@ import type { Logger } from '../../types/logger.js';
 import type { Intent, IntentToolCall, IntentToolResult } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
+import type { FullSoulState } from '../../storage/soul-provider.js';
 import type {
   ToolResult,
   LoopConfig,
@@ -192,6 +193,9 @@ export interface LoopContext {
 
   /** Recent thoughts for context priming (internal context) */
   recentThoughts?: MemoryEntry[] | undefined;
+
+  /** Soul state for identity awareness (who I am, what I care about) */
+  soulState?: FullSoulState | undefined;
 }
 
 /**
@@ -817,10 +821,16 @@ export class AgenticLoop {
       sections.push(userProfile);
     }
 
-    // Recent thoughts (internal context) - after user profile, before runtime snapshot
+    // Recent thoughts (internal context) - after user profile, before soul
     const thoughtsSection = this.buildRecentThoughtsSection(context);
     if (thoughtsSection) {
       sections.push(thoughtsSection);
+    }
+
+    // Soul section (identity awareness) - after thoughts, before runtime snapshot
+    const soulSection = this.buildSoulSection(context);
+    if (soulSection) {
+      sections.push(soulSection);
     }
 
     // Runtime snapshot (conditional, for state-related queries)
@@ -1232,6 +1242,56 @@ NOTE: Use the user's name sparingly; check conversation history first.`;
     return `## Recent Thoughts
 ${lines.join('\n')}
 NOTE: Your recent internal thoughts. Background context, not visible to user.`;
+  }
+
+  /**
+   * Build soul section for identity awareness.
+   * Shows who I am, what I care about, and my current narrative arc.
+   * Keeps the agent grounded in its identity during responses.
+   */
+  private buildSoulSection(context: LoopContext): string | null {
+    const { soulState } = context;
+    if (!soulState) {
+      return null;
+    }
+
+    const lines: string[] = [];
+
+    // Current narrative arc (who I am becoming) - brief
+    const narrative = soulState.selfModel.narrative.currentStory;
+    if (narrative.length > 0) {
+      lines.push(narrative);
+    }
+
+    // Core cares (top 3, sorted by weight)
+    const cares = soulState.constitution.coreCares;
+    if (cares.length > 0) {
+      const topCares = [...cares]
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 3)
+        .map((c) => {
+          const sacred = c.sacred ? ' ★' : '';
+          return `- ${c.care}${sacred}`;
+        });
+      lines.push('');
+      lines.push('Core cares:');
+      lines.push(...topCares);
+    }
+
+    // Current chapter (brief context)
+    const currentChapter = soulState.narrative.chapters.at(-1);
+    if (currentChapter?.title) {
+      lines.push('');
+      lines.push(`Current chapter: ${currentChapter.title}`);
+    }
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    return `## Who I Am (Living)
+${lines.join('\n')}
+NOTE: This is your living identity. Act from it, not just about it.`;
   }
 
   private buildRuntimeSnapshotSection(context: LoopContext, useSmart: boolean): string | null {

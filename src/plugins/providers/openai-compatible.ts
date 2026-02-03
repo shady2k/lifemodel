@@ -95,7 +95,7 @@ export interface OpenAICompatibleConfig {
 
 const DEFAULT_CONFIG = {
   name: 'openai-compatible',
-  timeout: 60_000,
+  timeout: 120_000, // 2 minutes - LLM calls can be slow
   maxRetries: 2,
   retryDelay: 1000,
   circuitResetTimeout: 60_000,

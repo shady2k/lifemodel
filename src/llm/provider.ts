@@ -186,6 +186,7 @@ export class LLMError extends Error {
  * Logger interface for LLM providers.
  */
 export interface LLMLogger {
+  trace(obj: Record<string, unknown>, msg: string): void;
   debug(obj: Record<string, unknown>, msg: string): void;
   info(obj: Record<string, unknown>, msg: string): void;
   warn(obj: Record<string, unknown>, msg: string): void;
@@ -217,7 +218,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
     const requestId = `req_${String(++this.requestCounter)}`;
     const startTime = Date.now();
 
-    // Log request start with full details
+    // Log request start (summary at debug, full details at trace)
     this.logger?.debug(
       {
         requestId,
@@ -230,12 +231,16 @@ export abstract class BaseLLMProvider implements LLMProvider {
         toolCount: request.tools?.length ?? 0,
         toolChoice: request.toolChoice,
         parallelToolCalls: request.parallelToolCalls,
-        tools: request.tools, // Full tool schemas for debugging
       },
       '🤖 LLM request started'
     );
 
-    // Log each message for debugging (full content for debugging)
+    // Log full tool schemas at trace level (very verbose - typically 20+ tools)
+    if (request.tools && request.tools.length > 0) {
+      this.logger?.trace({ requestId, tools: request.tools }, '🤖 LLM request tools');
+    }
+
+    // Log each message at debug level (includes system prompt, useful for verification)
     if (this.logger) {
       for (const [i, msg] of request.messages.entries()) {
         this.logger.debug(
@@ -257,7 +262,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
       const response = await this.doComplete(request);
       const duration = Date.now() - startTime;
 
-      // Log response (full content for debugging)
+      // Log response with full content at debug level
       this.logger?.debug(
         {
           requestId,
