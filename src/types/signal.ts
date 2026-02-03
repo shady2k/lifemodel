@@ -394,6 +394,9 @@ export interface ThoughtData {
 
   /** ID of the direct parent thought (undefined for root) */
   parentThoughtId?: string;
+
+  /** Recipient to route responses to (required for thoughts that may generate responses) */
+  recipientId?: string;
 }
 
 /**

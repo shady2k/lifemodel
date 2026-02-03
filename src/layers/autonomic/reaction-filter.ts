@@ -64,6 +64,7 @@ export class ReactionSignalFilter implements SignalFilter {
         triggerSource: 'plugin', // From external input (reaction)
         depth: 0, // Root thought (not a chain)
         rootThoughtId: `reaction_${signal.id}`,
+        recipientId: data.recipientId, // Route response to the user who reacted
       });
 
       result.push(thoughtSignal);
