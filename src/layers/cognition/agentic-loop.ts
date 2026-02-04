@@ -42,7 +42,7 @@ import type { ToolRegistry, MemoryEntry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
-import type { Message, ToolCall, ToolChoice } from '../../llm/provider.js';
+import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
 
 /**
  * Tools whose intents should be applied immediately during loop execution.
@@ -67,6 +67,9 @@ export interface ToolCompletionRequest {
 
   /** Whether to allow parallel tool calls (default: false for deterministic behavior) */
   parallelToolCalls?: boolean;
+
+  /** Response format (JSON mode for structured output when toolChoice is 'none') */
+  responseFormat?: ResponseFormat;
 }
 
 /**
@@ -470,22 +473,44 @@ export class AgenticLoop {
 
       const toolChoice: 'auto' | 'none' = state.forceRespond ? 'none' : 'auto';
 
-      const response = await this.llm.completeWithTools(
-        {
-          messages,
-          tools: state.forceRespond ? [] : filteredTools,
-          toolChoice,
-          parallelToolCalls: false, // Sequential for determinism
+      // Build request
+      // JSON schema applies to ALL requests - when model returns text (not tools),
+      // it will use {response: "text"} format. Tools still work normally.
+      const request: ToolCompletionRequest = {
+        messages,
+        tools: state.forceRespond ? [] : filteredTools,
+        toolChoice,
+        parallelToolCalls: false, // Sequential for determinism
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'agent_response',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                response: {
+                  type: 'string',
+                  description: 'Your response to the user',
+                },
+              },
+              required: ['response'],
+            },
+          },
         },
-        {
-          maxTokens: this.config.maxOutputTokens,
-          useSmart,
-        }
-      );
+      };
 
-      // Capture chain-of-thought if present
+      const response = await this.llm.completeWithTools(request, {
+        maxTokens: this.config.maxOutputTokens,
+        useSmart,
+      });
+
+      // Capture chain-of-thought if present (cleaned from JSON wrapper)
       if (response.content) {
-        state.thoughts.push(response.content);
+        const thought = this.parseResponseContent(response.content);
+        if (thought) {
+          state.thoughts.push(thought);
+        }
       }
 
       // Detect truncated responses due to token limit
@@ -511,7 +536,8 @@ export class AgenticLoop {
 
       // No tool calls = natural completion (Codex-style termination)
       if (response.toolCalls.length === 0) {
-        const messageText = response.content;
+        // Parse response content (handles JSON schema from responseFormat)
+        const messageText = this.parseResponseContent(response.content);
 
         // Edge case: user message but no response text
         if (!messageText && context.triggerSignal.type === 'user_message') {
@@ -1113,6 +1139,7 @@ export class AgenticLoop {
     state: LoopState,
     context: LoopContext
   ): LoopResult {
+    // messageText is already clean (parsed from JSON by parseResponseContent)
     const terminal: Terminal = messageText
       ? {
           type: 'respond',
@@ -1149,6 +1176,47 @@ export class AgenticLoop {
     }
 
     return Math.max(0.1, Math.min(1.0, confidence));
+  }
+
+  /**
+   * Parse LLM response content, handling both JSON schema and plain text.
+   * When toolChoice is 'none', we use JSON schema with {response: string}.
+   */
+  private parseResponseContent(content: string | null): string | null {
+    if (!content) {
+      return null;
+    }
+
+    const trimmed = content.trim();
+
+    // Try to parse as JSON first (from JSON schema mode)
+    try {
+      let jsonStr = trimmed;
+
+      // Handle markdown code blocks
+      if (jsonStr.startsWith('```')) {
+        const match = /```(?:json)?\s*([\s\S]*?)```/.exec(jsonStr);
+        if (match) {
+          jsonStr = match[1]?.trim() ?? jsonStr;
+        }
+      }
+
+      // Try to find JSON object in response
+      const jsonMatch = /\{[\s\S]*"response"[\s\S]*\}/.exec(jsonStr);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      }
+
+      const parsed = JSON.parse(jsonStr) as { response?: string };
+      if (parsed.response && typeof parsed.response === 'string') {
+        return parsed.response;
+      }
+    } catch {
+      // Not JSON or parsing failed - use as plain text
+    }
+
+    // Fallback: use as plain text
+    return trimmed;
   }
 
   /**
@@ -1325,10 +1393,9 @@ Current time: ${currentDateTime}
 Capabilities: think → use tools → update beliefs (with evidence) → respond
 
 Rules:
-- Plain text only, no markdown
+- Always output JSON for text content: {"response": "your message here"}
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
-- When done, simply respond with your message (no special tool needed)
 - Call core.conversationStatus before asking questions to set follow-up timing
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
 - Use Runtime Snapshot if provided; call core.state for precise/missing state

@@ -154,6 +154,11 @@ export class LLMAdapter implements CognitionLLM {
         parallelToolCalls: request.parallelToolCalls ?? false, // Default to sequential for determinism
       };
 
+      // Add responseFormat conditionally (only when defined, for JSON mode)
+      if (request.responseFormat !== undefined) {
+        completionRequest.responseFormat = request.responseFormat;
+      }
+
       // Select model based on useSmart flag
       if (useSmart) {
         if (this.config.smartModel) {
