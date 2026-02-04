@@ -781,7 +781,9 @@ export class CognitionProcessor implements CognitionLayer {
       // Check if we have pending items that need scheduling
       const state = await this.soulProvider.getState();
       if (state.pendingReflections.length > 0 && state.batchWindowStartAt) {
-        const elapsed = Date.now() - state.batchWindowStartAt.getTime();
+        // batchWindowStartAt may be a string after JSON deserialization
+        const windowStart = new Date(state.batchWindowStartAt);
+        const elapsed = Date.now() - windowStart.getTime();
 
         if (elapsed >= 30_000) {
           // Window already expired, process immediately

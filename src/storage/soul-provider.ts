@@ -735,7 +735,9 @@ export class SoulProvider {
         return [];
       }
 
-      const elapsed = Date.now() - state.reflectionBatchInFlight.startedAt.getTime();
+      // startedAt may be a string after JSON deserialization (defensive)
+      const startedAt = new Date(state.reflectionBatchInFlight.startedAt);
+      const elapsed = Date.now() - startedAt.getTime();
       const isStale = elapsed > 5 * 60 * 1000; // 5 minutes
       const tooManyAttempts = state.reflectionBatchInFlight.attemptCount >= 3;
 

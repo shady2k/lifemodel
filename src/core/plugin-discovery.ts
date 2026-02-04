@@ -131,6 +131,12 @@ export function isPluginEnabled(
 }
 
 /**
+ * Directories that look like plugins but are actually shared libraries.
+ * These are excluded from plugin discovery.
+ */
+const SHARED_LIBRARY_DIRS = ['web-shared'] as const;
+
+/**
  * Discover plugins in a directory.
  */
 async function discoverPluginsInDir(
@@ -153,6 +159,12 @@ async function discoverPluginsInDir(
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+
+      // Skip shared library directories (not plugins)
+      if (SHARED_LIBRARY_DIRS.includes(entry.name as (typeof SHARED_LIBRARY_DIRS)[number])) {
+        logger.debug({ dir: entry.name }, 'Skipping shared library directory');
+        continue;
+      }
 
       const pluginPath = join(dir, entry.name);
 

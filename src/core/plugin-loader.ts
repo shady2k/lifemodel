@@ -1529,10 +1529,9 @@ export class PluginLoader {
    */
   private registerPluginTools(pluginId: string, tools: PluginTool[]): void {
     if (!this.toolRegisterCallback) {
-      this.logger.warn(
-        { pluginId },
-        'Tool registration callback not set, skipping tool registration'
-      );
+      // This is expected during startup - plugins load before tool callback is set.
+      // Tools will be registered when setToolCallbacks() is called later.
+      this.logger.debug({ pluginId }, 'Tool registration deferred (callback not yet set)');
       return;
     }
 

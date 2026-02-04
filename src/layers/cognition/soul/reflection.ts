@@ -492,7 +492,9 @@ export async function shouldProcessBatch(
 
   // Time window elapsed
   if (state.batchWindowStartAt) {
-    const elapsed = Date.now() - state.batchWindowStartAt.getTime();
+    // batchWindowStartAt may be a string after JSON deserialization
+    const windowStart = new Date(state.batchWindowStartAt);
+    const elapsed = Date.now() - windowStart.getTime();
     if (elapsed >= cfg.windowMs) {
       return true;
     }

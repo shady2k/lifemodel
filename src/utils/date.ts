@@ -51,6 +51,9 @@ export const DATE_FIELD_NAMES = [
   'lastDeliberationAt',
   // Ack registry persistence
   'deferUntil',
+  // Batch reflection (soul provider)
+  'batchWindowStartAt',
+  'startedAt',
 ] as const;
 
 /**
