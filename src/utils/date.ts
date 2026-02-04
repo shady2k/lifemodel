@@ -47,6 +47,8 @@ export const DATE_FIELD_NAMES = [
   // Soft learning fields (Phase 3.5)
   'lastTouchedAt',
   'expiresAt',
+  // Parliament deliberation (Phase 4)
+  'lastDeliberationAt',
 ] as const;
 
 /**

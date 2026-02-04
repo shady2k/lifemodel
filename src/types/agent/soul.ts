@@ -348,6 +348,16 @@ export interface SoulBudget {
   auditCooldownSeconds: number;
   /** Last audit timestamp */
   lastAuditAt: Date | undefined;
+
+  // Phase 4: Parliament deliberation limits
+  /** Minimum seconds between deliberations */
+  deliberationCooldownSeconds: number;
+  /** Last deliberation timestamp */
+  lastDeliberationAt: Date | undefined;
+  /** Maximum deliberations per day */
+  deliberationsDailyLimit: number;
+  /** Deliberations used today */
+  deliberationsUsedToday: number;
 }
 
 /**
@@ -361,6 +371,11 @@ export const DEFAULT_SOUL_BUDGET: SoulBudget = {
   lastReflectionAt: undefined,
   auditCooldownSeconds: 300, // Max once per 5 minutes
   lastAuditAt: undefined,
+  // Phase 4: Parliament deliberation
+  deliberationCooldownSeconds: 300, // Max once per 5 minutes
+  lastDeliberationAt: undefined,
+  deliberationsDailyLimit: 3, // Max 3 deliberations per day
+  deliberationsUsedToday: 0,
 };
 
 // ============================================================================

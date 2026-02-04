@@ -55,6 +55,24 @@ Borderline observations (4-6) don't immediately create identity pressure. Instea
 
 This captures patterns without identity churn.
 
+## Parliament Deliberation
+
+When unresolved `soul:reflection` thoughts exist, Parliament can deliberate:
+
+1. **Voices Debate**: Each voice (Guardian, Truthkeeper, etc.) states their position
+2. **Quorum Check**: 50% of primary voices must agree for changes
+3. **Veto Check**: Any voice can veto if their conditions are triggered
+4. **Changes Applied**: Care nudges (≤0.03), expectations, precedents, narrative tensions
+5. **Resolution**: Original thought marked `state:resolved`, insight thought created
+
+**Allowed Changes (Phase 4):**
+- Care weight nudge: ±0.03 max
+- Add behavior expectation
+- Add non-binding precedent
+- Add narrative tension
+
+**Rate Limited:** Max 3 deliberations/day, 5min cooldown between them.
+
 ## Soul Thoughts
 
 Thoughts with tag `soul:reflection` create internal pressure (Zeigarnik effect) until processed by Parliament deliberation.
@@ -107,6 +125,7 @@ Shadow voices (Pleaser, Avoider) are acknowledged but don't have veto power.
 | Operation | Limit |
 |-----------|-------|
 | Reflection check | Once per 30s |
+| Parliament deliberation | Once per 5min, max 3/day |
 | Parliament deliberation | Once per 5min |
 | Daily tokens | 50,000 |
 
@@ -127,6 +146,6 @@ src/layers/cognition/soul/    # Reflection system
 - ✅ Phase 2.5: Unresolved Tensions visibility
 - ✅ Phase 3: Post-Response Reflection
 - ✅ Phase 3.5: Soft Learning (tiered dissonance)
-- ⏳ Phase 4: Parliament Deliberation
+- ✅ Phase 4: Parliament Deliberation
 - ⏳ Phase 5: Sleep Cycle Maintenance
 - ⏳ Phase 6: Soul Tools for Nika

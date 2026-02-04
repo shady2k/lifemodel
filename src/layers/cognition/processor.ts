@@ -29,9 +29,14 @@ import {
 } from './agentic-loop.js';
 import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
-import { createToolRegistry, type MemoryProvider } from './tools/registry.js';
+import { createToolRegistry, type MemoryProvider, type MemoryEntry } from './tools/registry.js';
 import type { SoulProvider, FullSoulState } from '../../storage/soul-provider.js';
-import { performReflection, type ReflectionContext } from './soul/index.js';
+import {
+  performReflection,
+  type ReflectionContext,
+  performDeliberation,
+  applyRevision,
+} from './soul/index.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -589,6 +594,31 @@ export class CognitionProcessor implements CognitionLayer {
   }
 
   /**
+   * Get full MemoryEntry objects for unresolved soul tensions.
+   * Used by Parliament deliberation which needs the full thought object.
+   */
+  private async getFullUnresolvedThoughts(recipientId?: string): Promise<MemoryEntry[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      const thoughts = await this.memoryProvider.getRecentByType('thought', {
+        recipientId,
+        windowMs: 7 * 24 * 60 * 60 * 1000, // 1 week
+        limit: 50,
+      });
+
+      return thoughts.filter((t) => {
+        if (!t.tags) return false;
+        return t.tags.includes('soul:reflection') && t.tags.includes('state:unresolved');
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Get soul state for identity awareness in system prompt.
    * Returns undefined if soul provider not configured (graceful degradation).
    */
@@ -653,6 +683,111 @@ export class CognitionProcessor implements CognitionLayer {
         'Reflection trigger failed unexpectedly'
       );
     });
+  }
+
+  /**
+   * Trigger Parliament deliberation if soul system is enabled and conditions are met.
+   *
+   * This processes unresolved soul:reflection thoughts through Parliament deliberation,
+   * potentially leading to soul changes (care nudges, expectations, precedents).
+   *
+   * Conditions:
+   * - Soul system configured
+   * - Unresolved soul:reflection thoughts exist
+   * - Deliberation budget allows (cooldown + daily limit)
+   *
+   * @param recipientId Recipient ID for creating resolution thoughts
+   * @param tickId Tick ID for tracing
+   * @returns True if deliberation was performed
+   */
+  async triggerParliamentIfEnabled(recipientId: string, tickId: string): Promise<boolean> {
+    // Skip if soul system not configured
+    if (!this.soulProvider || !this.cognitionLLM || !this.memoryProvider) {
+      return false;
+    }
+
+    // Check if deliberation is allowed (cooldown + daily limit)
+    if (!(await this.soulProvider.canDeliberate())) {
+      this.logger.trace('Parliament skipped: cooldown or daily limit');
+      return false;
+    }
+
+    // Get unresolved soul thoughts (full MemoryEntry for deliberation)
+    const thoughts = await this.getFullUnresolvedThoughts(recipientId);
+    if (thoughts.length === 0) {
+      this.logger.trace('Parliament skipped: no unresolved tensions');
+      return false;
+    }
+
+    // Take the oldest unresolved thought (FIFO processing)
+    const thought = thoughts[thoughts.length - 1];
+    if (!thought) {
+      return false;
+    }
+
+    // Check token budget
+    const DELIBERATION_TOKENS = 800;
+    if (!(await this.soulProvider.canAfford(DELIBERATION_TOKENS))) {
+      this.logger.trace('Parliament skipped: insufficient token budget');
+      return false;
+    }
+
+    const soulState = await this.soulProvider.getState();
+
+    this.logger.info({ thoughtId: thought.id }, 'Triggering Parliament deliberation');
+
+    try {
+      // Perform deliberation
+      const deliberationResult = await performDeliberation(
+        { logger: this.logger, llm: this.cognitionLLM },
+        { thought, soulState }
+      );
+
+      if (!deliberationResult.success || !deliberationResult.deliberation) {
+        this.logger.warn('Parliament deliberation failed');
+        return false;
+      }
+
+      // Record deliberation in budget
+      await this.soulProvider.recordDeliberation();
+      await this.soulProvider.deductTokens(DELIBERATION_TOKENS);
+
+      // Store deliberation record
+      await this.soulProvider.addDeliberation(deliberationResult.deliberation);
+
+      // Apply revision (changes + resolution)
+      const revisionResult = await applyRevision(
+        {
+          logger: this.logger,
+          soulProvider: this.soulProvider,
+          memoryProvider: this.memoryProvider,
+        },
+        {
+          deliberation: deliberationResult.deliberation,
+          originalThought: thought,
+          recipientId,
+          tickId,
+        }
+      );
+
+      if (revisionResult.success) {
+        this.logger.info(
+          {
+            deliberationId: deliberationResult.deliberation.id,
+            changesApplied: revisionResult.changesApplied,
+          },
+          'Parliament deliberation completed successfully'
+        );
+      }
+
+      return revisionResult.success;
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Parliament deliberation failed unexpectedly'
+      );
+      return false;
+    }
   }
 
   /**

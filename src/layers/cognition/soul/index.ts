@@ -6,8 +6,8 @@
  *
  * Components:
  * - reflection.ts: Post-response dissonance detection (Phase 3)
- * - parliament.ts: Deliberation engine for processing reflections (Phase 4, future)
- * - revision.ts: Apply changes to soul state (Phase 4, future)
+ * - parliament.ts: Deliberation engine for processing reflections (Phase 4)
+ * - revision.ts: Apply changes to soul state (Phase 4)
  */
 
 export {
@@ -17,3 +17,18 @@ export {
   type ReflectionDeps,
   type ReflectionConfig,
 } from './reflection.js';
+
+export {
+  performDeliberation,
+  type DeliberationResult,
+  type DeliberationContext,
+  type DeliberationDeps,
+  type DeliberationConfig,
+} from './parliament.js';
+
+export {
+  applyRevision,
+  type RevisionResult,
+  type RevisionContext,
+  type RevisionDeps,
+} from './revision.js';

@@ -154,6 +154,37 @@ export class SoulProvider {
   }
 
   /**
+   * Check if deliberation is allowed (respects cooldown + daily limit).
+   */
+  async canDeliberate(): Promise<boolean> {
+    await this.ensureLoaded();
+    this.maybeResetBudget();
+    const budget = this.getLoadedState().budget;
+
+    // Check daily limit
+    if (budget.deliberationsUsedToday >= budget.deliberationsDailyLimit) {
+      return false;
+    }
+
+    // Check cooldown
+    if (!budget.lastDeliberationAt) return true;
+    const elapsed = (Date.now() - budget.lastDeliberationAt.getTime()) / 1000;
+    return elapsed >= budget.deliberationCooldownSeconds;
+  }
+
+  /**
+   * Record that a deliberation was performed.
+   */
+  async recordDeliberation(): Promise<void> {
+    await this.ensureLoaded();
+    this.maybeResetBudget();
+    const budget = this.getLoadedState().budget;
+    budget.lastDeliberationAt = new Date();
+    budget.deliberationsUsedToday += 1;
+    await this.persist();
+  }
+
+  /**
    * Add a revision note.
    */
   async addRevision(revision: RevisionNote): Promise<void> {
@@ -623,6 +654,7 @@ export class SoulProvider {
     if (now >= this.state.budget.resetAt) {
       // Reset budget
       this.state.budget.tokensUsedToday = 0;
+      this.state.budget.deliberationsUsedToday = 0;
 
       // Set next reset to tomorrow midnight
       const tomorrow = new Date(now);
