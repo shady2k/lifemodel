@@ -24,7 +24,9 @@ import {
   createFinalTool,
   createRememberTool,
   createInterestTool,
+  createSoulTool,
 } from './core/index.js';
+import type { SoulProvider } from '../../../storage/soul-provider.js';
 
 // Import and re-export types for convenience
 import type {
@@ -59,6 +61,7 @@ export interface ToolRegistryDeps {
   agentStateProvider?: AgentStateProvider | undefined;
   userModelProvider?: UserModelProvider | undefined;
   conversationProvider?: ConversationProvider | undefined;
+  soulProvider?: SoulProvider | undefined;
 }
 
 /**
@@ -385,6 +388,16 @@ export class ToolRegistry {
 
     // Interest tool (dedicated topic interest tracking)
     this.tools.set('core.setInterest', createInterestTool());
+
+    // Soul tool (identity introspection - only if soulProvider available)
+    if (this.deps.soulProvider) {
+      this.tools.set(
+        'core.soul',
+        createSoulTool({
+          soulProvider: this.deps.soulProvider,
+        })
+      );
+    }
   }
 }
 

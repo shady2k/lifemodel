@@ -126,17 +126,33 @@ Shadow voices (Pleaser, Avoider) are acknowledged but don't have veto power.
 |-----------|-------|
 | Reflection check | Once per 30s |
 | Parliament deliberation | Once per 5min, max 3/day |
-| Parliament deliberation | Once per 5min |
 | Daily tokens | 50,000 |
+
+## Soul Tool (`core.soul`)
+
+Allows introspection and self-inquiry:
+
+| Action | Description |
+|--------|-------------|
+| `introspect` | Read constitution, self-model, narrative, health |
+| `reflect` | Get self-assessment context for a recent response |
+| `question` | Pose a Socratic question (creates internal pressure) |
+
+**Example:**
+```json
+{"action": "introspect", "focus": "constitution"}
+{"action": "question", "question_text": "Why do I prioritize connection?", "question_depth": "deep"}
+```
 
 ## Files
 
 ```
-src/types/agent/soul.ts       # Core types
-src/types/agent/parliament.ts # Parliament voices
-src/types/agent/socratic.ts   # Socratic Engine
-src/storage/soul-provider.ts  # Persistence
-src/layers/cognition/soul/    # Reflection system
+src/types/agent/soul.ts           # Core types
+src/types/agent/parliament.ts     # Parliament voices
+src/types/agent/socratic.ts       # Socratic Engine
+src/storage/soul-provider.ts      # Persistence
+src/layers/cognition/soul/        # Reflection + Parliament
+src/layers/cognition/tools/core/soul.ts  # Soul tool
 ```
 
 ## Implementation Status
@@ -148,4 +164,4 @@ src/layers/cognition/soul/    # Reflection system
 - ✅ Phase 3.5: Soft Learning (tiered dissonance)
 - ✅ Phase 4: Parliament Deliberation
 - ⏳ Phase 5: Sleep Cycle Maintenance
-- ⏳ Phase 6: Soul Tools for Nika
+- ✅ Phase 6: Soul Tools for Nika

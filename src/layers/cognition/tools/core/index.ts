@@ -15,6 +15,7 @@ export { createScheduleTool } from './schedule.js';
 export { createFinalTool } from './final.js';
 export { createRememberTool } from './remember.js';
 export { createInterestTool } from './interest.js';
+export { createSoulTool } from './soul.js';
 
 // Types
 export type {
@@ -35,3 +36,4 @@ export type {
   FinalPayload,
   CoreFinalArgs,
 } from './final.js';
+export type { SoulToolDeps } from './soul.js';
