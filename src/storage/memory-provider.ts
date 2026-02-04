@@ -90,6 +90,9 @@ export class JsonMemoryProvider implements MemoryProvider {
 
     // Reject empty or too short queries
     const trimmedQuery = query.trim();
+    const limit = options?.limit ?? 10;
+    const offset = options?.offset ?? 0;
+
     if (trimmedQuery.length < 2) {
       this.logger.debug({ query }, 'Search query too short, returning empty');
       return {
@@ -100,11 +103,14 @@ export class JsonMemoryProvider implements MemoryProvider {
           mediumConfidence: 0,
           lowConfidence: 0,
           hasMoreResults: false,
+          page: 1,
+          totalPages: 1,
+          offset,
+          limit,
         },
       };
     }
 
-    const limit = options?.limit ?? 10;
     const types = options?.types;
     const recipientId = options?.recipientId;
     const status = options?.status;
@@ -184,7 +190,7 @@ export class JsonMemoryProvider implements MemoryProvider {
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score);
 
-    // Calculate metadata before slicing to limit
+    // Calculate metadata before slicing
     const totalMatched = scored.length;
     // Thresholds matched to our data: articles are 0.4, filtered are 0.2
     const highConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) >= 0.5).length;
@@ -194,10 +200,16 @@ export class JsonMemoryProvider implements MemoryProvider {
     }).length;
     const lowConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) < 0.3).length;
 
-    const limited = scored.slice(0, limit).map((item) => item.entry);
+    // Apply pagination: slice with offset and limit
+    const limited = scored.slice(offset, offset + limit).map((item) => item.entry);
+
+    // Calculate pagination metadata
+    const totalPages = Math.max(1, Math.ceil(totalMatched / limit));
+    const page = Math.floor(offset / limit) + 1;
+    const hasMoreResults = offset + limited.length < totalMatched;
 
     this.logger.debug(
-      { query, results: limited.length, totalMatched, limit },
+      { query, results: limited.length, totalMatched, limit, offset, page, totalPages },
       'Memory search completed'
     );
 
@@ -208,7 +220,11 @@ export class JsonMemoryProvider implements MemoryProvider {
         highConfidence,
         mediumConfidence,
         lowConfidence,
-        hasMoreResults: totalMatched > limit,
+        hasMoreResults,
+        page,
+        totalPages,
+        offset,
+        limit,
       },
     };
   }

@@ -13,6 +13,8 @@ import { validateAgainstParameters } from '../validation.js';
  */
 export interface MemorySearchOptions {
   limit?: number | undefined;
+  /** Skip first N results for pagination (default: 0) */
+  offset?: number | undefined;
   types?: ('message' | 'thought' | 'fact' | 'intention')[] | undefined;
   recipientId?: string | undefined;
   /** Filter by status (for intentions) */
@@ -32,6 +34,14 @@ export interface SearchResult {
     mediumConfidence: number;
     lowConfidence: number;
     hasMoreResults: boolean;
+    /** Current page number (1-indexed) */
+    page: number;
+    /** Total number of pages */
+    totalPages: number;
+    /** Offset used for this query */
+    offset: number;
+    /** Limit used for this query */
+    limit: number;
   };
 }
 
@@ -112,7 +122,18 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     { name: 'action', type: 'string', description: 'search|save|saveFact', required: true },
     { name: 'query', type: 'string', description: 'Search query', required: false },
     { name: 'content', type: 'string', description: 'Content to save', required: false },
-    { name: 'limit', type: 'number', description: 'Max results (default: 10)', required: false },
+    {
+      name: 'limit',
+      type: 'number',
+      description: 'Max results per page (default: 10)',
+      required: false,
+    },
+    {
+      name: 'offset',
+      type: 'number',
+      description: 'Skip first N results for pagination (default: 0)',
+      required: false,
+    },
     {
       name: 'types',
       type: 'array',
@@ -157,10 +178,13 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     name: 'core.memory',
     description: `Long-term memory: search, save, or saveFact.
 
-Search returns high-confidence results (relevance + recency + confidence).
-Use minConfidence (0-1) to filter. Default: 0.3.
+Search returns paginated results (relevance + recency + confidence scoring).
+- Use limit (default: 10) and offset (default: 0) to paginate through results.
+- Use minConfidence (0-1) to filter. Default: 0.3.
+- Response includes pagination info (page, totalPages, hasNext, hasPrev).
+- To get next page: use offset = previous_offset + limit.
 
-Response includes summary. Mention available low-confidence matches to user only if explicitly relevant or they ask for "more".`,
+Mention available results on other pages only if explicitly relevant or user asks for "more".`,
     tags: ['search', 'save', 'facts', 'history'],
     hasSideEffects: true,
     parameters,
@@ -180,24 +204,26 @@ Response includes summary. Mention available low-confidence matches to user only
           }
 
           const limit = (args['limit'] as number | undefined) ?? 10;
+          const offset = (args['offset'] as number | undefined) ?? 0;
           const types = args['types'] as
             | ('message' | 'thought' | 'fact' | 'intention')[]
             | undefined;
           const status = args['status'] as 'pending' | 'completed' | undefined;
           const minConfidence = (args['minConfidence'] as number | undefined) ?? 0.3;
 
-          const options: MemorySearchOptions = { limit, minConfidence };
+          const options: MemorySearchOptions = { limit, offset, minConfidence };
           if (types) options.types = types;
           if (status) options.status = status;
           // Use context.recipientId - system knows the current conversation
           if (context?.recipientId) options.recipientId = context.recipientId;
 
           const searchResult = await deps.memoryProvider.search(query, options);
+          const { page, totalPages, hasMoreResults, totalMatched } = searchResult.metadata;
 
-          // Generate LLM-friendly summary
-          let summary = `Found ${String(searchResult.entries.length)} relevant results.`;
-          if (searchResult.metadata.hasMoreResults) {
-            summary += ` Use more specific terms to filter ${String(searchResult.metadata.totalMatched - searchResult.entries.length)} additional matches.`;
+          // Generate LLM-friendly summary with pagination info
+          let summary = `Page ${String(page)} of ${String(totalPages)}: Found ${String(searchResult.entries.length)} results.`;
+          if (hasMoreResults) {
+            summary += ` Use offset=${String(offset + limit)} to get next page (${String(totalMatched - offset - searchResult.entries.length)} more available).`;
           }
 
           return {
@@ -214,12 +240,19 @@ Response includes summary. Mention available low-confidence matches to user only
             })),
             count: searchResult.entries.length,
             summary,
+            pagination: {
+              page,
+              totalPages,
+              offset,
+              limit,
+              hasNext: hasMoreResults,
+              hasPrev: offset > 0,
+            },
             searchMetadata: {
               totalMatched: searchResult.metadata.totalMatched,
               highConfidence: searchResult.metadata.highConfidence,
               mediumConfidence: searchResult.metadata.mediumConfidence,
               lowConfidence: searchResult.metadata.lowConfidence,
-              hasMoreResults: searchResult.metadata.hasMoreResults,
             },
           };
         }
