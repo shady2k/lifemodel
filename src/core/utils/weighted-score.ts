@@ -135,10 +135,10 @@ const contactPressureNeuronBase = createNeuron({
 });
 
 export function contactPressureNeuron(values: Record<string, number>): NeuronResult {
-  if (values.acquaintancePressure === undefined && values.userAvailability !== undefined) {
+  if (values['acquaintancePressure'] === undefined && values['userAvailability'] !== undefined) {
     return contactPressureNeuronBase({
       ...values,
-      acquaintancePressure: values.userAvailability,
+      acquaintancePressure: values['userAvailability'],
     });
   }
   return contactPressureNeuronBase(values);

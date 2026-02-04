@@ -62,6 +62,7 @@ import type { SoulProvider } from '../storage/soul-provider.js';
 import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
+import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
 
 /**
  * Core loop configuration.
@@ -170,6 +171,7 @@ export class CoreLoop {
   private readonly memoryProvider: MemoryProvider | undefined;
   private readonly memoryConsolidator: MemoryConsolidator | undefined;
   private readonly recipientRegistry: IRecipientRegistry | undefined;
+  private readonly soulProvider: SoulProvider | undefined;
 
   /** Previous alertness mode for detecting transitions */
   private previousAlertnessMode: AlertnessMode | undefined;
@@ -214,6 +216,7 @@ export class CoreLoop {
     this.memoryProvider = deps.memoryProvider;
     this.memoryConsolidator = deps.memoryConsolidator;
     this.recipientRegistry = deps.recipientRegistry;
+    this.soulProvider = deps.soulProvider;
 
     // Initialize system health monitor
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
@@ -579,6 +582,33 @@ export class CoreLoop {
             this.metrics.gauge('memory_thoughts_queued', queuedCount);
           }
         });
+
+        // 6c. Trigger soul sleep maintenance (Phase 5)
+        // Like human sleep: consolidate identity alongside memories
+        if (this.soulProvider) {
+          void runSleepMaintenance({
+            logger: this.logger,
+            soulProvider: this.soulProvider,
+            memoryProvider: this.memoryProvider,
+          }).then((result) => {
+            if (result.success) {
+              this.logger.info(
+                {
+                  voicesRefreshed: result.voicesRefreshed,
+                  softLearningPromoted: result.softLearningPromoted,
+                  thoughtsMarkedForPruning: result.thoughtsMarkedForPruning,
+                  durationMs: result.durationMs,
+                },
+                'Soul sleep maintenance complete'
+              );
+              this.metrics.counter('soul_sleep_maintenances');
+              this.metrics.gauge('soul_voices_refreshed', result.voicesRefreshed);
+              this.metrics.gauge('soul_soft_learning_promoted', result.softLearningPromoted);
+            } else {
+              this.logger.warn({ error: result.error }, 'Soul sleep maintenance failed');
+            }
+          });
+        }
       }
       this.previousAlertnessMode = currentMode;
 

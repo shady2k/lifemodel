@@ -32,3 +32,10 @@ export {
   type RevisionContext,
   type RevisionDeps,
 } from './revision.js';
+
+export {
+  runSleepMaintenance,
+  type SleepMaintenanceResult,
+  type SleepMaintenanceDeps,
+  type SleepMaintenanceConfig,
+} from './sleep-maintenance.js';

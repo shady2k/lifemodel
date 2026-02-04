@@ -96,9 +96,10 @@ export class ContactPressureNeuron extends BaseNeuron {
       'userAvailability' in mergedWeights &&
       !(config.weights && 'acquaintancePressure' in config.weights)
     ) {
-      mergedWeights.acquaintancePressure = (mergedWeights as Record<string, number>)[
-        'userAvailability'
-      ];
+      const oldValue = (mergedWeights as Record<string, number>)['userAvailability'];
+      if (oldValue !== undefined) {
+        mergedWeights.acquaintancePressure = oldValue;
+      }
     }
     this.config = {
       ...DEFAULT_CONTACT_PRESSURE_CONFIG,
