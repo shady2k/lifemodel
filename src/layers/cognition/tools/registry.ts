@@ -182,19 +182,37 @@ export class ToolRegistry {
 
   /**
    * Get full schema for a specific tool.
+   * Includes rawParameterSchema when available for complex nested parameters.
    */
-  getToolSchema(
-    name: ToolName
-  ): { name: string; description: string; parameters: ToolParameter[]; tags: string[] } | null {
+  getToolSchema(name: ToolName): {
+    name: string;
+    description: string;
+    parameters: ToolParameter[];
+    tags: string[];
+    rawParameterSchema?: Record<string, unknown>;
+  } | null {
     const tool = this.tools.get(name);
     if (!tool) return null;
 
-    return {
+    const schema: {
+      name: string;
+      description: string;
+      parameters: ToolParameter[];
+      tags: string[];
+      rawParameterSchema?: Record<string, unknown>;
+    } = {
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
       tags: tool.tags ?? [],
     };
+
+    // Include rawParameterSchema if available (for complex nested parameters)
+    if (tool.rawParameterSchema) {
+      schema.rawParameterSchema = tool.rawParameterSchema;
+    }
+
+    return schema;
   }
 
   /**

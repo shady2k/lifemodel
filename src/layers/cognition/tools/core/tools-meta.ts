@@ -9,12 +9,15 @@ import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Tool schema for on-demand retrieval.
+ * Includes rawParameterSchema when available for tools with complex nested parameters.
  */
 export interface ToolSchema {
   name: string;
   description: string;
   parameters: ToolParameter[];
   tags: string[];
+  /** Raw JSON Schema for complex parameters (nested objects, arrays with items, etc.) */
+  rawParameterSchema?: Record<string, unknown>;
 }
 
 /**

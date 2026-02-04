@@ -14,6 +14,7 @@ import type {
   MealType,
   ActivityLevel,
   LogInput,
+  LogInputEntry,
   LogResult,
   LogResultItem,
   ListResult,
@@ -149,6 +150,183 @@ export function createCaloriesTool(
       if (item) map[id] = item;
     }
     return map;
+  }
+
+  // ============================================================================
+  // Validation Helpers
+  // ============================================================================
+
+  /**
+   * Valid portion units from the schema.
+   */
+  const VALID_UNITS: Unit[] = [
+    'g',
+    'kg',
+    'ml',
+    'l',
+    'item',
+    'slice',
+    'cup',
+    'tbsp',
+    'tsp',
+    'serving',
+    'custom',
+  ];
+
+  /**
+   * Valid meal types from the schema.
+   */
+  const VALID_MEAL_TYPES: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
+
+  /**
+   * Parse and validate entries array for log action.
+   * Returns normalized entries or an error message.
+   *
+   * Handles:
+   * - Gemini bug: passing JSON strings instead of objects
+   * - Strict mode: null values for optional fields
+   * - Validation of portion structure, units, etc.
+   */
+  function parseLogEntries(
+    raw: unknown
+  ): { success: true; entries: LogInputEntry[] } | { success: false; error: string } {
+    // Check entries is an array
+    if (!Array.isArray(raw)) {
+      return {
+        success: false,
+        error: 'entries: must be an array of food entry objects',
+      };
+    }
+
+    // Check non-empty
+    if (raw.length === 0) {
+      return {
+        success: false,
+        error: 'entries: array cannot be empty',
+      };
+    }
+
+    const entries: LogInputEntry[] = [];
+
+    for (let i = 0; i < raw.length; i++) {
+      const item: unknown = raw[i];
+
+      // Check each entry is an object (not a string - Gemini bug)
+      if (typeof item === 'string') {
+        return {
+          success: false,
+          error: `entries[${String(i)}]: must be an object with 'name' field, got string. Parse the JSON string or pass the object directly.`,
+        };
+      }
+
+      if (item === null || typeof item !== 'object') {
+        return {
+          success: false,
+          error: `entries[${String(i)}]: must be an object with 'name' field, got ${item === null ? 'null' : typeof item}`,
+        };
+      }
+
+      const entry = item as Record<string, unknown>;
+
+      // Validate required 'name' field
+      if (typeof entry['name'] !== 'string' || entry['name'].trim() === '') {
+        return {
+          success: false,
+          error: `entries[${String(i)}]: 'name' is required and must be a non-empty string`,
+        };
+      }
+
+      // Start building normalized entry
+      const normalized: LogInputEntry = {
+        name: entry['name'].trim(),
+      };
+
+      // Validate and normalize 'portion' (optional, can be null)
+      const portionRaw = entry['portion'];
+      if (portionRaw !== null && portionRaw !== undefined) {
+        if (typeof portionRaw !== 'object') {
+          return {
+            success: false,
+            error: `entries[${String(i)}].portion: must be an object with 'quantity' and 'unit', got ${typeof portionRaw}`,
+          };
+        }
+
+        const portion = portionRaw as Record<string, unknown>;
+        const quantity = portion['quantity'];
+        const unit = portion['unit'];
+
+        if (typeof quantity !== 'number' || quantity <= 0) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].portion.quantity: must be a positive number`,
+          };
+        }
+
+        if (typeof unit !== 'string' || !VALID_UNITS.includes(unit as Unit)) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].portion.unit: must be one of [${VALID_UNITS.join(', ')}]`,
+          };
+        }
+
+        normalized.portion = { quantity, unit: unit as Unit };
+      }
+
+      // Validate and normalize 'calories_estimate' (optional, can be null)
+      const caloriesRaw = entry['calories_estimate'];
+      if (caloriesRaw !== null && caloriesRaw !== undefined) {
+        if (typeof caloriesRaw !== 'number' || caloriesRaw < 0) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].calories_estimate: must be a non-negative number`,
+          };
+        }
+        normalized.calories_estimate = caloriesRaw;
+      }
+
+      // Validate and normalize 'meal_type' (optional, can be null)
+      const mealTypeRaw = entry['meal_type'];
+      if (mealTypeRaw !== null && mealTypeRaw !== undefined) {
+        if (
+          typeof mealTypeRaw !== 'string' ||
+          !VALID_MEAL_TYPES.includes(mealTypeRaw as MealType)
+        ) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].meal_type: must be one of [${VALID_MEAL_TYPES.join(', ')}]`,
+          };
+        }
+        normalized.meal_type = mealTypeRaw as MealType;
+      }
+
+      // Validate and normalize 'timestamp' (optional, can be null)
+      const timestampRaw = entry['timestamp'];
+      if (timestampRaw !== null && timestampRaw !== undefined) {
+        if (typeof timestampRaw !== 'string') {
+          return {
+            success: false,
+            error: `entries[${String(i)}].timestamp: must be an ISO timestamp string`,
+          };
+        }
+        normalized.timestamp = timestampRaw;
+      }
+
+      // Validate and normalize 'chooseItemId' (optional, can be null)
+      const chooseItemIdRaw = entry['chooseItemId'];
+      if (chooseItemIdRaw !== null && chooseItemIdRaw !== undefined) {
+        if (typeof chooseItemIdRaw !== 'string') {
+          return {
+            success: false,
+            error: `entries[${String(i)}].chooseItemId: must be a string`,
+          };
+        }
+        normalized.chooseItemId = chooseItemIdRaw;
+      }
+
+      entries.push(normalized);
+    }
+
+    return { success: true, entries };
   }
 
   // ============================================================================
@@ -497,6 +675,131 @@ export function createCaloriesTool(
   // Tool Definition
   // ============================================================================
 
+  /**
+   * OpenAI-compatible JSON Schema for the calories tool.
+   * Uses proper nested properties so OpenAI strict mode enforces structure.
+   *
+   * Key requirements for OpenAI strict mode:
+   * - All fields in `required` array (optional fields use type: ["type", "null"])
+   * - `additionalProperties: false` on all object types
+   */
+  const CALORIES_RAW_SCHEMA = {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'],
+        description: 'Action to perform',
+      },
+      entries: {
+        type: ['array', 'null'],
+        description: 'Array of food entries for log action',
+        items: {
+          type: 'object',
+          properties: {
+            name: {
+              type: 'string',
+              description: 'Food name (no quantity, e.g., "Американо" not "Американо 200мл")',
+            },
+            portion: {
+              type: ['object', 'null'],
+              description: 'Portion specification: { quantity, unit }',
+              properties: {
+                quantity: { type: 'number', description: 'Amount (e.g., 200)' },
+                unit: {
+                  type: 'string',
+                  enum: [
+                    'g',
+                    'kg',
+                    'ml',
+                    'l',
+                    'item',
+                    'slice',
+                    'cup',
+                    'tbsp',
+                    'tsp',
+                    'serving',
+                    'custom',
+                  ],
+                  description: 'Unit of measurement',
+                },
+              },
+              required: ['quantity', 'unit'],
+              additionalProperties: false,
+            },
+            calories_estimate: {
+              type: ['number', 'null'],
+              description: 'Calorie estimate if known (positive number)',
+            },
+            meal_type: {
+              type: ['string', 'null'],
+              enum: ['breakfast', 'lunch', 'dinner', 'snack', null],
+              description: 'Meal type',
+            },
+            timestamp: {
+              type: ['string', 'null'],
+              description: 'ISO timestamp override (optional)',
+            },
+            chooseItemId: {
+              type: ['string', 'null'],
+              description: 'Explicit item ID to resolve ambiguity',
+            },
+          },
+          required: [
+            'name',
+            'portion',
+            'calories_estimate',
+            'meal_type',
+            'timestamp',
+            'chooseItemId',
+          ],
+          additionalProperties: false,
+        },
+      },
+      date: {
+        type: ['string', 'null'],
+        description: 'Date YYYY-MM-DD (default: today based on sleep patterns)',
+      },
+      meal_type: {
+        type: ['string', 'null'],
+        enum: ['breakfast', 'lunch', 'dinner', 'snack', null],
+        description: 'Filter by meal type for list action',
+      },
+      limit: {
+        type: ['number', 'null'],
+        description: 'Max entries for list (default: 20)',
+      },
+      daily_target: {
+        type: ['number', 'null'],
+        description: 'Calorie goal for goal action',
+      },
+      calculate_from_stats: {
+        type: ['boolean', 'null'],
+        description: 'Calculate TDEE from user data for goal action',
+      },
+      weight: {
+        type: ['number', 'null'],
+        description: 'Weight in kg for log_weight action',
+      },
+      entry_id: {
+        type: ['string', 'null'],
+        description: 'Entry ID for delete action',
+      },
+    },
+    required: [
+      'action',
+      'entries',
+      'date',
+      'meal_type',
+      'limit',
+      'daily_target',
+      'calculate_from_stats',
+      'weight',
+      'entry_id',
+    ],
+    additionalProperties: false,
+  };
+
   const TOOL_DESCRIPTION = `Отслеживание еды и калорий.
 
 ДЕЙСТВИЯ:
@@ -528,6 +831,7 @@ LOG - формат entries:
     name: 'calories',
     description: TOOL_DESCRIPTION,
     tags: ['food', 'calories', 'weight', 'nutrition', 'diet', 'health', 'tracking'],
+    rawParameterSchema: CALORIES_RAW_SCHEMA,
     parameters: [
       {
         name: 'action',
@@ -596,6 +900,22 @@ LOG - формат entries:
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
       }
+
+      // Early validation for log action - catch Gemini string-entries bug here
+      if (a['action'] === 'log') {
+        const entriesRaw = a['entries'];
+        // Allow null (strict mode) but not missing when action is log
+        if (entriesRaw === null || entriesRaw === undefined) {
+          return { success: false, error: 'entries: required for log action' };
+        }
+        const parsed = parseLogEntries(entriesRaw);
+        if (!parsed.success) {
+          return { success: false, error: parsed.error };
+        }
+        // Store validated entries for execute()
+        a['_validatedEntries'] = parsed.entries;
+      }
+
       return { success: true, data: a };
     },
     execute: async (
@@ -617,13 +937,28 @@ LOG - формат entries:
 
       switch (action) {
         case 'log': {
-          const entries = args['entries'] as LogInput['entries'] | undefined;
-          if (!entries || !Array.isArray(entries) || entries.length === 0) {
-            return {
-              success: false,
-              error: 'entries array required for log action',
-            } as DeleteResult;
+          // Use pre-validated entries from validate() if available (defense-in-depth)
+          let entries = args['_validatedEntries'] as LogInputEntry[] | undefined;
+
+          // Fallback: re-validate if not already done (shouldn't happen in normal flow)
+          if (!entries) {
+            const entriesRaw = args['entries'];
+            if (entriesRaw === null || entriesRaw === undefined) {
+              return {
+                success: false,
+                error: 'entries array required for log action',
+              } as DeleteResult;
+            }
+            const parsed = parseLogEntries(entriesRaw);
+            if (!parsed.success) {
+              return {
+                success: false,
+                error: parsed.error,
+              } as DeleteResult;
+            }
+            entries = parsed.entries;
           }
+
           return logFood({ entries }, recipientId, effectiveDate);
         }
 
