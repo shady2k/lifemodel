@@ -8,7 +8,8 @@
 import { describe, it, expect } from 'vitest';
 import { validateAgainstParameters } from '../../src/layers/cognition/tools/validation.js';
 import type { ToolParameter } from '../../src/layers/cognition/tools/types.js';
-import { createFinalTool } from '../../src/layers/cognition/tools/core/final.js';
+import { createEscalateTool } from '../../src/layers/cognition/tools/core/escalate.js';
+import { createConversationStatusTool } from '../../src/layers/cognition/tools/core/conversation-status.js';
 
 describe('validateAgainstParameters', () => {
   const parameters: ToolParameter[] = [
@@ -133,41 +134,51 @@ describe('validateAgainstParameters', () => {
   });
 });
 
-describe('core.final validation (the original bug)', () => {
-  it('rejects type: "active" (the original bug that caused runtime error)', () => {
-    const tool = createFinalTool();
-    const result = tool.validate({ type: 'active' });
+describe('core.escalate validation', () => {
+  it('rejects missing reason parameter', () => {
+    const tool = createEscalateTool();
+    const result = tool.validate({}); // No reason provided
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error).toContain('must be one of [respond, no_action, defer]');
+      expect(result.error).toContain('reason: required');
     }
   });
 
-  it('accepts valid respond type', () => {
-    const tool = createFinalTool();
-    const result = tool.validate({
-      type: 'respond',
-      text: 'Hello',
-      confidence: 0.9,
-      conversationStatus: 'active',
-    });
+  it('accepts valid escalation request', () => {
+    const tool = createEscalateTool();
+    const result = tool.validate({ reason: 'Complex multi-step reasoning needed' });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('core.conversationStatus validation', () => {
+  it('rejects missing status parameter', () => {
+    const tool = createConversationStatusTool();
+    const result = tool.validate({}); // No status provided
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain('status: required');
+    }
+  });
+
+  it('rejects invalid status value', () => {
+    const tool = createConversationStatusTool();
+    const result = tool.validate({ status: 'invalid_status' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toContain('must be one of');
+    }
+  });
+
+  it('accepts valid awaiting_answer status', () => {
+    const tool = createConversationStatusTool();
+    const result = tool.validate({ status: 'awaiting_answer' });
     expect(result.success).toBe(true);
   });
 
-  it('accepts valid no_action type', () => {
-    const tool = createFinalTool();
-    const result = tool.validate({ type: 'no_action', reason: 'No response needed' });
-    expect(result.success).toBe(true);
-  });
-
-  it('accepts valid defer type', () => {
-    const tool = createFinalTool();
-    const result = tool.validate({
-      type: 'defer',
-      reason: 'User busy',
-      signalType: 'contact_urge',
-      deferHours: 4,
-    });
+  it('accepts valid closed status', () => {
+    const tool = createConversationStatusTool();
+    const result = tool.validate({ status: 'closed' });
     expect(result.success).toBe(true);
   });
 });

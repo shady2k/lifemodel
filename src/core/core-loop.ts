@@ -933,6 +933,11 @@ export class CoreLoop {
     tickId: string,
     enableSmartRetry = true
   ): CognitionContext {
+    // Get recipientId from trigger signal for mid-loop message injection
+    const triggerSignal = aggregationResult.triggerSignals[0];
+    const signalData = triggerSignal?.data as { recipientId?: string } | undefined;
+    const recipientId = signalData?.recipientId;
+
     return {
       aggregates: aggregationResult.aggregates,
       triggerSignals: aggregationResult.triggerSignals,
@@ -942,6 +947,38 @@ export class CoreLoop {
       runtimeConfig: {
         enableSmartRetry,
       },
+      drainPendingUserMessages: recipientId
+        ? this.createPendingMessagesDrainer(recipientId)
+        : undefined,
+    };
+  }
+
+  /**
+   * Create a callback to drain pending user messages for mid-loop injection.
+   * Returns only user_message signals for the same recipientId, preserving FIFO order.
+   */
+  private createPendingMessagesDrainer(recipientId: string): () => Signal[] {
+    return () => {
+      const drained: Signal[] = [];
+
+      // Iterate backwards to safely splice while iterating
+      for (let i = this.pendingSignals.length - 1; i >= 0; i--) {
+        const entry = this.pendingSignals[i];
+        if (!entry) continue; // Guard against undefined entries
+
+        const signal = entry.signal;
+        if (signal.type !== 'user_message') continue;
+
+        // Filter by recipient (same conversation only)
+        const signalData = signal.data as { recipientId?: string } | undefined;
+        const signalRecipient = signalData?.recipientId;
+        if (signalRecipient !== recipientId) continue;
+
+        this.pendingSignals.splice(i, 1);
+        drained.unshift(signal); // Preserve FIFO order
+      }
+
+      return drained;
     };
   }
 

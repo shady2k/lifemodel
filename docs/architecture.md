@@ -50,19 +50,23 @@ Fixed 1-second tick drives all processing:
 
 ## COGNITION Agentic Loop
 
-Uses native OpenAI tool calling:
+Uses native OpenAI tool calling with **Codex-style natural termination**:
 - Tools registered with `strict: true`
-- Terminal via `core.final` tool (discriminated union: `respond | no_action | defer`)
-- Smart retry: confidence < 0.6 and no side-effects → retry with expensive model
+- Natural termination: LLM stops calling tools when done (no `core.final` required)
+- Smart escalation: Fast model can request deeper reasoning via `core.escalate`
+- Smart retry: Low confidence and no side-effects → retry with expensive model
+- Conversation status: `core.conversationStatus` controls follow-up timing
 
 ```
-Request: messages + tools (tool_choice: "required")
+Request: messages + tools (tool_choice: "auto")
     ↓
 Response: { tool_calls: [...], content: "thinking..." }
     ↓
 Execute tools → add role: "tool" messages
     ↓
-Loop until core.final called → return intents
+No tool calls = natural completion → return intents
+    ↓
+Loop continues until LLM stops calling tools
 ```
 
 ---

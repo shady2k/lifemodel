@@ -21,10 +21,11 @@ import {
   createThoughtTool,
   createAgentTool,
   createScheduleTool,
-  createFinalTool,
   createRememberTool,
   createInterestTool,
   createSoulTool,
+  createEscalateTool,
+  createConversationStatusTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
@@ -398,14 +399,17 @@ export class ToolRegistry {
     // Schedule tool
     this.tools.set('core.schedule', createScheduleTool());
 
-    // Final tool (terminal - signals end of agentic loop)
-    this.tools.set('core.final', createFinalTool());
-
     // Remember tool (unified fact storage - replaces core.user)
     this.tools.set('core.remember', createRememberTool());
 
     // Interest tool (dedicated topic interest tracking)
     this.tools.set('core.setInterest', createInterestTool());
+
+    // Escalate tool (fast model only - requests smart model escalation)
+    this.tools.set('core.escalate', createEscalateTool());
+
+    // Conversation status tool (sets follow-up timing)
+    this.tools.set('core.conversationStatus', createConversationStatusTool());
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

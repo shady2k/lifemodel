@@ -296,6 +296,7 @@ export class CognitionProcessor implements CognitionLayer {
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
+      drainPendingUserMessages: context.drainPendingUserMessages,
     };
 
     // Run the agentic loop

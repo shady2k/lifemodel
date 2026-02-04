@@ -576,6 +576,18 @@ export interface LoopState {
 
   /** Track consecutive memory searches to detect search loops */
   consecutiveSearches: number;
+
+  /** Conversation status set by core.conversationStatus tool */
+  conversationStatus: ConversationStatus | undefined;
+
+  /** Track consecutive conversationStatus-only calls to detect infinite loops */
+  consecutiveStatusOnlyCalls: number;
+
+  /** Track forceRespond retry attempts to prevent dead-end */
+  forceRespondAttempts: number;
+
+  /** Track if we ever forced respond (for confidence calculation) */
+  everForcedRespond: boolean;
 }
 
 /**
@@ -593,6 +605,10 @@ export function createLoopState(): LoopState {
     failedCallCounts: new Map<string, number>(),
     identicalCallCounts: new Map<string, number>(),
     consecutiveSearches: 0,
+    conversationStatus: undefined,
+    consecutiveStatusOnlyCalls: 0,
+    forceRespondAttempts: 0,
+    everForcedRespond: false,
   };
 }
 

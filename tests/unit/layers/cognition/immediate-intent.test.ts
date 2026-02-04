@@ -92,9 +92,10 @@ describe('Immediate Intent Processing', () => {
   });
 
   /**
-   * Creates a mock LLM that responds with specific tool calls followed by core.final
+   * Creates a mock LLM that responds with specific tool calls, then naturally terminates.
+   * This uses the new Codex-style termination (no core.final).
    */
-  function createMockLlm(toolSequence: { name: string; args: Record<string, unknown> }[]) {
+  function createMockLlm(toolSequence: { name: string; args: Record<string, unknown> }[], finalResponse = 'Done') {
     let callIndex = 0;
 
     return {
@@ -119,25 +120,11 @@ describe('Immediate Intent Processing', () => {
           };
         }
 
-        // Final call - return core.final
+        // Natural completion - no tool calls, just text
         return {
-          content: null,
-          toolCalls: [
-            {
-              id: 'call-final',
-              type: 'function',
-              function: {
-                name: 'core_final',
-                arguments: JSON.stringify({
-                  type: 'respond',
-                  text: 'Done',
-                  conversationStatus: 'active',
-                  confidence: 0.9,
-                }),
-              },
-            },
-          ],
-          finishReason: 'tool_calls',
+          content: finalResponse,
+          toolCalls: [],
+          finishReason: 'stop',
         };
       }),
     } as CognitionLLM;

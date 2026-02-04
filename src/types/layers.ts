@@ -111,6 +111,9 @@ export interface CognitionContext {
     /** Whether smart model retry is enabled (based on system health) */
     enableSmartRetry: boolean;
   };
+
+  /** Callback to drain pending user messages for mid-loop injection */
+  drainPendingUserMessages: (() => Signal[]) | undefined;
 }
 
 // ============================================================

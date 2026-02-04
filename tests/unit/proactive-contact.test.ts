@@ -30,29 +30,16 @@ describe('Proactive Contact', () => {
     logger = createMockLogger();
     capturedRequests = [];
 
-    // Mock LLM that captures requests and returns valid core.final response
+    // Mock LLM that captures requests and uses natural termination
     mockLLM = {
       complete: vi.fn().mockResolvedValue(''),
       completeWithTools: vi.fn().mockImplementation(async (request: ToolCompletionRequest): Promise<ToolCompletionResponse> => {
         capturedRequests.push(request);
-        // Return a tool call to core.final with no_action to end the loop
-        // Uses flat structure: type, reason at top level (not nested under action)
+        // Natural termination: no tool calls, just text
         return {
-          content: 'Thinking about what to do...',
-          toolCalls: [
-            {
-              id: 'call_test1',
-              type: 'function',
-              function: {
-                name: 'core_final',
-                arguments: JSON.stringify({
-                  type: 'no_action',
-                  reason: 'Testing',
-                }),
-              },
-            },
-          ],
-          finishReason: 'tool_calls',
+          content: 'No action needed right now.',
+          toolCalls: [],
+          finishReason: 'stop',
         };
       }),
     };

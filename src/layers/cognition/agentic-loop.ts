@@ -4,12 +4,12 @@
  * Executes the think → tool → think cycle until natural conclusion using native OpenAI tool calling.
  * Handles tool execution, state updates, and escalation decisions.
  *
- * Flow (native tool calling):
+ * Flow (Codex-style natural termination):
  * 1. Build messages with system prompt and user context
- * 2. Call LLM with tools parameter (tool_choice: "required")
+ * 2. Call LLM with tools parameter (tool_choice: "auto")
  * 3. If tool_calls returned → execute tools, add results as tool messages
- * 4. If core.final called → parse args, compile to intents, return
- * 5. Loop until core.final or limits reached
+ * 4. If no tool calls → natural completion, compile to intents, return
+ * 5. Loop until no tool calls or limits reached
  * 6. If low confidence and safe to retry → retry with smart model
  */
 
@@ -26,6 +26,7 @@ import type {
   StructuredFact,
   ExecutedTool,
   EvidenceSource,
+  ConversationStatus,
 } from '../../types/cognition.js';
 import {
   DEFAULT_LOOP_CONFIG,
@@ -42,7 +43,6 @@ import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice } from '../../llm/provider.js';
-import type { CoreFinalArgs } from './tools/core/index.js';
 
 /**
  * Tools whose intents should be applied immediately during loop execution.
@@ -201,6 +201,9 @@ export interface LoopContext {
   unresolvedTensions?:
     | { id: string; content: string; dissonance: number; timestamp: Date }[]
     | undefined;
+
+  /** Callback to drain pending user messages for mid-loop injection */
+  drainPendingUserMessages: (() => Signal[]) | undefined;
 }
 
 /**
@@ -434,13 +437,44 @@ export class AgenticLoop {
 
       // Call LLM with native tool calling
       state.iteration++;
+
+      // Handle forceRespond with attempt limit to prevent dead-end
+      if (state.forceRespond) {
+        // Track that we ever forced respond (for confidence calculation)
+        if (!state.everForcedRespond) {
+          state.everForcedRespond = true;
+        }
+
+        if (state.forceRespondAttempts >= 3) {
+          // Allow tools again, but add system hint
+          messages.push({
+            role: 'system',
+            content: 'You must respond to the user now. Complete your response.',
+          });
+          state.forceRespond = false;
+          // Don't reset forceRespondAttempts or everForcedRespond - they persist for confidence
+        } else {
+          state.forceRespondAttempts++;
+        }
+      }
+
+      // Filter out core.escalate for smart model (can't escalate further)
+      const filteredTools = useSmart
+        ? tools.filter((t) => {
+            if (typeof t !== 'object') return true;
+            // Sanitize name for comparison (core.escalate in our code, core_escalate in API)
+            const name = t.function.name;
+            return name !== 'core.escalate' && name !== 'core_escalate';
+          })
+        : tools;
+
+      const toolChoice: 'auto' | 'none' = state.forceRespond ? 'none' : 'auto';
+
       const response = await this.llm.completeWithTools(
         {
           messages,
-          tools,
-          toolChoice: state.forceRespond
-            ? { type: 'function', function: { name: 'core_final' } } // Force terminal
-            : 'required', // Always require at least one tool call
+          tools: state.forceRespond ? [] : filteredTools,
+          toolChoice,
           parallelToolCalls: false, // Sequential for determinism
         },
         {
@@ -454,12 +488,52 @@ export class AgenticLoop {
         state.thoughts.push(response.content);
       }
 
-      // No tool calls = error (model MUST use core.final with tool_choice: "required")
+      // Detect truncated responses due to token limit
+      if (response.finishReason === 'length') {
+        this.logger.warn(
+          { iterations: state.iteration, toolCallsCount: response.toolCalls.length },
+          'Response truncated due to token limit - marking low confidence for potential retry'
+        );
+
+        // Mark as having difficulty (lowers confidence, may trigger smart retry)
+        if (!state.everForcedRespond) {
+          state.everForcedRespond = true;
+        }
+
+        // If we have tool calls, they might be incomplete
+        // If we have no tool calls but finishReason is length, text is definitely incomplete
+        if (response.toolCalls.length === 0 && context.triggerSignal.type === 'user_message') {
+          this.logger.debug('Truncated response with no tools for user message, forcing retry');
+          state.forceRespond = true;
+          continue;
+        }
+      }
+
+      // No tool calls = natural completion (Codex-style termination)
       if (response.toolCalls.length === 0) {
-        this.logger.error({ finishReason: response.finishReason }, 'Model returned no tool calls');
-        state.aborted = true;
-        state.abortReason = 'Model returned no tool calls - expected core.final';
-        break;
+        const messageText = response.content;
+
+        // Edge case: user message but no response text
+        if (!messageText && context.triggerSignal.type === 'user_message') {
+          this.logger.debug('No response text for user message, forcing response');
+          state.forceRespond = true;
+          continue; // Retry without tools
+        }
+
+        // Log warning for proactive triggers with no action (for investigation)
+        if (!messageText && context.triggerSignal.type !== 'user_message') {
+          this.logger.warn(
+            { triggerType: context.triggerSignal.type },
+            'Proactive trigger completed with no action - verify this is expected'
+          );
+        }
+
+        this.logger.debug(
+          { iterations: state.iteration, toolCalls: state.toolCallCount },
+          'Agentic loop completed naturally (no tool calls)'
+        );
+
+        return this.buildFinalResultFromNaturalCompletion(messageText, state, context);
       }
 
       // Add assistant message with tool calls to history
@@ -469,8 +543,19 @@ export class AgenticLoop {
         tool_calls: response.toolCalls,
       });
 
+      // Sort tool calls to ensure core.escalate is processed LAST within the batch
+      // This ensures other tools complete before escalation restarts the loop
+      const sortedToolCalls = [...response.toolCalls].sort((a, b) => {
+        const aName = unsanitizeToolName(a.function.name);
+        const bName = unsanitizeToolName(b.function.name);
+        // core.escalate should be last (highest sort value)
+        if (aName === 'core.escalate') return 1;
+        if (bName === 'core.escalate') return -1;
+        return 0;
+      });
+
       // Process tool calls (only one at a time due to parallel_tool_calls: false)
-      for (const toolCall of response.toolCalls) {
+      for (const toolCall of sortedToolCalls) {
         const toolName = unsanitizeToolName(toolCall.function.name);
         let args: Record<string, unknown>;
 
@@ -535,7 +620,7 @@ export class AgenticLoop {
                     notes: [
                       `STOP: This exact call has failed ${String(failCount)} times.`,
                       'Do NOT retry with same parameters.',
-                      'Use core.final to respond to user or ask for missing information.',
+                      'Respond to the user or ask for missing information.',
                     ],
                   }
                 : {
@@ -567,16 +652,56 @@ export class AgenticLoop {
           }
         }
 
-        // Check for terminal tool - DO NOT execute, just parse and return
-        if (toolName === 'core.final') {
-          this.logger.debug(
-            { type: args['type'], iterations: state.iteration, toolCalls: state.toolCallCount },
-            'Agentic loop completed via core.final'
-          );
+        // Intercept core.escalate - restart with smart model
+        if (toolName === 'core.escalate') {
+          const reason =
+            typeof args['reason'] === 'string' && args['reason']
+              ? args['reason']
+              : 'LLM requested deeper reasoning';
+          this.logger.info({ reason }, 'Escalating to smart model');
 
-          // Pass args directly - buildTerminalFromFinalArgs handles flat format
-          return this.buildFinalResult(args as unknown as CoreFinalArgs, state, context);
+          // Reset consecutive status-only calls on escalate
+          state.consecutiveStatusOnlyCalls = 0;
+
+          // Restart with smart model, preserving tool results
+          const enrichedContext: LoopContext = {
+            ...context,
+            previousAttempt: {
+              toolResults: [...state.toolResults], // Clone array
+              executedTools: [...state.executedTools], // Clone array (was Set, converted to array)
+              reason,
+            },
+          };
+
+          return this.runInternal(enrichedContext, true); // useSmart = true
         }
+
+        // Intercept core.conversationStatus - store in state
+        if (toolName === 'core.conversationStatus') {
+          state.conversationStatus = args['status'] as ConversationStatus;
+          state.consecutiveStatusOnlyCalls++;
+
+          // Infinite loop guard: if LLM only calls conversationStatus repeatedly, force response
+          if (state.consecutiveStatusOnlyCalls >= 3) {
+            this.logger.warn(
+              { consecutiveCalls: state.consecutiveStatusOnlyCalls },
+              'Forcing response after repeated conversationStatus calls'
+            );
+            state.forceRespond = true;
+          }
+
+          // Return success message
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ success: true, status: state.conversationStatus }),
+          });
+
+          continue; // Don't execute via registry, loop continues
+        }
+
+        // Reset consecutive status-only calls when any other tool is called
+        state.consecutiveStatusOnlyCalls = 0;
 
         // Track for smart retry
         state.executedTools.push({
@@ -658,7 +783,7 @@ export class AgenticLoop {
               count: identicalCount,
               message: `STOP: You called ${toolName} with identical parameters ${String(identicalCount)} times.`,
               action:
-                'Do NOT call this tool again with the same parameters. Use core.final to respond to user.',
+                'Do NOT call this tool again with the same parameters. Respond to the user directly.',
             },
           };
 
@@ -698,7 +823,7 @@ export class AgenticLoop {
               message:
                 'You have searched memory multiple times without finding what you need. ' +
                 'STOP searching. Either: (1) Try the actual tool that needs this data - it will tell you what is missing, ' +
-                'or (2) Use core.final to ask the user for the information.',
+                'or (2) Respond to the user directly asking for the information.',
             },
           };
 
@@ -735,7 +860,7 @@ export class AgenticLoop {
                 _repeatWarning: {
                   failCount,
                   message: `STOP: This exact call has failed ${String(failCount)} times.`,
-                  action: 'Do NOT retry. Use core.final to respond to user.',
+                  action: 'Do NOT retry. Respond to the user directly.',
                 },
               }
             : toolErrorData;
@@ -755,7 +880,16 @@ export class AgenticLoop {
         }
       }
 
-      // Continue loop - LLM will see tool results in next iteration
+      // Mid-loop user message injection
+      // Drain pending user messages and inject into conversation for next iteration
+      const pendingMessages = context.drainPendingUserMessages?.() ?? [];
+      for (const signal of pendingMessages) {
+        const text = (signal.data as { text: string }).text;
+        messages.push({ role: 'user', content: text });
+        this.logger.debug({ text: text.slice(0, 50) }, 'Injected mid-loop user message');
+      }
+
+      // Continue loop - LLM will see tool results and injected messages in next iteration
     }
 
     // Aborted - throw error to trigger smart retry at run() level
@@ -952,72 +1086,50 @@ export class AgenticLoop {
   }
 
   /**
-   * Build final result from core.final arguments.
+   * Build final result from natural completion (no tool calls).
+   * This implements Codex-style termination where the LLM naturally stops calling tools.
    */
-  private buildFinalResult(
-    args: CoreFinalArgs,
+  private buildFinalResultFromNaturalCompletion(
+    messageText: string | null,
     state: LoopState,
     context: LoopContext
   ): LoopResult {
-    const terminal = this.buildTerminalFromFinalArgs(args);
+    const terminal: Terminal = messageText
+      ? {
+          type: 'respond',
+          text: messageText,
+          conversationStatus: state.conversationStatus ?? 'active',
+          confidence: this.calculateConfidence(state),
+        }
+      : {
+          type: 'noAction',
+          reason: 'No response needed',
+        };
 
-    // Compile intents from tool results and terminal
-    // Pass full state so we can include tool_calls in SEND_MESSAGE for conversation history
     const intents = this.compileIntentsFromToolResults(terminal, context, state);
-
-    return {
-      success: true,
-      terminal,
-      intents,
-      state,
-      usedSmartRetry: state.iteration > 1, // If we retried
-    };
+    return { success: true, terminal, intents, state };
   }
 
   /**
-   * Convert core.final args to Terminal type.
-   * Uses flat format (all fields at root level).
+   * Calculate confidence based on loop state.
+   * Low iteration count and no forceRespond suggests higher confidence.
    */
-  private buildTerminalFromFinalArgs(args: CoreFinalArgs): Terminal {
-    switch (args.type) {
-      case 'respond': {
-        if (!args.text) {
-          throw new Error('core.final respond requires "text" field');
-        }
+  private calculateConfidence(state: LoopState): number {
+    // Base confidence
+    let confidence = 0.8;
 
-        return {
-          type: 'respond',
-          text: args.text,
-          conversationStatus: args.conversationStatus ?? 'active',
-          confidence: args.confidence ?? 0.8,
-        };
-      }
-      case 'no_action': {
-        if (!args.reason) {
-          throw new Error('core.final no_action requires "reason" field');
-        }
-        return {
-          type: 'noAction',
-          reason: args.reason,
-        };
-      }
-      case 'defer': {
-        if (!args.signalType || !args.reason || args.deferHours === undefined) {
-          throw new Error(
-            'core.final defer requires "signalType", "reason", and "deferHours" fields'
-          );
-        }
-
-        return {
-          type: 'defer',
-          signalType: args.signalType,
-          reason: args.reason,
-          deferHours: args.deferHours,
-        };
-      }
-      default:
-        throw new Error(`Unknown terminal type: ${String(args.type)}`);
+    // Reduce confidence if we ever had to force respond (indicates difficulty)
+    // This persists even after forceRespond is cleared to track prior difficulty
+    if (state.everForcedRespond) {
+      confidence -= 0.2;
     }
+
+    // Reduce confidence if many iterations (indicates uncertainty)
+    if (state.iteration > 3) {
+      confidence -= 0.1;
+    }
+
+    return Math.max(0.1, Math.min(1.0, confidence));
   }
 
   /**
@@ -1197,10 +1309,12 @@ Rules:
 - Plain text only, no markdown
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
-- confidence < 0.6 when uncertain
+- When done, simply respond with your message (no special tool needed)
+- Call core.conversationStatus before asking questions to set follow-up timing
+- Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
-- Tool requiresUserInput=true → ask user via core.final, don't retry
+- Tool requiresUserInput=true → ask user directly, don't retry
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
 - Tool returns success:false → inform user the action failed, don't claim success${
