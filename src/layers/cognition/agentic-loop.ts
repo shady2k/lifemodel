@@ -1567,6 +1567,11 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
       return `## Current Input\nUser message: "${text}"`;
     }
 
+    // Handle contact_urge triggers (proactive contact from ThresholdEngine)
+    if (signal.type === 'contact_urge') {
+      return this.buildProactiveContactSection(context, 'contact_urge');
+    }
+
     // Handle proactive contact triggers specially
     if (signal.type === 'threshold_crossed' && data) {
       const thresholdName = data['thresholdName'] as string | undefined;
