@@ -56,6 +56,7 @@ Uses native OpenAI tool calling with **Codex-style natural termination**:
 - Smart escalation: Fast model can request deeper reasoning via `core.escalate`
 - Smart retry: Low confidence and no side-effects → retry with expensive model
 - Conversation status: `core.conversationStatus` controls follow-up timing
+- Proactive deferral: `core.defer` allows LLM to postpone proactive contact
 
 ```
 Request: messages + tools (tool_choice: "auto")

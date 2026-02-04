@@ -12,8 +12,9 @@ Layers don't mutate state directly. They return Intents that CoreLoop applies.
 | `CANCEL_EVENT` | Remove scheduled event |
 | `SEND_MESSAGE` | Message the user |
 | `ACK_SIGNAL` | Mark signal as handled |
-| `DEFER_SIGNAL` | Postpone signal processing |
+| `DEFER_SIGNAL` | Postpone signal processing (from `core.defer`) |
 | `EMIT_THOUGHT` | Share internal thinking with memory |
+| `REMEMBER` | Store user facts with provenance tracking |
 | `SET_INTEREST` | Update topic interest weight |
 
 ## Why Intents?

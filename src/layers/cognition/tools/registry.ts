@@ -26,6 +26,7 @@ import {
   createSoulTool,
   createEscalateTool,
   createConversationStatusTool,
+  createDeferTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
@@ -410,6 +411,9 @@ export class ToolRegistry {
 
     // Conversation status tool (sets follow-up timing)
     this.tools.set('core.conversationStatus', createConversationStatusTool());
+
+    // Defer tool (defer proactive contact - terminal)
+    this.tools.set('core.defer', createDeferTool());
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

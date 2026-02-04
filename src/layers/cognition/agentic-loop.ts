@@ -700,6 +700,25 @@ export class AgenticLoop {
           continue; // Don't execute via registry, loop continues
         }
 
+        // Intercept core.defer - TERMINAL, ends loop with DeferTerminal
+        if (toolName === 'core.defer') {
+          const signalType = args['signalType'] as string;
+          const reason = args['reason'] as string;
+          const deferHours = args['deferHours'] as number;
+
+          this.logger.info({ signalType, reason, deferHours }, 'Deferring via core.defer');
+
+          const terminal: Terminal = {
+            type: 'defer',
+            signalType,
+            reason,
+            deferHours,
+          };
+
+          const intents = this.compileIntentsFromToolResults(terminal, context, state);
+          return { success: true, terminal, intents, state };
+        }
+
         // Reset consecutive status-only calls when any other tool is called
         state.consecutiveStatusOnlyCalls = 0;
 
@@ -1739,16 +1758,16 @@ Guidelines for proactive contact:
 - Do NOT ask about the previous conversation topic unless it's truly unfinished business
 
 DEFERRAL OPTION:
-If you decide NOT to contact now (user might be busy, it's late, etc.), use "defer" terminal:
-- Specify signalType (usually "contact_urge" for proactive contact)
-- Specify deferHours (2-8 hours typically)
-- Give a reason ("User seems busy", "It's late evening", etc.)
+If you decide NOT to contact now (user might be busy, it's late, etc.), call core.defer:
+- signalType: usually "contact_urge" for proactive contact
+- deferHours: 2-8 hours typically
+- reason: why deferring ("User seems busy", "It's late evening", etc.)
 - You won't be asked again until:
   a) The deferral time passes, OR
   b) Something significant changes (value increases significantly)
 
-Example defer terminal:
-{ "type": "defer", "signalType": "contact_urge", "reason": "User seems busy right now", "deferHours": 4, "parentId": "t1" }`;
+Example:
+core.defer({ signalType: "contact_urge", reason: "User seems busy right now", deferHours: 4 })`;
 
     return section;
   }
