@@ -110,7 +110,8 @@ export interface Deliberation {
   id: string;
   /** What triggered this deliberation */
   trigger: {
-    ticketId?: string;
+    /** Related soul:reflection thought that triggered this deliberation */
+    sourceThoughtId?: string;
     reason: string;
     context: string;
   };

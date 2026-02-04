@@ -364,6 +364,109 @@ export const DEFAULT_SOUL_BUDGET: SoulBudget = {
 };
 
 // ============================================================================
+// SOFT LEARNING (Phase 3.5)
+// ============================================================================
+
+/**
+ * A soft learning item - captures borderline dissonance (4-6) that decays over time.
+ *
+ * Philosophy: "Identity changes should be rare/costly" is about *impact*, not *observation*.
+ * We can observe frequently while keeping actual identity changes scarce.
+ *
+ * Items decay with a 72-hour half-life. If the same pattern repeats 3+ times
+ * within a week, the item is promoted to a standard soul:reflection thought.
+ */
+export interface SoftLearningItem {
+  id: string;
+  createdAt: Date;
+  lastTouchedAt: Date;
+  expiresAt: Date;
+
+  /** Dissonance score 4-6 */
+  dissonance: number;
+  /** Identity aspect involved (optional) */
+  aspect?: string;
+  /** What triggered this (user message summary) */
+  triggerSummary: string;
+  /** Snippet of the response */
+  responseSnippet: string;
+  /** Why this scored as dissonant */
+  reasoning: string;
+
+  /**
+   * Weight for consolidation (0-1).
+   * Calculated from dissonance: (dissonance - 3) / 3
+   * Decays over time: weight *= 0.5^(hours / halfLifeHours)
+   */
+  weight: number;
+  /** Number of merged occurrences */
+  count: number;
+  /** Lifecycle status */
+  status: 'active' | 'promoted' | 'expired';
+
+  /** Source context */
+  source: {
+    tickId: string;
+    recipientId: string;
+  };
+
+  /**
+   * Consolidation key - normalized for merging similar items.
+   * Format: aspect (or "general") + hash of reasoning pattern.
+   */
+  key: string;
+}
+
+/**
+ * Soft learning store - holds borderline observations that may or may not
+ * become real soul thoughts.
+ */
+export interface SoftLearningStore {
+  items: SoftLearningItem[];
+  /** Maximum items to keep */
+  maxItems: number;
+
+  /** Decay configuration */
+  decay: {
+    /** Half-life in hours for weight decay */
+    halfLifeHours: number;
+    /** Prune items below this weight */
+    pruneBelowWeight: number;
+  };
+
+  /** Promotion configuration */
+  promotion: {
+    /** Window in hours for counting occurrences */
+    windowHours: number;
+    /** Minimum merged count to promote */
+    minCount: number;
+    /** Minimum total weight to promote */
+    minTotalWeight: number;
+  };
+
+  /** Version for schema migrations */
+  version: number;
+}
+
+/**
+ * Default soft learning configuration.
+ */
+export const DEFAULT_SOFT_LEARNING_STORE: SoftLearningStore = {
+  items: [],
+  maxItems: 20,
+  decay: {
+    halfLifeHours: 72, // 3 days
+    pruneBelowWeight: 0.1,
+  },
+  promotion: {
+    windowHours: 168, // 1 week
+    minCount: 3,
+    minTotalWeight: 2.0,
+  },
+  version: 1,
+};
+
+// ============================================================================
 // AGGREGATE SOUL STATE
 // ============================================================================
 
@@ -378,6 +481,12 @@ export interface SoulState {
   cornerstones: Cornerstone[];
   revisions: RevisionNote[];
   budget: SoulBudget;
+
+  /**
+   * Soft learning store - borderline dissonance (4-6) observations.
+   * Items decay over time; only promoted to real thoughts if pattern repeats.
+   */
+  softLearning: SoftLearningStore;
 
   /**
    * Overall soul health (computed).
@@ -628,6 +737,7 @@ export function createDefaultSoulState(): SoulState {
     ],
     revisions: [],
     budget: createDefaultSoulBudget(),
+    softLearning: { ...DEFAULT_SOFT_LEARNING_STORE },
     health: {
       coherence: 0.7,
       stability: 0.8,

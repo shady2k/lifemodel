@@ -100,8 +100,8 @@ export interface SelfQuestion {
   thoughtPressureContribution: number;
   /** What output is expected */
   expectedOutput: QuestionOutput;
-  /** Related ticket if any */
-  ticketId?: string;
+  /** Related soul:reflection thought if any */
+  sourceThoughtId?: string;
 }
 
 /**

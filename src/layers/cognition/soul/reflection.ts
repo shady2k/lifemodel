@@ -4,11 +4,17 @@
  * Post-response reflection system that detects dissonance between
  * the agent's response and its self-model.
  *
+ * Tiered dissonance handling (Phase 3.5):
+ * - 1-3: Aligned, no action
+ * - 4-6: Soft learning item (decays, promotes if repeated)
+ * - 7-8: Standard soul:reflection thought
+ * - 9-10: Priority thought with urgent deliberation flag
+ *
  * Human-like flow:
  * 1. Response sent to user
  * 2. Quick reflection check: "Did that feel aligned with who I am?"
- * 3. If dissonance detected (score ≥ 7), create a soul:reflection thought
- * 4. The thought creates pressure until processed by Parliament (Phase 4)
+ * 3. Score determines action (soft learning vs hard thought)
+ * 4. Hard thoughts create pressure until processed by Parliament (Phase 4)
  *
  * Design principles:
  * - Non-blocking: Don't delay response to user
@@ -20,6 +26,7 @@ import type { Logger } from '../../../types/logger.js';
 import type { SoulProvider, FullSoulState } from '../../../storage/soul-provider.js';
 import type { MemoryProvider, MemoryEntry } from '../tools/registry.js';
 import type { CognitionLLM } from '../agentic-loop.js';
+import type { SoftLearningItem } from '../../../types/agent/soul.js';
 
 /**
  * Reflection result from the LLM.
@@ -126,10 +133,15 @@ export async function performReflection(
         'Reflection completed'
       );
 
-      // If dissonance is high enough, create a soul thought
+      // Tiered dissonance handling (Phase 3.5)
       if (result.dissonance >= cfg.dissonanceThreshold) {
+        // 7+: Create hard thought for Parliament deliberation
         await createReflectionThought(memoryProvider, result, context, log);
+      } else if (result.dissonance >= 4) {
+        // 4-6: Create soft learning item (decays, promotes if repeated)
+        await createSoftLearningItem(soulProvider, result, context, log);
       }
+      // 1-3: Aligned, no action needed
     } else {
       log.debug('Reflection LLM call failed, skipping budget consumption');
     }
@@ -311,4 +323,79 @@ I think I need to reflect on whether this aligns with who I am.`;
     { thoughtId: thought.id, dissonance: result.dissonance },
     'Soul reflection thought created'
   );
+}
+
+/**
+ * Create a soft learning item for borderline dissonance (4-6).
+ *
+ * Items decay over time (72h half-life). If the same pattern repeats
+ * 3+ times within a week, it's promoted to a standard reflection thought.
+ */
+async function createSoftLearningItem(
+  soulProvider: SoulProvider,
+  result: ReflectionResult,
+  context: ReflectionContext,
+  logger: Logger
+): Promise<void> {
+  const now = new Date();
+  const soulState = await soulProvider.getState();
+  const halfLifeHours = soulState.softLearning.decay.halfLifeHours;
+
+  // Calculate weight from dissonance: 4→0.33, 5→0.67, 6→1.0
+  const weight = (result.dissonance - 3) / 3;
+
+  // Generate consolidation key: aspect + reasoning pattern
+  const aspectKey = result.aspect ?? 'general';
+  const reasoningHash = simpleHash(result.reasoning);
+  const key = `${aspectKey}:${reasoningHash}`;
+
+  const item: SoftLearningItem = {
+    id: `soft_${String(Date.now())}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: now,
+    lastTouchedAt: now,
+    expiresAt: new Date(now.getTime() + halfLifeHours * 3 * 60 * 60 * 1000), // 3x half-life
+
+    dissonance: result.dissonance,
+    ...(result.aspect !== undefined && { aspect: result.aspect }),
+    triggerSummary: context.triggerSummary,
+    responseSnippet: context.responseText.slice(0, 150),
+    reasoning: result.reasoning,
+
+    weight,
+    count: 1,
+    status: 'active',
+
+    source: {
+      tickId: context.tickId,
+      recipientId: context.recipientId,
+    },
+
+    key,
+  };
+
+  await soulProvider.addSoftLearningItem(item);
+
+  logger.debug({ key, dissonance: result.dissonance, weight }, 'Soft learning item created');
+}
+
+/**
+ * Simple hash for consolidation keys.
+ * Not cryptographic - just for grouping similar reasoning patterns.
+ */
+function simpleHash(str: string): string {
+  // Normalize: lowercase, remove punctuation, take first 50 chars
+  const normalized = str
+    .toLowerCase()
+    .replace(/[^\w\s]/g, '')
+    .slice(0, 50);
+
+  // Simple string hash
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i++) {
+    const char = normalized.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+
+  return Math.abs(hash).toString(36);
 }

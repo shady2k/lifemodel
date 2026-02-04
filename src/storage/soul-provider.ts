@@ -20,6 +20,7 @@ import type {
   CaseLaw,
   NarrativeLoom,
   SelfModel,
+  SoftLearningItem,
 } from '../types/agent/soul.js';
 import type { Parliament, Deliberation } from '../types/agent/parliament.js';
 import type { SocraticEngine, UnanswerableCore, SelfQuestion } from '../types/agent/socratic.js';
@@ -327,6 +328,188 @@ export class SoulProvider {
       canReflect: await this.canReflect(),
       canAudit: await this.canAudit(),
     };
+  }
+
+  // ============================================================================
+  // SOFT LEARNING (Phase 3.5)
+  // ============================================================================
+
+  /**
+   * Add or merge a soft learning item.
+   *
+   * If an item with the same key exists, merge by incrementing count and
+   * taking the max weight. Otherwise, add a new item.
+   *
+   * @param item The soft learning item to add
+   * @returns The final item (new or merged)
+   */
+  async addSoftLearningItem(item: SoftLearningItem): Promise<SoftLearningItem> {
+    await this.ensureLoaded();
+    const state = this.getLoadedState();
+
+    // Run decay first to keep weights current
+    this.decaySoftLearningInternal();
+
+    // Check for existing item with same key
+    const existing = state.softLearning.items.find(
+      (i) => i.key === item.key && i.status === 'active'
+    );
+
+    if (existing) {
+      // Merge: increment count, take max weight, update timestamps
+      existing.count += 1;
+      existing.weight = Math.max(existing.weight, item.weight);
+      existing.lastTouchedAt = new Date();
+      // Extend expiry based on new observation
+      const now = new Date();
+      existing.expiresAt = new Date(
+        now.getTime() + state.softLearning.decay.halfLifeHours * 3 * 60 * 60 * 1000
+      );
+      this.logger.debug(
+        { key: item.key, count: existing.count, weight: existing.weight },
+        'Soft learning item merged'
+      );
+      await this.persist();
+      return existing;
+    }
+
+    // Add new item
+    state.softLearning.items.push(item);
+
+    // Enforce max items (keep highest weight items)
+    if (state.softLearning.items.length > state.softLearning.maxItems) {
+      state.softLearning.items.sort((a, b) => b.weight - a.weight);
+      const removed = state.softLearning.items.pop();
+      if (removed) {
+        this.logger.debug({ removedKey: removed.key }, 'Soft learning item evicted (max items)');
+      }
+    }
+
+    this.logger.debug({ key: item.key, dissonance: item.dissonance }, 'Soft learning item added');
+    await this.persist();
+    return item;
+  }
+
+  /**
+   * Apply decay to all soft learning items and prune expired ones.
+   *
+   * Called automatically on addSoftLearningItem. Can also be called
+   * explicitly during maintenance.
+   */
+  async decaySoftLearning(): Promise<void> {
+    await this.ensureLoaded();
+    this.decaySoftLearningInternal();
+    await this.persist();
+  }
+
+  /**
+   * Internal decay logic (no persist, no ensureLoaded).
+   */
+  private decaySoftLearningInternal(): void {
+    if (!this.state) return;
+
+    const now = Date.now();
+    const config = this.state.softLearning.decay;
+
+    for (const item of this.state.softLearning.items) {
+      if (item.status !== 'active') continue;
+
+      // Check expiry
+      if (now >= item.expiresAt.getTime()) {
+        item.status = 'expired';
+        continue;
+      }
+
+      // Apply exponential decay: weight *= 0.5^(hours / halfLifeHours)
+      const hoursSinceTouch = (now - item.lastTouchedAt.getTime()) / (60 * 60 * 1000);
+      const decayFactor = Math.pow(0.5, hoursSinceTouch / config.halfLifeHours);
+      item.weight *= decayFactor;
+      item.lastTouchedAt = new Date(now);
+
+      // Mark expired if below threshold
+      if (item.weight < config.pruneBelowWeight) {
+        item.status = 'expired';
+      }
+    }
+
+    // Remove expired items
+    const before = this.state.softLearning.items.length;
+    this.state.softLearning.items = this.state.softLearning.items.filter(
+      (i) => i.status !== 'expired'
+    );
+    const removed = before - this.state.softLearning.items.length;
+    if (removed > 0) {
+      this.logger.debug({ removed }, 'Soft learning items pruned');
+    }
+  }
+
+  /**
+   * Check if any soft learning items should be promoted to real thoughts.
+   *
+   * An item is promoted if:
+   * - count >= minCount (same pattern repeated enough times)
+   * - sum of weights for items with same key >= minTotalWeight
+   *
+   * Returns the items that should be promoted (caller creates the thoughts).
+   */
+  async promoteSoftLearning(): Promise<SoftLearningItem[]> {
+    await this.ensureLoaded();
+    const state = this.getLoadedState();
+    const config = state.softLearning.promotion;
+    const now = Date.now();
+
+    // Group active items by key
+    const byKey = new Map<string, SoftLearningItem[]>();
+    for (const item of state.softLearning.items) {
+      if (item.status !== 'active') continue;
+
+      // Check if within promotion window
+      const hoursSinceCreation = (now - item.createdAt.getTime()) / (60 * 60 * 1000);
+      if (hoursSinceCreation > config.windowHours) continue;
+
+      const items = byKey.get(item.key) ?? [];
+      items.push(item);
+      byKey.set(item.key, items);
+    }
+
+    // Find items that meet promotion criteria
+    const toPromote: SoftLearningItem[] = [];
+    for (const [key, items] of byKey) {
+      const totalCount = items.reduce((sum, i) => sum + i.count, 0);
+      const totalWeight = items.reduce((sum, i) => sum + i.weight, 0);
+
+      if (totalCount >= config.minCount && totalWeight >= config.minTotalWeight) {
+        // Take the most recent item as the representative
+        const representative = items.reduce((a, b) =>
+          a.lastTouchedAt.getTime() > b.lastTouchedAt.getTime() ? a : b
+        );
+        toPromote.push(representative);
+
+        // Mark all items with this key as promoted
+        for (const item of items) {
+          item.status = 'promoted';
+        }
+
+        this.logger.info(
+          { key, totalCount, totalWeight },
+          'Soft learning items promoted to reflection thought'
+        );
+      }
+    }
+
+    if (toPromote.length > 0) {
+      await this.persist();
+    }
+
+    return toPromote;
+  }
+
+  /**
+   * Get active soft learning items (for debugging/introspection).
+   */
+  async getSoftLearningItems(): Promise<SoftLearningItem[]> {
+    await this.ensureLoaded();
+    return this.getLoadedState().softLearning.items.filter((i) => i.status === 'active');
   }
 
   /**
