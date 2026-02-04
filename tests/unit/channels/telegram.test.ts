@@ -71,7 +71,7 @@ describe('TelegramChannel', () => {
   const config: TelegramConfig = {
     botToken: 'test-bot-token',
     timeout: 5000,
-    maxRetries: 2,
+    maxRetries: 3,
     retryDelay: 100,
   };
 

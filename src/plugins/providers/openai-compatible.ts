@@ -96,7 +96,7 @@ export interface OpenAICompatibleConfig {
 const DEFAULT_CONFIG = {
   name: 'openai-compatible',
   timeout: 120_000, // 2 minutes - LLM calls can be slow
-  maxRetries: 2,
+  maxRetries: 3,
   retryDelay: 1000,
   circuitResetTimeout: 60_000,
   enableThinking: false,
@@ -203,6 +203,27 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
   }
 
   /**
+   * Calculate backoff delay with exponential scaling for 429 rate limits.
+   * Rate limits need longer recovery time than other transient errors.
+   */
+  protected calculateBackoff(attempt: number, isRateLimit: boolean): number {
+    if (isRateLimit) {
+      // Exponential backoff for 429: 2s, 4s, 8s, 16s...
+      // Starting at 2 seconds to give upstream providers time to recover
+      return 2000 * Math.pow(2, attempt);
+    }
+    // Linear backoff for other errors: 1s, 2s, 3s...
+    return this.config.retryDelay * (attempt + 1);
+  }
+
+  /**
+   * Check if error is a 429 rate limit error.
+   */
+  protected isRateLimitError(error: unknown): boolean {
+    return error instanceof LLMError && error.statusCode === 429;
+  }
+
+  /**
    * Execute with retry logic.
    */
   protected async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
@@ -216,6 +237,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 
         // Extract error details for logging
         const errorInfo = this.extractErrorInfo(error);
+        const isRateLimit = this.isRateLimitError(error);
 
         if (error instanceof LLMError && !error.retryable) {
           this.providerLogger?.error(errorInfo, 'Non-retryable LLM error');
@@ -223,17 +245,20 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         }
 
         if (attempt < this.config.maxRetries) {
+          const backoffMs = this.calculateBackoff(attempt, isRateLimit);
           this.providerLogger?.warn(
             {
               attempt: attempt + 1,
               maxRetries: this.config.maxRetries,
+              backoffMs,
+              backoffReason: isRateLimit ? 'rate_limit_exponential' : 'linear',
               ...errorInfo,
             },
             'Retrying after transient error'
           );
-          await this.sleep(this.config.retryDelay * (attempt + 1));
+          await this.sleep(backoffMs);
         } else {
-          // Final attempt failed
+          // Final attempt failed - this is the "All retry attempts exhausted" case
           this.providerLogger?.error(
             {
               attempts: this.config.maxRetries + 1,

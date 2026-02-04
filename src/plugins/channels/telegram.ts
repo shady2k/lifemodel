@@ -46,7 +46,7 @@ export interface TelegramConfig {
 
 const DEFAULT_CONFIG = {
   timeout: 30_000,
-  maxRetries: 2,
+  maxRetries: 3,
   retryDelay: 1000,
 };
 
@@ -81,7 +81,7 @@ export class TelegramError extends Error {
  *
  * Features:
  * - Circuit breaker for resilience (3 failures → open, 60s reset)
- * - Retry logic (2 retries with exponential backoff)
+ * - Retry logic (3 retries with exponential backoff)
  * - Graceful start/stop
  */
 export class TelegramChannel implements Channel {
