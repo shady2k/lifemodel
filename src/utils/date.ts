@@ -49,6 +49,8 @@ export const DATE_FIELD_NAMES = [
   'expiresAt',
   // Parliament deliberation (Phase 4)
   'lastDeliberationAt',
+  // Ack registry persistence
+  'deferUntil',
 ] as const;
 
 /**

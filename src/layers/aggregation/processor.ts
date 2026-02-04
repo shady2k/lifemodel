@@ -104,6 +104,7 @@ export class AggregationProcessor implements AggregationLayer {
     primaryRecipientId?: string;
     pluginEventValidator?: PluginEventValidator;
     memoryProvider?: MemoryProvider;
+    ackRegistry?: SignalAckRegistry;
   }): void {
     const thresholdDeps: ThresholdEngineDeps = {};
     if (deps.conversationManager) thresholdDeps.conversationManager = deps.conversationManager;
@@ -111,6 +112,7 @@ export class AggregationProcessor implements AggregationLayer {
     if (deps.primaryRecipientId) thresholdDeps.primaryRecipientId = deps.primaryRecipientId;
     if (deps.pluginEventValidator) thresholdDeps.pluginEventValidator = deps.pluginEventValidator;
     if (deps.memoryProvider) thresholdDeps.memoryProvider = deps.memoryProvider;
+    if (deps.ackRegistry) thresholdDeps.ackRegistry = deps.ackRegistry;
     this.thresholdEngine.updateDeps(thresholdDeps);
     this.logger.debug('AGGREGATION dependencies updated');
   }

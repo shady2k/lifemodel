@@ -23,6 +23,27 @@ export type AckType =
   | 'suppressed'; // Don't wake for this type (until manually cleared)
 
 /**
+ * Persisted AckRegistry state (JSON-safe).
+ */
+export interface PersistedAckRegistryState {
+  version: number;
+  acks: PersistedSignalAck[];
+  handledSignalIds: [string, number][]; // [signalId, timestamp] entries
+  savedAt: string;
+}
+
+/**
+ * SignalAck with Dates as ISO strings.
+ */
+export interface PersistedSignalAck extends Omit<SignalAck, 'createdAt' | 'deferUntil'> {
+  createdAt: string;
+  deferUntil: string | null;
+}
+
+/** Current version of the persistence format */
+export const CURRENT_ACK_REGISTRY_VERSION = 1;
+
+/**
  * Signal acknowledgment record.
  */
 export interface SignalAck {
@@ -98,9 +119,9 @@ const DEFAULT_CONFIG: AckRegistryConfig = {
  * be woken vs when a signal should be filtered out.
  */
 export class SignalAckRegistry {
-  private readonly logger: Logger;
+  protected readonly logger: Logger;
   private readonly config: AckRegistryConfig;
-  private readonly acks = new Map<string, SignalAck>();
+  protected readonly acks = new Map<string, SignalAck>();
   /** Track handled signal IDs with timestamp for TTL pruning */
   private readonly handledSignalIds = new Map<string, number>();
   /** Max handled signal IDs to track (LRU-style cleanup) */
@@ -112,6 +133,14 @@ export class SignalAckRegistry {
   constructor(logger: Logger, config: Partial<AckRegistryConfig> = {}) {
     this.logger = logger.child({ component: 'ack-registry' });
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Called whenever state changes. Override in subclasses for persistence.
+   * Protected hook allows wrapper classes to track ALL state mutations.
+   */
+  protected onMutate(): void {
+    // Subclasses override to trigger persistence
   }
 
   /**
@@ -144,6 +173,7 @@ export class SignalAckRegistry {
     };
 
     this.acks.set(id, fullAck);
+    this.onMutate();
 
     this.logger.debug(
       {
@@ -194,6 +224,7 @@ export class SignalAckRegistry {
       case 'handled':
         // Handled acks are transient - clear and allow
         this.acks.delete(id);
+        this.onMutate();
         return {
           blocked: false,
           isOverride: false,
@@ -234,6 +265,7 @@ export class SignalAckRegistry {
         'Deferral expired'
       );
       this.acks.delete(ack.id);
+      this.onMutate();
       return {
         blocked: false,
         isOverride: false,
@@ -260,6 +292,7 @@ export class SignalAckRegistry {
           'Deferral override due to significant value increase'
         );
         this.acks.delete(ack.id);
+        this.onMutate();
         return {
           blocked: false,
           isOverride: true,
@@ -288,6 +321,7 @@ export class SignalAckRegistry {
 
     if (existed) {
       this.logger.debug({ signalType, source }, 'Signal ack cleared');
+      this.onMutate();
     }
 
     return existed;
@@ -301,6 +335,7 @@ export class SignalAckRegistry {
     const handledCount = this.handledSignalIds.size;
     this.acks.clear();
     this.handledSignalIds.clear();
+    this.onMutate();
     this.logger.debug({ ackCount, handledCount }, 'All signal acks cleared');
   }
 
@@ -338,6 +373,7 @@ export class SignalAckRegistry {
     }
 
     this.handledSignalIds.set(signalId, Date.now());
+    this.onMutate();
     this.logger.debug({ signalId }, 'Signal marked as handled');
   }
 
@@ -398,9 +434,186 @@ export class SignalAckRegistry {
 
     if (pruned > 0) {
       this.logger.debug({ pruned }, 'Expired acks pruned');
+      this.onMutate();
     }
 
     return pruned;
+  }
+
+  /**
+   * Export current state for persistence.
+   * Converts Dates to ISO strings for JSON serialization.
+   */
+  export(): PersistedAckRegistryState {
+    const acks: PersistedSignalAck[] = Array.from(this.acks.values()).map((ack) => ({
+      ...ack,
+      createdAt: ack.createdAt.toISOString(),
+      deferUntil: ack.deferUntil?.toISOString() ?? null,
+    }));
+
+    // Export handledSignalIds as [signalId, timestamp] tuples
+    // Only include non-expired entries (within TTL)
+    const now = Date.now();
+    const handledIds: [string, number][] = Array.from(this.handledSignalIds.entries())
+      .filter(([, timestamp]) => now - timestamp < this.handledIdsTtlMs)
+      .map(([signalId, timestamp]) => [signalId, timestamp]);
+
+    return {
+      version: CURRENT_ACK_REGISTRY_VERSION,
+      acks,
+      handledSignalIds: handledIds,
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Import state from persistence with validation.
+   * Converts ISO strings back to Dates, skips invalid/expired entries.
+   *
+   * Validates all entries before modifying state to prevent corruption
+   * if import fails partway through.
+   */
+  import(state: PersistedAckRegistryState): void {
+    // Validate version
+    if (state.version !== CURRENT_ACK_REGISTRY_VERSION) {
+      throw new Error(
+        `Invalid AckRegistry state version: expected ${String(CURRENT_ACK_REGISTRY_VERSION)}, got ${String(state.version)}`
+      );
+    }
+
+    // Validate structure (hardening against corrupted storage)
+    if (!Array.isArray(state.acks)) {
+      throw new Error('Invalid AckRegistry state: acks is not an array');
+    }
+    if (!Array.isArray(state.handledSignalIds)) {
+      throw new Error('Invalid AckRegistry state: handledSignalIds is not an array');
+    }
+
+    const now = new Date();
+    const validAcks = new Map<string, SignalAck>();
+    const validHandledIds = new Map<string, number>();
+    const validAckTypes: AckType[] = ['handled', 'deferred', 'suppressed'];
+
+    // First pass: validate all entries without modifying state
+    for (const ack of state.acks) {
+      // Validate id is a string
+      if (typeof ack.id !== 'string') {
+        this.logger.warn({ id: ack.id }, 'Skipping invalid ack: id is not a string');
+        continue;
+      }
+
+      // Validate signalType is a string
+      if (typeof ack.signalType !== 'string') {
+        this.logger.warn(
+          { id: ack.id, signalType: ack.signalType },
+          'Skipping invalid ack: signalType is not a string'
+        );
+        continue;
+      }
+
+      // Validate ackType is a known value
+      if (!validAckTypes.includes(ack.ackType)) {
+        this.logger.warn(
+          { id: ack.id, ackType: ack.ackType },
+          'Skipping invalid ack: unknown ackType'
+        );
+        continue;
+      }
+
+      // Validate createdAt is a valid date
+      const createdAt = new Date(ack.createdAt);
+      if (isNaN(createdAt.getTime())) {
+        this.logger.warn(
+          { id: ack.id, createdAt: ack.createdAt },
+          'Skipping invalid ack: createdAt is not a valid date'
+        );
+        continue;
+      }
+
+      // Validate deferUntil (if present) is a valid date
+      if (ack.deferUntil) {
+        const deferUntil = new Date(ack.deferUntil);
+        if (isNaN(deferUntil.getTime())) {
+          this.logger.warn(
+            { id: ack.id, deferUntil: ack.deferUntil },
+            'Skipping invalid ack: deferUntil is not a valid date'
+          );
+          continue;
+        }
+      }
+
+      // Skip expired deferrals
+      if (ack.ackType === 'deferred' && ack.deferUntil) {
+        const deferUntil = new Date(ack.deferUntil);
+        if (deferUntil <= now) {
+          this.logger.debug(
+            { id: ack.id, deferUntil: ack.deferUntil },
+            'Skipping expired deferral on import'
+          );
+          continue;
+        }
+      }
+
+      // Reconstruct ack with Dates
+      validAcks.set(ack.id, {
+        ...ack,
+        createdAt,
+        deferUntil: ack.deferUntil ? new Date(ack.deferUntil) : undefined,
+      });
+    }
+
+    // Validate handledSignalIds (skip expired entries)
+    for (const [signalId, timestamp] of state.handledSignalIds) {
+      // Validate signalId is a string
+      if (typeof signalId !== 'string') {
+        this.logger.warn(
+          { signalId },
+          'Skipping invalid handled signal ID: signalId is not a string'
+        );
+        continue;
+      }
+
+      // Validate timestamp is a number
+      if (typeof timestamp !== 'number' || isNaN(timestamp)) {
+        this.logger.warn(
+          { signalId, timestamp },
+          'Skipping invalid handled signal ID: timestamp is not a valid number'
+        );
+        continue;
+      }
+
+      const age = now.getTime() - timestamp;
+      if (age < this.handledIdsTtlMs) {
+        validHandledIds.set(signalId, timestamp);
+      } else {
+        this.logger.trace(
+          { signalId, age: Math.round(age / 1000) },
+          'Skipping expired handled signal ID on import'
+        );
+      }
+    }
+
+    // Second pass: only clear and set if all validation passed
+    this.acks.clear();
+    this.handledSignalIds.clear();
+
+    for (const [id, ack] of validAcks) {
+      this.acks.set(id, ack);
+    }
+
+    for (const [id, timestamp] of validHandledIds) {
+      this.handledSignalIds.set(id, timestamp);
+    }
+
+    this.logger.debug(
+      {
+        importedAckCount: this.acks.size,
+        originalAckCount: state.acks.length,
+        importedHandledCount: this.handledSignalIds.size,
+        originalHandledCount: state.handledSignalIds.length,
+      },
+      'AckRegistry state imported'
+    );
   }
 
   /**

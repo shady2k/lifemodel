@@ -21,3 +21,17 @@ export type { WakeDecision } from './threshold-engine.js';
 // Pattern detector
 export { PatternDetector, createPatternDetector } from './pattern-detector.js';
 export type { Pattern, PatternMatch, PatternDetectorConfig } from './pattern-detector.js';
+
+// Ack registry
+export { SignalAckRegistry, createAckRegistry } from './ack-registry.js';
+export type {
+  AckType,
+  SignalAck,
+  AckCheckResult,
+  AckRegistryConfig,
+  PersistedAckRegistryState,
+  PersistedSignalAck,
+} from './ack-registry.js';
+
+// Persistent ack registry
+export { PersistentAckRegistry } from './persistent-ack-registry.js';

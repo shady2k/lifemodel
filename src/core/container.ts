@@ -53,6 +53,7 @@ import {
   createPersistentRecipientRegistry,
   type IRecipientRegistry,
 } from './recipient-registry.js';
+import { PersistentAckRegistry } from '../layers/aggregation/persistent-ack-registry.js';
 
 /**
  * Application configuration.
@@ -462,6 +463,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   await recipientRegistry.init();
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
+  // Create persistent ack registry for deferrals (must be loaded before use)
+  const ackRegistry = new PersistentAckRegistry(logger, storage);
+  await ackRegistry.load();
+  logger.info('AckRegistry configured with persistence');
+
   // === PLUGIN SYSTEM INITIALIZATION ===
   // New architecture: Create layers first, wire callbacks, then load plugins
 
@@ -608,11 +614,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
 
-  // Wire plugin event validator and memory provider to aggregation layer
+  // Wire plugin event validator, memory provider, and ack registry to aggregation layer
   // Memory provider is needed for fact storage (fact_batch signals → memory)
+  // Ack registry is needed for deferral persistence
   layers.aggregation.updateDeps({
     pluginEventValidator: (data: PluginEventData) => pluginLoader.validatePluginEvent(data),
     memoryProvider,
+    ackRegistry,
   });
 
   // Create core loop config
@@ -720,6 +728,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
     // Flush recipient registry
     await recipientRegistry.flush();
+
+    // Flush ack registry
+    await ackRegistry.flush();
 
     // Flush deferred storage (ensures all pending writes are persisted)
     await storage.shutdown();
