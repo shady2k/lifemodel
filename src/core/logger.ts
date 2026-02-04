@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
+import { getTraceContext } from './trace-context.js';
 
 /**
  * Logger configuration.
@@ -90,12 +91,40 @@ function ensureLogDir(logDir: string): void {
 }
 
 /**
+ * Create Pino mixin that injects trace context.
+ * Auto-injects traceId, correlationId, parentId, and spanId into ALL log entries.
+ *
+ * IMPORTANT: Explicit trace fields in log args take precedence over ALS values.
+ * This allows developers to override trace IDs when needed.
+ */
+function createTraceMixin(): () => Record<string, unknown> {
+  // Cache these keys to avoid repeated string allocations
+  const TRACE_KEYS = ['traceId', 'correlationId', 'parentId', 'spanId'] as const;
+
+  return () => {
+    const ctx = getTraceContext();
+    if (!ctx) return {};
+
+    // Return only fields that are present in context
+    // Caller-provided values will override these via Pino's merge behavior
+    const result: Record<string, unknown> = {};
+    for (const key of TRACE_KEYS) {
+      if (ctx[key]) {
+        result[key] = ctx[key];
+      }
+    }
+    return result;
+  };
+}
+
+/**
  * Create a configured logger instance.
  *
  * Features:
  * - Console output with pino-pretty (in development)
  * - File output with timestamp-based filename
  * - Auto-cleanup of old and empty log files (max 10)
+ * - Auto-injection of trace context via mixin (AsyncLocalStorage)
  */
 export function createLogger(config: Partial<LoggerConfig> = {}): pino.Logger {
   const finalConfig = { ...DEFAULT_CONFIG, ...config };
@@ -146,5 +175,7 @@ export function createLogger(config: Partial<LoggerConfig> = {}): pino.Logger {
     transport: {
       targets,
     },
+    // Auto-inject trace context into ALL log entries
+    mixin: createTraceMixin(),
   });
 }

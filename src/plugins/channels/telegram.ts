@@ -7,6 +7,7 @@ import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
 import type { Channel, CircuitStats, SendOptions, SendResult } from '../../channels/channel.js';
 import type { IRecipientRegistry } from '../../core/recipient-registry.js';
+import { withTraceContext, createTraceContext } from '../../core/trace-context.js';
 
 /**
  * Telegram message payload structure.
@@ -275,6 +276,7 @@ export class TelegramChannel implements Channel {
 
   /**
    * Handle incoming message - convert to Signal and dispatch.
+   * Each message gets its own trace context for causal chain tracking.
    */
   private onMessage(ctx: {
     from?: { id: number; username?: string; first_name?: string; last_name?: string };
@@ -299,29 +301,43 @@ export class TelegramChannel implements Channel {
     const text = ctx.message.text;
     const recipientId = this.recipientRegistry.getOrCreate(this.name, destination);
 
-    if (this.signalCallback) {
-      const signal = createUserMessageSignal({
+    const correlationId = ctx.message.message_id.toString();
+    const signal = createUserMessageSignal(
+      {
         text,
         channel: 'telegram',
         userId,
         recipientId,
-      });
-      this.signalCallback(signal);
+      },
+      { correlationId }
+    );
 
-      this.logger?.debug(
-        {
-          signalId: signal.id,
-          userId,
-          recipientId,
-          textLength: text.length,
-        },
-        'Message received as Signal'
-      );
-    }
+    // Wrap callback in trace context (signal.id as root)
+    withTraceContext(
+      createTraceContext(signal.id, {
+        correlationId,
+        spanId: `msg_${String(ctx.message.message_id)}`,
+      }),
+      () => {
+        if (this.signalCallback) {
+          this.signalCallback(signal);
 
-    if (this.wakeUpCallback) {
-      this.wakeUpCallback();
-    }
+          this.logger?.debug(
+            {
+              signalId: signal.id,
+              userId,
+              recipientId,
+              textLength: text.length,
+            },
+            'Message received as Signal'
+          );
+        }
+
+        if (this.wakeUpCallback) {
+          this.wakeUpCallback();
+        }
+      }
+    );
   }
 
   /**
@@ -357,6 +373,7 @@ export class TelegramChannel implements Channel {
 
   /**
    * Process a single reaction and emit signal.
+   * Each reaction gets its own trace context for causal chain tracking.
    */
   private processReaction(
     chatId: string,
@@ -366,6 +383,7 @@ export class TelegramChannel implements Channel {
     actorChatId?: number
   ): void {
     const recipientId = this.recipientRegistry.getOrCreate(this.name, chatId);
+    const correlationId = messageId.toString();
 
     // Create signal - preview will be enriched by CoreLoop via conversation history lookup
     // No sentiment classification - LLM interprets emoji naturally
@@ -383,20 +401,29 @@ export class TelegramChannel implements Channel {
       signalParams.actorChatId = actorChatId.toString();
     }
 
-    const signal = createMessageReactionSignal(signalParams);
+    const signal = createMessageReactionSignal(signalParams, { correlationId });
 
-    this.signalCallback?.(signal);
-    this.wakeUpCallback?.();
+    // Wrap callbacks in trace context (signal.id as root)
+    withTraceContext(
+      createTraceContext(signal.id, {
+        correlationId,
+        spanId: `reaction_${String(messageId)}`,
+      }),
+      () => {
+        this.signalCallback?.(signal);
+        this.wakeUpCallback?.();
 
-    this.logger?.debug(
-      {
-        signalId: signal.id,
-        emoji,
-        messageId,
-        recipientId,
-        isAnonymous: !fromUserId && !!actorChatId,
-      },
-      'Reaction received as Signal'
+        this.logger?.debug(
+          {
+            signalId: signal.id,
+            emoji,
+            messageId,
+            recipientId,
+            isAnonymous: !fromUserId && !!actorChatId,
+          },
+          'Reaction received as Signal'
+        );
+      }
     );
   }
 

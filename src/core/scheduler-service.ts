@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { Logger } from '../types/logger.js';
 import type { Signal, PluginEventData } from '../types/signal.js';
 import type { SchedulerPrimitiveImpl } from './scheduler-primitive.js';
+import { withTraceContext, createTraceContext } from './trace-context.js';
 
 /**
  * Callback type for pushing signals into the pipeline.
@@ -223,44 +224,53 @@ export class SchedulerService {
             break;
           }
 
-          // IMPORTANT: Record fireId BEFORE emitting for at-most-once semantics
-          // If we crash after this but before signal delivery, event is lost (not duplicated)
-          await scheduler.markFired(entry.id, fireId, now);
+          const correlationId = entry.id;
+          const signal = this.createPluginEventSignal(pluginId, entry.data, fireId, correlationId);
 
-          // Get event kind from data
-          const rawKind = entry.data['kind'];
-          const eventKind = typeof rawKind === 'string' ? rawKind : `${pluginId}:scheduled`;
+          // Wrap schedule firing with trace context (signal.id as root)
+          await withTraceContext(
+            createTraceContext(signal.id, { correlationId, spanId: `fire_${fireId}` }),
+            async () => {
+              // IMPORTANT: Record fireId BEFORE emitting for at-most-once semantics
+              await scheduler.markFired(entry.id, fireId, now);
 
-          // Notify plugin of its event (for internal state updates)
-          if (this.pluginEventCallback) {
-            try {
-              await this.pluginEventCallback(pluginId, eventKind, entry.data);
-            } catch (error) {
-              this.logger.error(
+              // Get event kind from data
+              const rawKind = entry.data['kind'];
+              const eventKind = typeof rawKind === 'string' ? rawKind : `${pluginId}:scheduled`;
+
+              // Notify plugin of its event (for internal state updates)
+              if (this.pluginEventCallback) {
+                try {
+                  await this.pluginEventCallback(pluginId, eventKind, entry.data);
+                } catch (error) {
+                  this.logger.error(
+                    {
+                      pluginId,
+                      eventKind,
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                    'Plugin event callback failed'
+                  );
+                }
+              }
+
+              // Create and emit signal to wake cognition
+              if (this.signalCallback) {
+                this.signalCallback(signal);
+              }
+
+              totalFired++;
+
+              this.logger.debug(
                 {
                   pluginId,
-                  eventKind,
-                  error: error instanceof Error ? error.message : String(error),
+                  scheduleId: entry.id,
+                  fireId,
+                  dataKeys: Object.keys(entry.data),
                 },
-                'Plugin event callback failed'
+                'Schedule fired'
               );
             }
-          }
-
-          // Create and emit signal to wake cognition
-          const signal = this.createPluginEventSignal(pluginId, entry.data, fireId);
-          this.signalCallback(signal);
-
-          totalFired++;
-
-          this.logger.debug(
-            {
-              pluginId,
-              scheduleId: entry.id,
-              fireId,
-              dataKeys: Object.keys(entry.data),
-            },
-            'Schedule fired'
           );
         }
       } catch (error) {
@@ -282,7 +292,8 @@ export class SchedulerService {
   private createPluginEventSignal(
     pluginId: string,
     data: Record<string, unknown>,
-    fireId: string
+    fireId: string,
+    scheduleId?: string
   ): Signal {
     const rawKind = data['kind'];
     const eventKind = typeof rawKind === 'string' ? rawKind : `${pluginId}:scheduled`;
@@ -296,7 +307,7 @@ export class SchedulerService {
       payload: data,
     };
 
-    return {
+    const signal: Signal = {
       id: randomUUID(),
       type: 'plugin_event',
       source: 'plugin.scheduler',
@@ -306,6 +317,10 @@ export class SchedulerService {
       data: signalData,
       expiresAt: new Date(now.getTime() + 60_000), // 1 minute TTL
     };
+    if (scheduleId !== undefined) {
+      signal.correlationId = scheduleId;
+    }
+    return signal;
   }
 
   /**

@@ -647,28 +647,49 @@ export function createUserMessageSignal(
  * Create a message reaction signal (convenience function).
  * NOTE: No isPositive field - LLM interprets emoji sentiment from the thought content.
  */
-export function createMessageReactionSignal(data: {
-  emoji: string;
-  reactedMessageId: string;
-  reactedMessagePreview?: string;
-  userId?: string;
-  actorChatId?: string;
-  recipientId: string;
-  isRemoval?: boolean;
-}): Signal {
+export function createMessageReactionSignal(
+  data: {
+    emoji: string;
+    reactedMessageId: string;
+    reactedMessagePreview?: string;
+    userId?: string;
+    actorChatId?: string;
+    recipientId: string;
+    isRemoval?: boolean;
+  },
+  options?: {
+    priority?: Priority;
+    correlationId?: string;
+    parentId?: string;
+  }
+): Signal {
+  const signalOptions: {
+    priority: Priority;
+    data: MessageReactionData;
+    correlationId?: string;
+    parentId?: string;
+  } = {
+    priority: options?.priority ?? 2, // Priority.NORMAL
+    data: {
+      kind: 'message_reaction',
+      channel: 'telegram',
+      isAnonymous: !data.userId && !!data.actorChatId,
+      ...data,
+    } satisfies MessageReactionData,
+  };
+
+  if (options?.correlationId) {
+    signalOptions.correlationId = options.correlationId;
+  }
+  if (options?.parentId) {
+    signalOptions.parentId = options.parentId;
+  }
+
   return createSignal(
     'message_reaction',
     'sense.telegram.reaction',
     { value: 1, confidence: 1 },
-    {
-      priority: 2, // Priority.NORMAL - not as urgent as user_message
-      data: {
-        kind: 'message_reaction',
-        channel: 'telegram',
-        isAnonymous: !data.userId && !!data.actorChatId,
-        ...data,
-      } satisfies MessageReactionData,
-    }
+    signalOptions
   );
 }
 

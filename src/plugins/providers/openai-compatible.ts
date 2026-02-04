@@ -388,9 +388,24 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     const headers = this.buildHeaders();
     const body = this.buildRequestBody(request, model);
 
-    // Trace-level logging of full request body for debugging
-    // This helps diagnose issues with tool_calls not appearing in history
+    // Debug-level logging (without tools array to reduce noise)
     this.providerLogger?.debug(
+      {
+        url,
+        model,
+        messageCount: request.messages.length,
+        toolCount: request.tools?.length ?? 0,
+        // requestBody without tools
+        requestBody: {
+          ...body,
+          tools: undefined,
+        },
+      },
+      'OpenAI request'
+    );
+
+    // Trace-level logging includes full request body with tools
+    this.providerLogger?.trace(
       {
         url,
         model,
@@ -398,7 +413,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         toolCount: request.tools?.length ?? 0,
         requestBody: body,
       },
-      'Full OpenAI request body'
+      'Full OpenAI request body (with tools)'
     );
 
     const controller = new AbortController();

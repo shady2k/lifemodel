@@ -31,6 +31,7 @@ import type {
   MessageReactionData,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
+import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -144,6 +145,8 @@ interface PendingCognition {
   startedAt: number;
   /** Original trigger signal (may be undefined) */
   triggerSignal: Signal | undefined;
+  /** Trace context captured when cognition started */
+  traceContext: TraceContext;
 }
 
 /**
@@ -409,67 +412,84 @@ export class CoreLoop {
     const tickStart = Date.now();
     this.tickCount++;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
-    // tickId for batch grouping in logs (NOT causal tracing - use parentId for that)
     const tickId = randomUUID();
-
-    // Apply pending plugin changes FIRST (before any processing)
-    // This handles queued scheduler unregistrations from pause/unload
-    this.schedulerService?.applyPendingChanges();
-
-    // Check system health - determines which layers are active
-    const health = this.healthMonitor.getHealth();
-    const { activeLayers, stressLevel } = health;
-
-    const state = this.agent.getState();
-    this.logger.trace(
-      {
-        tick: this.tickCount,
-        energy: state.energy.toFixed(2),
-        socialDebt: state.socialDebt.toFixed(2),
-        pendingSignals: this.pendingSignals.length,
-        stressLevel,
-        tickId,
-      },
-      '⏱️ Tick starting'
-    );
+    const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
 
     try {
-      // Collect all intents from all layers
+      // ============================================================================
+      // TICK-INITIATED OPERATIONS (run every tick regardless of signals)
+      // Uses tickId as trace root for grouping housekeeping work
+      // ============================================================================
+
+      // Apply pending plugin changes FIRST (before any processing)
+      this.schedulerService?.applyPendingChanges();
+
+      // Check system health - determines which layers are active
+      const health = this.healthMonitor.getHealth();
+      const { activeLayers, stressLevel } = health;
+
+      const state = this.agent.getState();
+
+      await withTraceContext(tickCtx, async () => {
+        this.logger.trace(
+          {
+            tick: this.tickCount,
+            energy: state.energy.toFixed(2),
+            socialDebt: state.socialDebt.toFixed(2),
+            pendingSignals: this.pendingSignals.length,
+            stressLevel,
+            tickId,
+          },
+          '⏱️ Tick starting'
+        );
+
+        // Update thought pressure before neurons run
+        await this.updateThoughtPressure();
+      });
+
+      // ============================================================================
+      // SIGNAL-INITIATED OPERATIONS (only when signals exist)
+      // Each signal gets its own trace context (signal.id as trace root)
+      // correlationId=tickId links all signals to the same tick
+      // ============================================================================
       const allIntents: Intent[] = [];
       let allSignals: Signal[] = [];
 
-      // 1. Collect incoming signals from channels (sensory input)
-      // Enriches reaction signals with message previews (async)
-      const incomingSignals = await this.collectIncomingSignals();
+      // Drain signals (no side effects, no logs)
+      const pendingSignals = this.drainPendingSignals();
 
-      // 1b. Update thought pressure before neurons run
-      // This allows ThoughtsNeuron to see current pressure
-      await this.updateThoughtPressure();
+      // Normalize each signal under its own trace context
+      const incomingSignals: Signal[] = [];
+      for (const signal of pendingSignals) {
+        const signalCtx = createTraceContext(signal.id, { correlationId: tickId });
+        const normalized = await withTraceContext(signalCtx, () => this.normalizeSignal(signal));
+        incomingSignals.push(normalized);
+      }
 
-      // 2. AUTONOMIC: neurons check state, emit internal signals
-      // Always runs - vital signs monitoring
+      // AUTONOMIC layer (batch processing, no per-signal context to prevent leakage)
       if (activeLayers.autonomic) {
         const autonomicResult = await this.processAutonomic(incomingSignals, tickId);
         allIntents.push(...autonomicResult.intents);
         allSignals = autonomicResult.signals;
       } else {
-        // Critical stress - just pass through incoming signals
         allSignals = incomingSignals;
-        this.logger.warn({ stressLevel }, 'AUTONOMIC layer disabled due to stress');
+        withTraceContext(tickCtx, () => {
+          this.logger.warn({ stressLevel }, 'AUTONOMIC layer disabled due to stress');
+        });
       }
 
-      // 2b. Defer thought signals if COGNITION is busy
-      // Thought signals need COGNITION to process them, so if COGNITION is busy,
-      // re-queue them for the next tick rather than losing them in AGGREGATION
+      // Defer thought signals if COGNITION is busy
       const hasThoughtSignals = allSignals.some((s) => s.type === 'thought');
       if (this.pendingCognition && hasThoughtSignals) {
         const thoughtSignals = allSignals.filter((s) => s.type === 'thought');
         const otherSignals = allSignals.filter((s) => s.type !== 'thought');
 
-        this.logger.debug(
-          { pendingThoughts: thoughtSignals.length },
-          'COGNITION busy, deferring thought signals to next tick'
-        );
+        withTraceContext(tickCtx, () => {
+          this.logger.debug(
+            { pendingThoughts: thoughtSignals.length },
+            'COGNITION busy, deferring thought signals to next tick'
+          );
+        });
 
         // Re-queue thoughts at the front for next tick (FIFO order preserved)
         for (let i = thoughtSignals.length - 1; i >= 0; i--) {
@@ -478,24 +498,22 @@ export class CoreLoop {
             this.pendingSignals.unshift({ signal, timestamp: new Date() });
           }
         }
-
-        // Continue with non-thought signals only
         allSignals = otherSignals;
       }
 
-      // 3. AGGREGATION: collect signals, decide if COGNITION should wake
+      // AGGREGATION layer (batch processing)
       let aggregationResult: AggregationResult | null = null;
-
       if (activeLayers.aggregation) {
         aggregationResult = await this.processAggregation(allSignals);
         allIntents.push(...aggregationResult.intents);
       } else {
-        this.logger.warn({ stressLevel }, 'AGGREGATION layer disabled due to stress');
+        withTraceContext(tickCtx, () => {
+          this.logger.warn({ stressLevel }, 'AGGREGATION layer disabled due to stress');
+        });
       }
 
-      // 4. COGNITION: (if woken) process with fast LLM (NON-BLOCKING)
+      // Check pending COGNITION completion
       let cognitionResult: CognitionResult | null = null;
-      // Check if pending COGNITION completed
       if (this.pendingCognition) {
         const result = await this.checkPendingCognition();
         if (result) {
@@ -506,213 +524,228 @@ export class CoreLoop {
 
       const shouldWakeCognition = aggregationResult?.wakeCognition && activeLayers.cognition;
 
-      // Only start new COGNITION if no pending operation
+      // Start COGNITION if needed (capture trace context from trigger signal)
       if (shouldWakeCognition && aggregationResult && !this.pendingCognition) {
-        this.logger.debug(
-          { wakeReason: aggregationResult.wakeReason },
-          '🧠 COGNITION layer woken (non-blocking)'
-        );
+        withTraceContext(tickCtx, () => {
+          this.logger.debug(
+            { wakeReason: aggregationResult.wakeReason },
+            '🧠 COGNITION layer woken (non-blocking)'
+          );
+        });
 
-        // Pass enableSmartRetry based on activeLayers.smart (reuses health gating)
         const cognitionContext = this.buildCognitionContext(
           aggregationResult,
           tickId,
           activeLayers.smart
         );
 
-        // Start COGNITION in background (non-blocking)
-        this.startCognitionAsync(cognitionContext, aggregationResult.triggerSignals[0]);
+        const triggerSignal = aggregationResult.triggerSignals[0];
+        const traceContext = triggerSignal
+          ? createTraceContext(triggerSignal.id, { correlationId: tickId })
+          : tickCtx;
+
+        this.startCognitionAsync(cognitionContext, triggerSignal, traceContext);
       } else if (this.pendingCognition && shouldWakeCognition) {
-        // Already processing - thought signals were already re-queued in step 2b above
-        // This path handles user_message signals which can overlap with pending COGNITION
-        this.logger.debug('COGNITION already processing, waiting for completion');
+        withTraceContext(tickCtx, () => {
+          this.logger.debug('COGNITION already processing, waiting for completion');
+        });
       }
 
       if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
-        this.logger.warn(
-          { stressLevel, wakeReason: aggregationResult.wakeReason },
-          'COGNITION layer disabled due to stress - wake blocked'
-        );
+        withTraceContext(tickCtx, () => {
+          this.logger.warn(
+            { stressLevel, wakeReason: aggregationResult.wakeReason },
+            'COGNITION layer disabled due to stress - wake blocked'
+          );
+        });
       }
 
-      // 6. Update agent state (energy, social debt, etc.)
-      const agentIntents = this.agent.tick();
-      allIntents.push(...agentIntents);
+      // ============================================================================
+      // TICK-INITIATED OPERATIONS (rest of tick work stays under tick context)
+      // ============================================================================
+      await withTraceContext(tickCtx, async () => {
+        // Update agent state (energy, social debt, etc.)
+        const agentIntents = this.agent.tick();
+        allIntents.push(...agentIntents);
 
-      // 6b. Check for sleep mode transition - trigger memory consolidation
-      const currentMode = this.agent.getAlertnessMode();
-      if (
-        this.memoryConsolidator &&
-        this.memoryProvider &&
-        currentMode === 'sleep' &&
-        this.previousAlertnessMode !== 'sleep'
-      ) {
-        // Entering sleep mode - consolidate memories (like human sleep)
-        this.logger.info('Entering sleep mode - triggering memory consolidation');
-        void this.memoryConsolidator.consolidate(this.memoryProvider).then((result) => {
-          this.logger.info(
-            {
-              merged: result.merged,
-              forgotten: result.forgotten,
-              before: result.totalBefore,
-              after: result.totalAfter,
-              durationMs: result.durationMs,
-              thoughtsGenerated: result.thoughts.length,
-            },
-            'Memory consolidation complete'
-          );
-          this.metrics.counter('memory_consolidations');
-          this.metrics.gauge('memory_entries_merged', result.merged);
-          this.metrics.gauge('memory_entries_forgotten', result.forgotten);
-
-          // Create and queue thought signals from consolidation
-          // Uses shared enqueue logic with budget/dedupe checks
-          let queuedCount = 0;
-          for (const thoughtData of result.thoughts) {
-            if (this.enqueueThoughtSignal(thoughtData, 'memory.thought' as SignalSource)) {
-              queuedCount++;
-            }
-          }
-
-          if (queuedCount > 0) {
+        // Sleep mode transition - memory consolidation
+        const currentMode = this.agent.getAlertnessMode();
+        if (
+          this.memoryConsolidator &&
+          this.memoryProvider &&
+          currentMode === 'sleep' &&
+          this.previousAlertnessMode !== 'sleep'
+        ) {
+          this.logger.info('Entering sleep mode - triggering memory consolidation');
+          void this.memoryConsolidator.consolidate(this.memoryProvider).then((result) => {
             this.logger.info(
-              { queued: queuedCount, total: result.thoughts.length },
-              'Memory thoughts queued'
+              {
+                merged: result.merged,
+                forgotten: result.forgotten,
+                before: result.totalBefore,
+                after: result.totalAfter,
+                durationMs: result.durationMs,
+                thoughtsGenerated: result.thoughts.length,
+              },
+              'Memory consolidation complete'
             );
-            this.metrics.gauge('memory_thoughts_queued', queuedCount);
-          }
-        });
+            this.metrics.counter('memory_consolidations');
+            this.metrics.gauge('memory_entries_merged', result.merged);
+            this.metrics.gauge('memory_entries_forgotten', result.forgotten);
 
-        // 6c. Trigger soul sleep maintenance (Phase 5)
-        // Like human sleep: consolidate identity alongside memories
-        if (this.soulProvider) {
-          void runSleepMaintenance({
-            logger: this.logger,
-            soulProvider: this.soulProvider,
-            memoryProvider: this.memoryProvider,
-          }).then((result) => {
-            if (result.success) {
+            let queuedCount = 0;
+            for (const thoughtData of result.thoughts) {
+              if (this.enqueueThoughtSignal(thoughtData, 'memory.thought' as SignalSource)) {
+                queuedCount++;
+              }
+            }
+
+            if (queuedCount > 0) {
               this.logger.info(
-                {
-                  voicesRefreshed: result.voicesRefreshed,
-                  softLearningPromoted: result.softLearningPromoted,
-                  thoughtsMarkedForPruning: result.thoughtsMarkedForPruning,
-                  durationMs: result.durationMs,
-                },
-                'Soul sleep maintenance complete'
+                { queued: queuedCount, total: result.thoughts.length },
+                'Memory thoughts queued'
               );
-              this.metrics.counter('soul_sleep_maintenances');
-              this.metrics.gauge('soul_voices_refreshed', result.voicesRefreshed);
-              this.metrics.gauge('soul_soft_learning_promoted', result.softLearningPromoted);
-            } else {
-              this.logger.warn({ error: result.error }, 'Soul sleep maintenance failed');
+              this.metrics.gauge('memory_thoughts_queued', queuedCount);
             }
           });
+
+          // Soul sleep maintenance
+          if (this.soulProvider) {
+            void runSleepMaintenance({
+              logger: this.logger,
+              soulProvider: this.soulProvider,
+              memoryProvider: this.memoryProvider,
+            }).then((result) => {
+              if (result.success) {
+                this.logger.info(
+                  {
+                    voicesRefreshed: result.voicesRefreshed,
+                    softLearningPromoted: result.softLearningPromoted,
+                    thoughtsMarkedForPruning: result.thoughtsMarkedForPruning,
+                    durationMs: result.durationMs,
+                  },
+                  'Soul sleep maintenance complete'
+                );
+                this.metrics.counter('soul_sleep_maintenances');
+                this.metrics.gauge('soul_voices_refreshed', result.voicesRefreshed);
+                this.metrics.gauge('soul_soft_learning_promoted', result.softLearningPromoted);
+              } else {
+                this.logger.warn({ error: result.error }, 'Soul sleep maintenance failed');
+              }
+            });
+          }
         }
-      }
-      this.previousAlertnessMode = currentMode;
+        this.previousAlertnessMode = currentMode;
 
-      // 7. Update user model beliefs (time-based decay)
-      if (this.userModel) {
-        this.userModel.updateTimeBasedBeliefs();
-      }
-
-      // 7b. Check conversation status decay (active/awaiting_answer → idle after timeout)
-      if (this.conversationManager && this.primaryRecipientId) {
-        await this.checkConversationDecay();
-      }
-
-      // 7c. Check plugin schedulers for due events
-      if (this.schedulerService) {
-        try {
-          await this.schedulerService.tick();
-        } catch (error) {
-          this.logger.error(
-            { error: error instanceof Error ? error.message : String(error) },
-            'Scheduler service tick failed'
-          );
+        // Update user model beliefs (time-based decay)
+        if (this.userModel) {
+          this.userModel.updateTimeBasedBeliefs();
         }
-      }
 
-      // 8. Apply all intents
-      this.applyIntents(allIntents);
-
-      // 9. Periodic maintenance (only if aggregation is active)
-      if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {
-        const pruned = this.layers.aggregation.prune();
-        if (pruned > 0) {
-          this.logger.debug({ pruned }, 'Signals pruned from aggregation');
+        // Check conversation status decay
+        if (this.conversationManager && this.primaryRecipientId) {
+          await this.checkConversationDecay();
         }
-      }
 
-      // Log tick summary
-      const tickDuration = Date.now() - tickStart;
-      this.logger.trace(
-        {
-          tick: this.tickCount,
-          duration: tickDuration,
-          signalsProcessed: allSignals.length,
-          intentsApplied: allIntents.length,
-          cognitionWoke: shouldWakeCognition,
-          usedSmartRetry: cognitionResult?.usedSmartRetry,
-          stressLevel,
-          energy: this.agent.getEnergy().toFixed(2),
-        },
-        'Tick completed'
-      );
+        // Check plugin schedulers for due events
+        if (this.schedulerService) {
+          try {
+            await this.schedulerService.tick();
+          } catch (error) {
+            this.logger.error(
+              { error: error instanceof Error ? error.message : String(error) },
+              'Scheduler service tick failed'
+            );
+          }
+        }
 
-      // Update metrics
-      this.metrics.counter('signal_loop_ticks');
-      this.metrics.gauge('signal_loop_tick_duration', tickDuration);
-      this.metrics.gauge('signal_loop_signals_processed', allSignals.length);
-      this.metrics.gauge('system_event_loop_lag_ms', health.eventLoopLagMs);
-      this.metrics.gauge('system_cpu_percent', health.cpuPercent);
-      this.metrics.gauge('system_stress_level', this.stressLevelToNumber(stressLevel));
+        // Apply all intents (per-intent context handled inside)
+        this.applyIntents(allIntents, tickCtx);
 
-      // Schedule next tick
-      this.scheduleTick();
+        // Periodic maintenance
+        if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {
+          const pruned = this.layers.aggregation.prune();
+          if (pruned > 0) {
+            this.logger.debug({ pruned }, 'Signals pruned from aggregation');
+          }
+        }
+
+        // Log tick summary
+        const tickDuration = Date.now() - tickStart;
+        this.logger.trace(
+          {
+            tick: this.tickCount,
+            duration: tickDuration,
+            signalsProcessed: allSignals.length,
+            intentsApplied: allIntents.length,
+            cognitionWoke: shouldWakeCognition,
+            usedSmartRetry: cognitionResult?.usedSmartRetry,
+            stressLevel,
+            energy: this.agent.getEnergy().toFixed(2),
+          },
+          'Tick completed'
+        );
+
+        // Metrics
+        this.metrics.counter('signal_loop_ticks');
+        this.metrics.gauge('signal_loop_tick_duration', tickDuration);
+        this.metrics.gauge('signal_loop_signals_processed', allSignals.length);
+        this.metrics.gauge('system_event_loop_lag_ms', health.eventLoopLagMs);
+        this.metrics.gauge('system_cpu_percent', health.cpuPercent);
+        this.metrics.gauge('system_stress_level', this.stressLevelToNumber(stressLevel));
+
+        this.scheduleTick();
+      });
     } catch (error) {
-      // Serialize error properly for logging (pino doesn't serialize all error types well)
       const errorDetails =
         error instanceof Error
           ? { message: error.message, stack: error.stack, name: error.name }
           : { raw: String(error), type: typeof error };
 
-      this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
+      withTraceContext(tickCtx, () => {
+        this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
+      });
 
-      // Continue running despite error
       this.scheduleTick();
     }
   }
 
   /**
-   * Collect incoming signals from pending queue.
-   * Enriches reaction signals with message previews asynchronously.
+   * Drain pending signals without side effects or logging.
+   * Separated from normalization to enable per-signal trace context.
    */
-  private async collectIncomingSignals(): Promise<Signal[]> {
+  private drainPendingSignals(): Signal[] {
     const signals: Signal[] = [];
     const maxSignals = this.config.maxSignalsPerTick;
 
     while (this.pendingSignals.length > 0 && signals.length < maxSignals) {
       const pending = this.pendingSignals.shift();
       if (pending) {
-        let signal = pending.signal;
-
-        // Special handling for user messages
-        if (signal.type === 'user_message') {
-          this.processUserMessageSignal(signal);
-        }
-
-        // Enrich reaction signals with message preview (async lookup)
-        if (signal.type === 'message_reaction') {
-          signal = await this.enrichReactionSignal(signal);
-        }
-
-        signals.push(signal);
+        signals.push(pending.signal);
       }
     }
 
     return signals;
+  }
+
+  /**
+   * Normalize a single signal (side effects + enrichment).
+   * This should be called inside a per-signal trace context.
+   */
+  private async normalizeSignal(signal: Signal): Promise<Signal> {
+    let normalized = signal;
+
+    // Special handling for user messages
+    if (normalized.type === 'user_message') {
+      this.processUserMessageSignal(normalized);
+    }
+
+    // Enrich reaction signals with message preview (async lookup)
+    if (normalized.type === 'message_reaction') {
+      normalized = await this.enrichReactionSignal(normalized);
+    }
+
+    return normalized;
   }
 
   /**
@@ -915,10 +948,13 @@ export class CoreLoop {
   /**
    * Start COGNITION processing asynchronously (non-blocking).
    */
-  private startCognitionAsync(context: CognitionContext, triggerSignal: Signal | undefined): void {
+  private startCognitionAsync(
+    context: CognitionContext,
+    triggerSignal: Signal | undefined,
+    traceContext: TraceContext
+  ): void {
     const startedAt = Date.now();
 
-    // Create promise for COGNITION processing
     const promise = this.layers.cognition.process(context);
 
     this.pendingCognition = {
@@ -926,28 +962,31 @@ export class CoreLoop {
       tickId: context.tickId,
       startedAt,
       triggerSignal: triggerSignal ?? context.triggerSignals[0] ?? undefined,
+      traceContext,
     };
 
-    // Handle completion in background (don't await here)
     promise
       .then(() => {
-        this.logger.debug(
-          {
-            tickId: context.tickId,
-            duration: Date.now() - startedAt,
-          },
-          'COGNITION completed (async)'
-        );
+        withTraceContext(traceContext, () => {
+          this.logger.debug(
+            {
+              tickId: context.tickId,
+              duration: Date.now() - startedAt,
+            },
+            'COGNITION completed (async)'
+          );
+        });
       })
       .catch((error: unknown) => {
-        this.logger.error(
-          {
-            error: error instanceof Error ? error.message : String(error),
-            tickId: context.tickId,
-          },
-          'COGNITION failed (async)'
-        );
-        // Clear pending on error
+        withTraceContext(traceContext, () => {
+          this.logger.error(
+            {
+              error: error instanceof Error ? error.message : String(error),
+              tickId: context.tickId,
+            },
+            'COGNITION failed (async)'
+          );
+        });
         this.pendingCognition = null;
       });
   }
@@ -959,10 +998,8 @@ export class CoreLoop {
   private async checkPendingCognition(): Promise<CognitionResult | null> {
     if (!this.pendingCognition) return null;
 
-    // Check if promise is settled (non-blocking check using Promise.race)
     const pending = this.pendingCognition;
     const timeoutPromise = new Promise<'pending'>((resolve) => {
-      // Resolve immediately to check if cognition is done
       setImmediate(() => {
         resolve('pending');
       });
@@ -972,38 +1009,38 @@ export class CoreLoop {
       const result = await Promise.race([pending.promise, timeoutPromise]);
 
       if (result === 'pending') {
-        // Still processing
         const elapsed = Date.now() - pending.startedAt;
         if (elapsed > 5000 && elapsed % 5000 < 1000) {
-          // Log every ~5 seconds
-          this.logger.debug({ tickId: pending.tickId, elapsed }, 'COGNITION still processing...');
+          withTraceContext(pending.traceContext, () => {
+            this.logger.debug({ tickId: pending.tickId, elapsed }, 'COGNITION still processing...');
 
-          // Resend typing indicator (Telegram typing expires after ~5 seconds)
-          const recipientId = (
-            pending.triggerSignal?.data as Record<string, unknown> | undefined
-          )?.['recipientId'] as string | undefined;
-          if (recipientId) {
-            const route = this.recipientRegistry?.resolve(recipientId);
-            if (route) {
-              const channel = this.channels.get(route.channel);
-              if (channel?.sendTyping) {
-                channel.sendTyping(route.destination).catch(() => {
-                  /* ignore typing errors */
-                });
+            // Resend typing indicator (Telegram typing expires after ~5 seconds)
+            const recipientId = (
+              pending.triggerSignal?.data as Record<string, unknown> | undefined
+            )?.['recipientId'] as string | undefined;
+            if (recipientId) {
+              const route = this.recipientRegistry?.resolve(recipientId);
+              if (route) {
+                const channel = this.channels.get(route.channel);
+                if (channel?.sendTyping) {
+                  void channel.sendTyping(route.destination).catch(() => {
+                    /* ignore typing errors */
+                  });
+                }
               }
             }
-          }
+          });
         }
         return null;
       }
 
-      // Completed - clear pending and return result
       this.pendingCognition = null;
       return result;
     } catch (error) {
-      // COGNITION rejected - clear pending and log error
       this.pendingCognition = null;
-      this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
+      withTraceContext(pending.traceContext, () => {
+        this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
+      });
       return null;
     }
   }
@@ -1023,480 +1060,496 @@ export class CoreLoop {
       );
       return;
     }
-    this.applyIntents([intent]);
+
+    // Create trace context from intent's trace info
+    const trace = intent.trace;
+    let intentCtx: TraceContext;
+    if (trace?.parentSignalId ?? trace?.tickId) {
+      const traceId = trace.parentSignalId ?? trace.tickId ?? `intent_${String(Date.now())}`;
+      const options: { correlationId?: string; parentId?: string } = {};
+      if (trace.tickId !== undefined) {
+        options.correlationId = trace.tickId;
+      }
+      if (trace.parentSignalId !== undefined) {
+        options.parentId = trace.parentSignalId;
+      }
+      intentCtx = createTraceContext(traceId, options);
+    } else {
+      intentCtx = createTraceContext(`intent_${String(Date.now())}`);
+    }
+
+    this.applyIntents([intent], intentCtx);
   }
 
   /**
    * Apply intents from all layers.
+   * Each intent is applied under its own trace context.
    */
-  private applyIntents(intents: Intent[]): void {
+  private applyIntents(intents: Intent[], tickCtx: TraceContext): void {
     for (const intent of intents) {
-      switch (intent.type) {
-        case 'UPDATE_STATE':
-          this.agent.applyIntent(intent);
-          break;
+      // Create trace context for this intent
+      // Use intent's trace info if available, otherwise fall back to tick context
+      const trace = intent.trace;
 
-        case 'SEND_MESSAGE': {
-          const { recipientId, text, replyTo, conversationStatus, toolCalls, toolResults } =
-            intent.payload;
+      let intentCtx: TraceContext;
+      if (trace?.parentSignalId ?? trace?.tickId) {
+        const traceId = trace.parentSignalId ?? trace.tickId ?? tickCtx.traceId;
+        const options: { correlationId?: string; parentId?: string } = {};
+        if (trace.tickId !== undefined) options.correlationId = trace.tickId;
+        else if (tickCtx.correlationId !== undefined) options.correlationId = tickCtx.correlationId;
+        if (trace.parentSignalId !== undefined) options.parentId = trace.parentSignalId;
+        intentCtx = createTraceContext(traceId, options);
+      } else {
+        intentCtx = tickCtx;
+      }
 
-          if (!this.recipientRegistry) {
-            this.logger.error({ recipientId }, 'RecipientRegistry not configured');
-            this.metrics.counter('messages_failed', { reason: 'no_registry' });
+      withTraceContext(intentCtx, () => {
+        switch (intent.type) {
+          case 'UPDATE_STATE':
+            this.agent.applyIntent(intent);
             break;
-          }
 
-          const route = this.recipientRegistry.resolve(recipientId);
-          if (!route) {
-            this.logger.error({ recipientId }, 'Could not resolve recipientId');
-            this.metrics.counter('messages_failed', { reason: 'unresolved_recipient' });
-            break;
-          }
+          case 'SEND_MESSAGE': {
+            const { recipientId, text, replyTo, conversationStatus, toolCalls, toolResults } =
+              intent.payload;
 
-          const channelImpl = this.channels.get(route.channel);
-          if (!channelImpl) {
-            this.logger.error(
-              {
-                recipientId,
-                channel: route.channel,
-                registeredChannels: Array.from(this.channels.keys()),
-              },
-              'Channel not found'
-            );
-            this.metrics.counter('messages_failed', {
-              channel: route.channel,
-              reason: 'channel_not_found',
-            });
-            break;
-          }
+            if (!this.recipientRegistry) {
+              this.logger.error({ recipientId }, 'RecipientRegistry not configured');
+              this.metrics.counter('messages_failed', { reason: 'no_registry' });
+              break;
+            }
 
-          const sendOptions = replyTo ? { replyTo } : undefined;
-          // Wrap in Promise.resolve to catch both sync throws and async rejections
-          Promise.resolve()
-            .then(() => channelImpl.sendMessage(route.destination, text, sendOptions))
-            .then((result) => {
-              if (result.success) {
-                this.lastMessageSentAt = Date.now();
-                // Use recipientId (not route.destination) for tracking - matches processResponseTiming
-                this.lastMessageRecipientId = recipientId;
-                this.metrics.counter('messages_sent', { channel: route.channel });
+            const route = this.recipientRegistry.resolve(recipientId);
+            if (!route) {
+              this.logger.error({ recipientId }, 'Could not resolve recipientId');
+              this.metrics.counter('messages_failed', { reason: 'unresolved_recipient' });
+              break;
+            }
 
-                // Notify agent that message was sent (relieves social pressure)
-                this.agent.onMessageSent();
-
-                if (this.conversationManager) {
-                  // Use recipientId as conversation key for consistency
-                  // Pass tool call data for full turn preservation
-                  // Include channel metadata for reaction lookup
-                  void this.saveAgentMessage(
-                    recipientId,
-                    text,
-                    conversationStatus,
-                    toolCalls,
-                    toolResults,
-                    result.messageId
-                      ? { channelMessageId: result.messageId, channel: route.channel }
-                      : undefined
-                  );
-                }
-              } else {
-                this.logger.warn(
-                  { recipientId, channel: route.channel, textLength: text.length },
-                  'Message send returned false'
-                );
-                this.metrics.counter('messages_failed', {
-                  channel: route.channel,
-                  reason: 'returned_false',
-                });
-              }
-            })
-            .catch((error: unknown) => {
+            const channelImpl = this.channels.get(route.channel);
+            if (!channelImpl) {
               this.logger.error(
-                { error: error instanceof Error ? error.message : String(error), recipientId },
-                'Message send threw an error'
+                {
+                  recipientId,
+                  channel: route.channel,
+                  registeredChannels: Array.from(this.channels.keys()),
+                },
+                'Channel not found'
               );
               this.metrics.counter('messages_failed', {
                 channel: route.channel,
-                reason: 'exception',
+                reason: 'channel_not_found',
               });
-            });
-          break;
-        }
+              break;
+            }
 
-        case 'SCHEDULE_EVENT': {
-          const { event, delay, scheduleId } = intent.payload;
-          const fullEvent: Event = {
-            id: scheduleId ?? randomUUID(),
-            source: event.source as Event['source'],
-            type: event.type,
-            priority: event.priority,
-            timestamp: new Date(),
-            payload: event.payload,
-          };
-          if (event.channel) {
-            fullEvent.channel = event.channel;
+            const sendOptions = replyTo ? { replyTo } : undefined;
+            Promise.resolve()
+              .then(() => channelImpl.sendMessage(route.destination, text, sendOptions))
+              .then((result) => {
+                if (result.success) {
+                  this.lastMessageSentAt = Date.now();
+                  this.lastMessageRecipientId = recipientId;
+                  this.metrics.counter('messages_sent', { channel: route.channel });
+                  this.agent.onMessageSent();
+
+                  if (this.conversationManager) {
+                    void this.saveAgentMessage(
+                      recipientId,
+                      text,
+                      conversationStatus,
+                      toolCalls,
+                      toolResults,
+                      result.messageId
+                        ? { channelMessageId: result.messageId, channel: route.channel }
+                        : undefined
+                    );
+                  }
+                } else {
+                  this.logger.warn(
+                    { recipientId, channel: route.channel, textLength: text.length },
+                    'Message send returned false'
+                  );
+                  this.metrics.counter('messages_failed', {
+                    channel: route.channel,
+                    reason: 'returned_false',
+                  });
+                }
+              })
+              .catch((error: unknown) => {
+                this.logger.error(
+                  { error: error instanceof Error ? error.message : String(error), recipientId },
+                  'Message send threw an error'
+                );
+                this.metrics.counter('messages_failed', {
+                  channel: route.channel,
+                  reason: 'exception',
+                });
+              });
+            break;
           }
 
-          if (delay <= 0) {
-            void this.eventBus.publish(fullEvent);
-          } else {
-            setTimeout(() => {
-              if (this.running) {
-                void this.eventBus.publish(fullEvent);
+          case 'SCHEDULE_EVENT': {
+            const { event, delay, scheduleId } = intent.payload;
+            const fullEvent: Event = {
+              id: scheduleId ?? randomUUID(),
+              source: event.source as Event['source'],
+              type: event.type,
+              priority: event.priority,
+              timestamp: new Date(),
+              payload: event.payload,
+            };
+            if (event.channel) {
+              fullEvent.channel = event.channel;
+            }
+
+            if (delay <= 0) {
+              void this.eventBus.publish(fullEvent);
+            } else {
+              setTimeout(() => {
+                if (this.running) {
+                  void this.eventBus.publish(fullEvent);
+                }
+              }, delay);
+            }
+            break;
+          }
+
+          case 'LOG':
+            this.logger[intent.payload.level](intent.payload.context ?? {}, intent.payload.message);
+            break;
+
+          case 'EMIT_METRIC': {
+            const { type: metricType, name, value, labels } = intent.payload;
+            switch (metricType) {
+              case 'gauge':
+                this.metrics.gauge(name, value, labels);
+                break;
+              case 'counter':
+                this.metrics.counter(name, labels);
+                break;
+              case 'histogram':
+                this.metrics.histogram(name, value, labels);
+                break;
+            }
+            break;
+          }
+
+          case 'CANCEL_EVENT':
+            this.logger.debug({ intent }, 'CANCEL_EVENT not yet implemented');
+            break;
+
+          case 'SAVE_TO_MEMORY': {
+            const {
+              type: memoryType,
+              recipientId: memoryRecipientId,
+              content,
+              fact,
+              tags,
+            } = intent.payload;
+
+            if (this.memoryProvider) {
+              const subject = fact?.subject ?? '';
+              const predicate = fact?.predicate ?? '';
+              const object = fact?.object ?? '';
+              const evidence = fact?.evidence ?? '';
+              const entryContent = fact
+                ? `${subject} ${predicate} ${object}${evidence ? ` (${evidence})` : ''}`
+                : (content ?? '');
+
+              if (entryContent.trim()) {
+                const entry = {
+                  id: `mem_${Date.now().toString()}_${Math.random().toString(36).slice(2, 8)}`,
+                  type: memoryType as 'fact' | 'thought' | 'message',
+                  content: entryContent,
+                  timestamp: new Date(),
+                  recipientId: memoryRecipientId,
+                  tags: tags ?? fact?.tags,
+                  confidence: fact?.confidence,
+                  metadata: fact ? { subject, predicate, object } : undefined,
+                };
+
+                this.memoryProvider.save(entry).catch((err: unknown) => {
+                  this.logger.error(
+                    { error: err instanceof Error ? err.message : String(err) },
+                    'Failed to save to memory'
+                  );
+                });
+
+                this.logger.debug(
+                  { entryId: entry.id, type: memoryType, content: entryContent.slice(0, 50) },
+                  'Memory entry saved'
+                );
               }
-            }, delay);
+            } else {
+              this.logger.debug(
+                {
+                  memoryType,
+                  recipientId: memoryRecipientId,
+                  hasFact: !!fact,
+                  hasContent: !!content,
+                },
+                'Memory save skipped (no provider)'
+              );
+            }
+
+            this.metrics.counter('memory_saves', { type: memoryType });
+            break;
           }
-          break;
-        }
 
-        case 'LOG':
-          this.logger[intent.payload.level](intent.payload.context ?? {}, intent.payload.message);
-          break;
+          case 'ACK_SIGNAL': {
+            const { signalId, signalType, source, reason } = intent.payload;
 
-        case 'EMIT_METRIC': {
-          const { type: metricType, name, value, labels } = intent.payload;
-          switch (metricType) {
-            case 'gauge':
-              this.metrics.gauge(name, value, labels);
-              break;
-            case 'counter':
-              this.metrics.counter(name, labels);
-              break;
-            case 'histogram':
-              this.metrics.histogram(name, value, labels);
-              break;
+            const ackRegistry = this.layers.aggregation.getAckRegistry();
+
+            if (signalType === 'thought') {
+              if (signalId) {
+                ackRegistry.markHandled(signalId);
+              } else {
+                this.logger.warn({ signalType }, 'Thought ACK missing signalId');
+              }
+            }
+
+            ackRegistry.registerAck({
+              signalType: signalType as SignalType,
+              source: source as SignalSource | undefined,
+              ackType: 'handled',
+              reason,
+            });
+
+            this.logger.debug({ signalId, signalType, source, reason }, 'Signal acknowledged');
+            this.metrics.counter('signal_acks', { signalType, ackType: 'handled' });
+            break;
           }
-          break;
-        }
 
-        case 'CANCEL_EVENT':
-          this.logger.debug({ intent }, 'CANCEL_EVENT not yet implemented');
-          break;
+          case 'DEFER_SIGNAL': {
+            const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } =
+              intent.payload;
 
-        case 'SAVE_TO_MEMORY': {
-          const {
-            type: memoryType,
-            recipientId: memoryRecipientId,
-            content,
-            fact,
-            tags,
-          } = intent.payload;
+            let currentValue = valueAtDeferral;
+            if (currentValue === undefined) {
+              const aggregate = this.layers.aggregation.getAggregate(signalType as SignalType);
+              currentValue = aggregate?.currentValue;
+            }
 
-          if (this.memoryProvider) {
-            // Build memory entry from fact or content
-            const subject = fact?.subject ?? '';
-            const predicate = fact?.predicate ?? '';
-            const object = fact?.object ?? '';
-            const evidence = fact?.evidence ?? '';
-            const entryContent = fact
-              ? `${subject} ${predicate} ${object}${evidence ? ` (${evidence})` : ''}`
-              : (content ?? '');
+            const ackRegistry = this.layers.aggregation.getAckRegistry();
+            ackRegistry.registerAck({
+              signalType: signalType as SignalType,
+              source: source as SignalSource | undefined,
+              ackType: 'deferred',
+              deferUntil: new Date(Date.now() + deferMs),
+              valueAtAck: currentValue,
+              overrideDelta,
+              reason,
+            });
 
-            if (entryContent.trim()) {
-              const entry = {
-                id: `mem_${Date.now().toString()}_${Math.random().toString(36).slice(2, 8)}`,
-                type: memoryType as 'fact' | 'thought' | 'message',
-                content: entryContent,
+            this.logger.info(
+              {
+                signalType,
+                deferMs,
+                deferHours: (deferMs / (60 * 60 * 1000)).toFixed(1),
+                reason,
+                valueAtDeferral: currentValue?.toFixed(2),
+              },
+              'Signal deferred'
+            );
+            this.metrics.counter('signal_acks', { signalType, ackType: 'deferred' });
+            break;
+          }
+
+          case 'EMIT_THOUGHT': {
+            const { content, triggerSource, depth, rootThoughtId, parentThoughtId, signalSource } =
+              intent.payload;
+
+            const thoughtData: ThoughtData = {
+              kind: 'thought',
+              content,
+              triggerSource,
+              depth,
+              rootThoughtId,
+              ...(parentThoughtId !== undefined && { parentThoughtId }),
+            };
+
+            this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
+            break;
+          }
+
+          case 'REMEMBER': {
+            const {
+              subject,
+              attribute,
+              value,
+              confidence,
+              source,
+              evidence,
+              isUserFact,
+              recipientId: rememberRecipientId,
+            } = intent.payload;
+            const trace = intent.trace;
+
+            if (isUserFact && this.userModel) {
+              const strValue = value.trim();
+              const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
+              const deltaNum = isDelta ? this.parseDelta(value) : null;
+
+              if (isDelta && deltaNum !== null) {
+                const currentProp = this.userModel.getProperty(attribute);
+                const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
+                const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
+                this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
+                this.logger.debug(
+                  {
+                    attribute,
+                    delta: deltaNum,
+                    current: currentNum,
+                    newValue,
+                    tickId: trace?.tickId,
+                  },
+                  'User property updated (delta)'
+                );
+              } else {
+                this.userModel.setProperty(attribute, value, confidence, source, evidence);
+                this.logger.debug(
+                  {
+                    attribute,
+                    value,
+                    confidence,
+                    tickId: trace?.tickId,
+                    parentSignalId: trace?.parentSignalId,
+                  },
+                  'User property stored'
+                );
+              }
+            }
+
+            if (this.memoryProvider) {
+              const memoryEntry = {
+                id: `mem_${randomUUID()}`,
+                type: 'fact' as const,
+                content: `${subject}.${attribute}: ${value}`,
                 timestamp: new Date(),
-                recipientId: memoryRecipientId,
-                tags: tags ?? fact?.tags,
-                confidence: fact?.confidence,
-                metadata: fact ? { subject, predicate, object } : undefined,
+                recipientId: rememberRecipientId,
+                confidence,
+                metadata: { subject, attribute, source, evidence, isUserFact },
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
               };
 
-              this.memoryProvider.save(entry).catch((err: unknown) => {
+              this.memoryProvider.save(memoryEntry).catch((err: unknown) => {
                 this.logger.error(
                   { error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save to memory'
+                  'Failed to save remembered fact to memory'
                 );
               });
 
               this.logger.debug(
-                { entryId: entry.id, type: memoryType, content: entryContent.slice(0, 50) },
-                'Memory entry saved'
-              );
-            }
-          } else {
-            this.logger.debug(
-              {
-                memoryType,
-                recipientId: memoryRecipientId,
-                hasFact: !!fact,
-                hasContent: !!content,
-              },
-              'Memory save skipped (no provider)'
-            );
-          }
-
-          this.metrics.counter('memory_saves', { type: memoryType });
-          break;
-        }
-
-        case 'ACK_SIGNAL': {
-          const { signalId, signalType, source, reason } = intent.payload;
-
-          const ackRegistry = this.layers.aggregation.getAckRegistry();
-
-          // For thought signals, mark the specific signal ID as handled
-          // Note: This is in-memory only (won't persist across restarts)
-          if (signalType === 'thought') {
-            if (signalId) {
-              ackRegistry.markHandled(signalId);
-            } else {
-              this.logger.warn({ signalType }, 'Thought ACK missing signalId');
-            }
-          }
-
-          ackRegistry.registerAck({
-            signalType: signalType as SignalType,
-            source: source as SignalSource | undefined,
-            ackType: 'handled',
-            reason,
-          });
-
-          this.logger.debug({ signalId, signalType, source, reason }, 'Signal acknowledged');
-          this.metrics.counter('signal_acks', { signalType, ackType: 'handled' });
-          break;
-        }
-
-        case 'DEFER_SIGNAL': {
-          const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } =
-            intent.payload;
-
-          // Get current value if not provided
-          let currentValue = valueAtDeferral;
-          if (currentValue === undefined) {
-            const aggregate = this.layers.aggregation.getAggregate(signalType as SignalType);
-            currentValue = aggregate?.currentValue;
-          }
-
-          const ackRegistry = this.layers.aggregation.getAckRegistry();
-          ackRegistry.registerAck({
-            signalType: signalType as SignalType,
-            source: source as SignalSource | undefined,
-            ackType: 'deferred',
-            deferUntil: new Date(Date.now() + deferMs),
-            valueAtAck: currentValue,
-            overrideDelta,
-            reason,
-          });
-
-          this.logger.info(
-            {
-              signalType,
-              deferMs,
-              deferHours: (deferMs / (60 * 60 * 1000)).toFixed(1),
-              reason,
-              valueAtDeferral: currentValue?.toFixed(2),
-            },
-            'Signal deferred'
-          );
-          this.metrics.counter('signal_acks', { signalType, ackType: 'deferred' });
-          break;
-        }
-
-        case 'EMIT_THOUGHT': {
-          const { content, triggerSource, depth, rootThoughtId, parentThoughtId, signalSource } =
-            intent.payload;
-
-          // Build thought data
-          const thoughtData: ThoughtData = {
-            kind: 'thought',
-            content,
-            triggerSource,
-            depth,
-            rootThoughtId,
-            ...(parentThoughtId !== undefined && { parentThoughtId }),
-          };
-
-          // Use shared enqueue logic with budget check
-          // Deduplication handled by AGGREGATION layer
-          this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
-          break;
-        }
-
-        case 'REMEMBER': {
-          const {
-            subject,
-            attribute,
-            value,
-            confidence,
-            source,
-            evidence,
-            isUserFact,
-            recipientId: rememberRecipientId,
-          } = intent.payload;
-          const trace = intent.trace;
-
-          // 1. If user fact → update UserModel
-          if (isUserFact && this.userModel) {
-            // Check if value is a delta for numeric properties
-            const strValue = value.trim();
-            const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
-            const deltaNum = isDelta ? this.parseDelta(value) : null;
-
-            if (isDelta && deltaNum !== null) {
-              // Apply delta to current value
-              const currentProp = this.userModel.getProperty(attribute);
-              const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
-              const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
-              this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
-              this.logger.debug(
                 {
+                  subject,
                   attribute,
-                  delta: deltaNum,
-                  current: currentNum,
-                  newValue,
-                  tickId: trace?.tickId,
-                },
-                'User property updated (delta)'
-              );
-            } else {
-              // Store as-is (string or absolute value)
-              this.userModel.setProperty(attribute, value, confidence, source, evidence);
-              this.logger.debug(
-                {
-                  attribute,
-                  value,
-                  confidence,
                   tickId: trace?.tickId,
                   parentSignalId: trace?.parentSignalId,
                 },
-                'User property stored'
+                'Memory stored'
               );
             }
-          }
 
-          // 2. Always store in memory for semantic search
-          if (this.memoryProvider) {
-            const memoryEntry = {
-              id: `mem_${randomUUID()}`,
-              type: 'fact' as const,
-              content: `${subject}.${attribute}: ${value}`,
-              timestamp: new Date(),
-              recipientId: rememberRecipientId,
-              confidence,
-              metadata: { subject, attribute, source, evidence, isUserFact },
-              tickId: trace?.tickId,
-              parentSignalId: trace?.parentSignalId,
-            };
-
-            this.memoryProvider.save(memoryEntry).catch((err: unknown) => {
-              this.logger.error(
-                { error: err instanceof Error ? err.message : String(err) },
-                'Failed to save remembered fact to memory'
-              );
-            });
-
-            this.logger.debug(
-              { subject, attribute, tickId: trace?.tickId, parentSignalId: trace?.parentSignalId },
-              'Memory stored'
-            );
-          }
-
-          // 3. Record completed action to prevent LLM re-execution
-          if (rememberRecipientId && this.conversationManager) {
-            const summary = `${subject}.${attribute}="${value}"`;
-            this.conversationManager
-              .addCompletedAction(rememberRecipientId, {
-                tool: 'core.remember',
-                summary,
-              })
-              .catch((err: unknown) => {
-                this.logger.warn(
-                  { error: err instanceof Error ? err.message : String(err) },
-                  'Failed to record completed action for remember'
-                );
-              });
-          }
-
-          this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
-          break;
-        }
-
-        case 'SET_INTEREST': {
-          const {
-            topic,
-            intensity,
-            urgent,
-            source,
-            recipientId: interestRecipientId,
-          } = intent.payload;
-          const trace = intent.trace;
-
-          if (!this.userModel) {
-            this.logger.warn({ topic }, 'SET_INTEREST skipped: no UserModel');
-            break;
-          }
-
-          // Validate topic is a string
-          if (typeof topic !== 'string' || topic.length === 0) {
-            this.logger.error({ topic, intensity }, 'SET_INTEREST: invalid topic');
-            break;
-          }
-
-          // Split comma-separated keywords into individual entries
-          // "отключения,газ,вода" → ["отключения", "газ", "вода"]
-          const keywords = topic
-            .split(',')
-            .map((kw) => kw.trim().toLowerCase())
-            .filter((kw) => kw.length >= 2); // Skip empty or single-char
-
-          if (keywords.length === 0) {
-            this.logger.error({ topic, intensity }, 'SET_INTEREST: no valid keywords');
-            break;
-          }
-
-          // Get delta from intensity enum
-          const delta = CoreLoop.INTENSITY_DELTAS[intensity];
-          const interests = this.userModel.getInterests();
-
-          // Store each keyword as a separate interest entry
-          for (const keyword of keywords) {
-            const currentWeight = interests?.weights[keyword] ?? 0.5;
-            const newWeight = Math.max(0, Math.min(1, currentWeight + delta));
-            this.userModel.setTopicWeight(keyword, newWeight);
-
-            if (urgent) {
-              const currentUrgency = interests?.urgency[keyword] ?? 0.5;
-              const newUrgency = Math.max(0, Math.min(1, currentUrgency + 0.5));
-              this.userModel.setTopicUrgency(keyword, newUrgency);
+            if (rememberRecipientId && this.conversationManager) {
+              const summary = `${subject}.${attribute}="${value}"`;
+              this.conversationManager
+                .addCompletedAction(rememberRecipientId, {
+                  tool: 'core.remember',
+                  summary,
+                })
+                .catch((err: unknown) => {
+                  this.logger.warn(
+                    { error: err instanceof Error ? err.message : String(err) },
+                    'Failed to record completed action for remember'
+                  );
+                });
             }
+
+            this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
+            break;
           }
 
-          // Record completed action to prevent LLM re-execution
-          if (interestRecipientId && this.conversationManager) {
-            const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
-            this.conversationManager
-              .addCompletedAction(interestRecipientId, {
-                tool: 'core.setInterest',
-                summary,
-              })
-              .catch((err: unknown) => {
-                this.logger.warn(
-                  { error: err instanceof Error ? err.message : String(err) },
-                  'Failed to record completed action for setInterest'
-                );
-              });
-          }
-
-          this.logger.debug(
-            {
-              originalTopic: topic,
-              keywords,
+          case 'SET_INTEREST': {
+            const {
+              topic,
               intensity,
-              delta,
               urgent,
               source,
-              tickId: trace?.tickId,
-            },
-            'Topic interests updated'
-          );
+              recipientId: interestRecipientId,
+            } = intent.payload;
+            const trace = intent.trace;
 
-          this.metrics.counter('interests_set', { intensity, urgent: String(urgent) });
-          break;
+            if (!this.userModel) {
+              this.logger.warn({ topic }, 'SET_INTEREST skipped: no UserModel');
+              break;
+            }
+
+            if (typeof topic !== 'string' || topic.length === 0) {
+              this.logger.error({ topic, intensity }, 'SET_INTEREST: invalid topic');
+              break;
+            }
+
+            const keywords = topic
+              .split(',')
+              .map((kw) => kw.trim().toLowerCase())
+              .filter((kw) => kw.length >= 2);
+
+            if (keywords.length === 0) {
+              this.logger.error({ topic, intensity }, 'SET_INTEREST: no valid keywords');
+              break;
+            }
+
+            const delta = CoreLoop.INTENSITY_DELTAS[intensity];
+            const interests = this.userModel.getInterests();
+
+            for (const keyword of keywords) {
+              const currentWeight = interests?.weights[keyword] ?? 0.5;
+              const newWeight = Math.max(0, Math.min(1, currentWeight + delta));
+              this.userModel.setTopicWeight(keyword, newWeight);
+
+              if (urgent) {
+                const currentUrgency = interests?.urgency[keyword] ?? 0.5;
+                const newUrgency = Math.max(0, Math.min(1, currentUrgency + 0.5));
+                this.userModel.setTopicUrgency(keyword, newUrgency);
+              }
+            }
+
+            if (interestRecipientId && this.conversationManager) {
+              const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
+              this.conversationManager
+                .addCompletedAction(interestRecipientId, {
+                  tool: 'core.setInterest',
+                  summary,
+                })
+                .catch((err: unknown) => {
+                  this.logger.warn(
+                    { error: err instanceof Error ? err.message : String(err) },
+                    'Failed to record completed action for setInterest'
+                  );
+                });
+            }
+
+            this.logger.debug(
+              {
+                originalTopic: topic,
+                keywords,
+                intensity,
+                delta,
+                urgent,
+                source,
+                tickId: trace?.tickId,
+              },
+              'Topic interests updated'
+            );
+
+            this.metrics.counter('interests_set', { intensity, urgent: String(urgent) });
+            break;
+          }
         }
-      }
+      });
     }
   }
 
