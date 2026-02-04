@@ -482,6 +482,49 @@ export const DEFAULT_SOFT_LEARNING_STORE: SoftLearningStore = {
 };
 
 // ============================================================================
+// BATCH REFLECTION (Phase 3.6)
+// ============================================================================
+
+/**
+ * A pending reflection item waiting to be processed in a batch.
+ *
+ * Responses are queued and processed together after a 30s window or
+ * when 10 items accumulate, enabling pattern recognition across responses
+ * and reducing token overhead.
+ */
+export interface PendingReflection {
+  /** The response text that was sent */
+  responseText: string;
+  /** What triggered the response (user message summary) */
+  triggerSummary: string;
+  /** Recipient ID for creating thoughts */
+  recipientId: string;
+  /** Tick ID for tracing */
+  tickId: string;
+  /** Original response timestamp - CRITICAL for soft learning timing */
+  timestamp: Date;
+}
+
+/**
+ * In-flight batch state for crash recovery.
+ *
+ * When a batch is taken for processing, items are moved here.
+ * If processing fails or times out, items can be recovered.
+ */
+export interface ReflectionBatchInFlight {
+  /** Unique batch identifier */
+  batchId: string;
+  /** When processing started */
+  startedAt: Date;
+  /** Number of items in batch */
+  itemCount: number;
+  /** Items being processed (for crash recovery) */
+  items: PendingReflection[];
+  /** Number of processing attempts (prevents infinite retry) */
+  attemptCount: number;
+}
+
+// ============================================================================
 // AGGREGATE SOUL STATE
 // ============================================================================
 
@@ -502,6 +545,30 @@ export interface SoulState {
    * Items decay over time; only promoted to real thoughts if pattern repeats.
    */
   softLearning: SoftLearningStore;
+
+  // ============================================================================
+  // BATCH REFLECTION (Phase 3.6)
+  // ============================================================================
+
+  /**
+   * Pending reflections waiting to be processed in a batch.
+   * Queue is processed after 30s window or when 10 items accumulate.
+   */
+  pendingReflections: PendingReflection[];
+
+  /**
+   * When the first item was queued (fixed window start).
+   * Set on empty→non-empty transition, cleared after batch processes.
+   * Used for restart-safe timing: compute elapsed = now - batchWindowStartAt.
+   */
+  batchWindowStartAt?: Date;
+
+  /**
+   * In-flight batch for crash recovery.
+   * Present when a batch is being processed. Items are persisted here
+   * so they can be recovered if processing fails or times out.
+   */
+  reflectionBatchInFlight?: ReflectionBatchInFlight;
 
   /**
    * Overall soul health (computed).
@@ -753,6 +820,8 @@ export function createDefaultSoulState(): SoulState {
     revisions: [],
     budget: createDefaultSoulBudget(),
     softLearning: { ...DEFAULT_SOFT_LEARNING_STORE },
+    // Batch reflection (Phase 3.6) - optional fields omitted, will be created when first item queued
+    pendingReflections: [],
     health: {
       coherence: 0.7,
       stability: 0.8,
@@ -766,5 +835,9 @@ export function createDefaultSoulState(): SoulState {
 /**
  * Current soul state schema version.
  * Increment when making breaking changes.
+ *
+ * Version history:
+ * - 1: Initial version
+ * - 2: Added batch reflection (pendingReflections, batchWindowStartAt, reflectionBatchInFlight)
  */
-export const SOUL_STATE_VERSION = 1;
+export const SOUL_STATE_VERSION = 2;

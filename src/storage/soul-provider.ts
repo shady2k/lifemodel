@@ -21,6 +21,7 @@ import type {
   NarrativeLoom,
   SelfModel,
   SoftLearningItem,
+  PendingReflection,
 } from '../types/agent/soul.js';
 import type { Parliament, Deliberation } from '../types/agent/parliament.js';
 import type { SocraticEngine, UnanswerableCore, SelfQuestion } from '../types/agent/socratic.js';
@@ -64,6 +65,12 @@ export class SoulProvider {
   private readonly logger: Logger;
   private state: FullSoulState | null = null;
   private loaded = false;
+
+  /**
+   * Runtime-only mutex for serializing state mutations.
+   * NOT persisted - only prevents concurrent in-process mutations.
+   */
+  private stateMutex: Promise<void> = Promise.resolve();
 
   constructor(logger: Logger, config: SoulProviderConfig) {
     this.logger = logger.child({ component: 'soul-provider' });
@@ -543,6 +550,261 @@ export class SoulProvider {
     return this.getLoadedState().softLearning.items.filter((i) => i.status === 'active');
   }
 
+  // ============================================================================
+  // BATCH REFLECTION (Phase 3.6)
+  // ============================================================================
+
+  /**
+   * Serialize state mutations to prevent race conditions.
+   *
+   * This is a runtime-only mutex that ensures only one async operation
+   * can modify state at a time. Critical for batch reflection where
+   * multiple enqueue operations may happen concurrently.
+   */
+  private async withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+    const release = this.stateMutex;
+    let resolve: () => void = () => {
+      /* initialized by Promise constructor below */
+    };
+    this.stateMutex = new Promise((r) => {
+      resolve = r;
+    });
+    try {
+      await release;
+      return await fn();
+    } finally {
+      resolve();
+    }
+  }
+
+  /**
+   * Enqueue a pending reflection for batch processing.
+   *
+   * Items accumulate until either:
+   * - 30 seconds elapsed since first item (time-based)
+   * - 10 items queued (size-based)
+   *
+   * @param item The pending reflection to queue
+   * @returns True if this was the first item (caller should schedule timer)
+   */
+  async enqueuePendingReflection(item: PendingReflection): Promise<boolean> {
+    await this.ensureLoaded();
+
+    return this.withStateLock(async () => {
+      const state = this.getLoadedState();
+      const wasEmpty = state.pendingReflections.length === 0;
+
+      // Cap queue size to prevent unbounded growth (50 items max)
+      if (state.pendingReflections.length >= 50) {
+        this.logger.warn('Reflection queue full, dropping oldest item');
+        state.pendingReflections.shift();
+      }
+
+      state.pendingReflections.push(item);
+
+      // Set window start ONLY on empty→non-empty transition (fixed window, not sliding)
+      if (wasEmpty) {
+        (state as { batchWindowStartAt: Date }).batchWindowStartAt = new Date();
+      }
+
+      this.logger.debug(
+        {
+          tickId: item.tickId,
+          pending: state.pendingReflections.length,
+          windowStarted: wasEmpty,
+        },
+        'Reflection queued'
+      );
+
+      await this.persist();
+      return wasEmpty; // Caller uses this to know if timer needed
+    });
+  }
+
+  /**
+   * Take pending items for batch processing.
+   *
+   * Atomically moves items from pendingReflections to reflectionBatchInFlight.
+   * Returns null if already processing a batch or queue is empty.
+   *
+   * @returns Items to process, or null if unavailable
+   */
+  async takePendingBatch(): Promise<PendingReflection[] | null> {
+    await this.ensureLoaded();
+
+    return this.withStateLock(async () => {
+      const state = this.getLoadedState();
+
+      // Already processing a batch - don't take another
+      if (state.reflectionBatchInFlight) {
+        this.logger.debug('Batch already in flight, skipping take');
+        return null;
+      }
+
+      // Nothing to process
+      if (state.pendingReflections.length === 0) {
+        return null;
+      }
+
+      // Move items to in-flight
+      const items = [...state.pendingReflections];
+      state.reflectionBatchInFlight = {
+        batchId: `batch_${String(Date.now())}`,
+        startedAt: new Date(),
+        itemCount: items.length,
+        items,
+        attemptCount: 0,
+      };
+      state.pendingReflections = [];
+      delete state.batchWindowStartAt;
+
+      this.logger.debug(
+        { batchId: state.reflectionBatchInFlight.batchId, itemCount: items.length },
+        'Batch taken for processing'
+      );
+
+      await this.persist();
+      return items;
+    });
+  }
+
+  /**
+   * Commit (complete) the current batch.
+   *
+   * Called after batch processing succeeds. Clears the in-flight state.
+   */
+  async commitPendingBatch(): Promise<void> {
+    await this.ensureLoaded();
+
+    return this.withStateLock(async () => {
+      const state = this.getLoadedState();
+
+      if (state.reflectionBatchInFlight) {
+        this.logger.debug(
+          { batchId: state.reflectionBatchInFlight.batchId },
+          'Batch committed successfully'
+        );
+        delete state.reflectionBatchInFlight;
+      }
+
+      await this.persist();
+    });
+  }
+
+  /**
+   * Increment attempt count for the in-flight batch.
+   *
+   * Called before retrying batch processing.
+   */
+  async incrementBatchAttempt(): Promise<void> {
+    await this.ensureLoaded();
+
+    return this.withStateLock(async () => {
+      const state = this.getLoadedState();
+
+      if (state.reflectionBatchInFlight) {
+        state.reflectionBatchInFlight.attemptCount += 1;
+        this.logger.debug(
+          {
+            batchId: state.reflectionBatchInFlight.batchId,
+            attemptCount: state.reflectionBatchInFlight.attemptCount,
+          },
+          'Batch attempt incremented'
+        );
+        await this.persist();
+      }
+    });
+  }
+
+  /**
+   * Recover stale in-flight batch.
+   *
+   * Called on startup to handle crash recovery. If an in-flight batch is
+   * stale (>5 minutes) or has too many attempts (>=3), items are moved
+   * back to the pending queue.
+   *
+   * @returns The recovered items (for logging), empty array if none
+   */
+  async recoverStaleBatch(): Promise<PendingReflection[]> {
+    await this.ensureLoaded();
+
+    return this.withStateLock(async () => {
+      const state = this.getLoadedState();
+
+      if (!state.reflectionBatchInFlight) {
+        return [];
+      }
+
+      const elapsed = Date.now() - state.reflectionBatchInFlight.startedAt.getTime();
+      const isStale = elapsed > 5 * 60 * 1000; // 5 minutes
+      const tooManyAttempts = state.reflectionBatchInFlight.attemptCount >= 3;
+
+      if (isStale || tooManyAttempts) {
+        const items = state.reflectionBatchInFlight.items;
+        const reason = tooManyAttempts ? 'too many attempts' : 'stale';
+
+        this.logger.warn(
+          {
+            batchId: state.reflectionBatchInFlight.batchId,
+            itemCount: items.length,
+            reason,
+            elapsedMs: elapsed,
+            attemptCount: state.reflectionBatchInFlight.attemptCount,
+          },
+          'Recovering stale batch'
+        );
+
+        // Move items back to pending queue (prepend to maintain order)
+        state.pendingReflections = [...items, ...state.pendingReflections];
+        delete state.reflectionBatchInFlight;
+
+        // Restart window if we have items
+        if (state.pendingReflections.length > 0) {
+          (state as { batchWindowStartAt: Date }).batchWindowStartAt = new Date();
+        }
+
+        await this.persist();
+        return items;
+      }
+
+      return [];
+    });
+  }
+
+  /**
+   * Get current batch state for status/debugging.
+   */
+  async getBatchStatus(): Promise<{
+    pendingCount: number;
+    windowStartAt?: Date;
+    inFlight?: { batchId: string; itemCount: number; attemptCount: number };
+  }> {
+    await this.ensureLoaded();
+    const state = this.getLoadedState();
+
+    const result: {
+      pendingCount: number;
+      windowStartAt?: Date;
+      inFlight?: { batchId: string; itemCount: number; attemptCount: number };
+    } = {
+      pendingCount: state.pendingReflections.length,
+    };
+
+    if (state.batchWindowStartAt) {
+      result.windowStartAt = state.batchWindowStartAt;
+    }
+
+    if (state.reflectionBatchInFlight) {
+      result.inFlight = {
+        batchId: state.reflectionBatchInFlight.batchId,
+        itemCount: state.reflectionBatchInFlight.itemCount,
+        attemptCount: state.reflectionBatchInFlight.attemptCount,
+      };
+    }
+
+    return result;
+  }
+
   /**
    * Compute health metrics from memory.
    *
@@ -707,17 +969,16 @@ export class SoulProvider {
       version: number;
     };
 
-    // Handle version migrations if needed
+    // Handle version changes - no backward compatibility, just log and update version
     if (parsed.version < SOUL_STATE_VERSION) {
-      this.logger.warn(
+      this.logger.info(
         { storedVersion: parsed.version, currentVersion: SOUL_STATE_VERSION },
-        'Migrating soul state from older version'
+        'Soul state version updated, new fields will use defaults'
       );
-      // Add migration logic here when version changes
       parsed.version = SOUL_STATE_VERSION;
     }
 
-    // Ensure all required fields exist (defensive - for older stored versions)
+    // Ensure all required fields exist (defaults for any missing fields)
     // Cast to FullSoulState after ensuring all fields are populated
     return {
       ...parsed,
@@ -725,6 +986,10 @@ export class SoulProvider {
       socraticEngine: parsed.socraticEngine ?? createDefaultSocraticEngine(),
       unanswerableCore: parsed.unanswerableCore ?? createDefaultUnanswerableCore(),
       deliberations: parsed.deliberations ?? [],
+      // Batch reflection fields - start fresh if missing
+      pendingReflections: parsed.pendingReflections ?? [],
+      batchWindowStartAt: parsed.batchWindowStartAt ?? undefined,
+      reflectionBatchInFlight: parsed.reflectionBatchInFlight ?? undefined,
     } as FullSoulState;
   }
 }

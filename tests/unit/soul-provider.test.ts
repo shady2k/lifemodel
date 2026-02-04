@@ -207,4 +207,205 @@ describe('SoulProvider', () => {
       // not from internal state, so the provider just preserves the value
     });
   });
+
+  describe('batch reflection queue', () => {
+    it('sets batchWindowStartAt only on first item', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      // First item should trigger window start
+      const wasEmpty1 = await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+      expect(wasEmpty1).toBe(true);
+
+      const state1 = await provider.getState();
+      expect(state1.batchWindowStartAt).toBeDefined();
+      const windowStart = state1.batchWindowStartAt;
+
+      // Second item should not change window start
+      const wasEmpty2 = await provider.enqueuePendingReflection({
+        responseText: 'response 2',
+        triggerSummary: 'trigger 2',
+        recipientId: 'user1',
+        tickId: 'tick2',
+        timestamp: new Date(),
+      });
+      expect(wasEmpty2).toBe(false);
+
+      const state2 = await provider.getState();
+      expect(state2.batchWindowStartAt?.getTime()).toBe(windowStart?.getTime());
+    });
+
+    it('returns null from takePendingBatch if already in-flight', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      // Enqueue items
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      // Take first batch
+      const batch1 = await provider.takePendingBatch();
+      expect(batch1).not.toBeNull();
+      expect(batch1).toHaveLength(1);
+
+      // Second take should return null (already in-flight)
+      const batch2 = await provider.takePendingBatch();
+      expect(batch2).toBeNull();
+    });
+
+    it('takePendingBatch moves items to in-flight and clears queue', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      const batch = await provider.takePendingBatch();
+      expect(batch).toHaveLength(1);
+
+      const state = await provider.getState();
+      expect(state.pendingReflections).toHaveLength(0);
+      expect(state.reflectionBatchInFlight).toBeDefined();
+      expect(state.reflectionBatchInFlight?.itemCount).toBe(1);
+      expect(state.batchWindowStartAt).toBeUndefined();
+    });
+
+    it('commitPendingBatch clears in-flight state', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      await provider.takePendingBatch();
+      await provider.commitPendingBatch();
+
+      const state = await provider.getState();
+      expect(state.reflectionBatchInFlight).toBeUndefined();
+    });
+
+    it('recoverStaleBatch moves items back after 5 minutes', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      await provider.takePendingBatch();
+
+      // Manually make the batch stale by backdating startedAt
+      const state = await provider.getState();
+      if (state.reflectionBatchInFlight) {
+        state.reflectionBatchInFlight.startedAt = new Date(Date.now() - 6 * 60 * 1000); // 6 minutes ago
+        await provider.persist();
+      }
+
+      // Recover should move items back
+      const recovered = await provider.recoverStaleBatch();
+      expect(recovered).toHaveLength(1);
+
+      const stateAfter = await provider.getState();
+      expect(stateAfter.pendingReflections).toHaveLength(1);
+      expect(stateAfter.reflectionBatchInFlight).toBeUndefined();
+      expect(stateAfter.batchWindowStartAt).toBeDefined(); // Window restarted
+    });
+
+    it('recoverStaleBatch recovers after too many attempts', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      await provider.takePendingBatch();
+
+      // Increment attempts to 3
+      await provider.incrementBatchAttempt();
+      await provider.incrementBatchAttempt();
+      await provider.incrementBatchAttempt();
+
+      // Recover should trigger due to too many attempts
+      const recovered = await provider.recoverStaleBatch();
+      expect(recovered).toHaveLength(1);
+
+      const stateAfter = await provider.getState();
+      expect(stateAfter.reflectionBatchInFlight).toBeUndefined();
+    });
+
+    it('drops oldest item when queue exceeds 50', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      // Enqueue 51 items
+      for (let i = 0; i < 51; i++) {
+        await provider.enqueuePendingReflection({
+          responseText: `response ${String(i)}`,
+          triggerSummary: `trigger ${String(i)}`,
+          recipientId: 'user1',
+          tickId: `tick${String(i)}`,
+          timestamp: new Date(),
+        });
+      }
+
+      const state = await provider.getState();
+      expect(state.pendingReflections).toHaveLength(50); // Capped at 50
+      // First item should have been dropped
+      expect(state.pendingReflections[0].tickId).toBe('tick1');
+      expect(state.pendingReflections[49].tickId).toBe('tick50');
+    });
+
+    it('getBatchStatus returns correct state', async () => {
+      const provider = createSoulProvider(mockLogger as any, config);
+
+      // Initially empty
+      const status1 = await provider.getBatchStatus();
+      expect(status1.pendingCount).toBe(0);
+      expect(status1.windowStartAt).toBeUndefined();
+      expect(status1.inFlight).toBeUndefined();
+
+      // After enqueueing
+      await provider.enqueuePendingReflection({
+        responseText: 'response 1',
+        triggerSummary: 'trigger 1',
+        recipientId: 'user1',
+        tickId: 'tick1',
+        timestamp: new Date(),
+      });
+
+      const status2 = await provider.getBatchStatus();
+      expect(status2.pendingCount).toBe(1);
+      expect(status2.windowStartAt).toBeDefined();
+
+      // After taking batch
+      await provider.takePendingBatch();
+      const status3 = await provider.getBatchStatus();
+      expect(status3.pendingCount).toBe(0);
+      expect(status3.inFlight).toBeDefined();
+      expect(status3.inFlight?.itemCount).toBe(1);
+    });
+  });
 });

@@ -32,11 +32,13 @@ import type { ToolRegistry } from './tools/registry.js';
 import { createToolRegistry, type MemoryProvider, type MemoryEntry } from './tools/registry.js';
 import type { SoulProvider, FullSoulState } from '../../storage/soul-provider.js';
 import {
-  performReflection,
-  type ReflectionContext,
+  processBatchReflection,
+  shouldProcessBatch,
   performDeliberation,
   applyRevision,
+  type ReflectionDeps,
 } from './soul/index.js';
+import type { PendingReflection } from '../../types/agent/soul.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -96,6 +98,12 @@ export class CognitionProcessor implements CognitionLayer {
   private memoryProvider: MemoryProvider | undefined;
   private soulProvider: SoulProvider | undefined;
   private immediateIntentCallback: ((intent: Intent) => void) | undefined;
+
+  /**
+   * Runtime-only timer for batch reflection processing.
+   * NOT persisted - timer is rescheduled on startup based on batchWindowStartAt.
+   */
+  private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     logger: Logger,
@@ -640,10 +648,11 @@ export class CognitionProcessor implements CognitionLayer {
 
   /**
    * Trigger post-response reflection if soul system is enabled.
-   * Non-blocking - runs in background and logs any errors.
+   * Non-blocking - queues for batch processing and logs any errors.
    *
-   * This checks whether the response aligned with our self-model (identity).
-   * If dissonance is detected (score >= 7), creates a soul:reflection thought.
+   * Responses are queued and processed together after a 30s window or
+   * when 10 items accumulate. This enables pattern recognition and
+   * reduces token overhead.
    */
   private triggerReflectionIfEnabled(
     responseText: string,
@@ -659,30 +668,137 @@ export class CognitionProcessor implements CognitionLayer {
     // Build trigger summary for context
     const triggerSummary = this.buildTriggerSummary(triggerSignal);
 
-    const reflectionContext: ReflectionContext = {
+    const pendingReflection: PendingReflection = {
       responseText,
       triggerSummary,
       recipientId,
       tickId,
+      timestamp: new Date(),
     };
 
-    // Fire and forget - don't await, don't block the response
-    performReflection(
-      {
-        logger: this.logger,
-        soulProvider: this.soulProvider,
-        memoryProvider: this.memoryProvider,
-        llm: this.cognitionLLM,
-      },
-      reflectionContext
-    ).catch((error: unknown) => {
-      // This shouldn't happen as performReflection catches its own errors,
-      // but just in case
+    // Enqueue and schedule batch processing (fire and forget)
+    this.enqueueAndScheduleBatch(pendingReflection).catch((error: unknown) => {
       this.logger.warn(
         { error: error instanceof Error ? error.message : String(error) },
-        'Reflection trigger failed unexpectedly'
+        'Reflection enqueue failed'
       );
     });
+  }
+
+  /**
+   * Enqueue a pending reflection and schedule batch processing if needed.
+   */
+  private async enqueueAndScheduleBatch(item: PendingReflection): Promise<void> {
+    if (!this.soulProvider) return;
+
+    const wasEmpty = await this.soulProvider.enqueuePendingReflection(item);
+
+    // Schedule timer if this was the first item and no timer running
+    if (wasEmpty && !this.batchTimer) {
+      this.scheduleBatchTimer(30_000);
+    }
+
+    // Check if size threshold reached (immediate processing)
+    const deps = this.getReflectionDeps();
+    if (deps && (await shouldProcessBatch(deps))) {
+      this.clearBatchTimer();
+      await this.processBatchReflectionNow();
+    }
+  }
+
+  /**
+   * Schedule the batch timer to fire after the given delay.
+   */
+  private scheduleBatchTimer(delayMs: number): void {
+    this.clearBatchTimer();
+    this.batchTimer = setTimeout(() => {
+      this.batchTimer = null;
+      this.processBatchReflectionNow().catch((error: unknown) => {
+        this.logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Batch reflection processing failed'
+        );
+      });
+    }, delayMs);
+
+    this.logger.debug({ delayMs }, 'Batch timer scheduled');
+  }
+
+  /**
+   * Clear the batch timer if running.
+   */
+  private clearBatchTimer(): void {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+  }
+
+  /**
+   * Process batch reflection now.
+   */
+  private async processBatchReflectionNow(): Promise<void> {
+    const deps = this.getReflectionDeps();
+    if (!deps) return;
+
+    await processBatchReflection(deps);
+  }
+
+  /**
+   * Get reflection dependencies if all are available.
+   */
+  private getReflectionDeps(): ReflectionDeps | null {
+    if (!this.soulProvider || !this.cognitionLLM || !this.memoryProvider) {
+      return null;
+    }
+    return {
+      logger: this.logger,
+      soulProvider: this.soulProvider,
+      memoryProvider: this.memoryProvider,
+      llm: this.cognitionLLM,
+    };
+  }
+
+  /**
+   * Initialize batch reflection on startup.
+   *
+   * Recovers any stale in-flight batches and schedules timer
+   * for pending items based on elapsed window time.
+   *
+   * Should be called after all dependencies are set.
+   */
+  async initializeBatchReflection(): Promise<void> {
+    if (!this.soulProvider) return;
+
+    try {
+      // Recover any stale batches (crash recovery)
+      const recovered = await this.soulProvider.recoverStaleBatch();
+      if (recovered.length > 0) {
+        this.logger.info({ itemCount: recovered.length }, 'Recovered stale batch items');
+      }
+
+      // Check if we have pending items that need scheduling
+      const state = await this.soulProvider.getState();
+      if (state.pendingReflections.length > 0 && state.batchWindowStartAt) {
+        const elapsed = Date.now() - state.batchWindowStartAt.getTime();
+
+        if (elapsed >= 30_000) {
+          // Window already expired, process immediately
+          this.logger.debug('Window expired on startup, processing immediately');
+          await this.processBatchReflectionNow();
+        } else {
+          // Schedule for remaining time
+          const remainingMs = 30_000 - elapsed;
+          this.logger.debug({ remainingMs }, 'Scheduling batch timer for remaining window');
+          this.scheduleBatchTimer(remainingMs);
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Batch reflection initialization failed'
+      );
+    }
   }
 
   /**
