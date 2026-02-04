@@ -1,20 +1,26 @@
 /**
  * Calories Plugin Tool
  *
- * Unified tool for tracking food intake, calories, and body weight.
- * Actions: log, list, summary, goal, update, delete
+ * Unified tool for tracking food intake with catalog-based matching.
+ * Actions: log, list, summary, goal, delete, log_weight
  */
 
 import type { PluginPrimitives, PluginTool, PluginToolContext } from '../../types/plugin.js';
 import type {
+  FoodItem,
   FoodEntry,
-  CustomDish,
   WeightEntry,
-  DailySummary,
+  Portion,
   MealType,
   ActivityLevel,
-  CaloriesToolResult,
-  GoalValidation,
+  LogInput,
+  LogResult,
+  LogResultItem,
+  ListResult,
+  SummaryResult,
+  GoalResult,
+  DeleteResult,
+  Unit,
 } from './calories-types.js';
 import {
   CALORIES_STORAGE_KEYS,
@@ -24,25 +30,16 @@ import {
   calculateAge,
   calculateBMR,
   calculateTDEE,
-  calculateCalorieTarget,
+  calculatePortionCalories,
 } from './calories-types.js';
+import { extractCanonicalName, decideMatch } from './calories-matching.js';
 import { DateTime } from 'luxon';
 
-/**
- * Get the user's timezone by recipientId.
- */
 type GetTimezoneFunc = (recipientId: string) => string;
-
-/**
- * Get user patterns (wake/sleep hours) by recipientId.
- */
 type GetUserPatternsFunc = (
   recipientId: string
 ) => { wakeHour?: number; sleepHour?: number } | null;
 
-/**
- * Get user model data for TDEE calculation.
- */
 interface UserModelData {
   weight_kg?: number;
   height_cm?: number;
@@ -50,84 +47,12 @@ interface UserModelData {
   gender?: string;
   activity_level?: ActivityLevel;
   calorie_goal?: number;
-  target_weight_kg?: number;
 }
 
 type GetUserModelFunc = (recipientId: string) => Promise<UserModelData | null>;
 
 /**
- * Schema definitions for error responses.
- */
-const SCHEMA_LOG_FOOD = {
-  action: { type: 'string', required: true, enum: ['log'] },
-  entry_type: { type: 'string', required: true, enum: ['food'] },
-  description: { type: 'string', required: true, description: 'What was eaten' },
-  calories: { type: 'number', required: true, description: 'Calorie estimate (0-10000)' },
-  estimate_confidence: {
-    type: 'number',
-    required: false,
-    description: 'Confidence in estimate (0-1). 0.9+=common food, 0.7=uncertain, <0.5=ask user',
-  },
-  is_user_override: {
-    type: 'boolean',
-    required: false,
-    description: 'True if user provided exact calories',
-  },
-  meal_type: {
-    type: 'string',
-    required: false,
-    enum: ['breakfast', 'lunch', 'dinner', 'snack'],
-  },
-  date: { type: 'string', required: false, description: 'YYYY-MM-DD for retroactive logging' },
-};
-
-const SCHEMA_LOG_WEIGHT = {
-  action: { type: 'string', required: true, enum: ['log'] },
-  entry_type: { type: 'string', required: true, enum: ['weight'] },
-  weight: { type: 'number', required: true, description: 'Weight in kg (20-500)' },
-};
-
-const SCHEMA_LIST = {
-  action: { type: 'string', required: true, enum: ['list'] },
-  entry_type: { type: 'string', required: true, enum: ['food', 'weight'] },
-  date: { type: 'string', required: false, description: 'YYYY-MM-DD for food (default: today)' },
-  limit: { type: 'number', required: false, default: 10 },
-};
-
-const SCHEMA_SUMMARY = {
-  action: { type: 'string', required: true, enum: ['summary'] },
-  date: { type: 'string', required: false, description: 'YYYY-MM-DD (default: today)' },
-};
-
-const SCHEMA_GOAL = {
-  action: { type: 'string', required: true, enum: ['goal'] },
-  daily_target: { type: 'number', required: false, description: 'Manual daily calorie goal' },
-  calculate_from_stats: {
-    type: 'boolean',
-    required: false,
-    description: 'Calculate TDEE from user stats',
-  },
-};
-
-const SCHEMA_UPDATE = {
-  action: { type: 'string', required: true, enum: ['update'] },
-  entry_id: { type: 'string', required: true, description: 'Entry ID to update (food_xxx)' },
-  description: { type: 'string', required: false },
-  calories: { type: 'number', required: false },
-};
-
-const SCHEMA_DELETE = {
-  action: { type: 'string', required: true, enum: ['delete'] },
-  entry_id: { type: 'string', required: true, description: 'Entry ID to delete' },
-};
-
-/**
  * Get the current "food day" based on user's sleep patterns.
- *
- * Uses the midpoint of the sleep period as the day boundary cutoff.
- * Example: sleepHour=2, wakeHour=8 → cutoff=5 AM
- * - 3 AM → before cutoff → yesterday
- * - 6 AM → after cutoff → today
  */
 function getCurrentFoodDate(
   timezone: string,
@@ -136,24 +61,18 @@ function getCurrentFoodDate(
   const now = DateTime.now().setZone(timezone);
   const hour = now.hour;
 
-  // Default: sleep at 23 (11 PM), wake at 7 AM
   const sleepHour = userPatterns?.sleepHour ?? 23;
   const wakeHour = userPatterns?.wakeHour ?? 7;
 
-  // Calculate midpoint of sleep period as day boundary cutoff
   let cutoff: number;
   if (sleepHour < wakeHour) {
-    // Sleep doesn't cross midnight (e.g., 2 AM to 8 AM)
     cutoff = Math.floor((sleepHour + wakeHour) / 2);
   } else {
-    // Sleep crosses midnight (e.g., 23 to 7)
-    // Normalize wake to next day, find midpoint, wrap back
     const wakeNormalized = wakeHour + 24;
     const midpoint = (sleepHour + wakeNormalized) / 2;
     cutoff = Math.floor(midpoint % 24);
   }
 
-  // Between midnight and cutoff = still "yesterday"
   if (hour < cutoff) {
     return now.minus({ days: 1 }).toFormat('yyyy-MM-dd');
   }
@@ -162,41 +81,10 @@ function getCurrentFoodDate(
 }
 
 /**
- * Normalize a description for fuzzy matching.
+ * Default portion when not specified.
  */
-function normalizeDescription(desc: string): string {
-  return desc.toLowerCase().trim().replace(/\s+/g, ' ');
-}
-
-/**
- * Find a matching custom dish by name or keywords.
- */
-function findMatchingDish(
-  description: string,
-  dishes: CustomDish[],
-  recipientId: string
-): CustomDish | null {
-  const normalized = normalizeDescription(description);
-
-  for (const dish of dishes) {
-    if (dish.recipientId !== recipientId) continue;
-
-    // Exact name match
-    if (normalizeDescription(dish.name) === normalized) {
-      return dish;
-    }
-
-    // Keyword match
-    if (dish.keywords) {
-      for (const keyword of dish.keywords) {
-        if (normalized.includes(normalizeDescription(keyword))) {
-          return dish;
-        }
-      }
-    }
-  }
-
-  return null;
+function getDefaultPortion(): Portion {
+  return { quantity: 1, unit: 'serving' };
 }
 
 /**
@@ -210,552 +98,370 @@ export function createCaloriesTool(
 ): PluginTool {
   const { storage, logger } = primitives;
 
-  /**
-   * Get storage key for food entries on a specific date.
-   */
-  function getFoodKey(date: string): string {
-    return `${CALORIES_STORAGE_KEYS.foodPrefix}${date}`;
+  // ============================================================================
+  // Storage Helpers
+  // ============================================================================
+
+  async function loadItems(recipientId: string): Promise<FoodItem[]> {
+    const all = await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items);
+    return (all ?? []).filter((item) => item.recipientId === recipientId);
   }
 
-  /**
-   * Load food entries for a specific date.
-   */
-  async function loadFoodEntries(date: string): Promise<FoodEntry[]> {
-    const stored = await storage.get<FoodEntry[]>(getFoodKey(date));
-    return stored ?? [];
+  async function saveItem(item: FoodItem): Promise<void> {
+    const all = await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items);
+    const items = all ?? [];
+    items.push(item);
+    await storage.set(CALORIES_STORAGE_KEYS.items, items);
   }
 
-  /**
-   * Save food entries for a specific date.
-   */
-  async function saveFoodEntries(date: string, entries: FoodEntry[]): Promise<void> {
-    await storage.set(getFoodKey(date), entries);
+  async function loadFoodEntries(date: string, recipientId: string): Promise<FoodEntry[]> {
+    const key = `${CALORIES_STORAGE_KEYS.foodPrefix}${date}`;
+    const all = await storage.get<FoodEntry[]>(key);
+    return (all ?? []).filter((e) => e.recipientId === recipientId);
   }
 
-  /**
-   * Load all custom dishes.
-   */
-  async function loadDishes(): Promise<CustomDish[]> {
-    const stored = await storage.get<CustomDish[]>(CALORIES_STORAGE_KEYS.dishes);
-    return stored ?? [];
+  async function saveFoodEntry(date: string, entry: FoodEntry): Promise<void> {
+    const key = `${CALORIES_STORAGE_KEYS.foodPrefix}${date}`;
+    const all = await storage.get<FoodEntry[]>(key);
+    const entries = all ?? [];
+    entries.push(entry);
+    await storage.set(key, entries);
   }
 
-  /**
-   * Save custom dishes.
-   */
-  async function saveDishes(dishes: CustomDish[]): Promise<void> {
-    await storage.set(CALORIES_STORAGE_KEYS.dishes, dishes);
+  async function loadWeights(recipientId: string): Promise<WeightEntry[]> {
+    const all = await storage.get<WeightEntry[]>(CALORIES_STORAGE_KEYS.weights);
+    return (all ?? []).filter((w) => w.recipientId === recipientId);
   }
 
-  /**
-   * Load weight entries.
-   */
-  async function loadWeights(): Promise<WeightEntry[]> {
-    const stored = await storage.get<WeightEntry[]>(CALORIES_STORAGE_KEYS.weights);
-    return stored ?? [];
-  }
-
-  /**
-   * Save weight entries.
-   */
-  async function saveWeights(weights: WeightEntry[]): Promise<void> {
+  async function saveWeight(entry: WeightEntry): Promise<void> {
+    const all = await storage.get<WeightEntry[]>(CALORIES_STORAGE_KEYS.weights);
+    const weights = all ?? [];
+    weights.push(entry);
     await storage.set(CALORIES_STORAGE_KEYS.weights, weights);
   }
 
-  /**
-   * Log a food entry.
-   */
+  async function getItemsMap(itemIds: string[]): Promise<Record<string, FoodItem>> {
+    const all = await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items);
+    const items = all ?? [];
+    const map: Record<string, FoodItem> = {};
+    for (const id of itemIds) {
+      const item = items.find((i) => i.id === id);
+      if (item) map[id] = item;
+    }
+    return map;
+  }
+
+  // ============================================================================
+  // Core Logic
+  // ============================================================================
+
   async function logFood(
-    description: string,
-    calories: number,
+    input: LogInput,
     recipientId: string,
-    options: {
-      isUserOverride?: boolean;
-      estimateConfidence?: number;
-      mealType?: MealType;
-      date?: string;
-    }
-  ): Promise<CaloriesToolResult> {
-    // Validate calories
-    const caloriesValidation = validateCalories(calories);
-    if (!caloriesValidation.valid) {
-      return {
-        success: false,
-        action: 'log',
-        error: caloriesValidation.error ?? 'Invalid calories value',
-        hint: 'Estimate calories based on typical portions. Examples: oatmeal=150, pizza slice=285, banana=105',
-        receivedParams: ['description', 'calories'],
-        schema: SCHEMA_LOG_FOOD,
-      };
-    }
-
-    const timezone = getTimezone(recipientId);
-    const userPatterns = getUserPatterns(recipientId);
-    const effectiveDate = options.date ?? getCurrentFoodDate(timezone, userPatterns);
+    effectiveDate: string
+  ): Promise<LogResult> {
+    const items = await loadItems(recipientId);
+    const results: LogResultItem[] = [];
     const now = new Date().toISOString();
 
-    // Check for matching custom dish
-    const dishes = await loadDishes();
-    const matchingDish = findMatchingDish(description, dishes, recipientId);
+    for (const entry of input.entries) {
+      // Extract canonical name and portion from input
+      const parsed = extractCanonicalName(entry.name);
+      const portion = entry.portion ?? parsed.defaultPortion ?? getDefaultPortion();
 
-    let source: FoodEntry['source'] = 'llm_estimate';
-    let customDishId: string | undefined;
-    let customDishCreated: CaloriesToolResult['customDishCreated'];
+      // If explicit item choice provided, use it
+      if (entry.chooseItemId) {
+        const chosenItem = items.find((i) => i.id === entry.chooseItemId);
+        if (!chosenItem) {
+          results.push({
+            status: 'ambiguous',
+            originalName: entry.name,
+            candidates: [],
+            suggestedPortion: portion,
+          });
+          continue;
+        }
 
-    if (matchingDish) {
-      source = 'custom_dish';
-      customDishId = matchingDish.id;
-    } else if (options.isUserOverride) {
-      source = 'user_override';
+        const calories = entry.calories_estimate ?? calculatePortionCalories(chosenItem, portion);
+        const foodEntry: FoodEntry = {
+          id: generateId('food'),
+          itemId: chosenItem.id,
+          calories,
+          portion,
+          timestamp: entry.timestamp ?? now,
+          recipientId,
+        };
+        if (entry.meal_type) {
+          foodEntry.mealType = entry.meal_type;
+        }
 
-      // Auto-create custom dish when user provides explicit calories
-      const newDish: CustomDish = {
-        id: generateId('dish'),
-        name: description,
-        caloriesPerServing: calories,
-        createdAt: now,
-        updatedAt: now,
-        recipientId,
-      };
-      dishes.push(newDish);
-      await saveDishes(dishes);
+        await saveFoodEntry(effectiveDate, foodEntry);
 
-      customDishCreated = {
-        id: newDish.id,
-        name: newDish.name,
-        calories: newDish.caloriesPerServing,
-      };
+        results.push({
+          status: 'matched',
+          entryId: foodEntry.id,
+          itemId: chosenItem.id,
+          canonicalName: chosenItem.canonicalName,
+          calories,
+          portion,
+        });
+        continue;
+      }
 
-      logger.info({ dishId: newDish.id, name: newDish.name, calories }, 'Custom dish auto-created');
+      // Run matching
+      const decision = decideMatch(parsed.canonicalName, items);
+
+      if (decision.status === 'matched') {
+        const calories =
+          entry.calories_estimate ?? calculatePortionCalories(decision.item, portion);
+        const foodEntry: FoodEntry = {
+          id: generateId('food'),
+          itemId: decision.item.id,
+          calories,
+          portion,
+          timestamp: entry.timestamp ?? now,
+          recipientId,
+        };
+        if (entry.meal_type) {
+          foodEntry.mealType = entry.meal_type;
+        }
+
+        await saveFoodEntry(effectiveDate, foodEntry);
+
+        results.push({
+          status: 'matched',
+          entryId: foodEntry.id,
+          itemId: decision.item.id,
+          canonicalName: decision.item.canonicalName,
+          calories,
+          portion,
+        });
+
+        logger.info(
+          { entryId: foodEntry.id, itemId: decision.item.id, calories },
+          'Food entry logged (matched)'
+        );
+      } else if (decision.status === 'ambiguous') {
+        results.push({
+          status: 'ambiguous',
+          originalName: entry.name,
+          candidates: decision.candidates.map((c) => ({
+            itemId: c.item.id,
+            canonicalName: c.item.canonicalName,
+            score: c.score,
+          })),
+          suggestedPortion: portion,
+        });
+
+        logger.info(
+          { originalName: entry.name, candidateCount: decision.candidates.length },
+          'Ambiguous match - user choice needed'
+        );
+      } else {
+        // Create new item
+        const calories = entry.calories_estimate ?? 0;
+        if (calories === 0) {
+          // Can't create without calorie estimate
+          results.push({
+            status: 'ambiguous',
+            originalName: entry.name,
+            candidates: [],
+            suggestedPortion: portion,
+          });
+          continue;
+        }
+
+        const newItem: FoodItem = {
+          id: generateId('item'),
+          canonicalName: parsed.canonicalName,
+          measurementKind: inferMeasurementKind(portion.unit),
+          basis: {
+            caloriesPer: calories,
+            perQuantity: portion.quantity,
+            perUnit: portion.unit,
+          },
+          createdAt: now,
+          updatedAt: now,
+          recipientId,
+        };
+
+        await saveItem(newItem);
+        items.push(newItem); // Add to local cache for subsequent matches
+
+        const foodEntry: FoodEntry = {
+          id: generateId('food'),
+          itemId: newItem.id,
+          calories,
+          portion,
+          timestamp: entry.timestamp ?? now,
+          recipientId,
+        };
+        if (entry.meal_type) {
+          foodEntry.mealType = entry.meal_type;
+        }
+
+        await saveFoodEntry(effectiveDate, foodEntry);
+
+        results.push({
+          status: 'created',
+          entryId: foodEntry.id,
+          itemId: newItem.id,
+          canonicalName: newItem.canonicalName,
+          calories,
+          portion,
+        });
+
+        logger.info(
+          { entryId: foodEntry.id, itemId: newItem.id, name: newItem.canonicalName, calories },
+          'Food entry logged (new item created)'
+        );
+      }
     }
 
-    const entry: FoodEntry = {
-      id: generateId('food'),
-      description,
-      calories,
-      source,
-      customDishId,
-      eatenAt: now,
-      loggedAt: now,
-      recipientId,
-      mealType: options.mealType,
-    };
-
-    const entries = await loadFoodEntries(effectiveDate);
-    entries.push(entry);
-    await saveFoodEntries(effectiveDate, entries);
-
-    logger.info(
-      { entryId: entry.id, description, calories, source, date: effectiveDate },
-      'Food entry logged'
-    );
-
-    const result: CaloriesToolResult = {
-      success: true,
-      action: 'log',
-      entryId: entry.id,
-      entry,
-    };
-
-    if (customDishCreated) {
-      result.customDishCreated = customDishCreated;
-    }
-
-    // Add warning for low confidence estimates
-    if (options.estimateConfidence !== undefined && options.estimateConfidence < 0.5) {
-      result.warning = `Low confidence estimate (${options.estimateConfidence.toFixed(2)}). Consider asking user to confirm.`;
-    }
-
-    return result;
+    return { success: true, results };
   }
 
-  /**
-   * Log a weight entry.
-   */
-  async function logWeight(weight: number, recipientId: string): Promise<CaloriesToolResult> {
-    // Validate weight
-    const weightValidation = validateWeight(weight);
-    if (!weightValidation.valid) {
-      return {
-        success: false,
-        action: 'log',
-        error: weightValidation.error ?? 'Invalid weight value',
-        receivedParams: ['weight'],
-        schema: SCHEMA_LOG_WEIGHT,
-      };
-    }
-
-    const now = new Date().toISOString();
-
-    const entry: WeightEntry = {
-      id: generateId('weight'),
-      weight,
-      measuredAt: now,
-      loggedAt: now,
-      recipientId,
-    };
-
-    const weights = await loadWeights();
-    weights.push(entry);
-    await saveWeights(weights);
-
-    logger.info({ entryId: entry.id, weight }, 'Weight entry logged');
-
-    return {
-      success: true,
-      action: 'log',
-      entryId: entry.id,
-      entry,
-    };
+  function inferMeasurementKind(unit: Unit): FoodItem['measurementKind'] {
+    if (unit === 'g' || unit === 'kg') return 'weight';
+    if (unit === 'ml' || unit === 'l') return 'volume';
+    if (unit === 'item' || unit === 'slice') return 'count';
+    return 'serving';
   }
 
-  /**
-   * List food entries for a date.
-   */
   async function listFood(
     recipientId: string,
-    date: string | undefined,
-    limit: number
-  ): Promise<CaloriesToolResult> {
-    const timezone = getTimezone(recipientId);
-    const userPatterns = getUserPatterns(recipientId);
-    const effectiveDate = date ?? getCurrentFoodDate(timezone, userPatterns);
+    date: string,
+    mealType?: MealType,
+    limit?: number
+  ): Promise<ListResult> {
+    let entries = await loadFoodEntries(date, recipientId);
 
-    const entries = await loadFoodEntries(effectiveDate);
-    const filtered = entries
-      .filter((e) => e.recipientId === recipientId)
-      .sort((a, b) => new Date(b.eatenAt).getTime() - new Date(a.eatenAt).getTime())
-      .slice(0, limit);
+    if (mealType) {
+      entries = entries.filter((e) => e.mealType === mealType);
+    }
 
-    return {
-      success: true,
-      action: 'list',
-      entries: filtered,
-    };
+    entries.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    if (limit) {
+      entries = entries.slice(0, limit);
+    }
+
+    const itemIds = [...new Set(entries.map((e) => e.itemId))];
+    const items = await getItemsMap(itemIds);
+
+    return { success: true, date, entries, items };
   }
 
-  /**
-   * List weight entries.
-   */
-  async function listWeights(recipientId: string, limit: number): Promise<CaloriesToolResult> {
-    const weights = await loadWeights();
-    const filtered = weights
-      .filter((e) => e.recipientId === recipientId)
-      .sort((a, b) => new Date(b.measuredAt).getTime() - new Date(a.measuredAt).getTime())
-      .slice(0, limit);
-
-    return {
-      success: true,
-      action: 'list',
-      entries: filtered,
-    };
-  }
-
-  /**
-   * Get daily calorie summary.
-   */
-  async function getSummary(
-    recipientId: string,
-    date: string | undefined
-  ): Promise<CaloriesToolResult> {
-    const timezone = getTimezone(recipientId);
-    const userPatterns = getUserPatterns(recipientId);
-    const effectiveDate = date ?? getCurrentFoodDate(timezone, userPatterns);
-
-    const entries = await loadFoodEntries(effectiveDate);
-    const filtered = entries.filter((e) => e.recipientId === recipientId);
-
-    const totalCalories = filtered.reduce((sum, e) => sum + e.calories, 0);
+  async function getSummary(recipientId: string, date: string): Promise<SummaryResult> {
+    const entries = await loadFoodEntries(date, recipientId);
+    const totalCalories = entries.reduce((sum, e) => sum + e.calories, 0);
 
     const byMealType: Partial<Record<MealType, number>> = {};
-    for (const entry of filtered) {
+    for (const entry of entries) {
       if (entry.mealType) {
         byMealType[entry.mealType] = (byMealType[entry.mealType] ?? 0) + entry.calories;
       }
     }
 
-    // Get goal from user model
     const userModel = await getUserModel(recipientId);
     const goal = userModel?.calorie_goal ?? null;
 
-    // Build goal validation info when a goal exists
-    let goalValidation: GoalValidation | undefined;
-    if (goal !== null) {
-      const requiredStats = ['weight_kg', 'height_cm', 'birthday', 'gender'] as const;
-      const missingStats = requiredStats.filter((stat) => !userModel?.[stat]);
-
-      if (missingStats.length > 0) {
-        goalValidation = {
-          missingStats,
-          hint: `Goal cannot be validated without user stats. DO NOT call calories goal until ALL missing stats are remembered: ${missingStats.join(', ')}`,
-        };
-      } else if (
-        userModel?.birthday &&
-        userModel.gender &&
-        userModel.weight_kg &&
-        userModel.height_cm
-      ) {
-        // All stats available - calculate TDEE for comparison
-        const age = calculateAge(userModel.birthday);
-        const isMale = userModel.gender === 'male';
-        const bmr = calculateBMR(userModel.weight_kg, userModel.height_cm, age, isMale);
-        const tdee = calculateTDEE(bmr, userModel.activity_level ?? 'moderate');
-        const deficit = tdee - goal;
-
-        let hint: string;
-        if (deficit > 0) {
-          const deficitType = deficit < 500 ? 'moderate' : 'aggressive';
-          hint = `Goal ${String(goal)} is ${String(deficit)} below TDEE (${deficitType} deficit for weight loss)`;
-        } else if (deficit < 0) {
-          hint = `Goal ${String(goal)} is ${String(-deficit)} above TDEE (surplus for muscle gain)`;
-        } else {
-          hint = `Goal ${String(goal)} matches TDEE (maintenance)`;
-        }
-
-        goalValidation = {
-          calculatedTDEE: Math.round(tdee),
-          hint,
-        };
-      }
-    }
-
-    const summary: DailySummary = {
-      date: effectiveDate,
+    return {
+      success: true,
+      date,
       totalCalories,
       goal,
       remaining: goal !== null ? goal - totalCalories : null,
-      entryCount: filtered.length,
+      entryCount: entries.length,
       byMealType,
-      computedAt: new Date().toISOString(),
-      ...(goalValidation && { goalValidation }),
     };
-
-    const result: CaloriesToolResult = {
-      success: true,
-      action: 'summary',
-      summary,
-    };
-
-    // Signal that user input is needed before goal validation can work
-    if (goalValidation?.missingStats && goalValidation.missingStats.length > 0) {
-      result.requiresUserInput = true;
-      result.userPrompt = `To validate your calorie goal, I need: ${goalValidation.missingStats.join(', ')}`;
-    }
-
-    return result;
   }
 
-  /**
-   * Set or calculate calorie goal.
-   */
   async function setGoal(
     recipientId: string,
     dailyTarget?: number,
     calculateFromStats?: boolean
-  ): Promise<CaloriesToolResult> {
-    const userModel = await getUserModel(recipientId);
-
-    if (dailyTarget != null) {
-      // Manual target validation
+  ): Promise<GoalResult> {
+    if (dailyTarget !== undefined) {
       const validation = validateCalories(dailyTarget);
       if (!validation.valid) {
-        return {
-          success: false,
-          action: 'goal',
-          error: validation.error ?? 'Invalid calorie goal value',
-          schema: SCHEMA_GOAL,
-        };
+        return { success: false, error: validation.error ?? 'Invalid calorie value' };
       }
 
-      // Persist the goal to UserModel
       await primitives.services.setUserProperty('calorie_goal', dailyTarget, recipientId);
-      logger.info({ dailyTarget, recipientId }, 'Calorie goal persisted to user model');
 
       return {
         success: true,
-        action: 'goal',
-        goal: {
-          daily: dailyTarget,
-          source: 'manual',
-        },
+        goal: { daily: dailyTarget, source: 'manual' },
       };
     }
 
     if (calculateFromStats) {
-      // Need user stats for TDEE calculation
+      const userModel = await getUserModel(recipientId);
+      const missing: string[] = [];
+
+      if (!userModel?.weight_kg) missing.push('weight_kg');
+      if (!userModel?.height_cm) missing.push('height_cm');
+      if (!userModel?.birthday) missing.push('birthday');
+      if (!userModel?.gender) missing.push('gender');
+
+      // All required fields must be present for TDEE calculation
       if (
+        missing.length > 0 ||
         !userModel?.weight_kg ||
         !userModel.height_cm ||
         !userModel.birthday ||
         !userModel.gender
       ) {
-        // Build structured field errors for machine-readability
-        const fields: { path: string; expected: string; received: string }[] = [];
-        if (!userModel?.weight_kg) {
-          fields.push({ path: 'user.weight_kg', expected: 'number', received: 'missing' });
-        }
-        if (!userModel?.height_cm) {
-          fields.push({ path: 'user.height_cm', expected: 'number', received: 'missing' });
-        }
-        if (!userModel?.birthday) {
-          fields.push({
-            path: 'user.birthday',
-            expected: 'string (YYYY-MM-DD)',
-            received: 'missing',
-          });
-        }
-        if (!userModel?.gender) {
-          fields.push({ path: 'user.gender', expected: '"male" | "female"', received: 'missing' });
-        }
-
-        const missingList = fields.map((f) => f.path.replace('user.', '')).join(', ');
-
         return {
           success: false,
-          action: 'goal',
-          error: {
-            type: 'missing_data',
-            message: 'Cannot calculate TDEE - user profile data is missing',
-            fields,
-            retryable: false, // KEY: Do NOT retry with same params
-          },
-          hint: {
-            notes: [
-              'This data must come from the user, not from tool parameters.',
-              'Ask the user to provide their stats, then use core.remember to save them.',
-            ],
-            example: { action: 'goal', daily_target: 2000 },
-          },
-          requiresUserInput: true,
-          userPrompt: `To calculate your calorie goal, I need: ${missingList}.`,
+          error: 'Missing user data for TDEE calculation',
+          missingStats: missing,
         };
       }
 
       const age = calculateAge(userModel.birthday);
       const isMale = userModel.gender === 'male';
-      const activityLevel = userModel.activity_level ?? 'moderate';
-
       const bmr = calculateBMR(userModel.weight_kg, userModel.height_cm, age, isMale);
-      const tdee = calculateTDEE(bmr, activityLevel);
-
-      let dailyCalories = tdee;
-      if (userModel.target_weight_kg && userModel.target_weight_kg !== userModel.weight_kg) {
-        dailyCalories = calculateCalorieTarget(
-          tdee,
-          userModel.weight_kg,
-          userModel.target_weight_kg
-        );
-      }
+      const tdee = calculateTDEE(bmr, userModel.activity_level ?? 'moderate');
 
       return {
         success: true,
-        action: 'goal',
-        goal: {
-          daily: dailyCalories,
-          source: 'calculated',
-          tdee,
-        },
+        goal: { daily: tdee, source: 'calculated', tdee },
       };
     }
 
-    // Return current goal
+    const userModel = await getUserModel(recipientId);
     if (userModel?.calorie_goal) {
       return {
         success: true,
-        action: 'goal',
-        goal: {
-          daily: userModel.calorie_goal,
-          source: 'manual',
-        },
+        goal: { daily: userModel.calorie_goal, source: 'manual' },
       };
     }
 
-    return {
-      success: false,
-      action: 'goal',
-      error: 'No calorie goal set',
-      hint: 'Use daily_target to set a manual goal, or calculate_from_stats to compute from user data.',
-      schema: SCHEMA_GOAL,
-    };
+    return { success: false, error: 'No calorie goal set' };
   }
 
-  /**
-   * Update a food entry.
-   */
-  async function updateEntry(
-    entryId: string,
-    recipientId: string,
-    updates: { description?: string; calories?: number }
-  ): Promise<CaloriesToolResult> {
-    // Find the entry across all dates
-    const keys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
-
-    for (const key of keys) {
-      const entries = await storage.get<FoodEntry[]>(key);
-      if (!entries) continue;
-
-      const entryIndex = entries.findIndex((e) => e.id === entryId);
-      if (entryIndex === -1) continue;
-
-      const entry = entries[entryIndex];
-      if (!entry) continue; // TypeScript guard - entryIndex is valid but TS doesn't know
-
-      // Verify ownership
-      if (entry.recipientId !== recipientId) {
-        logger.warn(
-          { entryId, requestedRecipientId: recipientId, actualRecipientId: entry.recipientId },
-          'Attempted to update entry from different recipient'
-        );
-        return {
-          success: false,
-          action: 'update',
-          error: 'Entry not found',
-        };
-      }
-
-      // Validate new calories if provided
-      if (updates.calories !== undefined) {
-        const validation = validateCalories(updates.calories);
-        if (!validation.valid) {
-          return {
-            success: false,
-            action: 'update',
-            error: validation.error ?? 'Invalid calories value',
-            schema: SCHEMA_UPDATE,
-          };
-        }
-        entry.calories = updates.calories;
-      }
-
-      if (updates.description !== undefined) {
-        entry.description = updates.description;
-      }
-
-      entries[entryIndex] = entry;
-      await storage.set(key, entries);
-
-      logger.info({ entryId, updates }, 'Food entry updated');
-
-      return {
-        success: true,
-        action: 'update',
-        entryId,
-        entry,
-      };
+  async function logWeight(weight: number, recipientId: string): Promise<DeleteResult> {
+    const validation = validateWeight(weight);
+    if (!validation.valid) {
+      return { success: false, error: validation.error ?? 'Invalid weight value' };
     }
 
-    return {
-      success: false,
-      action: 'update',
-      error: 'Entry not found',
+    const entry: WeightEntry = {
+      id: generateId('weight'),
+      weight,
+      measuredAt: new Date().toISOString(),
+      recipientId,
     };
+
+    await saveWeight(entry);
+    logger.info({ entryId: entry.id, weight }, 'Weight entry logged');
+
+    return { success: true, entryId: entry.id };
   }
 
-  /**
-   * Delete an entry (food or weight).
-   */
-  async function deleteEntry(entryId: string, recipientId: string): Promise<CaloriesToolResult> {
-    // Check if it's a food entry
+  async function deleteEntry(entryId: string, recipientId: string): Promise<DeleteResult> {
     if (entryId.startsWith('food_')) {
       const keys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
 
@@ -763,171 +469,121 @@ export function createCaloriesTool(
         const entries = await storage.get<FoodEntry[]>(key);
         if (!entries) continue;
 
-        const entryIndex = entries.findIndex((e) => e.id === entryId);
-        if (entryIndex === -1) continue;
-
-        const entry = entries[entryIndex];
-        if (!entry) continue; // TypeScript guard
-
-        // Verify ownership
-        if (entry.recipientId !== recipientId) {
-          logger.warn(
-            { entryId, requestedRecipientId: recipientId, actualRecipientId: entry.recipientId },
-            'Attempted to delete entry from different recipient'
-          );
-          return {
-            success: false,
-            action: 'delete',
-            error: 'Entry not found',
-          };
+        const idx = entries.findIndex((e) => e.id === entryId && e.recipientId === recipientId);
+        if (idx !== -1) {
+          entries.splice(idx, 1);
+          await storage.set(key, entries);
+          logger.info({ entryId }, 'Food entry deleted');
+          return { success: true, entryId };
         }
-
-        entries.splice(entryIndex, 1);
-        await storage.set(key, entries);
-
-        logger.info({ entryId }, 'Food entry deleted');
-
-        return {
-          success: true,
-          action: 'delete',
-          entryId,
-        };
       }
     }
 
-    // Check if it's a weight entry
     if (entryId.startsWith('weight_')) {
-      const weights = await loadWeights();
-      const entryIndex = weights.findIndex((e) => e.id === entryId);
-
-      const entry = weights[entryIndex];
-      if (entryIndex !== -1 && entry) {
-        // Verify ownership
-        if (entry.recipientId !== recipientId) {
-          logger.warn(
-            { entryId, requestedRecipientId: recipientId, actualRecipientId: entry.recipientId },
-            'Attempted to delete weight entry from different recipient'
-          );
-          return {
-            success: false,
-            action: 'delete',
-            error: 'Entry not found',
-          };
-        }
-
-        weights.splice(entryIndex, 1);
-        await saveWeights(weights);
-
+      const weights = await loadWeights(recipientId);
+      const idx = weights.findIndex((w) => w.id === entryId);
+      if (idx !== -1) {
+        weights.splice(idx, 1);
+        await storage.set(CALORIES_STORAGE_KEYS.weights, weights);
         logger.info({ entryId }, 'Weight entry deleted');
-
-        return {
-          success: true,
-          action: 'delete',
-          entryId,
-        };
+        return { success: true, entryId };
       }
     }
 
-    return {
-      success: false,
-      action: 'delete',
-      error: 'Entry not found',
-    };
+    return { success: false, error: 'Entry not found' };
   }
+
+  // ============================================================================
+  // Tool Definition
+  // ============================================================================
+
+  const TOOL_DESCRIPTION = `Отслеживание еды и калорий.
+
+ДЕЙСТВИЯ:
+- log: Записать еду (поддерживает массив entries для нескольких позиций)
+- list: Показать записи за день
+- summary: Итоги дня (калории, цель, остаток)
+- goal: Установить цель калорий
+- log_weight: Записать вес
+- delete: Удалить запись
+
+LOG - формат entries:
+  entries: [
+    { name: "Американо", portion: { quantity: 200, unit: "ml" }, calories_estimate: 5, meal_type: "breakfast" },
+    { name: "Йогурт Teos Греческий 2%", portion: { quantity: 140, unit: "g" }, calories_estimate: 94 }
+  ]
+
+ПРАВИЛА:
+1. В name указывай ТОЛЬКО название без количества: "Американо", не "Американо 200мл"
+2. Количество и единицы в portion: { quantity: 200, unit: "ml" }
+3. Единицы: g, kg, ml, l, item, slice, cup, serving
+4. Если status="ambiguous", выбери нужный вариант через chooseItemId
+5. НЕ создавай новый продукт только из-за другой порции
+
+ПРИМЕР:
+Пользователь: "запиши американо и йогурт на завтрак"
+Ответ: log с entries=[{name:"Американо", portion:{quantity:200,unit:"ml"}, meal_type:"breakfast"}, ...]`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
-    description: `Track food intake, calories, and body weight.
-
-Actions: log, list, summary, goal, update, delete
-
-LOG: entry_type="food"|"weight". For food: description, calories (you estimate), estimate_confidence (0.9=certain, <0.5=ask user). If user provides calories: is_user_override=true.
-
-GOAL: daily_target=N for manual, OR calculate_from_stats=true for auto (returns what to ask user if stats missing).
-
-SUMMARY/LIST: View intake for date.`,
+    description: TOOL_DESCRIPTION,
     tags: ['food', 'calories', 'weight', 'nutrition', 'diet', 'health', 'tracking'],
     parameters: [
       {
         name: 'action',
         type: 'string',
-        description: 'Action to perform: "log", "list", "summary", "goal", "update", or "delete"',
+        description: 'Action: log, list, summary, goal, log_weight, delete',
         required: true,
-        enum: ['log', 'list', 'summary', 'goal', 'update', 'delete'],
+        enum: ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'],
       },
       {
-        name: 'entry_type',
-        type: 'string',
-        description: 'Type of entry: "food" or "weight" (for log and list actions)',
-        required: false,
-        enum: ['food', 'weight'],
-      },
-      {
-        name: 'description',
-        type: 'string',
-        description: 'Food description (for log food action)',
-        required: false,
-      },
-      {
-        name: 'calories',
-        type: 'number',
-        description: 'Calorie estimate 0-10000 (for log food action)',
-        required: false,
-      },
-      {
-        name: 'weight',
-        type: 'number',
-        description: 'Weight in kg 20-500 (for log weight action)',
-        required: false,
-      },
-      {
-        name: 'estimate_confidence',
-        type: 'number',
+        name: 'entries',
+        type: 'array',
         description:
-          'Confidence in calorie estimate (0.0-1.0). 0.9+=common food, 0.7=uncertain, <0.5=ask user',
+          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, meal_type?, chooseItemId?}',
         required: false,
       },
       {
-        name: 'is_user_override',
-        type: 'boolean',
-        description: 'True if user explicitly provided calorie count',
+        name: 'date',
+        type: 'string',
+        description: 'Date YYYY-MM-DD (default: today based on sleep patterns)',
         required: false,
       },
       {
         name: 'meal_type',
         type: 'string',
-        description: 'Meal category: breakfast, lunch, dinner, snack',
+        description: 'Filter by meal type for list action',
         required: false,
         enum: ['breakfast', 'lunch', 'dinner', 'snack'],
       },
       {
-        name: 'date',
-        type: 'string',
-        description: 'Date in YYYY-MM-DD format (for retroactive logging or list)',
-        required: false,
-      },
-      {
         name: 'limit',
         type: 'number',
-        description: 'Max entries to return (for list, default: 10)',
-        required: false,
-      },
-      {
-        name: 'entry_id',
-        type: 'string',
-        description: 'Entry ID (for update/delete actions)',
+        description: 'Max entries for list (default: 20)',
         required: false,
       },
       {
         name: 'daily_target',
         type: 'number',
-        description: 'Manual daily calorie goal (for goal action)',
+        description: 'Calorie goal for goal action',
         required: false,
       },
       {
         name: 'calculate_from_stats',
         type: 'boolean',
-        description: 'Calculate TDEE from user stats (for goal action)',
+        description: 'Calculate TDEE from user data for goal action',
+        required: false,
+      },
+      {
+        name: 'weight',
+        type: 'number',
+        description: 'Weight in kg for log_weight action',
+        required: false,
+      },
+      {
+        name: 'entry_id',
+        type: 'string',
+        description: 'Entry ID for delete action',
         required: false,
       },
     ],
@@ -936,112 +592,53 @@ SUMMARY/LIST: View intake for date.`,
       if (!a['action'] || typeof a['action'] !== 'string') {
         return { success: false, error: 'action: required' };
       }
-      const validActions = ['log', 'list', 'summary', 'goal', 'update', 'delete'];
+      const validActions = ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'];
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
       }
       return { success: true, data: a };
     },
-    execute: async (args, context?: PluginToolContext): Promise<CaloriesToolResult> => {
-      const action = args['action'];
-      if (typeof action !== 'string') {
-        return {
-          success: false,
-          action: 'unknown',
-          error: 'Missing or invalid action parameter',
-          receivedParams: Object.keys(args),
-          schema: {
-            availableActions: {
-              log_food: SCHEMA_LOG_FOOD,
-              log_weight: SCHEMA_LOG_WEIGHT,
-              list: SCHEMA_LIST,
-              summary: SCHEMA_SUMMARY,
-              goal: SCHEMA_GOAL,
-              update: SCHEMA_UPDATE,
-              delete: SCHEMA_DELETE,
-            },
-          },
-        };
+    execute: async (
+      args,
+      context?: PluginToolContext
+    ): Promise<LogResult | ListResult | SummaryResult | GoalResult | DeleteResult> => {
+      const action = args['action'] as string;
+      const recipientId = context?.recipientId;
+
+      if (!recipientId) {
+        return { success: false, error: 'No recipient context' } as DeleteResult;
       }
 
-      const recipientId = context?.recipientId;
-      if (!recipientId) {
-        return {
-          success: false,
-          action,
-          error: 'No recipient context available',
-        };
-      }
+      const timezone = getTimezone(recipientId);
+      const userPatterns = getUserPatterns(recipientId);
+      const dateArg = args['date'];
+      const effectiveDate =
+        typeof dateArg === 'string' ? dateArg : getCurrentFoodDate(timezone, userPatterns);
 
       switch (action) {
         case 'log': {
-          const entryType = args['entry_type'] as 'food' | 'weight' | undefined;
-
-          if (entryType === 'weight') {
-            const weight = args['weight'];
-            if (typeof weight !== 'number') {
-              return {
-                success: false,
-                action: 'log',
-                error: 'Missing required parameter: weight',
-                receivedParams: Object.keys(args),
-                schema: SCHEMA_LOG_WEIGHT,
-              };
-            }
-            return logWeight(weight, recipientId);
-          }
-
-          // Default to food
-          const description = args['description'] as string | undefined;
-          const calories = args['calories'] as number | undefined;
-
-          if (!description || calories === undefined) {
+          const entries = args['entries'] as LogInput['entries'] | undefined;
+          if (!entries || !Array.isArray(entries) || entries.length === 0) {
             return {
               success: false,
-              action: 'log',
-              error: 'Missing required parameters for food logging: description, calories',
-              hint: 'Estimate calories based on typical portions. Examples: oatmeal=150, pizza slice=285, banana=105',
-              receivedParams: Object.keys(args),
-              schema: SCHEMA_LOG_FOOD,
-            };
+              error: 'entries array required for log action',
+            } as DeleteResult;
           }
-
-          const options: {
-            isUserOverride?: boolean;
-            estimateConfidence?: number;
-            mealType?: MealType;
-            date?: string;
-          } = {};
-
-          if (args['is_user_override'] !== undefined) {
-            options.isUserOverride = args['is_user_override'] as boolean;
-          }
-          if (args['estimate_confidence'] !== undefined) {
-            options.estimateConfidence = args['estimate_confidence'] as number;
-          }
-          if (args['meal_type'] !== undefined) {
-            options.mealType = args['meal_type'] as MealType;
-          }
-          if (args['date'] !== undefined) {
-            options.date = args['date'] as string;
-          }
-
-          return logFood(description, calories, recipientId, options);
+          return logFood({ entries }, recipientId, effectiveDate);
         }
 
         case 'list': {
-          const entryType = args['entry_type'] as 'food' | 'weight' | undefined;
-          const limit = typeof args['limit'] === 'number' ? args['limit'] : 10;
-
-          if (entryType === 'weight') {
-            return listWeights(recipientId, limit);
-          }
-
-          return listFood(recipientId, args['date'] as string | undefined, limit);
+          const limitArg = args['limit'];
+          return listFood(
+            recipientId,
+            effectiveDate,
+            args['meal_type'] as MealType | undefined,
+            typeof limitArg === 'number' ? limitArg : 20
+          );
         }
 
         case 'summary': {
-          return getSummary(recipientId, args['date'] as string | undefined);
+          return getSummary(recipientId, effectiveDate);
         }
 
         case 'goal': {
@@ -1052,62 +649,27 @@ SUMMARY/LIST: View intake for date.`,
           );
         }
 
-        case 'update': {
-          const entryId = args['entry_id'];
-          if (typeof entryId !== 'string' || !entryId) {
+        case 'log_weight': {
+          const weight = args['weight'] as number | undefined;
+          if (weight === undefined) {
             return {
               success: false,
-              action: 'update',
-              error: 'Missing required parameter: entry_id',
-              receivedParams: Object.keys(args),
-              schema: SCHEMA_UPDATE,
-            };
+              error: 'weight required for log_weight action',
+            } as DeleteResult;
           }
-
-          const updates: { description?: string; calories?: number } = {};
-          if (args['description'] !== undefined) {
-            updates.description = args['description'] as string;
-          }
-          if (args['calories'] !== undefined) {
-            updates.calories = args['calories'] as number;
-          }
-
-          return updateEntry(entryId, recipientId, updates);
+          return logWeight(weight, recipientId);
         }
 
         case 'delete': {
-          const entryId = args['entry_id'];
-          if (typeof entryId !== 'string' || !entryId) {
-            return {
-              success: false,
-              action: 'delete',
-              error: 'Missing required parameter: entry_id',
-              receivedParams: Object.keys(args),
-              schema: SCHEMA_DELETE,
-            };
+          const entryId = args['entry_id'] as string | undefined;
+          if (!entryId) {
+            return { success: false, error: 'entry_id required for delete action' } as DeleteResult;
           }
-
           return deleteEntry(entryId, recipientId);
         }
 
         default:
-          return {
-            success: false,
-            action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "log", "list", "summary", "goal", "update", or "delete".`,
-            receivedParams: Object.keys(args),
-            schema: {
-              availableActions: {
-                log_food: SCHEMA_LOG_FOOD,
-                log_weight: SCHEMA_LOG_WEIGHT,
-                list: SCHEMA_LIST,
-                summary: SCHEMA_SUMMARY,
-                goal: SCHEMA_GOAL,
-                update: SCHEMA_UPDATE,
-                delete: SCHEMA_DELETE,
-              },
-            },
-          };
+          return { success: false, error: `Unknown action: ${action}` } as DeleteResult;
       }
     },
   };
@@ -1115,7 +677,4 @@ SUMMARY/LIST: View intake for date.`,
   return caloriesTool;
 }
 
-/**
- * Export helper functions for neuron access.
- */
 export { getCurrentFoodDate };

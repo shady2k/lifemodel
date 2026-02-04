@@ -1,30 +1,261 @@
 /**
  * Calories Plugin Types
  *
- * Type definitions for food entries, custom dishes, weight tracking,
- * and calorie management.
+ * Clean architecture: FoodItem (catalog) + FoodEntry (log)
  */
 
 import { z } from 'zod';
 
-/**
- * Source of calorie information.
- */
-export type CalorieSource = 'llm_estimate' | 'user_override' | 'custom_dish';
+// ============================================================================
+// Core Types
+// ============================================================================
 
-/**
- * Meal type for food entries.
- */
 export type MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack';
 
-/**
- * Activity level for TDEE calculation.
- */
+export type MeasurementKind = 'weight' | 'volume' | 'count' | 'serving';
+
+export type Unit =
+  | 'g'
+  | 'kg'
+  | 'ml'
+  | 'l'
+  | 'item'
+  | 'slice'
+  | 'cup'
+  | 'tbsp'
+  | 'tsp'
+  | 'serving'
+  | 'custom';
+
 export type ActivityLevel = 'sedentary' | 'light' | 'moderate' | 'active' | 'very_active';
 
+// ============================================================================
+// Food Catalog (FoodItem)
+// ============================================================================
+
 /**
- * Activity level multipliers for TDEE calculation.
+ * Nutritional basis for a food item.
+ * Example: { caloriesPer: 59, perQuantity: 100, perUnit: 'g' } = 59 cal per 100g
  */
+export interface NutrientBasis {
+  caloriesPer: number;
+  perQuantity: number;
+  perUnit: Unit;
+}
+
+/**
+ * Named portion definition for convenience.
+ * Example: { name: 'cup', quantity: 240, unit: 'ml' }
+ */
+export interface PortionDefinition {
+  name: string;
+  quantity: number;
+  unit: Unit;
+}
+
+/**
+ * Catalog entry for a food item.
+ * Stable, reusable across log entries.
+ */
+export interface FoodItem {
+  id: string;
+  canonicalName: string;
+  aliases?: string[];
+  measurementKind: MeasurementKind;
+  basis: NutrientBasis;
+  portionDefs?: PortionDefinition[];
+  metadata?: {
+    brand?: string;
+    tags?: string[];
+  };
+  createdAt: string;
+  updatedAt: string;
+  recipientId: string;
+}
+
+// ============================================================================
+// Food Log (FoodEntry)
+// ============================================================================
+
+/**
+ * Portion specification for a log entry.
+ */
+export interface Portion {
+  quantity: number;
+  unit: Unit;
+}
+
+/**
+ * A logged food entry, referencing a FoodItem.
+ */
+export interface FoodEntry {
+  id: string;
+  itemId: string;
+  calories: number;
+  portion: Portion;
+  mealType?: MealType;
+  timestamp: string;
+  recipientId: string;
+  note?: string;
+}
+
+// ============================================================================
+// Weight Tracking
+// ============================================================================
+
+export interface WeightEntry {
+  id: string;
+  weight: number;
+  measuredAt: string;
+  recipientId: string;
+}
+
+// ============================================================================
+// Tool API: Log Input/Output
+// ============================================================================
+
+/**
+ * Single entry in a bulk log request.
+ */
+export interface LogInputEntry {
+  name: string;
+  portion?: Portion;
+  calories_estimate?: number;
+  meal_type?: MealType;
+  timestamp?: string;
+  /** Explicit item selection to resolve ambiguity */
+  chooseItemId?: string;
+}
+
+export interface LogInput {
+  entries: LogInputEntry[];
+}
+
+export type LogResultItem =
+  | {
+      status: 'matched';
+      entryId: string;
+      itemId: string;
+      canonicalName: string;
+      calories: number;
+      portion: Portion;
+    }
+  | {
+      status: 'created';
+      entryId: string;
+      itemId: string;
+      canonicalName: string;
+      calories: number;
+      portion: Portion;
+    }
+  | {
+      status: 'ambiguous';
+      originalName: string;
+      candidates: {
+        itemId: string;
+        canonicalName: string;
+        score: number;
+      }[];
+      suggestedPortion?: Portion;
+    };
+
+export interface LogResult {
+  success: boolean;
+  results: LogResultItem[];
+}
+
+// ============================================================================
+// Tool API: Other Actions
+// ============================================================================
+
+export interface ListInput {
+  date?: string;
+  meal_type?: MealType;
+  limit?: number;
+}
+
+export interface ListResult {
+  success: boolean;
+  date: string;
+  entries: FoodEntry[];
+  items: Record<string, FoodItem>; // itemId → FoodItem for display
+}
+
+export interface SummaryResult {
+  success: boolean;
+  date: string;
+  totalCalories: number;
+  goal: number | null;
+  remaining: number | null;
+  entryCount: number;
+  byMealType: Partial<Record<MealType, number>>;
+}
+
+export interface GoalInput {
+  daily_target?: number;
+  calculate_from_stats?: boolean;
+}
+
+export interface GoalResult {
+  success: boolean;
+  goal?: {
+    daily: number;
+    source: 'manual' | 'calculated';
+    tdee?: number;
+  };
+  error?: string;
+  missingStats?: string[];
+}
+
+export interface DeleteInput {
+  entry_id: string;
+}
+
+export interface DeleteResult {
+  success: boolean;
+  entryId?: string;
+  error?: string;
+}
+
+// ============================================================================
+// Matching Types
+// ============================================================================
+
+export interface NormalizedNameResult {
+  canonicalName: string;
+  defaultPortion?: Portion;
+  normalizedKey: string;
+  removedTokens: string[];
+}
+
+// ============================================================================
+// Storage Keys
+// ============================================================================
+
+export const CALORIES_STORAGE_KEYS = {
+  items: 'items',
+  foodPrefix: 'food:',
+  weights: 'weights',
+} as const;
+
+// ============================================================================
+// Events
+// ============================================================================
+
+export const CALORIES_EVENT_KINDS = {
+  WEIGHT_CHECKIN: 'calories:weight_checkin',
+} as const;
+
+export const CALORIES_PLUGIN_ID = 'calories';
+
+export const weightCheckinSchema = z.object({
+  recipientId: z.string(),
+});
+
+// ============================================================================
+// Constants
+// ============================================================================
+
 export const ACTIVITY_MULTIPLIERS: Record<ActivityLevel, number> = {
   sedentary: 1.2,
   light: 1.375,
@@ -33,380 +264,112 @@ export const ACTIVITY_MULTIPLIERS: Record<ActivityLevel, number> = {
   very_active: 1.9,
 };
 
-/**
- * Validation bounds for numeric values.
- */
 export const VALIDATION_BOUNDS = {
   calories: { min: 0, max: 10000 },
   weight: { min: 20, max: 500 },
-  height: { min: 50, max: 300 },
-  age: { min: 1, max: 150 },
 } as const;
 
-/**
- * A logged food entry.
- */
-export interface FoodEntry {
-  /** Unique entry ID (food_xxx) */
-  id: string;
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
-  /** Description of what was eaten */
-  description: string;
-
-  /** Calorie count */
-  calories: number;
-
-  /** How calories were determined */
-  source: CalorieSource;
-
-  /** Reference to custom dish if used */
-  customDishId?: string | undefined;
-
-  /** When the food was eaten (ISO timestamp UTC) */
-  eatenAt: string;
-
-  /** When the entry was logged (ISO timestamp UTC) */
-  loggedAt: string;
-
-  /** Opaque recipient identifier */
-  recipientId: string;
-
-  /** Meal category */
-  mealType?: MealType | undefined;
+export function generateId(prefix: 'item' | 'food' | 'weight'): string {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${prefix}_${Date.now().toString(36)}_${rand}`;
 }
 
-/**
- * A user-defined custom dish for quick logging.
- */
-export interface CustomDish {
-  /** Unique dish ID (dish_xxx) */
-  id: string;
-
-  /** Dish name */
-  name: string;
-
-  /** Calories per serving */
-  caloriesPerServing: number;
-
-  /** Serving size description */
-  servingSize?: string | undefined;
-
-  /** Keywords for fuzzy matching */
-  keywords?: string[] | undefined;
-
-  /** When the dish was created (ISO timestamp UTC) */
-  createdAt: string;
-
-  /** When the dish was last updated (ISO timestamp UTC) */
-  updatedAt: string;
-
-  /** Opaque recipient identifier */
-  recipientId: string;
-}
-
-/**
- * A weight measurement entry.
- */
-export interface WeightEntry {
-  /** Unique entry ID (weight_xxx) */
-  id: string;
-
-  /** Weight in kg */
-  weight: number;
-
-  /** When the measurement was taken (ISO timestamp UTC) */
-  measuredAt: string;
-
-  /** When the entry was logged (ISO timestamp UTC) */
-  loggedAt: string;
-
-  /** Opaque recipient identifier */
-  recipientId: string;
-}
-
-/**
- * Goal validation status included in summary response.
- * Helps LLM understand if the goal is appropriate and what data is missing.
- */
-export interface GoalValidation {
-  /** Missing stats needed for TDEE calculation (present when data is incomplete) */
-  missingStats?: string[];
-
-  /** Calculated TDEE for comparison (present when all stats available) */
-  calculatedTDEE?: number;
-
-  /** Human-readable explanation for LLM context */
-  hint: string;
-}
-
-/**
- * Daily calorie summary.
- */
-export interface DailySummary {
-  /** Date in YYYY-MM-DD format */
-  date: string;
-
-  /** Total calories consumed */
-  totalCalories: number;
-
-  /** Calorie goal for the day */
-  goal: number | null;
-
-  /** Remaining calories (goal - consumed) */
-  remaining: number | null;
-
-  /** Number of entries logged */
-  entryCount: number;
-
-  /** Breakdown by meal type */
-  byMealType: Partial<Record<MealType, number>>;
-
-  /** When the summary was computed (ISO timestamp UTC) */
-  computedAt: string;
-
-  /** Goal validation status - helps LLM understand if goal is appropriate */
-  goalValidation?: GoalValidation;
-}
-
-/**
- * Storage keys used by the calories plugin.
- */
-export const CALORIES_STORAGE_KEYS = {
-  /** Food entries for a specific date (calories:food:YYYY-MM-DD) */
-  foodPrefix: 'food:',
-
-  /** Custom dishes array */
-  dishes: 'dishes',
-
-  /** Weight history array */
-  weights: 'weights',
-
-  /** Daily summary cache prefix */
-  summaryPrefix: 'summary:',
-} as const;
-
-/**
- * Event kinds emitted by the calories plugin.
- */
-export const CALORIES_EVENT_KINDS = {
-  /** Weight check-in reminder */
-  WEIGHT_CHECKIN: 'calories:weight_checkin',
-} as const;
-
-/**
- * Plugin ID for the calories plugin.
- */
-export const CALORIES_PLUGIN_ID = 'calories';
-
-/**
- * Zod schema for weight check-in event validation.
- */
-export const weightCheckinSchema = z.object({
-  kind: z.literal('plugin_event'),
-  eventKind: z.literal(CALORIES_EVENT_KINDS.WEIGHT_CHECKIN),
-  pluginId: z.literal(CALORIES_PLUGIN_ID),
-  fireId: z.string().optional(),
-  payload: z.object({
-    recipientId: z.string(),
-  }),
-});
-
-/**
- * Weight check-in event data.
- */
-export type WeightCheckinData = z.infer<typeof weightCheckinSchema>['payload'];
-
-/**
- * Error type for tool errors.
- * Helps LLM understand what action to take:
- * - validation_error: LLM can fix arguments and retry
- * - missing_data: Needs user input, do NOT retry
- * - not_found: Resource doesn't exist
- * - permission_denied: No access rights
- */
-export type ToolErrorType = 'validation_error' | 'missing_data' | 'not_found' | 'permission_denied';
-
-/**
- * Structured field error for machine-readable validation feedback.
- */
-export interface FieldError {
-  /** JSON path to the field (e.g., "user.weight_kg") */
-  path: string;
-  /** What was expected */
-  expected: string;
-  /** What was received */
-  received: string;
-  /** Optional additional detail */
-  detail?: string;
-}
-
-/**
- * Structured error object following ChatGPT best practices.
- */
-export interface StructuredToolError {
-  type: ToolErrorType;
-  message: string;
-  fields?: FieldError[];
-  /** Whether the LLM should retry the same call */
-  retryable: boolean;
-}
-
-/**
- * Hint object with examples and notes.
- */
-export interface ToolErrorHint {
-  /** Example of correct call */
-  example?: Record<string, unknown>;
-  /** Additional notes for the LLM */
-  notes?: string[];
-  /** Schema fragment if helpful */
-  schema?: Record<string, unknown>;
-}
-
-/**
- * Tool result interface for consistent responses.
- */
-export interface CaloriesToolResult {
-  success: boolean;
-  action: string;
-  entryId?: string;
-  entry?: FoodEntry | WeightEntry;
-  entries?: (FoodEntry | WeightEntry)[];
-  summary?: DailySummary;
-  customDishCreated?: {
-    id: string;
-    name: string;
-    calories: number;
-  };
-  goal?: {
-    daily: number;
-    source: 'manual' | 'calculated';
-    tdee?: number;
-  };
-  warning?: string;
-  /** Simple error string (for backwards compat) or structured error object */
-  error?: string | StructuredToolError;
-  /** Structured hint with example and notes */
-  hint?: string | ToolErrorHint;
-  receivedParams?: string[];
-  schema?: Record<string, unknown>;
-  /** If true, LLM must ask user instead of retrying */
-  requiresUserInput?: boolean;
-  /** Suggested prompt to ask the user */
-  userPrompt?: string;
-}
-
-/**
- * Generate a unique ID with prefix.
- */
-export function generateId(prefix: 'food' | 'dish' | 'weight'): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * Validate calories value.
- */
-export function validateCalories(calories: number): { valid: boolean; error?: string } {
-  if (typeof calories !== 'number' || isNaN(calories)) {
+export function validateCalories(value: number): { valid: boolean; error?: string } {
+  if (!Number.isFinite(value)) {
     return { valid: false, error: 'Calories must be a number' };
   }
-  if (calories < VALIDATION_BOUNDS.calories.min || calories > VALIDATION_BOUNDS.calories.max) {
+  const min = VALIDATION_BOUNDS.calories.min;
+  const max = VALIDATION_BOUNDS.calories.max;
+  if (value < min || value > max) {
     return {
       valid: false,
-      error: `Calories must be between ${String(VALIDATION_BOUNDS.calories.min)} and ${String(VALIDATION_BOUNDS.calories.max)}`,
+      error: `Calories must be between ${String(min)} and ${String(max)}`,
     };
   }
   return { valid: true };
 }
 
-/**
- * Validate weight value.
- */
-export function validateWeight(weight: number): { valid: boolean; error?: string } {
-  if (typeof weight !== 'number' || isNaN(weight)) {
+export function validateWeight(value: number): { valid: boolean; error?: string } {
+  if (!Number.isFinite(value)) {
     return { valid: false, error: 'Weight must be a number' };
   }
-  if (weight < VALIDATION_BOUNDS.weight.min || weight > VALIDATION_BOUNDS.weight.max) {
+  const min = VALIDATION_BOUNDS.weight.min;
+  const max = VALIDATION_BOUNDS.weight.max;
+  if (value < min || value > max) {
     return {
       valid: false,
-      error: `Weight must be between ${String(VALIDATION_BOUNDS.weight.min)} and ${String(VALIDATION_BOUNDS.weight.max)} kg`,
+      error: `Weight must be between ${String(min)} and ${String(max)}`,
     };
   }
   return { valid: true };
 }
 
-/**
- * Calculate age from birthday.
- */
-export function calculateAge(birthday: string | Date): number {
-  const birthDate = typeof birthday === 'string' ? new Date(birthday) : birthday;
-  const today = new Date();
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const monthDiff = today.getMonth() - birthDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-    age--;
+export function calculateAge(birthdayIso: string): number {
+  const birth = new Date(birthdayIso);
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const m = now.getMonth() - birth.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) {
+    age -= 1;
   }
   return age;
 }
 
-/**
- * Calculate BMR using Mifflin-St Jeor equation.
- *
- * @param weight Weight in kg
- * @param height Height in cm
- * @param age Age in years
- * @param isMale Whether the person is male
- * @returns BMR in kcal/day
- */
-export function calculateBMR(weight: number, height: number, age: number, isMale: boolean): number {
-  // Mifflin-St Jeor equation:
-  // Male: BMR = 10×weight + 6.25×height - 5×age + 5
-  // Female: BMR = 10×weight + 6.25×height - 5×age - 161
-  const base = 10 * weight + 6.25 * height - 5 * age;
-  return isMale ? base + 5 : base - 161;
-}
-
-/**
- * Calculate TDEE from BMR and activity level.
- */
-export function calculateTDEE(bmr: number, activityLevel: ActivityLevel): number {
-  return Math.round(bmr * ACTIVITY_MULTIPLIERS[activityLevel]);
-}
-
-/**
- * Calculate daily calorie target based on weight goal.
- *
- * @param tdee Total daily energy expenditure
- * @param currentWeight Current weight in kg
- * @param targetWeight Target weight in kg
- * @param weeksToGoal Optional weeks to reach goal (default: calculated)
- * @returns Daily calorie target
- */
-export function calculateCalorieTarget(
-  tdee: number,
-  currentWeight: number,
-  targetWeight: number,
-  weeksToGoal?: number
+export function calculateBMR(
+  weightKg: number,
+  heightCm: number,
+  ageYears: number,
+  isMale: boolean
 ): number {
-  const weightDiff = targetWeight - currentWeight;
+  // Mifflin-St Jeor equation
+  const sexFactor = isMale ? 5 : -161;
+  return 10 * weightKg + 6.25 * heightCm - 5 * ageYears + sexFactor;
+}
 
-  if (Math.abs(weightDiff) < 0.5) {
-    // At goal weight, maintain
-    return tdee;
+export function calculateTDEE(bmr: number, activity: ActivityLevel): number {
+  return Math.round(bmr * ACTIVITY_MULTIPLIERS[activity]);
+}
+
+/**
+ * Calculate calories for a portion based on FoodItem basis.
+ */
+export function calculatePortionCalories(item: FoodItem, portion: Portion): number {
+  const { basis } = item;
+
+  // Same unit - simple ratio
+  if (portion.unit === basis.perUnit) {
+    return Math.round((portion.quantity / basis.perQuantity) * basis.caloriesPer);
   }
 
-  // 7700 kcal ≈ 1kg of fat
-  // Safe rate: 0.5-1 kg per week = 500-1000 kcal deficit/surplus per day
-  const direction = weightDiff > 0 ? 1 : -1;
-  const maxWeeklyChange = 1; // kg
-  const weeksNeeded = weeksToGoal ?? Math.ceil(Math.abs(weightDiff) / maxWeeklyChange);
+  // Unit conversion (basic)
+  const conversions: Record<string, Record<string, number>> = {
+    g: { kg: 1000 },
+    kg: { g: 0.001 },
+    ml: { l: 1000 },
+    l: { ml: 0.001 },
+  };
 
-  // Calculate weekly change needed
-  const weeklyChange = Math.abs(weightDiff) / weeksNeeded;
-  const dailyCalorieAdjustment = (weeklyChange * 7700) / 7;
+  const factor = conversions[basis.perUnit]?.[portion.unit];
+  if (factor) {
+    const normalizedQuantity = portion.quantity * factor;
+    return Math.round((normalizedQuantity / basis.perQuantity) * basis.caloriesPer);
+  }
 
-  // Cap at safe limits (500-1000 kcal per day adjustment)
-  const safeAdjustment = Math.min(1000, Math.max(500, dailyCalorieAdjustment));
+  // Check portion definitions
+  if (item.portionDefs) {
+    const portionDef = item.portionDefs.find(
+      (p) => p.unit === portion.unit || p.name === portion.unit
+    );
+    if (portionDef?.unit === basis.perUnit) {
+      const totalInBasisUnit = portion.quantity * portionDef.quantity;
+      return Math.round((totalInBasisUnit / basis.perQuantity) * basis.caloriesPer);
+    }
+  }
 
-  return Math.round(tdee + direction * safeAdjustment);
+  // Fallback: use LLM estimate if provided, or basis calories
+  return basis.caloriesPer;
 }

@@ -1,26 +1,162 @@
 # Calories Tracking
 
-Track food intake, calories, and body weight with proactive deficit monitoring.
+Track food intake, calories, and body weight with catalog-based matching and proactive deficit monitoring.
 
 ## Features
 
-- **Food Logging**: Log meals with LLM-estimated or user-provided calories
-- **Custom Dishes**: Automatically learns user-defined dishes for quick logging
+- **Food Catalog**: Reusable `FoodItem` entries with structured portions
+- **Smart Matching**: Levenshtein-based fuzzy matching to prevent duplicates
+- **Bulk Logging**: Log multiple foods in a single tool call
 - **Weight Tracking**: Record weight measurements with weekly check-in reminders
 - **Calorie Goal**: Manual target or TDEE-based calculation
 - **Deficit Monitoring**: Neuron emits signals when calorie deficit becomes significant
 
-## How It Works
+## Architecture
 
-### Food Logging Flow
+### Data Model
 
-1. User says "I had oatmeal for breakfast"
-2. LLM estimates calories (150 kcal) with confidence (0.9)
-3. Tool stores entry with source `llm_estimate`
-4. If user provides calories ("my pasta, about 600 cal"), stored as `user_override`
-5. User-provided dishes are auto-saved for future quick logging
+```
+FoodItem (catalog)     FoodEntry (log)
+┌──────────────────┐   ┌──────────────────┐
+│ id               │   │ id               │
+│ canonicalName    │◄──│ itemId           │
+│ basis            │   │ calories         │
+│ measurementKind  │   │ portion          │
+│ portionDefs?     │   │ mealType?        │
+│ recipientId      │   │ timestamp        │
+└──────────────────┘   └──────────────────┘
+```
 
-### Neuron Behavior
+**FoodItem** — Stable catalog entry with nutritional basis:
+```typescript
+{
+  id: "item_xxx",
+  canonicalName: "Американо",
+  measurementKind: "volume",
+  basis: { caloriesPer: 5, perQuantity: 200, perUnit: "ml" }
+}
+```
+
+**FoodEntry** — Log instance referencing a FoodItem:
+```typescript
+{
+  id: "food_xxx",
+  itemId: "item_xxx",  // → FoodItem
+  calories: 5,
+  portion: { quantity: 200, unit: "ml" },
+  mealType: "breakfast",
+  timestamp: "2024-01-01T08:00:00Z"
+}
+```
+
+### Tool API
+
+Single `log` action with bulk support:
+
+```typescript
+calories({
+  action: "log",
+  entries: [
+    {
+      name: "Американо",
+      portion: { quantity: 200, unit: "ml" },
+      calories_estimate: 5,
+      meal_type: "breakfast"
+    },
+    {
+      name: "Йогурт Teos Греческий 2%",
+      portion: { quantity: 140, unit: "g" },
+      calories_estimate: 94
+    }
+  ]
+})
+```
+
+**Response types:**
+
+| Status | Meaning |
+|--------|---------|
+| `matched` | Existing FoodItem found, entry logged |
+| `created` | New FoodItem created, entry logged |
+| `ambiguous` | Multiple candidates, LLM must choose |
+
+Example response:
+```json
+{
+  "success": true,
+  "results": [
+    {
+      "status": "matched",
+      "entryId": "food_xxx",
+      "itemId": "item_xxx",
+      "canonicalName": "Американо",
+      "calories": 5,
+      "portion": { "quantity": 200, "unit": "ml" }
+    },
+    {
+      "status": "ambiguous",
+      "originalName": "йогурт",
+      "candidates": [
+        { "itemId": "item_1", "canonicalName": "Йогурт Греческий", "score": 0.85 },
+        { "itemId": "item_2", "canonicalName": "Йогурт Фруктовый", "score": 0.82 }
+      ],
+      "suggestedPortion": { "quantity": 140, "unit": "g" }
+    }
+  ]
+}
+```
+
+### Resolving Ambiguous Matches
+
+When `status: "ambiguous"`, the LLM should:
+1. Ask the user which item they meant
+2. Re-call `log` with `chooseItemId`:
+
+```typescript
+calories({
+  action: "log",
+  entries: [
+    {
+      name: "йогурт",
+      chooseItemId: "item_1",  // Explicit selection
+      portion: { quantity: 140, unit: "g" }
+    }
+  ]
+})
+```
+
+## LLM Instructions
+
+```
+ПРАВИЛА для calories tool:
+
+1. В name указывай ТОЛЬКО название без количества:
+   ✓ "Американо"
+   ✗ "Американо 200мл"
+
+2. Количество и единицы в portion:
+   portion: { quantity: 200, unit: "ml" }
+
+3. Единицы: g, kg, ml, l, item, slice, cup, serving
+
+4. Если status="ambiguous", уточни у пользователя и повтори с chooseItemId
+
+5. НЕ создавай новый продукт только из-за другой порции
+```
+
+## Matching Algorithm
+
+Uses Levenshtein distance with normalization:
+
+1. **Normalize** — lowercase, ё→е, remove punctuation
+2. **Remove stopwords** — "кофе", "чай", "напиток"
+3. **Calculate similarity** — `1 - (distance / max_length)`
+4. **Decide**:
+   - `score >= 0.90` → `matched`
+   - `score >= 0.80` with close runner-up → `ambiguous`
+   - `score < 0.80` → `created`
+
+## Neuron Behavior
 
 The `CaloriesDeficitNeuron` monitors calorie intake throughout the day:
 
@@ -43,26 +179,23 @@ Weekly reminder scheduled based on user's wake hour pattern:
 ## User Interaction Examples
 
 ```
-User: "I had oatmeal for breakfast"
-→ logs 150 kcal (LLM estimate, confidence 0.9)
+User: "запиши американо и йогурт на завтрак"
+→ log with entries=[
+    {name:"Американо", portion:{quantity:200,unit:"ml"}, meal_type:"breakfast"},
+    {name:"Йогурт", portion:{quantity:140,unit:"g"}, meal_type:"breakfast"}
+  ]
 
-User: "burger and fries for lunch"
-→ logs 850 kcal (LLM estimate, confidence 0.8)
+User: "что я ел сегодня?"
+→ list with date=today
 
-User: "my pasta, about 600 cal"
-→ logs 600 kcal (user override, creates custom dish)
+User: "сколько калорий осталось?"
+→ summary with date=today
 
-User: "what did I eat today?"
-→ returns daily summary with breakdown by meal
+User: "я вешу 75кг"
+→ log_weight with weight=75
 
-User: "I weigh 75kg"
-→ logs weight entry
-
-User: "set my goal to 2000"
-→ sets daily calorie target
-
-User: "calculate my goal"
-→ computes TDEE from user stats (weight, height, age, activity)
+User: "поставь цель 2000"
+→ goal with daily_target=2000
 ```
 
 ## Configuration
@@ -76,70 +209,49 @@ User: "calculate my goal"
 | `activity_level` | string | sedentary, light, moderate, active, very_active |
 | `calorie_goal` | number | Daily target (manual or calculated) |
 | `target_weight_kg` | number | Goal weight for TDEE adjustment |
-| `sleep_hour` | number | Typical bedtime hour (0-23), e.g., 23 for 11 PM |
-| `wake_hour` | number | Typical wake hour (0-23), e.g., 7 for 7 AM |
-
-Existing fields used:
-- `gender` - for BMR calculation
-- `birthday` - to compute age (not stored separately)
+| `sleep_hour` | number | Typical bedtime hour (0-23) |
+| `wake_hour` | number | Typical wake hour (0-23) |
+| `gender` | string | "male" or "female" |
+| `birthday` | string | YYYY-MM-DD format |
 
 ## Technical Details
 
 ### Storage Keys
 
 ```
-calories:food:YYYY-MM-DD   → FoodEntry[]     # Date-partitioned for efficiency
-calories:dishes            → CustomDish[]    # User-defined quick-log dishes
-calories:weights           → WeightEntry[]   # Weight history
-calories:summary:YYYY-MM-DD → DailySummary   # Cached daily summaries
+calories:items           → FoodItem[]      # Food catalog
+calories:food:YYYY-MM-DD → FoodEntry[]     # Date-partitioned log
+calories:weights         → WeightEntry[]   # Weight history
 ```
 
-### Signals
+### Units
 
-| Signal | When | Priority |
-|--------|------|----------|
-| `calories:deficit` | Deficit > 50% after 2 PM | NORMAL |
-| `calories:deficit` | Deficit > 80% after 6 PM | HIGH |
+| Unit | Type | Examples |
+|------|------|----------|
+| `g`, `kg` | weight | "140г", "2кг" |
+| `ml`, `l` | volume | "200мл", "1л" |
+| `item`, `slice` | count | "2 шт", "3 куска" |
+| `cup`, `tbsp`, `tsp` | measure | "1 чашка" |
+| `serving` | portion | "1 порция" |
+
+### Portion Calculation
+
+Calories are calculated from the FoodItem basis:
+
+```typescript
+// FoodItem: 59 cal per 100g
+// Entry: 140g portion
+calories = (140 / 100) * 59 = 82.6 → 83 cal
+```
 
 ### Sleep-Aware Day Boundary
 
-Food logging uses the **midpoint of the sleep period** as the day boundary, not calendar midnight. This handles both late-night eating and early morning scenarios correctly.
-
-**How it works:**
-
-The cutoff is calculated as the midpoint between `sleepHour` and `wakeHour`:
+Food logging uses the **midpoint of the sleep period** as the day boundary, not calendar midnight.
 
 | sleepHour | wakeHour | Cutoff | Example |
 |-----------|----------|--------|---------|
 | 23 (11 PM) | 7 AM | 3 AM | 2 AM → yesterday, 4 AM → today |
 | 2 AM | 8 AM | 5 AM | 3 AM → yesterday, 6 AM → today |
-| 0 (midnight) | 8 AM | 4 AM | 2 AM → yesterday, 5 AM → today |
-
-**Setting sleep patterns:**
-
-Set via conversation when user mentions their schedule:
-```
-core.remember(subject="user", attribute="sleep_hour", value="23", source="user_explicit")
-core.remember(subject="user", attribute="wake_hour", value="7", source="user_explicit")
-```
-
-The LLM should ask about sleep patterns when:
-- User first sets up calorie tracking
-- User reports food was assigned to wrong day
-- User mentions irregular sleep schedule
-
-### Goal Validation Flow
-
-When user asks to validate or calculate their calorie goal:
-
-1. **Summary** returns `goalValidation.missingStats` if user data incomplete
-2. LLM asks user for missing stats (weight, height, gender, birthday)
-3. LLM saves stats via `core.remember` with `source: "user_explicit"`
-4. **Immediate intent processing** makes data visible to subsequent tools
-5. LLM calls `calculate_from_stats=true` to compute TDEE
-6. Goal is validated against calculated TDEE
-
-Without immediate intent processing, step 4-5 would fail because `core.remember` batches intents until loop end. See [Intents - Immediate Processing](../concepts/intents.md#immediate-intent-processing).
 
 ### TDEE Calculation
 
@@ -154,4 +266,3 @@ Activity multipliers:
 - active: 1.725
 - very_active: 1.9
 
-Goal adjustment: 500-1000 kcal/day based on target weight difference.

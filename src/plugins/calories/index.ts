@@ -427,11 +427,13 @@ export default caloriesPlugin;
 
 // Re-export types for external use
 export type {
+  FoodItem,
   FoodEntry,
-  CustomDish,
   WeightEntry,
-  DailySummary,
-  CaloriesToolResult,
+  Portion,
+  LogResult,
+  ListResult,
+  SummaryResult,
 } from './calories-types.js';
 export {
   CALORIES_PLUGIN_ID,
