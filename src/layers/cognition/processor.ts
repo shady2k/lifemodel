@@ -331,6 +331,24 @@ export class CognitionProcessor implements CognitionLayer {
 
     const duration = Date.now() - startTime;
 
+    // Prominent turn-level timing log (user-perceived latency)
+    this.logger.info(
+      {
+        correlationId: context.tickId,
+        recipientId,
+        triggerType: triggerSignal.type,
+        success: loopResult.success,
+        terminalType: loopResult.terminal.type,
+        intents: loopResult.intents.length,
+        iterations: loopResult.state.iteration,
+        toolCalls: loopResult.state.toolCallCount,
+        usedSmartRetry: loopResult.usedSmartRetry,
+        turnDurationMs: duration,
+      },
+      '🔄 Agent turn complete'
+    );
+
+    // Debug-level detailed breakdown
     this.logger.debug(
       {
         success: loopResult.success,

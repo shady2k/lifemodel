@@ -421,6 +421,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       controller.abort();
     }, this.config.timeout);
 
+    // Track timing: request start, first byte (TTFB), complete
+    const requestStartTime = Date.now();
+    let firstByteTime: number | undefined;
+
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -429,6 +433,8 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         signal: controller.signal,
       });
 
+      // Headers received (fetch resolves when headers are available)
+      firstByteTime = Date.now();
       clearTimeout(timeoutId);
 
       if (!response.ok) {
@@ -446,9 +452,50 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       }
 
       const data = (await response.json()) as OpenAIResponse;
-      return this.parseResponse(data);
+      const parsed = this.parseResponse(data);
+
+      // Calculate and log timing metrics
+      const totalDuration = Date.now() - requestStartTime;
+      // Time to headers (fetch resolves when headers are available, not first body byte)
+      // firstByteTime is guaranteed to be set here (we set it after fetch resolved)
+      const timeToHeadersMs = firstByteTime - requestStartTime;
+      const generationTime = totalDuration - timeToHeadersMs;
+
+      // Calculate tokens per second (completion only)
+      const completionTokens = parsed.usage?.completionTokens ?? 0;
+      const tps =
+        generationTime > 0 && completionTokens > 0
+          ? Math.round((completionTokens / generationTime) * 1000)
+          : undefined;
+
+      // Log detailed timing metrics
+      this.providerLogger?.debug(
+        {
+          totalDurationMs: totalDuration,
+          timeToHeadersMs,
+          generationMs: generationTime,
+          tps,
+          completionTokens,
+          promptTokens: parsed.usage?.promptTokens,
+        },
+        'LLM timing breakdown'
+      );
+
+      return parsed;
     } catch (error) {
       clearTimeout(timeoutId);
+
+      // Log timing metrics even on failure for debugging
+      const totalDuration = Date.now() - requestStartTime;
+      const timeToHeadersMs = (firstByteTime ?? requestStartTime) - requestStartTime;
+      this.providerLogger?.warn(
+        {
+          totalDurationMs: totalDuration,
+          timeToHeadersMs: firstByteTime ? timeToHeadersMs : undefined,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'LLM request failed with timing data'
+      );
 
       if (error instanceof LLMError) {
         throw error;

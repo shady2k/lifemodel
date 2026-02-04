@@ -150,6 +150,12 @@ export class ConversationManager {
   /** How long to keep completed actions (24 hours in ms) */
   private readonly actionRetentionMs = 24 * 60 * 60 * 1000;
 
+  /** Maximum tool result content length to store (chars). Longer results are truncated. */
+  private readonly maxToolResultLength = 3000;
+
+  /** Maximum total content size (chars) before triggering compaction. ~50KB */
+  private readonly maxContentSizeBeforeCompaction = 50000;
+
   constructor(storage: Storage, logger: Logger) {
     this.storage = storage;
     this.logger = logger.child({ component: 'conversation-manager' });
@@ -322,12 +328,12 @@ export class ConversationManager {
     }
     stored.messages.push(assistantMsg);
 
-    // Add tool result messages
+    // Add tool result messages (truncated to save context space)
     if (toolResults && toolResults.length > 0) {
       for (const result of toolResults) {
         stored.messages.push({
           role: 'tool',
-          content: result.content,
+          content: this.truncateToolResult(result.content),
           tool_call_id: result.tool_call_id,
           timestamp,
         });
@@ -522,13 +528,50 @@ export class ConversationManager {
 
   /**
    * Check if conversation needs compaction.
-   * Uses turn counting, not raw message count, so tool-heavy conversations don't trigger early.
+   * Hybrid trigger: compacts if EITHER turn count OR content size exceeds threshold.
+   * This ensures both long conversations and bloated tool results trigger compaction.
    */
   async needsCompaction(userId: string): Promise<boolean> {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
+
+    // Check turn count (original behavior)
     const turnCount = this.countTurns(stored.messages);
-    return turnCount > this.maxTurnsBeforeCompaction;
+    if (turnCount > this.maxTurnsBeforeCompaction) {
+      this.logger.debug(
+        { userId, turnCount, threshold: this.maxTurnsBeforeCompaction },
+        'Compaction needed: turn count exceeded'
+      );
+      return true;
+    }
+
+    // Check total content size (new: handles bloated tool results)
+    const totalSize = this.calculateContentSize(stored.messages);
+    if (totalSize > this.maxContentSizeBeforeCompaction) {
+      this.logger.debug(
+        { userId, totalSize, threshold: this.maxContentSizeBeforeCompaction },
+        'Compaction needed: content size exceeded'
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Calculate total content size of messages in chars.
+   */
+  private calculateContentSize(messages: StoredMessage[]): number {
+    return messages.reduce((total, msg) => {
+      let size = msg.content?.length ?? 0;
+      // Include tool call arguments in size calculation
+      if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          size += tc.function.arguments.length;
+        }
+      }
+      return total + size;
+    }, 0);
   }
 
   /**
@@ -754,6 +797,99 @@ export class ConversationManager {
 
       this.logger.debug({ userId, clearedCount: count }, 'Completed actions cleared');
     }
+  }
+
+  /**
+   * Truncate tool result content to save context space.
+   * Preserves JSON structure when possible, adds truncation marker.
+   * Adds _historyNote to inform LLM that full content was already processed.
+   */
+  private truncateToolResult(content: string): string {
+    if (content.length <= this.maxToolResultLength) {
+      return content;
+    }
+
+    const originalLength = content.length;
+    this.logger.debug(
+      { originalLength, truncatedTo: this.maxToolResultLength },
+      'Truncating tool result for conversation history'
+    );
+
+    const historyNote = `[HISTORY NOTE: You already processed the full result (${String(originalLength)} chars) when it was returned. This is a truncated summary for context only. Do not request this data again.]`;
+
+    // Try to parse as JSON to preserve structure
+    try {
+      const parsed = JSON.parse(content) as unknown;
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        // For objects, truncate large string values and add history note
+        const truncated = this.truncateJsonValue(parsed, this.maxToolResultLength) as Record<
+          string,
+          unknown
+        >;
+        truncated['_historyNote'] = historyNote;
+        const result = JSON.stringify(truncated);
+
+        // If still too long, fall back to simple truncation
+        if (result.length > this.maxToolResultLength + 200) {
+          return JSON.stringify({
+            _historyNote: historyNote,
+            _truncatedPreview: content.slice(0, this.maxToolResultLength - 300),
+          });
+        }
+        return result;
+      }
+    } catch {
+      // Not JSON, use simple truncation
+    }
+
+    // Plain text or array - wrap in object with note
+    return JSON.stringify({
+      _historyNote: historyNote,
+      _truncatedPreview: content.slice(0, this.maxToolResultLength - 300),
+    });
+  }
+
+  /**
+   * Recursively truncate large string values in JSON objects.
+   * Preserves structure but shortens content.
+   */
+  private truncateJsonValue(value: unknown, budget: number): unknown {
+    if (typeof value === 'string') {
+      // Truncate long strings (800 chars keeps ~1 paragraph of content)
+      if (value.length > 800) {
+        return value.slice(0, 800) + '... [truncated]';
+      }
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      // Limit array length and truncate elements (keep more items with larger budget)
+      const maxItems = 6;
+      const result = value
+        .slice(0, maxItems)
+        .map((item) => this.truncateJsonValue(item, budget / maxItems));
+      if (value.length > maxItems) {
+        result.push({ _truncated: `${String(value.length - maxItems)} more items omitted` });
+      }
+      return result;
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      const result: Record<string, unknown> = {};
+      const entries = Object.entries(value as Record<string, unknown>);
+
+      for (const [key, val] of entries) {
+        // Skip very long keys (unusual but possible)
+        if (key.length > 100) continue;
+
+        // Truncate nested values
+        result[key] = this.truncateJsonValue(val, budget / entries.length);
+      }
+      return result;
+    }
+
+    // Primitives pass through
+    return value;
   }
 
   /**
