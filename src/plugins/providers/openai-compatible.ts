@@ -350,9 +350,13 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       stop: request.stop,
     };
 
-    // Thinking mode (for models that support it)
+    // Reasoning mode (for models like Grok, o1, DeepSeek-R1 that support it)
+    // OpenRouter uses { reasoning: { enabled: true/false } }
+    // Setting enabled: false disables chain-of-thought, dramatically reducing tokens/latency
     if (this.config.enableThinking === false) {
-      body['enable_thinking'] = false;
+      body['reasoning'] = { enabled: false };
+    } else if (this.config.enableThinking === true) {
+      body['reasoning'] = { enabled: true };
     }
 
     // Add native tools if provided

@@ -239,6 +239,10 @@ function createLLMProvider(
         ...(smartModel && { smartModel }),
         ...(appName && { appName }),
         ...(siteUrl && { siteUrl }),
+        // Disable reasoning/thinking mode by default for fast responses
+        // This prevents models like Grok 4.1 from generating 1000+ tokens of internal reasoning
+        // which adds ~50s to each turn. Can be overridden via config if needed.
+        enableThinking: false,
       },
       logger
     );
