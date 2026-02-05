@@ -245,9 +245,16 @@ export function createConversationLogger(
           spanId?: string;
         };
         if (parsed.msg) {
-          const timestamp = parsed.time
-            ? new Date(parsed.time).toISOString().slice(11, 23) // HH:mm:ss.mmm
-            : '';
+          // Format timestamp in server local time (not UTC) for easier debugging
+          let timestamp = '';
+          if (parsed.time) {
+            const d = new Date(parsed.time);
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+            const ss = String(d.getSeconds()).padStart(2, '0');
+            const ms = String(d.getMilliseconds()).padStart(3, '0');
+            timestamp = `${hh}:${mm}:${ss}.${ms}`;
+          }
           // Build prefix: [timestamp] [traceId:spanId] or just [timestamp]
           let prefix = timestamp ? `[${timestamp}] ` : '';
           if (parsed.traceId || parsed.spanId) {

@@ -80,7 +80,17 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
 
           if (timezone) {
             try {
-              const formatted = now.toLocaleString('en-US', { timeZone: timezone });
+              // Use 24-hour format for clarity (LLMs misinterpret AM/PM)
+              const formatted = now.toLocaleString('en-GB', {
+                timeZone: timezone,
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false,
+              });
               return Promise.resolve({
                 success: true,
                 action: 'now',

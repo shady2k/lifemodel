@@ -1359,6 +1359,20 @@ export class AgenticLoop {
     const timezoneOffset = context.userModel['timezoneOffset'] as number | null | undefined;
 
     const now = new Date();
+
+    // Determine the effective timezone:
+    // 1. Use IANA timezone if set
+    // 2. Derive from offset (Etc/GMT signs are inverted: +3 → Etc/GMT-3)
+    // 3. Default to Europe/Moscow
+    let effectiveTimezone = userTimezone;
+    if (!effectiveTimezone && timezoneOffset != null) {
+      const invertedOffset = -timezoneOffset;
+      const sign = invertedOffset >= 0 ? '+' : '';
+      effectiveTimezone = `Etc/GMT${sign}${String(invertedOffset)}`;
+    }
+    effectiveTimezone ??= 'Europe/Moscow';
+
+    // Use 24-hour format for clarity - LLMs often misinterpret AM/PM
     const dateTimeOptions: Intl.DateTimeFormatOptions = {
       weekday: 'long',
       year: 'numeric',
@@ -1366,27 +1380,12 @@ export class AgenticLoop {
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
+      timeZone: effectiveTimezone,
       timeZoneName: 'short',
     };
 
-    // Use IANA timezone if available
-    if (userTimezone) {
-      dateTimeOptions.timeZone = userTimezone;
-    }
-
-    let currentDateTime = now.toLocaleString('en-US', dateTimeOptions);
-
-    // If no IANA timezone but we have offset, append user's local time
-    if (!userTimezone && timezoneOffset != null) {
-      const userTime = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1000);
-      const userTimeStr = userTime.toLocaleString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-      });
-      const offsetStr = timezoneOffset >= 0 ? `+${String(timezoneOffset)}` : String(timezoneOffset);
-      currentDateTime += ` (user's local time: ${userTimeStr} UTC${offsetStr})`;
-    }
+    const currentDateTime = now.toLocaleString('en-US', dateTimeOptions);
 
     return `You are ${agentName} (${agentGender}). Values: ${values}
 ${genderNote}
@@ -1401,14 +1400,14 @@ Rules:
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
-- Time awareness: Current time is provided above. Call core.time ONLY for: timezone conversions, elapsed time ("since" actions like lastMessage/lastContact), or ISO timestamps.
+- Time awareness: "Current time" above is the AUTHORITATIVE present moment. Use it for all time reasoning (greetings, "now", "today", scheduling). Ignore any times mentioned in conversation history—they are from the past. Call core.time ONLY for: timezone conversions, elapsed time ("since" actions), or ISO timestamps.
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
 - Tool requiresUserInput=true → ask user directly, don't retry
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
 - Tool returns success:false → inform user the action failed, don't claim success
-- NO EMOJI at end of messages. Emoji only for: celebrating achievements, expressing sympathy for bad news. Most messages need ZERO emoji.${
+- IMPORTANT: Under NO circumstances should you ever use emoji characters in your responses.${
       useSmart
         ? ''
         : `
