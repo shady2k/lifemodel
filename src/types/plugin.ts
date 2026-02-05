@@ -500,6 +500,13 @@ export interface SchedulerPrimitive {
 
   /** Get all active schedules */
   getSchedules(): ScheduleEntry[] | Promise<ScheduleEntry[]>;
+
+  /**
+   * Update data for an existing schedule.
+   * Used to sync manifest changes (like emitSignal) to existing schedules.
+   * @returns true if schedule was found and updated, false if not found
+   */
+  updateScheduleData(scheduleId: string, data: Record<string, unknown>): Promise<boolean>;
 }
 
 /**

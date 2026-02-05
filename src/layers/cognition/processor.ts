@@ -335,17 +335,20 @@ export class CognitionProcessor implements CognitionLayer {
     const unresolvedTensions = await this.getUnresolvedTensions(recipientId);
 
     // Build loop context with runtime config
-    // Thoughts don't get full history - they're self-contained and can use core.memory if needed
-    // This follows Design Principle #1 (Energy Conservation) and prevents context confusion
-    const isThoughtTrigger = triggerSignal.type === 'thought';
+    // Autonomous triggers (thoughts, plugin events) don't get history:
+    // - They're not conversation continuations
+    // - They can use core.memory if they need context
+    // - This follows Design Principle #1 (Energy Conservation) and prevents context confusion
+    const triggerType = triggerSignal.type;
+    const isAutonomousTrigger = triggerType === 'thought' || triggerType === 'plugin_event';
     const loopContext: LoopContext = {
       triggerSignal,
       agentState: context.agentState,
       agentIdentity: identity
         ? { name: identity.name, gender: identity.gender, values: identity.values }
         : undefined,
-      conversationHistory: isThoughtTrigger
-        ? [] // Thoughts don't get full history - use core.memory if needed
+      conversationHistory: isAutonomousTrigger
+        ? [] // Autonomous triggers: use core.memory if context needed
         : await this.getConversationHistory(recipientId),
       userModel: this.userModel?.getBeliefs() ?? {},
       tickId: context.tickId,

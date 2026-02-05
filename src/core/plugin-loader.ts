@@ -1679,6 +1679,25 @@ export class PluginLoader {
         // Check if schedule already exists (persisted from previous run)
         const existing = existingById.get(scheduleId);
         if (existing) {
+          // Merge emitSignal flag from manifest (respects manifest changes while preserving fireAt)
+          // This handles the case where emitSignal was added to manifest after schedule was created
+          const manifestEmitSignal = scheduleDef.emitSignal;
+          const existingEmitSignal = existing.data['emitSignal'] as boolean | undefined;
+
+          if (manifestEmitSignal !== existingEmitSignal) {
+            const updatedData = { ...existing.data };
+            if (manifestEmitSignal === false) {
+              updatedData['emitSignal'] = false;
+            } else {
+              delete updatedData['emitSignal'];
+            }
+            await scheduler.updateScheduleData(existing.id, updatedData);
+            this.logger.info(
+              { scheduleId: existing.id, emitSignal: manifestEmitSignal },
+              'Updated schedule emitSignal flag from manifest'
+            );
+          }
+
           // Keep existing schedule - if nextFireAt is in the past, scheduler will catch up
           const isPast = existing.nextFireAt <= new Date();
           this.logger.info(

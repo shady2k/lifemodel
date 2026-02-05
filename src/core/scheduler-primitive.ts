@@ -212,6 +212,21 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   }
 
   /**
+   * Update data for an existing schedule.
+   * Used to sync manifest changes (like emitSignal) to existing schedules.
+   * @returns true if schedule was found and updated, false if not found
+   */
+  async updateScheduleData(scheduleId: string, data: Record<string, unknown>): Promise<boolean> {
+    const entry = this.schedules.get(scheduleId);
+    if (!entry) {
+      return false;
+    }
+    entry.data = data;
+    await this.persistSchedules();
+    return true;
+  }
+
+  /**
    * Check for due schedules and return those that should fire.
    * Called by SchedulerService on each tick.
    *
