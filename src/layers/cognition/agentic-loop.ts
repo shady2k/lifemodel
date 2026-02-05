@@ -745,9 +745,15 @@ export class AgenticLoop {
         state.identicalCallCounts.set(callSignature, identicalCount);
 
         if (identicalCount >= MAX_REPEATED_IDENTICAL_CALLS) {
+          // First occurrence (count=2): warn but let LLM continue with tools
+          // Subsequent (count>=3): force response
+          const shouldForceRespond = identicalCount > MAX_REPEATED_IDENTICAL_CALLS;
+
           this.logger.warn(
-            { tool: toolName, identicalCount },
-            'Identical tool call repeated - forcing response'
+            { tool: toolName, identicalCount, forceRespond: shouldForceRespond },
+            shouldForceRespond
+              ? 'Identical tool call repeated - forcing response'
+              : 'Identical tool call detected - warning LLM'
           );
 
           // Add warning to the response
@@ -755,9 +761,10 @@ export class AgenticLoop {
             ...(result.data as Record<string, unknown>),
             _identicalCallWarning: {
               count: identicalCount,
-              message: `STOP: You called ${toolName} with identical parameters ${String(identicalCount)} times.`,
-              action:
-                'Do NOT call this tool again with the same parameters. Respond to the user directly.',
+              message: `You already called ${toolName} with these parameters. The result is the same.`,
+              action: shouldForceRespond
+                ? 'STOP. Respond to the user directly NOW.'
+                : 'Use the result above. Call a different tool or respond to the user.',
             },
           };
 
@@ -767,7 +774,9 @@ export class AgenticLoop {
             content: JSON.stringify(loopWarning),
           });
 
-          state.forceRespond = true;
+          if (shouldForceRespond) {
+            state.forceRespond = true;
+          }
           continue; // Skip normal result handling
         }
 
@@ -1792,27 +1801,30 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
     const data = context.triggerSignal.data as Record<string, unknown> | undefined;
     const isDeferralOverride = data?.['deferralOverride'] === true;
 
-    const section = `## Proactive Contact Trigger
+    // Build trigger reason
+    const triggerReason = isFollowUp
+      ? 'User did not respond to your last message'
+      : 'Social debt accumulated';
 
-IMPORTANT: This is NOT a response to a user message. You are INITIATING contact.
-${timeContext ? `Time since last conversation: ${timeContext}` : ''}
-${isDeferralOverride ? '\n⚠️ OVERRIDE: Your earlier deferral is being reconsidered because pressure increased significantly.' : ''}
+    const section = `## Proactive Contact
 
-${isFollowUp ? 'Trigger: Follow-up (user did not respond to your previous message)' : 'Trigger: Internal drive to reach out (social debt accumulated)'}
+You are INITIATING contact with the user. This is not a response to them.
+${isDeferralOverride ? '\n⚠️ Deferral override: pressure increased significantly.\n' : ''}
+**Context:**
+- Last conversation: ${timeContext || 'unknown'} ago
+- Trigger: ${triggerReason}
 
-ACTION REQUIRED - Choose ONE:
-1. SEND A MESSAGE: Output {"response": "your greeting here"} with a brief, natural message
-   Examples: "Привет! Как дела?", "Эй, давно не общались. Как ты?", "Привет! Чем занимаешься?"
-2. DEFER: If now is not a good time, call core.defer and output {"response": ""} (empty)
+**Decide what feels right:**
+You have full context from Runtime Snapshot, conversation history, and memory. Consider:
+- Is there something specific worth reaching out about? (news they'd care about, following up on something, sharing a thought)
+- Or is this just a "thinking of you" moment?
+- Or is now not the right time? (they seem busy, it's late, nothing meaningful to say)
 
-Guidelines if sending a message:
-- Start FRESH - do NOT continue or reference the previous conversation
-- Keep it brief and natural - one short message
+**Actions:**
+- **Reach out:** Output {"response": "your message"}
+- **Wait:** Call core.defer(signalType="${triggerType}", deferHours=2-8, reason="...") then output {"response": ""}
 
-DEFERRAL OPTION (core.defer):
-- signalType: "${triggerType}"
-- deferHours: 2-8 hours typically
-- reason: why deferring ("User might be busy", "It's late evening", etc.)`;
+No need to call core.state — everything you need is in Runtime Snapshot.`;
 
     return section;
   }

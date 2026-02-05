@@ -21,7 +21,8 @@ interface OpenAIResponse {
   object?: string;
   created?: number;
   model: string;
-  choices: {
+  /** Can be undefined/empty on malformed responses from upstream providers */
+  choices?: {
     index?: number;
     message: {
       role: string;
@@ -520,9 +521,9 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
    * Parse the API response into our format.
    */
   protected parseResponse(data: OpenAIResponse): CompletionResponse {
-    const firstChoice = data.choices[0];
+    const firstChoice = data.choices?.[0];
     if (!firstChoice) {
-      throw new LLMError(`Invalid response from ${this.name}`, this.name);
+      throw new LLMError(`Invalid response from ${this.name}: no choices in response`, this.name);
     }
 
     // For "thinking" models: if content is empty but reasoning_content exists,
