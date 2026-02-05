@@ -598,6 +598,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     },
   }));
 
+  // 5b. Wire memory provider for plugin memory searches
+  pluginLoader.setMemoryProvider(memoryProvider);
+
   // 6. Wire scheduler to dispatch events to plugins
   schedulerService.setPluginEventCallback(async (pluginId, eventKind, payload) => {
     await pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload);

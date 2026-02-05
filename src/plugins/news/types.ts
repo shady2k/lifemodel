@@ -120,6 +120,30 @@ export interface FetchedArticle {
 }
 
 /**
+ * Article entry returned by get_news action.
+ */
+export interface NewsArticleEntry {
+  title: string;
+  summary?: string | undefined;
+  timestamp: Date;
+  topics: string[];
+  confidence?: number | undefined;
+  type: 'urgent' | 'interesting' | 'filtered';
+  url?: string | undefined;
+  source?: string | undefined;
+}
+
+/**
+ * Pagination info for get_news results.
+ */
+export interface NewsPagination {
+  page: number;
+  totalPages: number;
+  hasMore: boolean;
+  total: number;
+}
+
+/**
  * Result from the news tool.
  * Note: Using explicit undefined unions for exactOptionalPropertyTypes compatibility.
  */
@@ -140,6 +164,14 @@ export interface NewsToolResult {
   articlesStatus?: string | undefined;
   /** Hint for agent about how to access articles */
   hint?: string | undefined;
+  /** Articles returned by get_news action */
+  articles?: NewsArticleEntry[] | undefined;
+  /** Count of articles returned */
+  count?: number | undefined;
+  /** Filter applied to get_news query */
+  filter?: 'urgent' | 'interesting' | 'all' | undefined;
+  /** Pagination info for get_news */
+  pagination?: NewsPagination | undefined;
 }
 
 /**

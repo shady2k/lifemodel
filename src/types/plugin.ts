@@ -483,6 +483,9 @@ export interface PluginPrimitives {
 
   /** Shared services (timezone, etc.) */
   services: PluginServices;
+
+  /** Read-only access to memory (plugin's own facts only) */
+  memorySearch: MemorySearchPrimitive;
 }
 
 /**
@@ -520,6 +523,56 @@ export interface StoragePrimitive {
 
   /** Clear all plugin data */
   clear(): Promise<void>;
+}
+
+/**
+ * Options for plugin memory search.
+ */
+export interface MemorySearchOptions {
+  /** Max results (default: 10, max: 50) */
+  limit?: number;
+  /** Skip first N results for pagination */
+  offset?: number;
+  /** Minimum confidence threshold (0-1, default: 0.3) */
+  minConfidence?: number;
+}
+
+/**
+ * Memory entry visible to plugins (subset of core MemoryEntry).
+ */
+export interface PluginMemoryEntry {
+  id: string;
+  content: string;
+  timestamp: Date;
+  tags: string[];
+  confidence: number;
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Result from plugin memory search.
+ */
+export interface MemorySearchResult {
+  entries: PluginMemoryEntry[];
+  pagination: {
+    page: number;
+    totalPages: number;
+    hasMore: boolean;
+    total: number;
+  };
+}
+
+/**
+ * Memory search primitive interface.
+ * Read-only access to core memory, scoped to plugin's own facts.
+ */
+export interface MemorySearchPrimitive {
+  /**
+   * Search for facts created by this plugin.
+   * Results are automatically filtered to metadata.pluginId === callingPlugin.
+   * Only returns type: 'fact' entries (enforced in core).
+   */
+  searchOwnFacts: (query: string, options?: MemorySearchOptions) => Promise<MemorySearchResult>;
 }
 
 /**

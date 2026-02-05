@@ -14,9 +14,16 @@ import type {
   PluginToolContext,
   StoragePrimitive,
   IntentEmitterPrimitive,
+  MemorySearchPrimitive,
 } from '../../../types/plugin.js';
 import type { Logger } from '../../../types/logger.js';
-import type { NewsSource, SourceState, NewsToolResult, NewsSummary } from '../types.js';
+import type {
+  NewsSource,
+  SourceState,
+  NewsToolResult,
+  NewsSummary,
+  NewsArticleEntry,
+} from '../types.js';
 import { NEWS_STORAGE_KEYS, NEWS_PLUGIN_ID, NEWS_EVENT_KINDS } from '../types.js';
 import { validateUrl, validateTelegramHandle } from '../url-validator.js';
 import { fetchRssFeed } from '../fetchers/rss.js';
@@ -58,6 +65,31 @@ const SCHEMA_REMOVE_SOURCE = {
 
 const SCHEMA_LIST_SOURCES = {
   action: { type: 'string', required: true, enum: ['list_sources'] },
+};
+
+const SCHEMA_GET_NEWS = {
+  action: { type: 'string', required: true, enum: ['get_news'] },
+  query: {
+    type: 'string',
+    required: false,
+    description: 'Search term (default: all news)',
+  },
+  type: {
+    type: 'string',
+    required: false,
+    enum: ['urgent', 'interesting', 'all'],
+    description: 'Filter by urgency: "urgent", "interesting", or "all" (default: all)',
+  },
+  limit: {
+    type: 'number',
+    required: false,
+    description: 'Max results (default: 10, max: 50)',
+  },
+  offset: {
+    type: 'number',
+    required: false,
+    description: 'Skip first N results for pagination',
+  },
 };
 
 /**
@@ -347,8 +379,85 @@ async function listSources(storage: StoragePrimitive): Promise<NewsToolResult> {
     // Help agent find articles
     hint:
       summaries.length > 0
-        ? 'To find articles, use core.memory with action "search" and query for topics or "news" tag.'
+        ? 'To find articles, use get_news action or core.memory with action "search" and query for topics or "news" tag.'
         : undefined,
+  };
+}
+
+/**
+ * News type for filtering.
+ */
+type NewsType = 'urgent' | 'interesting' | 'all';
+
+/**
+ * Get news articles from memory.
+ * Retrieves facts created by this plugin (polled articles saved to memory).
+ *
+ * @param memorySearch - Memory search primitive
+ * @param query - Search term (default: all news)
+ * @param newsType - Filter by urgency: "urgent", "interesting", or "all" (default)
+ * @param limit - Max results (default: 10)
+ * @param offset - Skip first N results
+ */
+async function getNews(
+  memorySearch: MemorySearchPrimitive,
+  query?: string,
+  newsType: NewsType = 'all',
+  limit = 10,
+  offset = 0
+): Promise<NewsToolResult> {
+  const result = await memorySearch.searchOwnFacts(query ?? 'news', {
+    limit: limit * 2, // Fetch extra since we'll filter by type
+    offset,
+    minConfidence: 0.1, // Lower threshold to include filtered noise if needed
+  });
+
+  // Filter by news type based on metadata.eventKind
+  let filtered = result.entries;
+  if (newsType !== 'all') {
+    const targetEventKind = `news:${newsType}`;
+    filtered = result.entries.filter((e) => e.metadata['eventKind'] === targetEventKind);
+  }
+
+  // Apply limit after type filtering
+  const limitedEntries = filtered.slice(0, limit);
+
+  // Transform memory entries to article format
+  const articles: NewsArticleEntry[] = limitedEntries.map((e) => {
+    // Parse the content (format: "Title\n\nSummary" or just "Title")
+    const lines = e.content.split('\n');
+    const title = lines[0] ?? '';
+    const summary = lines.slice(2).join('\n') || undefined;
+
+    // Determine type from eventKind
+    const eventKind = e.metadata['eventKind'] as string | undefined;
+    let type: 'urgent' | 'interesting' | 'filtered' = 'interesting';
+    if (eventKind === 'news:urgent') type = 'urgent';
+    else if (eventKind === 'news:filtered') type = 'filtered';
+
+    return {
+      title,
+      summary,
+      timestamp: e.timestamp,
+      topics: e.tags.filter((t) => t !== 'news'),
+      confidence: e.confidence,
+      type,
+      url: e.metadata['url'] as string | undefined,
+      source: e.metadata['source'] as string | undefined,
+    };
+  });
+
+  return {
+    success: true,
+    action: 'get_news',
+    articles,
+    count: articles.length,
+    filter: newsType,
+    pagination: {
+      ...result.pagination,
+      // Update hasMore based on filtered count
+      hasMore: filtered.length > limit,
+    },
   };
 }
 
@@ -356,21 +465,23 @@ async function listSources(storage: StoragePrimitive): Promise<NewsToolResult> {
  * Create the news tool.
  */
 export function createNewsTool(primitives: PluginPrimitives): PluginTool {
-  const { storage, logger, intentEmitter } = primitives;
+  const { storage, logger, intentEmitter, memorySearch } = primitives;
 
   const newsTool: PluginTool = {
     name: 'news',
-    description: `Manage news sources (RSS feeds and Telegram channels).
-Actions: add_source, remove_source, list_sources.
-Articles are automatically scored and saved to memory (search with core.memory using "news" tag or topic keywords).`,
-    tags: ['rss', 'telegram', 'news', 'feed', 'add', 'remove', 'list'],
+    description: `Manage news sources and retrieve polled articles.
+Actions: add_source, remove_source, list_sources, get_news.
+Use get_news to retrieve articles already fetched from configured sources.
+For breaking news or topics not in your feeds, use the search tool instead.`,
+    tags: ['rss', 'telegram', 'news', 'feed', 'add', 'remove', 'list', 'get'],
     parameters: [
       {
         name: 'action',
         type: 'string',
-        description: 'Action to perform: "add_source", "remove_source", or "list_sources"',
+        description:
+          'Action to perform: "add_source", "remove_source", "list_sources", or "get_news"',
         required: true,
-        enum: ['add_source', 'remove_source', 'list_sources'],
+        enum: ['add_source', 'remove_source', 'list_sources', 'get_news'],
       },
       {
         name: 'type',
@@ -398,6 +509,18 @@ Articles are automatically scored and saved to memory (search with core.memory u
         description: 'Source ID to remove (required for remove_source)',
         required: false,
       },
+      {
+        name: 'query',
+        type: 'string',
+        description: 'Search term for articles (default: all news). Used with get_news action.',
+        required: false,
+      },
+      {
+        name: 'offset',
+        type: 'number',
+        description: 'Skip first N results for pagination. Used with get_news action.',
+        required: false,
+      },
     ],
     validate: (args) => {
       const a = args as Record<string, unknown>;
@@ -406,10 +529,10 @@ Articles are automatically scored and saved to memory (search with core.memory u
         return { success: false, error: 'action: required' };
       }
 
-      if (!['add_source', 'remove_source', 'list_sources'].includes(a['action'])) {
+      if (!['add_source', 'remove_source', 'list_sources', 'get_news'].includes(a['action'])) {
         return {
           success: false,
-          error: 'action: must be one of [add_source, remove_source, list_sources]',
+          error: 'action: must be one of [add_source, remove_source, list_sources, get_news]',
         };
       }
 
@@ -429,6 +552,7 @@ Articles are automatically scored and saved to memory (search with core.memory u
               add_source: SCHEMA_ADD_SOURCE,
               remove_source: SCHEMA_REMOVE_SOURCE,
               list_sources: SCHEMA_LIST_SOURCES,
+              get_news: SCHEMA_GET_NEWS,
             },
           },
         };
@@ -489,17 +613,27 @@ Articles are automatically scored and saved to memory (search with core.memory u
           return listSources(storage);
         }
 
+        case 'get_news': {
+          const query = args['query'] as string | undefined;
+          const newsType = (args['type'] as NewsType | undefined) ?? 'all';
+          const limit = (args['limit'] as number | undefined) ?? 10;
+          const offset = (args['offset'] as number | undefined) ?? 0;
+
+          return getNews(memorySearch, query, newsType, limit, offset);
+        }
+
         default:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", or "list_sources".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", or "get_news".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {
                 add_source: SCHEMA_ADD_SOURCE,
                 remove_source: SCHEMA_REMOVE_SOURCE,
                 list_sources: SCHEMA_LIST_SOURCES,
+                get_news: SCHEMA_GET_NEWS,
               },
             },
           };

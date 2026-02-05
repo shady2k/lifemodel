@@ -34,7 +34,11 @@ import type {
   EventSchema,
   NeuronPluginV2,
   PluginStateInfo,
+  MemorySearchPrimitive,
+  MemorySearchOptions,
+  MemorySearchResult,
 } from '../types/plugin.js';
+import type { MemoryProvider } from '../layers/cognition/tools/core/memory.js';
 import { isNeuronPlugin, isFilterPlugin } from '../types/plugin.js';
 import type { FilterPluginV2 } from '../types/plugin.js';
 import type { SignalFilter } from '../layers/autonomic/filter-registry.js';
@@ -139,6 +143,7 @@ export class PluginLoader {
   private toolRegisterCallback: ToolRegisterCallback | null = null;
   private toolUnregisterCallback: ToolUnregisterCallback | null = null;
   private servicesProvider: (() => BasePluginServices) | null = null;
+  private memoryProvider: MemoryProvider | null = null;
   private neuronRegisterCallback: NeuronRegisterCallback | null = null;
   private neuronUnregisterCallback: NeuronUnregisterCallback | null = null;
   private filterRegisterCallback: FilterRegisterCallback | null = null;
@@ -233,6 +238,14 @@ export class PluginLoader {
    */
   setServicesProvider(provider: () => BasePluginServices): void {
     this.servicesProvider = provider;
+  }
+
+  /**
+   * Set memory provider for plugin memory searches.
+   * Must be called before plugins can use memorySearch primitive.
+   */
+  setMemoryProvider(provider: MemoryProvider): void {
+    this.memoryProvider = provider;
   }
 
   /**
@@ -1233,6 +1246,55 @@ export class PluginLoader {
   }
 
   /**
+   * Create memory search primitive for a plugin.
+   * Enforces plugin isolation - can only see own facts.
+   */
+  private createMemorySearchPrimitive(pluginId: string): MemorySearchPrimitive {
+    return {
+      searchOwnFacts: async (
+        query: string,
+        options?: MemorySearchOptions
+      ): Promise<MemorySearchResult> => {
+        if (!this.memoryProvider) {
+          return { entries: [], pagination: { page: 1, totalPages: 1, hasMore: false, total: 0 } };
+        }
+
+        // Enforce limits in core (cannot be bypassed by plugins)
+        const limit = Math.min(options?.limit ?? 10, 50);
+        const offset = options?.offset ?? 0;
+        const minConfidence = options?.minConfidence ?? 0.3;
+
+        const result = await this.memoryProvider.search(query, {
+          types: ['fact'], // Enforced: plugins can only search facts
+          limit,
+          offset,
+          minConfidence,
+        });
+
+        // Filter to this plugin's facts only (enforced in core)
+        const pluginEntries = result.entries.filter((e) => e.metadata?.['pluginId'] === pluginId);
+
+        return {
+          entries: pluginEntries.map((e) => ({
+            id: e.id,
+            content: e.content,
+            timestamp: e.timestamp,
+            tags: e.tags ?? [],
+            confidence: e.confidence ?? 0.5,
+            metadata: e.metadata ?? {},
+          })),
+          pagination: {
+            page: result.metadata.page,
+            totalPages: result.metadata.totalPages,
+            hasMore: result.metadata.hasMoreResults,
+            total: result.metadata.totalMatched,
+          },
+        };
+      },
+    };
+  }
+
+  /**
    * Create primitives for a plugin.
    */
   private async createPrimitives(plugin: PluginV2): Promise<PluginPrimitives> {
@@ -1279,12 +1341,16 @@ export class PluginLoader {
       },
     };
 
+    // Create memory search primitive (scoped to plugin's own facts)
+    const memorySearch = this.createMemorySearchPrimitive(manifest.id);
+
     return {
       logger: pluginLogger,
       scheduler,
       storage,
       intentEmitter,
       services,
+      memorySearch,
     };
   }
 
