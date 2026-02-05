@@ -406,7 +406,10 @@ async function getNews(
   limit = 10,
   offset = 0
 ): Promise<NewsToolResult> {
-  const result = await memorySearch.searchOwnFacts(query ?? 'news', {
+  // Use empty string for "all news" - searching 'news' would limit to content matching that word
+  // Empty query with tag-based storage will return all plugin facts
+  const searchQuery = query ?? '';
+  const result = await memorySearch.searchOwnFacts(searchQuery, {
     limit: limit * 2, // Fetch extra since we'll filter by type
     offset,
     minConfidence: 0.1, // Lower threshold to include filtered noise if needed
@@ -447,6 +450,11 @@ async function getNews(
     };
   });
 
+  // Determine hasMore: true if we have more filtered results than limit,
+  // OR if the underlying search has more pages we haven't fetched yet
+  const hasMoreFiltered = filtered.length > limit;
+  const hasMorePages = result.pagination.hasMore;
+
   return {
     success: true,
     action: 'get_news',
@@ -454,9 +462,10 @@ async function getNews(
     count: articles.length,
     filter: newsType,
     pagination: {
-      ...result.pagination,
-      // Update hasMore based on filtered count
-      hasMore: filtered.length > limit,
+      page: result.pagination.page,
+      totalPages: result.pagination.totalPages,
+      total: result.pagination.total,
+      hasMore: hasMoreFiltered || hasMorePages,
     },
   };
 }
@@ -616,8 +625,11 @@ For breaking news or topics not in your feeds, use the search tool instead.`,
         case 'get_news': {
           const query = args['query'] as string | undefined;
           const newsType = (args['type'] as NewsType | undefined) ?? 'all';
-          const limit = (args['limit'] as number | undefined) ?? 10;
-          const offset = (args['offset'] as number | undefined) ?? 0;
+          // Clamp limit/offset to valid ranges (non-negative, max 50 for limit)
+          const rawLimit = (args['limit'] as number | undefined) ?? 10;
+          const rawOffset = (args['offset'] as number | undefined) ?? 0;
+          const limit = Math.max(0, Math.min(rawLimit, 50));
+          const offset = Math.max(0, rawOffset);
 
           return getNews(memorySearch, query, newsType, limit, offset);
         }

@@ -1260,8 +1260,9 @@ export class PluginLoader {
         }
 
         // Enforce limits in core (cannot be bypassed by plugins)
-        const limit = Math.min(options?.limit ?? 10, 50);
-        const offset = options?.offset ?? 0;
+        // Clamp to valid ranges: limit [0, 50], offset >= 0
+        const limit = Math.max(0, Math.min(options?.limit ?? 10, 50));
+        const offset = Math.max(0, options?.offset ?? 0);
         const minConfidence = options?.minConfidence ?? 0.3;
 
         const result = await this.memoryProvider.search(query, {
