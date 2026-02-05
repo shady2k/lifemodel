@@ -1819,6 +1819,11 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
       }
     }
 
+    // Handle plugin_event triggers (news, reminders, etc.)
+    if (signal.type === 'plugin_event') {
+      return this.buildPluginEventSection(data);
+    }
+
     return `## Current Trigger\nType: ${signal.type}\nData: ${JSON.stringify(data ?? {})}`;
   }
 
@@ -1872,6 +1877,54 @@ DEFERRAL OPTION (core.defer):
 - reason: why deferring ("User might be busy", "It's late evening", etc.)`;
 
     return section;
+  }
+
+  /**
+   * Build special section for plugin events (news, reminders, etc.)
+   * Parses the event data and provides clear instructions for delivery.
+   */
+  private buildPluginEventSection(data: Record<string, unknown> | undefined): string {
+    if (!data) {
+      return `## Plugin Event\nNo event data available.`;
+    }
+
+    const kind = data['kind'] as string | undefined;
+    const pluginId = data['pluginId'] as string | undefined;
+    const eventKind = data['eventKind'] as string | undefined;
+    const urgent = data['urgent'] as boolean | undefined;
+
+    // Handle fact_batch events (news, interesting facts)
+    if (kind === 'fact_batch' && Array.isArray(data['facts'])) {
+      const facts = data['facts'] as { content: string; url?: string; tags?: string[] }[];
+
+      if (facts.length === 0) {
+        return `## Plugin Event\nEmpty fact batch received.`;
+      }
+
+      const isUrgent = urgent === true;
+
+      // Format facts with inline URLs
+      const factSections = facts
+        .map((fact, index) => {
+          const url = fact.url ? ` — ${fact.url}` : '';
+          return `${String(index + 1)}. ${fact.content}${url}`;
+        })
+        .join('\n');
+
+      return `## ${isUrgent ? '⚠️ URGENT ' : ''}News Delivery
+
+You are INITIATING contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
+
+${factSections}
+
+→ Deliver this news with URLs inline.`;
+    }
+
+    // Generic plugin event format
+    return `## Plugin Event
+Type: ${eventKind ?? 'unknown'}
+Plugin: ${pluginId ?? 'unknown'}
+${urgent ? '⚠️ URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(data)}`;
   }
 
   /**
