@@ -440,6 +440,12 @@ export class AgenticLoop {
                   type: 'string',
                   description: 'Your response to the user',
                 },
+                status: {
+                  type: 'string',
+                  enum: ['active', 'awaiting_answer', 'closed', 'idle'],
+                  description:
+                    'Optional: conversation status for follow-up timing. Use awaiting_answer if you asked a question.',
+                },
               },
               required: ['response'],
             },
@@ -454,9 +460,9 @@ export class AgenticLoop {
 
       // Capture chain-of-thought if present (cleaned from JSON wrapper)
       if (response.content) {
-        const thought = this.parseResponseContent(response.content);
-        if (thought) {
-          state.thoughts.push(thought);
+        const parsed = this.parseResponseContent(response.content);
+        if (parsed.text) {
+          state.thoughts.push(parsed.text);
         }
       }
 
@@ -484,7 +490,13 @@ export class AgenticLoop {
       // No tool calls = natural completion (Codex-style termination)
       if (response.toolCalls.length === 0) {
         // Parse response content (handles JSON schema from responseFormat)
-        const messageText = this.parseResponseContent(response.content);
+        const parsed = this.parseResponseContent(response.content);
+        const messageText = parsed.text;
+
+        // Store conversation status from response if provided (replaces conversationStatus tool)
+        if (parsed.status) {
+          state.conversationStatus = parsed.status;
+        }
 
         // Edge case: user message but no response text
         if (!messageText && context.triggerSignal.type === 'user_message') {
@@ -502,7 +514,7 @@ export class AgenticLoop {
         }
 
         this.logger.debug(
-          { iterations: state.iteration, toolCalls: state.toolCallCount },
+          { iterations: state.iteration, toolCalls: state.toolCallCount, status: parsed.status },
           'Agentic loop completed naturally (no tool calls)'
         );
 
@@ -633,9 +645,6 @@ export class AgenticLoop {
               : 'LLM requested deeper reasoning';
           this.logger.info({ reason }, 'Escalating to smart model');
 
-          // Reset consecutive status-only calls on escalate
-          state.consecutiveStatusOnlyCalls = 0;
-
           // Restart with smart model, preserving tool results
           const enrichedContext: LoopContext = {
             ...context,
@@ -647,30 +656,6 @@ export class AgenticLoop {
           };
 
           return this.runInternal(enrichedContext, true); // useSmart = true
-        }
-
-        // Intercept core.conversationStatus - store in state
-        if (toolName === 'core.conversationStatus') {
-          state.conversationStatus = args['status'] as ConversationStatus;
-          state.consecutiveStatusOnlyCalls++;
-
-          // Infinite loop guard: if LLM only calls conversationStatus repeatedly, force response
-          if (state.consecutiveStatusOnlyCalls >= 3) {
-            this.logger.warn(
-              { consecutiveCalls: state.consecutiveStatusOnlyCalls },
-              'Forcing response after repeated conversationStatus calls'
-            );
-            state.forceRespond = true;
-          }
-
-          // Return success message
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: JSON.stringify({ success: true, status: state.conversationStatus }),
-          });
-
-          continue; // Don't execute via registry, loop continues
         }
 
         // Intercept core.defer - TERMINAL, ends loop with DeferTerminal
@@ -691,9 +676,6 @@ export class AgenticLoop {
           const intents = this.compileIntentsFromToolResults(terminal, context, state);
           return { success: true, terminal, intents, state };
         }
-
-        // Reset consecutive status-only calls when any other tool is called
-        state.consecutiveStatusOnlyCalls = 0;
 
         // Track for smart retry
         state.executedTools.push({
@@ -1137,11 +1119,15 @@ export class AgenticLoop {
 
   /**
    * Parse LLM response content, handling both JSON schema and plain text.
-   * When toolChoice is 'none', we use JSON schema with {response: string}.
+   * When toolChoice is 'none', we use JSON schema with {response: string, status?: string}.
+   * Returns both the response text and optional conversation status.
    */
-  private parseResponseContent(content: string | null): string | null {
+  private parseResponseContent(content: string | null): {
+    text: string | null;
+    status?: ConversationStatus;
+  } {
     if (!content) {
-      return null;
+      return { text: null };
     }
 
     const trimmed = content.trim();
@@ -1164,16 +1150,27 @@ export class AgenticLoop {
         jsonStr = jsonMatch[0];
       }
 
-      const parsed = JSON.parse(jsonStr) as { response?: string };
+      const parsed = JSON.parse(jsonStr) as { response?: string; status?: string };
       if (parsed.response && typeof parsed.response === 'string') {
-        return parsed.response;
+        // Validate status if provided
+        const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
+        const status =
+          parsed.status && validStatuses.includes(parsed.status)
+            ? (parsed.status as ConversationStatus)
+            : undefined;
+
+        // Only include status in result if it was provided and valid
+        if (status) {
+          return { text: parsed.response, status };
+        }
+        return { text: parsed.response };
       }
     } catch {
       // Not JSON or parsing failed - use as plain text
     }
 
     // Fallback: use as plain text
-    return trimmed;
+    return { text: trimmed };
   }
 
   /**
@@ -1374,14 +1371,10 @@ Current time: ${currentDateTime}
 Capabilities: think → use tools → update beliefs (with evidence) → respond
 
 Rules:
-- Always output JSON for text content: {"response": "your message here"}
+- Always output JSON: {"response": "text"} or {"response": "text", "status": "awaiting_answer"}
+- status is optional: "awaiting_answer" (asked question), "closed" (farewell), "idle" (statement). Omit for normal active chat.
 - Don't re-greet; use name sparingly (first greeting or after long pause)
-- Only promise what tools can do. Memory ≠ reminders.${
-      context.triggerSignal.type === 'user_message'
-        ? `
-- When responding to a user message, call core.conversationStatus before asking questions to set follow-up timing`
-        : ''
-    }
+- Only promise what tools can do. Memory ≠ reminders.
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
@@ -1815,7 +1808,6 @@ ACTION REQUIRED - Choose ONE:
 Guidelines if sending a message:
 - Start FRESH - do NOT continue or reference the previous conversation
 - Keep it brief and natural - one short message
-- Do NOT call conversationStatus before your message - just send the greeting directly
 
 DEFERRAL OPTION (core.defer):
 - signalType: "${triggerType}"

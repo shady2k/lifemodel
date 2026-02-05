@@ -25,7 +25,6 @@ import {
   createInterestTool,
   createSoulTool,
   createEscalateTool,
-  createConversationStatusTool,
   createDeferTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
@@ -408,9 +407,6 @@ export class ToolRegistry {
 
     // Escalate tool (fast model only - requests smart model escalation)
     this.tools.set('core.escalate', createEscalateTool());
-
-    // Conversation status tool (sets follow-up timing)
-    this.tools.set('core.conversationStatus', createConversationStatusTool());
 
     // Defer tool (defer proactive contact - terminal)
     this.tools.set('core.defer', createDeferTool());

@@ -16,7 +16,6 @@ export { createRememberTool } from './remember.js';
 export { createInterestTool } from './interest.js';
 export { createSoulTool } from './soul.js';
 export { createEscalateTool } from './escalate.js';
-export { createConversationStatusTool } from './conversation-status.js';
 export { createDeferTool } from './defer.js';
 
 // Types

@@ -580,11 +580,8 @@ export interface LoopState {
   /** Track consecutive memory searches to detect search loops */
   consecutiveSearches: number;
 
-  /** Conversation status set by core.conversationStatus tool */
+  /** Conversation status from LLM response JSON (optional "status" field) */
   conversationStatus: ConversationStatus | undefined;
-
-  /** Track consecutive conversationStatus-only calls to detect infinite loops */
-  consecutiveStatusOnlyCalls: number;
 
   /** Track forceRespond retry attempts to prevent dead-end */
   forceRespondAttempts: number;
@@ -609,7 +606,6 @@ export function createLoopState(): LoopState {
     identicalCallCounts: new Map<string, number>(),
     consecutiveSearches: 0,
     conversationStatus: undefined,
-    consecutiveStatusOnlyCalls: 0,
     forceRespondAttempts: 0,
     everForcedRespond: false,
   };
