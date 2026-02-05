@@ -137,10 +137,7 @@ export class ThresholdEngine {
   // Memory provider for saving facts
   private memoryProvider: MemoryProvider | undefined;
 
-  // Cooldown tracking
-  private lastProactiveContact: Date | null = null;
-
-  // Follow-up attempt tracking
+  // Follow-up attempt tracking (not persisted - resets on restart is OK)
   private followUpAttempts = 0;
 
   constructor(
@@ -189,9 +186,8 @@ export class ThresholdEngine {
     const userMessages = signals.filter((s) => s.type === 'user_message');
     if (userMessages.length > 0) {
       // Reset cooldown and follow-up tracking when user contacts us
-      this.lastProactiveContact = null;
+      // Note: clearAll() also clears lastProactiveContact in the registry
       this.followUpAttempts = 0;
-      // Clear all acks when user initiates contact (unified mechanism)
       this.ackRegistry.clearAll();
       return {
         shouldWake: true,
@@ -771,27 +767,30 @@ export class ThresholdEngine {
 
   /**
    * Check if we're in cooldown period.
+   * Uses persisted lastProactiveContact from AckRegistry (survives restarts).
    */
   private isInCooldown(): boolean {
-    if (!this.lastProactiveContact) {
+    const lastContact = this.ackRegistry.getLastProactiveContact();
+    if (!lastContact) {
       return false;
     }
-    const elapsed = Date.now() - this.lastProactiveContact.getTime();
+    const elapsed = Date.now() - lastContact.getTime();
     return elapsed < this.contactTiming.cooldownMs;
   }
 
   /**
    * Record that we made a proactive contact attempt.
+   * Persisted via AckRegistry to survive restarts.
    */
   private recordProactiveContact(): void {
-    this.lastProactiveContact = new Date();
+    this.ackRegistry.setLastProactiveContact(new Date());
   }
 
   /**
    * Reset cooldown (e.g., when user contacts us).
+   * Note: clearAll() also clears lastProactiveContact in the registry.
    */
   resetCooldown(): void {
-    this.lastProactiveContact = null;
     this.followUpAttempts = 0;
     this.ackRegistry.clearAll();
   }

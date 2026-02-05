@@ -29,6 +29,8 @@ export interface PersistedAckRegistryState {
   version: number;
   acks: PersistedSignalAck[];
   handledSignalIds: [string, number][]; // [signalId, timestamp] entries
+  /** Last proactive contact timestamp (ISO string) - survives restarts */
+  lastProactiveContact: string | null;
   savedAt: string;
 }
 
@@ -129,10 +131,27 @@ export class SignalAckRegistry {
   /** TTL for handled IDs in ms (1 hour) */
   private readonly handledIdsTtlMs = 60 * 60 * 1000;
   private checkCount = 0;
+  /** Last proactive contact timestamp - persisted to survive restarts */
+  private lastProactiveContact: Date | null = null;
 
   constructor(logger: Logger, config: Partial<AckRegistryConfig> = {}) {
     this.logger = logger.child({ component: 'ack-registry' });
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Get the last proactive contact timestamp.
+   */
+  getLastProactiveContact(): Date | null {
+    return this.lastProactiveContact;
+  }
+
+  /**
+   * Set the last proactive contact timestamp (triggers persistence).
+   */
+  setLastProactiveContact(timestamp: Date | null): void {
+    this.lastProactiveContact = timestamp;
+    this.onMutate();
   }
 
   /**
@@ -329,14 +348,20 @@ export class SignalAckRegistry {
 
   /**
    * Clear all acks (e.g., on user message).
+   * Also clears lastProactiveContact since user initiated contact.
    */
   clearAll(): void {
     const ackCount = this.acks.size;
     const handledCount = this.handledSignalIds.size;
+    const hadProactiveContact = this.lastProactiveContact !== null;
     this.acks.clear();
     this.handledSignalIds.clear();
+    this.lastProactiveContact = null;
     this.onMutate();
-    this.logger.debug({ ackCount, handledCount }, 'All signal acks cleared');
+    this.logger.debug(
+      { ackCount, handledCount, clearedProactiveContact: hadProactiveContact },
+      'All signal acks cleared'
+    );
   }
 
   /**
@@ -462,6 +487,7 @@ export class SignalAckRegistry {
       version: CURRENT_ACK_REGISTRY_VERSION,
       acks,
       handledSignalIds: handledIds,
+      lastProactiveContact: this.lastProactiveContact?.toISOString() ?? null,
       savedAt: new Date().toISOString(),
     };
   }
@@ -605,12 +631,29 @@ export class SignalAckRegistry {
       this.handledSignalIds.set(id, timestamp);
     }
 
+    // Restore lastProactiveContact (backward compatible - may be missing in old files)
+    if (state.lastProactiveContact) {
+      const lastContact = new Date(state.lastProactiveContact);
+      if (!isNaN(lastContact.getTime())) {
+        this.lastProactiveContact = lastContact;
+      } else {
+        this.logger.warn(
+          { lastProactiveContact: state.lastProactiveContact },
+          'Invalid lastProactiveContact date, ignoring'
+        );
+        this.lastProactiveContact = null;
+      }
+    } else {
+      this.lastProactiveContact = null;
+    }
+
     this.logger.debug(
       {
         importedAckCount: this.acks.size,
         originalAckCount: state.acks.length,
         importedHandledCount: this.handledSignalIds.size,
         originalHandledCount: state.handledSignalIds.length,
+        lastProactiveContact: this.lastProactiveContact?.toISOString() ?? null,
       },
       'AckRegistry state imported'
     );
