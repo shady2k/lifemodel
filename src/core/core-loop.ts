@@ -481,22 +481,27 @@ export class CoreLoop {
         });
       }
 
-      // Defer thought signals if COGNITION is busy
-      const hasThoughtSignals = allSignals.some((s) => s.type === 'thought');
-      if (this.pendingCognition && hasThoughtSignals) {
-        const thoughtSignals = allSignals.filter((s) => s.type === 'thought');
-        const otherSignals = allSignals.filter((s) => s.type !== 'thought');
+      // Defer thought and reaction signals if COGNITION is busy
+      // These signals need LLM processing, so they must wait for COGNITION to be free
+      const deferrableTypes = ['thought', 'message_reaction'];
+      const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
+      if (this.pendingCognition && hasDeferrableSignals) {
+        const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
+        const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
 
         withTraceContext(tickCtx, () => {
           this.logger.debug(
-            { pendingThoughts: thoughtSignals.length },
-            'COGNITION busy, deferring thought signals to next tick'
+            {
+              thoughts: toDefer.filter((s) => s.type === 'thought').length,
+              reactions: toDefer.filter((s) => s.type === 'message_reaction').length,
+            },
+            'COGNITION busy, deferring signals to next tick'
           );
         });
 
-        // Re-queue thoughts at the front for next tick (FIFO order preserved)
-        for (let i = thoughtSignals.length - 1; i >= 0; i--) {
-          const signal = thoughtSignals[i];
+        // Re-queue at the front for next tick (FIFO order preserved)
+        for (let i = toDefer.length - 1; i >= 0; i--) {
+          const signal = toDefer[i];
           if (signal) {
             this.pendingSignals.unshift({ signal, timestamp: new Date() });
           }
@@ -743,12 +748,57 @@ export class CoreLoop {
       this.processUserMessageSignal(normalized);
     }
 
-    // Enrich reaction signals with message preview (async lookup)
+    // Enrich reaction signals with message preview and add to history as metadata
+    // Reactions are passive feedback - they don't wake COGNITION, but appear in history
+    // for context when the LLM next processes a message
     if (normalized.type === 'message_reaction') {
       normalized = await this.enrichReactionSignal(normalized);
+      await this.processReactionSignal(normalized);
     }
 
     return normalized;
+  }
+
+  /**
+   * Process a reaction signal by adding it to conversation history as metadata.
+   *
+   * Reactions are passive feedback, not user instructions. By adding them as
+   * system messages:
+   * - They don't wake COGNITION (no immediate response)
+   * - They don't inflate turn count (system messages aren't counted)
+   * - LLM sees them as context on next interaction, can learn from them
+   *
+   * This follows the "Energy Conservation" principle - passive signals don't
+   * deserve expensive conscious thought.
+   */
+  private async processReactionSignal(signal: Signal): Promise<void> {
+    const data = signal.data as MessageReactionData;
+    if (!this.conversationManager || !data.recipientId) return;
+
+    // Skip noisy removal events when we don't have the original message
+    if (data.isRemoval && !data.reactedMessagePreview) return;
+
+    const rawPreview = data.reactedMessagePreview ?? '[message not found]';
+    // Sanitize preview: strip control chars, escape special chars
+    const preview = rawPreview
+      .slice(0, 100)
+      .split('')
+      .filter((c) => {
+        const code = c.charCodeAt(0);
+        // Keep printable ASCII and non-ASCII (UTF-8), strip control chars
+        return code >= 32 && code !== 127;
+      })
+      .join('')
+      .replace(/[[\]"\n\r]/g, (c) => (c === '\n' ? '\\n' : c === '\r' ? '\\r' : '\\' + c));
+
+    const content = data.isRemoval
+      ? `[Reaction: User removed ${data.emoji} from: "${preview}"]`
+      : `[Reaction: User reacted ${data.emoji} to: "${preview}"]`;
+
+    await this.conversationManager.addMessage(data.recipientId, {
+      role: 'system',
+      content,
+    });
   }
 
   /**

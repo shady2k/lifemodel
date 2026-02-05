@@ -33,7 +33,6 @@ import {
   type FilterContext,
   type FilterUserModel,
 } from './filter-registry.js';
-import { createReactionSignalFilter } from './reaction-filter.js';
 
 /**
  * Configuration for AUTONOMIC processor.
@@ -93,8 +92,8 @@ export class AutonomicProcessor implements AutonomicLayer {
     this.registry = createNeuronRegistry(this.logger);
     this.filterRegistry = createFilterRegistry(this.logger);
 
-    // Register core filters (not plugin-based)
-    this.filterRegistry.register(createReactionSignalFilter());
+    // Note: ReactionSignalFilter removed - reactions are now processed as passive
+    // history metadata in CoreLoop.processReactionSignal() rather than waking COGNITION
 
     // No initializeNeurons() - neurons are registered dynamically via callbacks
     this.logger.info('AUTONOMIC layer created (awaiting neuron/filter registration)');

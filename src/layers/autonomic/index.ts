@@ -36,6 +36,3 @@ export type { ChangeDetectorConfig, ChangeResult } from './change-detector.js';
 // Signal filters
 export { FilterRegistry, createFilterRegistry } from './filter-registry.js';
 export type { SignalFilter, FilterContext, FilterUserModel } from './filter-registry.js';
-
-// Core filters (not plugin-based)
-export { ReactionSignalFilter, createReactionSignalFilter } from './reaction-filter.js';

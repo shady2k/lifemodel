@@ -5,7 +5,7 @@
  * the LLM receives proper context about:
  * - This being a proactive outreach, not a reply
  * - Time since last conversation
- * - Instructions to start fresh, not continue old conversation
+ * - Decision guidance (reach out vs wait)
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -69,7 +69,7 @@ describe('Proactive Contact', () => {
   }
 
   describe('Prompt context for proactive contact', () => {
-    it('includes "Proactive Contact Trigger" section instead of raw JSON', async () => {
+    it('includes "Proactive Contact" section instead of raw JSON', async () => {
       const toolRegistry = createToolRegistry(logger);
       const loop = createAgenticLoop(logger, mockLLM, toolRegistry);
 
@@ -97,8 +97,8 @@ describe('Proactive Contact', () => {
         .join('\n\n');
 
       // Should have proactive contact section
-      expect(fullPrompt).toContain('## Proactive Contact Trigger');
-      expect(fullPrompt).toContain('This is NOT a response to a user message');
+      expect(fullPrompt).toContain('## Proactive Contact');
+      expect(fullPrompt).toContain('This is not a response to them');
       expect(fullPrompt).toContain('You are INITIATING contact');
     });
 
@@ -123,10 +123,10 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      expect(fullPrompt).toContain('Time since last conversation: 3 hour');
+      expect(fullPrompt).toContain('Last conversation: 3 hour');
     });
 
-    it('includes instructions to start fresh conversation', async () => {
+    it('includes decision guidance for proactive contact', async () => {
       const toolRegistry = createToolRegistry(logger);
       const loop = createAgenticLoop(logger, mockLLM, toolRegistry);
 
@@ -149,8 +149,10 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      expect(fullPrompt).toContain('do NOT continue or reference the previous conversation');
-      expect(fullPrompt).toContain('Start FRESH');
+      // New prompt gives agent decision guidance instead of strict instructions
+      expect(fullPrompt).toContain('Decide what feels right');
+      expect(fullPrompt).toContain('Reach out');
+      expect(fullPrompt).toContain('Wait');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {
@@ -217,8 +219,9 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      expect(fullPrompt).toContain('Follow-up');
-      expect(fullPrompt).toContain('user did not respond');
+      // Follow-up trigger shows user didn't respond
+      expect(fullPrompt).toContain('User did not respond');
+      expect(fullPrompt).toContain('proactive_follow_up');
     });
   });
 
@@ -262,7 +265,7 @@ describe('Proactive Contact', () => {
       // Should have user input section, NOT proactive contact
       expect(fullPrompt).toContain('## Current Input');
       expect(fullPrompt).toContain('User message: "Hello!"');
-      expect(fullPrompt).not.toContain('## Proactive Contact Trigger');
+      expect(fullPrompt).not.toContain('## Proactive Contact');
     });
   });
 });

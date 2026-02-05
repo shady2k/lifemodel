@@ -201,6 +201,20 @@ export class ThresholdEngine {
       };
     }
 
+    // Check for message reactions - wake COGNITION so LLM can decide how to respond
+    // (learn from feedback, adjust interests, acknowledge, or do nothing)
+    // Note: Reaction is already added to history as system message by CoreLoop,
+    // so LLM sees clear context like "[Reaction: User reacted 👍 to: "..."]"
+    const reactionSignals = signals.filter((s) => s.type === 'message_reaction');
+    if (reactionSignals.length > 0) {
+      return {
+        shouldWake: true,
+        trigger: 'user_message', // Treat as user interaction for tracking purposes
+        reason: 'User reacted to a message',
+        triggerSignals: reactionSignals,
+      };
+    }
+
     // Check for thought signals - bypass energy gate like user_message
     // Thoughts are internal processing that needs prompt handling
     // Filter out thoughts that have already been handled (ACKed)

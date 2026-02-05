@@ -1772,6 +1772,16 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
       return this.buildPluginEventSection(data);
     }
 
+    // Handle thought triggers
+    if (signal.type === 'thought' && data) {
+      return this.buildThoughtTriggerSection(data);
+    }
+
+    // Handle message_reaction triggers (direct, not converted to thought)
+    if (signal.type === 'message_reaction' && data) {
+      return this.buildReactionTriggerSection(data);
+    }
+
     return `## Current Trigger\nType: ${signal.type}\nData: ${JSON.stringify(data ?? {})}`;
   }
 
@@ -1875,6 +1885,75 @@ ${factSections}
 Type: ${eventKind ?? 'unknown'}
 Plugin: ${pluginId ?? 'unknown'}
 ${urgent ? '⚠️ URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(data)}`;
+  }
+
+  /**
+   * Build special section for thought triggers (including reactions).
+   * Provides clear guidance on when to respond vs when to just process internally.
+   */
+  private buildThoughtTriggerSection(data: Record<string, unknown>): string {
+    const content = data['content'] as string | undefined;
+    const rootId = data['rootThoughtId'] as string | undefined;
+
+    // Check if this is a reaction-based thought
+    const hasReactionRootId = rootId?.startsWith('reaction_') === true;
+    const hasReactionContent = content?.startsWith('User reacted') === true;
+    const isReaction = hasReactionRootId || hasReactionContent;
+
+    if (isReaction && content) {
+      // Extract emoji from content like "User reacted 👍 to my message: ..."
+      const emojiMatch = /User reacted (\S+) to/.exec(content);
+      const emoji = emojiMatch?.[1] ?? '👍';
+
+      return `## User Reaction
+
+${content}
+
+**This is feedback, not a question.** The user acknowledged your message with ${emoji}.
+
+**Decide what to do:**
+- If the reaction shows interest in a topic → call core.setInterest
+- If it reveals a preference worth remembering → call core.remember
+- If it's just acknowledgment (👍, ❤️, 👏) → usually no response needed
+
+**To end without sending a message:** output {"response": ""}
+**To respond:** output {"response": "your message"} (only if you have something meaningful to add)`;
+    }
+
+    // Generic thought handling
+    return `## Internal Thought
+
+${content ?? JSON.stringify(data)}
+
+This is an internal thought to process. Decide if any action is needed.
+To end without sending a message: output {"response": ""}`;
+  }
+
+  /**
+   * Build special section for message_reaction triggers.
+   * Reactions are direct signals (not converted to thoughts) that need clear guidance.
+   */
+  private buildReactionTriggerSection(data: Record<string, unknown>): string {
+    const emoji = data['emoji'] as string | undefined;
+    const preview = data['reactedMessagePreview'] as string | undefined;
+
+    const messageContext = preview
+      ? `Your message: "${preview.slice(0, 100)}${preview.length > 100 ? '...' : ''}"`
+      : 'Message preview not available';
+
+    return `## User Reaction
+
+The user reacted ${emoji ?? '👍'} to your message.
+
+${messageContext}
+
+**This is feedback, not a question.** Decide what to do:
+- If the reaction shows interest in a topic → call core.setInterest
+- If it reveals a preference worth remembering → call core.remember
+- If it's just acknowledgment (👍, ❤️, 👏) → usually no response needed
+
+**To end without sending a message:** output {"response": ""}
+**To respond:** output {"response": "your message"} (only if you have something meaningful to add)`;
   }
 
   /**
