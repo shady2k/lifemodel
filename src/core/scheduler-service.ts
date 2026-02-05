@@ -254,8 +254,10 @@ export class SchedulerService {
                 }
               }
 
-              // Create and emit signal to wake cognition
-              if (this.signalCallback) {
+              // Create and emit signal to wake cognition (unless suppressed by schedule config)
+              // Check emitSignal flag in schedule data - set by plugin-loader from manifest
+              const emitSignal = entry.data['emitSignal'];
+              if (this.signalCallback && emitSignal !== false) {
                 this.signalCallback(signal);
               }
 

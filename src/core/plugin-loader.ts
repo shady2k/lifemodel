@@ -1643,6 +1643,8 @@ export class PluginLoader {
           },
           data: {
             kind: scheduleDef.eventKind,
+            // Pass emitSignal flag so scheduler-service can skip signal emission if false
+            ...(scheduleDef.emitSignal === false && { emitSignal: false }),
           },
         });
 

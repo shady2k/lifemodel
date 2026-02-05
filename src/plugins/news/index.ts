@@ -149,6 +149,7 @@ const manifest: PluginManifestV2 = {
       cron: '0 */2 * * *', // Every 2 hours
       eventKind: NEWS_EVENT_KINDS.POLL_FEEDS,
       initialDelayMs: 2 * 60 * 60 * 1000, // First poll after 2 hours (don't flood on startup)
+      emitSignal: false, // Don't wake cognition - plugin emits article_batch signals via onEvent()
     },
   ],
 };

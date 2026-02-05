@@ -390,6 +390,13 @@ export interface PluginScheduleDefinition {
 
   /** Initial delay before first fire in ms (default: interval-based) */
   initialDelayMs?: number;
+
+  /**
+   * Whether to emit a signal to cognition when this schedule fires (default: true).
+   * Set to false for internal events where the plugin handles everything via onEvent()
+   * and emits its own meaningful signals (e.g., article_batch instead of poll_feeds).
+   */
+  emitSignal?: boolean;
 }
 
 /**
