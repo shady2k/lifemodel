@@ -92,6 +92,11 @@ export function createSearchTool(primitives: PluginPrimitives): PluginTool {
 
   const description = `Search the web using configurable providers.
 
+**IMPORTANT:** This is a FALLBACK tool. Before using web search:
+- For news queries → try plugin_news first (searches your configured RSS/Telegram sources)
+- For facts about the user → try core.memory first
+Only use web search if other tools don't have the relevant data.
+
 Returns search results with titles, URLs, and snippets. Use the fetch tool to get full page content for specific results.
 
 **Providers:**

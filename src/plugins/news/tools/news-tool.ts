@@ -74,7 +74,7 @@ const SCHEMA_GET_NEWS = {
     required: false,
     description: 'Search term (default: all news)',
   },
-  type: {
+  urgency: {
     type: 'string',
     required: false,
     enum: ['urgent', 'interesting', 'all'],
@@ -402,13 +402,19 @@ type NewsType = 'urgent' | 'interesting' | 'all';
 async function getNews(
   memorySearch: MemorySearchPrimitive,
   query?: string,
-  newsType: NewsType = 'all',
+  newsType?: NewsType,
   limit = 10,
   offset = 0
 ): Promise<NewsToolResult> {
   // Use empty string for "all news" - searching 'news' would limit to content matching that word
   // Empty query with tag-based storage will return all plugin facts
   const searchQuery = query ?? '';
+
+  // Smart default: if no urgency filter specified and no query,
+  // show interesting news (curated content, not noise)
+  // If query is provided, search all urgency levels by default
+  const effectiveType: NewsType = newsType ?? (searchQuery ? 'all' : 'interesting');
+
   const result = await memorySearch.searchOwnFacts(searchQuery, {
     limit: limit * 2, // Fetch extra since we'll filter by type
     offset,
@@ -417,8 +423,8 @@ async function getNews(
 
   // Filter by news type based on metadata.eventKind
   let filtered = result.entries;
-  if (newsType !== 'all') {
-    const targetEventKind = `news:${newsType}`;
+  if (effectiveType !== 'all') {
+    const targetEventKind = `news:${effectiveType}`;
     filtered = result.entries.filter((e) => e.metadata['eventKind'] === targetEventKind);
   }
 
@@ -460,7 +466,7 @@ async function getNews(
     action: 'get_news',
     articles,
     count: articles.length,
-    filter: newsType,
+    filter: effectiveType,
     pagination: {
       page: result.pagination.page,
       totalPages: result.pagination.totalPages,
@@ -480,8 +486,10 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
 Actions: add_source, remove_source, list_sources, get_news.
-Use get_news to retrieve articles already fetched from configured sources.
-For breaking news or topics not in your feeds, use the search tool instead.`,
+
+**For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
+This searches articles from configured RSS feeds and Telegram channels.
+Only fall back to web search if get_news returns no relevant results.`,
     tags: ['rss', 'telegram', 'news', 'feed', 'add', 'remove', 'list', 'get'],
     parameters: [
       {
@@ -523,6 +531,14 @@ For breaking news or topics not in your feeds, use the search tool instead.`,
         type: 'string',
         description: 'Search term for articles (default: all news). Used with get_news action.',
         required: false,
+      },
+      {
+        name: 'urgency',
+        type: 'string',
+        description:
+          'Filter by urgency: "urgent", "interesting", or "all" (default: all). Used with get_news action.',
+        required: false,
+        enum: ['urgent', 'interesting', 'all'],
       },
       {
         name: 'offset',
@@ -624,7 +640,8 @@ For breaking news or topics not in your feeds, use the search tool instead.`,
 
         case 'get_news': {
           const query = args['query'] as string | undefined;
-          const newsType = (args['type'] as NewsType | undefined) ?? 'all';
+          // Pass undefined to let getNews apply smart default (interesting for empty query, all for searches)
+          const newsType = args['urgency'] as NewsType | undefined;
           // Clamp limit/offset to valid ranges (non-negative, max 50 for limit)
           const rawLimit = (args['limit'] as number | undefined) ?? 10;
           const rawOffset = (args['offset'] as number | undefined) ?? 0;
