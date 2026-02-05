@@ -2,7 +2,12 @@ import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
-import { createLogger, type LoggerConfig } from './logger.js';
+import {
+  createLogger,
+  createConversationLogger,
+  setConversationLogger,
+  type LoggerConfig,
+} from './logger.js';
 import { createMetrics } from './metrics.js';
 import { type Agent, createAgent, type AgentConfig } from './agent.js';
 import { type EventBus, createEventBus } from './event-bus.js';
@@ -308,6 +313,14 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create logger
   const logger = createLogger(loggerConfig);
   logger.info('Loaded configuration');
+
+  // Create conversation logger for LLM interactions (separate file)
+  const conversationLogger = createConversationLogger(
+    configOverrides.logDir ?? mergedConfig.logging.logDir,
+    configOverrides.logLevel ?? mergedConfig.logging.level
+  );
+  setConversationLogger(conversationLogger);
+  logger.info('Conversation logger initialized');
 
   // Create storage with deferred writes (batches disk I/O, prevents race conditions)
   const storagePath = mergedConfig.paths.state;

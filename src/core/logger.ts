@@ -179,3 +179,108 @@ export function createLogger(config: Partial<LoggerConfig> = {}): pino.Logger {
     mixin: createTraceMixin(),
   });
 }
+
+/**
+ * Generate conversation log filename.
+ */
+function generateConversationLogFilename(): string {
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-');
+  return `conversation-${timestamp}.log`;
+}
+
+/**
+ * Create a separate logger for conversation logs.
+ *
+ * This creates a dedicated log file for LLM interactions (requests, responses, tool calls).
+ * Uses the same pino configuration but writes to a separate file.
+ *
+ * @param logDir - Directory for log files
+ * @param level - Log level (default: 'info')
+ * @returns Logger instance for conversation logs
+ */
+export function createConversationLogger(
+  logDir = './data/logs',
+  level: pino.Level = 'info'
+): pino.Logger {
+  // Ensure log directory exists
+  ensureLogDir(logDir);
+
+  // Cleanup old conversation logs
+  const maxFiles = 10;
+  const conversationFiles = fs
+    .readdirSync(logDir)
+    .filter((f) => f.startsWith('conversation-') && f.endsWith('.log'))
+    .map((f) => {
+      const filePath = path.join(logDir, f);
+      const stats = fs.statSync(filePath);
+      return { name: f, path: filePath, mtime: stats.mtime.getTime(), size: stats.size };
+    })
+    .filter((f) => f.size > 0)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  for (const file of conversationFiles.slice(maxFiles)) {
+    try {
+      fs.unlinkSync(file.path);
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // Generate conversation log file path
+  const conversationLogPath = path.join(logDir, generateConversationLogFilename());
+
+  // Create a write stream for plain text output
+  const logStream = fs.createWriteStream(conversationLogPath, { flags: 'a' });
+
+  // Custom destination: timestamp + message only (no level, no JSON noise)
+  const destination = {
+    write(chunk: string): void {
+      try {
+        const parsed = JSON.parse(chunk) as { msg?: string; time?: number };
+        if (parsed.msg) {
+          const timestamp = parsed.time
+            ? new Date(parsed.time).toISOString().slice(11, 23) // HH:mm:ss.mmm
+            : '';
+          const prefix = timestamp ? `[${timestamp}] ` : '';
+          logStream.write(prefix + parsed.msg + '\n');
+        }
+      } catch {
+        // If not JSON, write as-is
+        logStream.write(chunk);
+      }
+    },
+  };
+
+  return pino({ level }, destination);
+}
+
+/**
+ * Global conversation logger instance.
+ * Set by container and accessible throughout the app.
+ */
+let globalConversationLogger: pino.Logger | null = null;
+
+/**
+ * Set the global conversation logger.
+ * Called by container during initialization.
+ */
+export function setConversationLogger(logger: pino.Logger): void {
+  globalConversationLogger = logger;
+}
+
+/**
+ * Get the global conversation logger.
+ * Returns null if not yet initialized.
+ */
+export function getConversationLogger(): pino.Logger | null {
+  return globalConversationLogger;
+}
+
+/**
+ * Log to the conversation log.
+ * Convenience function that's safe to call even if conversation logger isn't initialized.
+ */
+export function logConversation(obj: unknown, msg: string, ...args: unknown[]): void {
+  globalConversationLogger?.info(obj, msg, ...args);
+}

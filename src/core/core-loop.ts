@@ -64,6 +64,7 @@ import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
 import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
+import { setPrimaryRecipientId } from './globals.js';
 
 /**
  * Core loop configuration.
@@ -248,6 +249,8 @@ export class CoreLoop {
           'telegram',
           config.primaryUserChatId
         );
+        // Set global accessor so any part of the system can access it
+        setPrimaryRecipientId(this.primaryRecipientId);
       }
 
       (this.layers.aggregation as { updateDeps: (deps: unknown) => void }).updateDeps({

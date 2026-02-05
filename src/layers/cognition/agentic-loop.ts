@@ -449,15 +449,27 @@ export class AgenticLoop {
         }
 
         if (state.forceRespondAttempts >= 3) {
-          // Allow tools again, but add system hint
-          messages.push({
-            role: 'system',
-            content: 'You must respond to the user now. Complete your response.',
-          });
-          state.forceRespond = false;
-          // Don't reset forceRespondAttempts or everForcedRespond - they persist for confidence
+          // Model refuses to respond after 3 attempts - abort with noAction
+          // This is better than re-enabling tools and looping forever
+          this.logger.warn(
+            { attempts: state.forceRespondAttempts, iteration: state.iteration },
+            'Model refused to respond after forced attempts - terminating with noAction'
+          );
+          const terminal: Terminal = {
+            type: 'noAction',
+            reason: 'Model refused to generate response after multiple forced attempts',
+          };
+          const intents = this.compileIntentsFromToolResults(terminal, context, state);
+          return { success: true, terminal, intents, state };
         } else {
           state.forceRespondAttempts++;
+          // Add increasingly urgent hint
+          if (state.forceRespondAttempts >= 2) {
+            messages.push({
+              role: 'system',
+              content: 'CRITICAL: You must generate a response NOW. No more tool calls.',
+            });
+          }
         }
       }
 
@@ -984,9 +996,12 @@ export class AgenticLoop {
       }
     }
 
-    // Add current trigger as user message (without history section since it's already in messages)
+    // Add current trigger - role depends on trigger type
+    // User messages → 'user' role (natural conversation)
+    // Proactive/system triggers → 'system' role (instructions to the model)
     const triggerPrompt = this.buildTriggerPrompt(context, useSmart);
-    messages.push({ role: 'user', content: triggerPrompt });
+    const isUserMessage = context.triggerSignal.type === 'user_message';
+    messages.push({ role: isUserMessage ? 'user' : 'system', content: triggerPrompt });
 
     return messages;
   }
@@ -1318,6 +1333,30 @@ export class AgenticLoop {
         payload: sendPayload,
         trace: baseTrace,
       });
+
+      this.logger.debug(
+        {
+          recipientId: context.recipientId,
+          textLength: terminal.text.length,
+          conversationStatus: terminal.conversationStatus,
+          toolCalls: intentToolCalls?.length ?? 0,
+        },
+        'SEND_MESSAGE intent created'
+      );
+    } else if (terminal.type === 'respond') {
+      // Response generated but cannot be routed - log for debugging
+      const reason = !context.recipientId
+        ? 'recipientId missing from LoopContext'
+        : 'unknown reason';
+      this.logger.warn(
+        {
+          textLength: terminal.text.length,
+          textPreview: terminal.text.slice(0, 100),
+          triggerType: context.triggerSignal.type,
+          reason,
+        },
+        'Response generated but SEND_MESSAGE intent NOT created - message will not be delivered'
+      );
     }
 
     // Add deferral intent if terminal is defer
@@ -1396,7 +1435,7 @@ Rules:
 - Always output JSON for text content: {"response": "your message here"}
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
-- Call core.conversationStatus before asking questions to set follow-up timing
+- When responding to a user message, call core.conversationStatus before asking questions to set follow-up timing
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
@@ -1817,24 +1856,20 @@ ${isDeferralOverride ? '\n⚠️ OVERRIDE: Your earlier deferral is being recons
 
 ${isFollowUp ? 'Trigger: Follow-up (user did not respond to your previous message)' : 'Trigger: Internal drive to reach out (social debt accumulated)'}
 
-Guidelines for proactive contact:
-- Do NOT continue or reference the previous conversation directly
-- Start FRESH with a new topic or friendly check-in
+ACTION REQUIRED - Choose ONE:
+1. SEND A MESSAGE: Output {"response": "your greeting here"} with a brief, natural message
+   Examples: "Привет! Как дела?", "Эй, давно не общались. Как ты?", "Привет! Чем занимаешься?"
+2. DEFER: If now is not a good time, call core.defer and output {"response": ""} (empty)
+
+Guidelines if sending a message:
+- Start FRESH - do NOT continue or reference the previous conversation
 - Keep it brief and natural - one short message
-- Examples: "Привет! Как дела?", "Эй, давно не общались. Как ты?", "Привет! Чем занимаешься?"
-- Do NOT ask about the previous conversation topic unless it's truly unfinished business
+- Do NOT call conversationStatus before your message - just send the greeting directly
 
-DEFERRAL OPTION:
-If you decide NOT to contact now (user might be busy, it's late, etc.), call core.defer:
-- signalType: usually "contact_urge" for proactive contact
+DEFERRAL OPTION (core.defer):
+- signalType: "${triggerType}"
 - deferHours: 2-8 hours typically
-- reason: why deferring ("User seems busy", "It's late evening", etc.)
-- You won't be asked again until:
-  a) The deferral time passes, OR
-  b) Something significant changes (value increases significantly)
-
-Example:
-core.defer({ signalType: "contact_urge", reason: "User seems busy right now", deferHours: 4 })`;
+- reason: why deferring ("User might be busy", "It's late evening", etc.)`;
 
     return section;
   }

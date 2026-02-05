@@ -251,6 +251,19 @@ export class CognitionProcessor implements CognitionLayer {
     const recipientId = signalData?.recipientId;
     const channel = signalData?.channel ?? 'telegram';
 
+    // Warn if recipientId is missing for non-user-message triggers
+    // This indicates proactive signals won't be able to route responses
+    if (!recipientId && triggerSignal.type !== 'user_message') {
+      this.logger.warn(
+        {
+          triggerType: triggerSignal.type,
+          signalKind: (signalData as { kind?: string } | undefined)?.kind,
+          hasRecipientId: false,
+        },
+        'COGNITION triggered without recipientId - responses cannot be routed'
+      );
+    }
+
     // Emit typing indicator only for user messages (not proactive triggers)
     // For proactive contact, we don't know if we'll respond until LLM decides
     const isUserMessage = triggerSignal.type === 'user_message';

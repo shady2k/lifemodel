@@ -6,6 +6,7 @@
  */
 
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from './tool-schema.js';
+import { logConversation } from '../core/logger.js';
 
 /**
  * Tool call from the model (OpenAI Chat Completions format).
@@ -258,6 +259,39 @@ export abstract class BaseLLMProvider implements LLMProvider {
       }
     }
 
+    // Log to conversation file (separate readable log for debugging)
+    logConversation(
+      { logType: 'REQUEST', requestId, provider: this.name, model: request.model },
+      `\n${'═'.repeat(60)}\n→ REQUEST [${requestId}] to ${this.name} (${request.model ?? request.role ?? 'unknown'})\n${'─'.repeat(60)}`
+    );
+
+    // Format all messages for conversation log - full detail for debugging
+    for (const [i, msg] of request.messages.entries()) {
+      const idx = String(i);
+      const role = msg.role.toUpperCase();
+      const content = msg.content ?? '(no content)';
+
+      if (msg.role === 'tool') {
+        // Tool result - show which tool call it responds to
+        logConversation(
+          { logType: 'TOOL_RESULT' },
+          `[${idx}] TOOL RESULT (${msg.tool_call_id ?? 'unknown'}):\n${content}`
+        );
+      } else if (msg.tool_calls && msg.tool_calls.length > 0) {
+        // Assistant with tool calls - show each call in detail
+        const toolDetails = msg.tool_calls
+          .map((tc) => `  📞 ${tc.function.name}(${tc.id}):\n     ${tc.function.arguments}`)
+          .join('\n');
+        logConversation(
+          { logType: 'ASSISTANT_TOOLS' },
+          `[${idx}] ${role}:\n${content}\n\n  Tool calls:\n${toolDetails}`
+        );
+      } else {
+        // Regular message
+        logConversation({ logType: role }, `[${idx}] ${role}:\n${content}`);
+      }
+    }
+
     try {
       const response = await this.doComplete(request);
       const duration = Date.now() - startTime;
@@ -280,6 +314,26 @@ export abstract class BaseLLMProvider implements LLMProvider {
         '🤖 LLM response received'
       );
 
+      // Log full response to conversation file (no truncation for debugging)
+      const responseContent = response.content ?? '(no content)';
+      const toolCallsDetail = response.toolCalls
+        ? `\n\n  Tool calls:\n${response.toolCalls.map((tc) => `  📞 ${tc.function.name}(${tc.id}):\n     ${tc.function.arguments}`).join('\n')}`
+        : '';
+      const durationStr = String(duration);
+      const tokensStr = String(response.usage?.totalTokens ?? '?');
+      const finishStr = response.finishReason ?? 'unknown';
+      logConversation(
+        {
+          logType: 'RESPONSE',
+          requestId,
+          model: response.model,
+          finishReason: response.finishReason,
+          durationMs: duration,
+          tokens: response.usage?.totalTokens,
+        },
+        `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens, ${finishStr}]\n${responseContent}${toolCallsDetail}\n${'═'.repeat(60)}`
+      );
+
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -294,6 +348,19 @@ export abstract class BaseLLMProvider implements LLMProvider {
           retryable: error instanceof LLMError ? error.retryable : false,
         },
         '🤖 LLM request failed'
+      );
+
+      // Log error to conversation file
+      const errorDurationStr = String(duration);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logConversation(
+        {
+          logType: 'ERROR',
+          requestId,
+          error: errorMsg,
+          durationMs: duration,
+        },
+        `${'─'.repeat(60)}\n✗ ERROR [${errorDurationStr}ms]: ${errorMsg}\n${'═'.repeat(60)}`
       );
 
       throw error;

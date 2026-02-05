@@ -357,6 +357,7 @@ export class NewsSignalFilter implements SignalFilter {
         pluginId: NEWS_PLUGIN_ID,
         eventKind: 'news:interesting',
         facts,
+        recipientId: context.primaryRecipientId, // Route responses to primary user
       };
 
       outputSignals.push(
@@ -392,6 +393,7 @@ export class NewsSignalFilter implements SignalFilter {
         pluginId: NEWS_PLUGIN_ID,
         eventKind: 'news:filtered',
         facts: filteredFacts,
+        recipientId: context.primaryRecipientId, // Route responses to primary user
       };
 
       outputSignals.push(
