@@ -8,12 +8,20 @@ import type { Tool, ToolParameter } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 
 /**
+ * Result from a time lookup - either a Date or a reason why lookup failed.
+ * This enables descriptive error messages instead of generic "not found".
+ */
+export type TimeLookupResult =
+  | { time: Date }
+  | { time: null; reason: 'no_recipient_context' | 'no_conversation_manager' | 'no_messages' };
+
+/**
  * Conversation provider for time-based queries.
  * Methods are async since they may need to read from storage.
  */
 export interface ConversationProvider {
-  getLastMessageTime(recipientId?: string): Promise<Date | null>;
-  getLastContactTime(recipientId?: string): Promise<Date | null>;
+  getLastMessageTime(recipientId?: string): Promise<TimeLookupResult>;
+  getLastContactTime(recipientId?: string): Promise<TimeLookupResult>;
 }
 
 /**
@@ -113,8 +121,18 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
           // Use context.recipientId - system knows the current conversation
           const recipientId = context?.recipientId;
 
+          // Human-readable error messages for each failure reason
+          const reasonMessages: Record<string, string> = {
+            no_recipient_context: 'No recipient context available (internal error)',
+            no_conversation_manager: 'Conversation manager not initialized (internal error)',
+            no_messages:
+              event === 'lastContact'
+                ? 'No user messages found - this may be a first contact scenario'
+                : 'No messages found in conversation history',
+          };
+
           // Handle async provider lookups
-          const getEventTime = async (): Promise<Date | null> => {
+          const getEventTime = async (): Promise<TimeLookupResult | Date | null> => {
             if (event === 'lastMessage' && deps.conversationProvider) {
               return deps.conversationProvider.getLastMessageTime(recipientId);
             } else if (event === 'lastContact' && deps.conversationProvider) {
@@ -128,12 +146,28 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
             }
           };
 
-          return getEventTime().then((eventTime) => {
+          return getEventTime().then((result) => {
+            // Handle TimeLookupResult (from provider) vs Date/null (from ISO parsing)
+            let eventTime: Date | null;
+            let failureReason: string | undefined;
+
+            if (result === null) {
+              eventTime = null;
+              failureReason = `Invalid event: "${event}" is not a recognized event or valid ISO timestamp`;
+            } else if (result instanceof Date) {
+              eventTime = result;
+            } else if (result.time === null) {
+              eventTime = null;
+              failureReason = reasonMessages[result.reason] ?? `Unknown reason: ${result.reason}`;
+            } else {
+              eventTime = result.time;
+            }
+
             if (!eventTime) {
               return {
                 success: false,
                 action: 'since',
-                error: `Event not found: ${event}`,
+                error: failureReason ?? `Event not found: ${event}`,
               };
             }
 

@@ -439,11 +439,14 @@ export const FIELD_POLICIES: Record<string, FieldPolicy> = {
     escalateIfUncertain: true,
   },
 
-  // Low-risk: ephemeral states
+  // Low-risk: ephemeral states (allow inference)
   'user.mood': {
     minConfidence: 0.6,
   },
   'user.availability': {
+    minConfidence: 0.5,
+  },
+  'user.last_interaction_state': {
     minConfidence: 0.5,
   },
 

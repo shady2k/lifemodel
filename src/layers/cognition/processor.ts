@@ -147,15 +147,21 @@ export class CognitionProcessor implements CognitionLayer {
         : undefined,
       userModelProvider: userModel ? { getModel: () => userModel.getBeliefs() } : undefined,
       // Lazy provider - reads conversationManager at call time (handles late binding)
+      // Returns TimeLookupResult with reason for better error messages
       conversationProvider: {
         getLastMessageTime: async (recipientId) => {
-          if (!recipientId || !this.conversationManager) return null;
+          if (!recipientId) return { time: null, reason: 'no_recipient_context' };
+          if (!this.conversationManager) return { time: null, reason: 'no_conversation_manager' };
           const status = await this.conversationManager.getStatus(recipientId);
-          return status.lastMessageAt;
+          if (!status.lastMessageAt) return { time: null, reason: 'no_messages' };
+          return { time: status.lastMessageAt };
         },
         getLastContactTime: async (recipientId) => {
-          if (!recipientId || !this.conversationManager) return null;
-          return this.conversationManager.getLastUserMessageTime(recipientId);
+          if (!recipientId) return { time: null, reason: 'no_recipient_context' };
+          if (!this.conversationManager) return { time: null, reason: 'no_conversation_manager' };
+          const time = await this.conversationManager.getLastUserMessageTime(recipientId);
+          if (!time) return { time: null, reason: 'no_messages' };
+          return { time };
         },
       },
     });
