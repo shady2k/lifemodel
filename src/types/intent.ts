@@ -263,6 +263,8 @@ export interface EmitThoughtIntent {
     parentThoughtId?: string;
     /** Signal source for the thought */
     signalSource: 'cognition.thought' | 'memory.thought' | 'plugin.thought';
+    /** Recipient context for routing and scoped memory search */
+    recipientId?: string;
   };
   /** Trace metadata for log analysis */
   trace?: IntentTrace | undefined;

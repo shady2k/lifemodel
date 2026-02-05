@@ -105,6 +105,11 @@ export class CognitionProcessor implements CognitionLayer {
    */
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Flag to ensure batch reflection is initialized only once.
+   */
+  private batchReflectionInitialized = false;
+
   constructor(
     logger: Logger,
     config: Partial<CognitionProcessorConfig> = {},
@@ -233,6 +238,19 @@ export class CognitionProcessor implements CognitionLayer {
       });
     }
 
+    // Initialize batch reflection if soul provider is available
+    // This recovers stale batches and sets up timers
+    if (deps.soulProvider && !this.batchReflectionInitialized) {
+      this.batchReflectionInitialized = true;
+      // Don't await - fire and forget to avoid blocking startup
+      this.initializeBatchReflection().catch((error: unknown) => {
+        this.logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Batch reflection initialization failed'
+        );
+      });
+    }
+
     this.logger.debug('COGNITION processor dependencies updated');
   }
 
@@ -269,16 +287,20 @@ export class CognitionProcessor implements CognitionLayer {
     const recipientId = signalData?.recipientId;
     const channel = signalData?.channel ?? 'telegram';
 
-    // Warn if recipientId is missing for non-user-message triggers
+    // Log if recipientId is missing for non-user-message triggers
     // This indicates proactive signals won't be able to route responses
+    // Thoughts without recipientId are a bug - should always have context
     if (!recipientId && triggerSignal.type !== 'user_message') {
-      this.logger.warn(
+      const level = triggerSignal.type === 'thought' ? 'error' : 'warn';
+      this.logger[level](
         {
           triggerType: triggerSignal.type,
           signalKind: (signalData as { kind?: string } | undefined)?.kind,
           hasRecipientId: false,
         },
-        'COGNITION triggered without recipientId - responses cannot be routed'
+        triggerSignal.type === 'thought'
+          ? 'Thought triggered without recipientId - indicates bug in thought emission'
+          : 'COGNITION triggered without recipientId - responses cannot be routed'
       );
     }
 
@@ -308,16 +330,21 @@ export class CognitionProcessor implements CognitionLayer {
     const unresolvedTensions = await this.getUnresolvedTensions(recipientId);
 
     // Build loop context with runtime config
+    // Thoughts don't get full history - they're self-contained and can use core.memory if needed
+    // This follows Design Principle #1 (Energy Conservation) and prevents context confusion
+    const isThoughtTrigger = triggerSignal.type === 'thought';
     const loopContext: LoopContext = {
       triggerSignal,
       agentState: context.agentState,
       agentIdentity: identity
         ? { name: identity.name, gender: identity.gender, values: identity.values }
         : undefined,
-      conversationHistory: await this.getConversationHistory(recipientId),
+      conversationHistory: isThoughtTrigger
+        ? [] // Thoughts don't get full history - use core.memory if needed
+        : await this.getConversationHistory(recipientId),
       userModel: this.userModel?.getBeliefs() ?? {},
       tickId: context.tickId,
-      recipientId,
+      recipientId, // Still propagate for routing if thought decides to respond
       userId: signalData?.userId,
       timeSinceLastMessageMs,
       completedActions,
@@ -745,14 +772,31 @@ export class CognitionProcessor implements CognitionLayer {
 
     // Schedule timer if this was the first item and no timer running
     if (wasEmpty && !this.batchTimer) {
+      this.logger.debug({ tickId: item.tickId }, 'Scheduling batch timer (first item)');
       this.scheduleBatchTimer(30_000);
     }
 
     // Check if size threshold reached (immediate processing)
     const deps = this.getReflectionDeps();
-    if (deps && (await shouldProcessBatch(deps))) {
-      this.clearBatchTimer();
-      await this.processBatchReflectionNow();
+    if (deps) {
+      const batchStatus = await deps.soulProvider.getBatchStatus();
+      this.logger.debug(
+        {
+          tickId: item.tickId,
+          pendingCount: batchStatus.pendingCount,
+          inFlight: batchStatus.inFlight,
+        },
+        'Checking if batch should process'
+      );
+
+      if (await shouldProcessBatch(deps)) {
+        this.logger.debug(
+          { pendingCount: batchStatus.pendingCount },
+          'Size threshold reached, processing immediately'
+        );
+        this.clearBatchTimer();
+        await this.processBatchReflectionNow();
+      }
     }
   }
 
@@ -789,9 +833,29 @@ export class CognitionProcessor implements CognitionLayer {
    */
   private async processBatchReflectionNow(): Promise<void> {
     const deps = this.getReflectionDeps();
-    if (!deps) return;
+    if (!deps) {
+      this.logger.trace('Skipping batch processing: missing dependencies');
+      return;
+    }
 
-    await processBatchReflection(deps);
+    const batchStatus = await deps.soulProvider.getBatchStatus();
+    this.logger.info(
+      {
+        pendingCount: batchStatus.pendingCount,
+        inFlight: batchStatus.inFlight,
+      },
+      '🚀 Starting batch reflection processing'
+    );
+
+    try {
+      await processBatchReflection(deps);
+      this.logger.debug('Batch reflection processing completed');
+    } catch (error) {
+      this.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Batch reflection processing threw error'
+      );
+    }
   }
 
   /**
@@ -820,15 +884,31 @@ export class CognitionProcessor implements CognitionLayer {
   async initializeBatchReflection(): Promise<void> {
     if (!this.soulProvider) return;
 
+    this.logger.info('🔧 Initializing batch reflection system');
+
     try {
       // Recover any stale batches (crash recovery)
       const recovered = await this.soulProvider.recoverStaleBatch();
       if (recovered.length > 0) {
-        this.logger.info({ itemCount: recovered.length }, 'Recovered stale batch items');
+        this.logger.info(
+          { itemCount: recovered.length },
+          '✅ Recovered stale batch items on startup'
+        );
       }
 
       // Check if we have pending items that need scheduling
       const state = await this.soulProvider.getState();
+      const batchStatus = await this.soulProvider.getBatchStatus();
+
+      this.logger.info(
+        {
+          pendingCount: batchStatus.pendingCount,
+          hasInFlight: !!batchStatus.inFlight,
+          hasWindowStart: !!state.batchWindowStartAt,
+        },
+        'Batch reflection initialization state'
+      );
+
       if (state.pendingReflections.length > 0 && state.batchWindowStartAt) {
         // batchWindowStartAt may be a string after JSON deserialization
         const windowStart = new Date(state.batchWindowStartAt);
@@ -836,17 +916,31 @@ export class CognitionProcessor implements CognitionLayer {
 
         if (elapsed >= 30_000) {
           // Window already expired, process immediately
-          this.logger.debug('Window expired on startup, processing immediately');
+          this.logger.info(
+            { elapsedMs: elapsed },
+            'Window expired on startup, processing immediately'
+          );
           await this.processBatchReflectionNow();
         } else {
           // Schedule for remaining time
           const remainingMs = 30_000 - elapsed;
-          this.logger.debug({ remainingMs }, 'Scheduling batch timer for remaining window');
+          this.logger.info(
+            { elapsedMs: elapsed, remainingMs },
+            'Scheduling batch timer for remaining window'
+          );
           this.scheduleBatchTimer(remainingMs);
         }
+      } else if (batchStatus.inFlight) {
+        this.logger.warn(
+          {
+            batchId: batchStatus.inFlight.batchId,
+            attempts: batchStatus.inFlight.attemptCount,
+          },
+          '⚠️ Has in-flight batch on startup - should have been recovered'
+        );
       }
     } catch (error) {
-      this.logger.warn(
+      this.logger.error(
         { error: error instanceof Error ? error.message : String(error) },
         'Batch reflection initialization failed'
       );

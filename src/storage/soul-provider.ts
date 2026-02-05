@@ -31,6 +31,7 @@ import {
   createDefaultSocraticEngine,
   createDefaultUnanswerableCore,
 } from '../types/agent/socratic.js';
+import { DEFAULT_SOFT_LEARNING_STORE } from '../types/agent/soul.js';
 import { dateReplacer, createDateReviver } from '../utils/date.js';
 
 /**
@@ -594,9 +595,20 @@ export class SoulProvider {
       const state = this.getLoadedState();
       const wasEmpty = state.pendingReflections.length === 0;
 
+      // DEBUG: Log queue state before adding
+      const beforeSize = state.pendingReflections.length;
+      const hasInFlight = !!state.reflectionBatchInFlight;
+
       // Cap queue size to prevent unbounded growth (50 items max)
       if (state.pendingReflections.length >= 50) {
-        this.logger.warn('Reflection queue full, dropping oldest item');
+        this.logger.warn(
+          {
+            queueSize: beforeSize,
+            droppedTickId: state.pendingReflections[0]?.tickId,
+            inFlightBatchId: state.reflectionBatchInFlight?.batchId,
+          },
+          'Reflection queue full, dropping oldest item'
+        );
         state.pendingReflections.shift();
       }
 
@@ -607,11 +619,15 @@ export class SoulProvider {
         (state as { batchWindowStartAt: Date }).batchWindowStartAt = new Date();
       }
 
+      // DEBUG: Log queue state after adding
       this.logger.debug(
         {
           tickId: item.tickId,
-          pending: state.pendingReflections.length,
+          queueSize: beforeSize,
+          queueSizeAfter: state.pendingReflections.length,
           windowStarted: wasEmpty,
+          hasInFlight,
+          inFlightBatchId: state.reflectionBatchInFlight?.batchId,
         },
         'Reflection queued'
       );
@@ -637,17 +653,30 @@ export class SoulProvider {
 
       // Already processing a batch - don't take another
       if (state.reflectionBatchInFlight) {
-        this.logger.debug('Batch already in flight, skipping take');
+        this.logger.debug(
+          {
+            inFlightBatchId: state.reflectionBatchInFlight.batchId,
+            inFlightAgeMs: Date.now() - new Date(state.reflectionBatchInFlight.startedAt).getTime(),
+            inFlightAttempts: state.reflectionBatchInFlight.attemptCount,
+            pendingCount: state.pendingReflections.length,
+          },
+          'Batch already in flight, skipping take'
+        );
         return null;
       }
 
       // Nothing to process
       if (state.pendingReflections.length === 0) {
+        this.logger.debug('No pending reflections to process');
         return null;
       }
 
-      // Move items to in-flight
-      const items = [...state.pendingReflections];
+      // Take up to MAX_BATCH_SIZE items to prevent LLM truncation
+      const MAX_BATCH_SIZE = 5;
+      const itemsToTake = Math.min(state.pendingReflections.length, MAX_BATCH_SIZE);
+      const items = state.pendingReflections.slice(0, itemsToTake);
+      const remaining = state.pendingReflections.slice(itemsToTake);
+
       state.reflectionBatchInFlight = {
         batchId: `batch_${String(Date.now())}`,
         startedAt: new Date(),
@@ -655,12 +684,23 @@ export class SoulProvider {
         items,
         attemptCount: 0,
       };
-      state.pendingReflections = [];
-      delete state.batchWindowStartAt;
+      state.pendingReflections = remaining;
 
-      this.logger.debug(
-        { batchId: state.reflectionBatchInFlight.batchId, itemCount: items.length },
-        'Batch taken for processing'
+      // If there are remaining items, restart the window
+      if (remaining.length > 0) {
+        (state as { batchWindowStartAt: Date }).batchWindowStartAt = new Date();
+      } else {
+        delete state.batchWindowStartAt;
+      }
+
+      // DEBUG: Detailed logging for batch take
+      this.logger.info(
+        {
+          batchId: state.reflectionBatchInFlight.batchId,
+          itemCount: items.length,
+          tickIds: items.map((i) => i.tickId),
+        },
+        '🔄 Batch taken for processing'
       );
 
       await this.persist();
@@ -680,11 +720,20 @@ export class SoulProvider {
       const state = this.getLoadedState();
 
       if (state.reflectionBatchInFlight) {
-        this.logger.debug(
-          { batchId: state.reflectionBatchInFlight.batchId },
-          'Batch committed successfully'
+        const batchId = state.reflectionBatchInFlight.batchId;
+        const duration = Date.now() - new Date(state.reflectionBatchInFlight.startedAt).getTime();
+
+        this.logger.info(
+          {
+            batchId,
+            durationMs: duration,
+            itemCount: state.reflectionBatchInFlight.itemCount,
+          },
+          '✅ Batch committed successfully'
         );
         delete state.reflectionBatchInFlight;
+      } else {
+        this.logger.warn('Attempted to commit batch but no in-flight batch found');
       }
 
       await this.persist();
@@ -720,8 +769,8 @@ export class SoulProvider {
    * Recover stale in-flight batch.
    *
    * Called on startup to handle crash recovery. If an in-flight batch is
-   * stale (>5 minutes) or has too many attempts (>=3), items are moved
-   * back to the pending queue.
+   * stale (>5 minutes), oversized (>5 items), or has too many attempts (>=3),
+   * items are moved back to the pending queue.
    *
    * @returns The recovered items (for logging), empty array if none
    */
@@ -730,6 +779,12 @@ export class SoulProvider {
 
     return this.withStateLock(async () => {
       const state = this.getLoadedState();
+
+      // DEBUG: Log entry
+      this.logger.debug(
+        { hasInFlight: !!state.reflectionBatchInFlight },
+        'Checking for stale batch to recover'
+      );
 
       if (!state.reflectionBatchInFlight) {
         return [];
@@ -740,20 +795,37 @@ export class SoulProvider {
       const elapsed = Date.now() - startedAt.getTime();
       const isStale = elapsed > 5 * 60 * 1000; // 5 minutes
       const tooManyAttempts = state.reflectionBatchInFlight.attemptCount >= 3;
+      const isOversized = state.reflectionBatchInFlight.items.length > 5; // Will cause truncation
 
-      if (isStale || tooManyAttempts) {
+      // DEBUG: Log batch state even if not recovering
+      this.logger.info(
+        {
+          batchId: state.reflectionBatchInFlight.batchId,
+          elapsedMinutes: Math.floor(elapsed / 60_000),
+          attemptCount: state.reflectionBatchInFlight.attemptCount,
+          isStale,
+          tooManyAttempts,
+          isOversized,
+          itemCount: state.reflectionBatchInFlight.items.length,
+        },
+        'In-flight batch state check'
+      );
+
+      if (isStale || tooManyAttempts || isOversized) {
         const items = state.reflectionBatchInFlight.items;
-        const reason = tooManyAttempts ? 'too many attempts' : 'stale';
+        let reason = tooManyAttempts ? 'too many attempts' : 'stale';
+        if (isOversized) reason = 'oversized (will truncate)';
 
         this.logger.warn(
           {
             batchId: state.reflectionBatchInFlight.batchId,
             itemCount: items.length,
             reason,
-            elapsedMs: elapsed,
+            elapsedMinutes: Math.floor(elapsed / 60_000),
             attemptCount: state.reflectionBatchInFlight.attemptCount,
+            tickIds: items.map((i) => i.tickId),
           },
-          'Recovering stale batch'
+          '🔧 Recovering stale batch'
         );
 
         // Move items back to pending queue (prepend to maintain order)
@@ -988,6 +1060,7 @@ export class SoulProvider {
       socraticEngine: parsed.socraticEngine ?? createDefaultSocraticEngine(),
       unanswerableCore: parsed.unanswerableCore ?? createDefaultUnanswerableCore(),
       deliberations: parsed.deliberations ?? [],
+      softLearning: parsed.softLearning ?? { ...DEFAULT_SOFT_LEARNING_STORE },
       // Batch reflection fields - start fresh if missing
       pendingReflections: parsed.pendingReflections ?? [],
       batchWindowStartAt: parsed.batchWindowStartAt ?? undefined,

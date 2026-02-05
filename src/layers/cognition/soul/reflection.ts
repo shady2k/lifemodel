@@ -83,7 +83,7 @@ const DEFAULT_BATCH_CONFIG: BatchReflectionConfig = {
   baseTokens: 400,
   perItemTokens: 150,
   windowMs: 30_000,
-  sizeThreshold: 10,
+  sizeThreshold: 5, // Reduced from 10 to prevent LLM truncation on large batches
 };
 
 /**
@@ -523,6 +523,8 @@ export async function processBatchReflection(
   const cfg = { ...DEFAULT_BATCH_CONFIG, ...config };
   const log = logger.child({ component: 'soul-reflection-batch' });
 
+  log.debug('processBatchReflection called');
+
   try {
     // Check cooldown (gates batch processing, not individual items)
     if (!(await soulProvider.canReflect())) {
@@ -537,12 +539,25 @@ export async function processBatchReflection(
       return;
     }
 
+    log.debug({ itemCount: items.length }, 'Items taken, proceeding with checks');
+
     // Calculate token cost
     const estimatedTokens = cfg.baseTokens + items.length * cfg.perItemTokens;
 
-    // Check budget
-    if (!(await soulProvider.canAfford(estimatedTokens))) {
-      log.warn({ itemCount: items.length }, 'Batch reflection deferred: insufficient token budget');
+    // Check budget BEFORE processing (but AFTER taking batch - this is the bug!)
+    const canAfford = await soulProvider.canAfford(estimatedTokens);
+    log.debug({ estimatedTokens, canAfford }, 'Budget check result');
+
+    if (!canAfford) {
+      // BUG: Items are in-flight but we're returning without clearing!
+      // This will cause the batch to be stuck forever
+      log.warn(
+        {
+          itemCount: items.length,
+          estimatedTokens,
+        },
+        '⚠️ CRITICAL: Budget check FAILED AFTER taking batch - items will be stuck in-flight!'
+      );
       // Items remain in-flight, will be recovered on next startup
       return;
     }
@@ -550,13 +565,18 @@ export async function processBatchReflection(
     // Increment attempt count before processing
     await soulProvider.incrementBatchAttempt();
 
-    log.debug({ itemCount: items.length, estimatedTokens }, 'Processing batch reflection');
+    log.info(
+      { itemCount: items.length, estimatedTokens },
+      '🧠 Processing batch reflection with LLM'
+    );
 
     // Get soul state for the reflection prompt
     const soulState = await soulProvider.getState();
 
     // Call LLM with batch
     const result = await callBatchReflectionLLM(llm, soulState, items, log);
+
+    log.debug({ success: result.success, resultCount: result.results.size }, 'LLM call completed');
 
     if (result.success) {
       // Record reflection (for cooldown)
@@ -606,13 +626,16 @@ export async function processBatchReflection(
       // Commit the batch
       await soulProvider.commitPendingBatch();
     } else {
-      log.warn('Batch reflection LLM call failed');
+      log.warn('⚠️ Batch reflection LLM call failed - items remain in-flight');
       // Items remain in-flight for recovery
     }
   } catch (error) {
-    log.warn(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Batch reflection failed'
+    log.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+      '⚠️ Batch reflection threw exception - items remain in-flight'
     );
     // Items remain in-flight for recovery
   }

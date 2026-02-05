@@ -1475,8 +1475,15 @@ export class CoreLoop {
           }
 
           case 'EMIT_THOUGHT': {
-            const { content, triggerSource, depth, rootThoughtId, parentThoughtId, signalSource } =
-              intent.payload;
+            const {
+              content,
+              triggerSource,
+              depth,
+              rootThoughtId,
+              parentThoughtId,
+              signalSource,
+              recipientId: thoughtRecipientId,
+            } = intent.payload;
 
             const thoughtData: ThoughtData = {
               kind: 'thought',
@@ -1485,6 +1492,7 @@ export class CoreLoop {
               depth,
               rootThoughtId,
               ...(parentThoughtId !== undefined && { parentThoughtId }),
+              ...(thoughtRecipientId !== undefined && { recipientId: thoughtRecipientId }),
             };
 
             this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);

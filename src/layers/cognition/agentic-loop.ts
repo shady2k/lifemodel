@@ -408,15 +408,27 @@ export class AgenticLoop {
         }
       }
 
-      // Filter out core.escalate for smart model (can't escalate further)
-      const filteredTools = useSmart
-        ? tools.filter((t) => {
-            if (typeof t !== 'object') return true;
-            // Sanitize name for comparison (core.escalate in our code, core_escalate in API)
-            const name = t.function.name;
-            return name !== 'core.escalate' && name !== 'core_escalate';
-          })
-        : tools;
+      // Filter tools based on context
+      // - Can't escalate from smart model (already using it)
+      // - Can't emit thoughts when processing a thought (prevents infinite loops)
+      const isThoughtTrigger = context.triggerSignal.type === 'thought';
+      const filteredTools = tools.filter((t) => {
+        if (typeof t !== 'object') return true;
+        // Sanitize name for comparison (core.escalate in our code, core_escalate in API)
+        const name = t.function.name;
+
+        // Can't escalate from smart model
+        if (useSmart && (name === 'core.escalate' || name === 'core_escalate')) {
+          return false;
+        }
+
+        // Can't emit thoughts when processing a thought (prevents loops entirely)
+        if (isThoughtTrigger && (name === 'core.thought' || name === 'core_thought')) {
+          return false;
+        }
+
+        return true;
+      });
 
       const toolChoice: 'auto' | 'none' = state.forceRespond ? 'none' : 'auto';
 
@@ -1160,7 +1172,9 @@ export class AgenticLoop {
       }
 
       const parsed = JSON.parse(jsonStr) as { response?: string; status?: string };
-      if (parsed.response && typeof parsed.response === 'string') {
+      // Check for string type explicitly - empty string "" is a valid "no response" value
+      // Using !== undefined because "" is falsy but valid
+      if (parsed.response !== undefined && typeof parsed.response === 'string') {
         // Validate status if provided
         const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
         const status =
@@ -1168,11 +1182,14 @@ export class AgenticLoop {
             ? (parsed.status as ConversationStatus)
             : undefined;
 
+        // Empty response means "don't send a message" - return null for text
+        const responseText = parsed.response.trim() || null;
+
         // Only include status in result if it was provided and valid
         if (status) {
-          return { text: parsed.response, status };
+          return { text: responseText, status };
         }
-        return { text: parsed.response };
+        return { text: responseText };
       }
     } catch {
       // Not JSON or parsing failed - use as plain text
@@ -1920,13 +1937,30 @@ ${content}
 **To respond:** output {"response": "your message"} (only if you have something meaningful to add)`;
     }
 
-    // Generic thought handling
-    return `## Internal Thought
+    // Internal thought processing - clear, directive prompt
+    // No conversation history is loaded for thoughts (energy efficient)
+    // core.thought is filtered out (prevents loops structurally)
+    return `## Processing Internal Thought
 
-${content ?? JSON.stringify(data)}
+You are processing an internal thought. No conversation history is loaded.
 
-This is an internal thought to process. Decide if any action is needed.
-To end without sending a message: output {"response": ""}`;
+**Thought:** ${content ?? JSON.stringify(data)}
+
+**Available actions:**
+- core.setInterest - if this reveals a topic of interest
+- core.remember - if this contains a fact worth saving
+- core.memory({ action: "search", types: ["message"] }) - if you need conversation context
+
+**NOT available:** core.thought (cannot emit thoughts while processing a thought)
+
+**Rules:**
+- If you need context, use core.memory search (scoped to current conversation)
+- Most thoughts complete with {"response": ""} after 0-2 tool calls
+- Only message user if explicitly required by the thought content
+- Return concise result; stop when complete
+
+**To end without sending a message:** output {"response": ""}
+**To respond:** output {"response": "your message"} (only if this warrants messaging the user)`;
   }
 
   /**
@@ -2121,6 +2155,7 @@ ${messageContext}
         rootThoughtId: rootId,
         signalSource: 'cognition.thought',
         ...(parentId !== undefined && { parentThoughtId: parentId }),
+        ...(context.recipientId !== undefined && { recipientId: context.recipientId }),
       },
     };
   }
