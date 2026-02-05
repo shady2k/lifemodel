@@ -1408,7 +1408,7 @@ Rules:
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
 - Tool returns success:false → inform user the action failed, don't claim success
-- Emoji: use sparingly, only when genuinely needed (emotional emphasis, greetings). Don't end every message with 😊${
+- NO EMOJI at end of messages. Emoji only for: celebrating achievements, expressing sympathy for bad news. Most messages need ZERO emoji.${
       useSmart
         ? ''
         : `
