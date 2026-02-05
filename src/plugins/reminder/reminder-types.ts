@@ -50,6 +50,12 @@ export interface Reminder {
 
   /** Associated schedule ID (from scheduler primitive) */
   scheduleId: string | null;
+
+  /** Advance notice specification (optional) */
+  advanceNotice: AdvanceNotice | null;
+
+  /** Advance notice schedule ID (from scheduler primitive) */
+  advanceNoticeScheduleId: string | null;
 }
 
 /**
@@ -250,11 +256,41 @@ export interface ReminderDueData {
 }
 
 /**
+ * Advance notice specification.
+ */
+export interface AdvanceNotice {
+  /** How long before the reminder to notify */
+  before: RelativeTime;
+  /** LLM's confidence in this interpretation (0-1) */
+  confidence: number;
+  /** Original phrase from user */
+  originalPhrase: string;
+}
+
+/**
+ * Reminder advance notice event data.
+ * Note: actualReminderAt is stored as ISO string (scheduler doesn't revive nested Dates).
+ */
+export interface ReminderAdvanceNoticeData {
+  reminderId: string;
+  recipientId: string;
+  content: string;
+  /** ISO string of when the actual reminder fires */
+  actualReminderAt: string;
+  advanceNoticeBefore: RelativeTime;
+  isRecurring: boolean;
+  fireCount: number;
+  tags?: string[];
+}
+
+/**
  * Event kinds emitted by the reminder plugin.
  */
 export const REMINDER_EVENT_KINDS = {
   /** Reminder is due and should be delivered */
   REMINDER_DUE: 'reminder:reminder_due',
+  /** Advance notice before the main reminder */
+  REMINDER_ADVANCE_NOTICE: 'reminder:advance_notice',
 } as const;
 
 /**

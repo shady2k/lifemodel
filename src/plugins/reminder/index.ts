@@ -15,8 +15,13 @@ import type {
   MigrationBundle,
   EventSchema,
 } from '../../types/plugin.js';
-import { createReminderTools, handleReminderDue, REMINDER_PLUGIN_ID } from './reminder-tool.js';
-import type { ReminderDueData } from './reminder-types.js';
+import {
+  createReminderTools,
+  handleReminderDue,
+  handleReminderAdvanceNotice,
+  REMINDER_PLUGIN_ID,
+} from './reminder-tool.js';
+import type { ReminderDueData, ReminderAdvanceNoticeData } from './reminder-types.js';
 import { REMINDER_EVENT_KINDS } from './reminder-types.js';
 
 /**
@@ -31,6 +36,30 @@ const reminderDueSchema = z.object({
     reminderId: z.string(),
     recipientId: z.string(),
     content: z.string(),
+    isRecurring: z.boolean(),
+    fireCount: z.number(),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+/**
+ * Zod schema for reminder_advance_notice event validation.
+ */
+const reminderAdvanceNoticeSchema = z.object({
+  kind: z.literal('plugin_event'),
+  eventKind: z.literal(REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE),
+  pluginId: z.literal(REMINDER_PLUGIN_ID),
+  fireId: z.string().optional(),
+  payload: z.object({
+    reminderId: z.string(),
+    recipientId: z.string(),
+    content: z.string(),
+    // ISO string - scheduler doesn't revive nested Dates
+    actualReminderAt: z.string(),
+    advanceNoticeBefore: z.object({
+      unit: z.enum(['minute', 'hour', 'day', 'week', 'month']),
+      amount: z.number(),
+    }),
     isRecurring: z.boolean(),
     fireCount: z.number(),
     tags: z.array(z.string()).optional(),
@@ -55,7 +84,7 @@ const manifest: PluginManifestV2 = {
   provides: [{ type: 'tool', id: 'reminder' }],
   requires: ['scheduler', 'storage', 'signalEmitter', 'logger'],
   limits: {
-    maxSchedules: 100, // Max 100 active reminders per user
+    maxSchedules: 200, // Max 100 active reminders (with potential dual schedules for advance notice)
     maxStorageMB: 10, // 10MB storage limit
   },
 };
@@ -77,7 +106,11 @@ const lifecycle: PluginLifecycleV2 = {
       REMINDER_EVENT_KINDS.REMINDER_DUE,
       reminderDueSchema as unknown as EventSchema
     );
-    primitives.logger.debug('Registered event schema for reminder_due');
+    primitives.services.registerEventSchema(
+      REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE,
+      reminderAdvanceNoticeSchema as unknown as EventSchema
+    );
+    primitives.logger.debug('Registered event schema for reminder_due and reminder_advance_notice');
 
     // Create tools using services.getTimezone for timezone resolution
     pluginTools = createReminderTools(primitives, (recipientId) =>
@@ -138,6 +171,12 @@ const lifecycle: PluginLifecycleV2 = {
     if (eventKind === REMINDER_EVENT_KINDS.REMINDER_DUE) {
       await handleReminderDue(
         payload as unknown as ReminderDueData,
+        pluginPrimitives.storage,
+        pluginPrimitives.logger
+      );
+    } else if (eventKind === REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE) {
+      handleReminderAdvanceNotice(
+        payload as unknown as ReminderAdvanceNoticeData,
         pluginPrimitives.storage,
         pluginPrimitives.logger
       );

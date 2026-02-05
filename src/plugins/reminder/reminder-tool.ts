@@ -16,9 +16,13 @@ import type {
   SemanticDateAnchor,
   ReminderDueData,
   ReminderSummary,
+  AdvanceNotice,
+  ReminderAdvanceNoticeData,
+  RelativeTime,
 } from './reminder-types.js';
 import { REMINDER_EVENT_KINDS, REMINDER_STORAGE_KEYS } from './reminder-types.js';
 import { resolveSemanticAnchor, formatRecurrence } from './date-parser.js';
+import { DateTime } from 'luxon';
 
 /**
  * Plugin ID for reminder plugin.
@@ -136,6 +140,16 @@ const SCHEMA_CREATE = {
           },
         },
       },
+    },
+  },
+  advanceNotice: {
+    type: 'object',
+    required: false,
+    description: 'Optional advance notice (e.g., "remind me 30 minutes before")',
+    properties: {
+      before: { type: 'object', required: true },
+      confidence: { type: 'number', required: true },
+      originalPhrase: { type: 'string', required: true },
     },
   },
   tags: { type: 'array', items: 'string', required: false },
@@ -283,6 +297,28 @@ const REMINDER_RAW_SCHEMA = {
       required: ['type', 'confidence', 'originalPhrase', 'relative', 'absolute', 'recurring'],
       additionalProperties: false,
     },
+    advanceNotice: {
+      type: ['object', 'null'],
+      description: 'Optional advance notice (e.g., "remind me 30 minutes before")',
+      properties: {
+        before: {
+          type: ['object', 'null'],
+          properties: {
+            unit: {
+              type: 'string',
+              enum: ['minute', 'hour', 'day', 'week', 'month'],
+            },
+            amount: { type: 'number', minimum: 1 },
+          },
+          required: ['unit', 'amount'],
+          additionalProperties: false,
+        },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        originalPhrase: { type: 'string' },
+      },
+      required: ['before', 'confidence', 'originalPhrase'],
+      additionalProperties: false,
+    },
     reminderId: {
       type: ['string', 'null'],
       description: 'Reminder ID (required for cancel)',
@@ -297,7 +333,7 @@ const REMINDER_RAW_SCHEMA = {
       description: 'Max reminders to return (list only, default: 10)',
     },
   },
-  required: ['action', 'content', 'anchor', 'reminderId', 'tags', 'limit'],
+  required: ['action', 'content', 'anchor', 'advanceNotice', 'reminderId', 'tags', 'limit'],
   additionalProperties: false,
 };
 
@@ -320,6 +356,14 @@ export function createReminderTools(
       for (const r of stored) {
         r.triggerAt = new Date(r.triggerAt);
         r.createdAt = new Date(r.createdAt);
+        // Handle existing reminders without new fields (for backward compatibility)
+        const reminderPartial = r as Partial<Reminder> & { triggerAt: Date; createdAt: Date };
+        if (reminderPartial.advanceNotice === undefined) {
+          reminderPartial.advanceNotice = null;
+        }
+        if (reminderPartial.advanceNoticeScheduleId === undefined) {
+          reminderPartial.advanceNoticeScheduleId = null;
+        }
         map.set(r.id, r);
       }
     }
@@ -334,13 +378,44 @@ export function createReminderTools(
   }
 
   /**
+   * Calculate when to send advance notice.
+   * CRITICAL: Calculate in user's timezone, not UTC, for DST correctness.
+   */
+  function calculateAdvanceNoticeTime(
+    reminderTime: Date,
+    before: RelativeTime,
+    userTimezone: string
+  ): Date {
+    // Convert to user's timezone first
+    const dt = DateTime.fromJSDate(reminderTime, { zone: userTimezone });
+
+    let advanceDt: DateTime;
+    const unit = before.unit;
+    if (unit === 'minute') {
+      advanceDt = dt.minus({ minutes: before.amount });
+    } else if (unit === 'hour') {
+      advanceDt = dt.minus({ hours: before.amount });
+    } else if (unit === 'day') {
+      advanceDt = dt.minus({ days: before.amount });
+    } else if (unit === 'week') {
+      advanceDt = dt.minus({ weeks: before.amount });
+    } else {
+      // unit === 'month' (all other cases exhausted)
+      advanceDt = dt.minus({ months: before.amount });
+    }
+
+    return advanceDt.toJSDate();
+  }
+
+  /**
    * Create a new reminder.
    */
   async function createReminder(
     content: string,
     anchor: SemanticDateAnchor,
     recipientId: string,
-    tags?: string[]
+    tags?: string[],
+    advanceNotice?: AdvanceNotice
   ): Promise<ReminderToolResult> {
     try {
       // Get user timezone, fall back to server timezone if not configured
@@ -348,6 +423,36 @@ export function createReminderTools(
       const timezone = userTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
       const resolved = resolveSemanticAnchor(anchor, new Date(), timezone);
       const reminderId = `rem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+      // Validate advance notice constraints BEFORE creating any schedules
+      // This prevents orphaned schedules if validation fails
+      if (advanceNotice) {
+        // For recurring reminders, enforce "same-day earlier" semantics
+        if (resolved.recurrence) {
+          if (!['minute', 'hour'].includes(advanceNotice.before.unit)) {
+            return {
+              success: false,
+              action: 'create',
+              error: 'Advance notice for recurring reminders supports minutes/hours only in v1.',
+            };
+          }
+
+          const reminderLocal = DateTime.fromJSDate(resolved.triggerAt, { zone: timezone });
+          const minutesSinceMidnight = reminderLocal.hour * 60 + reminderLocal.minute;
+          const offsetMinutes =
+            advanceNotice.before.unit === 'minute'
+              ? advanceNotice.before.amount
+              : advanceNotice.before.amount * 60;
+
+          if (offsetMinutes >= minutesSinceMidnight) {
+            return {
+              success: false,
+              action: 'create',
+              error: 'Advance notice must be earlier on the same day for recurring reminders.',
+            };
+          }
+        }
+      }
 
       const reminder: Reminder = {
         id: reminderId,
@@ -361,6 +466,8 @@ export function createReminderTools(
         timezone: resolved.recurrence ? timezone : null,
         fireCount: 0,
         scheduleId: null,
+        advanceNotice: advanceNotice ?? null,
+        advanceNoticeScheduleId: null,
       };
 
       if (tags) {
@@ -390,6 +497,52 @@ export function createReminderTools(
 
       const scheduleId = await scheduler.schedule(scheduleOptions);
       reminder.scheduleId = scheduleId;
+
+      // Create advance notice schedule if specified (validation already done above)
+      if (advanceNotice) {
+        // Calculate advance notice in user's timezone for DST correctness
+        const advanceNoticeTime = calculateAdvanceNoticeTime(
+          resolved.triggerAt,
+          advanceNotice.before,
+          timezone // Pass timezone for proper calculation
+        );
+
+        // Warn if advance notice is in the past
+        if (advanceNoticeTime < new Date()) {
+          logger.warn(
+            { reminderId, advanceNoticeTime, triggerAt: resolved.triggerAt },
+            'Advance notice time is in the past - may fire immediately'
+          );
+        }
+
+        const advanceNoticeData: Record<string, unknown> = {
+          kind: REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE,
+          reminderId,
+          recipientId,
+          content,
+          // Store as ISO string - scheduler doesn't revive nested Dates
+          actualReminderAt: resolved.triggerAt.toISOString(),
+          advanceNoticeBefore: advanceNotice.before,
+          isRecurring: resolved.recurrence !== null,
+          fireCount: 0,
+        };
+        if (tags) {
+          advanceNoticeData['tags'] = tags;
+        }
+
+        const advanceNoticeOptions: ScheduleOptions = {
+          fireAt: advanceNoticeTime,
+          data: advanceNoticeData,
+        };
+
+        if (resolved.recurrence) {
+          advanceNoticeOptions.recurrence = resolved.recurrence;
+          advanceNoticeOptions.timezone = timezone;
+        }
+
+        const advanceNoticeScheduleId = await scheduler.schedule(advanceNoticeOptions);
+        reminder.advanceNoticeScheduleId = advanceNoticeScheduleId;
+      }
 
       const reminders = await loadReminders();
       reminders.set(reminderId, reminder);
@@ -509,6 +662,11 @@ export function createReminderTools(
         await scheduler.cancel(reminder.scheduleId);
       }
 
+      // Cancel advance notice schedule if exists
+      if (reminder.advanceNoticeScheduleId) {
+        await scheduler.cancel(reminder.advanceNoticeScheduleId);
+      }
+
       reminder.status = 'cancelled';
       await saveReminders(reminders);
 
@@ -535,8 +693,19 @@ export function createReminderTools(
   const reminderTool: PluginTool = {
     name: 'reminder',
     description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
-Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating reminders.`,
-    tags: ['one-time', 'recurring', 'daily', 'weekly', 'monthly', 'create', 'list', 'cancel'],
+Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating reminders.
+Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice' parameter.`,
+    tags: [
+      'one-time',
+      'recurring',
+      'daily',
+      'weekly',
+      'monthly',
+      'create',
+      'list',
+      'cancel',
+      'advance-notice',
+    ],
     rawParameterSchema: REMINDER_RAW_SCHEMA,
     parameters: [
       {
@@ -561,6 +730,12 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
 - Recurring (fixed day): { type: "recurring", recurring: { frequency: "daily"|"weekly"|"monthly", interval: number, hour?: number, minute?: number, daysOfWeek?: number[], dayOfMonth?: number }, confidence: 0.9, originalPhrase: "..." }
 - Recurring (constrained): { type: "recurring", recurring: { frequency: "monthly", interval: 1, anchorDay: 10, constraint: "next-weekend"|"next-weekday"|"next-saturday"|"next-sunday", hour?: number, minute?: number }, confidence: 0.9, originalPhrase: "..." }
   Example: "weekend after 10th each month" -> anchorDay: 10, constraint: "next-weekend"`,
+        required: false,
+      },
+      {
+        name: 'advanceNotice',
+        type: 'object',
+        description: 'Optional advance notice (e.g., "remind me 30 minutes before")',
         required: false,
       },
       {
@@ -621,6 +796,10 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
           const content = args['content'] as string | undefined;
           const anchorArg = args['anchor'] as Record<string, unknown> | undefined;
           const tags = args['tags'] as string[] | undefined;
+          const advanceNoticeArg = args['advanceNotice'] as
+            | Record<string, unknown>
+            | undefined
+            | null;
 
           if (!content || !anchorArg) {
             return {
@@ -644,11 +823,41 @@ Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating 
             };
           }
 
+          // Validate advanceNotice if provided
+          if (advanceNoticeArg != null) {
+            const before = advanceNoticeArg['before'] as Record<string, unknown> | null | undefined;
+            const unit = before?.['unit'];
+            const amount = before?.['amount'];
+
+            const validUnits = ['minute', 'hour', 'day', 'week', 'month'];
+            if (
+              !before ||
+              !validUnits.includes(unit as string) ||
+              typeof amount !== 'number' ||
+              !Number.isFinite(amount) ||
+              amount < 1
+            ) {
+              return {
+                success: false,
+                action: 'create',
+                error:
+                  'Invalid advanceNotice.before: unit must be minute|hour|day|week|month and amount >= 1',
+                receivedParams: Object.keys(args),
+                schema: SCHEMA_CREATE,
+              };
+            }
+          }
+
+          // Normalize null to undefined for advanceNotice
+          const normalizedAdvanceNotice =
+            advanceNoticeArg === null ? undefined : (advanceNoticeArg as unknown as AdvanceNotice);
+
           return createReminder(
             content,
             anchorArg as unknown as SemanticDateAnchor,
             recipientId,
-            tags
+            tags,
+            normalizedAdvanceNotice
           );
         }
 
@@ -722,4 +931,46 @@ export async function handleReminderDue(
       logger.error({ reminderId: data.reminderId, error }, 'Failed to update reminder fire count');
     }
   }
+}
+
+/**
+ * Handle reminder advance notice event.
+ * NOTE: Does NOT emit message directly - goes through COGNITION like main reminder.
+ * Does NOT update fireCount - main reminder handler handles that.
+ */
+export function handleReminderAdvanceNotice(
+  data: ReminderAdvanceNoticeData,
+  _storage: PluginPrimitives['storage'],
+  logger: Logger
+): void {
+  logger.info(
+    {
+      reminderId: data.reminderId,
+      recipientId: data.recipientId,
+      content: data.content,
+      actualReminderAt: data.actualReminderAt,
+      advanceNoticeBefore: data.advanceNoticeBefore,
+    },
+    'Reminder advance notice'
+  );
+
+  // Parse ISO string back to Date for logging
+  const actualTime = new Date(data.actualReminderAt);
+  const duration = formatAdvanceNoticeDuration(data.advanceNoticeBefore);
+
+  logger.info(
+    { reminderId: data.reminderId, duration, actualTime },
+    `Advance notice: ${data.content} is coming up in ${duration}`
+  );
+
+  // Signal will be emitted by scheduler service to wake COGNITION
+  // COGNITION will generate the natural language response
+  // No fireCount update here - main reminder handler handles that
+}
+
+function formatAdvanceNoticeDuration(before: RelativeTime): string {
+  const amount = before.amount;
+  const unit = before.unit;
+  const amountStr = String(amount);
+  return amount === 1 ? `1 ${unit}` : `${amountStr} ${unit}s`;
 }
