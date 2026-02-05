@@ -39,6 +39,7 @@ import {
   type ReflectionDeps,
 } from './soul/index.js';
 import type { PendingReflection } from '../../types/agent/soul.js';
+import { getPrimaryRecipientId } from '../../core/globals.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -284,7 +285,11 @@ export class CognitionProcessor implements CognitionLayer {
     const signalData = triggerSignal.data as
       | { recipientId?: string; userId?: string; channel?: string }
       | undefined;
-    const recipientId = signalData?.recipientId;
+    // For non-user-message triggers (plugin events, thresholds), fall back to primary recipient
+    // This allows proactive outreach to be routed to the configured primary user
+    const recipientId =
+      signalData?.recipientId ??
+      (triggerSignal.type !== 'user_message' ? getPrimaryRecipientId() : undefined);
     const channel = signalData?.channel ?? 'telegram';
 
     // Log if recipientId is missing for non-user-message triggers

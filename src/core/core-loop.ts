@@ -1206,8 +1206,7 @@ export class CoreLoop {
             break;
 
           case 'SEND_MESSAGE': {
-            const { recipientId, text, replyTo, conversationStatus, toolCalls, toolResults } =
-              intent.payload;
+            const { recipientId, text, replyTo, conversationStatus } = intent.payload;
 
             if (!this.recipientRegistry) {
               this.logger.error({ recipientId }, 'RecipientRegistry not configured');
@@ -1268,12 +1267,12 @@ export class CoreLoop {
                   if (this.conversationManager) {
                     // Type guard: messageId only exists on actual send results, not on skipped results
                     const messageId = 'messageId' in result ? result.messageId : undefined;
+                    // Note: toolCalls and toolResults are NOT saved to history
+                    // They're kept in agentic loop memory only to prevent pollution across triggers
                     void this.saveAgentMessage(
                       recipientId,
                       text,
                       conversationStatus,
-                      toolCalls,
-                      toolResults,
                       messageId
                         ? { channelMessageId: messageId, channel: route.channel }
                         : undefined
@@ -1752,15 +1751,6 @@ export class CoreLoop {
     chatId: string,
     text: string,
     conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle',
-    toolCalls?: {
-      id: string;
-      type: 'function';
-      function: { name: string; arguments: string };
-    }[],
-    toolResults?: {
-      tool_call_id: string;
-      content: string;
-    }[],
     channelMeta?: {
       channelMessageId?: string;
       channel?: string;
@@ -1769,28 +1759,16 @@ export class CoreLoop {
     if (!this.conversationManager) return;
 
     try {
-      // Use addTurn when we have tool call data (preserves OpenAI format)
-      if (toolCalls && toolCalls.length > 0) {
-        await this.conversationManager.addTurn(
-          chatId,
-          {
-            content: text,
-            tool_calls: toolCalls,
-          },
-          toolResults,
-          channelMeta
-        );
-      } else {
-        // Simple message without tool calls
-        await this.conversationManager.addMessage(
-          chatId,
-          {
-            role: 'assistant',
-            content: text,
-          },
-          channelMeta
-        );
-      }
+      // Only save the final response text - tool calls are internal to the agentic loop
+      // This keeps conversation history clean: user messages, reactions, and assistant responses
+      await this.conversationManager.addMessage(
+        chatId,
+        {
+          role: 'assistant',
+          content: text,
+        },
+        channelMeta
+      );
 
       // Use inline status if provided, otherwise fall back to LLM classification
       if (conversationStatus) {

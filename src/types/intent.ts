@@ -113,27 +113,6 @@ export interface ScheduleEventIntent {
 export type ConversationStatus = 'active' | 'awaiting_answer' | 'closed' | 'idle';
 
 /**
- * Tool call data for conversation history.
- * Mirrors OpenAI's tool_call format.
- */
-export interface IntentToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-/**
- * Tool result data for conversation history.
- */
-export interface IntentToolResult {
-  tool_call_id: string;
-  content: string;
-}
-
-/**
  * Send a message through a channel.
  */
 export interface SendMessageIntent {
@@ -147,10 +126,9 @@ export interface SendMessageIntent {
     replyTo?: string;
     /** Conversation status for follow-up timing (avoids separate LLM call) */
     conversationStatus?: ConversationStatus;
-    /** Tool calls made during this turn (for conversation history) */
-    toolCalls?: IntentToolCall[];
-    /** Tool results from this turn (for conversation history) */
-    toolResults?: IntentToolResult[];
+    // Note: toolCalls and toolResults are intentionally NOT included
+    // Tool calls are kept in agentic loop memory only, not persisted to history
+    // This prevents tool call pollution across triggers (reactions seeing previous tool calls)
   };
   /** Source that emitted this intent (for attribution/auditing) */
   source?: string;

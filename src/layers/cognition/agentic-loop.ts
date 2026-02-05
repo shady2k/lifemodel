@@ -14,7 +14,7 @@
  */
 
 import type { Logger } from '../../types/logger.js';
-import type { Intent, IntentToolCall, IntentToolResult } from '../../types/intent.js';
+import type { Intent } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { FullSoulState } from '../../storage/soul-provider.js';
@@ -411,7 +411,18 @@ export class AgenticLoop {
       // Filter tools based on context
       // - Can't escalate from smart model (already using it)
       // - Can't emit thoughts when processing a thought (prevents infinite loops)
+      // - Can't do housekeeping (thought/agent) during proactive contact (prevents prep loops)
       const isThoughtTrigger = context.triggerSignal.type === 'thought';
+      const isProactiveTrigger =
+        context.triggerSignal.type === 'contact_urge' ||
+        this.isProactiveTrigger(context.triggerSignal);
+
+      // Set proactive tool budget (4 calls max for proactive contact)
+      if (isProactiveTrigger && state.proactiveToolBudget === undefined) {
+        state.proactiveToolBudget = 4;
+        this.logger.debug({ budget: 4 }, 'Proactive contact: tool budget set');
+      }
+
       const filteredTools = tools.filter((t) => {
         if (typeof t !== 'object') return true;
         // Sanitize name for comparison (core.escalate in our code, core_escalate in API)
@@ -425,6 +436,12 @@ export class AgenticLoop {
         // Can't emit thoughts when processing a thought (prevents loops entirely)
         if (isThoughtTrigger && (name === 'core.thought' || name === 'core_thought')) {
           return false;
+        }
+
+        // Proactive contact: no housekeeping tools (prevents endless preparation)
+        if (isProactiveTrigger) {
+          if (name === 'core.thought' || name === 'core_thought') return false;
+          if (name === 'core.agent' || name === 'core_agent') return false;
         }
 
         return true;
@@ -517,12 +534,23 @@ export class AgenticLoop {
           continue; // Retry without tools
         }
 
-        // Log warning for proactive triggers with no action (for investigation)
+        // Log for proactive triggers with no action (for investigation)
+        // Thought and reaction triggers commonly complete without messages - that's expected
         if (!messageText && context.triggerSignal.type !== 'user_message') {
-          this.logger.warn(
-            { triggerType: context.triggerSignal.type },
-            'Proactive trigger completed with no action - verify this is expected'
-          );
+          const isExpectedNoAction =
+            context.triggerSignal.type === 'thought' ||
+            context.triggerSignal.type === 'message_reaction';
+          if (isExpectedNoAction) {
+            this.logger.debug(
+              { triggerType: context.triggerSignal.type },
+              'Trigger completed without user message (expected for this type)'
+            );
+          } else {
+            this.logger.warn(
+              { triggerType: context.triggerSignal.type },
+              'Proactive trigger completed with no action - verify this is expected'
+            );
+          }
         }
 
         this.logger.debug(
@@ -707,6 +735,18 @@ export class AgenticLoop {
         });
 
         state.toolResults.push(result);
+
+        // Decrement proactive tool budget and force respond when exhausted
+        if (state.proactiveToolBudget !== undefined) {
+          state.proactiveToolBudget--;
+          if (state.proactiveToolBudget <= 0) {
+            this.logger.info(
+              { toolCallCount: state.toolCallCount },
+              'Proactive tool budget exhausted, forcing response'
+            );
+            state.forceRespond = true;
+          }
+        }
 
         // Apply REMEMBER and SET_INTEREST intents immediately so subsequent tools can see the data
         // This fixes the timing bug where core.remember returns success but data isn't visible
@@ -1246,56 +1286,16 @@ export class AgenticLoop {
 
     // Add response intent if terminal is respond
     if (terminal.type === 'respond' && context.recipientId) {
-      // Build tool_calls and tool_results for conversation history
-      // This allows CoreLoop to save the full turn with tool call data
-      const intentToolCalls: IntentToolCall[] | undefined =
-        state.executedTools.length > 0
-          ? state.executedTools.map(
-              (tool): IntentToolCall => ({
-                id: tool.toolCallId,
-                type: 'function',
-                function: {
-                  // Sanitize tool name for API format (core.setInterest → core_setInterest)
-                  name: tool.name.replace(/\./g, '_'),
-                  arguments: JSON.stringify(tool.args),
-                },
-              })
-            )
-          : undefined;
-
-      const intentToolResults: IntentToolResult[] | undefined =
-        toolResults.length > 0
-          ? toolResults.map(
-              (result): IntentToolResult => ({
-                tool_call_id: result.toolCallId,
-                content: JSON.stringify(result.success ? result.data : { error: result.error }),
-              })
-            )
-          : undefined;
-
-      // Build payload - only include optional fields when present (exactOptionalPropertyTypes)
-      const sendPayload: {
-        recipientId: string;
-        text: string;
-        conversationStatus?: typeof terminal.conversationStatus;
-        toolCalls?: IntentToolCall[];
-        toolResults?: IntentToolResult[];
-      } = {
-        recipientId: context.recipientId,
-        text: terminal.text,
-        conversationStatus: terminal.conversationStatus,
-      };
-
-      if (intentToolCalls) {
-        sendPayload.toolCalls = intentToolCalls;
-      }
-      if (intentToolResults) {
-        sendPayload.toolResults = intentToolResults;
-      }
-
+      // Note: toolCalls and toolResults are NOT included in the intent
+      // Tool calls are kept in agentic loop memory only, not persisted to conversation history
+      // This prevents tool call pollution across triggers (reactions seeing previous tool calls)
       intents.push({
         type: 'SEND_MESSAGE',
-        payload: sendPayload,
+        payload: {
+          recipientId: context.recipientId,
+          text: terminal.text,
+          conversationStatus: terminal.conversationStatus,
+        },
         trace: baseTrace,
       });
 
@@ -1304,7 +1304,6 @@ export class AgenticLoop {
           recipientId: context.recipientId,
           textLength: terminal.text.length,
           conversationStatus: terminal.conversationStatus,
-          toolCalls: intentToolCalls?.length ?? 0,
         },
         'SEND_MESSAGE intent created'
       );
@@ -1402,6 +1401,7 @@ Rules:
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
+- Time awareness: Current time is provided above. Call core.time ONLY for: timezone conversions, elapsed time ("since" actions like lastMessage/lastContact), or ISO timestamps.
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
 - Tool requiresUserInput=true → ask user directly, don't retry
@@ -1835,23 +1835,22 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
 
     const section = `## Proactive Contact
 
-You are INITIATING contact with the user. This is not a response to them.
+You are INITIATING contact with the user. This is NOT a response.
 ${isDeferralOverride ? '\n⚠️ Deferral override: pressure increased significantly.\n' : ''}
 **Context:**
 - Last conversation: ${timeContext || 'unknown'} ago
 - Trigger: ${triggerReason}
 
-**Decide what feels right:**
-You have full context from Runtime Snapshot, conversation history, and memory. Consider:
-- Is there something specific worth reaching out about? (news they'd care about, following up on something, sharing a thought)
-- Or is this just a "thinking of you" moment?
-- Or is now not the right time? (they seem busy, it's late, nothing meaningful to say)
+**Your goal:** Send a message OR defer. Pick one.
 
-**Actions:**
-- **Reach out:** Output {"response": "your message"}
-- **Wait:** Call core.defer(signalType="${triggerType}", deferHours=2-8, reason="...") then output {"response": ""}
+**Tool budget: 0-3 calls max.** You already have:
+- Runtime Snapshot (agent/user state)
+- Conversation history (recent context)
 
-No need to call core.state — everything you need is in Runtime Snapshot.`;
+If nothing specific comes to mind, a casual check-in is perfectly valid.
+
+**To reach out:** Output {"response": "your message"}
+**To wait:** Call core.defer(signalType="${triggerType}", deferHours=2-8, reason="...") then output {"response": ""}`;
 
     return section;
   }
@@ -1918,23 +1917,27 @@ ${urgent ? '⚠️ URGENT: This event requires immediate attention.\n' : ''}Data
     const isReaction = hasReactionRootId || hasReactionContent;
 
     if (isReaction && content) {
-      // Extract emoji from content like "User reacted 👍 to my message: ..."
-      const emojiMatch = /User reacted (\S+) to/.exec(content);
-      const emoji = emojiMatch?.[1] ?? '👍';
-
       return `## User Reaction
 
 ${content}
 
-**This is feedback, not a question.** The user acknowledged your message with ${emoji}.
+**This is feedback, not a question.** Interpret based on CONTEXT:
 
-**Decide what to do:**
-- If the reaction shows interest in a topic → call core.setInterest
-- If it reveals a preference worth remembering → call core.remember
-- If it's just acknowledgment (👍, ❤️, 👏) → usually no response needed
+**Examples of context-aware interpretation:**
+- 👍 on closing/check-in ("How are you?", "Talk soon") → acknowledgment, no action
+- 👍 on suggestion/recommendation ("Try this...", "Have you considered...") → user likes it, call core.setInterest
+- 👍 on factual statement ("It's 3 PM", "Python was released in 1991") → acknowledgment, no action
+- 👍 on question asking for opinion ("Don't you think...?", "Wouldn't you agree...?") → user agrees, call core.remember
+
+**Action guidance:**
+- If reaction shows genuine interest in a topic → core.setInterest
+- If it reveals a preference worth remembering → core.remember
+- If it's simple acknowledgment on non-substantive content → no response needed
+
+**IMPORTANT:** Never repeat your previous message. If responding, say something NEW.
 
 **To end without sending a message:** output {"response": ""}
-**To respond:** output {"response": "your message"} (only if you have something meaningful to add)`;
+**To respond:** output {"response": "your NEW message"} (only if you have something meaningful to add)`;
     }
 
     // Internal thought processing - clear, directive prompt
@@ -1981,13 +1984,23 @@ The user reacted ${emoji ?? '👍'} to your message.
 
 ${messageContext}
 
-**This is feedback, not a question.** Decide what to do:
-- If the reaction shows interest in a topic → call core.setInterest
-- If it reveals a preference worth remembering → call core.remember
-- If it's just acknowledgment (👍, ❤️, 👏) → usually no response needed
+**This is feedback, not a question.** Interpret based on CONTEXT:
+
+**Examples of context-aware interpretation:**
+- 👍 on closing/check-in ("How are you?", "Talk soon") → acknowledgment, no action
+- 👍 on suggestion/recommendation ("Try this...", "Have you considered...") → user likes it, call core.setInterest
+- 👍 on factual statement ("It's 3 PM", "Python was released in 1991") → acknowledgment, no action
+- 👍 on question asking for opinion ("Don't you think...?", "Wouldn't you agree...?") → user agrees, call core.remember
+
+**Action guidance:**
+- If reaction shows genuine interest in a topic → core.setInterest
+- If it reveals a preference worth remembering → core.remember
+- If it's simple acknowledgment on non-substantive content → no response needed
+
+**IMPORTANT:** Never repeat your previous message. If responding, say something NEW.
 
 **To end without sending a message:** output {"response": ""}
-**To respond:** output {"response": "your message"} (only if you have something meaningful to add)`;
+**To respond:** output {"response": "your NEW message"} (only if you have something meaningful to add)`;
   }
 
   /**

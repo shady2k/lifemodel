@@ -98,7 +98,7 @@ describe('Proactive Contact', () => {
 
       // Should have proactive contact section
       expect(fullPrompt).toContain('## Proactive Contact');
-      expect(fullPrompt).toContain('This is not a response to them');
+      expect(fullPrompt).toContain('This is NOT a response');
       expect(fullPrompt).toContain('You are INITIATING contact');
     });
 
@@ -149,10 +149,11 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      // New prompt gives agent decision guidance instead of strict instructions
-      expect(fullPrompt).toContain('Decide what feels right');
-      expect(fullPrompt).toContain('Reach out');
-      expect(fullPrompt).toContain('Wait');
+      // New prompt gives agent decision guidance with tool budget
+      expect(fullPrompt).toContain('Your goal');
+      expect(fullPrompt).toContain('Tool budget');
+      expect(fullPrompt).toContain('To reach out');
+      expect(fullPrompt).toContain('To wait');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {

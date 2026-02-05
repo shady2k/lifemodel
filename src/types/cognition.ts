@@ -528,8 +528,8 @@ export interface LoopConfig {
  * Default loop configuration.
  */
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
-  maxIterations: 10,
-  maxToolCalls: 15,
+  maxIterations: 15,
+  maxToolCalls: 20,
   timeoutMs: 120000,
   abortOnNewMessage: true,
   maxInputTokens: 10000,
@@ -588,6 +588,9 @@ export interface LoopState {
 
   /** Track if we ever forced respond (for confidence calculation) */
   everForcedRespond: boolean;
+
+  /** Tool budget for proactive contact (undefined = no limit) */
+  proactiveToolBudget?: number | undefined;
 }
 
 /**

@@ -523,6 +523,21 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
   protected parseResponse(data: OpenAIResponse): CompletionResponse {
     const firstChoice = data.choices?.[0];
     if (!firstChoice) {
+      // Log the raw response to help debug why there are no choices
+      // Common causes: content filtering, model overload, malformed request
+      this.providerLogger?.error(
+        {
+          responseKeys: Object.keys(data),
+          choicesLength: data.choices?.length ?? 0,
+          model: data.model,
+          id: data.id,
+          // Include error field if present (some providers return errors here)
+          error: (data as Record<string, unknown>)['error'],
+          // Include raw response preview (truncated for safety)
+          rawPreview: JSON.stringify(data).slice(0, 500),
+        },
+        'No choices in API response - logging raw response for debugging'
+      );
       throw new LLMError(`Invalid response from ${this.name}: no choices in response`, this.name);
     }
 
