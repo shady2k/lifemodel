@@ -224,6 +224,9 @@ export interface MessageReactionData {
 
   /** Derived: !userId && !!actorChatId */
   isAnonymous?: boolean;
+
+  /** Internal: Set by CoreLoop after adding to history (prevents duplicates on deferral) */
+  historyAdded?: boolean;
 }
 
 /**

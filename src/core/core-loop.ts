@@ -775,6 +775,9 @@ export class CoreLoop {
     const data = signal.data as MessageReactionData;
     if (!this.conversationManager || !data.recipientId) return;
 
+    // Skip if already added to history (prevents duplicates on deferral re-queue)
+    if (data.historyAdded) return;
+
     // Skip noisy removal events when we don't have the original message
     if (data.isRemoval && !data.reactedMessagePreview) return;
 
@@ -799,6 +802,9 @@ export class CoreLoop {
       role: 'system',
       content,
     });
+
+    // Mark as processed to prevent duplicates on deferral re-queue
+    data.historyAdded = true;
   }
 
   /**
