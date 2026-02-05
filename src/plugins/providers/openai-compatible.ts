@@ -532,7 +532,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
           model: data.model,
           id: data.id,
           // Include error field if present (some providers return errors here)
-          error: (data as Record<string, unknown>)['error'],
+          error: (data as unknown as Record<string, unknown>)['error'],
           // Include raw response preview (truncated for safety)
           rawPreview: JSON.stringify(data).slice(0, 500),
         },

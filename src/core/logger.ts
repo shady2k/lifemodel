@@ -233,16 +233,28 @@ export function createConversationLogger(
   // Create a write stream for plain text output
   const logStream = fs.createWriteStream(conversationLogPath, { flags: 'a' });
 
-  // Custom destination: timestamp + message only (no level, no JSON noise)
+  // Custom destination: timestamp + trace context + message (no level, no JSON noise)
+  // Trace context (traceId, spanId) allows correlation with main agent log
   const destination = {
     write(chunk: string): void {
       try {
-        const parsed = JSON.parse(chunk) as { msg?: string; time?: number };
+        const parsed = JSON.parse(chunk) as {
+          msg?: string;
+          time?: number;
+          traceId?: string;
+          spanId?: string;
+        };
         if (parsed.msg) {
           const timestamp = parsed.time
             ? new Date(parsed.time).toISOString().slice(11, 23) // HH:mm:ss.mmm
             : '';
-          const prefix = timestamp ? `[${timestamp}] ` : '';
+          // Build prefix: [timestamp] [traceId:spanId] or just [timestamp]
+          let prefix = timestamp ? `[${timestamp}] ` : '';
+          if (parsed.traceId || parsed.spanId) {
+            const traceShort = parsed.traceId?.slice(0, 8) ?? '????????';
+            const spanShort = parsed.spanId ?? '?';
+            prefix += `[${traceShort}:${spanShort}] `;
+          }
           logStream.write(prefix + parsed.msg + '\n');
         }
       } catch {
@@ -252,7 +264,8 @@ export function createConversationLogger(
     },
   };
 
-  return pino({ level }, destination);
+  // Use mixin to auto-inject trace context (traceId, spanId) from AsyncLocalStorage
+  return pino({ level, mixin: createTraceMixin() }, destination);
 }
 
 /**

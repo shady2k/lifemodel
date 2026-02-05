@@ -1407,7 +1407,8 @@ Rules:
 - Tool requiresUserInput=true → ask user directly, don't retry
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
-- Tool returns success:false → inform user the action failed, don't claim success${
+- Tool returns success:false → inform user the action failed, don't claim success
+- Emoji: use sparingly, only when genuinely needed (emotional emphasis, greetings). Don't end every message with 😊${
       useSmart
         ? ''
         : `
