@@ -1185,7 +1185,23 @@ export class CoreLoop {
 
             const sendOptions = replyTo ? { replyTo } : undefined;
             Promise.resolve()
-              .then(() => channelImpl.sendMessage(route.destination, text, sendOptions))
+              .then(async () => {
+                // Duplicate detection: skip sending if message is identical to last assistant message
+                // This prevents proactive contacts from repeating the same response
+                if (this.conversationManager) {
+                  const lastMessage =
+                    await this.conversationManager.getLastAssistantMessage(recipientId);
+                  if (lastMessage && lastMessage === text) {
+                    this.logger.warn(
+                      { recipientId, textLength: text.length },
+                      'Skipping duplicate message - identical to last assistant message'
+                    );
+                    this.metrics.counter('messages_skipped', { reason: 'duplicate' });
+                    return { success: false, skipped: true };
+                  }
+                }
+                return channelImpl.sendMessage(route.destination, text, sendOptions);
+              })
               .then((result) => {
                 if (result.success) {
                   this.lastMessageSentAt = Date.now();
@@ -1194,17 +1210,22 @@ export class CoreLoop {
                   this.agent.onMessageSent();
 
                   if (this.conversationManager) {
+                    // Type guard: messageId only exists on actual send results, not on skipped results
+                    const messageId = 'messageId' in result ? result.messageId : undefined;
                     void this.saveAgentMessage(
                       recipientId,
                       text,
                       conversationStatus,
                       toolCalls,
                       toolResults,
-                      result.messageId
-                        ? { channelMessageId: result.messageId, channel: route.channel }
+                      messageId
+                        ? { channelMessageId: messageId, channel: route.channel }
                         : undefined
                     );
                   }
+                } else if ('skipped' in result && result.skipped) {
+                  // Message was intentionally skipped (duplicate detection)
+                  // Already logged and tracked in the duplicate check
                 } else {
                   this.logger.warn(
                     { recipientId, channel: route.channel, textLength: text.length },

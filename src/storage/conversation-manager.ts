@@ -681,6 +681,25 @@ export class ConversationManager {
   }
 
   /**
+   * Get the last assistant message text (for duplicate detection).
+   * Used to prevent proactive contacts from sending the same message repeatedly.
+   */
+  async getLastAssistantMessage(userId: string): Promise<string | null> {
+    const key = this.getKey(userId);
+    const stored = await this.loadConversation(key);
+
+    // Walk backwards to find the most recent assistant message
+    for (let i = stored.messages.length - 1; i >= 0; i--) {
+      const msg = stored.messages[i];
+      if (msg?.role === 'assistant' && msg.content) {
+        return msg.content;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Check if follow-up is due based on conversation status and time.
    */
   async shouldFollowUp(userId: string): Promise<{

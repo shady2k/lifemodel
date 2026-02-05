@@ -144,6 +144,8 @@ export interface PreviousAttempt {
   executedTools: ExecutedTool[];
   /** Why we're retrying */
   reason: string;
+  /** Fast model's response text (if any) - shown to smart model to avoid regenerating */
+  responseText?: string;
 }
 
 /**
@@ -257,9 +259,6 @@ export interface LoopResult {
   usedSmartRetry?: boolean | undefined;
 }
 
-/** Confidence threshold below which smart retry is triggered */
-const SMART_RETRY_CONFIDENCE_THRESHOLD = 0.6;
-
 /**
  * Callbacks for immediate intent processing during loop execution.
  * Some intents (REMEMBER, SET_INTEREST) should be applied immediately
@@ -298,88 +297,24 @@ export class AgenticLoop {
   }
 
   /**
-   * Check if result needs deeper thinking (smart retry).
-   */
-  private needsDeepThinking(result: LoopResult): boolean {
-    // Only respond terminal triggers retry consideration
-    if (result.terminal.type !== 'respond') {
-      return false; // noAction, defer - no retry needed
-    }
-
-    // Check terminal confidence (now REQUIRED field)
-    if (result.terminal.confidence < SMART_RETRY_CONFIDENCE_THRESHOLD) {
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Check if it's safe to retry (no side-effect tools executed).
-   */
-  private canSafelyRetry(state: LoopState): boolean {
-    // CRITICAL: Only retry if no tools with side effects were executed
-    return !state.executedTools.some((t) => t.hasSideEffects);
-  }
-
-  /**
-   * Retry with smart model, reusing tool results from first attempt.
-   */
-  private async retryWithSmartModel(
-    firstResult: LoopResult,
-    context: LoopContext
-  ): Promise<LoopResult> {
-    this.logger.info(
-      {
-        originalConfidence:
-          firstResult.terminal.type === 'respond' ? firstResult.terminal.confidence : undefined,
-      },
-      'Retrying with smart model due to low confidence'
-    );
-
-    // Build enriched context with first attempt info
-    const enrichedContext: LoopContext = {
-      ...context,
-      previousAttempt: {
-        toolResults: firstResult.state.toolResults,
-        executedTools: firstResult.state.executedTools,
-        reason: 'Low confidence, using deeper reasoning',
-      },
-    };
-
-    // Run again with smart model
-    return this.runInternal(enrichedContext, true);
-  }
-
-  /**
    * Run the agentic loop until completion.
-   * Automatically retries with smart model if confidence is low and safe to retry.
+   *
+   * Smart model escalation is EXPLICIT only - via core.escalate tool.
+   * We trust the LLM to know when it needs deeper reasoning.
+   * Automatic confidence-based retry was removed because:
+   * 1. The confidence formula is heuristic, not quality-based
+   * 2. It second-guesses the LLM's own judgment
+   * 3. It caused bugs (overriding good responses with worse ones)
    */
   async run(context: LoopContext): Promise<LoopResult> {
-    const enableSmartRetry = context.runtimeConfig?.enableSmartRetry ?? true;
-    const useSmart = context.previousAttempt !== undefined; // Use smart if this is a retry
+    const useSmart = context.previousAttempt !== undefined; // Use smart if escalated via core.escalate
 
     try {
-      const result = await this.runInternal(context, useSmart);
-
-      // Check if we need smart retry
-      if (
-        enableSmartRetry &&
-        !useSmart && // Don't retry if already using smart
-        this.needsDeepThinking(result) &&
-        this.canSafelyRetry(result.state)
-      ) {
-        return await this.retryWithSmartModel(result, context);
-      }
-
-      return result;
+      return await this.runInternal(context, useSmart);
     } catch (error) {
-      // On fast model failure, we can ONLY retry with smart model if no side effects occurred
-      // Since we threw an error, we don't have a result to check - we cannot safely retry
-      // The error is thrown to the caller (processor) which will send a generic error response
       this.logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Agentic loop failed - cannot safely retry (no state to check for side effects)'
+        'Agentic loop failed'
       );
       throw error;
     }
@@ -1066,10 +1001,17 @@ export class AgenticLoop {
     previousAttempt: PreviousAttempt,
     state: LoopState
   ): void {
-    // Add a system note about the retry
+    // Add a system note about the retry, including fast model's draft response if available
+    // This helps smart model see what was already generated and avoid repeating history
+    let retryNote = `[Previous attempt with fast model - retrying with deeper reasoning. Reason: ${previousAttempt.reason}]`;
+
+    if (previousAttempt.responseText) {
+      retryNote += `\n\n## Fast Model Draft Response\nThe fast model generated this response: "${previousAttempt.responseText}"\n\nYou may use this response if it's appropriate, or generate a better one. Do NOT repeat the last assistant message from conversation history - generate something fresh.`;
+    }
+
     messages.push({
       role: 'system',
-      content: `[Previous attempt with fast model - retrying with deeper reasoning. Reason: ${previousAttempt.reason}]`,
+      content: retryNote,
     });
 
     // Reconstruct tool call messages from previous attempt
@@ -1434,8 +1376,12 @@ Capabilities: think → use tools → update beliefs (with evidence) → respond
 Rules:
 - Always output JSON for text content: {"response": "your message here"}
 - Don't re-greet; use name sparingly (first greeting or after long pause)
-- Only promise what tools can do. Memory ≠ reminders.
-- When responding to a user message, call core.conversationStatus before asking questions to set follow-up timing
+- Only promise what tools can do. Memory ≠ reminders.${
+      context.triggerSignal.type === 'user_message'
+        ? `
+- When responding to a user message, call core.conversationStatus before asking questions to set follow-up timing`
+        : ''
+    }
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
