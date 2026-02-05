@@ -205,6 +205,8 @@ export abstract class BaseLLMProvider implements LLMProvider {
   abstract readonly name: string;
   protected readonly logger?: LLMLogger | undefined;
   private requestCounter = 0;
+  /** Tracks how many messages have been logged to avoid repetition (delta logging) */
+  private lastLoggedMessageCount = 0;
 
   constructor(logger?: LLMLogger) {
     this.logger = logger?.child({ component: 'llm' });
@@ -259,38 +261,80 @@ export abstract class BaseLLMProvider implements LLMProvider {
       }
     }
 
-    // Log to conversation file (separate readable log for debugging)
+    // Log to conversation file (delta logging - only new messages since last request)
+    const totalMessages = request.messages.length;
+    const newMessageStart = this.lastLoggedMessageCount;
+
+    // Request header
     logConversation(
       { logType: 'REQUEST', requestId, provider: this.name, model: request.model },
       `\n${'═'.repeat(60)}\n→ REQUEST [${requestId}] to ${this.name} (${request.model ?? request.role ?? 'unknown'})\n${'─'.repeat(60)}`
     );
 
-    // Format all messages for conversation log - full detail for debugging
-    for (const [i, msg] of request.messages.entries()) {
+    // Show context summary if there are previously logged messages
+    if (newMessageStart > 0) {
+      logConversation(
+        { logType: 'CONTEXT' },
+        `[...${String(newMessageStart)} messages from history — see earlier in log...]`
+      );
+    }
+
+    // Only log NEW messages (delta logging eliminates massive repetition)
+    // Use "► " prefix to visually mark new messages (easy to scan)
+    const NEW = '► ';
+    const INDENT = '  ';
+    for (let i = newMessageStart; i < totalMessages; i++) {
+      const msg = request.messages[i];
+      if (!msg) continue;
       const idx = String(i);
       const role = msg.role.toUpperCase();
       const content = msg.content ?? '(no content)';
 
       if (msg.role === 'tool') {
-        // Tool result - show which tool call it responds to
+        // Tool result - pretty-print JSON if possible
+        let formattedContent = content;
+        try {
+          const parsed: unknown = JSON.parse(content);
+          formattedContent = JSON.stringify(parsed, null, 2)
+            .split('\n')
+            .join('\n' + INDENT);
+        } catch {
+          // Not JSON, use as-is
+        }
         logConversation(
           { logType: 'TOOL_RESULT' },
-          `[${idx}] TOOL RESULT (${msg.tool_call_id ?? 'unknown'}):\n${content}`
+          `${NEW}[${idx}] TOOL RESULT (${msg.tool_call_id ?? 'unknown'}):\n${INDENT}${formattedContent}`
         );
       } else if (msg.tool_calls && msg.tool_calls.length > 0) {
-        // Assistant with tool calls - show each call in detail
+        // Assistant with tool calls - pretty-print arguments
         const toolDetails = msg.tool_calls
-          .map((tc) => `  📞 ${tc.function.name}(${tc.id}):\n     ${tc.function.arguments}`)
+          .map((tc) => {
+            let args = tc.function.arguments;
+            try {
+              const parsed: unknown = JSON.parse(args);
+              args = JSON.stringify(parsed, null, 2)
+                .split('\n')
+                .join('\n' + INDENT + INDENT);
+            } catch {
+              // Not JSON, use as-is
+            }
+            return `${INDENT}📞 ${tc.function.name}(${tc.id}):\n${INDENT}${INDENT}${args}`;
+          })
           .join('\n');
+        const indentedContent = content === '(no content)' ? '' : `\n${INDENT}${content}`;
         logConversation(
           { logType: 'ASSISTANT_TOOLS' },
-          `[${idx}] ${role}:\n${content}\n\n  Tool calls:\n${toolDetails}`
+          `${NEW}[${idx}] ${role}:${indentedContent}\n${INDENT}Tool calls:\n${toolDetails}`
         );
       } else {
-        // Regular message
-        logConversation({ logType: role }, `[${idx}] ${role}:\n${content}`);
+        // Regular message - indent content
+        const indentedContent = content.split('\n').join('\n' + INDENT);
+        logConversation({ logType: role }, `${NEW}[${idx}] ${role}:\n${INDENT}${indentedContent}`);
       }
     }
+
+    // Update the count for next request
+    this.lastLoggedMessageCount = totalMessages;
 
     try {
       const response = await this.doComplete(request);
@@ -315,9 +359,33 @@ export abstract class BaseLLMProvider implements LLMProvider {
       );
 
       // Log full response to conversation file (no truncation for debugging)
-      const responseContent = response.content ?? '(no content)';
+      // Format response: extract "response" field if JSON, otherwise pretty-print or show as-is
+      let responseContent = response.content ?? '(no content)';
+      try {
+        const parsed = JSON.parse(responseContent) as Record<string, unknown>;
+        if (typeof parsed['response'] === 'string') {
+          // Extract the actual message from {"response": "..."} wrapper
+          responseContent = parsed['response'];
+        } else {
+          // Other JSON - pretty-print it
+          responseContent = JSON.stringify(parsed, null, 2);
+        }
+      } catch {
+        // Not JSON, use as-is
+      }
       const toolCallsDetail = response.toolCalls
-        ? `\n\n  Tool calls:\n${response.toolCalls.map((tc) => `  📞 ${tc.function.name}(${tc.id}):\n     ${tc.function.arguments}`).join('\n')}`
+        ? `\n\n  Tool calls:\n${response.toolCalls
+            .map((tc) => {
+              let args = tc.function.arguments;
+              try {
+                const parsed: unknown = JSON.parse(args);
+                args = JSON.stringify(parsed, null, 2).split('\n').join('\n       ');
+              } catch {
+                // Not JSON, use as-is
+              }
+              return `  📞 ${tc.function.name}(${tc.id}):\n       ${args}`;
+            })
+            .join('\n')}`
         : '';
       const durationStr = String(duration);
       const tokensStr = String(response.usage?.totalTokens ?? '?');
