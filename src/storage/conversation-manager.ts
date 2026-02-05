@@ -662,6 +662,25 @@ export class ConversationManager {
   }
 
   /**
+   * Get time of the last user message (when user last contacted us).
+   * Used by core.time tool for "lastContact" queries.
+   */
+  async getLastUserMessageTime(userId: string): Promise<Date | null> {
+    const key = this.getKey(userId);
+    const stored = await this.loadConversation(key);
+
+    // Walk backwards to find the most recent user message
+    for (let i = stored.messages.length - 1; i >= 0; i--) {
+      const msg = stored.messages[i];
+      if (msg?.role === 'user') {
+        return new Date(msg.timestamp);
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Check if follow-up is due based on conversation status and time.
    */
   async shouldFollowUp(userId: string): Promise<{

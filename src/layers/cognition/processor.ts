@@ -146,6 +146,18 @@ export class CognitionProcessor implements CognitionLayer {
         ? { getState: () => agent.getState() as unknown as Record<string, unknown> }
         : undefined,
       userModelProvider: userModel ? { getModel: () => userModel.getBeliefs() } : undefined,
+      // Lazy provider - reads conversationManager at call time (handles late binding)
+      conversationProvider: {
+        getLastMessageTime: async (recipientId) => {
+          if (!recipientId || !this.conversationManager) return null;
+          const status = await this.conversationManager.getStatus(recipientId);
+          return status.lastMessageAt;
+        },
+        getLastContactTime: async (recipientId) => {
+          if (!recipientId || !this.conversationManager) return null;
+          return this.conversationManager.getLastUserMessageTime(recipientId);
+        },
+      },
     });
 
     // Build callbacks for immediate intent processing

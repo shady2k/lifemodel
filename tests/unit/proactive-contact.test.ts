@@ -149,7 +149,7 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      expect(fullPrompt).toContain('Do NOT continue or reference the previous conversation');
+      expect(fullPrompt).toContain('do NOT continue or reference the previous conversation');
       expect(fullPrompt).toContain('Start FRESH');
     });
 

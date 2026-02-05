@@ -9,10 +9,11 @@ import { validateAgainstParameters } from '../validation.js';
 
 /**
  * Conversation provider for time-based queries.
+ * Methods are async since they may need to read from storage.
  */
 export interface ConversationProvider {
-  getLastMessageTime(recipientId?: string): Date | null;
-  getLastContactTime(recipientId?: string): Date | null;
+  getLastMessageTime(recipientId?: string): Promise<Date | null>;
+  getLastContactTime(recipientId?: string): Promise<Date | null>;
 }
 
 /**
@@ -111,46 +112,51 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
 
           // Use context.recipientId - system knows the current conversation
           const recipientId = context?.recipientId;
-          let eventTime: Date | null = null;
 
-          if (event === 'lastMessage' && deps.conversationProvider) {
-            eventTime = deps.conversationProvider.getLastMessageTime(recipientId);
-          } else if (event === 'lastContact' && deps.conversationProvider) {
-            eventTime = deps.conversationProvider.getLastContactTime(recipientId);
-          } else {
-            const parsed = new Date(event);
-            if (!isNaN(parsed.getTime())) {
-              eventTime = parsed;
+          // Handle async provider lookups
+          const getEventTime = async (): Promise<Date | null> => {
+            if (event === 'lastMessage' && deps.conversationProvider) {
+              return deps.conversationProvider.getLastMessageTime(recipientId);
+            } else if (event === 'lastContact' && deps.conversationProvider) {
+              return deps.conversationProvider.getLastContactTime(recipientId);
+            } else {
+              const parsed = new Date(event);
+              if (!isNaN(parsed.getTime())) {
+                return parsed;
+              }
+              return null;
             }
-          }
+          };
 
-          if (!eventTime) {
-            return Promise.resolve({
-              success: false,
+          return getEventTime().then((eventTime) => {
+            if (!eventTime) {
+              return {
+                success: false,
+                action: 'since',
+                error: `Event not found: ${event}`,
+              };
+            }
+
+            const now = Date.now();
+            const diffMs = now - eventTime.getTime();
+            const diffSeconds = Math.floor(diffMs / 1000);
+            const diffMinutes = Math.floor(diffSeconds / 60);
+            const diffHours = Math.floor(diffMinutes / 60);
+            const diffDays = Math.floor(diffHours / 24);
+
+            return {
+              success: true,
               action: 'since',
-              error: `Event not found: ${event}`,
-            });
-          }
-
-          const now = Date.now();
-          const diffMs = now - eventTime.getTime();
-          const diffSeconds = Math.floor(diffMs / 1000);
-          const diffMinutes = Math.floor(diffSeconds / 60);
-          const diffHours = Math.floor(diffMinutes / 60);
-          const diffDays = Math.floor(diffHours / 24);
-
-          return Promise.resolve({
-            success: true,
-            action: 'since',
-            eventTime: eventTime.toISOString(),
-            elapsed: {
-              ms: diffMs,
-              seconds: diffSeconds,
-              minutes: diffMinutes,
-              hours: diffHours,
-              days: diffDays,
-            },
-            human: formatDuration(diffMs),
+              eventTime: eventTime.toISOString(),
+              elapsed: {
+                ms: diffMs,
+                seconds: diffSeconds,
+                minutes: diffMinutes,
+                hours: diffHours,
+                days: diffDays,
+              },
+              human: formatDuration(diffMs),
+            };
           });
         }
 
