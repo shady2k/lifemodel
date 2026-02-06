@@ -98,21 +98,68 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
   }
 
   /**
-   * Override to apply Gemini-specific message sanitization.
+   * Override to apply prompt caching and Gemini-specific sanitization.
    */
   protected override buildRequestBody(
     request: CompletionRequest,
     model: string
   ): Record<string, unknown> {
     const body = super.buildRequestBody(request, model);
+    const messages = body['messages'] as Record<string, unknown>[];
 
     if (this.isGeminiModel(model)) {
-      const messages = body['messages'] as Record<string, unknown>[];
       this.ensureUserTurnForGemini(messages);
       this.sanitizeSystemMessagesForGemini(messages);
     }
 
+    // Add cache_control after all message transforms are done
+    this.addCacheControl(messages, model);
+
     return body;
+  }
+
+  /**
+   * Add cache_control breakpoint for prompt caching.
+   * Converts plain string content to multipart format with cache_control.
+   *
+   * Strategy differs by provider:
+   * - Anthropic: breakpoint on last system message (caches full system prefix)
+   * - Gemini: breakpoint on first user message (system_instruction loses cache_control)
+   * - Others: ignored gracefully
+   *
+   * OpenRouter routes to the correct provider, and for Gemini uses only the last breakpoint.
+   */
+  private addCacheControl(messages: Record<string, unknown>[], model: string): void {
+    let targetIdx: number;
+
+    if (this.isGeminiModel(model)) {
+      // Gemini: system messages become system_instruction and lose cache_control.
+      // Put breakpoint on the first user message instead.
+      targetIdx = messages.findIndex((m) => m['role'] === 'user');
+    } else {
+      // Anthropic/others: breakpoint on last leading system message
+      targetIdx = -1;
+      for (let i = 0; i < messages.length; i++) {
+        if (messages[i]?.['role'] !== 'system') break;
+        targetIdx = i;
+      }
+    }
+
+    if (targetIdx === -1) return;
+
+    const msg = messages[targetIdx];
+    if (!msg) return;
+    const content = msg['content'];
+    if (typeof content !== 'string') return; // already multipart or null
+
+    // Convert to multipart content with cache_control breakpoint
+    msg['content'] = [
+      {
+        type: 'text',
+        text: content,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
   }
 
   /**
