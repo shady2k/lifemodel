@@ -97,7 +97,7 @@ When stopping pagination at a "last seen" ID, use exact match (`===`), not less-
 ## Documentation
 
 Project documentation is in the `docs/` folder:
-- `docs/architecture.md` - 3-layer brain, CoreLoop, project structure
+- `docs/architecture.md` - 3-layer brain, CoreLoop, agentic loop module structure, project structure
 - `docs/concepts/` - Signals, intents, energy model, memory, conversation history
 - `docs/features/` - Thinking, news, reminders, social debt
 - `docs/plugins/` - Neurons, channels, plugin overview

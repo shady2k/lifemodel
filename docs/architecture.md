@@ -55,7 +55,7 @@ Uses native OpenAI tool calling with **Codex-style natural termination**:
 - Natural termination: LLM stops calling tools when done (no `core.final` required)
 - Smart escalation: Fast model can request deeper reasoning via `core.escalate`
 - Smart retry: Low confidence and no side-effects → retry with expensive model
-- Conversation status: `core.conversationStatus` controls follow-up timing
+- Conversation status: JSON schema `{"response": "...", "status": "..."}` controls follow-up timing
 - Proactive deferral: `core.defer` allows LLM to postpone proactive contact
 
 ```
@@ -69,6 +69,39 @@ No tool calls = natural completion → return intents
     ↓
 Loop continues until LLM stops calling tools
 ```
+
+### Module Structure
+
+The agentic loop is decomposed into focused modules:
+
+```
+src/layers/cognition/
+  agentic-loop.ts             # Orchestration (run + dependency wiring, ~280 lines)
+  agentic-loop-types.ts       # All shared types/interfaces (no runtime deps)
+  response-parser.ts          # parseResponseContent — JSON schema + plain text (pure)
+  intent-compiler.ts          # ToolResult→Intent, batched thoughts, confidence (pure)
+  tool-executor.ts            # Tool call loop + execution (sole LoopState mutator)
+  loop-orchestrator.ts        # buildRequest, filterToolsForContext, proactive budget
+
+  prompts/
+    system-prompt.ts           # Identity, rules, time awareness (runtime-dynamic)
+    trigger-prompt.ts          # Assembles context sections + trigger-specific section
+    context-sections.ts        # User profile, thoughts, soul, tensions, runtime snapshot
+    trigger-sections.ts        # Proactive contact, plugin events, thought, reaction
+    runtime-snapshot.ts        # State query detection, level descriptions, scope
+
+  messages/
+    history-builder.ts         # buildInitialMessages + conversation history injection
+    retry-builder.ts           # addPreviousAttemptMessages (smart retry context)
+    tool-call-validators.ts    # Orphaned tool result filtering (safety net)
+```
+
+Key design decisions:
+- **`agentic-loop.ts` re-exports all types** from `agentic-loop-types.ts` for backward compatibility
+- **`tool-executor.ts`** returns a `ToolExecutionOutcome` discriminated union (continue/escalate/defer) to preserve loop control flow
+- **`PromptBuilders` interface** enables dependency inversion — messages/ doesn't depend on prompts/
+- **Pure modules** (`response-parser`, `intent-compiler`, all prompts/) have read-only access to state
+- **System prompt is runtime-dynamic** (timestamp, timezone, useSmart) — never cached
 
 ---
 
