@@ -253,6 +253,9 @@ export interface ReminderDueData {
 
   /** Tags */
   tags?: string[];
+
+  /** ISO timestamp of when the reminder was originally scheduled to fire */
+  scheduledAt?: string;
 }
 
 /**

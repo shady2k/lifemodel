@@ -284,8 +284,8 @@ async function handleWeightCheckin(
     thoughtContent = `Time for a weight check-in! No previous weight recorded. Ask the user if they'd like to start tracking their weight for health goals.`;
   }
 
-  // Emit thought for COGNITION to process
-  primitives.intentEmitter.emitThought(thoughtContent);
+  // Save as pending intention — surfaces in next user-facing conversation
+  primitives.intentEmitter.emitPendingIntention(thoughtContent);
 
   primitives.logger.info({ recipientId, hasLastWeight: !!lastWeight }, 'Weight check-in triggered');
 }

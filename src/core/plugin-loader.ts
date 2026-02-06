@@ -1365,6 +1365,10 @@ export class PluginLoader {
     const warningThreshold = signalRateLimit ?? 120;
     let warningLogged = false;
 
+    // Separate rate limiting for pending intentions (max 5/minute)
+    let intentEmitCount = 0;
+    let intentLastMinuteStart = Date.now();
+
     const emitSignalImpl = (input: PluginSignalInput): EmitSignalResult => {
       const now = Date.now();
       if (now - lastMinuteStart > 60_000) {
@@ -1579,6 +1583,52 @@ export class PluginLoader {
         );
 
         return { success: true, signalId };
+      },
+
+      emitPendingIntention: (content: string, recipientId?: string): void => {
+        if (!this.memoryProvider) {
+          this.logger.warn({ pluginId }, 'emitPendingIntention called but memoryProvider not set');
+          return;
+        }
+
+        // Validate before consuming rate limit quota
+        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+          this.logger.warn({ pluginId }, 'emitPendingIntention requires non-empty content');
+          return;
+        }
+
+        // Separate rate limit for intentions (max 5/minute per plugin)
+        const now = Date.now();
+        if (now - intentLastMinuteStart > 60_000) {
+          intentEmitCount = 0;
+          intentLastMinuteStart = now;
+        }
+
+        intentEmitCount++;
+        if (intentEmitCount > 5) {
+          this.logger.warn(
+            { pluginId, intentEmitCount },
+            'Pending intention rate limit exceeded (5/minute)'
+          );
+          return;
+        }
+
+        // Plain object — avoids importing MemoryEntry from cognition layer into core
+        const entry = {
+          id: `int_${String(Date.now())}_${Math.random().toString(36).slice(2, 8)}`,
+          type: 'intention' as const,
+          content: content.trim(),
+          timestamp: new Date(),
+          recipientId,
+          tags: ['plugin_insight', pluginId],
+          status: 'pending' as const,
+          trigger: { condition: 'next_conversation' as const },
+        };
+
+        this.memoryProvider.save(entry).catch((err: unknown) => {
+          this.logger.error({ pluginId, err }, 'Failed to save pending intention');
+        });
+        this.logger.debug({ pluginId, content: content.slice(0, 80) }, 'Pending intention saved');
       },
     };
   }

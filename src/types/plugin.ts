@@ -621,6 +621,13 @@ export interface IntentEmitterPrimitive {
    * @returns Result with signalId on success, or error on failure (e.g., rate limit, budget exceeded)
    */
   emitThought(content: string): EmitSignalResult;
+
+  /**
+   * Save a pending intention directly to memory.
+   * Surfaces in next user-facing conversation as "Pending Insights".
+   * Skips thought processing — use when the plugin already knows the content is non-urgent.
+   */
+  emitPendingIntention(content: string, recipientId?: string): void;
 }
 
 /**

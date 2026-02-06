@@ -635,7 +635,7 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   // Emit thought to inform user about persistently broken sources
   if (sourcesToAlert.length > 0) {
     const sourceList = sourcesToAlert.join(', ');
-    intentEmitter.emitThought(
+    intentEmitter.emitPendingIntention(
       `News source health alert: ${sourceList} has failed ${String(SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD)} times in a row. ` +
         `The source is temporarily disabled. Consider checking if the source URL is still valid or removing it.`
     );
@@ -650,6 +650,26 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
 
   // Convert to NewsArticle format with topic extraction and breaking detection
   const newsArticles = fetchedArticles.map(convertToNewsArticle);
+
+  // Nudge about noteworthy articles (breaking patterns or large batches)
+  const breakingArticles = newsArticles.filter((a) => a.hasBreakingPattern);
+  if (breakingArticles.length > 0) {
+    const headlines = breakingArticles
+      .slice(0, 3)
+      .map((a) => `- ${a.title}`)
+      .join('\n');
+    intentEmitter.emitPendingIntention(
+      `Breaking news detected:\n${headlines}\nShare with the user if it matches their interests.`
+    );
+  } else if (newsArticles.length >= 5) {
+    const headlines = newsArticles
+      .slice(0, 3)
+      .map((a) => `- ${a.title}`)
+      .join('\n');
+    intentEmitter.emitPendingIntention(
+      `${String(newsArticles.length)} new articles from feeds. Top headlines:\n${headlines}\nMention any that match the user's interests.`
+    );
+  }
 
   // Group articles by source for the signal payload
   const articlesBySource = new Map<string, NewsArticle[]>();

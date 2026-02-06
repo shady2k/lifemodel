@@ -39,6 +39,7 @@ const reminderDueSchema = z.object({
     isRecurring: z.boolean(),
     fireCount: z.number(),
     tags: z.array(z.string()).optional(),
+    scheduledAt: z.string().optional(),
   }),
 });
 
@@ -172,13 +173,15 @@ const lifecycle: PluginLifecycleV2 = {
       await handleReminderDue(
         payload as unknown as ReminderDueData,
         pluginPrimitives.storage,
-        pluginPrimitives.logger
+        pluginPrimitives.logger,
+        pluginPrimitives.intentEmitter
       );
     } else if (eventKind === REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE) {
       handleReminderAdvanceNotice(
         payload as unknown as ReminderAdvanceNoticeData,
         pluginPrimitives.storage,
-        pluginPrimitives.logger
+        pluginPrimitives.logger,
+        pluginPrimitives.intentEmitter
       );
     }
   },

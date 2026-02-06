@@ -481,6 +481,7 @@ export function createReminderTools(
         content,
         isRecurring: resolved.recurrence !== null,
         fireCount: 0,
+        scheduledAt: resolved.triggerAt.toISOString(),
       };
       if (tags) {
         scheduleData['tags'] = tags;
@@ -904,7 +905,8 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
 export async function handleReminderDue(
   data: ReminderDueData,
   storage: PluginPrimitives['storage'],
-  logger: Logger
+  logger: Logger,
+  intentEmitter: PluginPrimitives['intentEmitter']
 ): Promise<void> {
   logger.info(
     {
@@ -917,19 +919,42 @@ export async function handleReminderDue(
     'Reminder due'
   );
 
+  // Detect overdue delivery (>5 min late) — only for non-recurring reminders.
+  // For recurring reminders, scheduledAt in the schedule data is stale (set once at creation),
+  // so overdue detection would give false positives on subsequent fires.
+  const scheduledAt = !data.isRecurring && data.scheduledAt ? new Date(data.scheduledAt) : null;
+  const delayMs = scheduledAt ? Date.now() - scheduledAt.getTime() : 0;
+  const isOverdue = delayMs > 5 * 60 * 1000;
+
   if (data.isRecurring) {
+    // Read fireCount from storage (source of truth) — schedule data's fireCount is stale
+    let storedFireCount = 0;
     try {
       const stored = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);
       if (stored) {
         const reminder = stored.find((r) => r.id === data.reminderId);
         if (reminder) {
-          reminder.fireCount = data.fireCount + 1;
+          storedFireCount = reminder.fireCount;
+          reminder.fireCount = storedFireCount + 1;
           await storage.set(REMINDER_STORAGE_KEYS.REMINDERS, stored);
         }
       }
     } catch (error) {
       logger.error({ reminderId: data.reminderId, error }, 'Failed to update reminder fire count');
     }
+
+    // Emit pending intention for recurring reminders after first fire
+    if (storedFireCount > 0) {
+      intentEmitter.emitPendingIntention(
+        `Recurring reminder (fired ${String(storedFireCount + 1)} times): "${data.content}".`,
+        data.recipientId
+      );
+    }
+  } else if (isOverdue) {
+    intentEmitter.emitPendingIntention(
+      `Reminder: "${data.content}". Note: this was delayed by ~${String(Math.round(delayMs / 60000))} minutes.`,
+      data.recipientId
+    );
   }
 }
 
@@ -941,7 +966,8 @@ export async function handleReminderDue(
 export function handleReminderAdvanceNotice(
   data: ReminderAdvanceNoticeData,
   _storage: PluginPrimitives['storage'],
-  logger: Logger
+  logger: Logger,
+  intentEmitter: PluginPrimitives['intentEmitter']
 ): void {
   logger.info(
     {
@@ -954,18 +980,17 @@ export function handleReminderAdvanceNotice(
     'Reminder advance notice'
   );
 
-  // Parse ISO string back to Date for logging
-  const actualTime = new Date(data.actualReminderAt);
   const duration = formatAdvanceNoticeDuration(data.advanceNoticeBefore);
 
-  logger.info(
-    { reminderId: data.reminderId, duration, actualTime },
-    `Advance notice: ${data.content} is coming up in ${duration}`
+  intentEmitter.emitPendingIntention(
+    `Upcoming reminder in ${duration}: "${data.content}". Give the user a gentle heads-up so they can prepare.`,
+    data.recipientId
   );
 
-  // Signal will be emitted by scheduler service to wake COGNITION
-  // COGNITION will generate the natural language response
-  // No fireCount update here - main reminder handler handles that
+  logger.info(
+    { reminderId: data.reminderId, duration },
+    `Advance notice: ${data.content} is coming up in ${duration}`
+  );
 }
 
 function formatAdvanceNoticeDuration(before: RelativeTime): string {
