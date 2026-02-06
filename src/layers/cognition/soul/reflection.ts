@@ -532,33 +532,31 @@ export async function processBatchReflection(
       return;
     }
 
-    // Take pending items
-    const items = await soulProvider.takePendingBatch();
-    if (!items || items.length === 0) {
-      log.trace('Batch reflection skipped: no items or already in flight');
+    // Short-circuit if batch already in flight
+    const batchStatus = await soulProvider.getBatchStatus();
+    if (batchStatus.inFlight) {
+      log.trace('Batch reflection skipped: already in flight');
       return;
     }
 
-    log.debug({ itemCount: items.length }, 'Items taken, proceeding with checks');
+    // Estimate budget using capped batch size (takePendingBatch caps at 5)
+    const estimatedCount = Math.min(batchStatus.pendingCount, 5);
+    if (estimatedCount === 0) {
+      log.trace('Batch reflection skipped: no pending items');
+      return;
+    }
+    const estimatedTokens = cfg.baseTokens + estimatedCount * cfg.perItemTokens;
 
-    // Calculate token cost
-    const estimatedTokens = cfg.baseTokens + items.length * cfg.perItemTokens;
+    // Check budget BEFORE taking batch to avoid stranding items in-flight
+    if (!(await soulProvider.canAfford(estimatedTokens))) {
+      log.debug({ estimatedTokens }, 'Batch reflection skipped: insufficient budget');
+      return;
+    }
 
-    // Check budget BEFORE processing (but AFTER taking batch - this is the bug!)
-    const canAfford = await soulProvider.canAfford(estimatedTokens);
-    log.debug({ estimatedTokens, canAfford }, 'Budget check result');
-
-    if (!canAfford) {
-      // BUG: Items are in-flight but we're returning without clearing!
-      // This will cause the batch to be stuck forever
-      log.warn(
-        {
-          itemCount: items.length,
-          estimatedTokens,
-        },
-        '⚠️ CRITICAL: Budget check FAILED AFTER taking batch - items will be stuck in-flight!'
-      );
-      // Items remain in-flight, will be recovered on next startup
+    // Now safe to take batch (items move to in-flight)
+    const items = await soulProvider.takePendingBatch();
+    if (!items || items.length === 0) {
+      log.trace('Batch reflection skipped: no items');
       return;
     }
 
@@ -656,9 +654,7 @@ async function callBatchReflectionLLM(
   // Build numbered list of responses
   const responseList = items
     .map((item, index) => {
-      const trigger = item.triggerSummary.slice(0, 100);
-      const response = item.responseText.slice(0, 200);
-      return `${String(index + 1)}. [tickId: ${item.tickId}] Trigger: ${trigger}\n   Response: "${response}"`;
+      return `${String(index + 1)}. [tickId: ${item.tickId}] Trigger: ${item.triggerSummary}\n   Response: "${item.responseText}"`;
     })
     .join('\n\n');
 

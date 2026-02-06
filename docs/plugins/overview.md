@@ -61,6 +61,15 @@ const myTool: PluginTool = {
 
 This ensures OpenAI's strict mode enforces the nested structure at generation time, rather than relying on description text.
 
+## Provider Compatibility
+
+The `OpenRouterProvider` includes Gemini-specific message sanitization (see [ADR-001](../adr/001-gemini-message-sanitization.md)):
+- Leading system messages are left as-is (OpenRouter collapses them into Gemini's `system_instruction`)
+- Mid-conversation system messages are converted to `user` role with `[System]` prefix
+- First content message is ensured to be `user` role (synthetic `[autonomous processing]` message inserted if needed)
+
+These transformations only apply to `google/*` models. Other models are unaffected.
+
 ## Available Plugins
 
 | Plugin | Type | Description |

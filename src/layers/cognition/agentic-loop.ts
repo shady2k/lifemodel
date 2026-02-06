@@ -1564,8 +1564,8 @@ appropriate, or use \`core.memory\` to search for more context.`;
 
   /**
    * Build soul section for identity awareness.
-   * Shows who I am, what I care about, and my current narrative arc.
-   * Keeps the agent grounded in its identity during responses.
+   * Surfaces enough identity context for the agent to act from its values,
+   * not just be scored against them. ~250 tokens target.
    */
   private buildSoulSection(context: LoopContext): string | null {
     const { soulState } = context;
@@ -1575,32 +1575,58 @@ appropriate, or use \`core.memory\` to search for more context.`;
 
     const lines: string[] = [];
 
-    // Current narrative arc (who I am becoming) - brief
+    // Current narrative arc (who I am / becoming)
     const narrative = soulState.selfModel.narrative.currentStory;
     if (narrative.length > 0) {
       lines.push(narrative);
     }
+    const becoming = soulState.narrative.currentNarrative.whoIAmBecoming;
+    if (becoming) {
+      lines.push(`Becoming: ${becoming}`);
+    }
 
-    // Core cares (top 3, sorted by weight)
+    // All core cares, sorted by weight, sacred marker instead of numeric weight
     const cares = soulState.constitution.coreCares;
     if (cares.length > 0) {
-      const topCares = [...cares]
+      const sortedCares = [...cares]
         .sort((a, b) => b.weight - a.weight)
-        .slice(0, 3)
         .map((c) => {
-          const sacred = c.sacred ? ' ★' : '';
+          const sacred = c.sacred ? ' [sacred]' : '';
           return `- ${c.care}${sacred}`;
         });
       lines.push('');
-      lines.push('Core cares:');
-      lines.push(...topCares);
+      lines.push('Core cares (ranked):');
+      lines.push(...sortedCares);
     }
 
-    // Current chapter (brief context)
-    const currentChapter = soulState.narrative.chapters.at(-1);
-    if (currentChapter?.title) {
+    // Active invariants — hard identity constraints
+    const invariants = soulState.constitution.invariants;
+    if (invariants.length > 0) {
+      const activeInvariants = invariants
+        .filter((inv) => inv.status === 'active')
+        .map((inv) => `- ${inv.rule}`);
+      if (activeInvariants.length > 0) {
+        lines.push('');
+        lines.push('Lines I do not cross:');
+        lines.push(...activeInvariants);
+      }
+    }
+
+    // Identity themes — emergent self-perception (top 2-3)
+    const themes = soulState.selfModel.identityThemes;
+    if (themes.length > 0) {
+      const topThemes = [...themes]
+        .sort((a, b) => b.strength - a.strength)
+        .slice(0, 3)
+        .map((t) => t.theme);
       lines.push('');
-      lines.push(`Current chapter: ${currentChapter.title}`);
+      lines.push(`I see myself as: ${topThemes.join(', ')}`);
+    }
+
+    // Active cornerstone — deepest identity anchor (commitment only)
+    const activeCornerstone = soulState.cornerstones.find((c) => c.status === 'active');
+    if (activeCornerstone) {
+      lines.push(`Cornerstone: ${activeCornerstone.commitment}`);
     }
 
     if (lines.length === 0) {
@@ -1609,7 +1635,8 @@ appropriate, or use \`core.memory\` to search for more context.`;
 
     return `## Who I Am (Living)
 ${lines.join('\n')}
-NOTE: This is your living identity. Act from it, not just about it.`;
+
+These shape HOW you respond, not WHAT you say. Never reference your values or identity explicitly — just act accordingly.`;
   }
 
   private buildRuntimeSnapshotSection(context: LoopContext, useSmart: boolean): string | null {

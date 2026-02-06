@@ -488,6 +488,16 @@ export class CognitionProcessor implements CognitionLayer {
       void this.triggerCompactionIfNeeded(recipientId);
     }
 
+    // Trigger Parliament deliberation if unresolved tensions exist (non-blocking)
+    if (recipientId) {
+      void this.triggerParliamentIfEnabled(recipientId, context.tickId).catch((error: unknown) => {
+        this.logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Parliament trigger failed'
+        );
+      });
+    }
+
     return result;
   }
 
@@ -1079,12 +1089,12 @@ export class CognitionProcessor implements CognitionLayer {
 
     if (signal.type === 'user_message' && data) {
       const text = (data['text'] as string | undefined) ?? '';
-      return `User message: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`;
+      return `User message: "${text}"`;
     }
 
     if (signal.type === 'thought' && data) {
       const content = (data['content'] as string | undefined) ?? '';
-      return `Thought: "${content.slice(0, 100)}${content.length > 100 ? '...' : ''}"`;
+      return `Thought: "${content}"`;
     }
 
     if (signal.type === 'threshold_crossed' && data) {

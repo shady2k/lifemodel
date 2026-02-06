@@ -1,4 +1,5 @@
 import type { Logger } from '../../types/index.js';
+import type { CompletionRequest } from '../../llm/provider.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 import type { OpenAICompatibleConfig } from './openai-compatible.js';
 
@@ -88,7 +89,82 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
       headers['X-Title'] = this.config.appName;
     }
 
+    // Set User-Agent for app identification in OpenRouter dashboard
+    // This is the primary way OpenRouter identifies your app
+    const appName = this.config.appName ?? 'Unknown';
+    headers['User-Agent'] = `${appName}/1.0`;
+
     return headers;
+  }
+
+  /**
+   * Override to apply Gemini-specific message sanitization.
+   */
+  protected override buildRequestBody(
+    request: CompletionRequest,
+    model: string
+  ): Record<string, unknown> {
+    const body = super.buildRequestBody(request, model);
+
+    if (this.isGeminiModel(model)) {
+      const messages = body['messages'] as Record<string, unknown>[];
+      this.ensureUserTurnForGemini(messages);
+      this.sanitizeSystemMessagesForGemini(messages);
+    }
+
+    return body;
+  }
+
+  /**
+   * Check if the resolved model is a Gemini model on OpenRouter.
+   */
+  private isGeminiModel(model: string): boolean {
+    return model.startsWith('google/');
+  }
+
+  /**
+   * Gemini requires the first content turn (after system_instruction) to be 'user' role.
+   * OpenRouter collapses leading system messages into system_instruction, so if the
+   * first non-system message is 'assistant' (autonomous triggers with tool calls),
+   * Gemini rejects it. Insert a synthetic user turn to satisfy this constraint.
+   */
+  private ensureUserTurnForGemini(messages: Record<string, unknown>[]): void {
+    const firstContentIdx = messages.findIndex((m) => m['role'] !== 'system');
+    if (firstContentIdx === -1) return; // all system — OpenRouter handles this
+
+    const firstContentMsg = messages[firstContentIdx];
+    if (!firstContentMsg || firstContentMsg['role'] === 'user') return; // already valid
+
+    messages.splice(firstContentIdx, 0, {
+      role: 'user',
+      content: '[autonomous processing]',
+    });
+  }
+
+  /**
+   * Gemini only supports system messages as system_instruction (leading position).
+   * OpenRouter collapses leading system messages automatically, but mid-conversation
+   * system messages have no Gemini equivalent and cause 500 errors.
+   * Convert them to user role with a prefix to preserve instructional intent.
+   */
+  private sanitizeSystemMessagesForGemini(messages: Record<string, unknown>[]): void {
+    // Find where the leading system block ends
+    let firstNonSystemIdx = 0;
+    while (
+      firstNonSystemIdx < messages.length &&
+      messages[firstNonSystemIdx]?.['role'] === 'system'
+    ) {
+      firstNonSystemIdx++;
+    }
+
+    // Convert any system messages after the leading block to user role
+    for (let i = firstNonSystemIdx; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg?.['role'] === 'system') {
+        msg['role'] = 'user';
+        msg['content'] = `[System] ${String(msg['content'])}`;
+      }
+    }
   }
 
   /**

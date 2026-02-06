@@ -252,7 +252,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
     fastModel: 'anthropic/claude-haiku-4.5',
     smartModel: 'anthropic/claude-sonnet-4.5',
     appName: 'Lifemodel',
-    siteUrl: null,
+    siteUrl: 'https://github.com/shady2k/lifemodel',
     local: {
       baseUrl: null,
       model: null,

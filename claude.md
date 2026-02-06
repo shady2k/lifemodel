@@ -101,6 +101,7 @@ Project documentation is in the `docs/` folder:
 - `docs/concepts/` - Signals, intents, energy model, memory, conversation history
 - `docs/features/` - Thinking, news, reminders, social debt
 - `docs/plugins/` - Neurons, channels, plugin overview
+- `docs/adr/` - Architecture Decision Records (historical context for design choices)
 
 ## Data & Logs
 

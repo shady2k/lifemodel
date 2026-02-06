@@ -400,6 +400,14 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         model,
         messageCount: request.messages.length,
         toolCount: request.tools?.length ?? 0,
+        // Log key headers for debugging (excluding full Authorization for security)
+        headers: {
+          'Content-Type': headers['Content-Type'],
+          Authorization: headers['Authorization'] ? 'Bearer ***' : undefined,
+          ...(headers['User-Agent'] && { 'User-Agent': headers['User-Agent'] }),
+          ...(headers['X-Title'] && { 'X-Title': headers['X-Title'] }),
+          ...(headers['HTTP-Referer'] && { 'HTTP-Referer': headers['HTTP-Referer'] }),
+        },
         // requestBody without tools
         requestBody: {
           ...body,
