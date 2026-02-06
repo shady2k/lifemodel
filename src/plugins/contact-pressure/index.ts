@@ -136,6 +136,14 @@ export class ContactPressureNeuron extends BaseNeuron {
       // Compute actual rate of change for trend detection in aggregator
       // Note: previousValue is guaranteed defined here (checked above)
       const rateOfChange = currentValue - this.previousValue;
+
+      // Stable value: use longer keep-alive interval to prevent log spam
+      // Aggregator window is 5min; emitting every ~60s is plenty for freshness
+      if (rateOfChange === 0 && this.isInRefractoryPeriod(this.config.refractoryPeriodMs * 12)) {
+        this.updatePrevious(currentValue);
+        return undefined;
+      }
+
       const signal = this.createSignal(currentValue, result, rateOfChange, correlationId);
       const previousForLog = this.previousValue;
 
@@ -146,7 +154,7 @@ export class ContactPressureNeuron extends BaseNeuron {
         {
           previous: previousForLog,
           current: currentValue.toFixed(2),
-          emitReason: 'above_threshold',
+          emitReason: rateOfChange === 0 ? 'keep_alive' : 'above_threshold',
           contributions: result.contributions.map((c) => ({
             name: c.name,
             value: c.value.toFixed(2),

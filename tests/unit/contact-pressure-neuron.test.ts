@@ -160,10 +160,10 @@ describe('ContactPressureNeuron', () => {
       expect(signal2).toBeUndefined();
     });
 
-    it('should emit after refractory period expires', async () => {
+    it('should suppress stable value until keep-alive interval', async () => {
       // Create neuron with very short refractory period for testing
       const fastNeuron = new ContactPressureNeuron(createTestLogger(), {
-        refractoryPeriodMs: 10, // 10ms for testing
+        refractoryPeriodMs: 10, // 10ms → stable keep-alive = 120ms
       });
 
       const state = createAgentState({ socialDebt: 1.0 });
@@ -172,11 +172,34 @@ describe('ContactPressureNeuron', () => {
       const signal1 = fastNeuron.check(state, 1.0, 'test-corr-1');
       expect(signal1).toBeDefined();
 
-      // Wait for refractory to expire
+      // Wait for base refractory but not stable keep-alive
       await new Promise((resolve) => setTimeout(resolve, 15));
 
-      // Second emission should work now
+      // Same value - suppressed until keep-alive
       const signal2 = fastNeuron.check(state, 1.0, 'test-corr-2');
+      expect(signal2).toBeUndefined();
+
+      // Wait for stable keep-alive (120ms total)
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      // Keep-alive fires
+      const signal3 = fastNeuron.check(state, 1.0, 'test-corr-3');
+      expect(signal3).toBeDefined();
+    });
+
+    it('should emit immediately on value change after refractory', async () => {
+      const fastNeuron = new ContactPressureNeuron(createTestLogger(), {
+        refractoryPeriodMs: 10,
+      });
+
+      const state1 = createAgentState({ socialDebt: 1.0 });
+      fastNeuron.check(state1, 1.0, 'test-corr-1');
+
+      await new Promise((resolve) => setTimeout(resolve, 15));
+
+      // Changed value - emits immediately
+      const state2 = createAgentState({ socialDebt: 0.5 });
+      const signal2 = fastNeuron.check(state2, 1.0, 'test-corr-2');
       expect(signal2).toBeDefined();
     });
   });

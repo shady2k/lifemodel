@@ -458,12 +458,12 @@ export class AgenticLoop {
           if (name === 'core.agent' || name === 'core_agent') return false; // no micro-updates
         }
 
-        // No intermediate messages during reactions (autonomous trigger — no user waiting)
-        if (
-          context.triggerSignal.type === 'message_reaction' &&
-          (name === 'core.say' || name === 'core_say')
-        ) {
-          return false;
+        // Reaction processing: limited tool set (setInterest + remember + memory only)
+        if (context.triggerSignal.type === 'message_reaction') {
+          if (name === 'core.thought' || name === 'core_thought') return false; // prevents loops
+          if (name === 'core.say' || name === 'core_say') return false; // no user waiting
+          if (name === 'core.state' || name === 'core_state') return false; // snapshot sufficient
+          if (name === 'core.agent' || name === 'core_agent') return false; // no micro-updates
         }
 
         // Proactive contact: no housekeeping tools (prevents endless preparation)
@@ -2217,27 +2217,18 @@ ${activeConvWarning}
 
     return `## User Reaction
 
-The user reacted ${emoji ?? '👍'} to your message.
+The user reacted ${emoji ?? '👍'} to: ${messageContext}
 
-${messageContext}
+This is feedback, not a conversation turn. Most reactions need NO action and NO response.
 
-**This is feedback, not a question.** Interpret based on CONTEXT:
+**Default: output {"response": ""} (no message)**
 
-**Examples of context-aware interpretation:**
-- 👍 on closing/check-in ("How are you?", "Talk soon") → acknowledgment, no action
-- 👍 on suggestion/recommendation ("Try this...", "Have you considered...") → user likes it, call core.setInterest
-- 👍 on factual statement ("It's 3 PM", "Python was released in 1991") → acknowledgment, no action
-- 👍 on question asking for opinion ("Don't you think...?", "Wouldn't you agree...?") → user agrees, call core.remember
+Only act if the reaction reveals something worth saving:
+- Genuine topic interest → ONE core.setInterest call
+- Clear preference worth remembering → ONE core.remember call
+- Simple acknowledgment (most cases) → no tools, no response
 
-**Action guidance:**
-- If reaction shows genuine interest in a topic → core.setInterest
-- If it reveals a preference worth remembering → core.remember
-- If it's simple acknowledgment on non-substantive content → no response needed
-
-**IMPORTANT:** Never repeat your previous message. If responding, say something NEW.
-
-**To end without sending a message:** output {"response": ""}
-**To respond:** output {"response": "your NEW message"} (only if you have something meaningful to add)`;
+Never repeat your previous message. Max 1 tool call total.`;
   }
 
   /**

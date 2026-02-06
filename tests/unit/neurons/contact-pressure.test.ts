@@ -76,21 +76,46 @@ describe('ContactPressureNeuron', () => {
       expect(second).toBeUndefined();
     });
 
-    it('emits continuously while above emitThreshold (new behavior)', async () => {
+    it('suppresses stable value until keep-alive interval', async () => {
       const neuron = createContactPressureNeuron(logger, {
-        refractoryPeriodMs: 10, // 10ms for testing
+        refractoryPeriodMs: 10, // 10ms for testing → stable keep-alive = 120ms
       });
       const state = createAgentState({ socialDebt: 0.5 }); // pressure = 0.25 > emitThreshold 0.2
 
       const first = neuron.check(state, 0.5, 'tick-1');
       expect(first).toBeDefined();
 
-      // Wait for refractory to expire
+      // Wait for base refractory (10ms) but not stable keep-alive (120ms)
       await new Promise((r) => setTimeout(r, 15));
 
-      // Same state - still above threshold, so still emits (emitWhileAbove: true)
+      // Same state - suppressed because value hasn't changed (stable keep-alive)
       const sameState = neuron.check(state, 0.5, 'tick-2');
-      expect(sameState).toBeDefined(); // Now emits continuously while above threshold
+      expect(sameState).toBeUndefined();
+
+      // Wait for stable keep-alive to expire (120ms total)
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Now keep-alive fires
+      const keepAlive = neuron.check(state, 0.5, 'tick-3');
+      expect(keepAlive).toBeDefined();
+    });
+
+    it('emits immediately when value changes above threshold', async () => {
+      const neuron = createContactPressureNeuron(logger, {
+        refractoryPeriodMs: 10, // 10ms for testing
+      });
+      const state1 = createAgentState({ socialDebt: 0.5 }); // pressure = 0.25
+
+      const first = neuron.check(state1, 0.5, 'tick-1');
+      expect(first).toBeDefined();
+
+      // Wait for base refractory only
+      await new Promise((r) => setTimeout(r, 15));
+
+      // Changed state - emits immediately despite stable keep-alive not due
+      const state2 = createAgentState({ socialDebt: 0.8 }); // pressure = 0.40
+      const changed = neuron.check(state2, 0.5, 'tick-2');
+      expect(changed).toBeDefined();
     });
 
     it('does not emit below emitThreshold (Weber-Fechner for change detection)', async () => {
