@@ -432,6 +432,13 @@ export class AgenticLoop {
         state.proactiveToolBudget = 3;
         this.logger.debug({ budget: 3 }, 'Thought processing: tool budget set');
       }
+      if (
+        context.triggerSignal.type === 'plugin_event' &&
+        state.proactiveToolBudget === undefined
+      ) {
+        state.proactiveToolBudget = 4;
+        this.logger.debug({ budget: 4 }, 'Plugin event: tool budget set');
+      }
 
       const filteredTools = tools.filter((t) => {
         if (typeof t !== 'object') return true;
@@ -749,6 +756,25 @@ export class AgenticLoop {
               error: `${toolName} limit reached (max ${String(maxCalls)} per turn). Use the results you already have.`,
             }),
           });
+
+          // Count limit violations toward proactive budget (LLM "spent" an action)
+          if (state.proactiveToolBudget !== undefined) {
+            state.proactiveToolBudget--;
+            if (state.proactiveToolBudget <= 0) {
+              state.forceRespond = true;
+            }
+          }
+
+          // Global safety valve: force respond after cumulative limit violations
+          state.limitViolationCount++;
+          if (state.limitViolationCount >= 3) {
+            state.forceRespond = true;
+            this.logger.warn(
+              { violations: state.limitViolationCount },
+              'Multiple tool limits exceeded — forcing response'
+            );
+          }
+
           continue;
         }
 
@@ -1546,6 +1572,7 @@ Rules:
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
 - Tool returns success:false → inform user the action failed, don't claim success
+- Before write actions (log, delete, update), check current state first (list/summary). Never assume data is missing — verify.
 - Conversation history has timestamps (e.g. [09:18], [yesterday 23:55], [Feb 4, 14:30]). Use them for temporal reasoning. Don't repeat information recently told to the user.
 - Keep responses proportional to the user's message length. Casual 1-2 word messages deserve 1-2 sentence replies. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
 - When processing takes time (multiple tool calls needed), call core.say("brief acknowledgment") first. It sends a message immediately while you continue working. Max 2 per turn. Don't use for your final response.
@@ -1557,7 +1584,8 @@ Rules:
 - If response needs state, call core.state first (unless snapshot answers it)`
     }
 
-MEMORY: Save ALL observations about the user with core.remember(attribute, value) — just 2 fields needed. Preferences, habits, work style, opinions, personality traits. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought.
+MEMORY: Save user observations with core.remember(attribute, value) — preferences, habits, work style, opinions, personality traits. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought.
+NEVER duplicate plugin data into core.remember. Plugin tools (plugin.*) are the authoritative source for their domain. Don't remember calorie totals, food logs, weight entries, news items, or any data that a plugin already stores. Only remember stable user traits (e.g., "prefers high-protein meals"), not transient data points.
 INTERESTS: core.setInterest for ongoing interests (not one-time questions). Use 1-3 word keywords, call multiple times for distinct topics. Explicit request → strong_positive + urgent=true. Implicit → weak_positive.`;
   }
 

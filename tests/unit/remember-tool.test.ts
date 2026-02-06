@@ -18,7 +18,7 @@ describe('core.remember tool', () => {
   describe('schema', () => {
     it('has correct name and description', () => {
       expect(tool.name).toBe('core.remember');
-      expect(tool.description).toContain('Remember a fact');
+      expect(tool.description).toContain('Remember a stable user trait or fact');
     });
 
     it('has required parameters: attribute, value', () => {

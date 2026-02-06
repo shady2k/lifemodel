@@ -80,7 +80,7 @@ export function createRememberTool(): Tool {
     name: 'core.remember',
     maxCallsPerTurn: 3,
     description:
-      'Remember a fact. Minimal: attribute + value (defaults: subject=user, source=user_implicit). For non-user subjects or explicit statements (name, birthday), specify subject/source.',
+      'Remember a stable user trait or fact. NOT for data managed by plugin tools (calories, weight, news). Minimal: attribute + value (defaults: subject=user, source=user_implicit). For non-user subjects or explicit statements (name, birthday), specify subject/source.',
     tags: ['memory', 'facts', 'user-model'],
     hasSideEffects: true,
     parameters,

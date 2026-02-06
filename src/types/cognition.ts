@@ -584,6 +584,9 @@ export interface LoopState {
   /** Per-tool call counts for maxCallsPerTurn enforcement */
   toolCallCounts: Map<string, number>;
 
+  /** Cumulative count of per-tool limit violations (safety valve for tool-limit loops) */
+  limitViolationCount: number;
+
   /** Collected thought contents (batched into single thought at end) */
   collectedThoughts: string[];
 }
@@ -606,6 +609,7 @@ export function createLoopState(): LoopState {
     forceRespondAttempts: 0,
     everForcedRespond: false,
     toolCallCounts: new Map<string, number>(),
+    limitViolationCount: 0,
     collectedThoughts: [],
   };
 }
