@@ -17,6 +17,7 @@ export { createInterestTool } from './interest.js';
 export { createSoulTool } from './soul.js';
 export { createEscalateTool } from './escalate.js';
 export { createDeferTool } from './defer.js';
+export { createSayTool } from './say.js';
 
 // Types
 export type {

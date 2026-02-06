@@ -26,6 +26,7 @@ import {
   createSoulTool,
   createEscalateTool,
   createDeferTool,
+  createSayTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
@@ -410,6 +411,9 @@ export class ToolRegistry {
 
     // Defer tool (defer proactive contact - terminal)
     this.tools.set('core.defer', createDeferTool());
+
+    // Say tool (intermediate messages - intercepted by agentic loop)
+    this.tools.set('core.say', createSayTool());
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

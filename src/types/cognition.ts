@@ -591,6 +591,9 @@ export interface LoopState {
 
   /** Tool budget for proactive contact (undefined = no limit) */
   proactiveToolBudget?: number | undefined;
+
+  /** Track core.say calls to enforce per-turn limit */
+  sayCount: number;
 }
 
 /**
@@ -611,6 +614,7 @@ export function createLoopState(): LoopState {
     conversationStatus: undefined,
     forceRespondAttempts: 0,
     everForcedRespond: false,
+    sayCount: 0,
   };
 }
 

@@ -442,6 +442,15 @@ export class AgenticLoop {
           return false;
         }
 
+        // No intermediate messages during internal processing (thoughts, reactions)
+        // These are autonomous triggers — no user is waiting for feedback
+        if (
+          (isThoughtTrigger || context.triggerSignal.type === 'message_reaction') &&
+          (name === 'core.say' || name === 'core_say')
+        ) {
+          return false;
+        }
+
         // Proactive contact: no housekeeping tools (prevents endless preparation)
         if (isProactiveTrigger) {
           if (name === 'core.thought' || name === 'core_thought') return false;
@@ -496,32 +505,6 @@ export class AgenticLoop {
         const parsed = this.parseResponseContent(response.content);
         if (parsed.text) {
           state.thoughts.push(parsed.text);
-        }
-      }
-
-      // Send intermediate message if LLM emitted structured JSON response alongside tool calls
-      // Only send if content is a valid {response: "text"} JSON (not plain chain-of-thought)
-      if (
-        response.content &&
-        response.toolCalls.length > 0 &&
-        this.callbacks?.onImmediateIntent &&
-        context.recipientId
-      ) {
-        try {
-          const json = JSON.parse(response.content.trim()) as Record<string, unknown>;
-          if (json['response'] && typeof json['response'] === 'string' && json['response'].trim()) {
-            this.callbacks.onImmediateIntent({
-              type: 'SEND_MESSAGE',
-              payload: {
-                recipientId: context.recipientId,
-                text: json['response'].trim(),
-                conversationStatus: 'active',
-              },
-            });
-            this.logger.debug({ textLength: json['response'].length }, 'Intermediate message sent');
-          }
-        } catch {
-          // Not valid JSON — chain-of-thought text, don't send to user
         }
       }
 
@@ -747,6 +730,59 @@ export class AgenticLoop {
           return { success: true, terminal, intents, state };
         }
 
+        // Intercept core.say - send intermediate message, continue loop
+        if (toolName === 'core.say') {
+          const text = typeof args['text'] === 'string' ? args['text'].trim() : '';
+          state.sayCount++;
+          state.toolCallCount++;
+
+          if (!text) {
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({ success: false, error: 'Text cannot be empty' }),
+            });
+            continue;
+          }
+
+          if (state.sayCount > 2) {
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify({
+                success: false,
+                error:
+                  'core.say limit reached (max 2 per turn). Continue processing and output your final response.',
+              }),
+            });
+            continue;
+          }
+
+          // Send immediately via callback
+          if (this.callbacks?.onImmediateIntent && context.recipientId) {
+            this.callbacks.onImmediateIntent({
+              type: 'SEND_MESSAGE',
+              payload: {
+                recipientId: context.recipientId,
+                text,
+                conversationStatus: 'active',
+              },
+            });
+          }
+
+          this.logger.debug(
+            { textLength: text.length, sayCount: state.sayCount },
+            'Intermediate message sent via core.say'
+          );
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ success: true, message: 'Message sent to user' }),
+          });
+          continue;
+        }
+
         // Track for smart retry
         state.executedTools.push({
           toolCallId: toolCall.id,
@@ -832,7 +868,7 @@ export class AgenticLoop {
           const shouldForceRespond = identicalCount > MAX_REPEATED_IDENTICAL_CALLS;
 
           this.logger.warn(
-            { tool: toolName, identicalCount, forceRespond: shouldForceRespond },
+            { tool: toolName, params: args, identicalCount, forceRespond: shouldForceRespond },
             shouldForceRespond
               ? 'Identical tool call repeated - forcing response'
               : 'Identical tool call detected - warning LLM'
@@ -1448,7 +1484,7 @@ Rules:
 - Tool returns success:false → inform user the action failed, don't claim success
 - Conversation history has timestamps (e.g. [09:18], [yesterday 23:55], [Feb 4, 14:30]). Use them for temporal reasoning. Don't repeat information recently told to the user.
 - Keep responses proportional to the user's message length. Casual 1-2 word messages deserve 1-2 sentence replies. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
-- When processing takes time (tool calls needed), you can write a quick acknowledgment as {"response": "text"} alongside tool calls. This text is sent immediately to the user.
+- When processing takes time (multiple tool calls needed), call core.say("brief acknowledgment") first. It sends a message immediately while you continue working. Max 2 per turn. Don't use for your final response.
 - IMPORTANT: Under NO circumstances should you ever use emoji characters in your responses.${
       useSmart
         ? ''
