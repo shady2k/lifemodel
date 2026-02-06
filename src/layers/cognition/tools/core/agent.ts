@@ -17,7 +17,8 @@ export function createAgentTool(): Tool {
     {
       name: 'field',
       type: 'string',
-      description: 'Field to update (e.g., socialDebt, energy)',
+      description:
+        'Field to update (e.g., curiosity, taskPressure). NOTE: socialDebt and energy are managed automatically — do not update them.',
       required: true,
     },
     {
@@ -43,8 +44,9 @@ export function createAgentTool(): Tool {
 
   return {
     name: 'core.agent',
+    maxCallsPerTurn: 1,
     description:
-      'Update agent internal state (energy, socialDebt, etc.). Subject to field policies (confidence thresholds, maxDelta). Values may be clamped.',
+      'Update agent internal state (curiosity, taskPressure). socialDebt and energy are automatic — do NOT update them. Subject to field policies (confidence thresholds, maxDelta). Values may be clamped.',
     tags: ['update', 'agent-state', 'internal'],
     hasSideEffects: true,
     parameters,
@@ -72,6 +74,16 @@ export function createAgentTool(): Tool {
           success: false,
           action: 'update',
           error: 'Missing required parameter: field',
+        });
+      }
+
+      // Block automatic fields — these are managed by the autonomic layer
+      const AUTOMATIC_FIELDS = ['socialDebt', 'energy'];
+      if (AUTOMATIC_FIELDS.includes(field)) {
+        return Promise.resolve({
+          success: false,
+          action: 'update',
+          error: `Field "${field}" is managed automatically and cannot be updated via core.agent. Do not retry.`,
         });
       }
       if (!operationRaw || (operationRaw !== 'set' && operationRaw !== 'delta')) {

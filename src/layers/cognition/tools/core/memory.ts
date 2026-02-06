@@ -105,6 +105,7 @@ export interface MemoryProvider {
     type: 'thought' | 'fact' | 'intention',
     options?: RecentByTypeOptions
   ): Promise<MemoryEntry[]>;
+  delete(id: string): Promise<boolean>;
 }
 
 /**
@@ -176,6 +177,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
 
   return {
     name: 'core.memory',
+    maxCallsPerTurn: 4,
     description: `Long-term memory: search, save, or saveFact.
 
 Search returns paginated results (relevance + recency + confidence scoring).

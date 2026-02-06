@@ -64,6 +64,7 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
 
   return {
     name: 'core.time',
+    maxCallsPerTurn: 1,
     description:
       'Get time information. Actions: now (current time), since (elapsed time from event).',
     tags: ['current-time', 'elapsed', 'timezone'],

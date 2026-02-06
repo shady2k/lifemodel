@@ -39,6 +39,7 @@ export function createStateTool(deps: StateToolDeps): Tool {
 
   return {
     name: 'core.state',
+    maxCallsPerTurn: 1,
     description: 'Get agent state (energy, mood) or user model.',
     tags: ['agent-state', 'user-model'],
     hasSideEffects: false,

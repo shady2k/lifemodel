@@ -328,6 +328,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get recent thoughts for context priming
     const recentThoughts = await this.getRecentThoughts(recipientId);
 
+    // Get pending intentions from thought processing (insights to surface)
+    const pendingIntentions = await this.getPendingIntentions(recipientId);
+
     // Get soul state for identity awareness
     const soulState = await this.getSoulState();
 
@@ -364,6 +367,7 @@ export class CognitionProcessor implements CognitionLayer {
       timeSinceLastMessageMs,
       completedActions,
       recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
+      pendingIntentions: pendingIntentions.length > 0 ? pendingIntentions : undefined,
       soulState,
       unresolvedTensions: unresolvedTensions.length > 0 ? unresolvedTensions : undefined,
       runtimeConfig: {
@@ -371,6 +375,34 @@ export class CognitionProcessor implements CognitionLayer {
       },
       drainPendingUserMessages: context.drainPendingUserMessages,
     };
+
+    // Mark surfaced intentions as consumed (delete from memory)
+    // Do this before running the loop so they don't re-appear on retry
+    if (pendingIntentions.length > 0 && this.memoryProvider) {
+      const rawThreshold =
+        triggerType === 'threshold_crossed'
+          ? (triggerSignal.data as Record<string, unknown> | undefined)?.['thresholdName']
+          : undefined;
+      const thresholdName = typeof rawThreshold === 'string' ? rawThreshold : '';
+      const isProactiveTrigger =
+        thresholdName.includes('proactive') || thresholdName.includes('contact_urge');
+      const isUserFacing =
+        triggerType === 'user_message' || triggerType === 'contact_urge' || isProactiveTrigger;
+      if (isUserFacing) {
+        for (const intention of pendingIntentions) {
+          this.memoryProvider.delete(intention.id).catch((err: unknown) => {
+            this.logger.trace(
+              { error: err instanceof Error ? err.message : String(err), id: intention.id },
+              'Failed to delete consumed intention'
+            );
+          });
+        }
+        this.logger.debug(
+          { count: pendingIntentions.length },
+          'Pending intentions consumed and deleted'
+        );
+      }
+    }
 
     // Run the agentic loop
     let loopResult;
@@ -404,6 +436,21 @@ export class CognitionProcessor implements CognitionLayer {
 
     const duration = Date.now() - startTime;
 
+    // Build tool breakdown summary (e.g., "remember×3, thought×1, state×1")
+    const toolCounts = new Map<string, number>();
+    for (const tool of loopResult.state.executedTools) {
+      toolCounts.set(tool.name, (toolCounts.get(tool.name) ?? 0) + 1);
+    }
+    // Include intercepted tools (core.say, core.thought) from generic per-tool counts
+    for (const [name, count] of loopResult.state.toolCallCounts) {
+      if (count > 0 && !toolCounts.has(name)) {
+        toolCounts.set(name, count);
+      }
+    }
+    const toolBreakdown = Array.from(toolCounts.entries())
+      .map(([name, count]) => (count > 1 ? `${name}×${String(count)}` : name))
+      .join(', ');
+
     // Prominent turn-level timing log (user-perceived latency)
     this.logger.info(
       {
@@ -415,6 +462,7 @@ export class CognitionProcessor implements CognitionLayer {
         intents: loopResult.intents.length,
         iterations: loopResult.state.iteration,
         toolCalls: loopResult.state.toolCallCount,
+        tools: toolBreakdown || 'none',
         usedSmartRetry: loopResult.usedSmartRetry,
         turnDurationMs: duration,
       },
@@ -658,6 +706,39 @@ export class CognitionProcessor implements CognitionLayer {
       this.logger.trace(
         { error: error instanceof Error ? error.message : 'Unknown' },
         'Failed to get recent thoughts'
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Get pending intentions from thought processing.
+   * These are non-urgent insights saved by thought loops for the next conversation.
+   * Uses a 2-hour window — older intentions are no longer relevant.
+   */
+  private async getPendingIntentions(
+    recipientId?: string
+  ): Promise<{ id: string; type: 'intention'; content: string; timestamp: Date }[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      const intentions = await this.memoryProvider.getRecentByType('intention', {
+        recipientId,
+        windowMs: 2 * 60 * 60 * 1000, // 2 hours
+        limit: 3,
+      });
+      return intentions.map((t) => ({
+        id: t.id,
+        type: 'intention' as const,
+        content: t.content,
+        timestamp: t.timestamp,
+      }));
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get pending intentions'
       );
       return [];
     }

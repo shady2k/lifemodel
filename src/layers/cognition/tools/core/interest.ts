@@ -88,6 +88,7 @@ export function createInterestTool(): Tool {
 
   return {
     name: 'core.setInterest',
+    maxCallsPerTurn: 2,
     description:
       'Track ongoing topic interests. For "warn me", "interested in", "notify me". Not for one-time questions.',
     tags: ['preferences', 'user-model', 'interests'],

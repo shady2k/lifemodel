@@ -33,6 +33,7 @@ export function createSayTool(): Tool {
 
   return {
     name: 'core.say',
+    maxCallsPerTurn: 2,
     description:
       'Send a brief intermediate message while continuing to process. ' +
       'Use ONLY for short acknowledgments before tool calls (e.g., "Let me check...", "One moment..."). ' +

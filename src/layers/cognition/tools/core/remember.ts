@@ -47,49 +47,60 @@ export interface RememberResult {
  */
 export function createRememberTool(): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'subject', type: 'string', required: true, description: '"user", name, or topic' },
     {
       name: 'attribute',
       type: 'string',
       required: true,
-      description: 'birthday, preference, etc.',
+      description: 'What to remember (birthday, preference, work_style, habit, etc.)',
     },
     {
       name: 'value',
       type: 'string',
       required: true,
-      description: 'Value (or "+0.3"/"-0.2" delta for numeric)',
+      description: 'The value or fact',
+    },
+    {
+      name: 'subject',
+      type: 'string',
+      required: false,
+      description: 'Who/what this is about (default: user). Set for non-user subjects.',
     },
     {
       name: 'source',
       type: 'string',
       enum: EVIDENCE_SOURCES,
-      required: true,
-      description: 'user_quote|user_explicit|user_implicit|inferred',
+      required: false,
+      description:
+        'Evidence type (default: user_implicit). Set user_explicit/user_quote for high-stakes facts like name, birthday.',
     },
     { name: 'confidence', type: 'number', required: false, description: '0-1 (auto from source)' },
   ];
 
   return {
     name: 'core.remember',
-    description: 'Remember a fact about the user or any subject.',
+    maxCallsPerTurn: 3,
+    description:
+      'Remember a fact. Minimal: attribute + value (defaults: subject=user, source=user_implicit). For non-user subjects or explicit statements (name, birthday), specify subject/source.',
     tags: ['memory', 'facts', 'user-model'],
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     execute: (args): Promise<RememberResult> => {
-      const subject = args['subject'] as string | undefined;
+      // Apply defaults for optional fields
+      const subjectRaw = args['subject'] as string | null | undefined;
+      const subject = subjectRaw ?? 'user';
       const attribute = args['attribute'] as string | undefined;
       const value = args['value'] as string | undefined;
-      const sourceArg = args['source'] as string | undefined;
+      const sourceRaw = args['source'] as string | null | undefined;
+      const sourceArg = sourceRaw ?? 'user_implicit';
       // Handle both undefined and null (strict mode sends null for optional fields)
       const confidenceArg = args['confidence'] as number | null | undefined;
 
-      // Validate required fields
-      if (!subject || !attribute || !value || !sourceArg) {
+      // Validate required fields (only attribute and value now)
+      if (!attribute || !value) {
         return Promise.resolve({
           success: false,
-          error: 'Missing required fields: subject, attribute, value, source',
+          error: 'Missing required fields: attribute, value',
         });
       }
 

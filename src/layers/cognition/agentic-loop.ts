@@ -32,7 +32,6 @@ import {
   DEFAULT_LOOP_CONFIG,
   createLoopState,
   MAX_REPEATED_FAILED_CALLS,
-  MAX_CONSECUTIVE_SEARCHES,
   MAX_REPEATED_IDENTICAL_CALLS,
 } from '../../types/cognition.js';
 import { THOUGHT_LIMITS } from '../../types/signal.js';
@@ -199,6 +198,9 @@ export interface LoopContext {
 
   /** Recent thoughts for context priming (internal context) */
   recentThoughts?: MemoryEntry[] | undefined;
+
+  /** Pending intentions from thought processing (insights to share with user) */
+  pendingIntentions?: MemoryEntry[] | undefined;
 
   /** Soul state for identity awareness (who I am, what I care about) */
   soulState?: FullSoulState | undefined;
@@ -421,10 +423,14 @@ export class AgenticLoop {
         context.triggerSignal.type === 'contact_urge' ||
         this.isProactiveTrigger(context.triggerSignal);
 
-      // Set proactive tool budget (4 calls max for proactive contact)
+      // Set tool budgets for autonomous triggers
       if (isProactiveTrigger && state.proactiveToolBudget === undefined) {
         state.proactiveToolBudget = 4;
         this.logger.debug({ budget: 4 }, 'Proactive contact: tool budget set');
+      }
+      if (isThoughtTrigger && state.proactiveToolBudget === undefined) {
+        state.proactiveToolBudget = 3;
+        this.logger.debug({ budget: 3 }, 'Thought processing: tool budget set');
       }
 
       const filteredTools = tools.filter((t) => {
@@ -437,15 +443,17 @@ export class AgenticLoop {
           return false;
         }
 
-        // Can't emit thoughts when processing a thought (prevents loops entirely)
-        if (isThoughtTrigger && (name === 'core.thought' || name === 'core_thought')) {
-          return false;
+        // Thought processing: limited tool set (memory + remember + setInterest only)
+        if (isThoughtTrigger) {
+          if (name === 'core.thought' || name === 'core_thought') return false; // prevents loops
+          if (name === 'core.say' || name === 'core_say') return false; // no user waiting
+          if (name === 'core.state' || name === 'core_state') return false; // snapshot sufficient
+          if (name === 'core.agent' || name === 'core_agent') return false; // no micro-updates
         }
 
-        // No intermediate messages during internal processing (thoughts, reactions)
-        // These are autonomous triggers — no user is waiting for feedback
+        // No intermediate messages during reactions (autonomous trigger — no user waiting)
         if (
-          (isThoughtTrigger || context.triggerSignal.type === 'message_reaction') &&
+          context.triggerSignal.type === 'message_reaction' &&
           (name === 'core.say' || name === 'core_say')
         ) {
           return false;
@@ -566,12 +574,43 @@ export class AgenticLoop {
           }
         }
 
+        // Thought trigger response routing:
+        // - urgent: true → send message immediately (rare: safety, deadlines)
+        // - non-urgent + text → save as intention for next conversation, don't send
+        // - empty → noAction (normal path)
+        let effectiveMessageText = messageText;
+        if (context.triggerSignal.type === 'thought' && messageText) {
+          if (parsed.urgent) {
+            this.logger.info(
+              { textLength: messageText.length },
+              'Thought loop: urgent response — sending to user'
+            );
+          } else {
+            this.logger.info(
+              { textLength: messageText.length, textPreview: messageText.slice(0, 80) },
+              'Thought loop: non-urgent response — saving as intention'
+            );
+            // Save insight as a memory intention for the next conversation
+            if (this.callbacks?.onImmediateIntent) {
+              this.callbacks.onImmediateIntent({
+                type: 'SAVE_TO_MEMORY',
+                payload: {
+                  type: 'intention',
+                  content: messageText,
+                  tags: ['thought_insight'],
+                },
+              });
+            }
+            effectiveMessageText = null; // Don't send to user
+          }
+        }
+
         this.logger.debug(
           { iterations: state.iteration, toolCalls: state.toolCallCount, status: parsed.status },
           'Agentic loop completed naturally (no tool calls)'
         );
 
-        return this.buildFinalResultFromNaturalCompletion(messageText, state, context);
+        return this.buildFinalResultFromNaturalCompletion(effectiveMessageText, state, context);
       }
 
       // Add assistant message with tool calls to history
@@ -690,6 +729,29 @@ export class AgenticLoop {
           }
         }
 
+        // ── Per-tool call limit (maxCallsPerTurn) ──
+        // Generic mechanism: each tool declares its own limit.
+        // Replaces special-purpose counters (sayCount, thoughtCount, consecutiveSearches).
+        const currentCallCount = (state.toolCallCounts.get(toolName) ?? 0) + 1;
+        state.toolCallCounts.set(toolName, currentCallCount);
+        const maxCalls = this.toolRegistry.getMaxCallsPerTurn(toolName);
+        if (maxCalls !== undefined && currentCallCount > maxCalls) {
+          this.logger.warn(
+            { tool: toolName, count: currentCallCount, max: maxCalls },
+            'Tool per-turn call limit exceeded'
+          );
+          state.toolCallCount++;
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({
+              success: false,
+              error: `${toolName} limit reached (max ${String(maxCalls)} per turn). Use the results you already have.`,
+            }),
+          });
+          continue;
+        }
+
         // Intercept core.escalate - restart with smart model
         if (toolName === 'core.escalate') {
           const reason =
@@ -733,7 +795,6 @@ export class AgenticLoop {
         // Intercept core.say - send intermediate message, continue loop
         if (toolName === 'core.say') {
           const text = typeof args['text'] === 'string' ? args['text'].trim() : '';
-          state.sayCount++;
           state.toolCallCount++;
 
           if (!text) {
@@ -741,19 +802,6 @@ export class AgenticLoop {
               role: 'tool',
               tool_call_id: toolCall.id,
               content: JSON.stringify({ success: false, error: 'Text cannot be empty' }),
-            });
-            continue;
-          }
-
-          if (state.sayCount > 2) {
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: JSON.stringify({
-                success: false,
-                error:
-                  'core.say limit reached (max 2 per turn). Continue processing and output your final response.',
-              }),
             });
             continue;
           }
@@ -771,7 +819,7 @@ export class AgenticLoop {
           }
 
           this.logger.debug(
-            { textLength: text.length, sayCount: state.sayCount },
+            { textLength: text.length, sayCount: state.toolCallCounts.get('core.say') ?? 0 },
             'Intermediate message sent via core.say'
           );
 
@@ -779,6 +827,32 @@ export class AgenticLoop {
             role: 'tool',
             tool_call_id: toolCall.id,
             content: JSON.stringify({ success: true, message: 'Message sent to user' }),
+          });
+          continue;
+        }
+
+        // Intercept core.thought - batch all thoughts, process as one later
+        if (toolName === 'core.thought') {
+          const content = typeof args['content'] === 'string' ? args['content'].trim() : '';
+          const thoughtCount = state.toolCallCounts.get('core.thought') ?? 0;
+          state.toolCallCount++;
+
+          if (content.length >= 5) {
+            state.collectedThoughts.push(content);
+          }
+
+          // Always return success — thoughts are batched silently
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({
+              success: true,
+              action: 'emit',
+              message:
+                thoughtCount === 1
+                  ? 'Thought queued for future processing'
+                  : 'Thought batched (will be merged with previous). Now respond to the user.',
+            }),
           });
           continue;
         }
@@ -895,44 +969,6 @@ export class AgenticLoop {
           if (shouldForceRespond) {
             state.forceRespond = true;
           }
-          continue; // Skip normal result handling
-        }
-
-        // Track consecutive memory searches to detect search loops
-        const isMemorySearch =
-          toolName === 'core.memory' && (args['action'] as string | undefined) === 'search';
-
-        if (isMemorySearch) {
-          state.consecutiveSearches++;
-        } else {
-          state.consecutiveSearches = 0; // Reset on non-search tool
-        }
-
-        // Detect search loop - LLM keeps searching but not making progress
-        const isSearchLoop = state.consecutiveSearches >= MAX_CONSECUTIVE_SEARCHES;
-        if (isSearchLoop && result.success) {
-          this.logger.warn(
-            { consecutiveSearches: state.consecutiveSearches, tool: toolName },
-            'Detected memory search loop - nudging LLM to try tools or respond'
-          );
-
-          // Add nudge to the successful response
-          const searchNudge = {
-            ...(result.data as Record<string, unknown>),
-            _searchLoopWarning: {
-              consecutiveSearches: state.consecutiveSearches,
-              message:
-                'You have searched memory multiple times without finding what you need. ' +
-                'STOP searching. Either: (1) Try the actual tool that needs this data - it will tell you what is missing, ' +
-                'or (2) Respond to the user directly asking for the information.',
-            },
-          };
-
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: JSON.stringify(searchNudge),
-          });
           continue; // Skip normal result handling
         }
 
@@ -1089,6 +1125,19 @@ export class AgenticLoop {
     const thoughtsSection = this.buildRecentThoughtsSection(context);
     if (thoughtsSection) {
       sections.push(thoughtsSection);
+    }
+
+    // Pending intentions (insights from thought processing to weave into conversation)
+    // Only for user-facing triggers — not internal processing (thoughts, reactions, plugin events)
+    const isUserFacing =
+      context.triggerSignal.type === 'user_message' ||
+      context.triggerSignal.type === 'contact_urge' ||
+      this.isProactiveTrigger(context.triggerSignal);
+    if (isUserFacing) {
+      const intentionsSection = this.buildPendingIntentionsSection(context);
+      if (intentionsSection) {
+        sections.push(intentionsSection);
+      }
     }
 
     // Soul section (identity awareness) - after thoughts, before tensions
@@ -1273,6 +1322,7 @@ export class AgenticLoop {
   private parseResponseContent(content: string | null): {
     text: string | null;
     status?: ConversationStatus;
+    urgent?: boolean;
   } {
     if (!content) {
       return { text: null };
@@ -1298,7 +1348,11 @@ export class AgenticLoop {
         jsonStr = jsonMatch[0];
       }
 
-      const parsed = JSON.parse(jsonStr) as { response?: string; status?: string };
+      const parsed = JSON.parse(jsonStr) as {
+        response?: string;
+        status?: string;
+        urgent?: boolean;
+      };
       // Check for string type explicitly - empty string "" is a valid "no response" value
       // Using !== undefined because "" is falsy but valid
       if (parsed.response !== undefined && typeof parsed.response === 'string') {
@@ -1312,11 +1366,9 @@ export class AgenticLoop {
         // Empty response means "don't send a message" - return null for text
         const responseText = parsed.response.trim() || null;
 
-        // Only include status in result if it was provided and valid
-        if (status) {
-          return { text: responseText, status };
-        }
-        return { text: responseText };
+        const urgent = parsed.urgent === true;
+
+        return { text: responseText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
       }
     } catch {
       // Not JSON or parsing failed - use as plain text
@@ -1345,6 +1397,23 @@ export class AgenticLoop {
       parentSignalId: context.triggerSignal.id,
     };
 
+    // Emit a single merged thought from all collected thoughts (batched during loop)
+    if (state.collectedThoughts.length > 0) {
+      const mergedContent = state.collectedThoughts.join(' | ');
+      const mergedResult: ToolResult = {
+        toolCallId: 'batched-thought',
+        toolName: 'core.thought',
+        resultId: 'batched-thought',
+        success: true,
+        data: { content: mergedContent },
+      };
+      const thoughtIntent = this.thoughtToolResultToIntent(mergedResult, context);
+      if (thoughtIntent) {
+        thoughtIntent.trace = { ...baseTrace, toolCallId: 'batched-thought' };
+        intents.push(thoughtIntent);
+      }
+    }
+
     // Convert tool results to intents
     for (const result of toolResults) {
       // Skip results whose intents were already applied immediately during loop execution
@@ -1353,13 +1422,8 @@ export class AgenticLoop {
         continue;
       }
 
-      // Handle core.thought specially (complex depth logic)
-      if (result.toolName === 'core.thought' && result.success) {
-        const thoughtIntent = this.thoughtToolResultToIntent(result, context);
-        if (thoughtIntent) {
-          thoughtIntent.trace = { ...baseTrace, toolCallId: result.toolCallId };
-          intents.push(thoughtIntent);
-        }
+      // core.thought is handled above via collectedThoughts batch — skip individual results
+      if (result.toolName === 'core.thought') {
         continue;
       }
 
@@ -1467,7 +1531,7 @@ ${genderNote}
 
 Current time: ${currentDateTime}
 
-Capabilities: think → use tools → update beliefs (with evidence) → respond
+Flow: if multiple tools needed, core.say first → gather info (tools) → update beliefs (with evidence) → respond
 
 Rules:
 - Always output JSON: {"response": "text"} or {"response": "text", "status": "awaiting_answer"}
@@ -1475,7 +1539,7 @@ Rules:
 - Don't re-greet; use name sparingly (first greeting or after long pause)
 - Only promise what tools can do. Memory ≠ reminders.
 - Call core.escalate if genuinely uncertain and need deeper reasoning (fast model only)
-- Time awareness: "Current time" above is the AUTHORITATIVE present moment. Use it for all time reasoning (greetings, "now", "today", scheduling). Ignore any times mentioned in conversation history—they are from the past. Call core.time ONLY for: timezone conversions, elapsed time ("since" actions), or ISO timestamps.
+- Time awareness: "Current time" above is the AUTHORITATIVE present moment. Use it for all time reasoning (greetings, "now", "today", scheduling). Ignore any times mentioned in conversation history—they are from the past. NEVER call core.time to get current time — it is already above. core.time is ONLY for: timezone conversions or elapsed time calculations.
 - Use Runtime Snapshot if provided; call core.state for precise/missing state
 - Optional params: pass null, not placeholders
 - Tool requiresUserInput=true → ask user directly, don't retry
@@ -1485,6 +1549,7 @@ Rules:
 - Conversation history has timestamps (e.g. [09:18], [yesterday 23:55], [Feb 4, 14:30]). Use them for temporal reasoning. Don't repeat information recently told to the user.
 - Keep responses proportional to the user's message length. Casual 1-2 word messages deserve 1-2 sentence replies. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
 - When processing takes time (multiple tool calls needed), call core.say("brief acknowledgment") first. It sends a message immediately while you continue working. Max 2 per turn. Don't use for your final response.
+- core.thought is for background side-thoughts only. NEVER use it to narrate, summarize, or track your current processing. Multiple thoughts are batched into one.
 - IMPORTANT: Under NO circumstances should you ever use emoji characters in your responses.${
       useSmart
         ? ''
@@ -1492,7 +1557,7 @@ Rules:
 - If response needs state, call core.state first (unless snapshot answers it)`
     }
 
-MEMORY: Save personal facts (birthday, name, preferences) with core.remember.
+MEMORY: Save ALL observations about the user with core.remember(attribute, value) — just 2 fields needed. Preferences, habits, work style, opinions, personality traits. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought.
 INTERESTS: core.setInterest for ongoing interests (not one-time questions). Use 1-3 word keywords, call multiple times for distinct topics. Explicit request → strong_positive + urgent=true. Implicit → weak_positive.`;
   }
 
@@ -1535,6 +1600,29 @@ NOTE: Use the user's name sparingly; check conversation history first.`;
     return `## Recent Thoughts
 ${lines.join('\n')}
 NOTE: Your recent internal thoughts. Background context, not visible to user.`;
+  }
+
+  /**
+   * Build pending intentions section.
+   * Shows insights from thought processing that should be woven into conversation naturally.
+   * These are non-urgent thought outputs saved for the next user interaction.
+   */
+  private buildPendingIntentionsSection(context: LoopContext): string | null {
+    const intentions = context.pendingIntentions;
+    if (!intentions || intentions.length === 0) {
+      return null;
+    }
+
+    const now = Date.now();
+    const lines = intentions.map((intention) => {
+      const ageMs = now - intention.timestamp.getTime();
+      const ageStr = this.formatAge(ageMs);
+      return `- [${ageStr} ago] ${intention.content}`;
+    });
+
+    return `## Pending Insights
+${lines.join('\n')}
+NOTE: Insights from your background thinking. Weave naturally into conversation if relevant — don't force them.`;
   }
 
   /**
@@ -1651,12 +1739,15 @@ These shape HOW you respond, not WHAT you say. Never reference your values or id
     const agentParts: string[] = [];
     const userParts: string[] = [];
 
+    // Automatic fields — read-only context, managed by autonomic layer
+    const autoParts: string[] = [];
     if (scope.includeAgentEnergy) {
-      agentParts.push(`energy ${this.describeLevel(agentState.energy)}`);
+      autoParts.push(`energy ${this.describeLevel(agentState.energy)}`);
     }
     if (scope.includeSocialDebt) {
-      agentParts.push(`socialDebt ${this.describeLevel(agentState.socialDebt)}`);
+      autoParts.push(`socialDebt ${this.describeLevel(agentState.socialDebt)}`);
     }
+
     if (scope.includeTaskPressure) {
       agentParts.push(`taskPressure ${this.describeLevel(agentState.taskPressure)}`);
     }
@@ -1678,13 +1769,17 @@ These shape HOW you respond, not WHAT you say. Never reference your values or id
       userParts.push(`availability ${this.describeLevel(userAvailability)}`);
     }
 
-    if (agentParts.length === 0 && userParts.length === 0) {
+    if (autoParts.length === 0 && agentParts.length === 0 && userParts.length === 0) {
       return null;
     }
 
+    const autoChunk =
+      autoParts.length > 0 ? `Automatic (do not update): ${autoParts.join(', ')}` : '';
     const agentChunk = agentParts.length > 0 ? `Agent: ${agentParts.join(', ')}` : '';
     const userChunk = userParts.length > 0 ? `User: ${userParts.join(', ')}` : '';
-    const combined = [agentChunk, userChunk].filter((part) => part.length > 0).join('; ');
+    const combined = [autoChunk, agentChunk, userChunk]
+      .filter((part) => part.length > 0)
+      .join('; ');
 
     return `## Runtime Snapshot
 ${combined}`;
@@ -2047,10 +2142,10 @@ ${content}
 
     // Internal thought processing - clear, directive prompt
     // No conversation history is loaded for thoughts (energy efficient)
-    // core.thought is filtered out (prevents loops structurally)
+    // Filtered out: core.thought, core.say, core.state, core.agent
     const activeConvWarning =
       context.conversationStatus === 'active'
-        ? `\n**Note: The user is currently in an active conversation.** If this thought is urgent, use core.memory to get conversation context and continue naturally. Otherwise, use core.defer to reach out later.\n`
+        ? `\n**Note: The user is currently in an active conversation.** Use core.defer to reach out later if needed.\n`
         : '';
 
     return `## Processing Internal Thought
@@ -2062,18 +2157,19 @@ ${activeConvWarning}
 **Available actions:**
 - core.setInterest - if this reveals a topic of interest
 - core.remember - if this contains a fact worth saving
-- core.memory({ action: "search", types: ["message"] }) - if you need conversation context
+- core.memory({ action: "search", types: ["fact"] }) - if you need context from saved facts
 
-**NOT available:** core.thought (cannot emit thoughts while processing a thought)
+**NOT available:** core.thought, core.say, core.state, core.agent
+**NOTE:** Message history is NOT indexed for thought processing. Do NOT search types: ["message"] — it will always return 0 results.
 
 **Rules:**
-- If you need context, use core.memory search (scoped to current conversation)
 - Most thoughts complete with {"response": ""} after 0-2 tool calls
-- Only message user if explicitly required by the thought content
+- Tool budget: 3 calls max. Be efficient.
 - Return concise result; stop when complete
 
-**To end without sending a message:** output {"response": ""}
-**To respond:** output {"response": "your message"} (only if this warrants messaging the user)`;
+**To end without sending (default):** output {"response": ""}
+**To save insight for next conversation:** output {"response": "your insight"}
+**To message user NOW (urgent only):** output {"response": "message", "urgent": true} — ONLY for immediate, time-sensitive user impact that becomes wrong or harmful if delayed (safety risk, deadline in hours). Reflections, insights, observations, emotional context → NEVER urgent.`;
   }
 
   /**

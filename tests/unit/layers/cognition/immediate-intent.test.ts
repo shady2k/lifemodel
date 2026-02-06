@@ -145,6 +145,7 @@ describe('Immediate Intent Processing', () => {
           },
         })),
       hasToolSideEffects: (name: string) => toolMap.get(name)?.hasSideEffects ?? false,
+      getMaxCallsPerTurn: (name: string) => toolMap.get(name)?.maxCallsPerTurn,
       execute: vi.fn().mockImplementation(async (request: { name: string; toolCallId: string }) => {
         const tool = toolMap.get(request.name);
         if (!tool) {

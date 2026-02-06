@@ -450,15 +450,7 @@ export const FIELD_POLICIES: Record<string, FieldPolicy> = {
     minConfidence: 0.5,
   },
 
-  // Agent state
-  'agent.socialDebt': {
-    minConfidence: 0.7,
-    maxDelta: 0.3,
-  },
-  'agent.energy': {
-    minConfidence: 0.9,
-    maxDelta: 0.1,
-  },
+  // Agent state (socialDebt and energy are automatic — not LLM-writable)
   'agent.curiosity': {
     minConfidence: 0.7,
     maxDelta: 0.2,
@@ -577,9 +569,6 @@ export interface LoopState {
   /** Track all identical tool call signatures to detect loops (successful or failed) */
   identicalCallCounts: Map<string, number>;
 
-  /** Track consecutive memory searches to detect search loops */
-  consecutiveSearches: number;
-
   /** Conversation status from LLM response JSON (optional "status" field) */
   conversationStatus: ConversationStatus | undefined;
 
@@ -592,8 +581,11 @@ export interface LoopState {
   /** Tool budget for proactive contact (undefined = no limit) */
   proactiveToolBudget?: number | undefined;
 
-  /** Track core.say calls to enforce per-turn limit */
-  sayCount: number;
+  /** Per-tool call counts for maxCallsPerTurn enforcement */
+  toolCallCounts: Map<string, number>;
+
+  /** Collected thought contents (batched into single thought at end) */
+  collectedThoughts: string[];
 }
 
 /**
@@ -610,16 +602,13 @@ export function createLoopState(): LoopState {
     aborted: false,
     failedCallCounts: new Map<string, number>(),
     identicalCallCounts: new Map<string, number>(),
-    consecutiveSearches: 0,
     conversationStatus: undefined,
     forceRespondAttempts: 0,
     everForcedRespond: false,
-    sayCount: 0,
+    toolCallCounts: new Map<string, number>(),
+    collectedThoughts: [],
   };
 }
-
-/** Threshold for consecutive searches before nudging LLM to try tools or respond */
-export const MAX_CONSECUTIVE_SEARCHES = 3;
 
 /**
  * Maximum times the same failing tool call can be retried before forcing response.

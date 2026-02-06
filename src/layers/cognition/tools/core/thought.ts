@@ -16,7 +16,8 @@ export function createThoughtTool(): Tool {
     {
       name: 'content',
       type: 'string',
-      description: 'The thought to process later',
+      description:
+        'An unresolved question or hunch — NOT a user fact (use core.remember for those)',
       required: true,
     },
     {
@@ -29,8 +30,9 @@ export function createThoughtTool(): Tool {
 
   return {
     name: 'core.thought',
+    maxCallsPerTurn: 2,
     description:
-      'Queue a thought for future processing. Use only when concrete follow-up or deeper analysis is needed. Do NOT use for vague "monitoring". Example: User says "I have an interview tomorrow" → emit thought to check in later.',
+      'Queue a background thought for later processing (like a human side-thought during conversation). NOT for narrating your current actions or reasoning about the current response. Multiple thoughts are batched into one. Example: "User mentioned switching jobs — might explain recent stress".',
     tags: ['thinking', 'follow-up', 'reflection'],
     hasSideEffects: true,
     parameters,

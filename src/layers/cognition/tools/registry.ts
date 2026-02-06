@@ -150,6 +150,15 @@ export class ToolRegistry {
   }
 
   /**
+   * Get the per-turn call limit for a tool.
+   * Returns undefined if no limit is set.
+   */
+  getMaxCallsPerTurn(name: string): number | undefined {
+    const tool = this.tools.get(name);
+    return tool?.maxCallsPerTurn;
+  }
+
+  /**
    * Get all registered tool names.
    */
   getToolNames(): ToolName[] {

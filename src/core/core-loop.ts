@@ -1391,7 +1391,7 @@ export class CoreLoop {
               if (entryContent.trim()) {
                 const entry = {
                   id: `mem_${Date.now().toString()}_${Math.random().toString(36).slice(2, 8)}`,
-                  type: memoryType as 'fact' | 'thought' | 'message',
+                  type: memoryType as 'fact' | 'thought' | 'message' | 'intention',
                   content: entryContent,
                   timestamp: new Date(),
                   recipientId: memoryRecipientId,

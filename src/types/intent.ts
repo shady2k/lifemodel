@@ -61,7 +61,7 @@ export interface SaveToMemoryIntent {
   type: 'SAVE_TO_MEMORY';
   payload: {
     /** Type of memory entry */
-    type: 'fact' | 'thought' | 'observation';
+    type: 'fact' | 'thought' | 'observation' | 'intention';
     /** Recipient context */
     recipientId?: string | undefined;
     /** The content to save */

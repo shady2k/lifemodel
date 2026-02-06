@@ -18,18 +18,17 @@ describe('core.remember tool', () => {
   describe('schema', () => {
     it('has correct name and description', () => {
       expect(tool.name).toBe('core.remember');
-      expect(tool.description).toBe('Remember a fact about the user or any subject.');
+      expect(tool.description).toContain('Remember a fact');
     });
 
-    it('has required parameters: subject, attribute, value, source', () => {
+    it('has required parameters: attribute, value', () => {
       const required = tool.parameters.filter((p) => p.required);
-      expect(required.map((p) => p.name)).toEqual(['subject', 'attribute', 'value', 'source']);
+      expect(required.map((p) => p.name)).toEqual(['attribute', 'value']);
     });
 
-    it('has optional confidence parameter', () => {
-      const confidence = tool.parameters.find((p) => p.name === 'confidence');
-      expect(confidence?.required).toBe(false);
-      expect(confidence?.type).toBe('number');
+    it('has optional subject, source, confidence parameters', () => {
+      const optional = tool.parameters.filter((p) => !p.required);
+      expect(optional.map((p) => p.name)).toEqual(['subject', 'source', 'confidence']);
     });
 
     it('source parameter has enum constraint', () => {
@@ -381,22 +380,9 @@ describe('core.remember tool', () => {
   });
 
   describe('required fields validation', () => {
-    it('rejects missing subject', async () => {
-      const result = (await tool.execute({
-        attribute: 'name',
-        value: 'Alice',
-        source: 'user_quote',
-      })) as RememberResult;
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Missing required fields');
-    });
-
     it('rejects missing attribute', async () => {
       const result = (await tool.execute({
-        subject: 'user',
         value: 'Alice',
-        source: 'user_quote',
       })) as RememberResult;
 
       expect(result.success).toBe(false);
@@ -405,24 +391,47 @@ describe('core.remember tool', () => {
 
     it('rejects missing value', async () => {
       const result = (await tool.execute({
-        subject: 'user',
         attribute: 'name',
-        source: 'user_quote',
       })) as RememberResult;
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Missing required fields');
     });
 
-    it('rejects missing source', async () => {
+    it('defaults subject to "user" when omitted', async () => {
       const result = (await tool.execute({
-        subject: 'user',
-        attribute: 'name',
-        value: 'Alice',
+        attribute: 'mood',
+        value: 'happy',
+        source: 'inferred',
       })) as RememberResult;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Missing required fields');
+      expect(result.success).toBe(true);
+      expect(result.subject).toBe('user');
+      expect(result.isUserFact).toBe(true);
+    });
+
+    it('defaults source to "user_implicit" when omitted', async () => {
+      const result = (await tool.execute({
+        attribute: 'work_style',
+        value: 'prefers structure',
+      })) as RememberResult;
+
+      expect(result.success).toBe(true);
+      expect(result.source).toBe('user_implicit');
+      expect(result.confidence).toBe(0.85);
+    });
+
+    it('works with just attribute and value (minimal call)', async () => {
+      const result = (await tool.execute({
+        attribute: 'coffee_preference',
+        value: 'dark roast',
+      })) as RememberResult;
+
+      expect(result.success).toBe(true);
+      expect(result.subject).toBe('user');
+      expect(result.source).toBe('user_implicit');
+      expect(result.confidence).toBe(0.85);
+      expect(result.isUserFact).toBe(true);
     });
   });
 

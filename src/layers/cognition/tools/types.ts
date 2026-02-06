@@ -48,6 +48,12 @@ export interface Tool {
    * Must include type: 'object', properties, and additionalProperties: false.
    */
   rawParameterSchema?: Record<string, unknown>;
+  /**
+   * Maximum number of times this tool can be called per agentic turn.
+   * When exceeded, the tool returns an error and is not executed.
+   * Undefined = no limit.
+   */
+  maxCallsPerTurn?: number;
 }
 
 /**
