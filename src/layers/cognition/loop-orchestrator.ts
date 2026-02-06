@@ -1,8 +1,7 @@
 /**
  * Loop Orchestrator
  *
- * Builds LLM requests and filters tools for the current context.
- * Pure module — no state mutation.
+ * Builds LLM requests, filters tools, and sets proactive tool budget.
  */
 
 import type { LoopState } from '../../types/cognition.js';
@@ -29,6 +28,7 @@ export function buildRequest(
       strict: true,
       schema: {
         type: 'object',
+        additionalProperties: false,
         properties: {
           response: {
             type: 'string',

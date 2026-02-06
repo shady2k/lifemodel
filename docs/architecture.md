@@ -80,7 +80,7 @@ src/layers/cognition/
   agentic-loop-types.ts       # All shared types/interfaces (no runtime deps)
   response-parser.ts          # parseResponseContent — JSON schema + plain text (pure)
   intent-compiler.ts          # ToolResult→Intent, batched thoughts, confidence (pure)
-  tool-executor.ts            # Tool call loop + execution (sole LoopState mutator)
+  tool-executor.ts            # Tool call loop + execution (primary LoopState mutator)
   loop-orchestrator.ts        # buildRequest, filterToolsForContext, proactive budget
 
   prompts/

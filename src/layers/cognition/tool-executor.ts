@@ -2,7 +2,9 @@
  * Tool Executor
  *
  * Handles tool call execution within the agentic loop.
- * This is the sole LoopState mutator besides agentic-loop.ts itself.
+ * Primary LoopState mutator during the main loop.
+ * Also mutated by: retry-builder.ts (initialization), loop-orchestrator.ts (proactive budget),
+ * and agentic-loop.ts (loop control fields).
  *
  * Responsibilities:
  * - JSON args parsing
@@ -217,11 +219,7 @@ export async function executeToolCalls(
 
       // Build enriched context for the caller to restart with
       const enrichedContext = onEscalate(state, context, reason);
-      return {
-        type: 'escalate',
-        enrichedContext,
-        result: { success: true, terminal: { type: 'noAction', reason }, intents: [], state },
-      } as ToolExecutionOutcome;
+      return { type: 'escalate', enrichedContext };
     }
 
     // Intercept core.defer - TERMINAL, ends loop with DeferTerminal

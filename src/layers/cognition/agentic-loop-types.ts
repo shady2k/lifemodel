@@ -256,6 +256,5 @@ export interface PromptBuilders {
  */
 export type ToolExecutionOutcome =
   | { type: 'continue'; messages: Message[] }
-  | { type: 'escalate'; enrichedContext: LoopContext; result: LoopResult }
-  | { type: 'defer'; result: LoopResult }
-  | { type: 'terminal'; messages: Message[]; terminal: Terminal };
+  | { type: 'escalate'; enrichedContext: LoopContext }
+  | { type: 'defer'; result: LoopResult };
