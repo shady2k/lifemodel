@@ -17,23 +17,17 @@ export function createThoughtTool(): Tool {
       name: 'content',
       type: 'string',
       description:
-        'An unresolved question or hunch — NOT a user fact (use core.remember for those)',
+        'A hypothesis or open question that needs future investigation. Must be something you CANNOT resolve right now. NOT for observations, strategy notes, or summarizing what just happened.',
       required: true,
-    },
-    {
-      name: 'reason',
-      type: 'string',
-      description: 'Why this thought matters (optional, for observability)',
-      required: false,
     },
   ];
 
   return {
     name: 'core.thought',
-    maxCallsPerTurn: 2,
+    maxCallsPerTurn: 1,
     description:
-      'Queue a background thought for later processing (like a human side-thought during conversation). NOT for narrating your current actions or reasoning about the current response. Multiple thoughts are batched into one. Example: "User mentioned switching jobs — might explain recent stress".',
-    tags: ['thinking', 'follow-up', 'reflection'],
+      'Flag an unresolved question for future investigation. ONLY for things you cannot resolve now and that may matter later. Do NOT call this to narrate, strategize, summarize, or reason about the current conversation. If you can act on it now, act instead of thinking. Bad: "User is interested in AI tools" (narration). Bad: "I should keep it technical" (strategy). Good: "User mentioned chest pain last week — should check if resolved".',
+    tags: ['follow-up', 'investigation'],
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
@@ -65,14 +59,11 @@ export function createThoughtTool(): Tool {
         });
       }
 
-      const reason = args['reason'] as string | undefined;
-
       return Promise.resolve({
         success: true,
         action: 'emit',
         content,
-        reason,
-        message: 'Thought queued for future processing',
+        message: 'Queued for investigation. Respond to the user now.',
       });
     },
   };

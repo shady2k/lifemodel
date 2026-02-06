@@ -857,28 +857,30 @@ export class AgenticLoop {
           continue;
         }
 
-        // Intercept core.thought - batch all thoughts, process as one later
+        // Intercept core.thought - execute tool and batch valid thoughts for later processing
         if (toolName === 'core.thought') {
-          const content = typeof args['content'] === 'string' ? args['content'].trim() : '';
-          const thoughtCount = state.toolCallCounts.get('core.thought') ?? 0;
           state.toolCallCount++;
 
-          if (content.length >= 5) {
-            state.collectedThoughts.push(content);
+          // Execute the tool — it validates content
+          const thoughtResult = await this.toolRegistry.execute({
+            toolCallId: toolCall.id,
+            name: toolName,
+            args,
+            context: this.buildToolContext(context),
+          });
+
+          const resultData = thoughtResult.data as Record<string, unknown> | undefined;
+          if (resultData?.['success'] === true && typeof resultData['content'] === 'string') {
+            state.collectedThoughts.push(resultData['content']);
           }
 
-          // Always return success — thoughts are batched silently
+          // Return the tool's actual response (success or rejection)
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: JSON.stringify({
-              success: true,
-              action: 'emit',
-              message:
-                thoughtCount === 1
-                  ? 'Thought queued for future processing'
-                  : 'Thought batched (will be merged with previous). Now respond to the user.',
-            }),
+            content: JSON.stringify(
+              resultData ?? { success: false, error: 'Thought processing failed' }
+            ),
           });
           continue;
         }
@@ -1557,7 +1559,7 @@ ${genderNote}
 
 Current time: ${currentDateTime}
 
-Flow: if multiple tools needed, core.say first → gather info (tools) → update beliefs (with evidence) → respond
+Flow: Respond directly when you can answer from conversation context. Only use tools when the user asks something you can't answer from context, requests an action, or provides new data to store. If multiple tools are needed: core.say first → tools → respond.
 
 Rules:
 - Always output JSON: {"response": "text"} or {"response": "text", "status": "awaiting_answer"}
@@ -1574,9 +1576,9 @@ Rules:
 - Tool returns success:false → inform user the action failed, don't claim success
 - Before write actions (log, delete, update), check current state first (list/summary). Never assume data is missing — verify.
 - Conversation history has timestamps (e.g. [09:18], [yesterday 23:55], [Feb 4, 14:30]). Use them for temporal reasoning. Don't repeat information recently told to the user.
-- Keep responses proportional to the user's message length. Casual 1-2 word messages deserve 1-2 sentence replies. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
+- Acknowledgments, confirmations, farewells, and simple reactions (e.g. "great", "thanks", "ok", "got it") → respond directly, NO tool calls. Only use tools when the user asks a question, requests an action, or provides new information worth remembering. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
 - When processing takes time (multiple tool calls needed), call core.say("brief acknowledgment") first. It sends a message immediately while you continue working. Max 2 per turn. Don't use for your final response.
-- core.thought is for background side-thoughts only. NEVER use it to narrate, summarize, or track your current processing. Multiple thoughts are batched into one.
+- core.thought: ONLY for unresolved questions you cannot answer now (e.g., "mentioned job change last week — unresolved stress?"). NEVER use it to narrate what you observe, plan your response strategy, or summarize what happened. If you find yourself writing "User is..." or "I should..." — that is narration, not a thought. Just respond.
 - IMPORTANT: Under NO circumstances should you ever use emoji characters in your responses.${
       useSmart
         ? ''
@@ -1584,7 +1586,8 @@ Rules:
 - If response needs state, call core.state first (unless snapshot answers it)`
     }
 
-MEMORY: Save user observations with core.remember(attribute, value) — preferences, habits, work style, opinions, personality traits. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought.
+MEMORY: Save direct observations with core.remember(attribute, value) — preferences, opinions, explicit statements. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought.
+Rules: (1) Only record what the user directly said or clearly demonstrated — never synthesize or combine multiple facts into one entry. (2) One observation = one remember call. No compound values. (3) A single occurrence is NOT a pattern — don't label it a "habit" or "routine". (4) Attribute names must be simple nouns (e.g. "diet_preference"), not invented behavioral patterns (e.g. "friday_evening_habit").
 NEVER duplicate plugin data into core.remember. Plugin tools (plugin.*) are the authoritative source for their domain. Don't remember calorie totals, food logs, weight entries, news items, or any data that a plugin already stores. Only remember stable user traits (e.g., "prefers high-protein meals"), not transient data points.
 INTERESTS: core.setInterest for ongoing interests (not one-time questions). Use 1-3 word keywords, call multiple times for distinct topics. Explicit request → strong_positive + urgent=true. Implicit → weak_positive.`;
   }
