@@ -42,6 +42,7 @@ import type { ToolRegistry, MemoryEntry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
+import { getEffectiveTimezone, formatTimestampPrefix } from '../../utils/date.js';
 import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
 
 /**
@@ -206,6 +207,9 @@ export interface LoopContext {
   unresolvedTensions?:
     | { id: string; content: string; dissonance: number; timestamp: Date }[]
     | undefined;
+
+  /** Current conversation status (for thought processing context) */
+  conversationStatus?: string | undefined;
 
   /** Callback to drain pending user messages for mid-loop injection */
   drainPendingUserMessages: (() => Signal[]) | undefined;
@@ -492,6 +496,32 @@ export class AgenticLoop {
         const parsed = this.parseResponseContent(response.content);
         if (parsed.text) {
           state.thoughts.push(parsed.text);
+        }
+      }
+
+      // Send intermediate message if LLM emitted structured JSON response alongside tool calls
+      // Only send if content is a valid {response: "text"} JSON (not plain chain-of-thought)
+      if (
+        response.content &&
+        response.toolCalls.length > 0 &&
+        this.callbacks?.onImmediateIntent &&
+        context.recipientId
+      ) {
+        try {
+          const json = JSON.parse(response.content.trim()) as Record<string, unknown>;
+          if (json['response'] && typeof json['response'] === 'string' && json['response'].trim()) {
+            this.callbacks.onImmediateIntent({
+              type: 'SEND_MESSAGE',
+              payload: {
+                recipientId: context.recipientId,
+                text: json['response'].trim(),
+                conversationStatus: 'active',
+              },
+            });
+            this.logger.debug({ textLength: json['response'].length }, 'Intermediate message sent');
+          }
+        } catch {
+          // Not valid JSON — chain-of-thought text, don't send to user
         }
       }
 
@@ -947,11 +977,32 @@ export class AgenticLoop {
     // Inject conversation history as proper messages (not flattened text)
     // This allows the LLM to see previous tool_calls and avoid re-execution
     if (context.conversationHistory.length > 0) {
+      const effectiveTimezone = getEffectiveTimezone(
+        context.userModel['defaultTimezone'] as string | undefined,
+        context.userModel['timezoneOffset'] as number | null | undefined
+      );
+      const now = new Date();
+
       for (const histMsg of context.conversationHistory) {
         const msg: Message = {
           role: histMsg.role,
           content: histMsg.content,
         };
+
+        // Prepend timestamp to user/assistant messages with non-null content
+        // Skip tool messages, system messages, and null-content assistant messages (tool_calls only)
+        if (
+          histMsg.timestamp &&
+          msg.content != null &&
+          (histMsg.role === 'user' || histMsg.role === 'assistant')
+        ) {
+          const ts =
+            histMsg.timestamp instanceof Date
+              ? histMsg.timestamp
+              : new Date(histMsg.timestamp as unknown as string);
+          const prefix = formatTimestampPrefix(ts, now, effectiveTimezone);
+          msg.content = `${prefix} ${msg.content}`;
+        }
 
         // Include tool_calls for assistant messages
         if (histMsg.tool_calls && histMsg.tool_calls.length > 0) {
@@ -1354,23 +1405,11 @@ export class AgenticLoop {
           : 'Use neutral grammatical forms when possible.';
 
     // Current time for temporal reasoning (age calculations, time-of-day awareness)
-    // Priority: defaultTimezone (IANA) > timezoneOffset > server timezone
-    const userTimezone = context.userModel['defaultTimezone'] as string | undefined;
-    const timezoneOffset = context.userModel['timezoneOffset'] as number | null | undefined;
-
     const now = new Date();
-
-    // Determine the effective timezone:
-    // 1. Use IANA timezone if set
-    // 2. Derive from offset (Etc/GMT signs are inverted: +3 → Etc/GMT-3)
-    // 3. Default to Europe/Moscow
-    let effectiveTimezone = userTimezone;
-    if (!effectiveTimezone && timezoneOffset != null) {
-      const invertedOffset = -timezoneOffset;
-      const sign = invertedOffset >= 0 ? '+' : '';
-      effectiveTimezone = `Etc/GMT${sign}${String(invertedOffset)}`;
-    }
-    effectiveTimezone ??= 'Europe/Moscow';
+    const effectiveTimezone = getEffectiveTimezone(
+      context.userModel['defaultTimezone'] as string | undefined,
+      context.userModel['timezoneOffset'] as number | null | undefined
+    );
 
     // Use 24-hour format for clarity - LLMs often misinterpret AM/PM
     const dateTimeOptions: Intl.DateTimeFormatOptions = {
@@ -1407,6 +1446,9 @@ Rules:
 - Search yields nothing → say "nothing found"
 - Articles/news: always include URL inline with each item. Never defer links to follow-up.
 - Tool returns success:false → inform user the action failed, don't claim success
+- Conversation history has timestamps (e.g. [09:18], [yesterday 23:55], [Feb 4, 14:30]). Use them for temporal reasoning. Don't repeat information recently told to the user.
+- Keep responses proportional to the user's message length. Casual 1-2 word messages deserve 1-2 sentence replies. Don't volunteer unsolicited info (weather, calories, news) unless asked or directly relevant.
+- When processing takes time (tool calls needed), you can write a quick acknowledgment as {"response": "text"} alongside tool calls. This text is sent immediately to the user.
 - IMPORTANT: Under NO circumstances should you ever use emoji characters in your responses.${
       useSmart
         ? ''
@@ -1791,7 +1833,7 @@ IMPORTANT: These actions were already executed in previous sessions. Do NOT call
 
     // Handle thought triggers
     if (signal.type === 'thought' && data) {
-      return this.buildThoughtTriggerSection(data);
+      return this.buildThoughtTriggerSection(data, context);
     }
 
     // Handle message_reaction triggers (direct, not converted to thought)
@@ -1907,7 +1949,7 @@ ${urgent ? '⚠️ URGENT: This event requires immediate attention.\n' : ''}Data
    * Build special section for thought triggers (including reactions).
    * Provides clear guidance on when to respond vs when to just process internally.
    */
-  private buildThoughtTriggerSection(data: Record<string, unknown>): string {
+  private buildThoughtTriggerSection(data: Record<string, unknown>, context: LoopContext): string {
     const content = data['content'] as string | undefined;
     const rootId = data['rootThoughtId'] as string | undefined;
 
@@ -1943,10 +1985,15 @@ ${content}
     // Internal thought processing - clear, directive prompt
     // No conversation history is loaded for thoughts (energy efficient)
     // core.thought is filtered out (prevents loops structurally)
+    const activeConvWarning =
+      context.conversationStatus === 'active'
+        ? `\n**Note: The user is currently in an active conversation.** If this thought is urgent, use core.memory to get conversation context and continue naturally. Otherwise, use core.defer to reach out later.\n`
+        : '';
+
     return `## Processing Internal Thought
 
 You are processing an internal thought. No conversation history is loaded.
-
+${activeConvWarning}
 **Thought:** ${content ?? JSON.stringify(data)}
 
 **Available actions:**

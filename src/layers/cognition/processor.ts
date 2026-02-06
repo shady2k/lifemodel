@@ -334,6 +334,12 @@ export class CognitionProcessor implements CognitionLayer {
     // Get unresolved soul tensions (for visibility in system prompt)
     const unresolvedTensions = await this.getUnresolvedTensions(recipientId);
 
+    // Get conversation status for thought processing context
+    const conversationStatus =
+      recipientId && this.conversationManager
+        ? (await this.conversationManager.getStatus(recipientId)).status
+        : undefined;
+
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:
     // - They're not conversation continuations
@@ -354,6 +360,7 @@ export class CognitionProcessor implements CognitionLayer {
       tickId: context.tickId,
       recipientId, // Still propagate for routing if thought decides to respond
       userId: signalData?.userId,
+      conversationStatus,
       timeSinceLastMessageMs,
       completedActions,
       recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
@@ -536,6 +543,10 @@ export class CognitionProcessor implements CognitionLayer {
           content: msg.content,
         };
         // Only include optional fields when they have values (TypeScript exactOptionalPropertyTypes)
+        if (msg.timestamp) {
+          convMsg.timestamp =
+            msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp as string);
+        }
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           convMsg.tool_calls = msg.tool_calls;
         }

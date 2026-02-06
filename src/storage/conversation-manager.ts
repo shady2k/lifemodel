@@ -396,6 +396,7 @@ export class ConversationManager {
       const convMsg: ConversationMessage = {
         role: msg.role,
         content: msg.content,
+        timestamp: new Date(msg.timestamp),
       };
 
       // Include tool_calls for assistant messages

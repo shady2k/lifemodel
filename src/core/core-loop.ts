@@ -534,9 +534,19 @@ export class CoreLoop {
 
       // Start COGNITION if needed (capture trace context from trigger signal)
       if (shouldWakeCognition && aggregationResult && !this.pendingCognition) {
+        // Log conversation status for debugging proactive contact issues
+        let convStatus = 'unknown';
+        if (this.conversationManager && this.primaryRecipientId) {
+          try {
+            convStatus = (await this.conversationManager.getStatus(this.primaryRecipientId)).status;
+          } catch {
+            // Non-critical - proceed with unknown status
+          }
+        }
+
         withTraceContext(tickCtx, () => {
           this.logger.debug(
-            { wakeReason: aggregationResult.wakeReason },
+            { wakeReason: aggregationResult.wakeReason, conversationStatus: convStatus },
             '🧠 COGNITION layer woken (non-blocking)'
           );
         });
@@ -1147,9 +1157,14 @@ export class CoreLoop {
    * during loop execution so subsequent tools can see the data.
    */
   applyImmediateIntent(intent: Intent): void {
-    // Only apply REMEMBER and SET_INTEREST immediately
+    // Only apply REMEMBER, SET_INTEREST, and SEND_MESSAGE immediately
+    // SEND_MESSAGE is used for intermediate acknowledgments during tool processing
     // Other intents should wait for normal intent processing
-    if (intent.type !== 'REMEMBER' && intent.type !== 'SET_INTEREST') {
+    if (
+      intent.type !== 'REMEMBER' &&
+      intent.type !== 'SET_INTEREST' &&
+      intent.type !== 'SEND_MESSAGE'
+    ) {
       this.logger.warn(
         { intentType: intent.type },
         'applyImmediateIntent called with non-immediate intent type, ignoring'

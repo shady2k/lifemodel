@@ -107,3 +107,69 @@ export function serializeWithDates(data: unknown): string {
 export function parseWithDates(json: string, additionalFields: readonly string[] = []): unknown {
   return JSON.parse(json, createDateReviver(additionalFields));
 }
+
+/**
+ * Resolve the effective IANA timezone from user model data.
+ *
+ * Priority:
+ * 1. Explicit IANA timezone string (e.g., "Europe/Moscow")
+ * 2. Derived from numeric offset (Etc/GMT signs are inverted: +3 → Etc/GMT-3)
+ * 3. Fallback default
+ *
+ * @param userTimezone IANA timezone string from user model
+ * @param timezoneOffset Numeric UTC offset (hours) from user model
+ * @param fallback Default timezone if neither is available
+ */
+export function getEffectiveTimezone(
+  userTimezone?: string,
+  timezoneOffset?: number | null,
+  fallback = 'Europe/Moscow'
+): string {
+  if (userTimezone) return userTimezone;
+
+  if (timezoneOffset != null) {
+    const invertedOffset = -timezoneOffset;
+    const sign = invertedOffset >= 0 ? '+' : '';
+    return `Etc/GMT${sign}${String(invertedOffset)}`;
+  }
+
+  return fallback;
+}
+
+/**
+ * Format a timestamp as a human-readable prefix for conversation messages.
+ *
+ * - Same day as `now`: `[09:18]`
+ * - Yesterday: `[yesterday 23:55]`
+ * - Older: `[Feb 4, 14:30]`
+ *
+ * @param ts Message timestamp
+ * @param now Reference "now" timestamp
+ * @param timezone IANA timezone for formatting
+ */
+export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): string {
+  const msgDate = ts.toLocaleDateString('en-GB', { timeZone: timezone });
+  const todayDate = now.toLocaleDateString('en-GB', { timeZone: timezone });
+  const yesterdayDate = new Date(now.getTime() - 86400000).toLocaleDateString('en-GB', {
+    timeZone: timezone,
+  });
+  const timeStr = ts.toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: timezone,
+  });
+
+  if (msgDate === todayDate) {
+    return `[${timeStr}]`;
+  } else if (msgDate === yesterdayDate) {
+    return `[yesterday ${timeStr}]`;
+  } else {
+    const dateStr = ts.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      timeZone: timezone,
+    });
+    return `[${dateStr}, ${timeStr}]`;
+  }
+}

@@ -9,4 +9,6 @@ export {
   dateReplacer,
   serializeWithDates,
   parseWithDates,
+  getEffectiveTimezone,
+  formatTimestampPrefix,
 } from './date.js';
