@@ -121,6 +121,8 @@ export interface LogInputEntry {
   name: string;
   portion?: Portion;
   calories_estimate?: number;
+  /** kcal per 100g — used with weight portion to compute calories */
+  calories_per_100g?: number;
   meal_type?: MealType;
   timestamp?: string;
   /** Explicit item selection to resolve ambiguity */
@@ -159,9 +161,16 @@ export type LogResultItem =
       suggestedPortion?: Portion;
     };
 
+export interface DailySummary {
+  totalCalories: number;
+  goal: number | null;
+  remaining: number | null;
+}
+
 export interface LogResult {
   success: boolean;
   results: LogResultItem[];
+  dailySummary?: DailySummary;
 }
 
 // ============================================================================
@@ -181,6 +190,13 @@ export interface ListResult {
   items: Record<string, FoodItem>; // itemId → FoodItem for display
 }
 
+export interface SummaryEntryInfo {
+  entryId: string;
+  name: string;
+  calories: number;
+  mealType?: MealType;
+}
+
 export interface SummaryResult {
   success: boolean;
   date: string;
@@ -189,6 +205,7 @@ export interface SummaryResult {
   remaining: number | null;
   entryCount: number;
   byMealType: Partial<Record<MealType, number>>;
+  entries: SummaryEntryInfo[];
 }
 
 export interface GoalInput {

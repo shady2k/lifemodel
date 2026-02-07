@@ -19,12 +19,15 @@ import type {
   LogResultItem,
   ListResult,
   SummaryResult,
+  SummaryEntryInfo,
+  DailySummary,
   GoalResult,
   DeleteResult,
   Unit,
 } from './calories-types.js';
 import {
   CALORIES_STORAGE_KEYS,
+  VALIDATION_BOUNDS,
   generateId,
   validateCalories,
   validateWeight,
@@ -284,6 +287,42 @@ export function createCaloriesTool(
         normalized.calories_estimate = caloriesRaw;
       }
 
+      // Validate and normalize 'calories_per_100g' (optional, can be null)
+      const per100gRaw = entry['calories_per_100g'];
+      if (per100gRaw !== null && per100gRaw !== undefined) {
+        if (typeof per100gRaw !== 'number' || !Number.isFinite(per100gRaw) || per100gRaw < 0) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].calories_per_100g: must be a non-negative number`,
+          };
+        }
+        if (per100gRaw > 1000) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].calories_per_100g: max 1000 (pure fat is ~900 kcal/100g)`,
+          };
+        }
+        // calories_per_100g requires a weight-based portion (g or kg)
+        const portionUnit = normalized.portion?.unit;
+        if (!portionUnit || (portionUnit !== 'g' && portionUnit !== 'kg')) {
+          return {
+            success: false,
+            error: `entries[${String(i)}].calories_per_100g: requires portion with unit 'g' or 'kg'`,
+          };
+        }
+        // Validate computed calories won't exceed max
+        const portionQuantity = normalized.portion?.quantity ?? 0;
+        const grams = portionUnit === 'kg' ? portionQuantity * 1000 : portionQuantity;
+        const computedCalories = Math.round((grams * per100gRaw) / 100);
+        if (computedCalories > VALIDATION_BOUNDS.calories.max) {
+          return {
+            success: false,
+            error: `entries[${String(i)}]: computed calories ${String(computedCalories)} exceeds max ${String(VALIDATION_BOUNDS.calories.max)}`,
+          };
+        }
+        normalized.calories_per_100g = per100gRaw;
+      }
+
       // Validate and normalize 'meal_type' (optional, can be null)
       const mealTypeRaw = entry['meal_type'];
       if (mealTypeRaw !== null && mealTypeRaw !== undefined) {
@@ -333,6 +372,46 @@ export function createCaloriesTool(
   // Core Logic
   // ============================================================================
 
+  /**
+   * Resolve calories for a log entry.
+   * Priority: calories_estimate > calories_per_100g * weight > calculatePortionCalories > 0
+   */
+  function resolveCalories(entry: LogInputEntry, portion: Portion, item: FoodItem | null): number {
+    // 1. Explicit estimate always wins
+    if (entry.calories_estimate !== undefined) {
+      return entry.calories_estimate;
+    }
+
+    // 2. calories_per_100g with weight portion
+    if (entry.calories_per_100g !== undefined && (portion.unit === 'g' || portion.unit === 'kg')) {
+      const grams = portion.unit === 'kg' ? portion.quantity * 1000 : portion.quantity;
+      return Math.round((grams * entry.calories_per_100g) / 100);
+    }
+
+    // 3. Calculate from existing item basis
+    if (item) {
+      return calculatePortionCalories(item, portion);
+    }
+
+    // 4. No data — 0
+    return 0;
+  }
+
+  /**
+   * Compute daily summary for a given date.
+   */
+  async function computeDailySummary(recipientId: string, date: string): Promise<DailySummary> {
+    const entries = await loadFoodEntries(date, recipientId);
+    const totalCalories = entries.reduce((sum, e) => sum + e.calories, 0);
+    const userModel = await getUserModel(recipientId);
+    const goal = userModel?.calorie_goal ?? null;
+    return {
+      totalCalories,
+      goal,
+      remaining: goal !== null ? goal - totalCalories : null,
+    };
+  }
+
   async function logFood(
     input: LogInput,
     recipientId: string,
@@ -360,7 +439,7 @@ export function createCaloriesTool(
           continue;
         }
 
-        const calories = entry.calories_estimate ?? calculatePortionCalories(chosenItem, portion);
+        const calories = resolveCalories(entry, portion, chosenItem);
         const foodEntry: FoodEntry = {
           id: generateId('food'),
           itemId: chosenItem.id,
@@ -390,8 +469,7 @@ export function createCaloriesTool(
       const decision = decideMatch(parsed.canonicalName, items);
 
       if (decision.status === 'matched') {
-        const calories =
-          entry.calories_estimate ?? calculatePortionCalories(decision.item, portion);
+        const calories = resolveCalories(entry, portion, decision.item);
         const foodEntry: FoodEntry = {
           id: generateId('food'),
           itemId: decision.item.id,
@@ -437,9 +515,13 @@ export function createCaloriesTool(
         );
       } else {
         // Create new item
-        const calories = entry.calories_estimate ?? 0;
-        if (calories === 0) {
-          // Can't create without calorie estimate
+        const calories = resolveCalories(entry, portion, null);
+        if (
+          calories === 0 &&
+          entry.calories_estimate === undefined &&
+          entry.calories_per_100g === undefined
+        ) {
+          // Can't create without calorie data
           results.push({
             status: 'ambiguous',
             originalName: entry.name,
@@ -449,15 +531,18 @@ export function createCaloriesTool(
           continue;
         }
 
+        // Prefer calories_per_100g for item basis when available
+        const basis =
+          entry.calories_per_100g !== undefined
+            ? { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' as Unit }
+            : { caloriesPer: calories, perQuantity: portion.quantity, perUnit: portion.unit };
+
         const newItem: FoodItem = {
           id: generateId('item'),
           canonicalName: parsed.canonicalName,
-          measurementKind: inferMeasurementKind(portion.unit),
-          basis: {
-            caloriesPer: calories,
-            perQuantity: portion.quantity,
-            perUnit: portion.unit,
-          },
+          measurementKind:
+            entry.calories_per_100g !== undefined ? 'weight' : inferMeasurementKind(portion.unit),
+          basis,
           createdAt: now,
           updatedAt: now,
           recipientId,
@@ -496,7 +581,8 @@ export function createCaloriesTool(
       }
     }
 
-    return { success: true, results };
+    const dailySummary = await computeDailySummary(recipientId, effectiveDate);
+    return { success: true, results, dailySummary };
   }
 
   function inferMeasurementKind(unit: Unit): FoodItem['measurementKind'] {
@@ -541,6 +627,21 @@ export function createCaloriesTool(
       }
     }
 
+    // Build per-entry breakdown with item names
+    const itemIds = [...new Set(entries.map((e) => e.itemId))];
+    const itemsMap = await getItemsMap(itemIds);
+    const summaryEntries: SummaryEntryInfo[] = entries.map((e) => {
+      const info: SummaryEntryInfo = {
+        entryId: e.id,
+        name: itemsMap[e.itemId]?.canonicalName ?? 'Unknown',
+        calories: e.calories,
+      };
+      if (e.mealType) {
+        info.mealType = e.mealType;
+      }
+      return info;
+    });
+
     const userModel = await getUserModel(recipientId);
     const goal = userModel?.calorie_goal ?? null;
 
@@ -552,6 +653,7 @@ export function createCaloriesTool(
       remaining: goal !== null ? goal - totalCalories : null,
       entryCount: entries.length,
       byMealType,
+      entries: summaryEntries,
     };
   }
 
@@ -731,6 +833,11 @@ export function createCaloriesTool(
               type: ['number', 'null'],
               description: 'Calorie estimate if known (positive number)',
             },
+            calories_per_100g: {
+              type: ['number', 'null'],
+              description:
+                'Caloric density (kcal per 100g). Use with weight portion (g/kg) — tool computes calories automatically.',
+            },
             meal_type: {
               type: ['string', 'null'],
               enum: ['breakfast', 'lunch', 'dinner', 'snack', null],
@@ -749,6 +856,7 @@ export function createCaloriesTool(
             'name',
             'portion',
             'calories_estimate',
+            'calories_per_100g',
             'meal_type',
             'timestamp',
             'chooseItemId',
@@ -800,32 +908,16 @@ export function createCaloriesTool(
     additionalProperties: false,
   };
 
-  const TOOL_DESCRIPTION = `Отслеживание еды и калорий.
+  const TOOL_DESCRIPTION = `Food and calorie tracking.
 
-ДЕЙСТВИЯ:
-- log: Записать еду (поддерживает массив entries для нескольких позиций)
-- list: Показать записи за день
-- summary: Итоги дня (калории, цель, остаток)
-- goal: Установить цель калорий
-- log_weight: Записать вес
-- delete: Удалить запись
+ACTIONS: log, list, summary, goal, log_weight, delete
 
-LOG - формат entries:
-  entries: [
-    { name: "Американо", portion: { quantity: 200, unit: "ml" }, calories_estimate: 5, meal_type: "breakfast" },
-    { name: "Йогурт Teos Греческий 2%", portion: { quantity: 140, unit: "g" }, calories_estimate: 94 }
-  ]
-
-ПРАВИЛА:
-1. В name указывай ТОЛЬКО название без количества: "Американо", не "Американо 200мл"
-2. Количество и единицы в portion: { quantity: 200, unit: "ml" }
-3. Единицы: g, kg, ml, l, item, slice, cup, serving
-4. Если status="ambiguous", выбери нужный вариант через chooseItemId
-5. НЕ создавай новый продукт только из-за другой порции
-
-ПРИМЕР:
-Пользователь: "запиши американо и йогурт на завтрак"
-Ответ: log с entries=[{name:"Американо", portion:{quantity:200,unit:"ml"}, meal_type:"breakfast"}, ...]`;
+KEY RULES:
+- log response includes dailySummary with daily totals — NEVER call summary after log
+- name = pure food name, no quantities ("Americano", not "Americano 200ml")
+- When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
+- If status="ambiguous", resolve via chooseItemId — do NOT create a new item for a different portion
+- log supports entries array for multiple items in one call`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
@@ -844,7 +936,7 @@ LOG - формат entries:
         name: 'entries',
         type: 'array',
         description:
-          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, meal_type?, chooseItemId?}',
+          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, calories_per_100g?, meal_type?, chooseItemId?}',
         required: false,
       },
       {
