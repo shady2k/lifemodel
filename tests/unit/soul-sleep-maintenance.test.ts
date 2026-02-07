@@ -43,6 +43,8 @@ function createMockMemoryProvider(entries: MemoryEntry[] = []): MemoryProvider {
     }),
     getAll: vi.fn().mockResolvedValue(store),
     clear: vi.fn(),
+    delete: vi.fn().mockResolvedValue(true),
+    getBehaviorRules: vi.fn().mockResolvedValue([]),
   } as unknown as MemoryProvider;
 }
 

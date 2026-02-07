@@ -13,7 +13,7 @@ import {
   buildRecentThoughtsSection,
   buildPendingIntentionsSection,
   buildSoulSection,
-  buildUnresolvedTensionsSection,
+  buildBehaviorRulesSection,
   buildRuntimeSnapshotSection,
   buildCompletedActionsSection,
 } from './context-sections.js';
@@ -63,10 +63,10 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
     sections.push(soulSection);
   }
 
-  // Unresolved soul tensions (Zeigarnik pressure) - after soul, before runtime
-  const tensionsSection = buildUnresolvedTensionsSection(context);
-  if (tensionsSection) {
-    sections.push(tensionsSection);
+  // Behavioral rules (learned from user feedback) - after soul, before runtime
+  const behaviorRulesSection = buildBehaviorRulesSection(context);
+  if (behaviorRulesSection) {
+    sections.push(behaviorRulesSection);
   }
 
   // Runtime snapshot (conditional, for state-related queries)

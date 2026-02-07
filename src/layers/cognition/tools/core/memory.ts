@@ -91,6 +91,26 @@ export interface RecentByTypeOptions {
 }
 
 /**
+ * Options for getBehaviorRules.
+ */
+export interface BehaviorRuleOptions {
+  /** Maximum rules to return (default: 5) */
+  limit?: number | undefined;
+  /** Filter by recipient for per-relationship scoping */
+  recipientId?: string | undefined;
+}
+
+/**
+ * A behavioral rule with decay-adjusted weight.
+ */
+export interface BehaviorRule {
+  /** The underlying memory entry */
+  entry: MemoryEntry;
+  /** Decay-adjusted effective weight */
+  effectiveWeight: number;
+}
+
+/**
  * Memory provider interface.
  */
 export interface MemoryProvider {
@@ -106,6 +126,16 @@ export interface MemoryProvider {
     options?: RecentByTypeOptions
   ): Promise<MemoryEntry[]>;
   delete(id: string): Promise<boolean>;
+
+  /**
+   * Get active behavioral rules learned from user feedback.
+   * Applies read-time decay with tiered half-life:
+   *   - user_feedback rules: 60-day half-life
+   *   - pattern rules: 21-day half-life
+   * Filters out rules with effectiveWeight < 0.1.
+   * Cleans up fully-decayed rules (effectiveWeight < 0.05) as side effect.
+   */
+  getBehaviorRules(options?: BehaviorRuleOptions): Promise<BehaviorRule[]>;
 }
 
 /**

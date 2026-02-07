@@ -155,6 +155,61 @@ src/layers/cognition/soul/        # Reflection + Parliament
 src/layers/cognition/tools/core/soul.ts  # Soul tool
 ```
 
+## Behavioral Self-Learning
+
+A lightweight rule system for everyday behavioral corrections, complementing Parliament's heavy identity-level deliberation.
+
+### Two-Track Model
+
+| Track | Scope | Example | Mechanism |
+|-------|-------|---------|-----------|
+| **Parliament** | Identity-level | "Am I being honest?" | Deliberation, soul changes |
+| **Behavioral Rules** | Everyday behavior | "Don't mention Langflow in every message" | Reflection → rule → prompt |
+
+### Rule Lifecycle
+
+```
+User complains → Agent responds → Reflection runs
+                                       ↓
+                    Existing rules shown to reflection LLM
+                                       ↓
+                    LLM detects explicit behavioral correction
+                    LLM decides: create new rule or update existing
+                                       ↓
+                    saveBehaviorRule() → MemoryProvider
+                                       ↓
+              Next conversation: rules injected in system prompt
+                                       ↓
+              No more complaints → rule weight decays (60-day half-life)
+              Repeated complaints → weight reinforced, rule persists
+```
+
+### Rule Storage
+
+Rules are stored as `MemoryEntry` facts with distinguishing tags:
+- `type: 'fact'`
+- `tags: ['behavior:rule', 'state:active']`
+- `metadata.source`: `'user_feedback'` or `'pattern'`
+- `metadata.weight`: base weight (reinforced +0.5 per correction, capped at 3.0)
+
+### Decay & Reinforcement
+
+| Parameter | Value |
+|-----------|-------|
+| Half-life (user_feedback) | 60 days |
+| Half-life (pattern) | 21 days |
+| Dead threshold (filtered) | effectiveWeight < 0.1 |
+| Cleanup threshold | effectiveWeight < 0.05 |
+| Reinforcement boost | +0.5 per repetition |
+| Weight cap | 3.0 |
+| Max rules per reflection | 2 |
+| Max rules in prompt | 5 |
+| Max rules in storage | 15 |
+
+### LLM-Driven Dedup
+
+Instead of mechanical text matching, existing rules are passed to the reflection LLM as context. The LLM decides whether a new correction overlaps with an existing rule (`action: "update"`) or is genuinely new (`action: "create"`).
+
 ## Implementation Status
 
 - ✅ Phase 1: Soul Foundation (types, storage)
@@ -165,3 +220,4 @@ src/layers/cognition/tools/core/soul.ts  # Soul tool
 - ✅ Phase 4: Parliament Deliberation
 - ⏳ Phase 5: Sleep Cycle Maintenance
 - ✅ Phase 6: Soul Tools for Nika
+- ✅ Phase 7: Behavioral Self-Learning

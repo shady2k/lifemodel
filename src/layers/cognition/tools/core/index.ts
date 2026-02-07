@@ -26,6 +26,8 @@ export type {
   MemorySearchOptions,
   SearchResult,
   RecentByTypeOptions,
+  BehaviorRuleOptions,
+  BehaviorRule,
   MemoryToolDeps,
 } from './memory.js';
 export type { ConversationProvider, TimeToolDeps } from './time.js';

@@ -46,6 +46,8 @@ function createMockMemoryProvider(initialEntries: MemoryEntry[] = []): MemoryPro
     }),
     getAll: vi.fn().mockResolvedValue(store),
     clear: vi.fn(),
+    delete: vi.fn().mockResolvedValue(true),
+    getBehaviorRules: vi.fn().mockResolvedValue([]),
     getEntries: () => store,
   };
 

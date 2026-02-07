@@ -168,10 +168,8 @@ export interface LoopContext {
   /** Soul state for identity awareness (who I am, what I care about) */
   soulState?: FullSoulState | undefined;
 
-  /** Unresolved soul tensions (soul:reflection + state:unresolved thoughts) */
-  unresolvedTensions?:
-    | { id: string; content: string; dissonance: number; timestamp: Date }[]
-    | undefined;
+  /** Behavioral rules learned from user feedback (for prompt injection) */
+  behaviorRules?: MemoryEntry[] | undefined;
 
   /** Current conversation status (for thought processing context) */
   conversationStatus?: string | undefined;

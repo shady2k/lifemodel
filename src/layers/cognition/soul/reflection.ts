@@ -51,6 +51,20 @@ export interface ReflectionResult {
 }
 
 /**
+ * Behavioral rule extracted from reflection.
+ */
+export interface ExtractedBehaviorRule {
+  /** Whether to create a new rule or update an existing one */
+  action: 'create' | 'update';
+  /** ID of existing rule to update (required for action='update') */
+  ruleId?: string | undefined;
+  /** Short imperative instruction (max 15 words) */
+  rule: string;
+  /** Quote from user's message that triggered this */
+  evidence: string;
+}
+
+/**
  * Batch reflection result from the LLM.
  */
 export interface BatchReflectionResult {
@@ -60,6 +74,8 @@ export interface BatchReflectionResult {
   results: Map<string, ReflectionResult>;
   /** Cross-response patterns observed (logged for observability) */
   patterns: string[];
+  /** Behavioral rules extracted from user corrections */
+  behaviorRules: ExtractedBehaviorRule[];
 }
 
 /**
@@ -463,6 +479,116 @@ function simpleHash(str: string): string {
 }
 
 // ============================================================================
+// BEHAVIORAL RULES
+// ============================================================================
+
+/**
+ * Save a behavioral rule to memory (create or update).
+ *
+ * Update path: find existing rule by ruleId, reinforce weight (+0.5, cap 3.0),
+ * update rule text, increment count, update lastReinforcedAt.
+ *
+ * Create path: new MemoryEntry with type: 'fact', tags: ['behavior:rule', 'state:active'].
+ */
+export async function saveBehaviorRule(
+  memoryProvider: MemoryProvider,
+  extractedRule: ExtractedBehaviorRule,
+  logger: Logger,
+  recipientId?: string
+): Promise<void> {
+  const now = new Date();
+
+  if (extractedRule.action === 'update' && extractedRule.ruleId) {
+    // Update existing rule: exact lookup via getBehaviorRules (covers all active rules)
+    const allRules = await memoryProvider.getBehaviorRules({ limit: 100 });
+    const existing = allRules.find(
+      (r) => r.entry.metadata?.['attribute'] === extractedRule.ruleId
+    )?.entry;
+
+    if (existing) {
+      const oldWeight = (existing.metadata?.['weight'] as number | undefined) ?? 1.0;
+      const oldCount = (existing.metadata?.['count'] as number | undefined) ?? 1;
+      const newWeight = Math.min(3.0, oldWeight + 0.5);
+
+      const updated: MemoryEntry = {
+        ...existing,
+        content: extractedRule.rule,
+        timestamp: now,
+        metadata: {
+          ...existing.metadata,
+          weight: newWeight,
+          count: oldCount + 1,
+          lastReinforcedAt: now.toISOString(),
+          evidence: extractedRule.evidence,
+        },
+      };
+
+      await memoryProvider.save(updated);
+      logger.info(
+        { ruleId: extractedRule.ruleId, weight: newWeight, count: oldCount + 1 },
+        'Behavioral rule reinforced'
+      );
+      return;
+    }
+
+    // If existing rule not found, fall through to create
+    logger.debug({ ruleId: extractedRule.ruleId }, 'Rule for update not found, creating new');
+  }
+
+  // Create new rule
+  const ruleId = `rule_${String(Date.now())}_${Math.random().toString(36).slice(2, 8)}`;
+  const entry: MemoryEntry = {
+    id: `mem_behavior_${ruleId}`,
+    type: 'fact',
+    content: extractedRule.rule,
+    timestamp: now,
+    recipientId,
+    tags: ['behavior:rule', 'state:active'],
+    confidence: 0.9,
+    metadata: {
+      subject: 'behavior_rule',
+      attribute: ruleId,
+      weight: 1.0,
+      count: 1,
+      source: 'user_feedback',
+      evidence: extractedRule.evidence,
+      lastReinforcedAt: now.toISOString(),
+    },
+  };
+
+  await memoryProvider.save(entry);
+  logger.info({ ruleId, rule: extractedRule.rule }, 'Behavioral rule created');
+}
+
+/**
+ * Prune excess behavioral rules to enforce hard cap.
+ * Keeps the highest-weight rules, deletes the rest.
+ * Uses a high limit to scan ALL rules, including low-weight ones
+ * that getBehaviorRules would normally filter out.
+ */
+export async function pruneExcessBehaviorRules(
+  memoryProvider: MemoryProvider,
+  logger: Logger,
+  maxRules = 15
+): Promise<void> {
+  // Use large limit to catch all rules (getBehaviorRules already cleans up dead ones)
+  const allRules = await memoryProvider.getBehaviorRules({ limit: 200 });
+
+  if (allRules.length <= maxRules) {
+    return;
+  }
+
+  // Rules are already sorted by effectiveWeight descending
+  const toDelete = allRules.slice(maxRules);
+
+  for (const rule of toDelete) {
+    await memoryProvider.delete(rule.entry.id);
+  }
+
+  logger.info({ deleted: toDelete.length, kept: maxRules }, 'Pruned excess behavioral rules');
+}
+
+// ============================================================================
 // BATCH REFLECTION (Phase 3.6)
 // ============================================================================
 
@@ -571,8 +697,15 @@ export async function processBatchReflection(
     // Get soul state for the reflection prompt
     const soulState = await soulProvider.getState();
 
+    // Fetch existing behavioral rules for LLM context (dedup)
+    const existingRuleEntries = await memoryProvider.getBehaviorRules({ limit: 15 });
+    const existingRules = existingRuleEntries.map((r) => ({
+      id: (r.entry.metadata?.['attribute'] as string | undefined) ?? r.entry.id,
+      rule: r.entry.content,
+    }));
+
     // Call LLM with batch
-    const result = await callBatchReflectionLLM(llm, soulState, items, log);
+    const result = await callBatchReflectionLLM(llm, soulState, items, existingRules, log);
 
     log.debug({ success: result.success, resultCount: result.results.size }, 'LLM call completed');
 
@@ -613,10 +746,22 @@ export async function processBatchReflection(
         // 1-3: Aligned, no action
       }
 
+      // Save any behavioral rules extracted by the LLM
+      if (result.behaviorRules.length > 0) {
+        // Use first item's recipientId for scoping (batch items share recipient)
+        const batchRecipientId = items[0]?.recipientId;
+        for (const rule of result.behaviorRules) {
+          await saveBehaviorRule(memoryProvider, rule, log, batchRecipientId);
+        }
+        // Enforce hard cap on total rules
+        await pruneExcessBehaviorRules(memoryProvider, log, 15);
+      }
+
       log.debug(
         {
           itemCount: items.length,
           scores: Array.from(result.results.values()).map((r) => r.dissonance),
+          behaviorRules: result.behaviorRules.length,
         },
         'Batch reflection complete'
       );
@@ -646,6 +791,7 @@ async function callBatchReflectionLLM(
   llm: CognitionLLM,
   soulState: FullSoulState,
   items: PendingReflection[],
+  existingRules: { id: string; rule: string }[],
   logger: Logger
 ): Promise<BatchReflectionResult> {
   // Build compact self-model summary (truncated to 500 chars)
@@ -658,19 +804,30 @@ async function callBatchReflectionLLM(
     })
     .join('\n\n');
 
+  // Build existing rules context for LLM dedup
+  const existingRulesSection =
+    existingRules.length > 0
+      ? `\nCurrent behavioral rules:\n${existingRules.map((r, i) => `${String(i + 1)}. [${r.id}] ${r.rule}`).join('\n')}\n`
+      : '';
+
   const systemPrompt = `You are performing batch self-reflection checks.
 Your task: Assess whether each response aligns with the agent's identity and values.
+Also detect if the user explicitly corrected the agent's behavior.
 
 Self-model (who I am):
 ${selfModelSummary}
-
+${existingRulesSection}
 Respond ONLY with valid JSON in this exact format:
 {
   "results": [
     {"tickId": "<id>", "dissonance": <1-10>, "reasoning": "<brief>", "aspect": "<optional>"},
     ...
   ],
-  "patterns": ["<optional cross-response observations>"]
+  "patterns": ["<optional cross-response observations>"],
+  "behaviorRules": [
+    {"action": "create", "rule": "<short imperative, max 15 words>", "evidence": "<user quote>"},
+    {"action": "update", "ruleId": "<existing rule id>", "rule": "<updated rule>", "evidence": "<user quote>"}
+  ]
 }
 
 Dissonance scale:
@@ -681,7 +838,10 @@ Dissonance scale:
 
 Be honest but not hypercritical. Most responses should score 1-5.
 Only flag 7+ when there's genuine tension with core values or identity.
-In "patterns", note any trends you see across multiple responses (optional).`;
+In "patterns", note any trends you see across multiple responses (optional).
+
+behaviorRules: Extract ONLY when user EXPLICITLY corrected agent behavior (e.g., "stop doing X", "don't mention Y", "please be more Z"). Most batches will have 0 rules. Max 2 rules per batch.
+If user's correction relates to an existing rule, use action "update" with its ruleId. If it's new, use "create".`;
 
   const userPrompt = `Review these responses for alignment with self-model:
 
@@ -691,13 +851,13 @@ Score each response's dissonance.`;
 
   try {
     const response = await llm.complete({ systemPrompt, userPrompt });
-    return parseBatchReflectionResponse(response, items, logger);
+    return parseBatchReflectionResponse(response, items, existingRules, logger);
   } catch (error) {
     logger.warn(
       { error: error instanceof Error ? error.message : String(error) },
       'LLM call failed for batch reflection'
     );
-    return { success: false, results: new Map(), patterns: [] };
+    return { success: false, results: new Map(), patterns: [], behaviorRules: [] };
   }
 }
 
@@ -707,6 +867,7 @@ Score each response's dissonance.`;
 function parseBatchReflectionResponse(
   response: string,
   items: PendingReflection[],
+  existingRules: { id: string; rule: string }[],
   logger: Logger
 ): BatchReflectionResult {
   try {
@@ -767,12 +928,70 @@ function parseBatchReflectionResponse(
       }
     }
 
-    return { success: true, results, patterns };
+    // Extract behavioral rules (max 2 per batch)
+    const behaviorRules = parseBehaviorRules(parsed, existingRules, logger);
+
+    return { success: true, results, patterns, behaviorRules };
   } catch (error) {
     logger.warn(
       { error: error instanceof Error ? error.message : String(error), response },
       'Failed to parse batch reflection response'
     );
-    return { success: false, results: new Map(), patterns: [] };
+    return { success: false, results: new Map(), patterns: [], behaviorRules: [] };
   }
+}
+
+/**
+ * Parse and validate behavioral rules from LLM response.
+ * Max 2 rules per batch.
+ */
+function parseBehaviorRules(
+  parsed: Record<string, unknown>,
+  existingRules: { id: string; rule: string }[],
+  logger: Logger
+): ExtractedBehaviorRule[] {
+  const rawRules = parsed['behaviorRules'];
+  if (!Array.isArray(rawRules)) {
+    return [];
+  }
+
+  const existingRuleIds = new Set(existingRules.map((r) => r.id));
+  const validated: ExtractedBehaviorRule[] = [];
+
+  for (const raw of rawRules) {
+    if (validated.length >= 2) break; // Hard cap: max 2 per batch
+
+    if (typeof raw !== 'object' || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+
+    const action = record['action'];
+    const rule = record['rule'];
+    const evidence = record['evidence'];
+    const ruleId = record['ruleId'];
+
+    // Validate required fields
+    if (action !== 'create' && action !== 'update') continue;
+    if (typeof rule !== 'string' || rule.trim().length === 0) continue;
+    if (typeof evidence !== 'string' || evidence.trim().length === 0) continue;
+
+    // For 'update', validate ruleId exists in existing rules
+    if (action === 'update') {
+      if (typeof ruleId !== 'string' || !existingRuleIds.has(ruleId)) {
+        logger.debug(
+          { ruleId, action },
+          'Behavioral rule update references non-existent ruleId, skipping'
+        );
+        continue;
+      }
+    }
+
+    validated.push({
+      action,
+      rule: rule.trim(),
+      evidence: evidence.trim(),
+      ...(action === 'update' && typeof ruleId === 'string' ? { ruleId } : {}),
+    });
+  }
+
+  return validated;
 }

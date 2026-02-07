@@ -13,6 +13,8 @@ import type {
   MemorySearchOptions,
   RecentByTypeOptions,
   SearchResult,
+  BehaviorRuleOptions,
+  BehaviorRule,
 } from '../layers/cognition/tools/registry.js';
 
 /**
@@ -324,6 +326,77 @@ export class JsonMemoryProvider implements MemoryProvider {
       })
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       .slice(0, limit);
+  }
+
+  /**
+   * Get active behavioral rules with read-time decay.
+   *
+   * Tiered half-life:
+   *   - user_feedback: 60-day half-life
+   *   - pattern: 21-day half-life
+   *
+   * Filters out rules with effectiveWeight < 0.1.
+   * Cleans up fully-decayed rules (effectiveWeight < 0.05) as side effect.
+   */
+  async getBehaviorRules(options?: BehaviorRuleOptions): Promise<BehaviorRule[]> {
+    await this.ensureLoaded();
+
+    const limit = options?.limit ?? 5;
+    const recipientId = options?.recipientId;
+    const now = Date.now();
+
+    // Half-life in milliseconds
+    const HALF_LIFE_USER_FEEDBACK_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+    const HALF_LIFE_PATTERN_MS = 21 * 24 * 60 * 60 * 1000; // 21 days
+
+    // Filter behavior:rule facts
+    const ruleEntries = this.entries.filter((e) => {
+      if (e.type !== 'fact') return false;
+      if (!e.tags?.includes('behavior:rule') || !e.tags.includes('state:active')) return false;
+      // Scope by recipient if requested
+      if (recipientId && e.recipientId && e.recipientId !== recipientId) return false;
+      return true;
+    });
+
+    // Calculate effective weights with decay
+    const rulesWithWeight: { entry: MemoryEntry; effectiveWeight: number }[] = [];
+    const toDelete: string[] = [];
+
+    for (const entry of ruleEntries) {
+      const baseWeight = (entry.metadata?.['weight'] as number | undefined) ?? 1.0;
+      const source = (entry.metadata?.['source'] as string | undefined) ?? 'user_feedback';
+      const lastReinforcedAt = entry.metadata?.['lastReinforcedAt'] as string | undefined;
+      const parsedTime = lastReinforcedAt ? new Date(lastReinforcedAt).getTime() : NaN;
+      const referenceTime = Number.isFinite(parsedTime) ? parsedTime : entry.timestamp.getTime();
+      // Clamp elapsed to >= 0 to guard against future timestamps (clock skew)
+      const elapsed = Math.max(0, now - referenceTime);
+
+      const halfLife = source === 'pattern' ? HALF_LIFE_PATTERN_MS : HALF_LIFE_USER_FEEDBACK_MS;
+      const effectiveWeight = baseWeight * Math.pow(0.5, elapsed / halfLife);
+
+      if (effectiveWeight < 0.05) {
+        // Fully decayed — schedule for cleanup
+        toDelete.push(entry.id);
+      } else if (effectiveWeight >= 0.1) {
+        rulesWithWeight.push({ entry, effectiveWeight });
+      }
+      // 0.05 <= effectiveWeight < 0.1: skip (functionally dead but not cleaned up yet)
+    }
+
+    // Clean up fully-decayed rules as side effect
+    if (toDelete.length > 0) {
+      for (const id of toDelete) {
+        const index = this.entries.findIndex((e) => e.id === id);
+        if (index >= 0) {
+          this.entries.splice(index, 1);
+        }
+      }
+      await this.persist();
+      this.logger.info({ count: toDelete.length }, 'Cleaned up fully-decayed behavior rules');
+    }
+
+    // Sort by effective weight descending, return top N
+    return rulesWithWeight.sort((a, b) => b.effectiveWeight - a.effectiveWeight).slice(0, limit);
   }
 
   /**

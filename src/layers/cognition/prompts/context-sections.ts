@@ -1,8 +1,8 @@
 /**
  * Context Sections
  *
- * Builds the 7 context sections injected into the trigger prompt:
- * user profile, recent thoughts, pending intentions, soul, unresolved tensions,
+ * Builds context sections injected into the trigger prompt:
+ * user profile, recent thoughts, pending intentions, soul, behavioral rules,
  * runtime snapshot, and completed actions.
  *
  * Pure functions — no state mutation.
@@ -177,12 +177,13 @@ These shape HOW you respond, not WHAT you say. Never reference your values or id
 
 /**
  * Build unresolved soul tensions section.
- * Shows dissonant reflections that need processing (Zeigarnik pressure).
- * Limited to 2-3 highest dissonance items.
+ * NOTE: Kept for potential Parliament use. Removed from main conversation prompt
+ * because the LLM can't process tensions mid-conversation (only Parliament can).
  */
-export function buildUnresolvedTensionsSection(context: LoopContext): string | null {
-  const tensions = context.unresolvedTensions;
-  if (!tensions || tensions.length === 0) {
+export function buildUnresolvedTensionsSection(
+  tensions: { id: string; content: string; dissonance: number; timestamp: Date }[]
+): string | null {
+  if (tensions.length === 0) {
     return null;
   }
 
@@ -196,6 +197,24 @@ ${lines.join('\n')}
 These are reflections creating internal pressure. They represent moments where
 your response felt misaligned with who you are. Consider processing them when
 appropriate, or use \`core.memory\` to search for more context.`;
+}
+
+/**
+ * Build behavioral rules section.
+ * Shows rules learned from user feedback that the agent should follow.
+ * Max 5 rules, sorted by effective weight (strongest first).
+ */
+export function buildBehaviorRulesSection(context: LoopContext): string | null {
+  const rules = context.behaviorRules;
+  if (!rules || rules.length === 0) {
+    return null;
+  }
+
+  const lines = rules.map((rule) => `- ${rule.content}`);
+
+  return `## Behavioral Guidelines (learned)
+${lines.join('\n')}
+These are patterns learned from past interactions. Follow them naturally.`;
 }
 
 export function buildRuntimeSnapshotSection(

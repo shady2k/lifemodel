@@ -10,7 +10,7 @@ export {
   buildRecentThoughtsSection,
   buildPendingIntentionsSection,
   buildSoulSection,
-  buildUnresolvedTensionsSection,
+  buildBehaviorRulesSection,
   buildRuntimeSnapshotSection,
   buildCompletedActionsSection,
 } from './context-sections.js';

@@ -334,8 +334,8 @@ export class CognitionProcessor implements CognitionLayer {
     // Get soul state for identity awareness
     const soulState = await this.getSoulState();
 
-    // Get unresolved soul tensions (for visibility in system prompt)
-    const unresolvedTensions = await this.getUnresolvedTensions(recipientId);
+    // Get behavioral rules learned from user feedback
+    const behaviorRules = await this.getBehaviorRules(recipientId);
 
     // Get conversation status for thought processing context
     const conversationStatus =
@@ -369,7 +369,7 @@ export class CognitionProcessor implements CognitionLayer {
       recentThoughts: recentThoughts.length > 0 ? recentThoughts : undefined,
       pendingIntentions: pendingIntentions.length > 0 ? pendingIntentions : undefined,
       soulState,
-      unresolvedTensions: unresolvedTensions.length > 0 ? unresolvedTensions : undefined,
+      behaviorRules: behaviorRules.length > 0 ? behaviorRules : undefined,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
@@ -745,44 +745,24 @@ export class CognitionProcessor implements CognitionLayer {
   }
 
   /**
-   * Get unresolved soul tensions (soul:reflection + state:unresolved thoughts).
-   * Returns thoughts sorted by dissonance (highest first), limited to 3.
+   * Get behavioral rules learned from user feedback.
+   * Uses MemoryProvider.getBehaviorRules() with read-time decay.
    */
-  private async getUnresolvedTensions(
-    recipientId?: string
-  ): Promise<{ id: string; content: string; dissonance: number; timestamp: Date }[]> {
+  private async getBehaviorRules(recipientId?: string): Promise<MemoryEntry[]> {
     if (!this.memoryProvider) {
       return [];
     }
 
     try {
-      // Get recent thoughts (1 week window for unresolved tensions)
-      const thoughts = await this.memoryProvider.getRecentByType('thought', {
+      const rules = await this.memoryProvider.getBehaviorRules({
+        limit: 5,
         recipientId,
-        windowMs: 7 * 24 * 60 * 60 * 1000, // 1 week
-        limit: 50,
       });
-
-      // Filter for soul:reflection + state:unresolved
-      const unresolvedTensions = thoughts.filter((t) => {
-        if (!t.tags) return false;
-        return t.tags.includes('soul:reflection') && t.tags.includes('state:unresolved');
-      });
-
-      // Sort by dissonance (highest first) and limit to 3
-      return unresolvedTensions
-        .map((t) => ({
-          id: t.id,
-          content: t.content,
-          dissonance: (t.metadata?.['dissonance'] as number | undefined) ?? 7,
-          timestamp: t.timestamp,
-        }))
-        .sort((a, b) => b.dissonance - a.dissonance)
-        .slice(0, 3);
+      return rules.map((r) => r.entry);
     } catch (error) {
       this.logger.trace(
         { error: error instanceof Error ? error.message : 'Unknown' },
-        'Failed to get unresolved tensions'
+        'Failed to get behavior rules'
       );
       return [];
     }

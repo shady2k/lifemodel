@@ -15,12 +15,15 @@ export {
   performReflection,
   processBatchReflection,
   shouldProcessBatch,
+  saveBehaviorRule,
+  pruneExcessBehaviorRules,
   type ReflectionResult,
   type ReflectionContext,
   type ReflectionDeps,
   type ReflectionConfig,
   type BatchReflectionResult,
   type BatchReflectionConfig,
+  type ExtractedBehaviorRule,
 } from './reflection.js';
 
 export {
