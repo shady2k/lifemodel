@@ -21,6 +21,8 @@ interface OpenAIResponse {
   object?: string;
   created?: number;
   model: string;
+  /** Upstream provider name (OpenRouter-specific, e.g. "Google AI Studio") */
+  provider?: string;
   /** Can be undefined/empty on malformed responses from upstream providers */
   choices?: {
     index?: number;
@@ -38,6 +40,12 @@ interface OpenAIResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /** Cost in USD (OpenRouter) */
+    cost?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
   };
 }
 
@@ -484,12 +492,16 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       // Log detailed timing metrics
       this.providerLogger?.debug(
         {
+          generationId: parsed.generationId,
+          provider: data.provider,
           totalDurationMs: totalDuration,
           timeToHeadersMs,
           generationMs: generationTime,
           tps,
           completionTokens,
           promptTokens: parsed.usage?.promptTokens,
+          cachedTokens: data.usage?.prompt_tokens_details?.cached_tokens,
+          cost: data.usage?.cost,
         },
         'LLM timing breakdown'
       );
@@ -533,19 +545,35 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
    * Parse the API response into our format.
    */
   protected parseResponse(data: OpenAIResponse): CompletionResponse {
+    // OpenRouter can return HTTP 200 with an error object in the body
+    // (e.g. upstream provider 500s wrapped as {"error": {"message": "...", "code": 500}})
+    const bodyError = (data as unknown as Record<string, unknown>)['error'] as
+      | { message?: string; code?: number }
+      | undefined;
+    if (bodyError && !data.choices?.length) {
+      const code = bodyError.code ?? 0;
+      const message = bodyError.message ?? 'Unknown error';
+      this.providerLogger?.warn(
+        { generationId: data.id, provider: data.provider, errorCode: code, errorMessage: message },
+        'Provider returned error in response body'
+      );
+      throw new LLMError(`${this.name} upstream error: ${String(code)} - ${message}`, this.name, {
+        statusCode: code,
+        retryable: code >= 500 || code === 429,
+      });
+    }
+
     const firstChoice = data.choices?.[0];
     if (!firstChoice) {
       // Log the raw response to help debug why there are no choices
       // Common causes: content filtering, model overload, malformed request
       this.providerLogger?.error(
         {
+          generationId: data.id,
+          provider: data.provider,
           responseKeys: Object.keys(data),
           choicesLength: data.choices?.length ?? 0,
           model: data.model,
-          id: data.id,
-          // Include error field if present (some providers return errors here)
-          error: (data as unknown as Record<string, unknown>)['error'],
-          // Include raw response preview (truncated for safety)
           rawPreview: JSON.stringify(data).slice(0, 500),
         },
         'No choices in API response - logging raw response for debugging'
@@ -567,6 +595,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     const result: CompletionResponse = {
       content,
       model: data.model,
+      generationId: data.id,
     };
 
     // Parse tool_calls if present (native tool calling)

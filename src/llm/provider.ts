@@ -129,6 +129,9 @@ export interface CompletionResponse {
   /** Model that was used */
   model: string;
 
+  /** Provider generation ID (e.g. OpenRouter "gen-..." for dashboard tracing) */
+  generationId?: string | undefined;
+
   /** Tool calls requested by the model (native tool calling) */
   toolCalls?: ToolCall[];
 
