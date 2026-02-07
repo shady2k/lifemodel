@@ -12,3 +12,5 @@ export {
   getEffectiveTimezone,
   formatTimestampPrefix,
 } from './date.js';
+
+export { markdownToTelegramHtml } from './telegram-html.js';

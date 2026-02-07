@@ -25,6 +25,7 @@ import type {
   Metrics,
   Intent,
   Channel,
+  SendOptions,
   Event,
   ThoughtData,
   InterestIntensity,
@@ -65,6 +66,7 @@ import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
 import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
 import { setPrimaryRecipientId } from './globals.js';
+import { markdownToTelegramHtml } from '../utils/telegram-html.js';
 
 /**
  * Core loop configuration.
@@ -1253,7 +1255,11 @@ export class CoreLoop {
               break;
             }
 
-            const sendOptions = replyTo ? { replyTo } : undefined;
+            const htmlText = markdownToTelegramHtml(text);
+            const sendOptions: SendOptions = {
+              ...(replyTo && { replyTo }),
+              parseMode: 'HTML',
+            };
             Promise.resolve()
               .then(async () => {
                 // Duplicate detection: skip sending if message is identical to last assistant message
@@ -1270,7 +1276,7 @@ export class CoreLoop {
                     return { success: false, skipped: true };
                   }
                 }
-                return channelImpl.sendMessage(route.destination, text, sendOptions);
+                return channelImpl.sendMessage(route.destination, htmlText, sendOptions);
               })
               .then((result) => {
                 if (result.success) {
