@@ -328,6 +328,7 @@ export class TelegramChannel implements Channel {
               userId,
               recipientId,
               textLength: text.length,
+              text: text.slice(0, 200).replace(/\n/g, ' '),
             },
             'Message received as Signal'
           );

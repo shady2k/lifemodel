@@ -485,7 +485,7 @@ export class CoreLoop {
 
       // Defer thought and reaction signals if COGNITION is busy
       // These signals need LLM processing, so they must wait for COGNITION to be free
-      const deferrableTypes = ['thought', 'message_reaction'];
+      const deferrableTypes = ['thought', 'message_reaction', 'user_message'];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
       if (this.pendingCognition && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
@@ -496,6 +496,7 @@ export class CoreLoop {
             {
               thoughts: toDefer.filter((s) => s.type === 'thought').length,
               reactions: toDefer.filter((s) => s.type === 'message_reaction').length,
+              userMessages: toDefer.filter((s) => s.type === 'user_message').length,
             },
             'COGNITION busy, deferring signals to next tick'
           );
@@ -862,6 +863,14 @@ export class CoreLoop {
    * Process user message signal for side effects.
    */
   private processUserMessageSignal(signal: Signal): void {
+    const data = signal.data as
+      | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
+      | undefined;
+
+    // Idempotency guard: skip if already applied (signal was re-queued after deferral)
+    if (data?.sideEffectsApplied) return;
+    if (data) data.sideEffectsApplied = true;
+
     // Note: Ack clearing is now handled by ThresholdEngine when it sees user_message
 
     // User responded - this is positive feedback (recharges energy, reduces social debt)
