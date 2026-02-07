@@ -1,8 +1,25 @@
 # Motor Cortex — Phase 1 Implementation Plan
 
-Phase 1 ("Hands") delivers the async sub-agent loop with code sandbox and shell tools. This document breaks the work into 8 ordered steps with explicit dependencies.
+Phase 1 ("Hands") delivers the async sub-agent loop with code sandbox. This document breaks the work into 8 ordered steps with explicit dependencies.
 
 Reference: [design.md](design.md) for full architecture and rationale.
+
+---
+
+## Implementation Status: COMPLETE
+
+Phase 1 is implemented with these deviations from the original plan:
+
+| Change | Reason |
+|--------|--------|
+| Shell tool disabled (deferred to Phase 2) | Insufficient isolation: no folder jailing, shell argument injection via `exec()`, `rm -rf /` passes allowlist |
+| `core.tasks` merged into `core.task` | Single tool with `action: list\|status\|cancel\|respond` — avoids LLM confusion between near-identical names |
+| `tasks.ts` deleted, `task.ts` rewritten | Follows the `filesystem` tool pattern (one tool, action parameter) |
+| Path traversal protection added | `resolveSafePath()` using `resolve()` + `relative()` rejects `../../etc/passwd` |
+| `pendingToolCallId` added to `MotorRun` | Preserves tool_call/tool_result atomicity for `ask_user` (Lesson Learned #2) |
+| `getActiveRun()` includes `awaiting_input` | Enforces single-run mutex even when paused for user input |
+| Sandbox runner `settled` guard | Prevents double-resolve race between timeout/message/error/exit handlers |
+| `MotorTool` type is `'code' \| 'filesystem' \| 'ask_user'` | Shell removed from union; shell runner files kept for Phase 2 |
 
 ---
 

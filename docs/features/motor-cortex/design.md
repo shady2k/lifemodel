@@ -131,7 +131,7 @@ Three tools for dispatch, query, and control.
     skill: { type: 'string', description: 'Optional skill name to load (maps to SKILL.md file). Agentic mode only.' },
     tools: {
       type: 'array',
-      items: { type: 'string', enum: ['code', 'shell', 'browser', 'filesystem'] },
+      items: { type: 'string', enum: ['code', 'filesystem'] },  // Phase 1; shell and browser added in Phase 2
       description: 'Which tool capabilities to grant. Agentic mode only. Principle of least privilege.',
     },
     approvalRequired: {
@@ -154,47 +154,33 @@ Three tools for dispatch, query, and control.
 
 **Oneshot tool gating:** Oneshot mode only runs JavaScript code in the sandbox — it does not accept `tools` parameter. No shell, filesystem, or browser access. It's a pure computation sandbox.
 
-#### `core.tasks` — List runs
+#### `core.task` — Manage runs (unified)
 
-```typescript
-{
-  name: 'core.tasks',
-  description: 'List Motor Cortex task runs. Shows active, recent completed, and awaiting-input runs.',
-  parameters: {
-    status: {
-      type: 'string',
-      enum: ['all', 'running', 'awaiting_input', 'completed', 'failed'],
-      description: 'Filter by status. Default: "all".',
-    },
-    limit: { type: 'number', description: 'Max results. Default: 10.' },
-  },
-}
-```
-
-**Returns:** `{ runs: [{ runId, status, task, startedAt, completedAt?, iterations, pendingQuestion? }], total }`
-
-#### `core.task` — Control a specific run
+Originally designed as two tools (`core.tasks` for listing, `core.task` for control), these were merged into a single `core.task` tool with an `action` parameter. This avoids LLM confusion between nearly-identical tool names.
 
 ```typescript
 {
   name: 'core.task',
-  description: 'Control a specific Motor Cortex run. Get status, cancel, or respond to a pending question.',
+  description: 'Manage Motor Cortex runs. list: show all runs. status: get details. cancel: stop a run. respond: answer a pending question.',
   parameters: {
-    runId: { type: 'string', description: 'Run ID to control.' },
     action: {
       type: 'string',
-      enum: ['status', 'cancel', 'respond'],
-      description: '"status" = get details. "cancel" = stop the run. "respond" = answer a pending question (also used for approval in Phase 2).',
+      enum: ['list', 'status', 'cancel', 'respond'],
+      description: 'Action to perform.',
     },
+    runId: { type: 'string', description: 'Run ID (required for status, cancel, respond).' },
+    status: { type: 'string', enum: ['created', 'running', 'awaiting_input', 'completed', 'failed'], description: 'Filter by status (for list action only).' },
+    limit: { type: 'number', description: 'Max runs to return (for list action only).' },
     answer: { type: 'string', description: 'Answer to the pending question. Required when action is "respond".' },
   },
 }
 ```
 
 **Returns:**
-- `status`: Full run details (status, steps, trace summary)
-- `cancel`: `{ runId, previousStatus, newStatus: 'failed', message: 'Cancelled by user' }`
-- `respond`: `{ runId, previousStatus: 'awaiting_input', newStatus: 'running', message: 'Resumed' }`
+- `list`: `{ runs: [{ id, status, task, startedAt, completedAt?, iterations, tools }], total }`
+- `status`: Full run details (status, steps, trace, pendingQuestion)
+- `cancel`: `{ runId, previousStatus, newStatus: 'failed' }`
+- `respond`: `{ runId, previousStatus: 'awaiting_input', newStatus: 'running' }`
 
 **Phase 2 adds:** `action: 'approve'` is handled via `respond` — the user's answer ("Yes" / "No") is the approval. No separate action needed; this keeps the API surface minimal.
 
@@ -768,21 +754,21 @@ interface TaskResult {
 
 | Phase | Name | What | Gate to Next |
 |-------|------|------|-------------|
-| 1 | **Hands** | Motor Cortex async loop + code sandbox + shell. `core.act`/`core.tasks`/`core.task` tools. `motor_result` signal. Ask-user pattern. | Does the sub-agent pattern work? Can it solve real tasks? |
+| 1 | **Hands** | Motor Cortex async loop + code sandbox. `core.act`/`core.task` tools. `motor_result` signal. Ask-user pattern. Shell deferred to Phase 2 (insufficient isolation). | Does the sub-agent pattern work? Can it solve real tasks? |
 | 2 | **Eyes** | Browser tool, skill files, credential store, approval gates, artifact persistence, history compaction. | Are browser workflows reliable enough? |
 | 3 | **Muscle Memory** | Skill harvesting — extract parameterized, testable skills from successful runs. | Agent repeatedly solves similar tasks → should be automatic |
 
 ### Phase 1: Hands
 
-Ship the Motor Cortex async sub-agent loop with code and shell tools only. Prove the pattern works.
+Ship the Motor Cortex async sub-agent loop with code sandbox. Prove the pattern works.
 
 **What you can do:**
-- Computation: parse data, calculate, transform
-- Shell pipelines: curl + jq, data processing, git operations
-- Multi-step tasks: fetch data → process → generate report
+- Computation: parse data, calculate, transform (code sandbox)
+- Multi-step tasks: code → filesystem → generate report (agentic mode)
 - Ask user questions mid-run for clarification
 
 **What's explicitly deferred to Phase 2:**
+- Shell command execution (insufficient isolation in Phase 1 — no folder jailing, argument validation gaps)
 - Browser automation
 - Skill file loading (SKILL.md)
 - Credential store (vault)
@@ -794,6 +780,14 @@ Ship the Motor Cortex async sub-agent loop with code and shell tools only. Prove
 - ProcessReaper / zombie process handling (no browser = no sticky processes)
 - `isolated-vm` sandbox (fork-based is acceptable for Phase 1)
 
+**Implementation deviations from original design:**
+- `core.tasks` merged into `core.task` with `action: 'list'` — avoids LLM confusion between similar tool names
+- `shell` removed from `MotorTool` union — shell runner files kept for Phase 2 reuse
+- Path traversal protection added to filesystem tool (`resolve()` + `relative()` boundary check)
+- `ask_user` preserves `tool_call_id` for atomicity (Lesson Learned #2)
+- `getActiveRun()` mutex includes `awaiting_input` status
+- Sandbox runner uses `settled` guard to prevent double-resolve race
+
 **File structure:**
 ```
 src/
@@ -801,20 +795,19 @@ src/
     motor-cortex/
       motor-cortex.ts        # MotorCortex service class (manages runs, mutex, signal emission)
       motor-loop.ts          # Sub-agent loop (receive task → iterate → emit signal)
-      motor-tools.ts         # Tool registry + definitions (code, shell, filesystem, ask_user)
+      motor-tools.ts         # Tool registry + definitions (code, filesystem, ask_user)
       motor-protocol.ts      # MotorRun, TaskResult, MotorToolResult, RunTrace types
       motor-state.ts         # Run state machine + DeferredStorage persistence
     sandbox/
-      sandbox-runner.ts      # Fork + IPC + timeout (preserved from original design)
-      sandbox-worker.ts      # Child process entry point
-      sandbox-guard.ts       # Static code safety checks
-    shell/
+      sandbox-runner.ts      # Fork + IPC + timeout + settled guard
+      sandbox-worker.ts      # Child process entry point (stripped globals)
+      sandbox-guard.ts       # Static code safety checks (regex-based, best-effort)
+    shell/                   # Kept for Phase 2 (not wired in Phase 1)
       shell-runner.ts        # Controlled shell execution
       shell-allowlist.ts     # Strict command allowlist
-  layers/cognition/tools/
-    core-act.ts              # core.act tool definition + handler
-    core-tasks.ts            # core.tasks tool definition + handler
-    core-task.ts             # core.task tool definition + handler
+  layers/cognition/tools/core/
+    act.ts                   # core.act tool definition + handler
+    task.ts                  # core.task tool (unified: list/status/cancel/respond)
 ```
 
 **Integration points:**

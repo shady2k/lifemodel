@@ -81,6 +81,8 @@ export interface AgentConfigFile {
     fastModel?: string;
     /** Smart model for composition */
     smartModel?: string;
+    /** Motor Cortex model */
+    motorModel?: string;
   };
 
   /** Logging configuration */
@@ -152,6 +154,7 @@ export interface MergedConfig {
     openRouterApiKey: string | null;
     fastModel: string;
     smartModel: string;
+    motorModel: string;
     /** App name for API tracking (shows in provider dashboards) */
     appName: string;
     /** Site URL for API tracking */
@@ -251,6 +254,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
     openRouterApiKey: null,
     fastModel: 'anthropic/claude-haiku-4.5',
     smartModel: 'anthropic/claude-sonnet-4.5',
+    motorModel: 'anthropic/claude-haiku-4.5',
     appName: 'Lifemodel',
     siteUrl: 'https://github.com/shady2k/lifemodel',
     local: {

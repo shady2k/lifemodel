@@ -157,6 +157,9 @@ export class ConfigLoader {
       if (file.llm.smartModel) {
         config.llm.smartModel = file.llm.smartModel;
       }
+      if (file.llm.motorModel) {
+        config.llm.motorModel = file.llm.motorModel;
+      }
     }
 
     // Logging
@@ -216,6 +219,11 @@ export class ConfigLoader {
     const smartModel = process.env['LLM_SMART_MODEL'];
     if (smartModel) {
       config.llm.smartModel = smartModel;
+    }
+
+    const motorModel = process.env['LLM_MOTOR_MODEL'];
+    if (motorModel) {
+      config.llm.motorModel = motorModel;
     }
 
     // Local model configuration

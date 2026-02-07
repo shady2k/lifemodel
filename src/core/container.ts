@@ -59,6 +59,9 @@ import {
   type IRecipientRegistry,
 } from './recipient-registry.js';
 import { PersistentAckRegistry } from '../layers/aggregation/persistent-ack-registry.js';
+import { createMotorCortex, type MotorCortex } from '../runtime/motor-cortex/motor-cortex.js';
+import { createActTool } from '../layers/cognition/tools/core/act.js';
+import { createTaskTool } from '../layers/cognition/tools/core/task.js';
 
 /**
  * Application configuration.
@@ -168,6 +171,8 @@ export interface Container {
   pluginLoader: PluginLoader | null;
   /** Recipient registry for message routing */
   recipientRegistry: IRecipientRegistry | null;
+  /** Motor Cortex service for code execution */
+  motorCortex: MotorCortex | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -269,6 +274,7 @@ function createLLMProvider(
       {
         fast: useLocalForFast ? localProvider : openRouterProvider,
         smart: useLocalForSmart ? localProvider : openRouterProvider,
+        motor: useLocalForFast ? localProvider : openRouterProvider, // Use fast provider for motor
         default: openRouterProvider,
       },
       logger
@@ -277,6 +283,7 @@ function createLLMProvider(
       {
         fastProvider: useLocalForFast ? 'local' : 'openrouter',
         smartProvider: useLocalForSmart ? 'local' : 'openrouter',
+        motorProvider: useLocalForFast ? 'local' : 'openrouter',
       },
       'MultiProvider configured'
     );
@@ -475,6 +482,24 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   });
   logger.info('SoulProvider configured');
 
+  // Create Motor Cortex service (for code execution)
+  let motorCortex: MotorCortex | null = null;
+  if (llmProvider) {
+    motorCortex = createMotorCortex({
+      llm: llmProvider,
+      storage,
+      logger,
+      energyModel: agent.getEnergyModel(),
+    });
+
+    // Wire signal callback
+    motorCortex.setSignalCallback((signal) => {
+      coreLoop.pushSignal(signal);
+    });
+
+    logger.info('Motor Cortex service initialized');
+  }
+
   // Create recipient registry for message routing (with persistence)
   const recipientRegistry = createPersistentRecipientRegistry(storage, logger);
   await recipientRegistry.init();
@@ -643,6 +668,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     ackRegistry,
   });
 
+  // Recover Motor Cortex runs on restart
+  if (motorCortex) {
+    await motorCortex.recoverOnRestart();
+    logger.info('Motor Cortex runs recovered');
+  }
+
   // Create core loop config
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...configOverrides.coreLoop,
@@ -689,6 +720,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       return layers.cognition.getToolRegistry().unregisterTool(toolName);
     }
   );
+
+  // Register Motor Cortex tools if service is available
+  if (motorCortex) {
+    layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
+    layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex));
+    logger.info('Motor Cortex tools registered');
+  }
 
   // Set scheduler service on core loop
   coreLoop.setSchedulerService(schedulerService);
@@ -789,6 +827,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     schedulerService,
     pluginLoader,
     recipientRegistry,
+    motorCortex,
     shutdown,
   };
 }

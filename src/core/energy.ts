@@ -16,6 +16,12 @@ export interface EnergyConfig {
   /** Drain per message composed (default: 0.01) */
   messageDrain: number;
 
+  /** Drain for Motor Cortex oneshot execution (default: 0.05) */
+  motorOneshotDrain: number;
+
+  /** Drain for Motor Cortex agentic run (default: 0.15) */
+  motorAgenticDrain: number;
+
   /** Base recharge per tick during low-activity (default: 0.002) */
   baseRecharge: number;
 
@@ -43,6 +49,8 @@ export const DEFAULT_ENERGY_CONFIG: EnergyConfig = {
   eventDrain: 0.005,
   llmDrain: 0.02,
   messageDrain: 0.01,
+  motorOneshotDrain: 0.05,
+  motorAgenticDrain: 0.15,
   baseRecharge: 0.002,
   nightRechargeMultiplier: 2.0,
   minEnergy: 0.05,
@@ -54,7 +62,7 @@ export const DEFAULT_ENERGY_CONFIG: EnergyConfig = {
 /**
  * Energy drain types for tracking/metrics.
  */
-export type DrainType = 'tick' | 'event' | 'llm' | 'message';
+export type DrainType = 'tick' | 'event' | 'llm' | 'message' | 'motor_oneshot' | 'motor_agentic';
 
 /**
  * Energy recharge sources.
@@ -189,6 +197,10 @@ export class EnergyModel {
         return this.config.llmDrain;
       case 'message':
         return this.config.messageDrain;
+      case 'motor_oneshot':
+        return this.config.motorOneshotDrain;
+      case 'motor_agentic':
+        return this.config.motorAgenticDrain;
     }
   }
 

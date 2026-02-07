@@ -43,7 +43,7 @@ export interface Message {
 /**
  * Model role for selecting appropriate model tier.
  */
-export type ModelRole = 'fast' | 'smart';
+export type ModelRole = 'fast' | 'smart' | 'motor';
 
 /**
  * JSON Schema definition for structured output.

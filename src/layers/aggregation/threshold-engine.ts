@@ -211,6 +211,17 @@ export class ThresholdEngine {
       };
     }
 
+    // Motor Cortex results — always wake immediately (user is waiting)
+    const motorResults = signals.filter((s) => s.type === 'motor_result');
+    if (motorResults.length > 0) {
+      return {
+        shouldWake: true,
+        trigger: 'scheduled', // closest existing WakeTrigger
+        reason: 'Motor Cortex run result',
+        triggerSignals: motorResults,
+      };
+    }
+
     // Check for thought signals - bypass energy gate like user_message
     // Thoughts are internal processing that needs prompt handling
     // Filter out thoughts that have already been handled (ACKed)

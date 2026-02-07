@@ -12,6 +12,9 @@ export interface MultiProviderConfig {
   /** Provider for smart/reasoning tasks */
   smart?: LLMProvider | undefined;
 
+  /** Provider for Motor Cortex sub-agent tasks */
+  motor?: LLMProvider | undefined;
+
   /** Default provider when role not specified */
   default?: LLMProvider | undefined;
 }
@@ -61,6 +64,8 @@ export class MultiProvider implements LLMProvider {
         return this.providers.fast ?? this.providers.default;
       case 'smart':
         return this.providers.smart ?? this.providers.default;
+      case 'motor':
+        return this.providers.motor ?? this.providers.fast ?? this.providers.default;
       default:
         return this.providers.default ?? this.providers.fast ?? this.providers.smart;
     }

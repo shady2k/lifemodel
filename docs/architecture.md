@@ -33,6 +33,17 @@
 
 Most ticks: only AUTONOMIC and AGGREGATION run. COGNITION wakes for user messages or threshold crossings. Smart model used only on retry (low confidence + safe to retry).
 
+### Motor Cortex (Runtime Service)
+
+Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cognition via `core.act`. It runs a separate agentic LLM loop with its own tools (code sandbox, filesystem) and conversation context. Results flow back via `motor_result` signals through the standard pipeline.
+
+- **Oneshot mode**: Synchronous JS execution in forked sandbox (5s timeout)
+- **Agentic mode**: Async sub-agent loop (max 20 iterations), returns runId immediately
+- **Mutex**: Only one agentic run at a time (including `awaiting_input`)
+- **Energy gated**: 0.05 (oneshot), 0.15 (agentic)
+
+See [docs/features/motor-cortex/](features/motor-cortex/) for full design.
+
 ---
 
 ## CoreLoop (The Heartbeat)
@@ -111,6 +122,7 @@ Key design decisions:
 src/
 ├── core/           # CoreLoop, Agent, energy, event-bus
 ├── layers/         # autonomic/, aggregation/, cognition/
+├── runtime/        # Motor Cortex service, sandbox, shell (async execution)
 ├── llm/            # LLM provider interface, tool schema conversion
 ├── plugins/        # Modular extensions
 ├── channels/       # Sensory organs (Telegram, etc.)

@@ -462,6 +462,13 @@ export class Agent {
     // Clamp to bounds
     return Math.max(min, Math.min(max, Math.round(interval)));
   }
+
+  /**
+   * Get the energy model for energy operations.
+   */
+  getEnergyModel(): EnergyModel {
+    return this.energy;
+  }
 }
 
 /**

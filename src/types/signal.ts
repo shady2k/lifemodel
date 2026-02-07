@@ -58,7 +58,10 @@ export type SignalType =
   | 'plugin_event' // Generic plugin event with namespaced kind
 
   // === INTERNAL THOUGHT (from cognition/memory) ===
-  | 'thought'; // Internal thought requiring processing
+  | 'thought' // Internal thought requiring processing
+
+  // === MOTOR CORTEX (from runtime service) ===
+  | 'motor_result'; // Motor Cortex run completed, failed, or needs input
 
 /**
  * Signal sources - which "organ" emitted the signal.
@@ -99,7 +102,10 @@ export type SignalSource =
   // === THOUGHT (from cognition/memory layers) ===
   | 'cognition.thought' // From COGNITION layer (emitThought step)
   | 'memory.thought' // From memory consolidation
-  | 'plugin.thought'; // From plugin emitThought() API
+  | 'plugin.thought' // From plugin emitThought() API
+
+  // === MOTOR CORTEX ===
+  | 'motor.cortex'; // From Motor Cortex runtime service
 
 /**
  * Signal - structured data emitted by sensory organs and neurons.
@@ -158,7 +164,8 @@ export type SignalData =
   | ContactUrgeData
   | PluginEventData
   | ThoughtData
-  | FactBatchData;
+  | FactBatchData
+  | MotorResultData;
 
 /**
  * Data for user_message signals.
@@ -464,6 +471,34 @@ export interface FactBatchData {
 }
 
 /**
+ * Data for motor_result signals.
+ *
+ * Emitted when a Motor Cortex run completes, fails, or needs user input.
+ */
+export interface MotorResultData {
+  kind: 'motor_result';
+
+  /** Run identifier */
+  runId: string;
+
+  /** Run status */
+  status: 'completed' | 'failed' | 'awaiting_input';
+
+  /** Result (present when status=completed) */
+  result?: {
+    ok: boolean;
+    summary: string;
+    stats: { iterations: number; durationMs: number; energyCost: number; errors: number };
+  };
+
+  /** Error details (present when status=failed) */
+  error?: { message: string; lastStep?: string };
+
+  /** Question for user (present when status=awaiting_input) */
+  question?: string;
+}
+
+/**
  * Signal metrics - the actual measurements.
  *
  * All values are typically 0-1 normalized, but some can be raw counts or times.
@@ -526,6 +561,9 @@ export const SIGNAL_TTL: Record<SignalType, number | null> = {
 
   // Thought signals
   thought: THOUGHT_LIMITS.TTL_MS, // 24 hours
+
+  // Motor Cortex signals
+  motor_result: 5 * 60_000, // 5 minutes - results are important
 };
 
 /**
