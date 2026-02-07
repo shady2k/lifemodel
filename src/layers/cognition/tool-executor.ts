@@ -279,7 +279,11 @@ export async function executeToolCalls(
         toolName,
         resultId: `${toolCall.id}-result`,
         success: true,
-        data: { success: true, message: 'Message sent to user' },
+        data: {
+          success: true,
+          delivered_text: text,
+          note: 'Already sent to user. Do not repeat or paraphrase this text in your response.',
+        },
       });
 
       logger.debug(
@@ -290,7 +294,11 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
-        content: JSON.stringify({ success: true, message: 'Message sent to user' }),
+        content: JSON.stringify({
+          success: true,
+          delivered_text: text,
+          note: 'Already sent to user. Do not repeat or paraphrase this text in your response.',
+        }),
       });
       continue;
     }

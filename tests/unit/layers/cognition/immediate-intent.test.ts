@@ -437,6 +437,54 @@ describe('Immediate Intent Processing', () => {
     });
   });
 
+  describe('core.say tool result includes delivered text', () => {
+    it('echoes delivered_text and do-not-repeat note in tool result messages', async () => {
+      const sayTool = createMockTool('core.say', true, {});
+
+      const sayText = 'Доброе утро! Помню про калории.';
+      mockLlm = createMockLlm([{ name: 'core.say', args: { text: sayText } }]);
+      mockToolRegistry = createMockToolRegistry([sayTool]);
+
+      const callbacks: LoopCallbacks = {
+        onImmediateIntent: immediateIntentCallback,
+      };
+
+      const context = createTestContext({ recipientId: 'rcpt-1' });
+      const loop = createAgenticLoop(createTestLogger(), mockLlm, mockToolRegistry, {}, callbacks);
+      const result = await loop.run(context);
+
+      // Verify the tool result in state contains delivered_text
+      const sayResults = result.state.toolResults.filter(
+        (r: ToolResult) => r.toolName === 'core.say'
+      );
+      expect(sayResults).toHaveLength(1);
+      expect(sayResults[0].data).toEqual(
+        expect.objectContaining({
+          success: true,
+          delivered_text: sayText,
+          note: expect.stringContaining('Do not repeat'),
+        })
+      );
+
+      // Verify the message pushed to LLM conversation contains the enriched content
+      const toolMessages = (mockLlm.completeWithTools as any).mock.calls
+        .flatMap((call: any[]) => call[0])
+        .filter((msg: any) => msg.role === 'tool');
+
+      // If the LLM was called again after core.say, it should see the enriched tool result
+      if (toolMessages.length > 0) {
+        const sayToolMsg = toolMessages.find((msg: any) => {
+          const content = JSON.parse(msg.content);
+          return content.delivered_text !== undefined;
+        });
+        expect(sayToolMsg).toBeDefined();
+        const parsed = JSON.parse(sayToolMsg.content);
+        expect(parsed.delivered_text).toBe(sayText);
+        expect(parsed.note).toContain('Do not repeat');
+      }
+    });
+  });
+
   describe('no callback provided', () => {
     it('works normally without onImmediateIntent callback', async () => {
       const rememberTool = createMockTool('core.remember', true, {
