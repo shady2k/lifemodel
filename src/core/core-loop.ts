@@ -483,9 +483,9 @@ export class CoreLoop {
         });
       }
 
-      // Defer thought and reaction signals if COGNITION is busy
-      // These signals need LLM processing, so they must wait for COGNITION to be free
-      const deferrableTypes = ['thought', 'message_reaction', 'user_message'];
+      // Defer signals that need LLM processing if COGNITION is busy
+      // These signals must wait for COGNITION to be free — otherwise they're consumed and lost
+      const deferrableTypes = ['thought', 'message_reaction', 'user_message', 'motor_result'];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
       if (this.pendingCognition && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));

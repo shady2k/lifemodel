@@ -38,19 +38,12 @@ function stripDangerousGlobals(): void {
   // @ts-expect-error -- SECURITY: intentionally deleting globals for sandbox isolation
   delete process.env;
 
-  // @ts-expect-error -- SECURITY: intentionally deleting globals for sandbox isolation
-  delete require; // eslint-disable-line no-delete-var
-
-  // @ts-expect-error -- SECURITY: intentionally deleting globals for sandbox isolation
-  delete __dirname; // eslint-disable-line no-delete-var
-
-  // @ts-expect-error -- SECURITY: intentionally deleting globals for sandbox isolation
-  delete __filename; // eslint-disable-line no-delete-var
-
-  // Delete module access
-  // @ts-expect-error -- SECURITY: intentionally deleting globals for sandbox isolation
-  delete global.module;
-  delete global.exports;
+  // SECURITY: strip CJS globals (no-ops in ESM, but defense-in-depth)
+  Reflect.deleteProperty(globalThis, 'require');
+  Reflect.deleteProperty(globalThis, '__dirname');
+  Reflect.deleteProperty(globalThis, '__filename');
+  Reflect.deleteProperty(globalThis, 'module');
+  Reflect.deleteProperty(globalThis, 'exports');
 }
 
 /**

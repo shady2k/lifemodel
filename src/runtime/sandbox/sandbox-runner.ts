@@ -82,8 +82,10 @@ export async function runSandbox(
       resolve(result);
     };
 
-    // Resolve the worker path
-    const workerPath = join(dirname(fileURLToPath(import.meta.url)), 'sandbox-worker.js');
+    // Resolve the worker path (match parent's extension: .ts in dev, .js in prod)
+    const currentFile = fileURLToPath(import.meta.url);
+    const ext = currentFile.endsWith('.ts') ? '.ts' : '.js';
+    const workerPath = join(dirname(currentFile), `sandbox-worker${ext}`);
 
     // Fork the worker process
     const child = fork(workerPath, [], {
