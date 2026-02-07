@@ -243,9 +243,18 @@ export abstract class BaseLLMProvider implements LLMProvider {
       this.logger?.trace({ requestId, tools: request.tools }, '🤖 LLM request tools');
     }
 
-    // Log each message at debug level (includes system prompt, useful for verification)
+    // Log only NEW messages at debug level (delta logging — avoids repeating full history)
     if (this.logger) {
-      for (const [i, msg] of request.messages.entries()) {
+      const debugStart = this.lastLoggedMessageCount;
+      if (debugStart > 0) {
+        this.logger.debug(
+          { requestId, skipped: debugStart },
+          `🤖 LLM messages [0..${String(debugStart - 1)}] — ${String(debugStart)} history messages (already logged)`
+        );
+      }
+      for (let i = debugStart; i < request.messages.length; i++) {
+        const msg = request.messages[i];
+        if (!msg) continue;
         this.logger.debug(
           {
             requestId,
