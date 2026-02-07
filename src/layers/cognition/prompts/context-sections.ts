@@ -187,9 +187,7 @@ export function buildUnresolvedTensionsSection(context: LoopContext): string | n
   }
 
   const lines = tensions.map((t) => {
-    // Extract first ~100 chars of content, truncate if needed
-    const preview = t.content.length > 100 ? t.content.slice(0, 100) + '...' : t.content;
-    return `- [${String(t.dissonance)}/10] ${preview}`;
+    return `- [${String(t.dissonance)}/10] ${t.content}`;
   });
 
   return `## Unresolved Soul Tensions

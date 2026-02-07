@@ -282,7 +282,7 @@ export async function executeToolCalls(
         data: {
           success: true,
           delivered_text: text,
-          note: 'Already sent to user. Do not repeat or paraphrase this text in your response.',
+          note: 'ALREADY DELIVERED to user. Your final response must NOT repeat or paraphrase this text. Continue from where this message left off.',
         },
       });
 
@@ -297,7 +297,7 @@ export async function executeToolCalls(
         content: JSON.stringify({
           success: true,
           delivered_text: text,
-          note: 'Already sent to user. Do not repeat or paraphrase this text in your response.',
+          note: 'ALREADY DELIVERED to user. Your final response must NOT repeat or paraphrase this text. Continue from where this message left off.',
         }),
       });
       continue;

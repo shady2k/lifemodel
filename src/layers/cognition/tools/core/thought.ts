@@ -24,7 +24,7 @@ export function createThoughtTool(): Tool {
 
   return {
     name: 'core.thought',
-    maxCallsPerTurn: 1,
+    maxCallsPerTurn: 2,
     description:
       'Flag an unresolved question for future investigation. ONLY for things you cannot resolve now and that may matter later. Do NOT call this to narrate, strategize, summarize, or reason about the current conversation. If you can act on it now, act instead of thinking. Bad: "User is interested in AI tools" (narration). Bad: "I should keep it technical" (strategy). Good: "User mentioned chest pain last week — should check if resolved".',
     tags: ['follow-up', 'investigation'],

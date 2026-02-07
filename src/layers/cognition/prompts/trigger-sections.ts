@@ -57,7 +57,7 @@ ${isDeferralOverride ? '\n⚠️ Deferral override: pressure increased significa
 If nothing specific comes to mind, a casual check-in is perfectly valid.
 
 **To reach out:** Output {"response": "your message"}
-**To wait:** Call core.defer(signalType="${triggerType}", deferHours=2-8, reason="...") then output {"response": ""}`;
+**To wait:** Call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...") then output {"response": ""}`;
 
   return section;
 }
