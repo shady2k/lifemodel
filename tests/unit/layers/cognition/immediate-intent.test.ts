@@ -462,7 +462,7 @@ describe('Immediate Intent Processing', () => {
         expect.objectContaining({
           success: true,
           delivered_text: sayText,
-          note: expect.stringContaining('Do not repeat'),
+          note: expect.stringContaining('ALREADY DELIVERED'),
         })
       );
 

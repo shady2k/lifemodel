@@ -235,6 +235,33 @@ export class JsonMemoryProvider implements MemoryProvider {
   async save(entry: MemoryEntry): Promise<void> {
     await this.ensureLoaded();
 
+    // Upsert for facts: same subject + attribute → update existing entry
+    const meta = entry.metadata;
+    if (entry.type === 'fact' && meta?.['subject'] && meta['attribute']) {
+      const subject = meta['subject'] as string;
+      const attribute = meta['attribute'] as string;
+      const existingFactIndex = this.entries.findIndex(
+        (e) =>
+          e.type === 'fact' &&
+          e.metadata?.['subject'] === subject &&
+          e.metadata['attribute'] === attribute
+      );
+      if (existingFactIndex >= 0) {
+        // Preserve original ID, update everything else
+        const existing = this.entries[existingFactIndex];
+        if (existing) {
+          entry.id = existing.id;
+        }
+        this.entries[existingFactIndex] = entry;
+        await this.persist();
+        this.logger.debug(
+          { entryId: entry.id, subject, attribute },
+          'Memory fact upserted (existing updated)'
+        );
+        return;
+      }
+    }
+
     // Check for duplicate ID
     const existingIndex = this.entries.findIndex((e) => e.id === entry.id);
     if (existingIndex >= 0) {

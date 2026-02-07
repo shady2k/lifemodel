@@ -90,6 +90,7 @@ export function filterToolsForContext(
       if (name === 'core.say' || name === 'core_say') return false; // no user waiting
       if (name === 'core.state' || name === 'core_state') return false; // snapshot sufficient
       if (name === 'core.agent' || name === 'core_agent') return false; // no micro-updates
+      if (name === 'core.schedule' || name === 'core_schedule') return false; // schedule during conversation, not reflection
     }
 
     // Reaction processing: limited tool set (setInterest + remember + memory only)
@@ -129,8 +130,8 @@ export function maybeSetProactiveToolBudget(
     state.proactiveToolBudget = 4;
     logger.debug({ budget: 4 }, 'Proactive contact: tool budget set');
   } else if (isThoughtTrigger) {
-    state.proactiveToolBudget = 3;
-    logger.debug({ budget: 3 }, 'Thought processing: tool budget set');
+    state.proactiveToolBudget = 2;
+    logger.debug({ budget: 2 }, 'Thought processing: tool budget set');
   } else if (context.triggerSignal.type === 'plugin_event') {
     state.proactiveToolBudget = 4;
     logger.debug({ budget: 4 }, 'Plugin event: tool budget set');

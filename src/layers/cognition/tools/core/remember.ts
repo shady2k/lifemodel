@@ -71,7 +71,7 @@ export function createRememberTool(): Tool {
       enum: EVIDENCE_SOURCES,
       required: false,
       description:
-        'Evidence type (default: user_implicit). Set user_explicit/user_quote for high-stakes facts like name, birthday.',
+        'Evidence source. user_quote: direct quote. user_explicit: user stated clearly. user_implicit: observed from behavior (default). inferred: only for non-user subjects or timezone.',
     },
     { name: 'confidence', type: 'number', required: false, description: '0-1 (auto from source)' },
   ];
@@ -80,7 +80,7 @@ export function createRememberTool(): Tool {
     name: 'core.remember',
     maxCallsPerTurn: 3,
     description:
-      'Remember a stable user trait or fact. NOT for data managed by plugin tools (calories, weight, news). Minimal: attribute + value (defaults: subject=user, source=user_implicit). For non-user subjects or explicit statements (name, birthday), specify subject/source.',
+      'Remember a stable user trait or fact. Same subject+attribute updates the existing entry (upsert). NOT for data managed by plugin tools (calories, weight, news). NOT for temporary status or blockers — only durable facts. Common attributes: name, birthday, location, language, timezone, diet_preference, work_role, hobby, communication_style. For projects use subject="ProjectName". Minimal: attribute + value (defaults: subject=user, source=user_implicit).',
     tags: ['memory', 'facts', 'user-model'],
     hasSideEffects: true,
     parameters,

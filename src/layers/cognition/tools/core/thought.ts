@@ -17,7 +17,7 @@ export function createThoughtTool(): Tool {
       name: 'content',
       type: 'string',
       description:
-        'A hypothesis or open question that needs future investigation. Must be something you CANNOT resolve right now. NOT for observations, strategy notes, or summarizing what just happened.',
+        'An unresolved question you genuinely want to figure out. NOT for action items, reminders, or observations about what just happened.',
       required: true,
     },
   ];
@@ -26,7 +26,7 @@ export function createThoughtTool(): Tool {
     name: 'core.thought',
     maxCallsPerTurn: 2,
     description:
-      'Flag an unresolved question for future investigation. ONLY for things you cannot resolve now and that may matter later. Do NOT call this to narrate, strategize, summarize, or reason about the current conversation. If you can act on it now, act instead of thinking. Bad: "User is interested in AI tools" (narration). Bad: "I should keep it technical" (strategy). Good: "User mentioned chest pain last week — should check if resolved".',
+      'Save a genuine unresolved question — something you want to FIGURE OUT, not something to DO. Not for action items ("check if resolved" → use core.schedule), not for narration ("User is..." → just respond), not for strategy ("I should..." → just do it). Good: "Why did the user seem deflated about Langflow — the tool itself or something deeper?" Good: "Mentioned chest pain last week — was that resolved or still ongoing?"',
     tags: ['follow-up', 'investigation'],
     hasSideEffects: true,
     parameters,
