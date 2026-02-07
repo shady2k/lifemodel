@@ -347,7 +347,7 @@ async function createReflectionThought(
 
   // Build natural-language thought content
   const aspectNote = result.aspect ? ` (aspect: ${result.aspect})` : '';
-  const content = `I said: "${context.responseText.slice(0, 100)}${context.responseText.length > 100 ? '...' : ''}"
+  const content = `I said: "${context.responseText}"
 
 This felt off${aspectNote}. Dissonance: ${String(result.dissonance)}/10.
 
