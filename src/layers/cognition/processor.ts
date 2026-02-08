@@ -13,7 +13,10 @@
 import type { CognitionLayer, CognitionContext, CognitionResult } from '../../types/layers.js';
 import type { Signal } from '../../types/signal.js';
 import type { Logger } from '../../types/logger.js';
-import type { ConversationManager } from '../../storage/conversation-manager.js';
+import {
+  CONVERSATION_TIMEOUTS,
+  type ConversationManager,
+} from '../../storage/conversation-manager.js';
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
 import type { Agent } from '../../core/agent.js';
@@ -105,6 +108,15 @@ export class CognitionProcessor implements CognitionLayer {
    * NOT persisted - timer is rescheduled on startup based on batchWindowStartAt.
    */
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Deferral interval when conversation is active (2 minutes) */
+  private static readonly REFLECTION_DEFERRAL_MS = 120_000;
+
+  /** Max deferrals before forcing reflection regardless of status */
+  private static readonly MAX_REFLECTION_DEFERRALS = 10;
+
+  /** Number of times batch processing has been deferred due to active conversation */
+  private reflectionDeferralCount = 0;
 
   /**
    * Flag to ensure batch reflection is initialized only once.
@@ -943,6 +955,24 @@ export class CognitionProcessor implements CognitionLayer {
       return;
     }
 
+    // Defer reflection while conversation is active (with max deferral cap)
+    if (this.reflectionDeferralCount < CognitionProcessor.MAX_REFLECTION_DEFERRALS) {
+      const state = await deps.soulProvider.getState();
+      const recipientId = state.pendingReflections[0]?.recipientId ?? getPrimaryRecipientId();
+      if (await this.isConversationActive(recipientId)) {
+        this.reflectionDeferralCount++;
+        this.logger.debug(
+          { recipientId, deferralCount: this.reflectionDeferralCount },
+          'Deferring batch reflection: conversation is active'
+        );
+        this.scheduleBatchTimer(CognitionProcessor.REFLECTION_DEFERRAL_MS);
+        return;
+      }
+    }
+
+    // Reset deferral counter on successful processing
+    this.reflectionDeferralCount = 0;
+
     const batchStatus = await deps.soulProvider.getBatchStatus();
     this.logger.info(
       {
@@ -976,6 +1006,26 @@ export class CognitionProcessor implements CognitionLayer {
       memoryProvider: this.memoryProvider,
       llm: this.cognitionLLM,
     };
+  }
+
+  /**
+   * Check if a conversation is currently active.
+   * Returns false (allow processing) on any error or missing deps — graceful degradation.
+   */
+  private async isConversationActive(recipientId?: string): Promise<boolean> {
+    const rid = recipientId ?? getPrimaryRecipientId();
+    if (!rid || !this.conversationManager) return false;
+    try {
+      const { status, lastMessageAt } = await this.conversationManager.getStatus(rid);
+      if (status !== 'active' && status !== 'awaiting_answer') return false;
+      // Stale-status safety: if last message is older than active decay timeout,
+      // treat as not active even if status wasn't decayed yet
+      if (lastMessageAt && Date.now() - lastMessageAt.getTime() > CONVERSATION_TIMEOUTS.active)
+        return false;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
