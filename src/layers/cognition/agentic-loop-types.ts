@@ -237,6 +237,12 @@ export interface LoopCallbacks {
    * Used for REMEMBER and SET_INTEREST so data is visible to subsequent tools.
    */
   onImmediateIntent?: (intent: Intent) => void;
+
+  /**
+   * Called when a side-effect plugin tool completes successfully.
+   * Records the action so the LLM won't re-execute it in subsequent sessions.
+   */
+  onCompletedAction?: (recipientId: string, tool: string, summary: string) => void;
 }
 
 /**

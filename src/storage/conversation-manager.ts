@@ -768,11 +768,31 @@ export class ConversationManager {
     // Initialize if needed
     stored.completedActions ??= [];
 
-    // Add new action
-    stored.completedActions.push({
-      ...action,
-      timestamp: new Date().toISOString(),
-    });
+    // Dedup: if the same tool+summary was recorded within 60s, update timestamp instead
+    const now = Date.now();
+    const dedupWindowMs = 60_000;
+    const existingIdx = stored.completedActions.findIndex(
+      (a) =>
+        a.tool === action.tool &&
+        a.summary === action.summary &&
+        now - new Date(a.timestamp).getTime() < dedupWindowMs
+    );
+
+    if (existingIdx >= 0) {
+      // Update timestamp of existing entry instead of adding duplicate
+      const existing = stored.completedActions[existingIdx];
+      if (existing) existing.timestamp = new Date().toISOString();
+      this.logger.debug(
+        { userId, tool: action.tool, summary: action.summary },
+        'Completed action deduped (updated timestamp)'
+      );
+    } else {
+      // Add new action
+      stored.completedActions.push({
+        ...action,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     // Prune old actions (older than retention period)
     const cutoff = Date.now() - this.actionRetentionMs;

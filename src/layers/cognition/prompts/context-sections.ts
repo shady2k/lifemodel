@@ -287,14 +287,37 @@ export function buildCompletedActionsSection(context: LoopContext): string | nul
 
   const isUserMessage = context.triggerSignal.type === 'user_message';
 
-  // Format actions with relative timestamps
+  // De-duplicate: collapse identical entries within 5 minutes of each other
   const now = Date.now();
-  const formatted = actions.map((action) => {
+  const dedupWindowMs = 5 * 60 * 1000;
+  const grouped: { action: (typeof actions)[0]; count: number }[] = [];
+  for (const action of actions) {
+    const actionTime = new Date(action.timestamp).getTime();
+    const existing = grouped.find(
+      (g) =>
+        g.action.tool === action.tool &&
+        g.action.summary === action.summary &&
+        Math.abs(actionTime - new Date(g.action.timestamp).getTime()) < dedupWindowMs
+    );
+    if (existing) {
+      existing.count++;
+      // Keep the most recent timestamp
+      if (actionTime > new Date(existing.action.timestamp).getTime()) {
+        existing.action = action;
+      }
+    } else {
+      grouped.push({ action, count: 1 });
+    }
+  }
+
+  // Format actions with relative timestamps
+  const formatted = grouped.map(({ action, count }) => {
     const ageMs = now - new Date(action.timestamp).getTime();
     const ageStr = formatAge(ageMs);
     // Simplify tool name (core.setInterest -> setInterest)
     const toolShort = action.tool.replace('core.', '');
-    return `- ${toolShort}: ${action.summary} (${ageStr} ago)`;
+    const countSuffix = count > 1 ? ` (x${String(count)})` : '';
+    return `- ${toolShort}: ${action.summary} (${ageStr} ago)${countSuffix}`;
   });
 
   if (isUserMessage) {

@@ -184,10 +184,21 @@ export class CognitionProcessor implements CognitionLayer {
       },
     });
 
-    // Build callbacks for immediate intent processing
-    const callbacks: LoopCallbacks | undefined = this.immediateIntentCallback
-      ? { onImmediateIntent: this.immediateIntentCallback }
-      : undefined;
+    // Build callbacks for immediate intent processing and completed action tracking
+    const callbacks: LoopCallbacks = {
+      ...(this.immediateIntentCallback && { onImmediateIntent: this.immediateIntentCallback }),
+      onCompletedAction: (recipientId, tool, summary) => {
+        if (!this.conversationManager) return;
+        this.conversationManager
+          .addCompletedAction(recipientId, { tool, summary })
+          .catch((err: unknown) => {
+            this.logger.warn(
+              { error: err instanceof Error ? err.message : String(err), tool },
+              'Failed to record completed plugin action'
+            );
+          });
+      },
+    };
 
     this.agenticLoop = createAgenticLoop(
       this.logger,

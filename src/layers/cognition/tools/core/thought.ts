@@ -24,7 +24,7 @@ export function createThoughtTool(): Tool {
 
   return {
     name: 'core.thought',
-    maxCallsPerTurn: 2,
+    maxCallsPerTurn: 3,
     description:
       'Save a genuine unresolved question — something you want to FIGURE OUT, not something to DO. Not for action items ("check if resolved" → use core.schedule), not for narration ("User is..." → just respond), not for strategy ("I should..." → just do it). Good: "Why did the user seem deflated about Langflow — the tool itself or something deeper?" Good: "Mentioned chest pain last week — was that resolved or still ongoing?"',
     tags: ['follow-up', 'investigation'],
