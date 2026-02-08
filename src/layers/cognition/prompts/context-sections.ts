@@ -276,19 +276,16 @@ ${combined}`;
 
 /**
  * Build completed actions section to prevent LLM re-execution.
- * Only included for non-user-message triggers (autonomous events).
+ * For autonomous triggers: always show if available.
+ * For user messages: only show if processor provided actions (active follow-ups).
  */
 export function buildCompletedActionsSection(context: LoopContext): string | null {
-  // Only include for non-user-message triggers
-  // User messages start fresh - the LLM should respond to what the user just said
-  if (context.triggerSignal.type === 'user_message') {
-    return null;
-  }
-
   const actions = context.completedActions;
   if (!actions || actions.length === 0) {
     return null;
   }
+
+  const isUserMessage = context.triggerSignal.type === 'user_message';
 
   // Format actions with relative timestamps
   const now = Date.now();
@@ -299,6 +296,12 @@ export function buildCompletedActionsSection(context: LoopContext): string | nul
     const toolShort = action.tool.replace('core.', '');
     return `- ${toolShort}: ${action.summary} (${ageStr} ago)`;
   });
+
+  if (isUserMessage) {
+    return `## Recent Actions (context)
+${formatted.join('\n')}
+These were already done. Don't repeat unless asked.`;
+  }
 
   return `## Actions Already Completed (DO NOT repeat these)
 ${formatted.join('\n')}
