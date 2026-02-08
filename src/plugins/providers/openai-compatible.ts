@@ -31,6 +31,8 @@ interface OpenAIResponse {
       content: string | null;
       /** For "thinking" models that separate reasoning from final answer */
       reasoning_content?: string;
+      /** OpenRouter reasoning field (alternative to reasoning_content) */
+      reasoning?: string;
       /** Tool calls requested by the model */
       tool_calls?: OpenAIToolCall[];
     };
@@ -45,6 +47,9 @@ interface OpenAIResponse {
     prompt_tokens_details?: {
       cached_tokens?: number;
       cache_write_tokens?: number;
+    };
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
     };
   };
 }
@@ -503,6 +508,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
           generationMs: generationTime,
           tps,
           completionTokens,
+          reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens,
           promptTokens: parsed.usage?.promptTokens,
           cachedTokens: data.usage?.prompt_tokens_details?.cached_tokens,
           cost: data.usage?.cost,
@@ -585,21 +591,27 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       throw new LLMError(`Invalid response from ${this.name}: no choices in response`, this.name);
     }
 
-    // For "thinking" models: if content is empty but reasoning_content exists,
-    // use reasoning_content as fallback
+    // For "thinking" models: reasoning text may be in `reasoning_content` (DeepSeek)
+    // or `reasoning` (OpenRouter/GLM-4.7)
+    const reasoningText =
+      firstChoice.message.reasoning_content ?? firstChoice.message.reasoning ?? undefined;
+
+    // If content is empty but reasoning exists, use reasoning as fallback
     let content = firstChoice.message.content;
-    if (!content && firstChoice.message.reasoning_content) {
+    if (!content && reasoningText) {
       this.providerLogger?.warn(
         { finishReason: firstChoice.finish_reason },
-        'Using reasoning_content as fallback (content was empty)'
+        'Using reasoning text as fallback (content was empty)'
       );
-      content = firstChoice.message.reasoning_content;
+      content = reasoningText;
     }
 
     const result: CompletionResponse = {
       content,
       model: data.model,
       generationId: data.id,
+      // Preserve reasoning text when model provides it alongside content
+      ...(reasoningText && content !== reasoningText && { reasoningContent: reasoningText }),
     };
 
     // Parse tool_calls if present (native tool calling)
@@ -622,10 +634,12 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
     }
 
     if (data.usage) {
+      const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens;
       result.usage = {
         promptTokens: data.usage.prompt_tokens,
         completionTokens: data.usage.completion_tokens,
         totalTokens: data.usage.total_tokens,
+        ...(reasoningTokens != null && { reasoningTokens }),
       };
     }
 

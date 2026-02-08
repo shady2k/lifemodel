@@ -141,8 +141,12 @@ export interface CompletionResponse {
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
+        reasoningTokens?: number;
       }
     | undefined;
+
+  /** Reasoning/thinking text from models that expose chain-of-thought */
+  reasoningContent?: string | undefined;
 
   /** Finish reason */
   finishReason?: 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'error' | undefined;
@@ -364,6 +368,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
           finishReason: response.finishReason,
           promptTokens: response.usage?.promptTokens,
           completionTokens: response.usage?.completionTokens,
+          reasoningTokens: response.usage?.reasoningTokens,
           totalTokens: response.usage?.totalTokens,
           responseLength: response.content?.length ?? 0,
           response: response.content,
@@ -403,7 +408,13 @@ export abstract class BaseLLMProvider implements LLMProvider {
         : '';
       const durationStr = String(duration);
       const tokensStr = String(response.usage?.totalTokens ?? '?');
+      const reasoningStr = response.usage?.reasoningTokens
+        ? `, ${String(response.usage.reasoningTokens)} reasoning`
+        : '';
       const finishStr = response.finishReason ?? 'unknown';
+      const reasoningDetail = response.reasoningContent
+        ? `\n\n  💭 Reasoning:\n${response.reasoningContent}`
+        : '';
       logConversation(
         {
           logType: 'RESPONSE',
@@ -412,8 +423,9 @@ export abstract class BaseLLMProvider implements LLMProvider {
           finishReason: response.finishReason,
           durationMs: duration,
           tokens: response.usage?.totalTokens,
+          reasoningTokens: response.usage?.reasoningTokens,
         },
-        `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens, ${finishStr}]${response.generationId ? ` gen:${response.generationId}` : ''}\n${responseContent}${toolCallsDetail}\n${'═'.repeat(60)}`
+        `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens${reasoningStr}, ${finishStr}]${response.generationId ? ` gen:${response.generationId}` : ''}\n${responseContent}${toolCallsDetail}${reasoningDetail}\n${'═'.repeat(60)}`
       );
 
       return response;

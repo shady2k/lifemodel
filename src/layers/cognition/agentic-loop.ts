@@ -346,21 +346,22 @@ export class AgenticLoop {
     const parsed = parseResponseContent(content);
     const messageText = parsed.text;
 
-    // Plain-text response for user messages = model skipped JSON format entirely.
-    // Treat as malformed and retry with forceRespond (which enforces JSON schema).
-    const isPlainText =
-      content && !content.trim().startsWith('{') && !content.trim().startsWith('```');
-    if (isPlainText && context.triggerSignal.type === 'user_message' && !state.malformedRetried) {
-      state.malformedRetried = true;
-      this.logger.warn(
+    // Plain-text response: model skipped JSON format but returned usable text.
+    // Accept it — retrying with json_schema can produce worse results on models
+    // that don't support structured output (e.g. GLM-4.7 on some providers).
+    if (
+      messageText &&
+      content &&
+      !content.trim().startsWith('{') &&
+      !content.trim().startsWith('```')
+    ) {
+      this.logger.info(
         {
           contentLength: content.length,
           contentPreview: content.slice(0, 100),
         },
-        'Plain-text response for user message (expected JSON) — retrying with forceRespond'
+        'Accepted plain-text response (model skipped JSON format)'
       );
-      state.forceRespond = true;
-      return null;
     }
 
     // Malformed response (truncated JSON, missing response field, etc.)
