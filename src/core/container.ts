@@ -43,6 +43,7 @@ import {
   createConversationManager,
 } from '../storage/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
+import { getEffectiveTimezone } from '../utils/date.js';
 import { type JsonMemoryProvider, createJsonMemoryProvider } from '../storage/memory-provider.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
@@ -555,9 +556,22 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   pluginLoader.setServicesProvider(() => ({
     getTimezone: (chatId?: string) => {
       if (userModel) {
-        return userModel.getTimezone(chatId) ?? 'UTC';
+        const tz = userModel.getTimezone(chatId);
+        if (tz) return tz;
+        const user = userModel.getUser();
+        return getEffectiveTimezone(undefined, user.timezoneOffset);
       }
-      return 'UTC';
+      return getEffectiveTimezone();
+    },
+    isTimezoneConfigured: (chatId?: string) => {
+      if (userModel) {
+        // Only explicit IANA timezones count as "configured" — not offset-derived Etc/GMT
+        const user = userModel.getUser();
+        if (chatId && user.chatTimezones?.[chatId]) return true;
+        if (user.defaultTimezone) return true;
+        return false;
+      }
+      return false;
     },
     getUserPatterns: (_recipientId?: string) => {
       if (!userModel) return null;

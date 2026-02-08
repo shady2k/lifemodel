@@ -64,6 +64,8 @@ interface StoredEntry {
   trigger?: { condition: string; keywords?: string[] | undefined } | undefined;
   /** Status for intentions */
   status?: 'pending' | 'completed' | undefined;
+  /** ISO string expiry time for intentions with per-entry TTL */
+  expiresAt?: string | undefined;
 }
 
 /**
@@ -452,6 +454,7 @@ export class JsonMemoryProvider implements MemoryProvider {
         parentSignalId: e.parentSignalId,
         trigger: e.trigger,
         status: e.status,
+        expiresAt: e.expiresAt?.toISOString(),
       })),
     };
 
@@ -484,6 +487,7 @@ export class JsonMemoryProvider implements MemoryProvider {
           parentSignalId: e.parentSignalId,
           trigger: e.trigger as MemoryEntry['trigger'],
           status: e.status,
+          expiresAt: e.expiresAt ? new Date(e.expiresAt) : undefined,
         }));
         this.logger.info({ entries: this.entries.length }, 'Memory loaded from storage');
       } else {

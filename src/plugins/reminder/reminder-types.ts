@@ -294,6 +294,8 @@ export const REMINDER_EVENT_KINDS = {
   REMINDER_DUE: 'reminder:reminder_due',
   /** Advance notice before the main reminder */
   REMINDER_ADVANCE_NOTICE: 'reminder:advance_notice',
+  /** Daily agenda check — emits pending intentions for today's reminders */
+  DAILY_AGENDA: 'reminder:daily_agenda',
 } as const;
 
 /**

@@ -31,9 +31,10 @@ export const REMINDER_PLUGIN_ID = 'reminder';
 
 /**
  * Get the user's timezone by recipientId.
- * Returns null if timezone is not configured.
+ * Always returns a valid IANA timezone (falls back to server timezone if not configured).
  */
-type GetTimezoneFunc = (recipientId: string) => string | null;
+type GetTimezoneFunc = (recipientId: string) => string;
+type IsTimezoneConfiguredFunc = (recipientId: string) => boolean;
 
 /**
  * Result type for the unified reminder tool.
@@ -44,6 +45,7 @@ interface ReminderToolResult {
   reminderId?: string;
   scheduledFor?: Date;
   isRecurring?: boolean;
+  timezoneNote?: string;
   reminders?: ReminderSummary[];
   total?: number;
   error?: string;
@@ -342,7 +344,8 @@ const REMINDER_RAW_SCHEMA = {
  */
 export function createReminderTools(
   primitives: PluginPrimitives,
-  getTimezone: GetTimezoneFunc
+  getTimezone: GetTimezoneFunc,
+  isTimezoneConfigured?: IsTimezoneConfiguredFunc
 ): PluginTool[] {
   const { storage, scheduler, logger } = primitives;
 
@@ -418,9 +421,7 @@ export function createReminderTools(
     advanceNotice?: AdvanceNotice
   ): Promise<ReminderToolResult> {
     try {
-      // Get user timezone, fall back to server timezone if not configured
-      const userTimezone = getTimezone(recipientId);
-      const timezone = userTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const timezone = getTimezone(recipientId);
       const resolved = resolveSemanticAnchor(anchor, new Date(), timezone);
       const reminderId = `rem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -560,13 +561,21 @@ export function createReminderTools(
         'Reminder created'
       );
 
-      return {
+      const result: ReminderToolResult = {
         success: true,
         action: 'create',
         reminderId,
         scheduledFor: resolved.triggerAt,
         isRecurring: resolved.recurrence !== null,
       };
+
+      if (isTimezoneConfigured && !isTimezoneConfigured(recipientId)) {
+        result.timezoneNote =
+          `Timezone was inferred (${timezone}), not explicitly configured. ` +
+          `Ask the user to confirm their timezone if this reminder is time-sensitive.`;
+      }
+
+      return result;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
@@ -998,4 +1007,75 @@ function formatAdvanceNoticeDuration(before: RelativeTime): string {
   const unit = before.unit;
   const amountStr = String(amount);
   return amount === 1 ? `1 ${unit}` : `${amountStr} ${unit}s`;
+}
+
+/**
+ * Handle daily agenda event.
+ * Emits pending intentions for today's upcoming reminders so the agent
+ * is aware of appointments on first user contact.
+ */
+export async function handleDailyAgenda(
+  storage: PluginPrimitives['storage'],
+  scheduler: PluginPrimitives['scheduler'],
+  logger: Logger,
+  intentEmitter: PluginPrimitives['intentEmitter'],
+  getTimezone: GetTimezoneFunc,
+  recipientId: string
+): Promise<void> {
+  try {
+    const reminders = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);
+    if (!reminders || reminders.length === 0) {
+      logger.debug('No reminders for daily agenda');
+      return;
+    }
+
+    const activeReminders = reminders.filter(
+      (r) => r.status === 'active' && r.recipientId === recipientId && r.scheduleId
+    );
+
+    if (activeReminders.length === 0) {
+      logger.debug('No active reminders with schedules for daily agenda');
+      return;
+    }
+
+    // Get all schedules to find nextFireAt
+    const schedules = await scheduler.getSchedules();
+    const scheduleMap = new Map(schedules.map((s) => [s.id, s]));
+
+    const now = Date.now();
+    const horizon = 18 * 60 * 60 * 1000; // 18 hours ahead
+    const timezone = getTimezone(recipientId);
+    let emitted = 0;
+
+    const agendaItems: string[] = [];
+    for (const reminder of activeReminders) {
+      const schedule = reminder.scheduleId ? scheduleMap.get(reminder.scheduleId) : undefined;
+      if (!schedule) continue;
+
+      const fireAt = schedule.nextFireAt.getTime();
+      if (fireAt > now && fireAt < now + horizon) {
+        const fireTime = DateTime.fromJSDate(schedule.nextFireAt, { zone: timezone });
+        const formattedTime = fireTime.toFormat('HH:mm');
+        agendaItems.push(`"${reminder.content}" at ${formattedTime}`);
+        emitted++;
+      }
+    }
+
+    if (agendaItems.length > 0) {
+      // Batch all agenda items into a single intention to avoid rate limits
+      const summary =
+        agendaItems.length === 1
+          ? `Upcoming reminder: ${String(agendaItems[0])}.`
+          : `Upcoming reminders: ${agendaItems.join('; ')}.`;
+
+      intentEmitter.emitPendingIntention(summary, recipientId, { ttlMs: horizon });
+    }
+
+    logger.info({ recipientId, emitted, total: activeReminders.length }, 'Daily agenda processed');
+  } catch (error) {
+    logger.error(
+      { error: error instanceof Error ? error.message : String(error), recipientId },
+      'Failed to process daily agenda'
+    );
+  }
 }

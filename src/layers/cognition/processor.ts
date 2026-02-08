@@ -724,11 +724,26 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     try {
-      const intentions = await this.memoryProvider.getRecentByType('intention', {
+      // Fetch a wide window, then filter by per-entry TTL
+      const raw = await this.memoryProvider.getRecentByType('intention', {
         recipientId,
-        windowMs: 2 * 60 * 60 * 1000, // 2 hours
-        limit: 3,
+        windowMs: 24 * 60 * 60 * 1000, // 24h wide fetch
+        limit: 20,
       });
+
+      const now = Date.now();
+      const defaultExpiry = 2 * 60 * 60 * 1000; // 2h default for entries without expiresAt
+
+      const intentions = raw
+        .filter((entry) => {
+          if (entry.expiresAt) {
+            return entry.expiresAt.getTime() > now;
+          }
+          // Backward compat: entries without expiresAt use 2h window from timestamp
+          return now - entry.timestamp.getTime() < defaultExpiry;
+        })
+        .slice(0, 5);
+
       return intentions.map((t) => ({
         id: t.id,
         type: 'intention' as const,

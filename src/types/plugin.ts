@@ -429,8 +429,11 @@ export interface UserPropertySnapshot {
  * PluginLoader adds registerEventSchema on top of this.
  */
 export interface BasePluginServices {
-  /** Get timezone for a recipient (IANA name). Returns 'UTC' if not found. */
+  /** Get timezone for a recipient (IANA name). Falls back to server timezone if not configured. */
   getTimezone: (recipientId?: string) => string;
+
+  /** Check whether the user has an explicitly configured timezone (vs inferred fallback). */
+  isTimezoneConfigured: (recipientId?: string) => boolean;
 
   /**
    * Get user's behavioral patterns (wake/sleep hours).
@@ -627,7 +630,7 @@ export interface IntentEmitterPrimitive {
    * Surfaces in next user-facing conversation as "Pending Insights".
    * Skips thought processing — use when the plugin already knows the content is non-urgent.
    */
-  emitPendingIntention(content: string, recipientId?: string): void;
+  emitPendingIntention(content: string, recipientId?: string, options?: { ttlMs?: number }): void;
 }
 
 /**

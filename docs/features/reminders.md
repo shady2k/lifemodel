@@ -57,6 +57,27 @@ Reminders survive restarts:
 - On restart, past-due reminders fire immediately
 - Future reminders continue as planned
 
+## Timezone Resolution
+
+Reminders use `getEffectiveTimezone()` from `src/utils/date.ts` for timezone fallback:
+1. Explicit IANA timezone from user model (e.g., `Europe/Moscow`)
+2. Derived from numeric UTC offset (e.g., `+3` → `Etc/GMT-3`)
+3. Server default (`Europe/Moscow`)
+
+When the timezone is inferred rather than explicitly configured, the tool result includes a `timezoneNote` prompting the LLM to ask the user to confirm their timezone for time-sensitive reminders.
+
+## Daily Agenda
+
+The plugin registers a daily schedule at the user's wake hour (default 08:00). When it fires:
+1. Reads all active reminders from storage
+2. Correlates each reminder's `scheduleId` with scheduler entries to get `nextFireAt`
+3. Emits a pending intention for each reminder firing within the next 18 hours
+4. Intentions surface as "Pending Insights" on first user contact
+
+This ensures the agent is aware of today's appointments even if the user hasn't asked about them.
+
+The daily agenda schedule is restart-safe: it uses a stable ID and checks for existing schedules before creating a new one.
+
 ## Tool Schema
 
 The reminder tool uses `rawParameterSchema` to provide OpenAI with proper JSON Schema structure for the anchor parameter. This ensures the LLM generates correctly structured anchors instead of guessing from description text.

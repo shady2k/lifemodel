@@ -75,6 +75,8 @@ export interface MemoryEntry {
   trigger?: IntentionTrigger | undefined;
   /** Status for intentions */
   status?: 'pending' | 'completed' | undefined;
+  /** Expiry time for this entry. Used by getPendingIntentions to filter stale intentions. */
+  expiresAt?: Date | undefined;
 }
 
 /**

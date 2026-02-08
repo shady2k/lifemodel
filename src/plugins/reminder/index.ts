@@ -14,11 +14,14 @@ import type {
   PluginTool,
   MigrationBundle,
   EventSchema,
+  ScheduleEntry,
 } from '../../types/plugin.js';
+import { DateTime } from 'luxon';
 import {
   createReminderTools,
   handleReminderDue,
   handleReminderAdvanceNotice,
+  handleDailyAgenda,
   REMINDER_PLUGIN_ID,
 } from './reminder-tool.js';
 import type { ReminderDueData, ReminderAdvanceNoticeData } from './reminder-types.js';
@@ -68,6 +71,19 @@ const reminderAdvanceNoticeSchema = z.object({
 });
 
 /**
+ * Zod schema for daily_agenda event validation.
+ */
+const dailyAgendaSchema = z.object({
+  kind: z.literal('plugin_event'),
+  eventKind: z.literal(REMINDER_EVENT_KINDS.DAILY_AGENDA),
+  pluginId: z.literal(REMINDER_PLUGIN_ID),
+  fireId: z.string().optional(),
+  payload: z.object({
+    recipientId: z.string(),
+  }),
+});
+
+/**
  * Plugin state (set during activation).
  */
 let pluginPrimitives: PluginPrimitives | null = null;
@@ -111,11 +127,24 @@ const lifecycle: PluginLifecycleV2 = {
       REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE,
       reminderAdvanceNoticeSchema as unknown as EventSchema
     );
-    primitives.logger.debug('Registered event schema for reminder_due and reminder_advance_notice');
+    primitives.services.registerEventSchema(
+      REMINDER_EVENT_KINDS.DAILY_AGENDA,
+      dailyAgendaSchema as unknown as EventSchema
+    );
+    primitives.logger.debug(
+      'Registered event schemas for reminder_due, reminder_advance_notice, and daily_agenda'
+    );
+
+    // Schedule daily agenda (restart-safe)
+    scheduleDailyAgenda(primitives).catch((err: unknown) => {
+      primitives.logger.error({ err }, 'Failed to schedule daily agenda');
+    });
 
     // Create tools using services.getTimezone for timezone resolution
-    pluginTools = createReminderTools(primitives, (recipientId) =>
-      primitives.services.getTimezone(recipientId)
+    pluginTools = createReminderTools(
+      primitives,
+      (recipientId) => primitives.services.getTimezone(recipientId),
+      (recipientId) => primitives.services.isTimezoneConfigured(recipientId)
     );
 
     primitives.logger.info('Reminder plugin activated');
@@ -183,9 +212,63 @@ const lifecycle: PluginLifecycleV2 = {
         pluginPrimitives.logger,
         pluginPrimitives.intentEmitter
       );
+    } else if (eventKind === REMINDER_EVENT_KINDS.DAILY_AGENDA) {
+      await handleDailyAgenda(
+        pluginPrimitives.storage,
+        pluginPrimitives.scheduler,
+        pluginPrimitives.logger,
+        pluginPrimitives.intentEmitter,
+        (rid) => pluginPrimitives?.services.getTimezone(rid) ?? 'Europe/Moscow',
+        (payload['recipientId'] as string | undefined) ?? 'default'
+      );
     }
   },
 };
+
+/**
+ * Schedule daily agenda check (restart-safe).
+ * Follows the same pattern as calories plugin's scheduleWeightCheckin.
+ */
+async function scheduleDailyAgenda(primitives: PluginPrimitives): Promise<void> {
+  // Use a stable recipientId — daily agenda applies to the default user
+  const recipientId = 'default';
+  const scheduleId = `daily_agenda_${recipientId}`;
+
+  // Check if schedule already exists (restart-safe — preserve existing, scheduler handles catch-up)
+  const existing = await primitives.scheduler.getSchedules();
+  const hasExisting = existing.some((s: ScheduleEntry) => s.id === scheduleId);
+  if (hasExisting) {
+    primitives.logger.debug({ scheduleId }, 'Daily agenda schedule already exists');
+    return;
+  }
+
+  const userPatterns = primitives.services.getUserPatterns(recipientId);
+  const wakeHour = userPatterns?.wakeHour ?? 8;
+  const timezone = primitives.services.getTimezone(recipientId);
+
+  // Calculate next occurrence of wake hour
+  const now = DateTime.now().setZone(timezone);
+  let fireAt = now.set({ hour: wakeHour, minute: 0, second: 0, millisecond: 0 });
+  if (fireAt <= now) {
+    fireAt = fireAt.plus({ days: 1 });
+  }
+
+  await primitives.scheduler.schedule({
+    id: scheduleId,
+    fireAt: fireAt.toJSDate(),
+    recurrence: { frequency: 'daily', interval: 1 },
+    timezone,
+    data: {
+      kind: REMINDER_EVENT_KINDS.DAILY_AGENDA,
+      recipientId,
+    },
+  });
+
+  primitives.logger.info(
+    { scheduleId, fireAt: fireAt.toISO(), timezone, wakeHour },
+    'Daily agenda schedule created'
+  );
+}
 
 /**
  * Get plugin tools (for manual registration if needed).

@@ -55,6 +55,7 @@ import {
   ActivationError,
   AlreadyLoadedError,
 } from './plugin-errors.js';
+import { getEffectiveTimezone } from '../utils/date.js';
 
 /**
  * Callback type for pushing signals into the pipeline.
@@ -1328,7 +1329,8 @@ export class PluginLoader {
 
     // Get base services from provider (registerEventSchema added below)
     const baseServices = this.servicesProvider?.() ?? {
-      getTimezone: () => 'UTC',
+      getTimezone: () => getEffectiveTimezone(),
+      isTimezoneConfigured: () => false,
       getUserPatterns: () => null,
       getUserProperty: () => null,
       setUserProperty: () => Promise.resolve(),
@@ -1585,7 +1587,11 @@ export class PluginLoader {
         return { success: true, signalId };
       },
 
-      emitPendingIntention: (content: string, recipientId?: string): void => {
+      emitPendingIntention: (
+        content: string,
+        recipientId?: string,
+        options?: { ttlMs?: number }
+      ): void => {
         if (!this.memoryProvider) {
           this.logger.warn({ pluginId }, 'emitPendingIntention called but memoryProvider not set');
           return;
@@ -1623,6 +1629,7 @@ export class PluginLoader {
           tags: ['plugin_insight', pluginId],
           status: 'pending' as const,
           trigger: { condition: 'next_conversation' as const },
+          expiresAt: options?.ttlMs ? new Date(Date.now() + options.ttlMs) : undefined,
         };
 
         this.memoryProvider.save(entry).catch((err: unknown) => {

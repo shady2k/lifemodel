@@ -49,6 +49,16 @@ The `core.memory` tool supports:
 
 The LLM receives metadata about hidden results and can explicitly search with `minConfidence: 0` to access peripheral information when needed.
 
+## Intentions & TTL
+
+Intentions are non-urgent insights saved for the next user conversation. They surface as "Pending Insights" in the system prompt.
+
+Each intention can carry a per-entry TTL via the `expiresAt` field on `MemoryEntry`:
+- **Default (no `expiresAt`)**: 2-hour window from `timestamp` — suitable for thought-loop insights
+- **Custom TTL**: set via `emitPendingIntention(content, recipientId, { ttlMs })` — e.g., daily agenda items use 18h
+
+`getPendingIntentions` fetches a 24h window and filters by `expiresAt` (or the 2h default), ensuring long-lived intentions aren't prematurely expired while short-lived ones don't linger.
+
 ## Consolidation
 
 During sleep mode:
