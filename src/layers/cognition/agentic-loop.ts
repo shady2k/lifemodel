@@ -58,6 +58,7 @@ import { addPreviousAttemptMessages } from './messages/retry-builder.js';
 import { validateToolCallPairs } from './messages/tool-call-validators.js';
 import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
+import { getTraceContext } from '../../core/trace-context.js';
 
 /**
  * Agentic Loop implementation.
@@ -300,6 +301,57 @@ export class AgenticLoop {
   ): LoopResult | null {
     const parsed = parseResponseContent(content);
     const messageText = parsed.text;
+
+    // Malformed response (truncated JSON, missing response field, etc.)
+    if (parsed.malformed) {
+      if (!state.malformedRetried) {
+        state.malformedRetried = true;
+        this.logger.warn(
+          {
+            contentLength: content?.length ?? 0,
+            contentPreview: content?.slice(0, 100),
+            triggerType: context.triggerSignal.type,
+          },
+          'Malformed LLM response detected — retrying'
+        );
+        state.forceRespond = true;
+        return null; // Retry via existing forceRespond machinery
+      }
+
+      // Already retried — give up
+      this.logger.error(
+        {
+          contentLength: content?.length ?? 0,
+          rawContent: content,
+          triggerType: context.triggerSignal.type,
+        },
+        'Malformed LLM response persists after retry'
+      );
+
+      if (context.triggerSignal.type !== 'user_message') {
+        // Proactive trigger — silent abort
+        const terminal: Terminal = {
+          type: 'noAction',
+          reason: 'Malformed LLM response after retry',
+        };
+        const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+        return { success: true, terminal, intents, state };
+      }
+
+      // User message — return error with trace context for log lookup
+      const trace = getTraceContext();
+      const traceRef = trace
+        ? `${trace.traceId.slice(0, 8)}:${trace.spanId ?? 'unknown'}`
+        : 'unknown';
+      const terminal: Terminal = {
+        type: 'respond',
+        text: `Sorry, I had trouble processing that. Could you try again? (trace: ${traceRef})`,
+        conversationStatus: 'active',
+        confidence: 0.3,
+      };
+      const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+      return { success: true, terminal, intents, state };
+    }
 
     // Store conversation status from response if provided
     if (parsed.status) {

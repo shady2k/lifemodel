@@ -589,6 +589,9 @@ export interface LoopState {
 
   /** Collected thought contents (batched into single thought at end) */
   collectedThoughts: string[];
+
+  /** Whether a malformed response retry has already been attempted */
+  malformedRetried: boolean;
 }
 
 /**
@@ -611,6 +614,7 @@ export function createLoopState(): LoopState {
     toolCallCounts: new Map<string, number>(),
     limitViolationCount: 0,
     collectedThoughts: [],
+    malformedRetried: false,
   };
 }
 

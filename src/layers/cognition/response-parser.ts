@@ -3,6 +3,9 @@
  *
  * Parses LLM response content, handling both JSON schema and plain text.
  * Pure module — no state mutation.
+ *
+ * Key safety invariant: never return raw JSON or partial JSON as user-visible text.
+ * If content looks like JSON but can't be properly parsed → malformed: true, text: null.
  */
 
 import type { ConversationStatus } from '../../types/cognition.js';
@@ -11,11 +14,17 @@ import type { ConversationStatus } from '../../types/cognition.js';
  * Parse LLM response content, handling both JSON schema and plain text.
  * When toolChoice is 'none', we use JSON schema with {response: string, status?: string}.
  * Returns both the response text and optional conversation status.
+ *
+ * Malformed detection:
+ * - If content starts with '{' or '```' but can't be parsed as valid JSON → malformed: true
+ * - If JSON parses but response field is missing or wrong type → malformed: true
+ * - Prevents truncated/broken model output from reaching the user as raw JSON text
  */
 export function parseResponseContent(content: string | null): {
   text: string | null;
   status?: ConversationStatus;
   urgent?: boolean;
+  malformed?: boolean;
 } {
   if (!content) {
     return { text: null };
@@ -23,32 +32,34 @@ export function parseResponseContent(content: string | null): {
 
   const trimmed = content.trim();
 
-  // Try to parse as JSON first (from JSON schema mode)
-  try {
-    let jsonStr = trimmed;
+  // Step 1: Strip code-fence wrapper if present (```json ... ```)
+  let jsonStr = trimmed;
+  if (jsonStr.startsWith('```')) {
+    const match = /^```(?:json)?\s*([\s\S]*?)```\s*$/.exec(jsonStr);
+    if (match) {
+      jsonStr = match[1]?.trim() ?? jsonStr;
+    } else {
+      // Starts with ``` but no closing ``` — truncated code fence
+      return { text: null, malformed: true };
+    }
+  }
 
-    // Handle markdown code blocks
-    if (jsonStr.startsWith('```')) {
-      const match = /```(?:json)?\s*([\s\S]*?)```/.exec(jsonStr);
-      if (match) {
-        jsonStr = match[1]?.trim() ?? jsonStr;
+  // Step 2: Try JSON.parse
+  const looksLikeJson = jsonStr.startsWith('{');
+
+  if (looksLikeJson) {
+    try {
+      const parsed = JSON.parse(jsonStr) as {
+        response?: unknown;
+        status?: string;
+        urgent?: boolean;
+      };
+
+      // 2a: response must be a string
+      if (typeof parsed.response !== 'string') {
+        return { text: null, malformed: true };
       }
-    }
 
-    // Try to find JSON object in response
-    const jsonMatch = /\{[\s\S]*"response"[\s\S]*\}/.exec(jsonStr);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[0];
-    }
-
-    const parsed = JSON.parse(jsonStr) as {
-      response?: string;
-      status?: string;
-      urgent?: boolean;
-    };
-    // Check for string type explicitly - empty string "" is a valid "no response" value
-    // Using !== undefined because "" is falsy but valid
-    if (parsed.response !== undefined && typeof parsed.response === 'string') {
       // Validate status if provided
       const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
       const status =
@@ -62,11 +73,12 @@ export function parseResponseContent(content: string | null): {
       const urgent = parsed.urgent === true;
 
       return { text: responseText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
+    } catch {
+      // 3a: Starts with '{' but JSON.parse failed → truncated/malformed JSON
+      return { text: null, malformed: true };
     }
-  } catch {
-    // Not JSON or parsing failed - use as plain text
   }
 
-  // Fallback: use as plain text
+  // Step 3b: Not JSON — plain text fallback (for non-JSON-schema providers)
   return { text: trimmed };
 }

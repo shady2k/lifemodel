@@ -358,6 +358,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
           requestId,
           provider: this.name,
           model: response.model,
+          generationId: response.generationId,
           durationMs: duration,
           finishReason: response.finishReason,
           promptTokens: response.usage?.promptTokens,
