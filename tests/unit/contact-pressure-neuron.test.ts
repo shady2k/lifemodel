@@ -75,8 +75,8 @@ describe('ContactPressureNeuron', () => {
       expect(DEFAULT_CONTACT_PRESSURE_CONFIG.emitWhileAbove).toBe(true);
     });
 
-    it('should have refractory period of 5 seconds', () => {
-      expect(DEFAULT_CONTACT_PRESSURE_CONFIG.refractoryPeriodMs).toBe(5000);
+    it('should have refractory period of 30 seconds', () => {
+      expect(DEFAULT_CONTACT_PRESSURE_CONFIG.refractoryPeriodMs).toBe(30000);
     });
   });
 

@@ -74,9 +74,11 @@ Request: messages + tools (tool_choice: "auto")
     ↓
 Response: { tool_calls: [...], content: "thinking..." }
     ↓
-Execute tools → add role: "tool" messages
+Execute tools → add role: "tool" messages → drain pending user messages
     ↓
-No tool calls = natural completion → return intents
+No tool calls = natural completion
+    ├─ pending user messages? → deliver response, absorb messages, continue loop
+    └─ no pending messages  → return intents
     ↓
 Loop continues until LLM stops calling tools
 ```

@@ -232,6 +232,50 @@ export class AgenticLoop {
           // forceRespond was set — continue loop
           continue;
         }
+
+        // Before returning, check for pending user messages that arrived mid-loop.
+        // If found, deliver the current response and absorb the new messages into this loop
+        // to avoid spawning a redundant COGNITION run.
+        // Gate on recipientId + onImmediateIntent to ensure the response can actually be delivered;
+        // otherwise fall through to normal return (message will spawn its own COGNITION run).
+        if (
+          result.terminal.type === 'respond' &&
+          result.terminal.text &&
+          context.drainPendingUserMessages &&
+          context.recipientId &&
+          this.callbacks?.onImmediateIntent
+        ) {
+          const pendingMessages = context.drainPendingUserMessages();
+          if (pendingMessages.length > 0) {
+            // Deliver current response immediately
+            this.callbacks.onImmediateIntent({
+              type: 'SEND_MESSAGE',
+              payload: {
+                recipientId: context.recipientId,
+                text: result.terminal.text,
+                conversationStatus: result.terminal.conversationStatus,
+              },
+            });
+
+            // Add as assistant context for the next iteration
+            messages.push({ role: 'assistant', content: result.terminal.text });
+
+            // Inject pending user messages
+            for (const signal of pendingMessages) {
+              const text = (signal.data as { text: string }).text;
+              messages.push({ role: 'user', content: text });
+              this.logger.debug(
+                { text: text.slice(0, 50) },
+                'Absorbed pending user message at natural completion'
+              );
+            }
+
+            state.forceRespond = false;
+            state.forceRespondAttempts = 0;
+            continue;
+          }
+        }
+
         return result;
       }
 

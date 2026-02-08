@@ -331,11 +331,30 @@ export class CognitionProcessor implements CognitionLayer {
     // Get agent identity
     const identity = this.agent?.getIdentity();
 
-    // Get time since last message (for proactive contact context)
-    const timeSinceLastMessageMs = await this.getTimeSinceLastMessage(recipientId);
+    // Fetch conversation status once (used for completedActions, timeSince, and loop context)
+    let conversationStatus: string | undefined;
+    let timeSinceLastMessageMs: number | undefined;
+    if (recipientId && this.conversationManager) {
+      try {
+        const convStatus = await this.conversationManager.getStatus(recipientId);
+        conversationStatus = convStatus.status;
+        if (convStatus.lastMessageAt) {
+          timeSinceLastMessageMs = Date.now() - convStatus.lastMessageAt.getTime();
+        }
+      } catch (error) {
+        this.logger.trace(
+          { chatId: recipientId, error: error instanceof Error ? error.message : 'Unknown' },
+          'Failed to get conversation status'
+        );
+      }
+    }
 
-    // Get completed actions (for autonomous triggers to prevent re-execution)
-    const completedActions = await this.getCompletedActions(recipientId, triggerSignal.type);
+    // Get completed actions (for autonomous triggers and active follow-up messages)
+    const completedActions = await this.getCompletedActions(
+      recipientId,
+      triggerSignal.type,
+      conversationStatus
+    );
 
     // Get recent thoughts for context priming
     const recentThoughts = await this.getRecentThoughts(recipientId);
@@ -348,12 +367,6 @@ export class CognitionProcessor implements CognitionLayer {
 
     // Get behavioral rules learned from user feedback
     const behaviorRules = await this.getBehaviorRules(recipientId);
-
-    // Get conversation status for thought processing context
-    const conversationStatus =
-      recipientId && this.conversationManager
-        ? (await this.conversationManager.getStatus(recipientId)).status
-        : undefined;
 
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:
@@ -635,44 +648,28 @@ export class CognitionProcessor implements CognitionLayer {
   }
 
   /**
-   * Get time since last message in conversation.
-   */
-  private async getTimeSinceLastMessage(chatId?: string): Promise<number | undefined> {
-    if (!chatId || !this.conversationManager) {
-      return undefined;
-    }
-
-    try {
-      const status = await this.conversationManager.getStatus(chatId);
-      if (status.lastMessageAt) {
-        return Date.now() - status.lastMessageAt.getTime();
-      }
-      return undefined;
-    } catch (error) {
-      this.logger.trace(
-        { chatId, error: error instanceof Error ? error.message : 'Unknown' },
-        'Failed to get conversation status for time since'
-      );
-      return undefined;
-    }
-  }
-
-  /**
    * Get completed actions for preventing LLM re-execution.
-   * Only fetched for non-user-message triggers (autonomous events).
+   *
+   * For autonomous triggers: uses default 4-hour window.
+   * For user messages during active conversations: uses short 5-min window
+   * to prevent duplicate actions when follow-up messages arrive in quick succession.
    *
    * @param chatId Conversation ID
    * @param triggerType Type of trigger signal
+   * @param conversationStatus Current conversation status (avoids extra getStatus call)
    * @returns List of recent completed actions, or undefined
    */
   private async getCompletedActions(
     chatId?: string,
-    triggerType?: string
+    triggerType?: string,
+    conversationStatus?: string
   ): Promise<{ tool: string; summary: string; timestamp: string }[] | undefined> {
-    // Only fetch for non-user-message triggers
-    // User messages start fresh conversation turns
+    // For user messages, only include actions during active conversations
+    // (quick follow-ups where the prior turn may have already executed tools)
     if (triggerType === 'user_message') {
-      return undefined;
+      if (conversationStatus !== 'active' && conversationStatus !== 'awaiting_answer') {
+        return undefined;
+      }
     }
 
     if (!chatId || !this.conversationManager) {
@@ -680,7 +677,12 @@ export class CognitionProcessor implements CognitionLayer {
     }
 
     try {
-      const actions = await this.conversationManager.getRecentActions(chatId);
+      // Use a short window for follow-up user messages to avoid noise from old actions
+      const maxAge =
+        triggerType === 'user_message'
+          ? 5 * 60 * 1000 // 5 minutes for follow-up user messages
+          : undefined; // default 4 hours for autonomous triggers
+      const actions = await this.conversationManager.getRecentActions(chatId, maxAge);
       return actions.length > 0 ? actions : undefined;
     } catch (error) {
       this.logger.trace(
