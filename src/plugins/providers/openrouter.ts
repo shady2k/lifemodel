@@ -2,6 +2,7 @@ import type { Logger } from '../../types/index.js';
 import type { CompletionRequest } from '../../llm/provider.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 import type { OpenAICompatibleConfig } from './openai-compatible.js';
+import { resolveModelParams } from './model-params.js';
 
 /**
  * OpenRouter-specific provider configuration.
@@ -98,7 +99,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
   }
 
   /**
-   * Override to apply prompt caching and Gemini-specific sanitization.
+   * Override to apply model-specific params, prompt caching, and Gemini sanitization.
    */
   protected override buildRequestBody(
     request: CompletionRequest,
@@ -106,6 +107,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
   ): Record<string, unknown> {
     const body = super.buildRequestBody(request, model);
     const messages = body['messages'] as Record<string, unknown>[];
+
+    // Apply per-model parameter overrides (temperature, reasoning, etc.)
+    this.applyModelParamOverrides(body, model);
 
     if (this.isGeminiModel(model)) {
       this.ensureUserTurnForGemini(messages);
@@ -116,6 +120,37 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     this.addCacheControl(messages, model);
 
     return body;
+  }
+
+  /**
+   * Apply model-family-specific parameter overrides.
+   * Post-processes the request body built by the base class.
+   */
+  private applyModelParamOverrides(body: Record<string, unknown>, model: string): void {
+    const overrides = resolveModelParams(model);
+
+    // Temperature: number → force set, null → delete (use provider default)
+    if (overrides.temperature === null) {
+      delete body['temperature'];
+    } else if (typeof overrides.temperature === 'number') {
+      body['temperature'] = overrides.temperature;
+    }
+
+    // Top-p: number → force set, null → delete
+    if (overrides.topP === null) {
+      delete body['top_p'];
+    } else if (typeof overrides.topP === 'number') {
+      body['top_p'] = overrides.topP;
+    }
+
+    // Reasoning: 'omit' → remove field, 'enable'/'disable' → explicit
+    if (overrides.reasoning === 'omit') {
+      delete body['reasoning'];
+    } else if (overrides.reasoning === 'enable') {
+      body['reasoning'] = { enabled: true };
+    } else if (overrides.reasoning === 'disable') {
+      body['reasoning'] = { enabled: false };
+    }
   }
 
   /**

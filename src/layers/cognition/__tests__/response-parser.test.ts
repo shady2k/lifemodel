@@ -49,6 +49,16 @@ describe('parseResponseContent', () => {
     expect(result).toEqual({ text: 'Hello world' });
   });
 
+  it('strips leading timestamp from plain text', () => {
+    const result = parseResponseContent('[20:14] Hello world');
+    expect(result).toEqual({ text: 'Hello world' });
+  });
+
+  it('strips leading timestamp from JSON response', () => {
+    const result = parseResponseContent('{"response":"[09:07] Hello world"}');
+    expect(result).toEqual({ text: 'Hello world' });
+  });
+
   it('returns null text for null input', () => {
     const result = parseResponseContent(null);
     expect(result).toEqual({ text: null });

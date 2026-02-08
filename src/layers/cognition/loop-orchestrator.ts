@@ -21,42 +21,48 @@ export function buildRequest(
 ): ToolCompletionRequest {
   const toolChoice: 'auto' | 'none' = forceRespond ? 'none' : 'auto';
 
-  const responseFormat: ResponseFormat = {
-    type: 'json_schema',
-    json_schema: {
-      name: 'agent_response',
-      strict: true,
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          response: {
-            type: 'string',
-            description: 'Your response to the user',
-          },
-          status: {
-            type: 'string',
-            enum: ['active', 'awaiting_answer', 'closed', 'idle'],
-            description:
-              'Optional: conversation status for follow-up timing. Use awaiting_answer if you asked a question.',
-          },
-          urgent: {
-            type: 'boolean',
-            description:
-              'Set true ONLY for immediate, time-sensitive user impact (safety, deadline in hours). Thought triggers only.',
+  // Only enforce json_schema when the model must produce a final text response (no tools).
+  // When tools are available, response_format can conflict with tool calling on models
+  // that don't support both simultaneously (e.g., GLM-4.7). The system prompt already
+  // instructs JSON output as a fallback, and malformed responses are retried.
+  const responseFormat: ResponseFormat | undefined = forceRespond
+    ? {
+        type: 'json_schema',
+        json_schema: {
+          name: 'agent_response',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              response: {
+                type: 'string',
+                description: 'Your response to the user',
+              },
+              status: {
+                type: 'string',
+                enum: ['active', 'awaiting_answer', 'closed', 'idle'],
+                description:
+                  'Optional: conversation status for follow-up timing. Use awaiting_answer if you asked a question.',
+              },
+              urgent: {
+                type: 'boolean',
+                description:
+                  'Set true ONLY for immediate, time-sensitive user impact (safety, deadline in hours). Thought triggers only.',
+              },
+            },
+            required: ['response'],
           },
         },
-        required: ['response'],
-      },
-    },
-  };
+      }
+    : undefined;
 
   return {
     messages,
     tools: forceRespond ? [] : tools,
     toolChoice,
     parallelToolCalls: false, // Sequential for determinism
-    responseFormat,
+    ...(responseFormat && { responseFormat }),
   };
 }
 

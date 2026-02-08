@@ -31,6 +31,14 @@ export function parseResponseContent(content: string | null): {
   }
 
   const trimmed = content.trim();
+  const stripLeadingTimestamp = (text: string): string =>
+    text
+      .replace(/^(?:<msg_time>[^<]*<\/msg_time>\s*)+/, '') // XML-style timestamps
+      .replace(
+        /^(?:\[(?:(?:yesterday\s+)?(?:[01]?\d|2[0-3]):[0-5]\d|[A-Z][a-z]{2}\s+\d{1,2},\s*(?:[01]?\d|2[0-3]):[0-5]\d)\]\s*)+/,
+        ''
+      ) // Legacy [HH:MM], [yesterday HH:MM], [Feb 4, HH:MM]
+      .trimStart();
 
   // Step 1: Strip code-fence wrapper if present (```json ... ```)
   let jsonStr = trimmed;
@@ -68,11 +76,13 @@ export function parseResponseContent(content: string | null): {
           : undefined;
 
       // Empty response means "don't send a message" - return null for text
-      const responseText = parsed.response.trim() || null;
+      const responseText = parsed.response.trim();
+      const cleanedText = stripLeadingTimestamp(responseText).trim();
+      const finalText = cleanedText || null;
 
       const urgent = parsed.urgent === true;
 
-      return { text: responseText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
+      return { text: finalText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
     } catch {
       // 3a: Starts with '{' but JSON.parse failed → truncated/malformed JSON
       return { text: null, malformed: true };
@@ -80,5 +90,5 @@ export function parseResponseContent(content: string | null): {
   }
 
   // Step 3b: Not JSON — plain text fallback (for non-JSON-schema providers)
-  return { text: trimmed };
+  return { text: stripLeadingTimestamp(trimmed) };
 }

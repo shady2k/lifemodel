@@ -161,15 +161,15 @@ export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): st
   });
 
   if (msgDate === todayDate) {
-    return `[${timeStr}]`;
+    return `<msg_time>${timeStr}</msg_time>`;
   } else if (msgDate === yesterdayDate) {
-    return `[yesterday ${timeStr}]`;
+    return `<msg_time>yesterday ${timeStr}</msg_time>`;
   } else {
     const dateStr = ts.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       timeZone: timezone,
     });
-    return `[${dateStr}, ${timeStr}]`;
+    return `<msg_time>${dateStr}, ${timeStr}</msg_time>`;
   }
 }

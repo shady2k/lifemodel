@@ -49,7 +49,7 @@ export function buildInitialMessages(
             ? histMsg.timestamp
             : new Date(histMsg.timestamp as unknown as string);
         const prefix = formatTimestampPrefix(ts, now, effectiveTimezone);
-        msg.content = `${prefix} ${msg.content}`;
+        msg.content = `${prefix}\n${msg.content}`;
       }
 
       // Include tool_calls for assistant messages
