@@ -456,7 +456,10 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
 
       // Headers received (fetch resolves when headers are available)
       firstByteTime = Date.now();
-      clearTimeout(timeoutId);
+      // NOTE: Do NOT clearTimeout here — keep the overall deadline active
+      // during body reading. The upstream provider may stall or terminate
+      // the connection mid-body (e.g., proxy timeout). Without this guard,
+      // response.json() can hang indefinitely until the remote side closes.
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -473,6 +476,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       }
 
       const data = (await response.json()) as OpenAIResponse;
+      clearTimeout(timeoutId);
       const parsed = this.parseResponse(data);
 
       // Calculate and log timing metrics
