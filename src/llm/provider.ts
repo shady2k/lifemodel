@@ -413,7 +413,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
           durationMs: duration,
           tokens: response.usage?.totalTokens,
         },
-        `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens, ${finishStr}]\n${responseContent}${toolCallsDetail}\n${'═'.repeat(60)}`
+        `${'─'.repeat(60)}\n← RESPONSE [${durationStr}ms, ${tokensStr} tokens, ${finishStr}]${response.generationId ? ` gen:${response.generationId}` : ''}\n${responseContent}${toolCallsDetail}\n${'═'.repeat(60)}`
       );
 
       return response;

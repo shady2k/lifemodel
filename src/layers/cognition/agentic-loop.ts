@@ -346,6 +346,23 @@ export class AgenticLoop {
     const parsed = parseResponseContent(content);
     const messageText = parsed.text;
 
+    // Plain-text response for user messages = model skipped JSON format entirely.
+    // Treat as malformed and retry with forceRespond (which enforces JSON schema).
+    const isPlainText =
+      content && !content.trim().startsWith('{') && !content.trim().startsWith('```');
+    if (isPlainText && context.triggerSignal.type === 'user_message' && !state.malformedRetried) {
+      state.malformedRetried = true;
+      this.logger.warn(
+        {
+          contentLength: content.length,
+          contentPreview: content.slice(0, 100),
+        },
+        'Plain-text response for user message (expected JSON) — retrying with forceRespond'
+      );
+      state.forceRespond = true;
+      return null;
+    }
+
     // Malformed response (truncated JSON, missing response field, etc.)
     if (parsed.malformed) {
       if (!state.malformedRetried) {

@@ -33,12 +33,12 @@ export function createSayTool(): Tool {
 
   return {
     name: 'core.say',
-    maxCallsPerTurn: 2,
+    maxCallsPerTurn: 1,
     description:
       'Send a brief intermediate message while continuing to process. ' +
-      'Use ONLY for short acknowledgments before tool calls (e.g., "Let me check...", "One moment..."). ' +
-      'Do NOT use as your final response — you must still output {"response": "text"} when done. ' +
-      'Maximum 2 calls per turn.',
+      'Use ONLY for a short acknowledgment BEFORE your first tool call (e.g., "Let me check...", "One moment..."). ' +
+      'NEVER use for content delivery — article text, summaries, results go in your final {"response": "text"}. ' +
+      'Maximum 1 call per turn.',
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
     tags: ['messaging', 'intermediate'],

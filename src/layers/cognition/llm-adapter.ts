@@ -90,7 +90,7 @@ export class LLMAdapter implements CognitionLLM {
     try {
       const completionRequest: Parameters<typeof this.provider.complete>[0] = {
         messages,
-        maxTokens: options?.maxTokens ?? 1000,
+        maxTokens: options?.maxTokens ?? 2000,
         temperature: options?.temperature ?? this.config.temperature,
       };
 
