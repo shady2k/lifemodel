@@ -90,7 +90,7 @@ export class LLMAdapter implements CognitionLLM {
     try {
       const completionRequest: Parameters<typeof this.provider.complete>[0] = {
         messages,
-        maxTokens: options?.maxTokens ?? 2000,
+        maxTokens: options?.maxTokens ?? 5000,
         temperature: options?.temperature ?? this.config.temperature,
       };
 
@@ -147,7 +147,7 @@ export class LLMAdapter implements CognitionLLM {
     try {
       const completionRequest: Parameters<typeof this.provider.complete>[0] = {
         messages: request.messages,
-        maxTokens: options?.maxTokens ?? 2000,
+        maxTokens: options?.maxTokens ?? 5000,
         temperature: options?.temperature ?? this.config.temperature,
         tools: request.tools,
         toolChoice: request.toolChoice ?? 'required', // Default to required for agentic loop
