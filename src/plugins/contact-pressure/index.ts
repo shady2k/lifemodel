@@ -59,7 +59,7 @@ export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
     maxThreshold: 0.4,
     alertnessInfluence: 0.3,
   },
-  refractoryPeriodMs: 5000,
+  refractoryPeriodMs: 30000,
   highPriorityThreshold: 0.6,
   emitThreshold: 0.2,
   emitWhileAbove: true,
@@ -82,6 +82,8 @@ export class ContactPressureNeuron extends BaseNeuron {
 
   private readonly config: ContactPressureNeuronConfig;
   private lastNeuronResult: NeuronResult | undefined;
+  private wasAboveEmitThreshold = false;
+  private wasHighPriority = false;
 
   constructor(logger: Logger, config: Partial<ContactPressureNeuronConfig> = {}) {
     super(logger);
@@ -120,6 +122,7 @@ export class ContactPressureNeuron extends BaseNeuron {
       this.updatePrevious(currentValue);
       if (currentValue >= this.config.emitThreshold) {
         this.recordEmission();
+        this.logTransitions(currentValue, result);
         return this.createSignal(currentValue, result, 0, correlationId);
       }
       return undefined;
@@ -149,8 +152,9 @@ export class ContactPressureNeuron extends BaseNeuron {
 
       this.updatePrevious(currentValue);
       this.recordEmission();
+      this.logTransitions(currentValue, result);
 
-      this.logger.debug(
+      this.logger.trace(
         {
           previous: previousForLog,
           current: currentValue.toFixed(2),
@@ -184,8 +188,9 @@ export class ContactPressureNeuron extends BaseNeuron {
 
       this.updatePrevious(currentValue);
       this.recordEmission();
+      this.logTransitions(currentValue, result);
 
-      this.logger.debug(
+      this.logger.trace(
         {
           previous: previousForLog,
           current: currentValue.toFixed(2),
@@ -203,8 +208,65 @@ export class ContactPressureNeuron extends BaseNeuron {
       return signal;
     }
 
+    // Log transition below threshold (pressure dropped)
+    if (this.wasAboveEmitThreshold && currentValue < this.config.emitThreshold) {
+      this.logger.debug(
+        { current: currentValue.toFixed(2), threshold: this.config.emitThreshold },
+        'Contact pressure dropped below emit threshold'
+      );
+      this.wasAboveEmitThreshold = false;
+    }
+
     this.updatePrevious(currentValue);
     return undefined;
+  }
+
+  private logTransitions(currentValue: number, result: NeuronResult): void {
+    const isAbove = currentValue >= this.config.emitThreshold;
+    const isHighPriority = currentValue >= this.config.highPriorityThreshold;
+    const topContributor = result.contributions.reduce((a, b) =>
+      b.contribution > a.contribution ? b : a
+    );
+
+    // Crossed above emit threshold
+    if (isAbove && !this.wasAboveEmitThreshold) {
+      this.logger.debug(
+        {
+          current: currentValue.toFixed(2),
+          threshold: this.config.emitThreshold,
+          topContributor: topContributor.name,
+          topValue: topContributor.value.toFixed(2),
+        },
+        'Contact pressure crossed above emit threshold'
+      );
+    }
+
+    // Crossed into high priority
+    if (isHighPriority && !this.wasHighPriority) {
+      this.logger.debug(
+        {
+          current: currentValue.toFixed(2),
+          threshold: this.config.highPriorityThreshold,
+          contributions: result.contributions.map((c) => ({
+            name: c.name,
+            value: c.value.toFixed(2),
+            contribution: c.contribution.toFixed(2),
+          })),
+        },
+        'Contact pressure reached HIGH priority'
+      );
+    }
+
+    // Dropped out of high priority
+    if (!isHighPriority && this.wasHighPriority) {
+      this.logger.debug(
+        { current: currentValue.toFixed(2), threshold: this.config.highPriorityThreshold },
+        'Contact pressure dropped below high priority'
+      );
+    }
+
+    this.wasAboveEmitThreshold = isAbove;
+    this.wasHighPriority = isHighPriority;
   }
 
   private calculatePressure(state: AgentState): NeuronResult {

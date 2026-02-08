@@ -35,7 +35,7 @@ Contact pressure is a weighted combination:
 
 Multiple layers prevent spam:
 
-1. **Neuron refractory period (5s):** Minimum time between signal emissions
+1. **Neuron refractory period (30s):** Minimum time between signal emissions
 2. **ThresholdEngine cooldown (30min):** Minimum time between waking Cognition
 3. **AckRegistry:** Cognition-controlled deferrals with custom durations
 4. **`core.defer` tool:** LLM can explicitly defer proactive contact
