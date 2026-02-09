@@ -108,7 +108,6 @@ export async function runSandbox(
 
           // Non-zero exit but worker may have written valid JSON to stdout
           // (worker exits with code 1 on execution errors)
-          // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
           const stdoutData = stdout || err.stdout || '';
           if (stdoutData) {
             try {

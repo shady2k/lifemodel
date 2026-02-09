@@ -25,6 +25,11 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-exports': 'error',
       // Use Pino logger instead of console
       'no-console': 'error',
+      // Allow || on primitives where falsy-coalescing is intentional (e.g. empty string fallback)
+      '@typescript-eslint/prefer-nullish-coalescing': [
+        'error',
+        { ignorePrimitives: { string: true } },
+      ],
       // Prohibit any type usage
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-unsafe-assignment': 'error',
