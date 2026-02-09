@@ -170,7 +170,7 @@ class DockerContainerHandle implements ContainerHandle {
     });
   }
 
-  deliverCredential(name: string, value: string): void {
+  async deliverCredential(name: string, value: string): Promise<void> {
     if (this.destroyed) return;
 
     const frame = encodeFrame({ type: 'credential', name, value });
@@ -178,6 +178,7 @@ class DockerContainerHandle implements ContainerHandle {
 
     // Best-effort — don't wait for ack (credential delivery is fire-and-forget)
     // The tool-server will ack on its timeline
+    return Promise.resolve();
   }
 
   async destroy(): Promise<void> {

@@ -5,6 +5,8 @@
  * These are shared between OpenRouter providers and VercelAIProvider.
  */
 
+import { resolveModelParams } from './model-params.js';
+
 /**
  * Check if the resolved model is a Gemini model on OpenRouter.
  */
@@ -64,11 +66,17 @@ export function sanitizeSystemMessagesForGemini(messages: Record<string, unknown
  * Strategy differs by provider:
  * - Anthropic: breakpoint on last system message (caches full system prefix)
  * - Gemini: breakpoint on first user message (system_instruction loses cache_control)
- * - Others: ignored gracefully
+ * - Models without cache support: skipped entirely
  *
  * OpenRouter routes to the correct provider, and for Gemini uses only the last breakpoint.
  */
 export function addCacheControl(messages: Record<string, unknown>[], model: string): void {
+  // Check if this model supports prompt caching using the model params configuration
+  const params = resolveModelParams(model);
+  if (params.supportsCacheControl === false) {
+    return; // Skip cache control for models that don't support it
+  }
+
   let targetIdx: number;
 
   if (isGeminiModel(model)) {

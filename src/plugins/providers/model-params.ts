@@ -28,6 +28,8 @@ export interface ModelParamOverrides {
   topP?: number | null;
   /** 'omit' → don't send reasoning field; 'enable'/'disable' → explicit */
   reasoning?: ReasoningMode;
+  /** Whether this model supports OpenAI-style prompt caching (default: true for OpenAI-compatible) */
+  supportsCacheControl?: boolean;
 }
 
 interface ModelParamRule {
@@ -43,8 +45,15 @@ interface ModelParamRule {
  */
 const BUILTIN_RULES: ModelParamRule[] = [
   // GLM-4.7: temp 1.0 per official docs, thinking enabled by default (don't touch reasoning)
-  { match: 'glm-4.7', params: { temperature: 1.0, reasoning: 'omit' } },
-  { match: 'glm-4.6', params: { temperature: 1.0, reasoning: 'omit' } },
+  // GLM doesn't support OpenAI-style prompt caching
+  {
+    match: 'glm-4.7',
+    params: { temperature: 1.0, reasoning: 'omit', supportsCacheControl: false },
+  },
+  {
+    match: 'glm-4.6',
+    params: { temperature: 1.0, reasoning: 'omit', supportsCacheControl: false },
+  },
   // Claude: let provider choose temperature, no reasoning field
   { match: 'claude', params: { temperature: null, reasoning: 'omit' } },
   // Gemini: temp 1.0, top_p 0.95 per docs; pin to Google AI Studio — Vertex returns null/failures
@@ -54,17 +63,18 @@ const BUILTIN_RULES: ModelParamRule[] = [
     provider: { order: ['Google AI Studio'], allow_fallbacks: true },
   },
   // DeepSeek: temp 1.0, top_p 0.95 per official docs; pin to DeepInfra — AtlasCloud/Google mangle tool calls
+  // DeepSeek doesn't support prompt caching
   {
     match: 'deepseek',
-    params: { temperature: 1.0, topP: 0.95 },
+    params: { temperature: 1.0, topP: 0.95, supportsCacheControl: false },
     provider: { order: ['DeepInfra'], allow_fallbacks: true },
   },
-  // Qwen: temp 0.55 per OpenCode findings
-  { match: 'qwen', params: { temperature: 0.55 } },
-  // StepFun: reasoning is mandatory, cannot be disabled
-  { match: 'stepfun', params: { reasoning: 'omit' } },
-  // MiniMax: reasoning is mandatory, cannot be disabled
-  { match: 'minimax', params: { reasoning: 'omit' } },
+  // Qwen: temp 0.55 per OpenCode findings, doesn't support prompt caching
+  { match: 'qwen', params: { temperature: 0.55, supportsCacheControl: false } },
+  // StepFun: reasoning is mandatory, cannot be disabled, doesn't support prompt caching
+  { match: 'stepfun', params: { reasoning: 'omit', supportsCacheControl: false } },
+  // MiniMax: reasoning is mandatory, cannot be disabled, doesn't support prompt caching
+  { match: 'minimax', params: { reasoning: 'omit', supportsCacheControl: false } },
 ];
 
 /**

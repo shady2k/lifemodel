@@ -37,19 +37,17 @@ RUN apk add --no-cache \\
     coreutils \\
     && rm -rf /var/cache/apk/*
 
-# Create non-root user
-RUN adduser -D -u 1000 motor
-
 # Create tool-server directory
-RUN mkdir -p /opt/motor && chown motor:motor /opt/motor
+# Use the built-in 'node' user (uid 1000) from node:24-alpine
+RUN mkdir -p /opt/motor && chown node:node /opt/motor
 
 # Copy all runtime files (tool-server + sandbox-worker)
 COPY . /opt/motor/
 
 # Create workspace and skills dirs (will be bind-mounted)
-RUN mkdir -p /workspace /skills && chown motor:motor /workspace /skills
+RUN mkdir -p /workspace /skills && chown node:node /workspace /skills
 
-USER motor
+USER node
 WORKDIR /workspace
 
 # Entrypoint runs the tool-server (compiled JS)

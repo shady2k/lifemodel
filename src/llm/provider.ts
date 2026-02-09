@@ -422,9 +422,13 @@ export abstract class BaseLLMProvider implements LLMProvider {
         ? `, ${String(response.usage.reasoningTokens)} reasoning`
         : '';
       const finishStr = response.finishReason ?? 'unknown';
-      const reasoningDetail = response.reasoningContent
-        ? `\n\n  💭 Reasoning:\n${response.reasoningContent}`
-        : '';
+      // Only log reasoning if it's not the AI SDK's redacted placeholder
+      const reasoningDetail =
+        response.reasoningContent && response.reasoningContent !== '[REDACTED]'
+          ? `\n\n  💭 Reasoning:\n${response.reasoningContent}`
+          : response.reasoningContent === '[REDACTED]'
+            ? '\n\n  💭 Reasoning: [Not available for this model]'
+            : '';
       logConversation(
         {
           logType: 'RESPONSE',

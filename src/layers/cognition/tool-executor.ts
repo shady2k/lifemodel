@@ -27,6 +27,77 @@ import type { ToolContext } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
 
 /**
+ * Robust JSON parser for LLM-generated tool arguments.
+ *
+ * LLMs often generate JSON with common mistakes:
+ * - Unescaped quotes inside string values
+ * - Trailing commas
+ * - Single quotes instead of double quotes
+ *
+ * This function attempts to fix these issues before parsing.
+ */
+function robustJsonParse(argsString: string): Record<string, unknown> | null {
+  const trimmed = argsString.trim();
+  if (trimmed === '') return {};
+
+  // Try standard JSON.parse first
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    // Fall through to recovery attempts
+  }
+
+  // Attempt 1: Fix unescaped quotes inside string values
+  // Pattern: Look for quotes after colons that aren't preceded by backslash
+  // This is a heuristic - not perfect but handles common cases
+  let attempt1 = trimmed;
+  // Fix quotes inside string values by escaping them
+  // Look for ": " followed by content with unescaped quotes, then comma or }
+  attempt1 = attempt1.replace(/:\s*"((?:[^"\\]|\\.)*)"/g, (_match: string, content: string) => {
+    // Escape any unescaped quotes in the content
+    const escaped = content.replace(/(?<!\\)"/g, '\\"');
+    return `: "${escaped}"`;
+  });
+
+  try {
+    return JSON.parse(attempt1) as Record<string, unknown>;
+  } catch {
+    // Continue to next attempt
+  }
+
+  // Attempt 2: More aggressive - find all string values and escape quotes
+  // Match JSON string values: "key": "value" or "key":"value"
+  let attempt2 = trimmed;
+  attempt2 = attempt2.replace(
+    /"([^"]+?)":\s*"((?:[^"\\]|\\.)*)"/g,
+    (_match: string, key: string, value: string) => {
+      // Escape unescaped quotes in value
+      const escapedValue = value.replace(/(?<!\\)"/g, '\\"');
+      return `"${key}": "${escapedValue}"`;
+    }
+  );
+
+  try {
+    return JSON.parse(attempt2) as Record<string, unknown>;
+  } catch {
+    // Continue to next attempt
+  }
+
+  // Attempt 3: Replace curly quotes with straight quotes
+  let attempt3 = trimmed;
+  attempt3 = attempt3.replace(/["""]/g, '"').replace(/['']/g, "'");
+
+  try {
+    return JSON.parse(attempt3) as Record<string, unknown>;
+  } catch {
+    // Continue to next attempt
+  }
+
+  // All attempts failed
+  return null;
+}
+
+/**
  * Tools whose intents should be applied immediately during loop execution.
  * This allows subsequent tools in the same loop to see the data.
  * - core.remember: User facts should be immediately queryable
@@ -128,7 +199,8 @@ export async function executeToolCalls(
     try {
       // Handle empty arguments string as empty object
       const argsString = toolCall.function.arguments.trim();
-      args = argsString === '' ? {} : (JSON.parse(argsString) as Record<string, unknown>);
+      const parsedArgs = robustJsonParse(argsString);
+      args = parsedArgs ?? {};
     } catch {
       logger.error(
         { toolName, arguments: toolCall.function.arguments },

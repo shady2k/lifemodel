@@ -404,7 +404,8 @@ export class VercelAIProvider extends BaseLLMProvider {
 
   /**
    * Convert tools from OpenAI format to AI SDK format.
-   * The AI SDK expects tools with `inputSchema` instead of `parameters`.
+   * The AI SDK v6 expects tools with `inputSchema` as a FUNCTION that returns JSONSchema7,
+   * not a plain object. This is different from AI SDK v3.
    */
   private convertTools(tools: CompletionRequest['tools']): Record<string, unknown> | undefined {
     if (!tools || tools.length === 0) return undefined;
@@ -416,10 +417,11 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Check if this is OpenAIChatTool (has parameters) or MinimalOpenAIChatTool
       if ('parameters' in fn) {
         const schema = fn.parameters;
-        // Build AI SDK tool structure with `inputSchema` instead of `parameters`
+        // Build AI SDK tool structure with `inputSchema` as a function
+        // AI SDK v6 requires inputSchema to be a function that returns PromiseLike<JSONSchema7>
         aiTools[fn.name] = {
           description: fn.description,
-          inputSchema: schema,
+          inputSchema: () => Promise.resolve(schema as JsonObject),
         };
       }
       // Minimal format - skip tools without parameters
@@ -448,50 +450,90 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
-   * Build provider options for OpenRouter-specific fields.
+   * Build provider options for OpenRouter-specific fields and response format.
+   * Uses extraBody to pass response_format to the underlying API.
    */
   private buildProviderOptions(
     modelId: string,
     overrides: ReturnType<typeof resolveModelParams>,
     request: CompletionRequest
-  ): { openrouter: Record<string, unknown> } | undefined {
-    if (!isOpenRouterConfig(this.config)) {
-      return undefined;
+  ): { openrouter?: Record<string, unknown>; openai?: Record<string, unknown> } | undefined {
+    const providerOptions: Record<string, Record<string, unknown>> = {};
+    const extraBody: Record<string, unknown> = {};
+
+    // Determine provider key (openrouter or openai)
+    const providerKey = isOpenRouterConfig(this.config) ? 'openrouter' : 'openai';
+
+    if (isOpenRouterConfig(this.config)) {
+      const openrouterOptions: Record<string, unknown> = {};
+
+      // Add provider preferences
+      const providerPrefs = resolveProviderPreferences(modelId);
+      if (providerPrefs) {
+        openrouterOptions['provider'] = {
+          order: providerPrefs.order,
+          ignore: providerPrefs.ignore,
+          allow_fallbacks: providerPrefs.allow_fallbacks,
+          preferred_min_throughput: providerPrefs.preferred_min_throughput,
+        };
+      } else {
+        openrouterOptions['provider'] = {
+          preferred_min_throughput: { p50: 10 },
+        };
+      }
+
+      // Add reasoning config
+      if (overrides.reasoning === 'enable') {
+        openrouterOptions['reasoning'] = { enabled: true };
+      } else if (overrides.reasoning === 'disable') {
+        openrouterOptions['reasoning'] = { enabled: false };
+      }
+      // If 'omit', don't add the field
+
+      // Pass parallel_tool_calls via providerOptions (OpenAI-specific, not in AI SDK CallSettings)
+      if (request.parallelToolCalls === false) {
+        openrouterOptions['parallel_tool_calls'] = false;
+      }
+
+      providerOptions[providerKey] = openrouterOptions;
     }
 
-    const openrouterOptions: Record<string, unknown> = {};
+    // Add responseFormat via extraBody (both OpenRouter and OpenAI-compatible)
+    // Note: response_format is an OpenAI API parameter, not an AI SDK generateText parameter
+    if (request.responseFormat) {
+      this.providerLogger?.debug(
+        {
+          responseFormatType: request.responseFormat.type,
+          hasJsonSchema: !!request.responseFormat.json_schema,
+        },
+        'Processing responseFormat for extraBody'
+      );
+      if (request.responseFormat.type === 'json_object') {
+        extraBody['response_format'] = { type: 'json_object' };
+      } else if (
+        request.responseFormat.type === 'json_schema' &&
+        request.responseFormat.json_schema
+      ) {
+        extraBody['response_format'] = {
+          type: 'json_schema',
+          json_schema: {
+            name: request.responseFormat.json_schema.name,
+            schema: request.responseFormat.json_schema.schema,
+          },
+        };
+      }
+    }
 
-    // Add provider preferences
-    const providerPrefs = resolveProviderPreferences(modelId);
-    if (providerPrefs) {
-      openrouterOptions['provider'] = {
-        order: providerPrefs.order,
-        ignore: providerPrefs.ignore,
-        allow_fallbacks: providerPrefs.allow_fallbacks,
-        preferred_min_throughput: providerPrefs.preferred_min_throughput,
-      };
+    // Add extraBody if we have any fields
+    if (Object.keys(extraBody).length > 0) {
+      providerOptions[providerKey] ??= {};
+      providerOptions[providerKey]['extraBody'] = extraBody;
+      this.providerLogger?.debug({ extraBody }, 'extraBody added to providerOptions');
     } else {
-      openrouterOptions['provider'] = {
-        preferred_min_throughput: { p50: 10 },
-      };
+      this.providerLogger?.debug('No extraBody fields to add');
     }
 
-    // Add reasoning config
-    if (overrides.reasoning === 'enable') {
-      openrouterOptions['reasoning'] = { enabled: true };
-    } else if (overrides.reasoning === 'disable') {
-      openrouterOptions['reasoning'] = { enabled: false };
-    }
-    // If 'omit', don't add the field
-
-    // Pass parallel_tool_calls via providerOptions (OpenAI-specific, not in AI SDK CallSettings)
-    if (request.parallelToolCalls === false) {
-      openrouterOptions['parallel_tool_calls'] = false;
-    }
-
-    return {
-      openrouter: openrouterOptions,
-    };
+    return Object.keys(providerOptions).length > 0 ? providerOptions : undefined;
   }
 
   /**
@@ -592,25 +634,14 @@ export class VercelAIProvider extends BaseLLMProvider {
         maxRetries: 0,
       };
 
-      // Add response format if specified
-      if (request.responseFormat) {
-        if (request.responseFormat.type === 'json_object') {
-          generateOptions['responseFormat'] = { type: 'json' };
-        } else if (
-          request.responseFormat.type === 'json_schema' &&
-          request.responseFormat.json_schema
-        ) {
-          generateOptions['responseFormat'] = {
-            type: 'json',
-            schema: request.responseFormat.json_schema.schema,
-            name: request.responseFormat.json_schema.name,
-          };
-        }
-      }
-
       // Add tools if present
       if (aiTools && Object.keys(aiTools).length > 0) {
         generateOptions['tools'] = aiTools;
+        // Debug: log tools to see what's being passed
+        this.providerLogger?.debug(
+          { toolCount: Object.keys(aiTools).length, sampleTool: Object.keys(aiTools)[0] },
+          'Tools added to generateText'
+        );
         if (toolChoice) {
           generateOptions['toolChoice'] = toolChoice;
         }
@@ -619,6 +650,8 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Add provider options if present
       if (providerOptions) {
         generateOptions['providerOptions'] = providerOptions;
+        // Debug: log providerOptions to see what's being passed
+        this.providerLogger?.debug({ providerOptions }, 'Provider options added');
       }
 
       // Add HTTP headers (OpenRouter app identification: HTTP-Referer, X-Title)
@@ -643,6 +676,8 @@ export class VercelAIProvider extends BaseLLMProvider {
           toolCallsCount: result.toolCalls.length,
           finishReason: result.finishReason,
           usage: result.usage,
+          hasReasoningText: !!result.reasoningText,
+          reasoningPreview: result.reasoningText?.slice(0, 1000) || null,
         },
         'AI SDK generateText response'
       );

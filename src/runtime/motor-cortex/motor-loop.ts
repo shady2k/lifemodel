@@ -166,11 +166,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     await taskLog?.log(`\nITERATION ${String(i)}`);
 
     // Call LLM (with retry on transient provider errors)
-    let response;
+    let llmResponse: Awaited<ReturnType<typeof llm.complete>> | undefined;
     const LLM_MAX_RETRIES = 2;
     for (let retryIdx = 0; retryIdx <= LLM_MAX_RETRIES; retryIdx++) {
       try {
-        response = await llm.complete({
+        llmResponse = await llm.complete({
           messages,
           tools: toolDefinitions,
           toolChoice: 'auto',
@@ -194,9 +194,10 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       }
     }
 
-    // response is guaranteed defined here (break on success, throw on exhausted retries)
-
-    const llmResponse = response;
+    // llmResponse is guaranteed defined here (break on success, throw on exhausted retries)
+    if (!llmResponse) {
+      throw new Error('LLM response is undefined after retries');
+    }
     await taskLog?.log(
       `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls`
     );
