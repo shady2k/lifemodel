@@ -114,11 +114,10 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     // Apply per-model parameter overrides (temperature, reasoning, etc.)
     this.applyModelParamOverrides(body, model);
 
-    // Apply per-model provider routing preferences
+    // Apply provider routing preferences: global throughput floor + per-model overrides
     const providerPrefs = resolveProviderPreferences(model);
-    if (providerPrefs) {
-      body['provider'] = providerPrefs;
-    }
+    const globalFloor = { preferred_min_throughput: { p50: 10 } };
+    body['provider'] = providerPrefs ? { ...globalFloor, ...providerPrefs } : globalFloor;
 
     if (this.isGeminiModel(model)) {
       this.ensureUserTurnForGemini(messages);

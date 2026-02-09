@@ -62,11 +62,20 @@ function executeCode(code: string): {
 
   try {
     // SECURITY: intentional — using Function constructor for sandbox eval (no closure access)
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const fn = new Function(code) as () => unknown;
-
-    // Execute the function
-    const result: unknown = fn();
+    // Try expression mode first (prepend "return") so single expressions like
+    // "Math.pow(2, 32)" return their value. Falls back to statement mode for
+    // multi-statement code where "return ..." would be a syntax error.
+    let result: unknown;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const exprFn = new Function(`return (${code})`) as () => unknown;
+      result = exprFn();
+    } catch {
+      // Expression mode failed (multi-statement code) — run as statements
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const fn = new Function(code) as () => unknown;
+      result = fn();
+    }
 
     // Convert result to string
     let output: string;

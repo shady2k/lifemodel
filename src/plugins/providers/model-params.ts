@@ -18,6 +18,8 @@ export interface ProviderPreferences {
   ignore?: string[];
   /** Fall back to other providers if preferred ones are unavailable (default: true) */
   allow_fallbacks?: boolean;
+  /** Deprioritize providers below this throughput (tokens/sec) at given percentiles */
+  preferred_min_throughput?: Record<string, number>;
 }
 
 export interface ModelParamOverrides {
@@ -61,6 +63,8 @@ const BUILTIN_RULES: ModelParamRule[] = [
   { match: 'qwen', params: { temperature: 0.55 } },
   // StepFun: reasoning is mandatory, cannot be disabled
   { match: 'stepfun', params: { reasoning: 'omit' } },
+  // MiniMax: reasoning is mandatory, cannot be disabled
+  { match: 'minimax', params: { reasoning: 'omit' } },
 ];
 
 /**
