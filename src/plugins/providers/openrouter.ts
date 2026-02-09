@@ -2,7 +2,7 @@ import type { Logger } from '../../types/index.js';
 import type { CompletionRequest } from '../../llm/provider.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 import type { OpenAICompatibleConfig } from './openai-compatible.js';
-import { resolveModelParams } from './model-params.js';
+import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
 
 /**
  * OpenRouter-specific provider configuration.
@@ -110,6 +110,12 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
 
     // Apply per-model parameter overrides (temperature, reasoning, etc.)
     this.applyModelParamOverrides(body, model);
+
+    // Apply per-model provider routing preferences
+    const providerPrefs = resolveProviderPreferences(model);
+    if (providerPrefs) {
+      body['provider'] = providerPrefs;
+    }
 
     if (this.isGeminiModel(model)) {
       this.ensureUserTurnForGemini(messages);

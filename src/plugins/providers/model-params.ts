@@ -10,6 +10,16 @@
 
 export type ReasoningMode = 'omit' | 'enable' | 'disable';
 
+/** OpenRouter provider routing preferences (per-model). */
+export interface ProviderPreferences {
+  /** Preferred providers in priority order */
+  order?: string[];
+  /** Providers to never use */
+  ignore?: string[];
+  /** Fall back to other providers if preferred ones are unavailable (default: true) */
+  allow_fallback?: boolean;
+}
+
 export interface ModelParamOverrides {
   /** number → force set; null → force omit (use provider default); undefined → leave as-is */
   temperature?: number | null;
@@ -21,6 +31,8 @@ export interface ModelParamOverrides {
 interface ModelParamRule {
   match: string;
   params: ModelParamOverrides;
+  /** OpenRouter provider routing for this model family */
+  provider?: ProviderPreferences;
 }
 
 /**
@@ -35,6 +47,12 @@ const BUILTIN_RULES: ModelParamRule[] = [
   { match: 'claude', params: { temperature: null, reasoning: 'omit' } },
   // Gemini: temp 1.0, top_p 0.95 per OpenCode findings
   { match: 'google/', params: { temperature: 1.0, topP: 0.95 } },
+  // DeepSeek: temp 1.0, top_p 0.95 per official docs; pin to DeepInfra — AtlasCloud/Google mangle tool calls
+  {
+    match: 'deepseek',
+    params: { temperature: 1.0, topP: 0.95 },
+    provider: { order: ['DeepInfra'], allow_fallback: true },
+  },
   // Qwen: temp 0.55 per OpenCode findings
   { match: 'qwen', params: { temperature: 0.55 } },
 ];
@@ -51,4 +69,18 @@ export function resolveModelParams(model: string): ModelParamOverrides {
     }
   }
   return {};
+}
+
+/**
+ * Resolve provider routing preferences for a given model ID.
+ * Returns undefined for models without provider preferences.
+ */
+export function resolveProviderPreferences(model: string): ProviderPreferences | undefined {
+  const id = model.toLowerCase();
+  for (const rule of BUILTIN_RULES) {
+    if (id.includes(rule.match.toLowerCase())) {
+      return rule.provider;
+    }
+  }
+  return undefined;
 }
