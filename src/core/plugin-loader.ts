@@ -1271,10 +1271,10 @@ export class PluginLoader {
           limit,
           offset,
           minConfidence,
+          metadata: { pluginId }, // Filter at search level, not post-pagination
         });
 
-        // Filter to this plugin's facts only (enforced in core)
-        const pluginEntries = result.entries.filter((e) => e.metadata?.['pluginId'] === pluginId);
+        const pluginEntries = result.entries;
 
         return {
           entries: pluginEntries.map((e) => ({

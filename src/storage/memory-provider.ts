@@ -92,13 +92,24 @@ export class JsonMemoryProvider implements MemoryProvider {
   async search(query: string, options?: MemorySearchOptions): Promise<SearchResult> {
     await this.ensureLoaded();
 
-    // Reject empty or too short queries
     const trimmedQuery = query.trim();
     const limit = options?.limit ?? 10;
     const offset = options?.offset ?? 0;
+    const types = options?.types;
+    const recipientId = options?.recipientId;
+    const status = options?.status;
+    const minConfidence = options?.minConfidence ?? 0;
+    const metadataFilter = options?.metadata;
+    const hasFilters =
+      types != null ||
+      recipientId != null ||
+      status != null ||
+      minConfidence > 0 ||
+      metadataFilter != null;
 
-    if (trimmedQuery.length < 2) {
-      this.logger.debug({ query }, 'Search query too short, returning empty');
+    // Reject empty queries unless filters are provided (browse mode)
+    if (trimmedQuery.length < 2 && !hasFilters) {
+      this.logger.debug({ query }, 'Search query too short and no filters, returning empty');
       return {
         entries: [],
         metadata: {
@@ -115,14 +126,11 @@ export class JsonMemoryProvider implements MemoryProvider {
       };
     }
 
-    const types = options?.types;
-    const recipientId = options?.recipientId;
-    const status = options?.status;
-    const minConfidence = options?.minConfidence ?? 0;
+    const isTextSearch = trimmedQuery.length >= 2;
 
-    // Normalize query for matching
-    const queryLower = trimmedQuery.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter((t) => t.length >= 2);
+    // Normalize query for matching (only used in text search mode)
+    const queryLower = isTextSearch ? trimmedQuery.toLowerCase() : '';
+    const queryTerms = isTextSearch ? queryLower.split(/\s+/).filter((t) => t.length >= 2) : [];
 
     // Score and filter entries
     const scored = this.entries
@@ -143,38 +151,49 @@ export class JsonMemoryProvider implements MemoryProvider {
         if (minConfidence > 0 && (entry.confidence ?? 0.5) < minConfidence) {
           return false;
         }
+        // Filter by metadata key-value pairs
+        if (metadataFilter) {
+          for (const [key, value] of Object.entries(metadataFilter)) {
+            if (entry.metadata?.[key] !== value) {
+              return false;
+            }
+          }
+        }
         return true;
       })
       .map((entry) => {
-        // Calculate relevance score
-        const contentLower = entry.content.toLowerCase();
         let score = 0;
 
-        // Exact phrase match (highest weight)
-        if (contentLower.includes(queryLower)) {
-          score += 10;
-        }
+        if (isTextSearch) {
+          // Calculate relevance score from text matching
+          const contentLower = entry.content.toLowerCase();
 
-        // Term matches (with word boundary for short terms to avoid false positives)
-        for (const term of queryTerms) {
-          if (term.length < 4) {
-            // Short terms require word boundaries (e.g., "ai" shouldn't match "Yo-Kai")
-            // Unicode-aware: \p{L} = letter, \p{N} = number
-            const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
-            if (pattern.test(contentLower)) {
+          // Exact phrase match (highest weight)
+          if (contentLower.includes(queryLower)) {
+            score += 10;
+          }
+
+          // Term matches (with word boundary for short terms to avoid false positives)
+          for (const term of queryTerms) {
+            if (term.length < 4) {
+              // Short terms require word boundaries (e.g., "ai" shouldn't match "Yo-Kai")
+              // Unicode-aware: \p{L} = letter, \p{N} = number
+              const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
+              if (pattern.test(contentLower)) {
+                score += 2;
+              }
+            } else if (contentLower.includes(term)) {
               score += 2;
             }
-          } else if (contentLower.includes(term)) {
-            score += 2;
           }
-        }
 
-        // Tag matches
-        if (entry.tags) {
-          for (const tag of entry.tags) {
-            if (queryTerms.includes(tag.toLowerCase())) {
-              score += 3;
+          // Tag matches
+          if (entry.tags) {
+            for (const tag of entry.tags) {
+              if (queryTerms.includes(tag.toLowerCase())) {
+                score += 3;
+              }
             }
           }
         }

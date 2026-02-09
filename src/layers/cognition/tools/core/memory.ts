@@ -21,6 +21,8 @@ export interface MemorySearchOptions {
   status?: 'pending' | 'completed' | undefined;
   /** Minimum confidence threshold (0-1) */
   minConfidence?: number | undefined;
+  /** Filter by metadata key-value pairs (all must match) */
+  metadata?: Record<string, unknown> | undefined;
 }
 
 /**
