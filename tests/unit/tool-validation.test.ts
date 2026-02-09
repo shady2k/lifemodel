@@ -25,7 +25,8 @@ describe('validateAgainstParameters', () => {
       const result = validateAgainstParameters({}, parameters);
       expect(result.success).toBe(false);
       if (!result.success) {
-        expect(result.error).toContain('type: required');
+        expect(result.error).toContain('Missing required parameter');
+        expect(result.error).toContain('"type"');
       }
     });
 
@@ -33,7 +34,8 @@ describe('validateAgainstParameters', () => {
       const result = validateAgainstParameters({ type: null }, parameters);
       expect(result.success).toBe(false);
       if (!result.success) {
-        expect(result.error).toContain('type: required');
+        expect(result.error).toContain('Missing required parameter');
+        expect(result.error).toContain('"type"');
       }
     });
 
@@ -126,7 +128,8 @@ describe('validateAgainstParameters', () => {
       );
       expect(result.success).toBe(false);
       if (!result.success) {
-        expect(result.error).toContain('type: required');
+        expect(result.error).toContain('Missing required parameter');
+        expect(result.error).toContain('"type"');
         expect(result.error).toContain('expected number');
         expect(result.error).toContain('expected boolean');
       }
@@ -140,7 +143,8 @@ describe('core.escalate validation', () => {
     const result = tool.validate({}); // No reason provided
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error).toContain('reason: required');
+      expect(result.error).toContain('Missing required parameter');
+      expect(result.error).toContain('"reason"');
     }
   });
 
@@ -157,7 +161,8 @@ describe('core.conversationStatus validation', () => {
     const result = tool.validate({}); // No status provided
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error).toContain('status: required');
+      expect(result.error).toContain('Missing required parameter');
+      expect(result.error).toContain('"status"');
     }
   });
 

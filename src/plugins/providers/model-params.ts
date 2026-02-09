@@ -69,6 +69,9 @@ const BUILTIN_RULES: ModelParamRule[] = [
     params: { temperature: 1.0, topP: 0.95, supportsCacheControl: false },
     provider: { order: ['DeepInfra'], allow_fallbacks: true },
   },
+  // Grok (xAI): doesn't support prompt caching
+  { match: 'grok', params: { supportsCacheControl: false } },
+  { match: 'x-ai/', params: { supportsCacheControl: false } },
   // Qwen: temp 0.55 per OpenCode findings, doesn't support prompt caching
   { match: 'qwen', params: { temperature: 0.55, supportsCacheControl: false } },
   // StepFun: reasoning is mandatory, cannot be disabled, doesn't support prompt caching

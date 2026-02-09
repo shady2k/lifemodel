@@ -555,7 +555,10 @@ function processToolValidationFailure(
           ],
         }
       : {
-          notes: ['Check parameter types and required fields.'],
+          notes: [
+            'Fix the parameter error and call the tool again.',
+            'IMPORTANT: If you produce text output instead of calling the tool, the loop stops and no further retry will happen.',
+          ],
         },
   };
 

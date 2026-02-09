@@ -621,49 +621,49 @@ export class VercelAIProvider extends BaseLLMProvider {
 
     const startTime = Date.now();
 
+    // Prepare generateText options (declare outside try for error logging)
+    const generateOptions: Record<string, unknown> = {
+      model,
+      messages: coreMessages as { role: string; content: string | Record<string, unknown>[] }[],
+      temperature: temperature ?? undefined,
+      ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
+      maxOutputTokens: request.maxTokens,
+      stopSequences: request.stop,
+      // Disable AI SDK's built-in retry (we handle it ourselves)
+      maxRetries: 0,
+    };
+
+    // Add tools if present
+    if (aiTools && Object.keys(aiTools).length > 0) {
+      generateOptions['tools'] = aiTools;
+      // Debug: log tools to see what's being passed
+      this.providerLogger?.debug(
+        { toolCount: Object.keys(aiTools).length, sampleTool: Object.keys(aiTools)[0] },
+        'Tools added to generateText'
+      );
+      if (toolChoice) {
+        generateOptions['toolChoice'] = toolChoice;
+      }
+    }
+
+    // Add provider options if present
+    if (providerOptions) {
+      generateOptions['providerOptions'] = providerOptions;
+      // Debug: log providerOptions to see what's being passed
+      this.providerLogger?.debug({ providerOptions }, 'Provider options added');
+    }
+
+    // Add HTTP headers (OpenRouter app identification: HTTP-Referer, X-Title)
+    if (httpHeaders) {
+      generateOptions['headers'] = httpHeaders;
+    }
+
+    // Add per-request timeout if specified (AI SDK has native timeout support)
+    if (request.timeoutMs) {
+      generateOptions['timeout'] = request.timeoutMs;
+    }
+
     try {
-      // Prepare generateText options
-      const generateOptions: Record<string, unknown> = {
-        model,
-        messages: coreMessages as { role: string; content: string | Record<string, unknown>[] }[],
-        temperature: temperature ?? undefined,
-        ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
-        maxOutputTokens: request.maxTokens,
-        stopSequences: request.stop,
-        // Disable AI SDK's built-in retry (we handle it ourselves)
-        maxRetries: 0,
-      };
-
-      // Add tools if present
-      if (aiTools && Object.keys(aiTools).length > 0) {
-        generateOptions['tools'] = aiTools;
-        // Debug: log tools to see what's being passed
-        this.providerLogger?.debug(
-          { toolCount: Object.keys(aiTools).length, sampleTool: Object.keys(aiTools)[0] },
-          'Tools added to generateText'
-        );
-        if (toolChoice) {
-          generateOptions['toolChoice'] = toolChoice;
-        }
-      }
-
-      // Add provider options if present
-      if (providerOptions) {
-        generateOptions['providerOptions'] = providerOptions;
-        // Debug: log providerOptions to see what's being passed
-        this.providerLogger?.debug({ providerOptions }, 'Provider options added');
-      }
-
-      // Add HTTP headers (OpenRouter app identification: HTTP-Referer, X-Title)
-      if (httpHeaders) {
-        generateOptions['headers'] = httpHeaders;
-      }
-
-      // Add per-request timeout if specified (AI SDK has native timeout support)
-      if (request.timeoutMs) {
-        generateOptions['timeout'] = request.timeoutMs;
-      }
-
       // Call generateText
       const result = await generateText(generateOptions as Parameters<typeof generateText>[0]);
 
@@ -687,10 +687,28 @@ export class VercelAIProvider extends BaseLLMProvider {
     } catch (error) {
       const duration = Date.now() - startTime;
 
+      // Log detailed information about the failed request
       this.providerLogger?.error(
         {
           durationMs: duration,
+          model: modelId,
           error: error instanceof Error ? error.message : String(error),
+          errorName: error instanceof Error ? error.name : 'Unknown',
+          // Log message count and structure to help debug schema issues
+          messageCount: coreMessages.length,
+          messages: coreMessages.map((m) => ({
+            role: m.role,
+            contentType: Array.isArray(m.content) ? 'array' : typeof m.content,
+            contentPreview:
+              typeof m.content === 'string'
+                ? m.content.slice(0, 200)
+                : Array.isArray(m.content)
+                  ? `[${String(m.content.length)} parts] ${JSON.stringify(m.content).slice(0, 200)}`
+                  : JSON.stringify(m.content).slice(0, 200),
+          })),
+          hasTools: !!(aiTools && Object.keys(aiTools).length > 0),
+          toolCount: aiTools ? Object.keys(aiTools).length : 0,
+          hasProviderOptions: !!providerOptions,
         },
         'AI SDK generateText failed'
       );

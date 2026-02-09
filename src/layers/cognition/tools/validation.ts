@@ -50,12 +50,22 @@ export function validateAgainstParameters(
 ): ValidationResult<Record<string, unknown>> {
   const errors: string[] = [];
 
+  // Detect if LLM passed unknown parameter names (helpful hint for schema mismatch)
+  const providedKeys = Object.keys(args);
+  const knownKeys = new Set(parameters.map((p) => p.name));
+  const unknownKeys = providedKeys.filter((k) => !knownKeys.has(k));
+
   for (const param of parameters) {
     const value = args[param.name];
 
     // Check required
     if (param.required && (value === undefined || value === null)) {
-      errors.push(`${param.name}: required`);
+      let errorMsg = `Missing required parameter: "${param.name}"`;
+      // Add hint about unknown parameter names that might be what the LLM intended
+      if (unknownKeys.length > 0) {
+        errorMsg += `. You passed: ${unknownKeys.map((k) => `"${k}"`).join(', ')}. Did you mean to use "${param.name}" instead?`;
+      }
+      errors.push(errorMsg);
       continue;
     }
 
