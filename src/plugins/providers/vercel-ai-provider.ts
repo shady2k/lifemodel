@@ -8,7 +8,12 @@
 import type { Logger } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
-import type { CompletionRequest, CompletionResponse, ToolCall } from '../../llm/provider.js';
+import type {
+  CompletionRequest,
+  CompletionResponse,
+  Message,
+  ToolCall,
+} from '../../llm/provider.js';
 import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
 import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
 import {
@@ -288,50 +293,49 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
-   * Convert our Message format to AI SDK format.
-   * The AI SDK uses a simpler message format - we can pass our messages mostly as-is.
+   * Convert our Message format to AI SDK CoreMessage format.
+   *
+   * Key differences from OpenAI format:
+   * - ToolCallPart uses `input` (not `args`)
+   * - ToolResultPart uses `output` (not `content`) and requires `toolName`
    */
-  private convertMessages(request: CompletionRequest): {
+  private convertMessages(messages: Message[]): {
     role: string;
-    content:
-      | string
-      | {
-          type: string;
-          text?: string;
-          toolCallId?: string;
-          toolName?: string;
-          args?: JsonObject;
-        }[];
+    content: string | Record<string, unknown>[];
   }[] {
-    return request.messages.map((msg) => {
+    // Build a map from tool_call_id → toolName for tool result messages
+    const toolCallIdToName = new Map<string, string>();
+    for (const msg of messages) {
+      if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          toolCallIdToName.set(tc.id, tc.function.name);
+        }
+      }
+    }
+
+    return messages.map((msg) => {
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         // Assistant with tool calls - build content array
-        const parts: {
-          type: string;
-          text?: string;
-          toolCallId?: string;
-          toolName?: string;
-          args?: JsonObject;
-        }[] = [];
+        const parts: Record<string, unknown>[] = [];
 
         // Add text content if present
         if (msg.content) {
           parts.push({ type: 'text', text: msg.content });
         }
 
-        // Add tool calls in AI SDK format
+        // Add tool calls in AI SDK format (uses `input`, not `args`)
         for (const tc of msg.tool_calls) {
-          let args: JsonObject;
+          let input: unknown;
           try {
-            args = JSON.parse(tc.function.arguments) as JsonObject;
+            input = JSON.parse(tc.function.arguments) as JsonObject;
           } catch {
-            args = { _raw: tc.function.arguments };
+            input = { _raw: tc.function.arguments };
           }
           parts.push({
             type: 'tool-call',
             toolCallId: tc.id,
             toolName: tc.function.name,
-            args,
+            input,
           });
         }
 
@@ -342,23 +346,58 @@ export class VercelAIProvider extends BaseLLMProvider {
       }
 
       if (msg.role === 'tool') {
-        // Tool result
+        // Tool result — AI SDK requires structured `output` and `toolName`
+        const toolCallId = msg.tool_call_id ?? '';
+        const toolName = toolCallIdToName.get(toolCallId);
+        if (!toolName) {
+          this.providerLogger?.warn(
+            { toolCallId },
+            'Tool result has no matching tool_call — toolName will be "unknown"'
+          );
+        }
+        // AI SDK ToolResultOutput must be { type: 'text', value } or { type: 'json', value }
+        const rawContent = msg.content ?? '';
+        let output: { type: string; value: unknown };
+        try {
+          output = { type: 'json', value: JSON.parse(rawContent) };
+        } catch {
+          output = { type: 'text', value: rawContent };
+        }
         return {
           role: 'tool',
           content: [
             {
               type: 'tool-result',
-              toolCallId: msg.tool_call_id ?? '',
-              content: msg.content ?? '',
+              toolCallId,
+              toolName: toolName ?? 'unknown',
+              output,
             },
           ],
         };
       }
 
       // system, user, or assistant without tool calls
+      // Handle multipart content from addCacheControl (converts string → [{ type, text, cache_control }])
+      const rawContent = (msg as unknown as Record<string, unknown>)['content'];
+      if (Array.isArray(rawContent)) {
+        // Multipart content with cache_control — propagate via providerOptions on each part
+        const parts = rawContent.map((part: Record<string, unknown>) => {
+          const converted: Record<string, unknown> = {
+            type: part['type'],
+            text: part['text'],
+          };
+          if (part['cache_control']) {
+            converted['providerOptions'] = {
+              openrouter: { cacheControl: part['cache_control'] },
+            };
+          }
+          return converted;
+        });
+        return { role: msg.role, content: parts };
+      }
       return {
         role: msg.role,
-        content: msg.content ?? '',
+        content: (rawContent as string) || '',
       };
     });
   }
@@ -414,7 +453,7 @@ export class VercelAIProvider extends BaseLLMProvider {
   private buildProviderOptions(
     modelId: string,
     overrides: ReturnType<typeof resolveModelParams>,
-    headers: Record<string, string> | undefined
+    request: CompletionRequest
   ): { openrouter: Record<string, unknown> } | undefined {
     if (!isOpenRouterConfig(this.config)) {
       return undefined;
@@ -445,9 +484,9 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
     // If 'omit', don't add the field
 
-    // Add headers if present
-    if (headers) {
-      openrouterOptions['headers'] = headers;
+    // Pass parallel_tool_calls via providerOptions (OpenAI-specific, not in AI SDK CallSettings)
+    if (request.parallelToolCalls === false) {
+      openrouterOptions['parallel_tool_calls'] = false;
     }
 
     return {
@@ -482,29 +521,34 @@ export class VercelAIProvider extends BaseLLMProvider {
     request: CompletionRequest,
     modelId: string
   ): Promise<CompletionResponse> {
-    // Build messages array for transformation
-    const messagesForTransform = request.messages.map((m) => ({
+    // Apply model param overrides
+    const overrides = resolveModelParams(modelId);
+
+    // Handle temperature: null means "force omit" (use provider default)
+    const temperature =
+      overrides.temperature === null ? undefined : (overrides.temperature ?? request.temperature);
+
+    // Copy messages for transformation (Gemini transforms + cache control mutate in place)
+    const messages: Message[] = request.messages.map((m) => ({
       role: m.role,
       content: m.content,
       ...(m.tool_calls && { tool_calls: m.tool_calls }),
       ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
     }));
 
-    // Apply model param overrides
-    const overrides = resolveModelParams(modelId);
-    const temperature = overrides.temperature ?? request.temperature;
-
     // Apply Gemini message transforms if needed
+    // Cast through unknown since Message interface lacks index signature
+    const transformable = messages as unknown as Record<string, unknown>[];
     if (isGeminiModel(modelId)) {
-      ensureUserTurnForGemini(messagesForTransform);
-      sanitizeSystemMessagesForGemini(messagesForTransform);
+      ensureUserTurnForGemini(transformable);
+      sanitizeSystemMessagesForGemini(transformable);
     }
 
-    // Add cache control
-    addCacheControl(messagesForTransform, modelId);
+    // Add cache control breakpoints
+    addCacheControl(transformable, modelId);
 
-    // Convert to AI SDK format
-    const coreMessages = this.convertMessages(request);
+    // Convert transformed messages to AI SDK format
+    const coreMessages = this.convertMessages(messages);
 
     // Convert tools
     const aiTools = this.convertTools(request.tools);
@@ -512,11 +556,11 @@ export class VercelAIProvider extends BaseLLMProvider {
     // Build tool choice
     const toolChoice = request.toolChoice ? this.mapToolChoice(request.toolChoice) : undefined;
 
-    // Build headers for OpenRouter
-    const headers = this.buildHeaders();
+    // Build HTTP headers for OpenRouter app identification
+    const httpHeaders = this.buildHeaders();
 
-    // Build provider options
-    const providerOptions = this.buildProviderOptions(modelId, overrides, headers);
+    // Build provider options (OpenRouter-specific body fields)
+    const providerOptions = this.buildProviderOptions(modelId, overrides, request);
 
     // Get the model
     const model = this.getModel(modelId);
@@ -541,11 +585,28 @@ export class VercelAIProvider extends BaseLLMProvider {
         model,
         messages: coreMessages as { role: string; content: string | Record<string, unknown>[] }[],
         temperature: temperature ?? undefined,
-        maxTokens: request.maxTokens,
+        ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
+        maxOutputTokens: request.maxTokens,
         stopSequences: request.stop,
         // Disable AI SDK's built-in retry (we handle it ourselves)
         maxRetries: 0,
       };
+
+      // Add response format if specified
+      if (request.responseFormat) {
+        if (request.responseFormat.type === 'json_object') {
+          generateOptions['responseFormat'] = { type: 'json' };
+        } else if (
+          request.responseFormat.type === 'json_schema' &&
+          request.responseFormat.json_schema
+        ) {
+          generateOptions['responseFormat'] = {
+            type: 'json',
+            schema: request.responseFormat.json_schema.schema,
+            name: request.responseFormat.json_schema.name,
+          };
+        }
+      }
 
       // Add tools if present
       if (aiTools && Object.keys(aiTools).length > 0) {
@@ -558,6 +619,16 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Add provider options if present
       if (providerOptions) {
         generateOptions['providerOptions'] = providerOptions;
+      }
+
+      // Add HTTP headers (OpenRouter app identification: HTTP-Referer, X-Title)
+      if (httpHeaders) {
+        generateOptions['headers'] = httpHeaders;
+      }
+
+      // Add per-request timeout if specified (AI SDK has native timeout support)
+      if (request.timeoutMs) {
+        generateOptions['timeout'] = request.timeoutMs;
       }
 
       // Call generateText
@@ -600,21 +671,33 @@ export class VercelAIProvider extends BaseLLMProvider {
   private mapAIResponseToCompletion(
     result: {
       text: string;
+      reasoningText?: string | undefined;
       toolCalls?: Record<string, unknown>[];
       finishReason: string | undefined;
       usage: {
         inputTokens: number | undefined;
         outputTokens: number | undefined;
         totalTokens: number | undefined;
+        reasoningTokens?: number | undefined;
+      };
+      response: {
+        id: string;
+        headers?: Record<string, string>;
       };
     },
     modelId: string
   ): CompletionResponse {
     const response: CompletionResponse = {
-      content: result.text,
+      content: result.text || null,
       model: modelId,
+      generationId: result.response.id || undefined,
       finishReason: this.mapFinishReason(result.finishReason ?? 'error'),
     };
+
+    // Map reasoning content if present
+    if (result.reasoningText) {
+      response.reasoningContent = result.reasoningText;
+    }
 
     // Map tool calls - AI SDK tool calls have different structures
     if (result.toolCalls && result.toolCalls.length > 0) {
@@ -624,7 +707,7 @@ export class VercelAIProvider extends BaseLLMProvider {
         const toolCallId =
           typeof toolCallIdRaw === 'string' ? toolCallIdRaw : String(toolCallIdRaw);
         const toolName = typeof toolNameRaw === 'string' ? toolNameRaw : String(toolNameRaw);
-        const args = tc['args'] as JsonObject;
+        const args = tc['input'] as JsonObject;
         return {
           id: toolCallId,
           type: 'function',
@@ -641,6 +724,9 @@ export class VercelAIProvider extends BaseLLMProvider {
       promptTokens: result.usage.inputTokens ?? 0,
       completionTokens: result.usage.outputTokens ?? 0,
       totalTokens: result.usage.totalTokens ?? 0,
+      ...(result.usage.reasoningTokens != null && {
+        reasoningTokens: result.usage.reasoningTokens,
+      }),
     };
 
     return response;
@@ -675,7 +761,34 @@ export class VercelAIProvider extends BaseLLMProvider {
   private mapAIErrorToLLMError(error: unknown): LLMError {
     const message = error instanceof Error ? error.message : String(error);
 
-    // Check for rate limit errors
+    // AI SDK throws APICallError with structured statusCode — check it first
+    const statusCode =
+      error instanceof Error && 'statusCode' in error
+        ? (error as { statusCode: number }).statusCode
+        : undefined;
+
+    if (statusCode === 429) {
+      return new LLMError(`Rate limit: ${message}`, this.name, {
+        statusCode: 429,
+        retryable: true,
+      });
+    }
+
+    if (statusCode !== undefined && statusCode >= 500) {
+      return new LLMError(`Server error: ${message}`, this.name, {
+        statusCode,
+        retryable: true,
+      });
+    }
+
+    if (statusCode === 408) {
+      return new LLMError(`Request timeout: ${message}`, this.name, {
+        statusCode: 408,
+        retryable: true,
+      });
+    }
+
+    // Fallback: string matching for errors without structured status codes
     if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
       return new LLMError(`Rate limit: ${message}`, this.name, {
         statusCode: 429,
@@ -683,15 +796,15 @@ export class VercelAIProvider extends BaseLLMProvider {
       });
     }
 
-    // Check for timeout errors
+    // Check for timeout errors (AbortError from AbortSignal)
     if (error instanceof Error && error.name === 'AbortError') {
       return new LLMError('Request timed out', this.name, {
         retryable: true,
       });
     }
 
-    // Check for 5xx errors
-    const serverErrorMatch = /5(\d{2})/.exec(message);
+    // Check for 5xx errors in message text
+    const serverErrorMatch = /(5\d{2})/.exec(message);
     if (serverErrorMatch?.[1]) {
       return new LLMError(`Server error: ${message}`, this.name, {
         statusCode: parseInt(serverErrorMatch[1], 10),
