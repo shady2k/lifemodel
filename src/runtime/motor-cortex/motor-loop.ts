@@ -17,6 +17,7 @@ import type { CredentialStore } from '../vault/credential-store.js';
 import { resolveCredentials } from '../vault/credential-store.js';
 import { readdir, cp, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createTaskLogger, redactCredentials } from './task-logger.js';
 
 /**
  * Parameters for running the motor loop.
@@ -79,6 +80,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   const workspace = await createWorkspace();
   childLogger.debug({ workspace }, 'Workspace created');
 
+  // Create per-run task log
+  const taskLog = createTaskLogger(params.artifactsBaseDir, run.id);
+  await taskLog?.log(`RUN ${run.id} started`);
+  await taskLog?.log(`  Task: ${run.task}`);
+  await taskLog?.log(`  Tools: ${run.tools.join(', ')}`);
+
   // Build tool context with allowed roots (workspace + skills dir)
   const skillsDir = params.skillsDir;
   const allowedRoots = skillsDir ? [workspace, skillsDir] : [workspace];
@@ -120,6 +127,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   for (let i = run.stepCursor; i < run.maxIterations; i++) {
     childLogger.debug({ iteration: i, messageCount: messages.length }, 'Loop iteration');
+    await taskLog?.log(`\nITERATION ${String(i)}`);
 
     // Call LLM
     const response = await llm.complete({
@@ -129,6 +137,10 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       maxTokens: 4096,
       role: 'motor',
     });
+
+    await taskLog?.log(
+      `  LLM [${response.model}] → ${String(response.toolCalls?.length ?? 0)} tool calls`
+    );
 
     // Append assistant message
     const assistantMessage: Message = {
@@ -215,6 +227,10 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       );
 
       childLogger.info({ summary: result.summary }, 'Motor Cortex run completed');
+      await taskLog?.log(
+        `\nCOMPLETED (${(result.stats.durationMs / 1000).toFixed(1)}s, ${String(result.stats.iterations)} iterations, ${String(result.stats.errors)} errors)`
+      );
+      await taskLog?.log(`  Summary: ${result.summary.slice(0, 200)}`);
       return;
     }
 
@@ -233,6 +249,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       }
 
       childLogger.debug({ tool: toolName, args: toolArgs }, 'Executing tool');
+      const argsSummary = redactCredentials(JSON.stringify(toolArgs)).slice(0, 200);
+      await taskLog?.log(`  TOOL ${toolName}(${argsSummary})`);
 
       // Check for request_approval (internal tool, like ask_user with timeout)
       if (toolName === 'request_approval') {
@@ -386,6 +404,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
             { tool: toolName, errorCode: toolResult.errorCode, count: consecutiveFailures.count },
             'Consecutive failures detected - auto-failing'
           );
+          await taskLog?.log(
+            `\nFAILED: ${toolName} failed ${String(consecutiveFailures.count)}x with ${toolResult.errorCode}`
+          );
 
           run.status = 'failed';
           run.completedAt = new Date().toISOString();
@@ -437,6 +458,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       };
       messages.push(toolMessage);
 
+      const resultPreview = redactCredentials(toolResult.output.slice(0, 120)).replace(/\n/g, ' ');
+      await taskLog?.log(
+        `    → ${toolResult.ok ? 'OK' : 'FAIL'} (${String(toolResult.durationMs)}ms): ${resultPreview}`
+      );
+
       childLogger.debug(
         { tool: toolName, ok: toolResult.ok, durationMs: toolResult.durationMs },
         'Tool executed'
@@ -467,6 +493,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   // Max iterations reached - fail with partial result
   childLogger.warn({ maxIterations: run.maxIterations }, 'Max iterations reached');
+  await taskLog?.log(`\nFAILED: Max iterations (${String(run.maxIterations)}) reached`);
 
   run.status = 'failed';
   run.completedAt = new Date().toISOString();

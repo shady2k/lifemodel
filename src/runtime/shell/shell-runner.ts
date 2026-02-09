@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { MotorToolResult } from '../motor-cortex/motor-protocol.js';
 import { validatePipeline, isNetworkCommand, DEFAULT_ALLOWLIST } from './shell-allowlist.js';
+import { tokenize, hasDangerousMetachars } from './shell-tokenizer.js';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -121,10 +122,35 @@ export async function runShell(
     let stdout: string;
     let stderr: string;
 
-    // Check if command contains pipe
-    if (command.includes('|')) {
-      // Pipeline: use exec with sh -c
-      // Note: We already validated each command in the pipeline
+    // Quote-aware tokenization (shared with allowlist validation)
+    const parsed = tokenize(command);
+
+    if (parsed.segments.length === 0) {
+      // Unterminated quote or empty input
+      return {
+        ok: false,
+        output: 'Malformed command (unterminated quote)',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    if (parsed.hasPipe) {
+      // Reject shell metacharacters in pipelines to prevent injection via exec
+      if (hasDangerousMetachars(command)) {
+        return {
+          ok: false,
+          output: 'Command contains forbidden shell metacharacters',
+          errorCode: 'invalid_args',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      // Pipeline: use exec with sh -c (validated by allowlist + metachar check)
       const { stdout: out, stderr: err } = await execAsync(command, {
         cwd,
         timeout: opts.timeout,
@@ -133,9 +159,9 @@ export async function runShell(
       stdout = out;
       stderr = err;
     } else {
-      // Single command: use execFile (no shell interpretation)
-      const parts = command.split(/\s+/);
-      const cmd = parts[0];
+      // Single command: use execFile with quote-aware tokens
+      const tokens = parsed.segments[0] ?? [];
+      const cmd = tokens[0];
       if (!cmd) {
         return {
           ok: false,
@@ -146,7 +172,7 @@ export async function runShell(
           durationMs: Date.now() - startTime,
         };
       }
-      const args = parts.slice(1);
+      const args = tokens.slice(1);
 
       const { stdout: out, stderr: err } =
         args.length > 0

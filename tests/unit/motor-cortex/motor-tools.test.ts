@@ -189,6 +189,94 @@ describe('shell tool', () => {
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('invalid_args');
   });
+
+  it('handles double-quoted arguments', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "hello world"' },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('hello world');
+  });
+
+  it('handles single-quoted arguments', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: "echo 'hello world'" },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('hello world');
+  });
+
+  it('does not treat pipe inside quotes as pipeline', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "a|b"' },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('a|b');
+  });
+
+  it('rejects unterminated quotes', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "hello' },
+      ctx
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects shell injection in pipelines', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo ok; rm -rf / | cat' },
+      ctx
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects $() expansion in pipelines', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "$(id)" | cat' },
+      ctx
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('preserves backslash in double-quoted non-special chars', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "hello\\nworld"' },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    // execFile passes args directly — backslash should be preserved
+    expect(result.output).toContain('hello\\nworld');
+  });
+
+  it('preserves empty quoted arguments', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "" "hello"' },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('hello');
+  });
+
+  it('allows & inside double quotes in pipelines', async () => {
+    const result = await executeTool(
+      'shell',
+      { command: 'echo "a&b" | cat' },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('a&b');
+  });
 });
 
 describe('filesystem tool with multiple roots', () => {

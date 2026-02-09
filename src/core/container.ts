@@ -491,10 +491,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create Motor Cortex service (for code execution)
   let motorCortex: MotorCortex | null = null;
+  const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
   if (llmProvider) {
     const credentialStore = createEnvCredentialStore();
     const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
-    const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
 
     motorCortex = createMotorCortex({
       llm: llmProvider,
@@ -745,7 +745,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Register Motor Cortex tools if service is available
   if (motorCortex) {
     layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
-    layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex));
+    layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex, artifactsBaseDir));
     logger.info('Motor Cortex tools registered');
   }
 

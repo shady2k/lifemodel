@@ -5,6 +5,8 @@
  * This is a security boundary - never allow arbitrary commands.
  */
 
+import { tokenize } from './shell-tokenizer.js';
+
 /**
  * Default allowlist of safe commands.
  *
@@ -31,7 +33,6 @@ export const DEFAULT_ALLOWLIST = new Set([
   'mkdir',
   'cp',
   'mv',
-  'rm',
   'find',
   'date',
 
@@ -103,6 +104,7 @@ export function isNetworkCommand(command: string): boolean {
  * Validate a pipeline of commands (e.g., "cat file | grep pattern").
  *
  * Each command in the pipeline must be on the allowlist.
+ * Uses quote-aware tokenizer so that `|` inside quotes is not treated as a pipe.
  *
  * @param pipeline - Full command string with optional pipes
  * @param allowlist - Set of allowed commands (defaults to DEFAULT_ALLOWLIST)
@@ -112,18 +114,16 @@ export function validatePipeline(
   pipeline: string,
   allowlist: Set<string> = DEFAULT_ALLOWLIST
 ): ValidationResult {
-  // Split by pipe character
-  const commands = pipeline.split('|').map((c) => c.trim());
+  const { segments } = tokenize(pipeline);
 
-  if (commands.length === 0) {
-    return { valid: false, reason: 'Empty command' };
+  if (segments.length === 0) {
+    return { valid: false, reason: 'Malformed command (unterminated quote)' };
   }
 
-  // Validate each command
+  // Validate each segment's first token against allowlist
   const commandNames: string[] = [];
-  for (const cmd of commands) {
-    // Extract command name (first word)
-    const commandName = cmd.split(/\s+/)[0];
+  for (const tokens of segments) {
+    const commandName = tokens[0];
 
     if (!commandName) {
       return { valid: false, reason: 'Empty command in pipeline' };
