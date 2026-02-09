@@ -78,7 +78,7 @@ function getTimeoutForTrigger(triggerType: SignalType): number | undefined {
     case 'user_message':
       return undefined; // Use provider default (120s)
     case 'message_reaction':
-      return 30_000; // Stale quickly, no point waiting
+      return 60_000; // Low priority but needs enough time for cold starts/retries
     case 'contact_urge':
     case 'thought':
     case 'plugin_event':

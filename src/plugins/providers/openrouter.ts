@@ -50,6 +50,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     };
 
     // Only add optional properties if they are defined
+    if (config.motorModel !== undefined) {
+      baseConfig.motorModel = config.motorModel;
+    }
     if (config.timeout !== undefined) {
       baseConfig.timeout = config.timeout;
     }

@@ -17,7 +17,7 @@ export interface ProviderPreferences {
   /** Providers to never use */
   ignore?: string[];
   /** Fall back to other providers if preferred ones are unavailable (default: true) */
-  allow_fallback?: boolean;
+  allow_fallbacks?: boolean;
 }
 
 export interface ModelParamOverrides {
@@ -45,16 +45,22 @@ const BUILTIN_RULES: ModelParamRule[] = [
   { match: 'glm-4.6', params: { temperature: 1.0, reasoning: 'omit' } },
   // Claude: let provider choose temperature, no reasoning field
   { match: 'claude', params: { temperature: null, reasoning: 'omit' } },
-  // Gemini: temp 1.0, top_p 0.95 per OpenCode findings
-  { match: 'google/', params: { temperature: 1.0, topP: 0.95 } },
+  // Gemini: temp 1.0, top_p 0.95 per docs; pin to Google AI Studio — Vertex returns null/failures
+  {
+    match: 'google/',
+    params: { temperature: 1.0, topP: 0.95 },
+    provider: { order: ['Google AI Studio'], allow_fallbacks: true },
+  },
   // DeepSeek: temp 1.0, top_p 0.95 per official docs; pin to DeepInfra — AtlasCloud/Google mangle tool calls
   {
     match: 'deepseek',
     params: { temperature: 1.0, topP: 0.95 },
-    provider: { order: ['DeepInfra'], allow_fallback: true },
+    provider: { order: ['DeepInfra'], allow_fallbacks: true },
   },
   // Qwen: temp 0.55 per OpenCode findings
   { match: 'qwen', params: { temperature: 0.55 } },
+  // StepFun: reasoning is mandatory, cannot be disabled
+  { match: 'stepfun', params: { reasoning: 'omit' } },
 ];
 
 /**

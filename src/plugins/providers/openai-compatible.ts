@@ -79,6 +79,9 @@ export interface OpenAICompatibleConfig {
   /** Smart model for composition, reasoning (expensive) */
   smartModel?: string;
 
+  /** Motor model for Motor Cortex sub-agent tasks */
+  motorModel?: string;
+
   /** Optional API key */
   apiKey?: string;
 
@@ -164,6 +167,7 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         defaultModel: this.config.defaultModel,
         fastModel: this.config.fastModel,
         smartModel: this.config.smartModel,
+        motorModel: this.config.motorModel,
       },
       `${this.name} provider initialized`
     );
@@ -191,6 +195,8 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
         return this.config.fastModel ?? this.config.defaultModel;
       case 'smart':
         return this.config.smartModel ?? this.config.defaultModel;
+      case 'motor':
+        return this.config.motorModel ?? this.config.fastModel ?? this.config.defaultModel;
       default:
         return this.config.defaultModel;
     }
@@ -538,10 +544,9 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       }
 
       if (error instanceof Error && error.name === 'AbortError') {
-        // Explicit per-request timeouts (low-priority triggers) are non-retryable —
-        // the pressure system will naturally re-trigger them
+        // Timeouts are always retryable — transient network/provider delays resolve on retry
         throw new LLMError('Request timed out', this.name, {
-          retryable: request.timeoutMs === undefined,
+          retryable: true,
         });
       }
 

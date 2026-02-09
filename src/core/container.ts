@@ -205,6 +205,7 @@ interface LLMProviderConfig {
   openRouterApiKey?: string | null | undefined;
   fastModel?: string | undefined;
   smartModel?: string | undefined;
+  motorModel?: string | undefined;
   appName?: string | undefined;
   siteUrl?: string | null | undefined;
   local?:
@@ -237,6 +238,7 @@ function createLLMProvider(
   if (openRouterApiKey) {
     const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
     const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
+    const motorModel = config?.motorModel ?? process.env['LLM_MOTOR_MODEL'];
     const appName = config?.appName ?? process.env['LLM_APP_NAME'];
     const siteUrl = config?.siteUrl ?? process.env['LLM_SITE_URL'];
 
@@ -245,6 +247,7 @@ function createLLMProvider(
         apiKey: openRouterApiKey,
         ...(fastModel && { fastModel }),
         ...(smartModel && { smartModel }),
+        ...(motorModel && { motorModel }),
         ...(appName && { appName }),
         ...(siteUrl && { siteUrl }),
         // Disable reasoning/thinking mode by default for fast responses
@@ -445,6 +448,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       configOverrides.llm?.openRouterApiKey ?? mergedConfig.llm.openRouterApiKey ?? undefined,
     fastModel: configOverrides.llm?.fastModel ?? mergedConfig.llm.fastModel,
     smartModel: configOverrides.llm?.smartModel ?? mergedConfig.llm.smartModel,
+    motorModel: mergedConfig.llm.motorModel,
     appName: mergedConfig.llm.appName,
     siteUrl: mergedConfig.llm.siteUrl,
     local: configOverrides.llm?.local ?? mergedConfig.llm.local,
@@ -500,11 +504,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       credentialStore,
       skillsDir,
       artifactsBaseDir,
-    });
-
-    // Wire signal callback
-    motorCortex.setSignalCallback((signal) => {
-      coreLoop.pushSignal(signal);
     });
 
     logger.info('Motor Cortex service initialized');
@@ -691,12 +690,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     ackRegistry,
   });
 
-  // Recover Motor Cortex runs on restart
-  if (motorCortex) {
-    await motorCortex.recoverOnRestart();
-    logger.info('Motor Cortex runs recovered');
-  }
-
   // Create core loop config
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...configOverrides.coreLoop,
@@ -725,6 +718,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   pluginLoader.setSignalCallback((signal) => {
     coreLoop.pushSignal(signal);
   });
+  if (motorCortex) {
+    motorCortex.setSignalCallback((signal) => {
+      coreLoop.pushSignal(signal);
+    });
+  }
 
   // Set tool registration callbacks now that layers exist
   pluginLoader.setToolCallbacks(
@@ -749,6 +747,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
     layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex));
     logger.info('Motor Cortex tools registered');
+  }
+
+  // Recover Motor Cortex runs on restart (must happen after coreLoop exists for signal routing)
+  if (motorCortex) {
+    await motorCortex.recoverOnRestart();
+    logger.info('Motor Cortex runs recovered');
   }
 
   // Set scheduler service on core loop

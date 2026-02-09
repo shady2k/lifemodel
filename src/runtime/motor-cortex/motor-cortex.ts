@@ -250,23 +250,59 @@ export class MotorCortex {
    * This is fire-and-forget - result comes back via signal.
    */
   private async runLoopInBackground(run: MotorRun): Promise<void> {
-    // Transition to running
-    run.status = 'running';
-    await this.stateManager.updateRun(run);
+    try {
+      // Transition to running
+      run.status = 'running';
+      await this.stateManager.updateRun(run);
 
-    // Run the loop
-    await runMotorLoop({
-      run,
-      llm: this.llm,
-      stateManager: this.stateManager,
-      pushSignal: (signal) => {
-        this.pushSignal(signal);
-      },
-      logger: this.logger,
-      ...(this.skillsDir && { skillsDir: this.skillsDir }),
-      ...(this.credentialStore && { credentialStore: this.credentialStore }),
-      ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
-    });
+      // Run the loop
+      await runMotorLoop({
+        run,
+        llm: this.llm,
+        stateManager: this.stateManager,
+        pushSignal: (signal) => {
+          this.pushSignal(signal);
+        },
+        logger: this.logger,
+        ...(this.skillsDir && { skillsDir: this.skillsDir }),
+        ...(this.credentialStore && { credentialStore: this.credentialStore }),
+        ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
+      });
+    } catch (error) {
+      // Motor loop threw an unhandled error (e.g. LLM provider failure, storage failure).
+      // Mark run as failed and emit signal so cognition layer gets feedback.
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error({ runId: run.id, error: message }, 'Motor loop crashed');
+
+      run.status = 'failed';
+      run.completedAt = new Date().toISOString();
+      run.trace.totalDurationMs = Date.now() - new Date(run.startedAt).getTime();
+      delete run.pendingQuestion;
+      delete run.pendingApproval;
+      delete run.pendingToolCallId;
+
+      try {
+        await this.stateManager.updateRun(run);
+      } catch {
+        this.logger.error({ runId: run.id }, 'Failed to persist failed run state');
+      }
+
+      this.pushSignal(
+        createSignal(
+          'motor_result',
+          'motor.cortex',
+          { value: 1, confidence: 1 },
+          {
+            data: {
+              kind: 'motor_result',
+              runId: run.id,
+              status: 'failed',
+              error: { message },
+            },
+          }
+        )
+      );
+    }
   }
 
   /**
@@ -480,7 +516,38 @@ export class MotorCortex {
 
     for (const run of activeRuns) {
       switch (run.status) {
-        case 'running':
+        case 'running': {
+          // Stale check: if no progress was made (stepCursor 0) and run is older than 5 min,
+          // the LLM likely crashed before producing any output — fail rather than retry.
+          const ageMs = Date.now() - new Date(run.startedAt).getTime();
+          const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+          if (run.stepCursor === 0 && ageMs > STALE_THRESHOLD_MS) {
+            this.logger.info(
+              { runId: run.id, ageMs },
+              'Failing stale run (no progress, older than 5 min)'
+            );
+            run.status = 'failed';
+            run.completedAt = new Date().toISOString();
+            run.trace.totalDurationMs = ageMs;
+            await this.stateManager.updateRun(run);
+            this.pushSignal(
+              createSignal(
+                'motor_result',
+                'motor.cortex',
+                { value: 1, confidence: 1 },
+                {
+                  data: {
+                    kind: 'motor_result',
+                    runId: run.id,
+                    status: 'failed',
+                    error: { message: 'Run stale on restart (no progress before crash)' },
+                  },
+                }
+              )
+            );
+            break;
+          }
+
           // Resume from stepCursor
           this.logger.info(
             { runId: run.id, stepCursor: run.stepCursor },
@@ -491,6 +558,7 @@ export class MotorCortex {
           });
           resumed++;
           break;
+        }
 
         case 'awaiting_input':
           // Re-emit signal

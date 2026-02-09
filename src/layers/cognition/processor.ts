@@ -451,18 +451,19 @@ export class CognitionProcessor implements CognitionLayer {
         'COGNITION failed'
       );
 
-      // Send error response to user if we have a recipient
-      const errorIntents = recipientId
-        ? [
-            {
-              type: 'SEND_MESSAGE' as const,
-              payload: {
-                recipientId,
-                text: 'Извини, произошла ошибка. Попробуй ещё раз.',
+      // Send error response only for user messages — reactions and proactive triggers fail silently
+      const errorIntents =
+        recipientId && isUserMessage
+          ? [
+              {
+                type: 'SEND_MESSAGE' as const,
+                payload: {
+                  recipientId,
+                  text: 'Извини, произошла ошибка. Попробуй ещё раз.',
+                },
               },
-            },
-          ]
-        : [];
+            ]
+          : [];
 
       return {
         confidence: 0,
