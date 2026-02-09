@@ -1632,10 +1632,20 @@ export class PluginLoader {
           expiresAt: options?.ttlMs ? new Date(Date.now() + options.ttlMs) : undefined,
         };
 
-        this.memoryProvider.save(entry).catch((err: unknown) => {
-          this.logger.error({ pluginId, err }, 'Failed to save pending intention');
-        });
-        this.logger.debug({ pluginId, content: content.slice(0, 80) }, 'Pending intention saved');
+        this.memoryProvider
+          .save(entry)
+          .then(() => {
+            this.logger.debug(
+              { pluginId, content: content.slice(0, 80) },
+              'Pending intention saved'
+            );
+          })
+          .catch((err: unknown) => {
+            this.logger.error(
+              { pluginId, err, content: content.slice(0, 80) },
+              'Failed to save pending intention'
+            );
+          });
       },
     };
   }

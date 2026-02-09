@@ -14,6 +14,7 @@ import type { SemanticDateAnchor } from '../../../src/plugins/reminder/reminder-
 describe('Date Parser', () => {
   const baseTime = new Date('2024-03-15T10:00:00Z');
   const timezone = 'America/New_York'; // UTC-4/5
+  const wakeHour = 8; // Default wake hour for tests
 
   describe('resolveSemanticAnchor - relative', () => {
     it('should resolve "in 30 minutes"', () => {
@@ -24,7 +25,7 @@ describe('Date Parser', () => {
         originalPhrase: 'in 30 minutes',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.triggerAt.getTime()).toBe(baseTime.getTime() + 30 * 60 * 1000);
       expect(result.recurrence).toBeNull();
@@ -38,7 +39,7 @@ describe('Date Parser', () => {
         originalPhrase: 'in 2 hours',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.triggerAt.getTime()).toBe(baseTime.getTime() + 2 * 60 * 60 * 1000);
     });
@@ -51,14 +52,18 @@ describe('Date Parser', () => {
         originalPhrase: 'in 3 days',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.triggerAt.getTime()).toBe(baseTime.getTime() + 3 * 24 * 60 * 60 * 1000);
     });
   });
 
   describe('resolveSemanticAnchor - absolute', () => {
-    it('should resolve "tomorrow at 3pm"', () => {
+    it('should resolve "tomorrow at 3pm" when current time is after wake hour', () => {
+      // Use a base time that's actually after wake hour in the local timezone
+      // March 15, 2024 1:00 PM UTC = 9:00 AM EDT (after wake hour 8 AM)
+      const baseTimeAfterWake = new Date('2024-03-15T13:00:00Z');
+
       const anchor: SemanticDateAnchor = {
         type: 'absolute',
         absolute: { special: 'tomorrow', hour: 15, minute: 0 },
@@ -66,12 +71,54 @@ describe('Date Parser', () => {
         originalPhrase: 'tomorrow at 3pm',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTimeAfterWake, timezone, wakeHour);
 
       // Should be March 16th at 3pm in the user's timezone
       const expected = new Date(result.triggerAt);
       expect(expected.getDate()).toBe(16);
       expect(result.recurrence).toBeNull();
+    });
+
+    it('should resolve "tomorrow" before wake hour as today at 9am', () => {
+      // User asks at 1 AM for "tomorrow" - should mean today at 9 AM
+      const earlyMorning = new Date('2024-03-15T01:00:00Z'); // 1 AM UTC
+      const timezone = 'Europe/Moscow'; // UTC+3, so this is 4 AM local time
+      const wakeHour = 8; // User wakes at 8 AM
+
+      const anchor: SemanticDateAnchor = {
+        type: 'absolute',
+        absolute: { special: 'tomorrow' },
+        confidence: 0.9,
+        originalPhrase: 'tomorrow',
+      };
+
+      const result = resolveSemanticAnchor(anchor, earlyMorning, timezone, wakeHour);
+
+      // Should be today (March 15th) at 9 AM, not tomorrow
+      const expected = new Date(result.triggerAt);
+      expect(expected.getUTCDate()).toBe(15); // Same day, not tomorrow
+      expect(expected.getUTCHours()).toBe(6); // 9 AM Moscow time = 6 AM UTC
+    });
+
+    it('should resolve "tomorrow" after wake hour as tomorrow at 9am', () => {
+      // User asks at 2 PM for "tomorrow" - should mean tomorrow at 9 AM
+      const afternoon = new Date('2024-03-15T11:00:00Z'); // 11 AM UTC = 2 PM Moscow time
+      const timezone = 'Europe/Moscow'; // UTC+3
+      const wakeHour = 8; // User wakes at 8 AM
+
+      const anchor: SemanticDateAnchor = {
+        type: 'absolute',
+        absolute: { special: 'tomorrow' },
+        confidence: 0.9,
+        originalPhrase: 'tomorrow',
+      };
+
+      const result = resolveSemanticAnchor(anchor, afternoon, timezone, wakeHour);
+
+      // Should be tomorrow (March 16th) at 9 AM
+      const expected = new Date(result.triggerAt);
+      expect(expected.getUTCDate()).toBe(16); // Next day
+      expect(expected.getUTCHours()).toBe(6); // 9 AM Moscow time = 6 AM UTC
     });
 
     it('should resolve explicit date/time', () => {
@@ -82,7 +129,7 @@ describe('Date Parser', () => {
         originalPhrase: 'April 1st at 9:30am',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       const expected = new Date(result.triggerAt);
       expect(expected.getMonth()).toBe(3); // April (0-indexed)
@@ -99,7 +146,7 @@ describe('Date Parser', () => {
         originalPhrase: 'every day at 9am',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.recurrence).not.toBeNull();
       expect(result.recurrence?.frequency).toBe('daily');
@@ -115,7 +162,7 @@ describe('Date Parser', () => {
         originalPhrase: 'every Monday at 10am',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.recurrence).not.toBeNull();
       expect(result.recurrence?.frequency).toBe('weekly');
@@ -130,7 +177,7 @@ describe('Date Parser', () => {
         originalPhrase: 'every 2 weeks',
       };
 
-      const result = resolveSemanticAnchor(anchor, baseTime, timezone);
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
 
       expect(result.recurrence?.frequency).toBe('weekly');
       expect(result.recurrence?.interval).toBe(2);

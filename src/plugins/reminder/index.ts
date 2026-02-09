@@ -144,7 +144,8 @@ const lifecycle: PluginLifecycleV2 = {
     pluginTools = createReminderTools(
       primitives,
       (recipientId) => primitives.services.getTimezone(recipientId),
-      (recipientId) => primitives.services.isTimezoneConfigured(recipientId)
+      (recipientId) => primitives.services.isTimezoneConfigured(recipientId),
+      (recipientId) => primitives.services.getUserPatterns(recipientId)
     );
 
     primitives.logger.info('Reminder plugin activated');

@@ -35,11 +35,13 @@ export interface ResolvedDate {
  * @param anchor The semantic anchor from LLM
  * @param baseTime Base time for calculations (usually now)
  * @param timezone User's timezone (IANA name, e.g., "America/New_York")
+ * @param wakeHour User's wake hour (0-23) for "tomorrow" semantics
  */
 export function resolveSemanticAnchor(
   anchor: SemanticDateAnchor,
   baseTime: Date,
-  timezone: string
+  timezone: string,
+  wakeHour: number
 ): ResolvedDate {
   const baseDt = DateTime.fromJSDate(baseTime, { zone: timezone });
 
@@ -54,7 +56,7 @@ export function resolveSemanticAnchor(
       if (!anchor.absolute) {
         throw new Error('Absolute anchor missing absolute data');
       }
-      return resolveAbsolute(anchor.absolute, baseDt, timezone);
+      return resolveAbsolute(anchor.absolute, baseDt, timezone, wakeHour);
 
     case 'recurring':
       if (!anchor.recurring) {
@@ -106,13 +108,14 @@ function resolveRelative(relative: RelativeTime, baseDt: DateTime): ResolvedDate
 function resolveAbsolute(
   absolute: AbsoluteTime,
   baseDt: DateTime,
-  _timezone: string
+  _timezone: string,
+  wakeHour = 8
 ): ResolvedDate {
   let triggerDt = baseDt;
 
   // Handle special named times first
   if (absolute.special) {
-    triggerDt = resolveSpecialTime(absolute.special, baseDt);
+    triggerDt = resolveSpecialTime(absolute.special, baseDt, wakeHour);
   }
 
   // Handle day of week (e.g., "next Monday")
@@ -159,10 +162,27 @@ function resolveAbsolute(
 /**
  * Resolve special named times.
  */
-function resolveSpecialTime(special: AbsoluteTime['special'], baseDt: DateTime): DateTime {
+function resolveSpecialTime(
+  special: AbsoluteTime['special'],
+  baseDt: DateTime,
+  wakeHour = 8
+): DateTime {
   switch (special) {
-    case 'tomorrow':
-      return baseDt.plus({ days: 1 }).startOf('day');
+    case 'tomorrow': {
+      // If it's before the user's wake hour, "tomorrow" means later today (after they wake up)
+      // This handles the common case of asking for a reminder "tomorrow" late at night
+      // when you actually mean "later today"
+      const currentHour = baseDt.hour;
+      if (currentHour < wakeHour) {
+        // Before wake hour - "tomorrow" means today at 9 AM
+        return baseDt.startOf('day').set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+      }
+      // After wake hour - "tomorrow" means the next calendar day at 9 AM
+      return baseDt
+        .startOf('day')
+        .plus({ days: 1 })
+        .set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+    }
 
     case 'next_week':
       // Next Monday

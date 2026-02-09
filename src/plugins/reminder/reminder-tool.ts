@@ -35,6 +35,7 @@ export const REMINDER_PLUGIN_ID = 'reminder';
  */
 type GetTimezoneFunc = (recipientId: string) => string;
 type IsTimezoneConfiguredFunc = (recipientId: string) => boolean;
+type GetUserPatternsFunc = (recipientId: string) => { wakeHour?: number | null } | null | undefined;
 
 /**
  * Result type for the unified reminder tool.
@@ -345,7 +346,8 @@ const REMINDER_RAW_SCHEMA = {
 export function createReminderTools(
   primitives: PluginPrimitives,
   getTimezone: GetTimezoneFunc,
-  isTimezoneConfigured?: IsTimezoneConfiguredFunc
+  isTimezoneConfigured?: IsTimezoneConfiguredFunc,
+  getUserPatterns?: GetUserPatternsFunc
 ): PluginTool[] {
   const { storage, scheduler, logger } = primitives;
 
@@ -422,7 +424,9 @@ export function createReminderTools(
   ): Promise<ReminderToolResult> {
     try {
       const timezone = getTimezone(recipientId);
-      const resolved = resolveSemanticAnchor(anchor, new Date(), timezone);
+      const userPatterns = getUserPatterns?.(recipientId);
+      const wakeHour = userPatterns?.wakeHour ?? 8;
+      const resolved = resolveSemanticAnchor(anchor, new Date(), timezone, wakeHour);
       const reminderId = `rem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
       // Validate advance notice constraints BEFORE creating any schedules
@@ -1023,18 +1027,28 @@ export async function handleDailyAgenda(
   recipientId: string
 ): Promise<void> {
   try {
+    logger.debug({ recipientId }, 'Daily agenda handler started');
+
     const reminders = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);
     if (!reminders || reminders.length === 0) {
-      logger.debug('No reminders for daily agenda');
+      logger.debug({ recipientId }, 'No reminders found for daily agenda');
       return;
     }
+
+    logger.debug(
+      { recipientId, totalReminders: reminders.length },
+      'Loaded reminders for daily agenda'
+    );
 
     const activeReminders = reminders.filter(
       (r) => r.status === 'active' && r.recipientId === recipientId && r.scheduleId
     );
 
     if (activeReminders.length === 0) {
-      logger.debug('No active reminders with schedules for daily agenda');
+      logger.debug(
+        { recipientId, totalReminders: reminders.length },
+        'No active reminders with schedules for daily agenda'
+      );
       return;
     }
 
@@ -1068,7 +1082,16 @@ export async function handleDailyAgenda(
           ? `Upcoming reminder: ${String(agendaItems[0])}.`
           : `Upcoming reminders: ${agendaItems.join('; ')}.`;
 
+      logger.debug(
+        { recipientId, agendaItems, summary },
+        'Emitting pending intention for daily agenda'
+      );
       intentEmitter.emitPendingIntention(summary, recipientId, { ttlMs: horizon });
+    } else {
+      logger.debug(
+        { recipientId, horizon, activeReminders: activeReminders.length },
+        'No agenda items found within horizon'
+      );
     }
 
     logger.info({ recipientId, emitted, total: activeReminders.length }, 'Daily agenda processed');
