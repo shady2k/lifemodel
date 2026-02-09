@@ -52,6 +52,7 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 You are initiating contact with the user. This is not a response to anything.
 You already have: Runtime Snapshot (agent/user state) and conversation history.
+Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring. Asking follow-up questions about something discussed minutes ago feels intrusive.
 Decide: send a message or defer. A casual check-in is valid if nothing specific comes to mind.
 
 To send a message: output {"response": "your message"}

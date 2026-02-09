@@ -139,7 +139,10 @@ export function getEffectiveTimezone(
 /**
  * Format a timestamp as a human-readable prefix for conversation messages.
  *
- * - Same day as `now`: `[09:18]`
+ * Today's messages use relative time so the LLM doesn't need arithmetic:
+ * - < 1 min: `[just now]`
+ * - < 60 min: `[6 min ago]`
+ * - Same day: `[3 hours ago]`
  * - Yesterday: `[yesterday 23:55]`
  * - Older: `[Feb 4, 14:30]`
  *
@@ -153,18 +156,41 @@ export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): st
   const yesterdayDate = new Date(now.getTime() - 86400000).toLocaleDateString('en-GB', {
     timeZone: timezone,
   });
-  const timeStr = ts.toLocaleTimeString('en-GB', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-    timeZone: timezone,
-  });
 
   if (msgDate === todayDate) {
-    return `<msg_time>${timeStr}</msg_time>`;
+    // Same day — use relative time (no arithmetic needed by the LLM)
+    const diffMs = now.getTime() - ts.getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    const diffHours = Math.floor(diffMin / 60);
+    const remainMin = diffMin % 60;
+
+    let relative: string;
+    if (diffMin < 1) {
+      relative = 'just now';
+    } else if (diffMin < 60) {
+      relative = `${String(diffMin)} min ago`;
+    } else if (remainMin > 0) {
+      relative = `${String(diffHours)}h ${String(remainMin)}m ago`;
+    } else {
+      relative = `${String(diffHours)}h ago`;
+    }
+
+    return `<msg_time>${relative}</msg_time>`;
   } else if (msgDate === yesterdayDate) {
+    const timeStr = ts.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone,
+    });
     return `<msg_time>yesterday ${timeStr}</msg_time>`;
   } else {
+    const timeStr = ts.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone,
+    });
     const dateStr = ts.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
