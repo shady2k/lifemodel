@@ -2,7 +2,7 @@
  * Tests for response-parser.ts
  *
  * Validates parsing of LLM responses: JSON schema mode, plain text fallback,
- * and malformed/truncated response detection.
+ * malformed/truncated response detection, and plain-text policy gating.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -92,5 +92,40 @@ describe('parseResponseContent', () => {
   it('preserves conversation status from valid response', () => {
     const result = parseResponseContent('{"response":"thinking...","status":"awaiting_answer"}');
     expect(result).toEqual({ text: 'thinking...', status: 'awaiting_answer' });
+  });
+
+  describe('allowPlainText option', () => {
+    it('rejects plain text when allowPlainText is false', () => {
+      const result = parseResponseContent('Hello world', { allowPlainText: false });
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+
+    it('rejects leaked prompt instructions when allowPlainText is false', () => {
+      const leaked = `(empty)\n\n**Rules:**\n- Keep it short\n- Do NOT ask multiple questions`;
+      const result = parseResponseContent(leaked, { allowPlainText: false });
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+
+    it('still accepts valid JSON when allowPlainText is false', () => {
+      const result = parseResponseContent('{"response":"hello"}', { allowPlainText: false });
+      expect(result).toEqual({ text: 'hello' });
+    });
+
+    it('still accepts code-fence JSON when allowPlainText is false', () => {
+      const result = parseResponseContent('```json\n{"response":"hello"}\n```', {
+        allowPlainText: false,
+      });
+      expect(result).toEqual({ text: 'hello' });
+    });
+
+    it('allows plain text by default (no options)', () => {
+      const result = parseResponseContent('Hello world');
+      expect(result).toEqual({ text: 'Hello world' });
+    });
+
+    it('allows plain text when allowPlainText is true', () => {
+      const result = parseResponseContent('Hello world', { allowPlainText: true });
+      expect(result).toEqual({ text: 'Hello world' });
+    });
   });
 });

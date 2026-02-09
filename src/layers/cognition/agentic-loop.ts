@@ -41,7 +41,7 @@ export type {
 import type { CognitionLLM, LoopContext, LoopCallbacks, LoopResult } from './agentic-loop-types.js';
 
 // Sub-modules
-import { parseResponseContent } from './response-parser.js';
+import { parseResponseContent, type ParseOptions } from './response-parser.js';
 import {
   compileIntentsFromToolResults,
   toolResultToIntent,
@@ -200,8 +200,10 @@ export class AgenticLoop {
       });
 
       // Capture chain-of-thought if present (cleaned from JSON wrapper)
+      // Use same allowPlainText policy to avoid capturing leaked prompt text as thoughts
       if (response.content) {
-        const parsed = parseResponseContent(response.content);
+        const allowPlainText = context.triggerSignal.type === 'user_message';
+        const parsed = parseResponseContent(response.content, { allowPlainText });
         if (parsed.text) {
           state.thoughts.push(parsed.text);
         }
@@ -343,12 +345,15 @@ export class AgenticLoop {
     state: LoopState,
     context: LoopContext
   ): LoopResult | null {
-    const parsed = parseResponseContent(content);
+    // Only accept plain-text (non-JSON) responses for user messages.
+    // Proactive triggers require JSON to prevent prompt leakage — weaker models
+    // sometimes echo system instructions as plain text instead of responding.
+    const allowPlainText = context.triggerSignal.type === 'user_message';
+    const parseOpts: ParseOptions = { allowPlainText };
+    const parsed = parseResponseContent(content, parseOpts);
     const messageText = parsed.text;
 
-    // Plain-text response: model skipped JSON format but returned usable text.
-    // Accept it — retrying with json_schema can produce worse results on models
-    // that don't support structured output (e.g. GLM-4.7 on some providers).
+    // Log plain-text acceptance for monitoring
     if (
       messageText &&
       content &&

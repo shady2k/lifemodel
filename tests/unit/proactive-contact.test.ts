@@ -97,9 +97,9 @@ describe('Proactive Contact', () => {
         .join('\n\n');
 
       // Should have proactive contact section
-      expect(fullPrompt).toContain('## Proactive Contact');
-      expect(fullPrompt).toContain('This is NOT a response');
-      expect(fullPrompt).toContain('You are INITIATING contact');
+      expect(fullPrompt).toContain('<trigger type="proactive_contact">');
+      expect(fullPrompt).toContain('This is not a response to anything');
+      expect(fullPrompt).toContain('You are initiating contact');
     });
 
     it('includes time since last message in prompt', async () => {
@@ -149,11 +149,11 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      // New prompt gives agent decision guidance with tool budget
-      expect(fullPrompt).toContain('Your goal');
+      // Prompt gives agent decision guidance with tool budget
+      expect(fullPrompt).toContain('send a message or defer');
       expect(fullPrompt).toContain('Tool budget');
-      expect(fullPrompt).toContain('To reach out');
-      expect(fullPrompt).toContain('To wait');
+      expect(fullPrompt).toContain('To send a message');
+      expect(fullPrompt).toContain('To defer');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {
@@ -264,9 +264,9 @@ describe('Proactive Contact', () => {
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
       // Should have user input section, NOT proactive contact
-      expect(fullPrompt).toContain('## Current Input');
-      expect(fullPrompt).toContain('User message: "Hello!"');
-      expect(fullPrompt).not.toContain('## Proactive Contact');
+      expect(fullPrompt).toContain('<user_input>');
+      expect(fullPrompt).toContain('Hello!');
+      expect(fullPrompt).not.toContain('<trigger type="proactive_contact">');
     });
   });
 });

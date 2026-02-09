@@ -268,10 +268,10 @@ describe('buildBehaviorRulesSection', () => {
 
     const result = buildBehaviorRulesSection(context);
     expect(result).not.toBeNull();
-    expect(result).toContain('## Behavioral Guidelines (learned)');
+    expect(result).toContain('<learned_behaviors>');
     expect(result).toContain('- Keep responses concise');
     expect(result).toContain("- Don't bring up projects unless asked");
-    expect(result).toContain('patterns learned from past interactions');
+    expect(result).toContain('Follow these naturally.');
   });
 });
 

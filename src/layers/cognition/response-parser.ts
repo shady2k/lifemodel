@@ -10,6 +10,12 @@
 
 import type { ConversationStatus } from '../../types/cognition.js';
 
+export interface ParseOptions {
+  /** Allow plain-text (non-JSON) responses. Default: true.
+   *  Set to false for proactive triggers where prompt leakage is likely. */
+  allowPlainText?: boolean;
+}
+
 /**
  * Parse LLM response content, handling both JSON schema and plain text.
  * When toolChoice is 'none', we use JSON schema with {response: string, status?: string}.
@@ -18,9 +24,13 @@ import type { ConversationStatus } from '../../types/cognition.js';
  * Malformed detection:
  * - If content starts with '{' or '```' but can't be parsed as valid JSON → malformed: true
  * - If JSON parses but response field is missing or wrong type → malformed: true
+ * - If allowPlainText is false and content is not JSON → malformed: true
  * - Prevents truncated/broken model output from reaching the user as raw JSON text
  */
-export function parseResponseContent(content: string | null): {
+export function parseResponseContent(
+  content: string | null,
+  options?: ParseOptions
+): {
   text: string | null;
   status?: ConversationStatus;
   urgent?: boolean;
@@ -89,6 +99,12 @@ export function parseResponseContent(content: string | null): {
     }
   }
 
-  // Step 3b: Not JSON — plain text fallback (for non-JSON-schema providers)
+  // Step 3b: Not JSON — plain text fallback
+  // Only allowed for user_message triggers; proactive triggers require JSON
+  // to prevent prompt leakage (model echoing instructions as plain text).
+  if (options?.allowPlainText === false) {
+    return { text: null, malformed: true };
+  }
+
   return { text: stripLeadingTimestamp(trimmed) };
 }

@@ -5,6 +5,9 @@
  * user profile, recent thoughts, pending intentions, soul, behavioral rules,
  * runtime snapshot, and completed actions.
  *
+ * Uses XML tags to mark data blocks clearly, preventing weaker models
+ * from confusing context data with output instructions.
+ *
  * Pure functions — no state mutation.
  */
 
@@ -48,9 +51,10 @@ export function buildUserProfileSection(context: LoopContext): string | null {
     return null;
   }
 
-  return `## User Profile (stable facts)
+  return `<user_profile>
 ${lines.join('\n')}
-NOTE: Use the user's name sparingly; check conversation history first.`;
+Use the user's name sparingly; check conversation history first.
+</user_profile>`;
 }
 
 /**
@@ -70,9 +74,10 @@ export function buildRecentThoughtsSection(context: LoopContext): string | null 
     return `- [${ageStr} ago] ${thought.content}`;
   });
 
-  return `## Recent Thoughts
+  return `<recent_thoughts>
 ${lines.join('\n')}
-NOTE: Your recent internal thoughts. Background context, not visible to user.`;
+Background context, not visible to user.
+</recent_thoughts>`;
 }
 
 /**
@@ -93,9 +98,10 @@ export function buildPendingIntentionsSection(context: LoopContext): string | nu
     return `- [${ageStr} ago] ${intention.content}`;
   });
 
-  return `## Pending Insights
+  return `<pending_insights>
 ${lines.join('\n')}
-NOTE: Insights from your background thinking. Weave naturally into conversation if relevant — don't force them.`;
+Weave naturally into conversation if relevant. Do not force them.
+</pending_insights>`;
 }
 
 /**
@@ -169,10 +175,11 @@ export function buildSoulSection(context: LoopContext): string | null {
     return null;
   }
 
-  return `## Who I Am (Living)
+  return `<soul>
 ${lines.join('\n')}
 
-These shape HOW you respond, not WHAT you say. Never reference your values or identity explicitly — just act accordingly.`;
+These shape HOW you respond, not WHAT you say. Never reference your values or identity explicitly — just act accordingly.
+</soul>`;
 }
 
 /**
@@ -191,12 +198,10 @@ export function buildUnresolvedTensionsSection(
     return `- [${String(t.dissonance)}/10] ${t.content}`;
   });
 
-  return `## Unresolved Soul Tensions
+  return `<soul_tensions>
 ${lines.join('\n')}
-
-These are reflections creating internal pressure. They represent moments where
-your response felt misaligned with who you are. Consider processing them when
-appropriate, or use \`core.memory\` to search for more context.`;
+Reflections creating internal pressure. Consider processing when appropriate.
+</soul_tensions>`;
 }
 
 /**
@@ -212,9 +217,10 @@ export function buildBehaviorRulesSection(context: LoopContext): string | null {
 
   const lines = rules.map((rule) => `- ${rule.content}`);
 
-  return `## Behavioral Guidelines (learned)
+  return `<learned_behaviors>
 ${lines.join('\n')}
-These are patterns learned from past interactions. Follow them naturally.`;
+Follow these naturally.
+</learned_behaviors>`;
 }
 
 export function buildRuntimeSnapshotSection(
@@ -270,8 +276,9 @@ export function buildRuntimeSnapshotSection(
   const userChunk = userParts.length > 0 ? `User: ${userParts.join(', ')}` : '';
   const combined = [autoChunk, agentChunk, userChunk].filter((part) => part.length > 0).join('; ');
 
-  return `## Runtime Snapshot
-${combined}`;
+  return `<runtime_snapshot>
+${combined}
+</runtime_snapshot>`;
 }
 
 /**
@@ -321,12 +328,14 @@ export function buildCompletedActionsSection(context: LoopContext): string | nul
   });
 
   if (isUserMessage) {
-    return `## Recent Actions (context)
+    return `<completed_actions>
 ${formatted.join('\n')}
-These were already done. Don't repeat unless asked.`;
+Already done. Do not repeat unless asked.
+</completed_actions>`;
   }
 
-  return `## Actions Already Completed (DO NOT repeat these)
+  return `<completed_actions>
 ${formatted.join('\n')}
-IMPORTANT: These actions were already executed in previous sessions. Do NOT call these tools again for the same data.`;
+These actions were already executed. Do NOT call these tools again for the same data.
+</completed_actions>`;
 }

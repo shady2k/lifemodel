@@ -4,6 +4,9 @@
  * Builds specialized prompt sections for different trigger types:
  * proactive contact, plugin events, thoughts, and reactions.
  *
+ * Uses XML tags (<trigger>, <context>, <task>) to create clear semantic
+ * boundaries that prevent weaker models from echoing instructions as output.
+ *
  * Pure functions — no state mutation.
  */
 
@@ -40,26 +43,22 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
     ? 'User did not respond to your last message'
     : 'Social debt accumulated';
 
-  const section = `## Proactive Contact
+  return `<trigger type="proactive_contact">
+<context>
+Last conversation: ${timeContext || 'unknown'} ago
+Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}
+</context>
 
-You are INITIATING contact with the user. This is NOT a response.
-${isDeferralOverride ? '\n⚠️ Deferral override: pressure increased significantly.\n' : ''}
-**Context:**
-- Last conversation: ${timeContext || 'unknown'} ago
-- Trigger: ${triggerReason}
+<task>
+You are initiating contact with the user. This is not a response to anything.
+You already have: Runtime Snapshot (agent/user state) and conversation history.
+Decide: send a message or defer. A casual check-in is valid if nothing specific comes to mind.
 
-**Your goal:** Send a message OR defer. Pick one.
-
-**Tool budget: 0-3 calls max.** You already have:
-- Runtime Snapshot (agent/user state)
-- Conversation history (recent context)
-
-If nothing specific comes to mind, a casual check-in is perfectly valid.
-
-**To reach out:** Output {"response": "your message"}
-**To wait:** Call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...") then output {"response": ""}`;
-
-  return section;
+To send a message: output {"response": "your message"}
+To defer: call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...") then output {"response": ""}
+Tool budget: 0-3 calls maximum.
+</task>
+</trigger>`;
 }
 
 /**
@@ -68,7 +67,7 @@ If nothing specific comes to mind, a casual check-in is perfectly valid.
  */
 export function buildPluginEventSection(data: Record<string, unknown> | undefined): string {
   if (!data) {
-    return `## Plugin Event\nNo event data available.`;
+    return `<trigger type="plugin_event">\n<task>No event data available.</task>\n</trigger>`;
   }
 
   const kind = data['kind'] as string | undefined;
@@ -81,7 +80,7 @@ export function buildPluginEventSection(data: Record<string, unknown> | undefine
     const facts = data['facts'] as { content: string; url?: string; tags?: string[] }[];
 
     if (facts.length === 0) {
-      return `## Plugin Event\nEmpty fact batch received.`;
+      return `<trigger type="plugin_event">\n<task>Empty fact batch received.</task>\n</trigger>`;
     }
 
     const isUrgent = urgent === true;
@@ -94,20 +93,28 @@ export function buildPluginEventSection(data: Record<string, unknown> | undefine
       })
       .join('\n');
 
-    return `## ${isUrgent ? '⚠️ URGENT ' : ''}News Delivery
-
-You are INITIATING contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
-
+    return `<trigger type="news_delivery"${isUrgent ? ' urgent="true"' : ''}>
+<context>
 ${factSections}
+</context>
 
-→ Deliver this news with URLs inline.`;
+<task>
+You are initiating contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
+Deliver this news with URLs inline.
+</task>
+</trigger>`;
   }
 
   // Generic plugin event format
-  return `## Plugin Event
-Type: ${eventKind ?? 'unknown'}
+  return `<trigger type="plugin_event">
+<context>
+Event: ${eventKind ?? 'unknown'}
 Plugin: ${pluginId ?? 'unknown'}
-${urgent ? '⚠️ URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(data)}`;
+${urgent ? 'URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(data)}
+</context>
+
+<task>Process this event and respond appropriately.</task>
+</trigger>`;
 }
 
 /**
@@ -127,59 +134,55 @@ export function buildThoughtTriggerSection(
   const isReaction = hasReactionRootId || hasReactionContent;
 
   if (isReaction && content) {
-    return `## User Reaction
-
+    return `<trigger type="user_reaction">
+<context>
 ${content}
 
-**This is feedback, not a question.** Interpret based on CONTEXT:
+This is feedback, not a question. Interpret based on context:
+- Reaction on closing/check-in ("How are you?", "Talk soon") = acknowledgment, no action
+- Reaction on suggestion/recommendation ("Try this...") = user likes it, call core.setInterest
+- Reaction on factual statement = acknowledgment, no action
+- Reaction on question asking opinion ("Don't you think...?") = user agrees, call core.remember
+</context>
 
-**Examples of context-aware interpretation:**
-- 👍 on closing/check-in ("How are you?", "Talk soon") → acknowledgment, no action
-- 👍 on suggestion/recommendation ("Try this...", "Have you considered...") → user likes it, call core.setInterest
-- 👍 on factual statement ("It's 3 PM", "Python was released in 1991") → acknowledgment, no action
-- 👍 on question asking for opinion ("Don't you think...?", "Wouldn't you agree...?") → user agrees, call core.remember
+<task>
+If reaction shows genuine interest: one core.setInterest call.
+If it reveals a preference worth remembering: one core.remember call.
+If simple acknowledgment (most cases): no response needed.
+Never repeat your previous message. If responding, say something new.
 
-**Action guidance:**
-- If reaction shows genuine interest in a topic → core.setInterest
-- If it reveals a preference worth remembering → core.remember
-- If it's simple acknowledgment on non-substantive content → no response needed
-
-**IMPORTANT:** Never repeat your previous message. If responding, say something NEW.
-
-**To end without sending a message:** output {"response": ""}
-**To respond:** output {"response": "your NEW message"} (only if you have something meaningful to add)`;
+To end without sending a message: output {"response": ""}
+To respond: output {"response": "your new message"}
+</task>
+</trigger>`;
   }
 
-  // Internal thought processing - clear, directive prompt
-  // No conversation history is loaded for thoughts (energy efficient)
+  // Internal thought processing — no conversation history loaded (energy efficient)
   // Filtered out: core.thought, core.say, core.state, core.agent
   const activeConvWarning =
     context.conversationStatus === 'active'
-      ? `\n**Note: The user is currently in an active conversation.** Use core.defer to reach out later if needed.\n`
+      ? 'The user is currently in an active conversation. Use core.defer to reach out later if needed.\n'
       : '';
 
-  return `## Processing Internal Thought
-
+  return `<trigger type="internal_thought">
+<context>
 You are processing an internal thought. No conversation history is loaded.
-${activeConvWarning}
-**Thought:** ${content ?? JSON.stringify(data)}
+${activeConvWarning}Thought: ${content ?? JSON.stringify(data)}
+</context>
 
-**Available actions:**
-- core.setInterest - if this reveals a topic of interest
-- core.remember - if this contains a fact worth saving
-- core.memory({ action: "search", types: ["fact"] }) - if you need context from saved facts
+<task>
+Available tools: core.setInterest, core.remember, core.memory({ action: "search", types: ["fact"] })
+Not available: core.thought, core.say, core.state, core.agent
+Message history is NOT indexed for thought processing. Do not search types: ["message"].
 
-**NOT available:** core.thought, core.say, core.state, core.agent
-**NOTE:** Message history is NOT indexed for thought processing. Do NOT search types: ["message"] — it will always return 0 results.
+Most thoughts complete with {"response": ""} after 0-2 tool calls. Tool budget: 3 calls max.
 
-**Rules:**
-- Most thoughts complete with {"response": ""} after 0-2 tool calls
-- Tool budget: 3 calls max. Be efficient.
-- Return concise result; stop when complete
-
-**To end without sending (default):** output {"response": ""}
-**To save insight for next conversation:** output {"response": "your insight"}
-**To message user NOW (urgent only):** output {"response": "message", "urgent": true} — ONLY for immediate, time-sensitive user impact that becomes wrong or harmful if delayed (safety risk, deadline in hours). Reflections, insights, observations, emotional context → NEVER urgent.`;
+To end without sending (default): output {"response": ""}
+To save insight for next conversation: output {"response": "your insight"}
+To message user NOW (urgent only, immediate time-sensitive impact): output {"response": "message", "urgent": true}
+Urgent means: safety risk, deadline in hours. Reflections, insights, observations = never urgent.
+</task>
+</trigger>`;
 }
 
 /**
@@ -194,18 +197,19 @@ export function buildReactionTriggerSection(data: Record<string, unknown>): stri
     ? `Your message: "${preview.slice(0, 100)}${preview.length > 100 ? '...' : ''}"`
     : 'Message preview not available';
 
-  return `## User Reaction
+  return `<trigger type="user_reaction">
+<context>
+The user reacted ${emoji ?? '(thumbs up)'} to: ${messageContext}
+This is feedback, not a conversation turn.
+</context>
 
-The user reacted ${emoji ?? '👍'} to: ${messageContext}
-
-This is feedback, not a conversation turn. Most reactions need NO action and NO response.
-
-**Default: output {"response": ""} (no message)**
-
+<task>
+Default action: output {"response": ""} (no message).
 Only act if the reaction reveals something worth saving:
-- Genuine topic interest → ONE core.setInterest call
-- Clear preference worth remembering → ONE core.remember call
-- Simple acknowledgment (most cases) → no tools, no response
-
-Never repeat your previous message. Max 1 tool call total.`;
+- Genuine topic interest: one core.setInterest call
+- Clear preference: one core.remember call
+- Simple acknowledgment (most cases): no tools, no response
+Never repeat your previous message. Max 1 tool call total.
+</task>
+</trigger>`;
 }

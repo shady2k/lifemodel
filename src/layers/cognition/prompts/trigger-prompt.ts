@@ -92,7 +92,7 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
 
   if (signal.type === 'user_message' && data) {
     const text = (data['text'] as string | undefined) ?? '';
-    return `## Current Input\nUser message: "${text}"`;
+    return `<user_input>${text}</user_input>`;
   }
 
   // Handle contact_urge triggers (proactive contact from ThresholdEngine)
@@ -123,5 +123,5 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
     return buildReactionTriggerSection(data);
   }
 
-  return `## Current Trigger\nType: ${signal.type}\nData: ${JSON.stringify(data ?? {})}`;
+  return `<trigger type="${signal.type}">\n<context>${JSON.stringify(data ?? {})}</context>\n</trigger>`;
 }
