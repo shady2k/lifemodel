@@ -92,6 +92,7 @@ export class LLMAdapter implements CognitionLLM {
         messages,
         maxTokens: options?.maxTokens ?? 5000,
         temperature: options?.temperature ?? this.config.temperature,
+        ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
       };
 
       // Select model based on useSmart flag
@@ -152,6 +153,7 @@ export class LLMAdapter implements CognitionLLM {
         tools: request.tools,
         toolChoice: request.toolChoice ?? 'required', // Default to required for agentic loop
         parallelToolCalls: request.parallelToolCalls ?? false, // Default to sequential for determinism
+        ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
       };
 
       // Add responseFormat conditionally (only when defined, for JSON mode)

@@ -117,6 +117,9 @@ export interface CompletionRequest {
 
   /** Whether to allow parallel tool calls (default: true, set false for strict mode) */
   parallelToolCalls?: boolean;
+
+  /** Per-request timeout override in ms (provider uses its default if omitted) */
+  timeoutMs?: number;
 }
 
 /**

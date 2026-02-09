@@ -86,6 +86,8 @@ export interface LLMOptions {
   temperature?: number;
   /** Use smart (expensive) model instead of fast model */
   useSmart?: boolean;
+  /** Per-request LLM timeout in ms (overrides provider default) */
+  timeoutMs?: number;
 }
 
 /**

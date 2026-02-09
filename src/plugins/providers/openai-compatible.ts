@@ -442,10 +442,11 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       'Full OpenAI request body (with tools)'
     );
 
+    const timeout = request.timeoutMs ?? this.config.timeout;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
-    }, this.config.timeout);
+    }, timeout);
 
     // Track timing: request start, first byte (TTFB), complete
     const requestStartTime = Date.now();
@@ -537,7 +538,11 @@ export class OpenAICompatibleProvider extends BaseLLMProvider {
       }
 
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new LLMError('Request timed out', this.name, { retryable: true });
+        // Explicit per-request timeouts (low-priority triggers) are non-retryable —
+        // the pressure system will naturally re-trigger them
+        throw new LLMError('Request timed out', this.name, {
+          retryable: request.timeoutMs === undefined,
+        });
       }
 
       // Connection refused or network error - server might be down

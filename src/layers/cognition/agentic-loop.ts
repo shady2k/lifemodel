@@ -38,7 +38,14 @@ export type {
   ToolExecutionOutcome,
 } from './agentic-loop-types.js';
 
-import type { CognitionLLM, LoopContext, LoopCallbacks, LoopResult } from './agentic-loop-types.js';
+import type {
+  CognitionLLM,
+  LLMOptions,
+  LoopContext,
+  LoopCallbacks,
+  LoopResult,
+} from './agentic-loop-types.js';
+import type { SignalType } from '../../types/signal.js';
 
 // Sub-modules
 import { parseResponseContent, type ParseOptions } from './response-parser.js';
@@ -59,6 +66,27 @@ import { validateToolCallPairs } from './messages/tool-call-validators.js';
 import { buildSystemPrompt } from './prompts/system-prompt.js';
 import { buildTriggerPrompt } from './prompts/trigger-prompt.js';
 import { getTraceContext } from '../../core/trace-context.js';
+
+/**
+ * Resolve per-request LLM timeout based on trigger type.
+ *
+ * Low-priority triggers fail fast — the pressure system re-triggers naturally.
+ * User messages keep the full timeout since someone is actively waiting.
+ */
+function getTimeoutForTrigger(triggerType: SignalType): number | undefined {
+  switch (triggerType) {
+    case 'user_message':
+      return undefined; // Use provider default (120s)
+    case 'message_reaction':
+      return 30_000; // Stale quickly, no point waiting
+    case 'contact_urge':
+    case 'thought':
+    case 'plugin_event':
+      return 60_000; // Background processing, pressure re-triggers
+    default:
+      return 60_000; // Safe default for any other proactive trigger
+  }
+}
 
 /**
  * Agentic Loop implementation.
@@ -194,10 +222,14 @@ export class AgenticLoop {
       // Build request
       const request = buildRequest(messages, filteredTools, state.forceRespond === true);
 
-      const response = await this.llm.completeWithTools(request, {
+      const triggerTimeout = getTimeoutForTrigger(context.triggerSignal.type);
+      const llmOptions: LLMOptions = {
         maxTokens: this.config.maxOutputTokens,
         useSmart,
-      });
+        ...(triggerTimeout !== undefined && { timeoutMs: triggerTimeout }),
+      };
+
+      const response = await this.llm.completeWithTools(request, llmOptions);
 
       // Capture chain-of-thought if present (cleaned from JSON wrapper)
       // Use same allowPlainText policy to avoid capturing leaked prompt text as thoughts
