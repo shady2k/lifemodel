@@ -32,6 +32,7 @@ import { type MessageComposer, createMessageComposer } from '../llm/composer.js'
 import type { LLMProvider } from '../llm/provider.js';
 import { createOpenRouterProvider } from '../plugins/providers/openrouter.js';
 import { createOpenAICompatibleProvider } from '../plugins/providers/openai-compatible.js';
+import { createVercelAIProvider } from '../plugins/providers/vercel-ai-provider.js';
 import { createMultiProvider } from '../llm/multi-provider.js';
 import {
   type Storage,
@@ -234,45 +235,78 @@ function createLLMProvider(
   const useLocalForSmart =
     config?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
 
+  // Feature flag: LLM provider engine selection
+  // 'fetch' (default) = use raw fetch() with OpenAICompatibleProvider
+  // 'vercel-ai' = use Vercel AI SDK with VercelAIProvider
+  const providerEngine = process.env['LLM_PROVIDER_ENGINE'] ?? 'fetch';
+
+  const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
+  const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
+  const motorModel = config?.motorModel ?? process.env['LLM_MOTOR_MODEL'];
+  const appName = config?.appName ?? process.env['LLM_APP_NAME'];
+  const siteUrl = config?.siteUrl ?? process.env['LLM_SITE_URL'];
+
   // Create OpenRouter provider if configured
   let openRouterProvider = null;
   if (openRouterApiKey) {
-    const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
-    const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
-    const motorModel = config?.motorModel ?? process.env['LLM_MOTOR_MODEL'];
-    const appName = config?.appName ?? process.env['LLM_APP_NAME'];
-    const siteUrl = config?.siteUrl ?? process.env['LLM_SITE_URL'];
-
-    openRouterProvider = createOpenRouterProvider(
-      {
-        apiKey: openRouterApiKey,
-        ...(fastModel && { fastModel }),
-        ...(smartModel && { smartModel }),
-        ...(motorModel && { motorModel }),
-        ...(appName && { appName }),
-        ...(siteUrl && { siteUrl }),
-        // Disable reasoning/thinking mode by default for fast responses
-        // This prevents models like Grok 4.1 from generating 1000+ tokens of internal reasoning
-        // which adds ~50s to each turn. Can be overridden via config if needed.
-        enableThinking: false,
-      },
-      logger
-    );
+    if (providerEngine === 'vercel-ai') {
+      logger.info('Using Vercel AI SDK provider for OpenRouter');
+      openRouterProvider = createVercelAIProvider(
+        {
+          apiKey: openRouterApiKey,
+          ...(fastModel && { fastModel }),
+          ...(smartModel && { smartModel }),
+          ...(motorModel && { motorModel }),
+          ...(appName && { appName }),
+          ...(siteUrl && { siteUrl }),
+        },
+        logger
+      );
+    } else {
+      logger.info('Using fetch-based provider for OpenRouter');
+      openRouterProvider = createOpenRouterProvider(
+        {
+          apiKey: openRouterApiKey,
+          ...(fastModel && { fastModel }),
+          ...(smartModel && { smartModel }),
+          ...(motorModel && { motorModel }),
+          ...(appName && { appName }),
+          ...(siteUrl && { siteUrl }),
+          // Disable reasoning/thinking mode by default for fast responses
+          // This prevents models like Grok 4.1 from generating 1000+ tokens of internal reasoning
+          // which adds ~50s to each turn. Can be overridden via config if needed.
+          enableThinking: false,
+        },
+        logger
+      );
+    }
   }
 
   // Create local provider if configured
   // Thinking mode is disabled by default for fast cognition (saves tokens)
   let localProvider = null;
   if (localBaseUrl && localModel) {
-    localProvider = createOpenAICompatibleProvider(
-      {
-        baseUrl: localBaseUrl,
-        defaultModel: localModel,
-        name: 'local',
-        enableThinking: false,
-      },
-      logger
-    );
+    if (providerEngine === 'vercel-ai') {
+      logger.info('Using Vercel AI SDK provider for local server');
+      localProvider = createVercelAIProvider(
+        {
+          baseUrl: localBaseUrl,
+          model: localModel,
+        },
+        logger
+      );
+    } else {
+      logger.info('Using fetch-based provider for local server');
+      localProvider = createOpenAICompatibleProvider(
+        {
+          baseUrl: localBaseUrl,
+          defaultModel: localModel,
+          name: 'local',
+          enableThinking: false,
+        },
+        logger
+      );
+    }
   }
 
   // Create multi-provider if we have both, or use single provider
@@ -291,15 +325,16 @@ function createLLMProvider(
         fastProvider: useLocalForFast ? 'local' : 'openrouter',
         smartProvider: useLocalForSmart ? 'local' : 'openrouter',
         motorProvider: useLocalForFast ? 'local' : 'openrouter',
+        providerEngine,
       },
       'MultiProvider configured'
     );
     return multiProvider;
   } else if (localProvider) {
-    logger.info('Local LLM provider configured');
+    logger.info({ providerEngine }, 'Local LLM provider configured');
     return localProvider;
   } else if (openRouterProvider) {
-    logger.info('OpenRouter LLM provider configured');
+    logger.info({ providerEngine }, 'OpenRouter LLM provider configured');
     return openRouterProvider;
   }
 

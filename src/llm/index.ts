@@ -21,6 +21,16 @@ export {
   type OpenAICompatibleConfig,
 } from '../plugins/providers/openai-compatible.js';
 
+export {
+  VercelAIProvider,
+  createVercelAIProvider,
+  createVercelAIOpenRouterProvider,
+  createVercelAILocalProvider,
+  type VercelAIProviderConfig,
+  type VercelAIOpenRouterConfig,
+  type VercelAILocalConfig,
+} from '../plugins/providers/vercel-ai-provider.js';
+
 export { MultiProvider, createMultiProvider, type MultiProviderConfig } from './multi-provider.js';
 
 export {

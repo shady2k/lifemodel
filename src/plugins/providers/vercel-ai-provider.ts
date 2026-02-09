@@ -1,0 +1,751 @@
+/**
+ * Vercel AI SDK Provider
+ *
+ * LLM provider implementation using the Vercel AI SDK (ai package v5).
+ * Provides tool call parsing/repair, streaming support, and provider-specific message transforms.
+ */
+
+import type { Logger } from '../../types/index.js';
+import type { CircuitBreaker } from '../../core/circuit-breaker.js';
+import { createCircuitBreaker } from '../../core/circuit-breaker.js';
+import type { CompletionRequest, CompletionResponse, ToolCall } from '../../llm/provider.js';
+import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
+import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
+import {
+  isGeminiModel,
+  ensureUserTurnForGemini,
+  sanitizeSystemMessagesForGemini,
+  addCacheControl,
+} from './gemini-transforms.js';
+
+// Vercel AI SDK imports
+import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+import { createOpenAI } from '@ai-sdk/openai';
+import { generateText } from 'ai';
+import type { LanguageModel } from 'ai';
+
+/**
+ * JSON object type for tool arguments.
+ */
+type JsonObject = Record<string, unknown>;
+
+/**
+ * OpenRouter configuration for VercelAIProvider.
+ */
+export interface VercelAIOpenRouterConfig {
+  /** API key (required for OpenRouter) */
+  apiKey: string;
+  /** Fast model for classification */
+  fastModel?: string;
+  /** Smart model for reasoning */
+  smartModel?: string;
+  /** Motor model for Motor Cortex tasks */
+  motorModel?: string;
+  /** App name for OpenRouter dashboard */
+  appName?: string;
+  /** Site URL for OpenRouter attribution */
+  siteUrl?: string;
+}
+
+/**
+ * Local OpenAI-compatible server configuration for VercelAIProvider.
+ */
+export interface VercelAILocalConfig {
+  /** Base URL of local server (e.g., http://localhost:1234) */
+  baseUrl: string;
+  /** Model name to use */
+  model: string;
+}
+
+/**
+ * Configuration for VercelAIProvider.
+ */
+export type VercelAIProviderConfig = VercelAIOpenRouterConfig | VercelAILocalConfig;
+
+/**
+ * Discriminate between config types.
+ */
+function isOpenRouterConfig(config: VercelAIProviderConfig): config is VercelAIOpenRouterConfig {
+  return 'apiKey' in config;
+}
+
+const OPENROUTER_DEFAULTS = {
+  name: 'openrouter',
+  defaultModel: 'anthropic/claude-3.5-haiku',
+  fastModel: 'anthropic/claude-3.5-haiku',
+  smartModel: 'anthropic/claude-sonnet-4',
+};
+
+const DEFAULT_TIMEOUT = 120_000; // 2 minutes
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_DELAY = 1000;
+const DEFAULT_CIRCUIT_RESET_TIMEOUT = 60_000;
+
+/**
+ * Vercel AI SDK LLM provider.
+ *
+ * Uses Vercel AI SDK's generateText() for non-streaming completions with:
+ * - Automatic tool call parsing and repair
+ * - Provider-specific message transforms
+ * - Our retry/circuit breaker logic (AI SDK's retry is disabled)
+ */
+export class VercelAIProvider extends BaseLLMProvider {
+  readonly name: string;
+  private readonly config: VercelAIProviderConfig;
+  private readonly providerLogger?: Logger | undefined;
+  private readonly circuitBreaker: CircuitBreaker;
+
+  constructor(config: VercelAIProviderConfig, logger?: Logger) {
+    super(logger);
+
+    this.config = config;
+    this.name = isOpenRouterConfig(config) ? OPENROUTER_DEFAULTS.name : 'local';
+    this.providerLogger = logger?.child({ component: 'vercel-ai-provider' });
+
+    const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
+      name: 'vercel-ai-provider',
+      maxFailures: 3,
+      resetTimeout: DEFAULT_CIRCUIT_RESET_TIMEOUT,
+      timeout: DEFAULT_TIMEOUT,
+    };
+    if (this.providerLogger) {
+      circuitConfig.logger = this.providerLogger;
+    }
+    this.circuitBreaker = createCircuitBreaker(circuitConfig);
+
+    this.providerLogger?.info(
+      {
+        provider: this.name,
+        ...(isOpenRouterConfig(config)
+          ? {
+              fastModel: config.fastModel ?? OPENROUTER_DEFAULTS.fastModel,
+              smartModel: config.smartModel ?? OPENROUTER_DEFAULTS.smartModel,
+            }
+          : { baseUrl: config.baseUrl, model: config.model }),
+      },
+      'VercelAIProvider initialized'
+    );
+  }
+
+  /**
+   * Check if provider is configured.
+   */
+  isAvailable(): boolean {
+    if (isOpenRouterConfig(this.config)) {
+      return Boolean(this.config.apiKey);
+    }
+    return Boolean(this.config.baseUrl && this.config.model);
+  }
+
+  /**
+   * Get the model to use based on role or explicit model.
+   */
+  private getModelId(request: CompletionRequest): string {
+    // Explicit model takes precedence
+    if (request.model) {
+      return request.model;
+    }
+
+    if (isOpenRouterConfig(this.config)) {
+      // Select based on role for OpenRouter
+      switch (request.role) {
+        case 'fast':
+          return this.config.fastModel ?? OPENROUTER_DEFAULTS.fastModel;
+        case 'smart':
+          return this.config.smartModel ?? OPENROUTER_DEFAULTS.smartModel;
+        case 'motor':
+          return this.config.motorModel ?? this.config.fastModel ?? OPENROUTER_DEFAULTS.fastModel;
+        default:
+          return OPENROUTER_DEFAULTS.defaultModel;
+      }
+    } else {
+      // Local provider uses the configured model
+      return this.config.model;
+    }
+  }
+
+  /**
+   * Get the language model instance.
+   */
+  private getModel(modelId: string): LanguageModel {
+    if (isOpenRouterConfig(this.config)) {
+      return createOpenRouter({
+        apiKey: this.config.apiKey,
+      })(modelId);
+    } else {
+      return createOpenAI({
+        baseURL: this.config.baseUrl,
+      })(modelId);
+    }
+  }
+
+  /**
+   * Generate a completion (called by BaseLLMProvider.complete with logging).
+   */
+  protected async doComplete(request: CompletionRequest): Promise<CompletionResponse> {
+    if (!this.isAvailable()) {
+      throw new LLMError('VercelAIProvider not configured', this.name);
+    }
+
+    const modelId = this.getModelId(request);
+
+    return this.circuitBreaker.execute(async () => {
+      return this.executeWithRetry(async () => {
+        return this.executeRequest(request, modelId);
+      });
+    });
+  }
+
+  /**
+   * Calculate backoff delay with exponential scaling for 429 rate limits.
+   */
+  private calculateBackoff(attempt: number, isRateLimit: boolean): number {
+    if (isRateLimit) {
+      // Exponential backoff for 429: 2s, 4s, 8s, 16s...
+      return 2000 * Math.pow(2, attempt);
+    }
+    // Linear backoff for other errors: 1s, 2s, 3s...
+    return DEFAULT_RETRY_DELAY * (attempt + 1);
+  }
+
+  /**
+   * Check if error is a 429 rate limit error.
+   */
+  private isRateLimitError(error: unknown): boolean {
+    return error instanceof LLMError && error.statusCode === 429;
+  }
+
+  /**
+   * Execute with retry logic.
+   */
+  private async executeWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        const errorInfo = this.extractErrorInfo(error);
+        const isRateLimit = this.isRateLimitError(error);
+
+        if (error instanceof LLMError && !error.retryable) {
+          this.providerLogger?.error(errorInfo, 'Non-retryable LLM error');
+          throw error;
+        }
+
+        if (attempt < DEFAULT_MAX_RETRIES) {
+          const backoffMs = this.calculateBackoff(attempt, isRateLimit);
+          this.providerLogger?.warn(
+            {
+              attempt: attempt + 1,
+              maxRetries: DEFAULT_MAX_RETRIES,
+              backoffMs,
+              backoffReason: isRateLimit ? 'rate_limit_exponential' : 'linear',
+              ...errorInfo,
+            },
+            'Retrying after transient error'
+          );
+          await this.sleep(backoffMs);
+        } else {
+          this.providerLogger?.error(
+            {
+              attempts: DEFAULT_MAX_RETRIES + 1,
+              ...errorInfo,
+            },
+            'All retry attempts exhausted'
+          );
+        }
+      }
+    }
+
+    throw lastError ?? new Error('Unknown error');
+  }
+
+  /**
+   * Extract error information for logging.
+   */
+  private extractErrorInfo(error: unknown): Record<string, unknown> {
+    if (error instanceof LLMError) {
+      return {
+        errorType: 'LLMError',
+        message: error.message,
+        statusCode: error.statusCode,
+        retryable: error.retryable,
+      };
+    }
+    if (error instanceof Error) {
+      return {
+        errorType: error.name,
+        message: error.message,
+      };
+    }
+    return {
+      errorType: 'unknown',
+      message: String(error),
+    };
+  }
+
+  /**
+   * Convert our Message format to AI SDK format.
+   * The AI SDK uses a simpler message format - we can pass our messages mostly as-is.
+   */
+  private convertMessages(request: CompletionRequest): {
+    role: string;
+    content:
+      | string
+      | {
+          type: string;
+          text?: string;
+          toolCallId?: string;
+          toolName?: string;
+          args?: JsonObject;
+        }[];
+  }[] {
+    return request.messages.map((msg) => {
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        // Assistant with tool calls - build content array
+        const parts: {
+          type: string;
+          text?: string;
+          toolCallId?: string;
+          toolName?: string;
+          args?: JsonObject;
+        }[] = [];
+
+        // Add text content if present
+        if (msg.content) {
+          parts.push({ type: 'text', text: msg.content });
+        }
+
+        // Add tool calls in AI SDK format
+        for (const tc of msg.tool_calls) {
+          let args: JsonObject;
+          try {
+            args = JSON.parse(tc.function.arguments) as JsonObject;
+          } catch {
+            args = { _raw: tc.function.arguments };
+          }
+          parts.push({
+            type: 'tool-call',
+            toolCallId: tc.id,
+            toolName: tc.function.name,
+            args,
+          });
+        }
+
+        return {
+          role: 'assistant',
+          content: parts,
+        };
+      }
+
+      if (msg.role === 'tool') {
+        // Tool result
+        return {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: msg.tool_call_id ?? '',
+              content: msg.content ?? '',
+            },
+          ],
+        };
+      }
+
+      // system, user, or assistant without tool calls
+      return {
+        role: msg.role,
+        content: msg.content ?? '',
+      };
+    });
+  }
+
+  /**
+   * Convert tools from OpenAI format to AI SDK format.
+   * The AI SDK expects tools with `inputSchema` instead of `parameters`.
+   */
+  private convertTools(tools: CompletionRequest['tools']): Record<string, unknown> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+
+    const aiTools: Record<string, unknown> = {};
+
+    for (const t of tools) {
+      const fn = t.function;
+      // Check if this is OpenAIChatTool (has parameters) or MinimalOpenAIChatTool
+      if ('parameters' in fn) {
+        const schema = fn.parameters;
+        // Build AI SDK tool structure with `inputSchema` instead of `parameters`
+        aiTools[fn.name] = {
+          description: fn.description,
+          inputSchema: schema,
+        };
+      }
+      // Minimal format - skip tools without parameters
+      // They'll need to call core.tools to get the full schema
+    }
+
+    return aiTools;
+  }
+
+  /**
+   * Map tool choice from our format to AI SDK format.
+   */
+  private mapToolChoice(
+    toolChoice: CompletionRequest['toolChoice']
+  ): string | { type: string; toolName?: string } {
+    if (toolChoice === 'auto' || toolChoice === 'required' || toolChoice === 'none') {
+      return toolChoice;
+    }
+    if (typeof toolChoice === 'object') {
+      return {
+        type: 'tool',
+        toolName: toolChoice.function.name,
+      };
+    }
+    return 'auto';
+  }
+
+  /**
+   * Build provider options for OpenRouter-specific fields.
+   */
+  private buildProviderOptions(
+    modelId: string,
+    overrides: ReturnType<typeof resolveModelParams>,
+    headers: Record<string, string> | undefined
+  ): { openrouter: Record<string, unknown> } | undefined {
+    if (!isOpenRouterConfig(this.config)) {
+      return undefined;
+    }
+
+    const openrouterOptions: Record<string, unknown> = {};
+
+    // Add provider preferences
+    const providerPrefs = resolveProviderPreferences(modelId);
+    if (providerPrefs) {
+      openrouterOptions['provider'] = {
+        order: providerPrefs.order,
+        ignore: providerPrefs.ignore,
+        allow_fallbacks: providerPrefs.allow_fallbacks,
+        preferred_min_throughput: providerPrefs.preferred_min_throughput,
+      };
+    } else {
+      openrouterOptions['provider'] = {
+        preferred_min_throughput: { p50: 10 },
+      };
+    }
+
+    // Add reasoning config
+    if (overrides.reasoning === 'enable') {
+      openrouterOptions['reasoning'] = { enabled: true };
+    } else if (overrides.reasoning === 'disable') {
+      openrouterOptions['reasoning'] = { enabled: false };
+    }
+    // If 'omit', don't add the field
+
+    // Add headers if present
+    if (headers) {
+      openrouterOptions['headers'] = headers;
+    }
+
+    return {
+      openrouter: openrouterOptions,
+    };
+  }
+
+  /**
+   * Build headers for OpenRouter app identification.
+   */
+  private buildHeaders(): Record<string, string> | undefined {
+    if (!isOpenRouterConfig(this.config)) {
+      return undefined;
+    }
+
+    const headers: Record<string, string> = {};
+    if (this.config.siteUrl) {
+      headers['HTTP-Referer'] = this.config.siteUrl;
+    }
+    if (this.config.appName) {
+      headers['X-Title'] = this.config.appName;
+      headers['User-Agent'] = `${this.config.appName}/1.0`;
+    }
+
+    return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
+  /**
+   * Perform the actual LLM request using AI SDK.
+   */
+  private async executeRequest(
+    request: CompletionRequest,
+    modelId: string
+  ): Promise<CompletionResponse> {
+    // Build messages array for transformation
+    const messagesForTransform = request.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      ...(m.tool_calls && { tool_calls: m.tool_calls }),
+      ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+    }));
+
+    // Apply model param overrides
+    const overrides = resolveModelParams(modelId);
+    const temperature = overrides.temperature ?? request.temperature;
+
+    // Apply Gemini message transforms if needed
+    if (isGeminiModel(modelId)) {
+      ensureUserTurnForGemini(messagesForTransform);
+      sanitizeSystemMessagesForGemini(messagesForTransform);
+    }
+
+    // Add cache control
+    addCacheControl(messagesForTransform, modelId);
+
+    // Convert to AI SDK format
+    const coreMessages = this.convertMessages(request);
+
+    // Convert tools
+    const aiTools = this.convertTools(request.tools);
+
+    // Build tool choice
+    const toolChoice = request.toolChoice ? this.mapToolChoice(request.toolChoice) : undefined;
+
+    // Build headers for OpenRouter
+    const headers = this.buildHeaders();
+
+    // Build provider options
+    const providerOptions = this.buildProviderOptions(modelId, overrides, headers);
+
+    // Get the model
+    const model = this.getModel(modelId);
+
+    // Debug logging
+    this.providerLogger?.debug(
+      {
+        model: modelId,
+        messageCount: coreMessages.length,
+        toolCount: Object.keys(aiTools ?? {}).length,
+        temperature,
+        toolChoice,
+      },
+      'AI SDK generateText request'
+    );
+
+    const startTime = Date.now();
+
+    try {
+      // Prepare generateText options
+      const generateOptions: Record<string, unknown> = {
+        model,
+        messages: coreMessages as { role: string; content: string | Record<string, unknown>[] }[],
+        temperature: temperature ?? undefined,
+        maxTokens: request.maxTokens,
+        stopSequences: request.stop,
+        // Disable AI SDK's built-in retry (we handle it ourselves)
+        maxRetries: 0,
+      };
+
+      // Add tools if present
+      if (aiTools && Object.keys(aiTools).length > 0) {
+        generateOptions['tools'] = aiTools;
+        if (toolChoice) {
+          generateOptions['toolChoice'] = toolChoice;
+        }
+      }
+
+      // Add provider options if present
+      if (providerOptions) {
+        generateOptions['providerOptions'] = providerOptions;
+      }
+
+      // Call generateText
+      const result = await generateText(generateOptions as Parameters<typeof generateText>[0]);
+
+      const duration = Date.now() - startTime;
+
+      this.providerLogger?.debug(
+        {
+          durationMs: duration,
+          textLength: result.text.length,
+          toolCallsCount: result.toolCalls.length,
+          finishReason: result.finishReason,
+          usage: result.usage,
+        },
+        'AI SDK generateText response'
+      );
+
+      // Map AI SDK result back to CompletionResponse
+      return this.mapAIResponseToCompletion(result, modelId);
+    } catch (error) {
+      const duration = Date.now() - startTime;
+
+      this.providerLogger?.error(
+        {
+          durationMs: duration,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'AI SDK generateText failed'
+      );
+
+      // Map AI SDK errors to LLMError
+      throw this.mapAIErrorToLLMError(error);
+    }
+  }
+
+  /**
+   * Map AI SDK response to our CompletionResponse format.
+   */
+  private mapAIResponseToCompletion(
+    result: {
+      text: string;
+      toolCalls?: Record<string, unknown>[];
+      finishReason: string | undefined;
+      usage: {
+        inputTokens: number | undefined;
+        outputTokens: number | undefined;
+        totalTokens: number | undefined;
+      };
+    },
+    modelId: string
+  ): CompletionResponse {
+    const response: CompletionResponse = {
+      content: result.text,
+      model: modelId,
+      finishReason: this.mapFinishReason(result.finishReason ?? 'error'),
+    };
+
+    // Map tool calls - AI SDK tool calls have different structures
+    if (result.toolCalls && result.toolCalls.length > 0) {
+      response.toolCalls = result.toolCalls.map((tc): ToolCall => {
+        const toolCallIdRaw = tc['toolCallId'];
+        const toolNameRaw = tc['toolName'];
+        const toolCallId =
+          typeof toolCallIdRaw === 'string' ? toolCallIdRaw : String(toolCallIdRaw);
+        const toolName = typeof toolNameRaw === 'string' ? toolNameRaw : String(toolNameRaw);
+        const args = tc['args'] as JsonObject;
+        return {
+          id: toolCallId,
+          type: 'function',
+          function: {
+            name: toolName,
+            arguments: JSON.stringify(args),
+          },
+        };
+      });
+    }
+
+    // Map usage - AI SDK uses inputTokens/outputTokens, we need promptTokens/completionTokens
+    response.usage = {
+      promptTokens: result.usage.inputTokens ?? 0,
+      completionTokens: result.usage.outputTokens ?? 0,
+      totalTokens: result.usage.totalTokens ?? 0,
+    };
+
+    return response;
+  }
+
+  /**
+   * Map AI SDK finish reason to our format.
+   */
+  private mapFinishReason(
+    reason: string | undefined
+  ): 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'error' | undefined {
+    if (!reason) {
+      return 'error';
+    }
+    switch (reason) {
+      case 'stop':
+        return 'stop';
+      case 'tool-calls':
+        return 'tool_calls';
+      case 'length':
+        return 'length';
+      case 'content-filter':
+        return 'content_filter';
+      default:
+        return 'error';
+    }
+  }
+
+  /**
+   * Map AI SDK error to LLMError.
+   */
+  private mapAIErrorToLLMError(error: unknown): LLMError {
+    const message = error instanceof Error ? error.message : String(error);
+
+    // Check for rate limit errors
+    if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
+      return new LLMError(`Rate limit: ${message}`, this.name, {
+        statusCode: 429,
+        retryable: true,
+      });
+    }
+
+    // Check for timeout errors
+    if (error instanceof Error && error.name === 'AbortError') {
+      return new LLMError('Request timed out', this.name, {
+        retryable: true,
+      });
+    }
+
+    // Check for 5xx errors
+    const serverErrorMatch = /5(\d{2})/.exec(message);
+    if (serverErrorMatch?.[1]) {
+      return new LLMError(`Server error: ${message}`, this.name, {
+        statusCode: parseInt(serverErrorMatch[1], 10),
+        retryable: true,
+      });
+    }
+
+    // Default to non-retryable
+    return new LLMError(message, this.name, {
+      retryable: false,
+    });
+  }
+
+  /**
+   * Sleep for the specified duration.
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Get circuit breaker stats.
+   */
+  getCircuitStats(): ReturnType<CircuitBreaker['getStats']> {
+    return this.circuitBreaker.getStats();
+  }
+}
+
+/**
+ * Factory function for OpenRouter config.
+ */
+export function createVercelAIOpenRouterProvider(
+  config: VercelAIOpenRouterConfig,
+  logger?: Logger
+): VercelAIProvider {
+  return new VercelAIProvider(config, logger);
+}
+
+/**
+ * Factory function for local OpenAI-compatible config.
+ */
+export function createVercelAILocalProvider(
+  config: VercelAILocalConfig,
+  logger?: Logger
+): VercelAIProvider {
+  return new VercelAIProvider(config, logger);
+}
+
+/**
+ * Unified factory function.
+ */
+export function createVercelAIProvider(
+  config: VercelAIProviderConfig,
+  logger?: Logger
+): VercelAIProvider {
+  return new VercelAIProvider(config, logger);
+}
