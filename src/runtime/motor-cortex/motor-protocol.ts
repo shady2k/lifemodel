@@ -14,12 +14,18 @@ import type { Message } from '../../llm/provider.js';
  * Flow: created → running → awaiting_input → completed
  *                     ↘ failed
  */
-export type RunStatus = 'created' | 'running' | 'awaiting_input' | 'completed' | 'failed';
+export type RunStatus =
+  | 'created'
+  | 'running'
+  | 'awaiting_input'
+  | 'awaiting_approval'
+  | 'completed'
+  | 'failed';
 
 /**
  * Tools available to the Motor Cortex sub-agent.
  */
-export type MotorTool = 'code' | 'filesystem' | 'ask_user';
+export type MotorTool = 'code' | 'filesystem' | 'ask_user' | 'shell' | 'grep' | 'patch';
 
 /**
  * Result from executing a Motor Cortex tool.
@@ -68,6 +74,9 @@ export interface TaskResult {
 
   /** Run ID that produced this result */
   runId: string;
+
+  /** Files produced by the run (copied to artifacts dir) */
+  artifacts?: string[];
 
   /** Execution statistics */
   stats: {
@@ -193,6 +202,16 @@ export interface MotorRun {
 
   /** Tool call ID for the pending ask_user (for tool_call/result atomicity) */
   pendingToolCallId?: string;
+
+  /** Pending approval request (set when status=awaiting_approval) */
+  pendingApproval?: {
+    /** Description of the action needing approval */
+    action: string;
+    /** Step cursor when approval was requested */
+    stepCursor: number;
+    /** When approval expires (auto-cancel) */
+    expiresAt: string;
+  };
 
   /** Final result (set when status=completed) */
   result?: TaskResult;

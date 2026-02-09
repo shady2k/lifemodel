@@ -482,13 +482,14 @@ export interface MotorResultData {
   runId: string;
 
   /** Run status */
-  status: 'completed' | 'failed' | 'awaiting_input';
+  status: 'completed' | 'failed' | 'awaiting_input' | 'awaiting_approval';
 
   /** Result (present when status=completed) */
   result?: {
     ok: boolean;
     summary: string;
     stats: { iterations: number; durationMs: number; energyCost: number; errors: number };
+    artifacts?: string[];
   };
 
   /** Error details (present when status=failed) */
@@ -496,6 +497,9 @@ export interface MotorResultData {
 
   /** Question for user (present when status=awaiting_input) */
   question?: string;
+
+  /** Approval request (present when status=awaiting_approval) */
+  approval?: { action: string; expiresAt: string };
 }
 
 /**

@@ -10,6 +10,7 @@ import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
 import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
+import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
 
 /**
  * Create the core.act tool.
@@ -33,7 +34,8 @@ export function createActTool(motorCortex: MotorCortex): Tool {
     {
       name: 'tools',
       type: 'array' as const,
-      description: 'Tools for agentic mode (code, filesystem). Default: [code]',
+      description:
+        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user). Default: [code]',
       required: false,
     },
     {
@@ -42,12 +44,25 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       description: 'Max iterations for agentic mode (default: 20)',
       required: false,
     },
+    {
+      name: 'skill',
+      type: 'string' as const,
+      description:
+        'Skill name to load and inject (loads from data/skills/<name>/SKILL.md). Overrides tools with skill-defined tools.',
+      required: false,
+    },
+    {
+      name: 'inputs',
+      type: 'object' as const,
+      description: 'Input values for skill execution (validated against skill input schema)',
+      required: false,
+    },
   ];
 
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously and returns the result. "agentic" starts an async sub-agent task that can use tools like code and filesystem. Agentic tasks run in the background and results come back via signals.',
+      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously and returns the result. "agentic" starts an async sub-agent task that can use tools like code, filesystem, shell, grep, and patch. Agentic tasks run in the background and results come back via signals. Optionally load a skill for guided execution.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -86,13 +101,50 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       if (mode === 'agentic') {
         // Start agentic run
         try {
-          const tools = (args['tools'] as MotorTool[] | undefined) ?? ['code'];
+          const skillName = args['skill'] as string | undefined;
+          const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
+          let tools = (args['tools'] as MotorTool[] | undefined) ?? ['code'];
           const maxIterations = (args['maxIterations'] as number | undefined) ?? 20;
 
+          // Load skill if specified
+          let loadedSkill = undefined;
+          if (skillName) {
+            const skillResult = await loadSkill(skillName);
+            if ('error' in skillResult) {
+              return {
+                success: false,
+                error: skillResult.error,
+              };
+            }
+            loadedSkill = skillResult;
+
+            // Override tools with skill-defined tools
+            tools = loadedSkill.definition.tools;
+
+            // Validate inputs against skill schema
+            const inputErrors = validateSkillInputs(loadedSkill, inputs);
+            if (inputErrors.length > 0) {
+              return {
+                success: false,
+                error: `Skill input validation failed: ${inputErrors.join('; ')}`,
+              };
+            }
+          }
+
+          // Build task with inputs if provided
+          let fullTask = task;
+          if (Object.keys(inputs).length > 0) {
+            const inputStr = Object.entries(inputs)
+              .map(([k, v]) => `${k}: ${String(v)}`)
+              .join('\n');
+            fullTask = `${task}\n\nInputs:\n${inputStr}`;
+          }
+
           const { runId } = await motorCortex.startRun({
-            task,
+            task: fullTask,
             tools,
             maxIterations,
+            ...(loadedSkill && { skill: loadedSkill }),
           });
 
           return {
@@ -101,6 +153,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
               mode: 'agentic',
               runId,
               status: 'started',
+              ...(skillName && { skill: skillName }),
               message: 'Task started in background. Results will arrive via motor_result signal.',
             },
           };

@@ -17,9 +17,9 @@ export function createTaskTool(motorCortex: MotorCortex): Tool {
     {
       name: 'action',
       type: 'string' as const,
-      description: 'Action: list (all runs), status (one run), cancel, respond',
+      description: 'Action: list (all runs), status (one run), cancel, respond, approve',
       required: true,
-      enum: ['list', 'status', 'cancel', 'respond'] as const,
+      enum: ['list', 'status', 'cancel', 'respond', 'approve'] as const,
     },
     {
       name: 'runId',
@@ -32,7 +32,14 @@ export function createTaskTool(motorCortex: MotorCortex): Tool {
       type: 'string' as const,
       description: 'Filter by status (for list action only)',
       required: false,
-      enum: ['created', 'running', 'awaiting_input', 'completed', 'failed'] as const,
+      enum: [
+        'created',
+        'running',
+        'awaiting_input',
+        'awaiting_approval',
+        'completed',
+        'failed',
+      ] as const,
     },
     {
       name: 'limit',
@@ -44,6 +51,12 @@ export function createTaskTool(motorCortex: MotorCortex): Tool {
       name: 'answer',
       type: 'string' as const,
       description: 'Answer to provide (for respond action)',
+      required: false,
+    },
+    {
+      name: 'approved',
+      type: 'boolean' as const,
+      description: 'Whether to approve (true) or deny (false) (for approve action)',
       required: false,
     },
   ];
@@ -199,10 +212,40 @@ export function createTaskTool(motorCortex: MotorCortex): Tool {
           }
         }
 
+        case 'approve': {
+          const runId = args['runId'] as string;
+          const approved = args['approved'] as boolean | undefined;
+          if (!runId) {
+            return {
+              success: false,
+              error: 'Missing required parameter: runId (for approve action)',
+            };
+          }
+          if (approved === undefined) {
+            return {
+              success: false,
+              error: 'Missing required parameter: approved (for approve action)',
+            };
+          }
+
+          try {
+            const result = await motorCortex.respondToApproval(runId, approved);
+            return {
+              success: true,
+              data: result,
+            };
+          } catch (error) {
+            return {
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
         default:
           return {
             success: false,
-            error: `Unknown action: ${action}. Use list, status, cancel, or respond.`,
+            error: `Unknown action: ${action}. Use list, status, cancel, respond, or approve.`,
           };
       }
     },

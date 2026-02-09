@@ -15,6 +15,8 @@ import type { MotorRun, MotorTool, RunStatus } from './motor-protocol.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
+import type { LoadedSkill } from '../skills/skill-types.js';
+import type { CredentialStore } from '../vault/credential-store.js';
 
 /**
  * Default max iterations.
@@ -36,6 +38,15 @@ export interface MotorCortexDeps {
 
   /** Energy model for energy gating */
   energyModel: EnergyModel;
+
+  /** Credential store for resolving <credential:name> placeholders (optional) */
+  credentialStore?: CredentialStore;
+
+  /** Skills directory absolute path (optional, default: data/skills) */
+  skillsDir?: string;
+
+  /** Base directory for persisting run artifacts (optional, default: data/motor-runs) */
+  artifactsBaseDir?: string;
 }
 
 /**
@@ -53,6 +64,9 @@ export class MotorCortex {
   private readonly logger: Logger;
   private readonly energyModel: EnergyModel;
   private readonly stateManager: MotorStateManager;
+  private readonly credentialStore: CredentialStore | undefined;
+  private readonly skillsDir: string | undefined;
+  private readonly artifactsBaseDir: string | undefined;
 
   /** Signal callback (wired by container) */
   private signalCallback: ((signal: Signal) => void) | null = null;
@@ -65,6 +79,9 @@ export class MotorCortex {
     this.logger = deps.logger.child({ component: 'motor-cortex' });
     this.energyModel = deps.energyModel;
     this.stateManager = createMotorStateManager(deps.storage, this.logger);
+    this.credentialStore = deps.credentialStore;
+    this.skillsDir = deps.skillsDir;
+    this.artifactsBaseDir = deps.artifactsBaseDir;
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -139,6 +156,7 @@ export class MotorCortex {
     tools: MotorTool[];
     maxIterations?: number;
     timeout?: number;
+    skill?: LoadedSkill;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -205,8 +223,13 @@ export class MotorCortex {
       },
     };
 
-    // Fix messages with proper run object
-    run.messages = buildInitialMessages(run);
+    // Set skill name on the run if one was provided
+    if (params.skill) {
+      run.skill = params.skill.definition.name;
+    }
+
+    // Fix messages with proper run object (including skill injection)
+    run.messages = buildInitialMessages(run, params.skill);
 
     // Persist run
     await this.stateManager.createRun(run);
@@ -240,6 +263,9 @@ export class MotorCortex {
         this.pushSignal(signal);
       },
       logger: this.logger,
+      ...(this.skillsDir && { skillsDir: this.skillsDir }),
+      ...(this.credentialStore && { credentialStore: this.credentialStore }),
+      ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
     });
   }
 
@@ -364,6 +390,81 @@ export class MotorCortex {
   }
 
   /**
+   * Respond to a run that's awaiting approval.
+   *
+   * @param runId - Run ID
+   * @param approved - Whether the action is approved
+   */
+  async respondToApproval(
+    runId: string,
+    approved: boolean
+  ): Promise<{
+    runId: string;
+    previousStatus: 'awaiting_approval';
+    newStatus: 'running' | 'failed';
+  }> {
+    const run = await this.stateManager.getRun(runId);
+    if (!run) {
+      throw new Error(`Run not found: ${runId}`);
+    }
+
+    if (run.status !== 'awaiting_approval') {
+      throw new Error(`Run ${runId} is not awaiting approval (status: ${run.status})`);
+    }
+
+    // Inject tool result for the request_approval call
+    if (run.pendingToolCallId) {
+      run.messages.push({
+        role: 'tool',
+        content: JSON.stringify({
+          ok: approved,
+          output: approved ? 'Approved. Proceed.' : 'Denied. Do not proceed with this action.',
+        }),
+        tool_call_id: run.pendingToolCallId,
+      });
+    }
+
+    if (approved) {
+      run.status = 'running';
+      delete run.pendingApproval;
+      delete run.pendingToolCallId;
+      await this.stateManager.updateRun(run);
+
+      this.logger.info({ runId }, 'Approval granted, resuming Motor Cortex loop');
+      this.runLoopInBackground(run).catch((error: unknown) => {
+        this.logger.error({ runId, error }, 'Motor loop resumption failed');
+      });
+
+      return { runId, previousStatus: 'awaiting_approval', newStatus: 'running' };
+    } else {
+      run.status = 'failed';
+      run.completedAt = new Date().toISOString();
+      delete run.pendingApproval;
+      delete run.pendingToolCallId;
+      await this.stateManager.updateRun(run);
+
+      this.pushSignal(
+        createSignal(
+          'motor_result',
+          'motor.cortex',
+          { value: 1, confidence: 1 },
+          {
+            data: {
+              kind: 'motor_result',
+              runId,
+              status: 'failed',
+              error: { message: 'Approval denied by user' },
+            },
+          }
+        )
+      );
+
+      this.logger.info({ runId }, 'Approval denied, run failed');
+      return { runId, previousStatus: 'awaiting_approval', newStatus: 'failed' };
+    }
+  }
+
+  /**
    * Recover runs on restart.
    *
    * - running → resume from stepCursor
@@ -412,6 +513,58 @@ export class MotorCortex {
             );
           }
           reEmitted++;
+          break;
+
+        case 'awaiting_approval':
+          // Check timeout, auto-cancel if expired
+          if (run.pendingApproval) {
+            const expiresAt = new Date(run.pendingApproval.expiresAt);
+            if (new Date() > expiresAt) {
+              this.logger.info({ runId: run.id }, 'Approval timed out, auto-canceling');
+              run.status = 'failed';
+              run.completedAt = new Date().toISOString();
+              delete run.pendingApproval;
+              delete run.pendingToolCallId;
+              await this.stateManager.updateRun(run);
+              this.pushSignal(
+                createSignal(
+                  'motor_result',
+                  'motor.cortex',
+                  { value: 1, confidence: 1 },
+                  {
+                    data: {
+                      kind: 'motor_result',
+                      runId: run.id,
+                      status: 'failed',
+                      error: { message: 'Approval timed out (15 min)' },
+                    },
+                  }
+                )
+              );
+            } else {
+              // Re-emit approval signal
+              this.logger.info({ runId: run.id }, 'Re-emitting awaiting_approval signal');
+              this.pushSignal(
+                createSignal(
+                  'motor_result',
+                  'motor.cortex',
+                  { value: 1, confidence: 1 },
+                  {
+                    data: {
+                      kind: 'motor_result',
+                      runId: run.id,
+                      status: 'awaiting_approval',
+                      approval: {
+                        action: run.pendingApproval.action,
+                        expiresAt: run.pendingApproval.expiresAt,
+                      },
+                    },
+                  }
+                )
+              );
+              reEmitted++;
+            }
+          }
           break;
 
         case 'created':
