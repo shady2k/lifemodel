@@ -285,24 +285,25 @@ export abstract class BaseLLMProvider implements LLMProvider {
     const totalMessages = request.messages.length;
     const newMessageStart = this.lastLoggedMessageCount;
 
+    // Build the entire request block as a single string, then log once.
+    // This avoids repeating the pino prefix ([timestamp] [traceId]) on every message.
+    const NEW = '► ';
+    const INDENT = '  ';
+    const lines: string[] = [];
+
     // Request header
-    logConversation(
-      { logType: 'REQUEST', requestId, provider: this.name, model: request.model },
-      `\n${'═'.repeat(60)}\n→ REQUEST [${requestId}] to ${this.name} (${request.model ?? request.role ?? 'unknown'})\n${'─'.repeat(60)}`
+    lines.push(`\n${'═'.repeat(60)}`);
+    lines.push(
+      `→ REQUEST [${requestId}] to ${this.name} (${request.model ?? request.role ?? 'unknown'})`
     );
+    lines.push('─'.repeat(60));
 
     // Show context summary if there are previously logged messages
     if (newMessageStart > 0) {
-      logConversation(
-        { logType: 'CONTEXT' },
-        `[...${String(newMessageStart)} messages from history — see earlier in log...]`
-      );
+      lines.push(`[...${String(newMessageStart)} messages from history — see earlier in log...]`);
     }
 
     // Only log NEW messages (delta logging eliminates massive repetition)
-    // Use "► " prefix to visually mark new messages (easy to scan)
-    const NEW = '► ';
-    const INDENT = '  ';
     for (let i = newMessageStart; i < totalMessages; i++) {
       const msg = request.messages[i];
       if (!msg) continue;
@@ -321,8 +322,7 @@ export abstract class BaseLLMProvider implements LLMProvider {
         } catch {
           // Not JSON, use as-is
         }
-        logConversation(
-          { logType: 'TOOL_RESULT' },
+        lines.push(
           `${NEW}[${idx}] TOOL RESULT (${msg.tool_call_id ?? 'unknown'}):\n${INDENT}${formattedContent}`
         );
       } else if (msg.tool_calls && msg.tool_calls.length > 0) {
@@ -342,16 +342,23 @@ export abstract class BaseLLMProvider implements LLMProvider {
           })
           .join('\n');
         const indentedContent = content === '(no content)' ? '' : `\n${INDENT}${content}`;
-        logConversation(
-          { logType: 'ASSISTANT_TOOLS' },
+        lines.push(
           `${NEW}[${idx}] ${role}:${indentedContent}\n${INDENT}Tool calls:\n${toolDetails}`
         );
       } else {
-        // Regular message - indent content
-        const indentedContent = content.split('\n').join('\n' + INDENT);
-        logConversation({ logType: role }, `${NEW}[${idx}] ${role}:\n${INDENT}${indentedContent}`);
+        // Regular message — extract <msg_time> into header for compact log output
+        const timeMatch = /^<msg_time>(.*?)<\/msg_time>\n?/.exec(content);
+        const timeLabel = timeMatch?.[1] ? ` (${timeMatch[1]})` : '';
+        const cleanContent = timeMatch ? content.slice(timeMatch[0].length) : content;
+        const indentedContent = cleanContent.split('\n').join('\n' + INDENT);
+        lines.push(`${NEW}[${idx}] ${role}${timeLabel}:\n${INDENT}${indentedContent}`);
       }
     }
+
+    logConversation(
+      { logType: 'REQUEST', requestId, provider: this.name, model: request.model },
+      lines.join('\n')
+    );
 
     // Update the count for next request
     this.lastLoggedMessageCount = totalMessages;
