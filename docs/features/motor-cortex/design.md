@@ -165,7 +165,7 @@ Originally designed as two tools (`core.tasks` for listing, `core.task` for cont
   parameters: {
     action: {
       type: 'string',
-      enum: ['list', 'status', 'cancel', 'respond'],
+      enum: ['list', 'status', 'cancel', 'respond', 'approve', 'log', 'retry'],
       description: 'Action to perform.',
     },
     runId: { type: 'string', description: 'Run ID (required for status, cancel, respond).' },
@@ -181,8 +181,9 @@ Originally designed as two tools (`core.tasks` for listing, `core.task` for cont
 - `status`: Full run details (status, steps, trace, pendingQuestion)
 - `cancel`: `{ runId, previousStatus, newStatus: 'failed' }`
 - `respond`: `{ runId, previousStatus: 'awaiting_input', newStatus: 'running' }`
-
-**Phase 2 adds:** `action: 'approve'` is handled via `respond` — the user's answer ("Yes" / "No") is the approval. No separate action needed; this keeps the API surface minimal.
+- `approve`: `{ runId, previousStatus: 'awaiting_approval', newStatus: 'running' | 'failed' }`
+- `log`: `{ log: string }` — last 16KB of execution log
+- `retry`: `{ runId, attemptIndex: number, status: 'running' }` — retries a failed run with guidance
 
 ### No Separate Intent Type
 
@@ -353,14 +354,10 @@ interface MotorRun {
   skill?: string;
   tools: MotorTool[];
 
-  // Progress
-  stepCursor: number;                  // Persisted separately from trace for fast restart recovery
-                                       // (resume without loading full trace into memory)
-  maxIterations: number;
-  messages: Message[];                 // Sub-agent conversation (uses existing Message type)
-
-  // User interaction (Phase 1)
-  pendingQuestion?: string;            // Set when status = 'awaiting_input', cleared on resume
+  // Attempts (each retry is a new attempt with clean messages)
+  attempts: MotorAttempt[];            // Ordered list of attempts
+  currentAttemptIndex: number;         // Index into attempts[]
+  maxAttempts: number;                 // Default: 3
 
   // Outcome
   result?: TaskResult;
@@ -369,7 +366,22 @@ interface MotorRun {
   startedAt: string;
   completedAt?: string;
   energyConsumed: number;
+}
+
+interface MotorAttempt {
+  id: string;                          // "att_0", "att_1", etc.
+  index: number;                       // 0-based
+  status: 'running' | 'awaiting_input' | 'awaiting_approval' | 'completed' | 'failed';
+  messages: Message[];                 // Sub-agent conversation for THIS attempt
+  stepCursor: number;                  // For resumption after restart
+  maxIterations: number;               // 20 for first, 15 for retries
   trace: RunTrace;                     // Step-by-step structured trace
+  recoveryContext?: RecoveryContext;    // Present on attempts 1+
+  failure?: FailureSummary;            // Present when status='failed'
+  pendingQuestion?: string;            // Set when status = 'awaiting_input'
+  pendingToolCallId?: string;          // For tool_call/result atomicity
+  startedAt: string;
+  completedAt?: string;
 }
 ```
 
@@ -969,6 +981,33 @@ Motor Cortex resumes:
 Cognition (turn 4):
   → core.say("All readings submitted. Apt 67: 988 (+3), Apt 69: ...")
 ```
+
+### Failure Recovery: Attempt Model
+
+When a Motor Cortex run fails, Cognition can retry the same run instead of starting from scratch. Each retry is a new **attempt** with clean message history but structured recovery context from the previous failure.
+
+**Key concepts:**
+- A `MotorRun` contains an ordered list of `MotorAttempt`s (max 3 by default)
+- Each attempt has its own messages, trace, and step cursor — no mutating past attempts
+- On failure, a `FailureSummary` classifies what went wrong (tool_failure, model_failure, budget_exhausted, invalid_task) and whether it's retryable
+- An optional LLM hint provides free-text analysis of the failure (best-effort, graceful on failure)
+- On retry, Cognition provides a `RecoveryContext` with corrective guidance, injected into the motor system prompt as `<recovery_context>` (never as `role: 'user'` — preserves provenance boundaries)
+
+**Flow:**
+
+```
+Cognition calls core.act → attempt 0 starts
+  → attempt 0 fails (tool_failure, retryable=true)
+  → motor_result signal with FailureSummary
+
+Cognition wakes, sees failure trigger:
+  → Reviews failure summary + optional hint
+  → Calls core.task(action:"retry", runId:"...", guidance:"use port 8080")
+  → attempt 1 starts with fresh messages + recovery context in system prompt
+  → attempt 1 succeeds (or fails → Cognition reports failure to user)
+```
+
+Cognition's trigger prompt for failed runs instructs it to retry with guidance if possible, or report failure to the user if not retryable or after max attempts.
 
 ### Phase 3: Muscle Memory
 

@@ -20,9 +20,9 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
       name: 'action',
       type: 'string' as const,
       description:
-        'Action: list (all runs), status (one run), cancel, respond, approve, log (view run log)',
+        'Action: list (all runs), status (one run), cancel, respond, approve, log (view run log), retry (retry failed run with guidance)',
       required: true,
-      enum: ['list', 'status', 'cancel', 'respond', 'approve', 'log'] as const,
+      enum: ['list', 'status', 'cancel', 'respond', 'approve', 'log', 'retry'] as const,
     },
     {
       name: 'runId',
@@ -62,12 +62,26 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
       description: 'Whether to approve (true) or deny (false) (for approve action)',
       required: false,
     },
+    {
+      name: 'guidance',
+      type: 'string' as const,
+      description:
+        'Corrective instructions for retry attempt (for retry action). Explain what went wrong and what to try differently.',
+      required: false,
+    },
+    {
+      name: 'constraints',
+      type: 'array' as const,
+      description:
+        'Optional constraints for retry attempt (e.g. "do not retry login more than once")',
+      required: false,
+    },
   ];
 
   return {
     name: 'core.task',
     description:
-      'Manage Motor Cortex runs. list: show all runs (filterable by status). status: get details of one run. cancel: stop a running run. respond: answer a question from an awaiting_input run. log: view execution log for a run.',
+      'Manage Motor Cortex runs. list: show all runs (filterable by status). status: get details of one run. cancel: stop a running run. respond: answer a question from an awaiting_input run. log: view execution log for a run. retry: retry a failed run with corrective guidance.',
     tags: ['motor', 'control'],
     hasSideEffects: true,
     parameters,
@@ -104,15 +118,20 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
             }
             const result = await motorCortex.listRuns(filter);
 
-            const runs = result.runs.map((run) => ({
-              id: run.id,
-              status: run.status,
-              task: run.task,
-              startedAt: run.startedAt,
-              completedAt: run.completedAt,
-              iterations: run.trace.totalIterations,
-              tools: run.tools,
-            }));
+            const runs = result.runs.map((run) => {
+              const currentAttempt = run.attempts[run.currentAttemptIndex];
+              return {
+                id: run.id,
+                status: run.status,
+                task: run.task,
+                startedAt: run.startedAt,
+                completedAt: run.completedAt,
+                attemptIndex: run.currentAttemptIndex,
+                totalAttempts: run.attempts.length,
+                iterations: currentAttempt?.trace.totalIterations ?? 0,
+                tools: run.tools,
+              };
+            });
 
             return {
               success: true,
@@ -143,6 +162,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
             };
           }
 
+          const currentAttempt = run.attempts[run.currentAttemptIndex];
           return {
             success: true,
             data: {
@@ -150,14 +170,18 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
               status: run.status,
               task: run.task,
               tools: run.tools,
-              stepCursor: run.stepCursor,
-              maxIterations: run.maxIterations,
+              attemptIndex: run.currentAttemptIndex,
+              totalAttempts: run.attempts.length,
+              maxAttempts: run.maxAttempts,
+              stepCursor: currentAttempt?.stepCursor ?? 0,
+              maxIterations: currentAttempt?.maxIterations ?? 0,
               startedAt: run.startedAt,
               completedAt: run.completedAt,
               energyConsumed: run.energyConsumed,
-              iterations: run.trace.totalIterations,
-              errors: run.trace.errors,
-              pendingQuestion: run.pendingQuestion,
+              iterations: currentAttempt?.trace.totalIterations ?? 0,
+              errors: currentAttempt?.trace.errors ?? 0,
+              pendingQuestion: currentAttempt?.pendingQuestion,
+              failure: currentAttempt?.failure,
             },
           };
         }
@@ -294,10 +318,41 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
           }
         }
 
+        case 'retry': {
+          const runId = args['runId'] as string;
+          const guidance = args['guidance'] as string;
+          if (!runId) {
+            return {
+              success: false,
+              error: 'Missing required parameter: runId (for retry action)',
+            };
+          }
+          if (!guidance) {
+            return {
+              success: false,
+              error: 'Missing required parameter: guidance (for retry action)',
+            };
+          }
+
+          try {
+            const constraints = args['constraints'] as string[] | undefined;
+            const result = await motorCortex.retryRun(runId, guidance, constraints);
+            return {
+              success: true,
+              data: result,
+            };
+          } catch (error) {
+            return {
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
         default:
           return {
             success: false,
-            error: `Unknown action: ${action}. Use list, status, cancel, respond, approve, or log.`,
+            error: `Unknown action: ${action}. Use list, status, cancel, respond, approve, retry, or log.`,
           };
       }
     },

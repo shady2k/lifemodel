@@ -3,6 +3,9 @@
  *
  * Top-level service for Motor Cortex functionality.
  * Manages runs, energy gating, async dispatch, and signal emission.
+ *
+ * A run contains one or more attempts. Each retry creates a new attempt
+ * with clean message history but recovery context from the previous failure.
  */
 
 import type { Logger } from '../../types/index.js';
@@ -11,17 +14,24 @@ import type { Storage } from '../../storage/storage.js';
 import type { Signal } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import type { EnergyModel } from '../../core/energy.js';
-import type { MotorRun, MotorTool, RunStatus } from './motor-protocol.js';
+import type { MotorRun, MotorTool, RunStatus, MotorAttempt } from './motor-protocol.js';
+import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
+import { loadSkill } from '../skills/skill-loader.js';
 
 /**
- * Default max iterations.
+ * Default max iterations per attempt.
  */
 const DEFAULT_MAX_ITERATIONS = 20;
+
+/**
+ * Default max iterations for retry attempts (slightly reduced budget).
+ */
+const RETRY_MAX_ITERATIONS = 15;
 
 /**
  * Dependencies for Motor Cortex service.
@@ -58,6 +68,7 @@ export interface MotorCortexDeps {
  * - Energy gating: Check energy before creating runs
  * - Async dispatch: startRun() returns immediately, results via signal
  * - Oneshot: Direct sandbox execution without sub-agent loop
+ * - Retry: Failed runs can be retried with recovery guidance from Cognition
  */
 export class MotorCortex {
   private readonly llm: LLMProvider;
@@ -143,6 +154,43 @@ export class MotorCortex {
   }
 
   /**
+   * Create a fresh MotorAttempt.
+   */
+  private createAttempt(
+    index: number,
+    run: MotorRun,
+    maxIterations: number,
+    skill?: LoadedSkill,
+    recoveryContext?: MotorAttempt['recoveryContext']
+  ): MotorAttempt {
+    const attemptId = `att_${String(index)}`;
+    const messages = buildInitialMessages(run, skill, recoveryContext, maxIterations);
+
+    return {
+      id: attemptId,
+      index,
+      status: 'running',
+      messages,
+      stepCursor: 0,
+      maxIterations,
+      trace: {
+        runId: run.id,
+        task: run.task,
+        status: 'running',
+        steps: [],
+        totalIterations: 0,
+        totalDurationMs: 0,
+        totalEnergyCost: 0,
+        llmCalls: 0,
+        toolCalls: 0,
+        errors: 0,
+      },
+      ...(recoveryContext && { recoveryContext }),
+      startedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
    * Start an agentic run (async sub-agent loop).
    *
    * Returns immediately with runId. Result comes back via signal.
@@ -176,51 +224,18 @@ export class MotorCortex {
     // Create run
     const runId = crypto.randomUUID();
     const now = new Date().toISOString();
+    const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
     const run: MotorRun = {
       id: runId,
       status: 'created',
       task: params.task,
       tools: params.tools,
-      stepCursor: 0,
-      maxIterations: params.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-      messages: buildInitialMessages({
-        id: runId,
-        status: 'created',
-        task: params.task,
-        tools: params.tools,
-        stepCursor: 0,
-        maxIterations: params.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-        messages: [], // Will be set by buildInitialMessages
-        startedAt: now,
-        energyConsumed: energyBefore - this.energyModel.getEnergy(),
-        trace: {
-          runId,
-          task: params.task,
-          status: 'created',
-          steps: [],
-          totalIterations: 0,
-          totalDurationMs: 0,
-          totalEnergyCost: 0,
-          llmCalls: 0,
-          toolCalls: 0,
-          errors: 0,
-        },
-      }),
+      attempts: [], // Will be populated below
+      currentAttemptIndex: 0,
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
       startedAt: now,
       energyConsumed: energyBefore - this.energyModel.getEnergy(),
-      trace: {
-        runId,
-        task: params.task,
-        status: 'created',
-        steps: [],
-        totalIterations: 0,
-        totalDurationMs: 0,
-        totalEnergyCost: 0,
-        llmCalls: 0,
-        toolCalls: 0,
-        errors: 0,
-      },
     };
 
     // Set skill name on the run if one was provided
@@ -228,8 +243,9 @@ export class MotorCortex {
       run.skill = params.skill.definition.name;
     }
 
-    // Fix messages with proper run object (including skill injection)
-    run.messages = buildInitialMessages(run, params.skill);
+    // Create initial attempt (index 0, no recovery context)
+    const attempt0 = this.createAttempt(0, run, maxIterations, params.skill);
+    run.attempts.push(attempt0);
 
     // Persist run
     await this.stateManager.createRun(run);
@@ -237,7 +253,7 @@ export class MotorCortex {
     this.logger.info({ runId, task: params.task, tools: params.tools }, 'Motor Cortex run created');
 
     // Kick off loop in background (fire and forget)
-    this.runLoopInBackground(run).catch((error: unknown) => {
+    this.runLoopInBackground(run, attempt0).catch((error: unknown) => {
       this.logger.error({ runId, error }, 'Motor loop execution failed');
     });
 
@@ -245,19 +261,115 @@ export class MotorCortex {
   }
 
   /**
-   * Run the motor loop in background.
+   * Retry a failed run with recovery guidance from Cognition.
+   *
+   * Creates a new attempt with clean message history but recovery context.
+   * Cognition provides corrective instructions; Motor handles execution.
+   *
+   * @param runId - Run to retry
+   * @param guidance - Corrective instructions from Cognition
+   * @param constraints - Optional constraints for the retry
+   * @returns Run ID and new attempt index
+   */
+  async retryRun(
+    runId: string,
+    guidance: string,
+    constraints?: string[]
+  ): Promise<{ runId: string; attemptIndex: number; status: 'running' }> {
+    const run = await this.stateManager.getRun(runId);
+    if (!run) {
+      throw new Error(`Run not found: ${runId}`);
+    }
+
+    // Validate: last attempt must be failed
+    const lastAttempt = run.attempts[run.currentAttemptIndex];
+    if (lastAttempt?.status !== 'failed') {
+      throw new Error(
+        `Cannot retry run ${runId}: last attempt is not failed (status: ${lastAttempt?.status ?? 'none'})`
+      );
+    }
+
+    // Validate: haven't exceeded max attempts
+    if (run.attempts.length >= run.maxAttempts) {
+      throw new Error(
+        `Cannot retry run ${runId}: max attempts (${String(run.maxAttempts)}) reached`
+      );
+    }
+
+    // Check mutex: no other active run
+    const activeRun = await this.stateManager.getActiveRun();
+    if (activeRun) {
+      throw new Error(
+        `Cannot retry: active run exists (${activeRun.id}, status: ${activeRun.status})`
+      );
+    }
+
+    // Build recovery context
+    const recoveryContext: MotorAttempt['recoveryContext'] = {
+      source: 'cognition',
+      previousAttemptId: lastAttempt.id,
+      guidance,
+      ...(constraints && constraints.length > 0 && { constraints }),
+    };
+
+    // Re-load skill if the run had one (so retry attempt gets skill instructions)
+    let skill: LoadedSkill | undefined;
+    if (run.skill && this.skillsDir) {
+      const skillResult = await loadSkill(run.skill, this.skillsDir);
+      if (!('error' in skillResult)) {
+        skill = skillResult;
+      }
+    }
+
+    // Set currentAttemptIndex BEFORE createAttempt (buildMotorSystemPrompt reads it for maxIterations)
+    const newIndex = run.attempts.length;
+    run.currentAttemptIndex = newIndex;
+
+    // Create new attempt with fresh messages but recovery context
+    const newAttempt = this.createAttempt(
+      newIndex,
+      run,
+      RETRY_MAX_ITERATIONS,
+      skill,
+      recoveryContext
+    );
+    run.attempts.push(newAttempt);
+
+    // Transition run back to running
+    run.status = 'running';
+    delete run.completedAt;
+
+    await this.stateManager.updateRun(run);
+
+    this.logger.info(
+      { runId, attemptIndex: newIndex, guidance: guidance.slice(0, 100) },
+      'Motor Cortex run retrying with guidance'
+    );
+
+    // Kick off loop in background
+    this.runLoopInBackground(run, newAttempt).catch((error: unknown) => {
+      this.logger.error({ runId, error }, 'Motor loop retry execution failed');
+    });
+
+    return { runId, attemptIndex: newIndex, status: 'running' };
+  }
+
+  /**
+   * Run the motor loop in background for a specific attempt.
    *
    * This is fire-and-forget - result comes back via signal.
    */
-  private async runLoopInBackground(run: MotorRun): Promise<void> {
+  private async runLoopInBackground(run: MotorRun, attempt: MotorAttempt): Promise<void> {
     try {
       // Transition to running
       run.status = 'running';
+      attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
       // Run the loop
       await runMotorLoop({
         run,
+        attempt,
         llm: this.llm,
         stateManager: this.stateManager,
         pushSignal: (signal) => {
@@ -270,16 +382,28 @@ export class MotorCortex {
       });
     } catch (error) {
       // Motor loop threw an unhandled error (e.g. LLM provider failure, storage failure).
-      // Mark run as failed and emit signal so cognition layer gets feedback.
+      // Mark attempt and run as failed, emit signal so cognition layer gets feedback.
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error({ runId: run.id, error: message }, 'Motor loop crashed');
+      this.logger.error(
+        { runId: run.id, attemptId: attempt.id, error: message },
+        'Motor loop crashed'
+      );
+
+      attempt.status = 'failed';
+      attempt.completedAt = new Date().toISOString();
+      attempt.failure = {
+        category: 'model_failure',
+        retryable: true,
+        suggestedAction: 'retry_with_guidance',
+        lastToolResults: [],
+        hint: message,
+      };
+      delete attempt.pendingQuestion;
+      delete attempt.pendingApproval;
+      delete attempt.pendingToolCallId;
 
       run.status = 'failed';
       run.completedAt = new Date().toISOString();
-      run.trace.totalDurationMs = Date.now() - new Date(run.startedAt).getTime();
-      delete run.pendingQuestion;
-      delete run.pendingApproval;
-      delete run.pendingToolCallId;
 
       try {
         await this.stateManager.updateRun(run);
@@ -297,6 +421,8 @@ export class MotorCortex {
               kind: 'motor_result',
               runId: run.id,
               status: 'failed',
+              attemptIndex: attempt.index,
+              failure: attempt.failure,
               error: { message },
             },
           }
@@ -345,9 +471,20 @@ export class MotorCortex {
     }
 
     const previousStatus = run.status;
+
+    // Mark current attempt as failed
+    const currentAttempt = run.attempts[run.currentAttemptIndex];
+    if (
+      currentAttempt &&
+      currentAttempt.status !== 'completed' &&
+      currentAttempt.status !== 'failed'
+    ) {
+      currentAttempt.status = 'failed';
+      currentAttempt.completedAt = new Date().toISOString();
+    }
+
     run.status = 'failed';
     run.completedAt = new Date().toISOString();
-    run.trace.totalDurationMs = Date.now() - new Date(run.startedAt).getTime();
 
     await this.stateManager.updateRun(run);
 
@@ -362,6 +499,7 @@ export class MotorCortex {
             kind: 'motor_result',
             runId,
             status: 'failed',
+            attemptIndex: run.currentAttemptIndex,
             error: { message: 'Run canceled by user' },
           },
         }
@@ -399,26 +537,33 @@ export class MotorCortex {
       this.awaitingInputTimer = null;
     }
 
+    // Get current attempt
+    const attempt = run.attempts[run.currentAttemptIndex];
+    if (!attempt) {
+      throw new Error(`Run ${runId} has no current attempt`);
+    }
+
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)
-    if (run.pendingToolCallId) {
-      run.messages.push({
+    if (attempt.pendingToolCallId) {
+      attempt.messages.push({
         role: 'tool',
         content: JSON.stringify({ ok: true, output: `User answered: ${answer}` }),
-        tool_call_id: run.pendingToolCallId,
+        tool_call_id: attempt.pendingToolCallId,
       });
     }
 
     // Update status
-    run.status = 'running';
-    run.pendingQuestion = '';
-    delete run.pendingToolCallId;
+    attempt.status = 'running';
+    attempt.pendingQuestion = '';
+    delete attempt.pendingToolCallId;
 
+    run.status = 'running';
     await this.stateManager.updateRun(run);
 
     this.logger.info({ runId }, 'User response received, resuming Motor Cortex loop');
 
     // Resume loop in background
-    this.runLoopInBackground(run).catch((error: unknown) => {
+    this.runLoopInBackground(run, attempt).catch((error: unknown) => {
       this.logger.error({ runId, error }, 'Motor loop resumption failed');
     });
 
@@ -448,35 +593,46 @@ export class MotorCortex {
       throw new Error(`Run ${runId} is not awaiting approval (status: ${run.status})`);
     }
 
+    // Get current attempt
+    const attempt = run.attempts[run.currentAttemptIndex];
+    if (!attempt) {
+      throw new Error(`Run ${runId} has no current attempt`);
+    }
+
     // Inject tool result for the request_approval call
-    if (run.pendingToolCallId) {
-      run.messages.push({
+    if (attempt.pendingToolCallId) {
+      attempt.messages.push({
         role: 'tool',
         content: JSON.stringify({
           ok: approved,
           output: approved ? 'Approved. Proceed.' : 'Denied. Do not proceed with this action.',
         }),
-        tool_call_id: run.pendingToolCallId,
+        tool_call_id: attempt.pendingToolCallId,
       });
     }
 
     if (approved) {
+      attempt.status = 'running';
+      delete attempt.pendingApproval;
+      delete attempt.pendingToolCallId;
+
       run.status = 'running';
-      delete run.pendingApproval;
-      delete run.pendingToolCallId;
       await this.stateManager.updateRun(run);
 
       this.logger.info({ runId }, 'Approval granted, resuming Motor Cortex loop');
-      this.runLoopInBackground(run).catch((error: unknown) => {
+      this.runLoopInBackground(run, attempt).catch((error: unknown) => {
         this.logger.error({ runId, error }, 'Motor loop resumption failed');
       });
 
       return { runId, previousStatus: 'awaiting_approval', newStatus: 'running' };
     } else {
+      attempt.status = 'failed';
+      attempt.completedAt = new Date().toISOString();
+      delete attempt.pendingApproval;
+      delete attempt.pendingToolCallId;
+
       run.status = 'failed';
       run.completedAt = new Date().toISOString();
-      delete run.pendingApproval;
-      delete run.pendingToolCallId;
       await this.stateManager.updateRun(run);
 
       this.pushSignal(
@@ -489,6 +645,7 @@ export class MotorCortex {
               kind: 'motor_result',
               runId,
               status: 'failed',
+              attemptIndex: attempt.index,
               error: { message: 'Approval denied by user' },
             },
           }
@@ -515,20 +672,24 @@ export class MotorCortex {
     let reEmitted = 0;
 
     for (const run of activeRuns) {
+      const attempt = run.attempts[run.currentAttemptIndex];
+      if (!attempt) continue;
+
       switch (run.status) {
         case 'running': {
           // Stale check: if no progress was made (stepCursor 0) and run is older than 5 min,
           // the LLM likely crashed before producing any output — fail rather than retry.
           const ageMs = Date.now() - new Date(run.startedAt).getTime();
           const STALE_THRESHOLD_MS = 5 * 60 * 1000;
-          if (run.stepCursor === 0 && ageMs > STALE_THRESHOLD_MS) {
+          if (attempt.stepCursor === 0 && ageMs > STALE_THRESHOLD_MS) {
             this.logger.info(
               { runId: run.id, ageMs },
               'Failing stale run (no progress, older than 5 min)'
             );
+            attempt.status = 'failed';
+            attempt.completedAt = new Date().toISOString();
             run.status = 'failed';
             run.completedAt = new Date().toISOString();
-            run.trace.totalDurationMs = ageMs;
             await this.stateManager.updateRun(run);
             this.pushSignal(
               createSignal(
@@ -540,6 +701,7 @@ export class MotorCortex {
                     kind: 'motor_result',
                     runId: run.id,
                     status: 'failed',
+                    attemptIndex: attempt.index,
                     error: { message: 'Run stale on restart (no progress before crash)' },
                   },
                 }
@@ -550,10 +712,10 @@ export class MotorCortex {
 
           // Resume from stepCursor
           this.logger.info(
-            { runId: run.id, stepCursor: run.stepCursor },
+            { runId: run.id, stepCursor: attempt.stepCursor, attemptIndex: attempt.index },
             'Resuming Motor Cortex run'
           );
-          this.runLoopInBackground(run).catch((error: unknown) => {
+          this.runLoopInBackground(run, attempt).catch((error: unknown) => {
             this.logger.error({ runId: run.id, error }, 'Motor loop resumption failed');
           });
           resumed++;
@@ -563,7 +725,7 @@ export class MotorCortex {
         case 'awaiting_input':
           // Re-emit signal
           this.logger.info({ runId: run.id }, 'Re-emitting awaiting_input signal');
-          if (run.pendingQuestion) {
+          if (attempt.pendingQuestion) {
             this.pushSignal(
               createSignal(
                 'motor_result',
@@ -574,7 +736,8 @@ export class MotorCortex {
                     kind: 'motor_result',
                     runId: run.id,
                     status: 'awaiting_input',
-                    question: run.pendingQuestion,
+                    attemptIndex: attempt.index,
+                    question: attempt.pendingQuestion,
                   },
                 }
               )
@@ -585,14 +748,16 @@ export class MotorCortex {
 
         case 'awaiting_approval':
           // Check timeout, auto-cancel if expired
-          if (run.pendingApproval) {
-            const expiresAt = new Date(run.pendingApproval.expiresAt);
+          if (attempt.pendingApproval) {
+            const expiresAt = new Date(attempt.pendingApproval.expiresAt);
             if (new Date() > expiresAt) {
               this.logger.info({ runId: run.id }, 'Approval timed out, auto-canceling');
+              attempt.status = 'failed';
+              attempt.completedAt = new Date().toISOString();
+              delete attempt.pendingApproval;
+              delete attempt.pendingToolCallId;
               run.status = 'failed';
               run.completedAt = new Date().toISOString();
-              delete run.pendingApproval;
-              delete run.pendingToolCallId;
               await this.stateManager.updateRun(run);
               this.pushSignal(
                 createSignal(
@@ -604,6 +769,7 @@ export class MotorCortex {
                       kind: 'motor_result',
                       runId: run.id,
                       status: 'failed',
+                      attemptIndex: attempt.index,
                       error: { message: 'Approval timed out (15 min)' },
                     },
                   }
@@ -622,9 +788,10 @@ export class MotorCortex {
                       kind: 'motor_result',
                       runId: run.id,
                       status: 'awaiting_approval',
+                      attemptIndex: attempt.index,
                       approval: {
-                        action: run.pendingApproval.action,
-                        expiresAt: run.pendingApproval.expiresAt,
+                        action: attempt.pendingApproval.action,
+                        expiresAt: attempt.pendingApproval.expiresAt,
                       },
                     },
                   }
@@ -639,8 +806,9 @@ export class MotorCortex {
           // Transition to running and start
           this.logger.info({ runId: run.id }, 'Starting created run');
           run.status = 'running';
+          attempt.status = 'running';
           await this.stateManager.updateRun(run);
-          this.runLoopInBackground(run).catch((error: unknown) => {
+          this.runLoopInBackground(run, attempt).catch((error: unknown) => {
             this.logger.error({ runId: run.id, error }, 'Motor loop start failed');
           });
           resumed++;

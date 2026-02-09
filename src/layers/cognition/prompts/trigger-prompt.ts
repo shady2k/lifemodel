@@ -22,7 +22,9 @@ import {
   buildPluginEventSection,
   buildThoughtTriggerSection,
   buildReactionTriggerSection,
+  buildMotorResultSection,
 } from './trigger-sections.js';
+import type { MotorResultData } from '../../../types/signal.js';
 
 /**
  * Build trigger prompt for current context.
@@ -121,6 +123,11 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
   // Handle message_reaction triggers (direct, not converted to thought)
   if (signal.type === 'message_reaction' && data) {
     return buildReactionTriggerSection(data);
+  }
+
+  // Handle motor_result triggers (task completion, failure, awaiting input/approval)
+  if (signal.type === 'motor_result' && data?.['kind'] === 'motor_result') {
+    return buildMotorResultSection(data as unknown as MotorResultData);
   }
 
   return `<trigger type="${signal.type}">\n<context>${JSON.stringify(data ?? {})}</context>\n</trigger>`;

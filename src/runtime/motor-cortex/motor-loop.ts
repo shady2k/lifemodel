@@ -3,13 +3,22 @@
  *
  * The sub-agent iteration loop for Motor Cortex runs.
  * Handles LLM interaction, tool execution, state persistence, and result emission.
+ *
+ * Operates on a single MotorAttempt — the run-level lifecycle is managed by motor-cortex.ts.
  */
 
 import type { Logger } from '../../types/index.js';
 import type { LLMProvider, Message } from '../../llm/provider.js';
 import type { Signal } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
-import type { MotorRun, StepTrace, TaskResult } from './motor-protocol.js';
+import type {
+  MotorRun,
+  MotorAttempt,
+  StepTrace,
+  TaskResult,
+  FailureSummary,
+  FailureCategory,
+} from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
 import { getToolDefinitions, executeTool, createWorkspace } from './motor-tools.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
@@ -23,8 +32,11 @@ import { createTaskLogger, redactCredentials } from './task-logger.js';
  * Parameters for running the motor loop.
  */
 export interface MotorLoopParams {
-  /** The run to execute */
+  /** The run (for run-level metadata like id, task, tools) */
   run: MotorRun;
+
+  /** The specific attempt to execute */
+  attempt: MotorAttempt;
 
   /** LLM provider for the sub-agent */
   llm: LLMProvider;
@@ -57,10 +69,15 @@ export interface MotorLoopParams {
 const CONSECUTIVE_FAILURE_THRESHOLD = 3;
 
 /**
- * Run the Motor Cortex loop.
+ * Max tokens for failure hint generation.
+ */
+const FAILURE_HINT_MAX_TOKENS = 256;
+
+/**
+ * Run the Motor Cortex loop for a single attempt.
  *
  * This is the core sub-agent execution loop. It:
- * 1. Builds system prompt with task and tools
+ * 1. Builds system prompt with task and tools (+ recovery context if retrying)
  * 2. Enters iteration loop (starting from stepCursor)
  * 3. Calls LLM, executes tools, records results
  * 4. Persists state after each tool execution
@@ -71,10 +88,13 @@ const CONSECUTIVE_FAILURE_THRESHOLD = 3;
  * @param params - Loop parameters
  */
 export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
-  const { run, llm, stateManager, pushSignal, logger } = params;
-  const childLogger = logger.child({ runId: run.id });
+  const { run, attempt, llm, stateManager, pushSignal, logger } = params;
+  const childLogger = logger.child({ runId: run.id, attemptId: attempt.id });
 
-  childLogger.info({ task: run.task, tools: run.tools }, 'Starting Motor Cortex loop');
+  childLogger.info(
+    { task: run.task, tools: run.tools, attemptIndex: attempt.index },
+    'Starting Motor Cortex loop'
+  );
 
   // Create workspace for this run
   const workspace = await createWorkspace();
@@ -82,9 +102,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   // Create per-run task log
   const taskLog = createTaskLogger(params.artifactsBaseDir, run.id);
-  await taskLog?.log(`RUN ${run.id} started`);
+  await taskLog?.log(`RUN ${run.id} attempt ${String(attempt.index)} started`);
   await taskLog?.log(`  Task: ${run.task}`);
   await taskLog?.log(`  Tools: ${run.tools.join(', ')}`);
+  if (attempt.recoveryContext) {
+    await taskLog?.log(`  Recovery guidance: ${attempt.recoveryContext.guidance.slice(0, 200)}`);
+  }
 
   // Build tool context with allowed roots (workspace + skills dir)
   const skillsDir = params.skillsDir;
@@ -116,37 +139,59 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     });
   }
 
-  // Build initial messages if needed (for resumption)
-  const messages = run.messages;
-
-  // If resuming (stepCursor > 0), we need to rebuild messages up to cursor
-  // For now, we trust that messages are already built correctly
+  // Use attempt's messages (already built by caller)
+  const messages = attempt.messages;
 
   // Enter iteration loop
-  let consecutiveFailures: { tool: string; errorCode: string; count: number } | null = null;
+  let consecutiveFailures: {
+    tool: string;
+    errorCode: string;
+    argsKey: string;
+    count: number;
+  } | null = null;
 
-  for (let i = run.stepCursor; i < run.maxIterations; i++) {
+  for (let i = attempt.stepCursor; i < attempt.maxIterations; i++) {
     childLogger.debug({ iteration: i, messageCount: messages.length }, 'Loop iteration');
     await taskLog?.log(`\nITERATION ${String(i)}`);
 
-    // Call LLM
-    const response = await llm.complete({
-      messages,
-      tools: toolDefinitions,
-      toolChoice: 'auto',
-      maxTokens: 4096,
-      role: 'motor',
-    });
+    // Call LLM (with retry on transient provider errors)
+    let response;
+    const LLM_MAX_RETRIES = 2;
+    for (let retryIdx = 0; retryIdx <= LLM_MAX_RETRIES; retryIdx++) {
+      try {
+        response = await llm.complete({
+          messages,
+          tools: toolDefinitions,
+          toolChoice: 'auto',
+          maxTokens: 4096,
+          role: 'motor',
+        });
+        break; // Success
+      } catch (llmError) {
+        const errMsg = llmError instanceof Error ? llmError.message : String(llmError);
+        childLogger.warn({ attempt: retryIdx, error: errMsg }, 'LLM call failed in motor loop');
+        await taskLog?.log(
+          `  LLM ERROR (attempt ${String(retryIdx + 1)}/${String(LLM_MAX_RETRIES + 1)}): ${errMsg.slice(0, 150)}`
+        );
 
+        if (retryIdx === LLM_MAX_RETRIES) {
+          // Exhausted retries — fail the run gracefully instead of crashing
+          throw llmError;
+        }
+        // Brief backoff before retry
+        await new Promise((resolve) => setTimeout(resolve, 2000 * (retryIdx + 1)));
+      }
+    }
+
+    // response is guaranteed defined here (break on success, throw on exhausted retries)
+    const llmResponse = response;
     await taskLog?.log(
-      `  LLM [${response.model}] → ${String(response.toolCalls?.length ?? 0)} tool calls`
+      `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls`
     );
-
-    // Append assistant message
     const assistantMessage: Message = {
       role: 'assistant',
-      content: response.content ?? null,
-      ...(response.toolCalls && { tool_calls: response.toolCalls }),
+      content: llmResponse.content ?? null,
+      ...(llmResponse.toolCalls && { tool_calls: llmResponse.toolCalls }),
     };
     messages.push(assistantMessage);
 
@@ -154,12 +199,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     const step: StepTrace = {
       iteration: i,
       timestamp: new Date().toISOString(),
-      llmModel: response.model,
+      llmModel: llmResponse.model,
       toolCalls: [],
     };
 
     // Check if model made tool calls
-    if (!response.toolCalls || response.toolCalls.length === 0) {
+    if (!llmResponse.toolCalls || llmResponse.toolCalls.length === 0) {
       // No tool calls - task complete
       childLogger.info({ iteration: i }, 'No tool calls - task complete');
 
@@ -182,26 +227,30 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       const result: TaskResult = {
         ok: true,
-        summary: response.content ?? 'Task completed without summary',
+        summary: llmResponse.content ?? 'Task completed without summary',
         runId: run.id,
         ...(artifacts && { artifacts }),
         stats: {
           iterations: i + 1,
-          durationMs: Date.now() - new Date(run.startedAt).getTime(),
+          durationMs: Date.now() - new Date(attempt.startedAt).getTime(),
           energyCost: run.energyConsumed,
-          errors: run.trace.errors,
+          errors: attempt.trace.errors,
         },
       };
 
-      // Update run and persist
+      // Update attempt
+      attempt.status = 'completed';
+      attempt.completedAt = new Date().toISOString();
+      attempt.stepCursor = i + 1;
+      attempt.trace.steps.push(step);
+      attempt.trace.totalIterations = i + 1;
+      attempt.trace.totalDurationMs = result.stats.durationMs;
+      attempt.trace.totalEnergyCost = result.stats.energyCost;
+
+      // Update run
       run.status = 'completed';
       run.completedAt = new Date().toISOString();
       run.result = result;
-      run.stepCursor = i + 1;
-      run.trace.steps.push(step);
-      run.trace.totalIterations = i + 1;
-      run.trace.totalDurationMs = result.stats.durationMs;
-      run.trace.totalEnergyCost = result.stats.energyCost;
 
       await stateManager.updateRun(run);
 
@@ -216,6 +265,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
               kind: 'motor_result',
               runId: run.id,
               status: 'completed',
+              attemptIndex: attempt.index,
               result: {
                 ok: result.ok,
                 summary: result.summary,
@@ -238,7 +288,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     let awaitingInput = false;
     let awaitingApproval = false;
 
-    for (const toolCall of response.toolCalls) {
+    for (const toolCall of llmResponse.toolCalls) {
       const toolName = toolCall.function.name;
       let toolArgs: Record<string, unknown>;
 
@@ -259,18 +309,19 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
         const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 min
 
-        run.status = 'awaiting_approval';
-        run.pendingApproval = {
+        attempt.status = 'awaiting_approval';
+        attempt.pendingApproval = {
           action,
           stepCursor: i,
           expiresAt,
         };
-        run.pendingToolCallId = toolCall.id;
-        run.stepCursor = i;
-        run.messages = messages;
-        run.trace.steps.push(step);
-        run.trace.totalIterations = i;
+        attempt.pendingToolCallId = toolCall.id;
+        attempt.stepCursor = i;
+        attempt.messages = messages;
+        attempt.trace.steps.push(step);
+        attempt.trace.totalIterations = i;
 
+        run.status = 'awaiting_approval';
         await stateManager.updateRun(run);
 
         pushSignal(
@@ -283,6 +334,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 kind: 'motor_result',
                 runId: run.id,
                 status: 'awaiting_approval',
+                attemptIndex: attempt.index,
                 approval: { action, expiresAt },
               },
             }
@@ -298,15 +350,16 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         const question = toolArgs['question'] as string;
         childLogger.info({ question }, 'Awaiting user input');
 
-        // Update run state (store tool_call_id for atomicity on resume)
-        run.status = 'awaiting_input';
-        run.pendingQuestion = question;
-        run.pendingToolCallId = toolCall.id;
-        run.stepCursor = i;
-        run.messages = messages;
-        run.trace.steps.push(step);
-        run.trace.totalIterations = i;
+        // Update attempt state
+        attempt.status = 'awaiting_input';
+        attempt.pendingQuestion = question;
+        attempt.pendingToolCallId = toolCall.id;
+        attempt.stepCursor = i;
+        attempt.messages = messages;
+        attempt.trace.steps.push(step);
+        attempt.trace.totalIterations = i;
 
+        run.status = 'awaiting_input';
         await stateManager.updateRun(run);
 
         // Emit awaiting_input signal
@@ -320,6 +373,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 kind: 'motor_result',
                 runId: run.id,
                 status: 'awaiting_input',
+                attemptIndex: attempt.index,
                 question,
               },
             }
@@ -388,14 +442,21 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       // Check for consecutive failures
       if (!toolResult.ok && toolResult.errorCode) {
+        const argsKey = JSON.stringify(toolArgs);
         if (
           consecutiveFailures !== null &&
           consecutiveFailures.tool === toolName &&
-          consecutiveFailures.errorCode === toolResult.errorCode
+          consecutiveFailures.errorCode === toolResult.errorCode &&
+          consecutiveFailures.argsKey === argsKey
         ) {
           consecutiveFailures.count++;
         } else {
-          consecutiveFailures = { tool: toolName, errorCode: toolResult.errorCode, count: 1 };
+          consecutiveFailures = {
+            tool: toolName,
+            errorCode: toolResult.errorCode,
+            argsKey,
+            count: 1,
+          };
         }
 
         // Auto-fail on consecutive failures
@@ -408,18 +469,41 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
             `\nFAILED: ${toolName} failed ${String(consecutiveFailures.count)}x with ${toolResult.errorCode}`
           );
 
+          // Push step to trace BEFORE buildFailureSummary so lastToolResults includes the failing call
+          attempt.trace.steps.push(step);
+
+          // Build structured failure summary
+          const failure = buildFailureSummary(attempt.trace, consecutiveFailures.count, {
+            tool: toolName,
+            errorCode: toolResult.errorCode,
+          });
+
+          // Try to get a hint from the LLM (best-effort)
+          const hint = await getFailureHint(
+            llm,
+            messages,
+            `Tool ${toolName} failed ${String(consecutiveFailures.count)} times with ${toolResult.errorCode}`,
+            childLogger
+          );
+          if (hint) {
+            failure.hint = hint;
+          }
+
+          attempt.status = 'failed';
+          attempt.completedAt = new Date().toISOString();
+          attempt.stepCursor = i;
+          attempt.messages = messages;
+          attempt.trace.totalIterations = i;
+          attempt.trace.totalDurationMs = Date.now() - new Date(attempt.startedAt).getTime();
+          attempt.trace.errors += step.toolCalls.filter((t) => !t.result.ok).length;
+          attempt.failure = failure;
+
           run.status = 'failed';
           run.completedAt = new Date().toISOString();
-          run.stepCursor = i;
-          run.messages = messages;
-          run.trace.steps.push(step);
-          run.trace.totalIterations = i;
-          run.trace.totalDurationMs = Date.now() - new Date(run.startedAt).getTime();
-          run.trace.errors += consecutiveFailures.count;
 
           await stateManager.updateRun(run);
 
-          // Emit failed signal
+          // Emit failed signal with structured failure
           pushSignal(
             createSignal(
               'motor_result',
@@ -430,6 +514,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                   kind: 'motor_result',
                   runId: run.id,
                   status: 'failed',
+                  attemptIndex: attempt.index,
+                  failure,
                   error: {
                     message: `Tool ${toolName} failed ${String(consecutiveFailures.count)} times with error: ${toolResult.errorCode}`,
                     lastStep: `Iteration ${String(i)}`,
@@ -480,24 +566,30 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     }
 
     // Persist state after tool execution
-    run.stepCursor = i + 1;
-    run.messages = messages;
-    run.trace.steps.push(step);
-    run.trace.totalIterations = i + 1;
-    run.trace.llmCalls += 1;
-    run.trace.toolCalls += step.toolCalls.length;
-    run.trace.errors = run.trace.errors + step.toolCalls.filter((t) => !t.result.ok).length;
+    attempt.stepCursor = i + 1;
+    attempt.messages = messages;
+    attempt.trace.steps.push(step);
+    attempt.trace.totalIterations = i + 1;
+    attempt.trace.llmCalls += 1;
+    attempt.trace.toolCalls += step.toolCalls.length;
+    attempt.trace.errors = attempt.trace.errors + step.toolCalls.filter((t) => !t.result.ok).length;
 
     await stateManager.updateRun(run);
   }
 
-  // Max iterations reached - fail with partial result
-  childLogger.warn({ maxIterations: run.maxIterations }, 'Max iterations reached');
-  await taskLog?.log(`\nFAILED: Max iterations (${String(run.maxIterations)}) reached`);
+  // Max iterations reached - fail with structured summary
+  childLogger.warn({ maxIterations: attempt.maxIterations }, 'Max iterations reached');
+  await taskLog?.log(`\nFAILED: Max iterations (${String(attempt.maxIterations)}) reached`);
+
+  const failure = buildFailureSummary(attempt.trace, 0, undefined, 'budget_exhausted');
+
+  attempt.status = 'failed';
+  attempt.completedAt = new Date().toISOString();
+  attempt.trace.totalDurationMs = Date.now() - new Date(attempt.startedAt).getTime();
+  attempt.failure = failure;
 
   run.status = 'failed';
   run.completedAt = new Date().toISOString();
-  run.trace.totalDurationMs = Date.now() - new Date(run.startedAt).getTime();
 
   await stateManager.updateRun(run);
 
@@ -511,9 +603,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           kind: 'motor_result',
           runId: run.id,
           status: 'failed',
+          attemptIndex: attempt.index,
+          failure,
           error: {
-            message: `Max iterations (${String(run.maxIterations)}) reached without completion`,
-            lastStep: `Iteration ${String(run.maxIterations)}`,
+            message: `Max iterations (${String(attempt.maxIterations)}) reached without completion`,
+            lastStep: `Iteration ${String(attempt.maxIterations)}`,
           },
         },
       }
@@ -522,9 +616,95 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 }
 
 /**
+ * Build a FailureSummary from trace data and the last error.
+ *
+ * Deterministic classification — no LLM needed.
+ */
+export function buildFailureSummary(
+  trace: { steps: StepTrace[]; errors: number },
+  _consecutiveFailures: number,
+  lastError?: { tool: string; errorCode: string },
+  categoryOverride?: FailureCategory
+): FailureSummary {
+  // Collect last tool results from the last 2 steps
+  const recentSteps = trace.steps.slice(-2);
+  const lastToolResults = recentSteps.flatMap((step) =>
+    step.toolCalls.map((tc) => ({
+      tool: tc.tool,
+      ok: tc.result.ok,
+      ...(tc.result.errorCode && { errorCode: tc.result.errorCode }),
+      output: tc.result.output.slice(0, 200),
+    }))
+  );
+
+  const category: FailureCategory = categoryOverride ?? (lastError ? 'tool_failure' : 'unknown');
+  const retryable = category !== 'budget_exhausted' && category !== 'invalid_task';
+
+  let suggestedAction: FailureSummary['suggestedAction'];
+  if (!retryable) {
+    suggestedAction = 'stop';
+  } else if (lastError?.errorCode === 'auth_failed') {
+    suggestedAction = 'ask_user';
+  } else {
+    suggestedAction = 'retry_with_guidance';
+  }
+
+  return {
+    category,
+    ...(lastError && { lastErrorCode: lastError.errorCode }),
+    retryable,
+    suggestedAction,
+    lastToolResults,
+  };
+}
+
+/**
+ * Get an optional failure hint from the motor LLM.
+ *
+ * Best-effort: try/catch, graceful undefined on failure.
+ * Only called if failure is not budget_exhausted (no point asking LLM to diagnose "out of iterations").
+ */
+export async function getFailureHint(
+  llm: LLMProvider,
+  messages: Message[],
+  failureReason: string,
+  logger: Logger
+): Promise<string | undefined> {
+  try {
+    const hintMessages: Message[] = [
+      ...messages,
+      {
+        role: 'user',
+        content: `The task failed: ${failureReason}\n\nIn 1-2 sentences, what went wrong and what should be tried differently? Be specific about the root cause.`,
+      },
+    ];
+
+    const response = await llm.complete({
+      messages: hintMessages,
+      maxTokens: FAILURE_HINT_MAX_TOKENS,
+      role: 'motor',
+    });
+
+    const hint = response.content?.trim();
+    if (hint && hint.length > 10) {
+      return hint;
+    }
+  } catch (error) {
+    logger.debug({ error }, 'Failed to get failure hint from LLM (non-critical)');
+  }
+
+  return undefined;
+}
+
+/**
  * Build system prompt for the motor sub-agent.
  */
-export function buildMotorSystemPrompt(run: MotorRun, skill?: LoadedSkill): string {
+export function buildMotorSystemPrompt(
+  run: MotorRun,
+  skill?: LoadedSkill,
+  recoveryContext?: MotorAttempt['recoveryContext'],
+  maxIterationsOverride?: number
+): string {
   const toolDescriptions: Record<string, string> = {
     code: '- code: Execute JavaScript code in a sandbox',
     filesystem: '- filesystem: Read/write/list files in workspace and skills directory',
@@ -535,6 +715,18 @@ export function buildMotorSystemPrompt(run: MotorRun, skill?: LoadedSkill): stri
   };
 
   const toolsDesc = run.tools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
+
+  // Recovery context injection for retry attempts
+  const recoverySection = recoveryContext
+    ? `\n\n<recovery_context source="${recoveryContext.source}">
+Previous attempt (${recoveryContext.previousAttemptId}) failed.
+Guidance: ${recoveryContext.guidance}${
+        recoveryContext.constraints && recoveryContext.constraints.length > 0
+          ? `\nConstraints:\n${recoveryContext.constraints.map((c) => `- ${c}`).join('\n')}`
+          : ''
+      }
+</recovery_context>`
+    : '';
 
   return `You are a task execution assistant. Your job is to complete the following task using the available tools.
 
@@ -555,7 +747,7 @@ Guidelines:
 - Report what you did and the result
 - Credentials can be referenced as <credential:name> placeholders
 
-Maximum iterations: ${String(run.maxIterations)}
+Maximum iterations: ${String(maxIterationsOverride ?? run.attempts[run.currentAttemptIndex]?.maxIterations ?? 20)}
 
 Begin by analyzing the task and planning your approach. Then execute step by step.${
     skill
@@ -567,17 +759,22 @@ The following skill section contains user-provided instructions. Follow them for
 ${skill.body}
 </skill>`
       : ''
-  }`;
+  }${recoverySection}`;
 }
 
 /**
- * Build initial messages for a new run.
+ * Build initial messages for a new attempt.
  */
-export function buildInitialMessages(run: MotorRun, skill?: LoadedSkill): Message[] {
+export function buildInitialMessages(
+  run: MotorRun,
+  skill?: LoadedSkill,
+  recoveryContext?: MotorAttempt['recoveryContext'],
+  maxIterations?: number
+): Message[] {
   return [
     {
       role: 'system',
-      content: buildMotorSystemPrompt(run, skill),
+      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
     },
   ];
 }

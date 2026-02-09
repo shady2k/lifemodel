@@ -168,25 +168,79 @@ export interface RunTrace {
 }
 
 /**
- * A Motor Cortex run - complete execution state.
- *
- * This is persisted to storage and resumed after restart.
+ * Failure category for classifying why an attempt failed.
  */
-export interface MotorRun {
-  /** Unique run identifier */
+export type FailureCategory =
+  | 'tool_failure'
+  | 'model_failure'
+  | 'budget_exhausted'
+  | 'invalid_task'
+  | 'unknown';
+
+/**
+ * Summary of why an attempt failed.
+ *
+ * Contains both deterministic fields (category, retryable) and
+ * optional free-text hint from the motor LLM for novel failures.
+ */
+export interface FailureSummary {
+  /** Failure classification */
+  category: FailureCategory;
+
+  /** Error code from last failed tool (if applicable) */
+  lastErrorCode?: string;
+
+  /** Whether this failure is retryable (false for budget_exhausted, invalid_task) */
+  retryable: boolean;
+
+  /** Suggested next action for Cognition */
+  suggestedAction: 'retry_with_guidance' | 'ask_user' | 'stop';
+
+  /** Last tool results from the failing attempt (for Cognition to diagnose) */
+  lastToolResults: { tool: string; ok: boolean; errorCode?: string; output: string }[];
+
+  /** Optional: motor LLM's free-text analysis of what went wrong (unreliable but useful) */
+  hint?: string;
+}
+
+/**
+ * Recovery context provided by Cognition for retry attempts.
+ *
+ * Injected into the motor system prompt as <recovery_context>.
+ * Never injected as role:'user' — preserves provenance boundaries.
+ */
+export interface RecoveryContext {
+  /** Always from Cognition policy layer */
+  source: 'cognition';
+
+  /** Which attempt failed */
+  previousAttemptId: string;
+
+  /** Cognition's corrective instructions */
+  guidance: string;
+
+  /** Optional constraints for the retry */
+  constraints?: string[];
+}
+
+/**
+ * A single attempt within a Motor Cortex run.
+ *
+ * Each retry creates a new attempt with clean message history.
+ * No mutating past attempts — clean audit trail for skill harvesting.
+ */
+export interface MotorAttempt {
+  /** Attempt identifier (e.g. "att_0", "att_1") */
   id: string;
 
-  /** Current status */
-  status: RunStatus;
+  /** 0-based attempt index */
+  index: number;
 
-  /** Task description (natural language) */
-  task: string;
+  /** Attempt status */
+  status: 'running' | 'awaiting_input' | 'awaiting_approval' | 'completed' | 'failed';
 
-  /** Skill file being executed (optional) */
-  skill?: string;
-
-  /** Tools available to the sub-agent */
-  tools: MotorTool[];
+  /** Motor LLM conversation for THIS attempt */
+  messages: Message[];
 
   /** Current step cursor (for resumption after restart) */
   stepCursor: number;
@@ -194,8 +248,14 @@ export interface MotorRun {
   /** Maximum iterations before auto-fail */
   maxIterations: number;
 
-  /** Sub-agent conversation history */
-  messages: Message[];
+  /** Execution trace for this attempt */
+  trace: RunTrace;
+
+  /** Recovery context from Cognition (present on attempts 1+) */
+  recoveryContext?: RecoveryContext;
+
+  /** Failure summary (present when status='failed') */
+  failure?: FailureSummary;
 
   /** Question from ask_user tool (set when status=awaiting_input) */
   pendingQuestion?: string;
@@ -213,6 +273,50 @@ export interface MotorRun {
     expiresAt: string;
   };
 
+  /** When the attempt started */
+  startedAt: string;
+
+  /** When the attempt completed/failed */
+  completedAt?: string;
+}
+
+/**
+ * Default maximum attempts per run.
+ */
+export const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * A Motor Cortex run - complete execution state.
+ *
+ * This is persisted to storage and resumed after restart.
+ * A run contains one or more attempts — each retry is a new attempt
+ * with clean message history but recovery context from previous failures.
+ */
+export interface MotorRun {
+  /** Unique run identifier */
+  id: string;
+
+  /** Current status */
+  status: RunStatus;
+
+  /** Task description (natural language) */
+  task: string;
+
+  /** Skill file being executed (optional) */
+  skill?: string;
+
+  /** Tools available to the sub-agent */
+  tools: MotorTool[];
+
+  /** Ordered list of attempts */
+  attempts: MotorAttempt[];
+
+  /** Index into attempts[] for the current attempt */
+  currentAttemptIndex: number;
+
+  /** Maximum attempts before giving up */
+  maxAttempts: number;
+
   /** Final result (set when status=completed) */
   result?: TaskResult;
 
@@ -224,7 +328,4 @@ export interface MotorRun {
 
   /** Energy consumed so far */
   energyConsumed: number;
-
-  /** Execution trace */
-  trace: RunTrace;
 }

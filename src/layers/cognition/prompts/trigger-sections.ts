@@ -11,6 +11,7 @@
  */
 
 import type { LoopContext } from '../agentic-loop-types.js';
+import type { MotorResultData } from '../../../types/signal.js';
 
 /**
  * Build special section for proactive contact explaining this is NOT a response.
@@ -213,4 +214,95 @@ Only act if the reaction reveals something worth saving:
 Never repeat your previous message. Max 1 tool call total.
 </task>
 </trigger>`;
+}
+
+/**
+ * Build dedicated trigger section for motor_result signals.
+ *
+ * Status-specific sections with clear instructions:
+ * - completed: report result to user
+ * - failed: diagnose and retry or report
+ * - awaiting_input: relay question to user
+ * - awaiting_approval: present approval request to user
+ */
+export function buildMotorResultSection(data: MotorResultData): string {
+  const { runId, status, attemptIndex } = data;
+
+  switch (status) {
+    case 'completed': {
+      const result = data.result;
+      const summary = result?.summary ?? 'No summary';
+      const stats = result?.stats;
+      const statsLine = stats
+        ? `${String(stats.iterations)} iterations, ${(stats.durationMs / 1000).toFixed(1)}s`
+        : '';
+      return `<trigger type="motor_result">
+<context>Task run ${runId} completed. Summary: ${summary}. Stats: ${statsLine}.</context>
+<task>Report the result to the user concisely.</task>
+</trigger>`;
+    }
+
+    case 'failed': {
+      const failure = data.failure;
+      const attemptLabel = attemptIndex !== undefined ? ` attempt ${String(attemptIndex)}` : '';
+
+      if (!failure) {
+        // Legacy format (no structured failure)
+        const errorMsg = data.error?.message ?? 'Unknown error';
+        return `<trigger type="motor_result_failed">
+<context>Task run ${runId}${attemptLabel} failed. Error: ${errorMsg}</context>
+<task>Report the failure to the user clearly.</task>
+</trigger>`;
+      }
+
+      // Format last tool results
+      const toolResultsStr = failure.lastToolResults
+        .map(
+          (tr) =>
+            `  ${tr.tool}: ${tr.ok ? 'OK' : 'FAIL'}${tr.errorCode ? ` (${tr.errorCode})` : ''} — ${tr.output.slice(0, 100)}`
+        )
+        .join('\n');
+
+      return `<trigger type="motor_result_failed">
+<context>
+Task run ${runId}${attemptLabel} failed.
+Category: ${failure.category} | Retryable: ${String(failure.retryable)}
+${failure.lastErrorCode ? `Last error: ${failure.lastErrorCode}\n` : ''}Last tool results:
+${toolResultsStr || '  (none)'}${failure.hint ? `\nAnalysis: ${failure.hint}` : ''}
+</context>
+<task>
+A background task failed. Follow this protocol:
+1. Review the failure summary above.
+2. If retryable and you can provide useful guidance, call core.task(action:"retry", runId:"${runId}", guidance:"your corrective instructions").
+3. If you need more detail, call core.task(action:"log", runId:"${runId}") first.
+4. If not retryable or after 2 failed attempts, report the failure to the user clearly.
+Do NOT create a new core.act run for the same task. Use retry to continue the existing run.
+</task>
+</trigger>`;
+    }
+
+    case 'awaiting_input': {
+      const question = data.question ?? 'No question provided';
+      return `<trigger type="motor_awaiting_input">
+<context>Task run ${runId} needs user input: "${question}"</context>
+<task>
+Relay this question to the user naturally. When they respond, call core.task(action:"respond", runId:"${runId}", answer:"their answer").
+</task>
+</trigger>`;
+    }
+
+    case 'awaiting_approval': {
+      const action = data.approval?.action ?? 'Unknown action';
+      return `<trigger type="motor_awaiting_approval">
+<context>Task run ${runId} is requesting approval for: "${action}"</context>
+<task>
+Present this approval request to the user. When they decide, call core.task(action:"approve", runId:"${runId}", approved:true/false).
+If the action sounds dangerous or unclear, recommend denying.
+</task>
+</trigger>`;
+    }
+
+    default:
+      return `<trigger type="motor_result">\n<context>${JSON.stringify(data)}</context>\n</trigger>`;
+  }
 }

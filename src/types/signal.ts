@@ -16,6 +16,7 @@
  */
 
 import type { Priority } from './priority.js';
+import type { FailureSummary } from '../runtime/motor-cortex/motor-protocol.js';
 
 /**
  * Signal types - what the signal represents.
@@ -484,6 +485,12 @@ export interface MotorResultData {
   /** Run status */
   status: 'completed' | 'failed' | 'awaiting_input' | 'awaiting_approval';
 
+  /** Which attempt this result is about (0-based) */
+  attemptIndex?: number;
+
+  /** Structured failure summary (present when status=failed) */
+  failure?: FailureSummary;
+
   /** Result (present when status=completed) */
   result?: {
     ok: boolean;
@@ -492,7 +499,7 @@ export interface MotorResultData {
     artifacts?: string[];
   };
 
-  /** Error details (present when status=failed) */
+  /** Error details (present when status=failed, legacy compat) */
   error?: { message: string; lastStep?: string };
 
   /** Question for user (present when status=awaiting_input) */
