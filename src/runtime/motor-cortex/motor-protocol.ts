@@ -328,4 +328,7 @@ export interface MotorRun {
 
   /** Energy consumed so far */
   energyConsumed: number;
+
+  /** Docker container ID (if running in container isolation) */
+  containerId?: string;
 }

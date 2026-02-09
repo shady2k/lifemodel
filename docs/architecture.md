@@ -35,12 +35,14 @@ Most ticks: only AUTONOMIC and AGGREGATION run. COGNITION wakes for user message
 
 ### Motor Cortex (Runtime Service)
 
-Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cognition via `core.act`. It runs a separate agentic LLM loop with its own tools (code sandbox, filesystem) and conversation context. Results flow back via `motor_result` signals through the standard pipeline.
+Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cognition via `core.act`. It runs a separate agentic LLM loop with its own tools (code sandbox, filesystem, shell) and conversation context. Results flow back via `motor_result` signals through the standard pipeline.
 
-- **Oneshot mode**: Synchronous JS execution in forked sandbox (5s timeout)
+- **Oneshot mode**: Synchronous JS execution in sandbox (5s timeout)
 - **Agentic mode**: Async sub-agent loop (max 20 iterations), returns runId immediately
 - **Mutex**: Only one agentic run at a time (including `awaiting_input`)
 - **Energy gated**: 0.05 (oneshot), 0.15 (agentic)
+- **Docker isolation**: Agentic runs execute inside per-run Docker containers with `--read-only`, `--network none`, `--cap-drop ALL`, resource limits (512MB, 1 CPU, 64 PIDs). Falls back to direct execution only with explicit `MOTOR_CORTEX_UNSAFE=true`.
+- **IPC**: Host communicates with container via length-prefixed JSON on stdin/stdout (long-lived tool-server process).
 
 See [docs/features/motor-cortex/](features/motor-cortex/) for full design.
 
@@ -124,7 +126,7 @@ Key design decisions:
 src/
 ├── core/           # CoreLoop, Agent, energy, event-bus
 ├── layers/         # autonomic/, aggregation/, cognition/
-├── runtime/        # Motor Cortex service, sandbox, shell (async execution)
+├── runtime/        # Motor Cortex service, sandbox, shell, container isolation
 ├── llm/            # LLM provider interface, tool schema conversion
 ├── plugins/        # Modular extensions
 ├── channels/       # Sensory organs (Telegram, etc.)

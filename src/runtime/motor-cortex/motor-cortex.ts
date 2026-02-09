@@ -19,6 +19,8 @@ import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
+import { createWorkspace } from './motor-tools.js';
+import type { ContainerManager, ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
 import { loadSkill } from '../skills/skill-loader.js';
@@ -57,6 +59,9 @@ export interface MotorCortexDeps {
 
   /** Base directory for persisting run artifacts (optional, default: data/motor-runs) */
   artifactsBaseDir?: string;
+
+  /** Container manager for Docker isolation (optional) */
+  containerManager?: ContainerManager;
 }
 
 /**
@@ -78,6 +83,10 @@ export class MotorCortex {
   private readonly credentialStore: CredentialStore | undefined;
   private readonly skillsDir: string | undefined;
   private readonly artifactsBaseDir: string | undefined;
+  private readonly containerManager: ContainerManager | undefined;
+
+  /** Whether Docker isolation is available */
+  private dockerAvailable: boolean | null = null;
 
   /** Signal callback (wired by container) */
   private signalCallback: ((signal: Signal) => void) | null = null;
@@ -93,6 +102,7 @@ export class MotorCortex {
     this.credentialStore = deps.credentialStore;
     this.skillsDir = deps.skillsDir;
     this.artifactsBaseDir = deps.artifactsBaseDir;
+    this.containerManager = deps.containerManager;
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -113,6 +123,27 @@ export class MotorCortex {
     } else {
       this.logger.warn({ signalType: signal.type }, 'No signal callback set, signal not pushed');
     }
+  }
+
+  /**
+   * Check if Docker isolation is available.
+   * Caches result after first check.
+   */
+  private async isDockerAvailable(): Promise<boolean> {
+    if (this.dockerAvailable !== null) return this.dockerAvailable;
+    if (!this.containerManager) {
+      this.dockerAvailable = false;
+      return false;
+    }
+    this.dockerAvailable = await this.containerManager.isAvailable();
+    return this.dockerAvailable;
+  }
+
+  /**
+   * Check if unsafe mode is explicitly enabled.
+   */
+  private isUnsafeMode(): boolean {
+    return process.env['MOTOR_CORTEX_UNSAFE'] === 'true';
   }
 
   /**
@@ -212,6 +243,18 @@ export class MotorCortex {
       throw new Error(
         `Cannot start new run: active run exists (${activeRun.id}, status: ${activeRun.status})`
       );
+    }
+
+    // Check Docker availability for agentic runs
+    const dockerReady = await this.isDockerAvailable();
+    if (!dockerReady && !this.isUnsafeMode()) {
+      throw new Error(
+        'Docker required for Motor Cortex isolation. ' +
+          'Install Docker or set MOTOR_CORTEX_UNSAFE=true to bypass (not recommended).'
+      );
+    }
+    if (!dockerReady && this.isUnsafeMode()) {
+      this.logger.warn('MOTOR_CORTEX_UNSAFE: Running without Docker isolation');
     }
 
     // Check energy
@@ -360,13 +403,37 @@ export class MotorCortex {
    * This is fire-and-forget - result comes back via signal.
    */
   private async runLoopInBackground(run: MotorRun, attempt: MotorAttempt): Promise<void> {
+    let containerHandle: ContainerHandle | undefined;
+
     try {
       // Transition to running
       run.status = 'running';
       attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
-      // Run the loop
+      // Create workspace once — shared between container mount and loop
+      const workspace = await createWorkspace();
+
+      // Create container if Docker is available
+      if (this.containerManager && (await this.isDockerAvailable())) {
+        containerHandle = await this.containerManager.create(run.id, {
+          workspacePath: workspace,
+          ...(this.skillsDir && { skillsPath: this.skillsDir }),
+        });
+        run.containerId = containerHandle.containerId;
+        await this.stateManager.updateRun(run);
+        this.logger.info(
+          { runId: run.id, containerId: containerHandle.containerId.slice(0, 12) },
+          'Container created for run'
+        );
+      } else if (this.isUnsafeMode()) {
+        this.logger.warn(
+          { runId: run.id },
+          'MOTOR_CORTEX_UNSAFE: Executing without container isolation'
+        );
+      }
+
+      // Run the loop — pass the same workspace used by the container
       await runMotorLoop({
         run,
         attempt,
@@ -376,9 +443,11 @@ export class MotorCortex {
           this.pushSignal(signal);
         },
         logger: this.logger,
+        workspace,
         ...(this.skillsDir && { skillsDir: this.skillsDir }),
         ...(this.credentialStore && { credentialStore: this.credentialStore }),
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
+        ...(containerHandle && { containerHandle }),
       });
     } catch (error) {
       // Motor loop threw an unhandled error (e.g. LLM provider failure, storage failure).
@@ -428,6 +497,17 @@ export class MotorCortex {
           }
         )
       );
+    } finally {
+      // Always destroy container when run completes or fails
+      // Use containerManager.destroy() to also clean up the activeContainers map
+      if (containerHandle && this.containerManager) {
+        try {
+          await this.containerManager.destroy(run.id);
+          this.logger.info({ runId: run.id }, 'Container destroyed');
+        } catch (destroyError) {
+          this.logger.warn({ runId: run.id, error: destroyError }, 'Failed to destroy container');
+        }
+      }
     }
   }
 
@@ -666,6 +746,18 @@ export class MotorCortex {
    */
   async recoverOnRestart(): Promise<void> {
     this.logger.info('Recovering Motor Cortex runs from state...');
+
+    // Prune stale containers from previous runs
+    if (this.containerManager) {
+      try {
+        const pruned = await this.containerManager.prune(5 * 60 * 1000); // 5 min
+        if (pruned > 0) {
+          this.logger.info({ pruned }, 'Pruned stale Motor Cortex containers');
+        }
+      } catch (error) {
+        this.logger.warn({ error }, 'Failed to prune stale containers');
+      }
+    }
 
     const activeRuns = await this.stateManager.listRuns();
     let resumed = 0;

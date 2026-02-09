@@ -36,6 +36,9 @@ export interface SkillDefinition {
 
   /** Credential names this skill needs (optional) */
   credentials?: string[];
+
+  /** Network domains this skill needs access to (optional, not enforced yet) */
+  domains?: string[];
 }
 
 /**

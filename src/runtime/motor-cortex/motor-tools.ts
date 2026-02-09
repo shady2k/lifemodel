@@ -7,6 +7,11 @@
 
 import type { OpenAIChatTool } from '../../llm/tool-schema.js';
 import type { MotorTool, MotorToolResult } from './motor-protocol.js';
+import type {
+  ContainerHandle,
+  ToolExecuteRequest,
+  ToolExecuteResponse,
+} from '../container/types.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { runShell } from '../shell/shell-runner.js';
 import { readFile, writeFile, readdir, mkdir, mkdtemp, lstat, realpath } from 'node:fs/promises';
@@ -22,6 +27,9 @@ export interface ToolContext {
 
   /** Primary workspace directory (first allowed root) */
   workspace: string;
+
+  /** Container handle for dispatching tools via Docker isolation (optional) */
+  containerHandle?: ContainerHandle;
 }
 
 /**
@@ -638,7 +646,15 @@ export function getToolDefinitions(granted: MotorTool[]): OpenAIChatTool[] {
 }
 
 /**
+ * Default timeout for tool execution requests (30s).
+ */
+const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+
+/**
  * Execute a tool.
+ *
+ * When a containerHandle is present in the context, the tool is dispatched
+ * to the Docker container via IPC. Otherwise, it executes directly in-process.
  *
  * @param name - Tool name
  * @param args - Tool arguments
@@ -661,6 +677,32 @@ export async function executeTool(
     };
   }
 
+  // Container dispatch path: serialize and send to container
+  if (ctx.containerHandle) {
+    const request: ToolExecuteRequest = {
+      type: 'execute',
+      id: crypto.randomUUID(),
+      tool: name,
+      args,
+      timeoutMs: (args['timeout'] as number | undefined) ?? DEFAULT_TOOL_TIMEOUT_MS,
+    };
+
+    try {
+      const response: ToolExecuteResponse = await ctx.containerHandle.execute(request);
+      return response.result;
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'execution_error',
+        retryable: true,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+  }
+
+  // Direct execution path (no container)
   const executor = TOOL_EXECUTORS[name as MotorTool];
   return executor(args, ctx);
 }

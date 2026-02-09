@@ -21,6 +21,7 @@ import type {
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
 import { getToolDefinitions, executeTool, createWorkspace } from './motor-tools.js';
+import type { ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
 import { resolveCredentials } from '../vault/credential-store.js';
@@ -61,6 +62,12 @@ export interface MotorLoopParams {
 
   /** Base directory for persisting run artifacts (optional) */
   artifactsBaseDir?: string;
+
+  /** Container handle for Docker-isolated execution (optional) */
+  containerHandle?: ContainerHandle;
+
+  /** Pre-created workspace directory (optional — if not provided, one is created) */
+  workspace?: string;
 }
 
 /**
@@ -96,9 +103,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     'Starting Motor Cortex loop'
   );
 
-  // Create workspace for this run
-  const workspace = await createWorkspace();
-  childLogger.debug({ workspace }, 'Workspace created');
+  // Use pre-created workspace or create one
+  const workspace = params.workspace ?? (await createWorkspace());
+  childLogger.debug({ workspace }, 'Workspace ready');
 
   // Create per-run task log
   const taskLog = createTaskLogger(params.artifactsBaseDir, run.id);
@@ -112,7 +119,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Build tool context with allowed roots (workspace + skills dir)
   const skillsDir = params.skillsDir;
   const allowedRoots = skillsDir ? [workspace, skillsDir] : [workspace];
-  const toolContext = { workspace, allowedRoots };
+  const toolContext = {
+    workspace,
+    allowedRoots,
+    ...(params.containerHandle && { containerHandle: params.containerHandle }),
+  };
 
   // Get tool definitions
   const toolDefinitions = getToolDefinitions(run.tools);
@@ -184,6 +195,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     }
 
     // response is guaranteed defined here (break on success, throw on exhausted retries)
+
     const llmResponse = response;
     await taskLog?.log(
       `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls`
@@ -384,7 +396,30 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         break; // Stop processing tools
       }
 
+      // Deliver credentials to container's in-memory store.
+      // This is needed because filesystem write content is resolved INSIDE the container
+      // (tool-server has its own credential resolver for file content).
+      // Host-side resolution below handles all other tool args.
+      if (params.containerHandle && params.credentialStore) {
+        for (const value of Object.values(toolArgs)) {
+          if (typeof value === 'string') {
+            const placeholderRegex = /<credential:([a-zA-Z0-9_]+)>/g;
+            let match;
+            while ((match = placeholderRegex.exec(value)) !== null) {
+              const credName = match[1];
+              if (credName) {
+                const credValue = params.credentialStore.get(credName);
+                if (credValue) {
+                  await params.containerHandle.deliverCredential(credName, credValue);
+                }
+              }
+            }
+          }
+        }
+      }
+
       // Resolve credential placeholders in tool args (AFTER state persistence, BEFORE execution)
+      // Always resolve on the host side — both container and direct execution paths need resolved args
       let resolvedArgs = toolArgs;
       if (params.credentialStore) {
         const resolvedEntries: [string, unknown][] = [];

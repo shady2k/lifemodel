@@ -1,8 +1,13 @@
 /**
  * Sandbox Worker - Child process entry point.
  *
- * This file runs in a forked child process with stripped environment.
- * Receives code via IPC, executes it, and returns the result.
+ * This file runs as a spawned child process with stripped environment.
+ * Receives code via CLI argument (--eval <code>), executes it, and
+ * writes JSON result to stdout.
+ *
+ * Communication protocol:
+ * - Input: CLI argument `--eval <code>`
+ * - Output: JSON on stdout: { ok, output, error, durationMs }
  *
  * Security approach:
  * - Dangerous globals are deleted before user code runs
@@ -119,28 +124,37 @@ function executeCode(code: string): {
   }
 }
 
-/**
- * Process message handler (for fork IPC).
- */
+// ─── Entry Point ─────────────────────────────────────────────────
 
 // Strip dangerous globals on startup
 stripDangerousGlobals();
 
-process.on('message', (message: unknown) => {
-  const msg = message as { type: string; code?: string };
+// Get code from CLI arguments: --eval <code>
+const evalIndex = process.argv.indexOf('--eval');
+if (evalIndex !== -1 && evalIndex + 1 < process.argv.length) {
+  const code = process.argv[evalIndex + 1] ?? '';
+  const result = executeCode(code);
 
-  if (msg.type === 'execute' && msg.code) {
-    const result = executeCode(msg.code);
+  // Write JSON result to stdout
+  process.stdout.write(JSON.stringify(result));
+  process.exit(result.ok ? 0 : 1);
+} else {
+  // Legacy IPC mode (for backward compatibility during transition)
+  process.on('message', (message: unknown) => {
+    const msg = message as { type: string; code?: string };
 
-    const response: ResultMessage = {
-      type: 'result',
-      ok: result.ok,
-      output: result.output,
-      error: result.error,
-      durationMs: result.durationMs,
-    };
+    if (msg.type === 'execute' && msg.code) {
+      const result = executeCode(msg.code);
 
-    // Send response back to parent via IPC
-    process.send?.(response);
-  }
-});
+      const response: ResultMessage = {
+        type: 'result',
+        ok: result.ok,
+        output: result.output,
+        error: result.error,
+        durationMs: result.durationMs,
+      };
+
+      process.send?.(response);
+    }
+  });
+}

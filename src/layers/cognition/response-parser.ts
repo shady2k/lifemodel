@@ -63,11 +63,52 @@ export function parseResponseContent(
   }
 
   // Step 2: Try JSON.parse
-  const looksLikeJson = jsonStr.startsWith('{');
+  // Check for JSON at start OR at end (models sometimes output text, then JSON)
+  let looksLikeJson = jsonStr.startsWith('{');
+  let jsonCandidate = jsonStr;
+
+  // If content doesn't start with '{', check if it ends with a JSON object
+  // This handles models that output thinking/rationale as text, then JSON
+  if (!looksLikeJson && jsonStr.includes('\n')) {
+    // Find the last occurrence of '{' and try to parse from there
+    const lastBraceIndex = jsonStr.lastIndexOf('{');
+    if (lastBraceIndex > 0) {
+      const potentialJson = jsonStr.slice(lastBraceIndex);
+      // Quick validation: must end with '}' and have balanced braces
+      if (potentialJson.endsWith('}')) {
+        let braceCount = 0;
+        let inString = false;
+        let escapeNext = false;
+        for (const char of potentialJson) {
+          if (escapeNext) {
+            escapeNext = false;
+            continue;
+          }
+          if (char === '\\') {
+            escapeNext = true;
+            continue;
+          }
+          if (char === '"') {
+            inString = !inString;
+            continue;
+          }
+          if (!inString) {
+            if (char === '{') braceCount++;
+            if (char === '}') braceCount--;
+          }
+        }
+        // If braces are balanced (should end at 0), try parsing
+        if (braceCount === 0) {
+          jsonCandidate = potentialJson;
+          looksLikeJson = true;
+        }
+      }
+    }
+  }
 
   if (looksLikeJson) {
     try {
-      const parsed = JSON.parse(jsonStr) as {
+      const parsed = JSON.parse(jsonCandidate) as {
         response?: unknown;
         status?: string;
         urgent?: boolean;

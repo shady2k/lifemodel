@@ -63,3 +63,33 @@ export function createTaskLogger(
 export function redactCredentials(text: string): string {
   return text.replace(/<credential:[^>]+>/g, '<credential:***>');
 }
+
+/**
+ * Log a container lifecycle event.
+ */
+export async function logContainerEvent(
+  taskLog: TaskLogger | null,
+  event: 'create' | 'destroy' | 'prune',
+  details: Record<string, unknown>
+): Promise<void> {
+  if (!taskLog) return;
+  const detailStr = Object.entries(details)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(', ');
+  await taskLog.log(`CONTAINER ${event.toUpperCase()}: ${detailStr}`);
+}
+
+/**
+ * Log a security-relevant event (path traversal, blocked command, etc).
+ */
+export async function logSecurityEvent(
+  taskLog: TaskLogger | null,
+  event: string,
+  details: Record<string, unknown>
+): Promise<void> {
+  if (!taskLog) return;
+  const detailStr = Object.entries(details)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(', ');
+  await taskLog.log(`SECURITY: ${event} — ${detailStr}`);
+}

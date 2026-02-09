@@ -176,6 +176,19 @@ export function validateSkillDefinition(def: Record<string, unknown>): string[] 
     errors.push('"inputs" must be an array');
   }
 
+  // Optional: domains (array of strings — accepted but not enforced yet)
+  if (def['domains'] != null) {
+    if (!Array.isArray(def['domains'])) {
+      errors.push('"domains" must be an array');
+    } else {
+      for (const domain of def['domains'] as unknown[]) {
+        if (typeof domain !== 'string') {
+          errors.push(`Invalid domain: "${String(domain)}" (must be a string)`);
+        }
+      }
+    }
+  }
+
   return errors;
 }
 
@@ -194,6 +207,9 @@ function toSkillDefinition(raw: Record<string, unknown>): SkillDefinition {
   }
   if (Array.isArray(raw['credentials'])) {
     def.credentials = raw['credentials'] as string[];
+  }
+  if (Array.isArray(raw['domains'])) {
+    def.domains = raw['domains'] as string[];
   }
   return def;
 }

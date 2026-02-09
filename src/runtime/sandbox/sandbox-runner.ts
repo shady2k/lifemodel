@@ -1,31 +1,16 @@
 /**
- * Sandbox Runner - Fork orchestrator for code execution.
+ * Sandbox Runner - Orchestrator for sandboxed code execution.
  *
- * Manages child process lifecycle, IPC communication, and timeouts.
- * This is the main process entry point for sandbox execution.
+ * Manages child process lifecycle, communication, and timeouts.
+ * Uses execFile (not fork) so the worker can run both on the host
+ * and inside Docker containers without bundling issues.
  */
 
-import { fork } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MotorToolResult } from '../motor-cortex/motor-protocol.js';
 import { guardCode } from './sandbox-guard.js';
-
-/**
- * IPC message types.
- */
-interface ExecuteMessage {
-  type: 'execute';
-  code: string;
-}
-
-interface ResultMessage {
-  type: 'result';
-  ok: boolean;
-  output: string;
-  error: string;
-  durationMs: number;
-}
 
 /**
  * Shell options for sandbox execution.
@@ -50,6 +35,10 @@ const DEFAULT_AGENTIC_TIMEOUT = 30_000;
 /**
  * Run code in the sandbox.
  *
+ * Uses execFile to spawn a worker process that executes code in a
+ * stripped global environment. The worker receives code via CLI arg
+ * and returns a JSON result on stdout.
+ *
  * @param code - JavaScript code to execute
  * @param timeoutMs - Timeout in milliseconds
  * @returns MotorToolResult with execution output
@@ -73,115 +62,141 @@ export async function runSandbox(
     };
   }
 
+  // Resolve the worker path (match parent's extension: .ts in dev, .js in prod)
+  const currentFile = fileURLToPath(import.meta.url);
+  const ext = currentFile.endsWith('.ts') ? '.ts' : '.js';
+  const workerPath = join(dirname(currentFile), `sandbox-worker${ext}`);
+
   return new Promise<MotorToolResult>((resolve) => {
     let settled = false;
     const settle = (result: MotorToolResult): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
       resolve(result);
     };
 
-    // Resolve the worker path (match parent's extension: .ts in dev, .js in prod)
-    const currentFile = fileURLToPath(import.meta.url);
-    const ext = currentFile.endsWith('.ts') ? '.ts' : '.js';
-    const workerPath = join(dirname(currentFile), `sandbox-worker${ext}`);
+    // Spawn the worker using execFile (not fork)
+    // Code is passed via --eval CLI argument
+    execFile(
+      process.execPath,
+      [workerPath, '--eval', code],
+      {
+        timeout: timeoutMs,
+        env: {}, // Empty environment
+        maxBuffer: 64 * 1024, // 64KB buffer
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          // Check if it was a timeout
+          const err = error as {
+            killed?: boolean;
+            signal?: string;
+            stdout?: string;
+            stderr?: string;
+          };
+          if (err.killed || err.signal === 'SIGTERM') {
+            settle({
+              ok: false,
+              output: '',
+              errorCode: 'timeout',
+              retryable: true,
+              provenance: 'internal',
+              durationMs: timeoutMs,
+            });
+            return;
+          }
 
-    // Fork the worker process
-    const child = fork(workerPath, [], {
-      silent: true, // Don't share stdio
-      env: {}, // Empty environment
-      execArgv: [], // No Node.js flags
-    });
+          // Non-zero exit but worker may have written valid JSON to stdout
+          // (worker exits with code 1 on execution errors)
+          // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+          const stdoutData = stdout || err.stdout || '';
+          if (stdoutData) {
+            try {
+              const result = JSON.parse(stdoutData) as {
+                ok: boolean;
+                output: string;
+                error: string;
+                durationMs: number;
+              };
 
-    // Set up timeout
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      settle({
-        ok: false,
-        output: '',
-        errorCode: 'timeout',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: timeoutMs,
-      });
-    }, timeoutMs);
+              let errorCode: MotorToolResult['errorCode'] = 'execution_error';
+              if (result.error.includes('too large')) {
+                errorCode = 'invalid_args';
+              }
 
-    // Capture stderr for error reporting
-    let stderrOutput = '';
-    if (child.stderr) {
-      child.stderr.on('data', (data: Buffer) => {
-        stderrOutput += data.toString();
-      });
-    }
+              settle({
+                ok: false,
+                output: result.output || result.error,
+                errorCode,
+                retryable: false,
+                provenance: 'internal',
+                durationMs: result.durationMs,
+              });
+              return;
+            } catch {
+              // stdout wasn't valid JSON — fall through
+            }
+          }
 
-    // Send code to worker
-    const message: ExecuteMessage = {
-      type: 'execute',
-      code,
-    };
-    child.send(message);
-
-    // Handle worker response
-    child.on('message', (response: unknown) => {
-      const result = response as ResultMessage;
-
-      if (result.ok) {
-        settle({
-          ok: true,
-          output: result.output,
-          retryable: false,
-          provenance: 'internal',
-          durationMs: result.durationMs,
-        });
-      } else {
-        // Map error to error codes
-        let errorCode: MotorToolResult['errorCode'] = 'execution_error';
-        if (result.error.includes('too large')) {
-          errorCode = 'invalid_args';
-        } else if (result.error.includes('timeout')) {
-          errorCode = 'timeout';
+          // Truly unexpected error
+          settle({
+            ok: false,
+            output: stderr || error.message,
+            errorCode: 'execution_error',
+            retryable: true,
+            provenance: 'internal',
+            durationMs: Date.now() - startTime,
+          });
+          return;
         }
 
-        settle({
-          ok: false,
-          output: result.output,
-          errorCode,
-          retryable: errorCode === 'timeout',
-          provenance: 'internal',
-          durationMs: result.durationMs,
-        });
+        // Parse JSON result from stdout
+        try {
+          const result = JSON.parse(stdout) as {
+            ok: boolean;
+            output: string;
+            error: string;
+            durationMs: number;
+          };
+
+          if (result.ok) {
+            settle({
+              ok: true,
+              output: result.output,
+              retryable: false,
+              provenance: 'internal',
+              durationMs: result.durationMs,
+            });
+          } else {
+            let errorCode: MotorToolResult['errorCode'] = 'execution_error';
+            if (result.error.includes('too large')) {
+              errorCode = 'invalid_args';
+            } else if (result.error.includes('timeout')) {
+              errorCode = 'timeout';
+            }
+
+            settle({
+              ok: false,
+              output: result.output || result.error,
+              errorCode,
+              retryable: errorCode === 'timeout',
+              provenance: 'internal',
+              durationMs: result.durationMs,
+            });
+          }
+        } catch {
+          // stdout wasn't valid JSON — treat as raw output
+          settle({
+            ok: false,
+            output: stdout || stderr || 'Process exited without output',
+            errorCode: 'execution_error',
+            retryable: true,
+            provenance: 'internal',
+            durationMs: Date.now() - startTime,
+          });
+        }
       }
-
-      // Clean up child process
-      child.kill();
-    });
-
-    // Handle worker errors
-    child.on('error', (_error: Error) => {
-      settle({
-        ok: false,
-        output: '',
-        errorCode: 'execution_error',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      });
-    });
-
-    // Handle worker exit (without response)
-    child.on('exit', (code: number | null, signal: string | null) => {
-      settle({
-        ok: false,
-        output:
-          stderrOutput ||
-          `Process exited unexpectedly (code: ${String(code)}, signal: ${String(signal)})`,
-        errorCode: 'execution_error',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      });
-    });
+    );
   });
 }
 

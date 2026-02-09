@@ -62,6 +62,7 @@ import {
 import { PersistentAckRegistry } from '../layers/aggregation/persistent-ack-registry.js';
 import { createMotorCortex, type MotorCortex } from '../runtime/motor-cortex/motor-cortex.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
+import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve } from 'node:path';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
@@ -495,6 +496,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   if (llmProvider) {
     const credentialStore = createEnvCredentialStore();
     const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
+    const containerMgr = createContainerManager(logger);
 
     motorCortex = createMotorCortex({
       llm: llmProvider,
@@ -504,6 +506,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       credentialStore,
       skillsDir,
       artifactsBaseDir,
+      containerManager: containerMgr,
     });
 
     logger.info('Motor Cortex service initialized');

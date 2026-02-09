@@ -80,3 +80,4 @@ These are requirements, not suggestions.
 - **Model echoing instructions:** Search `"Accepted plain-text response"`. Non-user-message triggers reject plain text (`allowPlainText: false`). If it still leaked, check which model (`model` field) and whether it's a prompt clarity issue.
 - **Poisoned history:** Bad response saved in conversation history → model copies pattern. Check for bad text in prior ASSISTANT messages in the conversation log. Fix: clean `data/state/` conversation files.
 - **Truncated response:** `finishReason: "length"` — model hit token limit. Agentic loop retries with smart model.
+- **Container issues:** Search logs for `component: "container-manager"`. `docker ps -a --filter label=com.lifemodel.component=motor-cortex` lists all Motor Cortex containers. Stale containers are pruned on restart. If Docker is unavailable, agentic runs fail unless `MOTOR_CORTEX_UNSAFE=true`.

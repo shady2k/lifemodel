@@ -128,4 +128,51 @@ describe('parseResponseContent', () => {
       expect(result).toEqual({ text: 'Hello world' });
     });
   });
+
+  describe('JSON at end of content (model leak)', () => {
+    it('extracts JSON from end of content when model outputs text then JSON', () => {
+      const leaked = `Here are the articles:
+
+1. Article one
+2. Article two
+
+{"response":"Here are the articles:\\n\\n1. Article one\\n2. Article two"}`;
+      const result = parseResponseContent(leaked);
+      expect(result).toEqual({
+        text: 'Here are the articles:\n\n1. Article one\n2. Article two',
+      });
+    });
+
+    it('handles markdown text followed by JSON', () => {
+      const leaked = `**Bold title**
+
+Some description
+
+[Link](url)
+
+{"response":"**Bold title**\\n\\nSome description\\n\\n[Link](url)","status":"active"}`;
+      const result = parseResponseContent(leaked);
+      expect(result).toEqual({
+        text: '**Bold title**\n\nSome description\n\n[Link](url)',
+        status: 'active',
+      });
+    });
+
+    it('ignores trailing text when valid JSON is found at end', () => {
+      // This is the canonical case from the bug report
+      const leaked = `Теперь есть! По Хабу появились свежие статьи:
+
+1. **ИИ повис на стекловолокне**: дефицит специфического стекловолокна от японской компании Nittobo ограничивает производство ИИ-чипов
+   Читать (https://habr.com/ru/companies/bothub/news/994392/?utm_source=habrahabr&utm_medium=rss&utm_campaign=994392)
+
+Тебе какая‑то из них особенно интересна?
+
+{"response":"Теперь есть! По Хабу появились свежие статьи:\\n\\n1. **ИИ повис на стекловолокне**: дефицит специфического стекловолокна от японской компании Nittobo ограничивает производство ИИ-чипов  \\n   Читать (https://habr.com/ru/companies/bothub/news/994392/?utm_source=habrahabr&utm_medium=rss&utm_campaign=994392)\\n\\nТебе какая‑то из них особенно интересна?"}`;
+      const result = parseResponseContent(leaked);
+      expect(result.text).toContain('ИИ повис на стекловолокне');
+      expect(result.text).toContain('Тебе какая‑то из них особенно интересна?');
+      // Should NOT contain the JSON wrapper
+      expect(result.text).not.toContain('{"response":');
+    });
+  });
 });
