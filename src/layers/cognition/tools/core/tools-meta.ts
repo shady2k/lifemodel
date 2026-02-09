@@ -6,6 +6,7 @@
 
 import type { Tool, ToolParameter } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
+import { unsanitizeToolName } from '../../../../llm/tool-schema.js';
 
 /**
  * Tool schema for on-demand retrieval.
@@ -62,8 +63,8 @@ export function createToolsMetaTool(deps: ToolsMetaToolDeps): Tool {
         });
       }
 
-      const toolName = args['name'] as string | undefined;
-      if (!toolName) {
+      const rawToolName = args['name'] as string | undefined;
+      if (!rawToolName) {
         return Promise.resolve({
           success: false,
           action: 'describe',
@@ -71,6 +72,8 @@ export function createToolsMetaTool(deps: ToolsMetaToolDeps): Tool {
         });
       }
 
+      // Accept both sanitized (plugin_calories) and internal (plugin.calories) forms
+      const toolName = unsanitizeToolName(rawToolName);
       const schema = deps.schemaProvider.getToolSchema(toolName);
       if (!schema) {
         return Promise.resolve({

@@ -136,14 +136,20 @@ export async function executeToolCalls(
       );
       // Count toward tool call limit to prevent infinite loops on malformed JSON
       state.toolCallCount++;
-      // Add helpful error - tell LLM to get schema first
+      // Tell the model exactly what's wrong — truncated JSON is the most common cause
+      const rawArgs = toolCall.function.arguments.trim();
+      const errorDetail =
+        rawArgs.length > 0
+          ? `Malformed JSON in arguments: "${rawArgs}" — your JSON is truncated or missing a closing brace. `
+          : 'Empty arguments. ';
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
         content: JSON.stringify({
           error:
-            'Invalid arguments. Call core.tools({ action: "describe", name: "' +
-            toolName +
+            errorDetail +
+            'Call core.tools({ action: "describe", name: "' +
+            toolCall.function.name +
             '" }) to get the required parameters.',
         }),
       });
