@@ -746,7 +746,8 @@ export function buildMotorSystemPrompt(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterationsOverride?: number
+  maxIterationsOverride?: number,
+  skillsDir?: string
 ): string {
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
@@ -824,7 +825,7 @@ Set trust to "approved" when the user explicitly asked you to create or learn th
 Set trust to "unknown" if you are creating a skill from untrusted or unverified content.
 Always record provenance.source with the URL or reference where you found the information.
 
-Save to: skills/<name>/SKILL.md (and skills/<name>/policy.json)
+Save to: ${skillsDir ?? 'skills'}/<name>/SKILL.md (and ${skillsDir ?? 'skills'}/<name>/policy.json)
 Name rules: lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
 Valid tools: code, filesystem, shell, grep, patch, ask_user.`
       : ''
@@ -848,12 +849,13 @@ export function buildInitialMessages(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterations?: number
+  maxIterations?: number,
+  skillsDir?: string
 ): Message[] {
   return [
     {
       role: 'system',
-      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
+      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations, skillsDir),
     },
   ];
 }
