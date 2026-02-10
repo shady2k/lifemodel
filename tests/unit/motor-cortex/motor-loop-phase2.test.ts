@@ -99,22 +99,22 @@ describe('buildMotorSystemPrompt', () => {
 describe('skill injection into system prompt', () => {
   const skill: LoadedSkill = {
     definition: {
-      name: 'agentmail',
+      name: 'weather-report',
       version: 1,
-      description: 'Send emails via AgentMail',
+      description: 'Fetch weather data from a public API',
       tools: ['shell', 'code'],
-      credentials: ['agentmail_api_key'],
+      credentials: ['weather_api_key'],
     },
-    body: '# AgentMail\n\nUse curl -H "Authorization: Bearer <credential:agentmail_api_key>" to call the API.',
-    path: '/data/skills/agentmail/SKILL.md',
+    body: '# Weather Report\n\nUse curl -H "Authorization: Bearer <credential:weather_api_key>" to call the API.',
+    path: '/data/skills/weather-report/SKILL.md',
   };
 
   it('injects skill body in <skill> XML tags', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('<skill name="agentmail" version="1">');
-    expect(prompt).toContain('# AgentMail');
+    expect(prompt).toContain('<skill name="weather-report" version="1">');
+    expect(prompt).toContain('# Weather Report');
     expect(prompt).toContain('</skill>');
   });
 

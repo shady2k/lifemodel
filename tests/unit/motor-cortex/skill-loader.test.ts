@@ -19,24 +19,24 @@ import type { LoadedSkill } from '../../../src/runtime/skills/skill-types.js';
 describe('parseSkillFile', () => {
   it('parses valid SKILL.md with frontmatter and body', () => {
     const content = `---
-name: agentmail
+name: weather-report
 version: 1
-description: Send emails via AgentMail API
+description: Fetch weather data from a public API
 tools: [shell, code, filesystem]
-credentials: [agentmail_api_key]
+credentials: [weather_api_key]
 ---
-# AgentMail Skill
+# Weather Report Skill
 
-Use curl to call the AgentMail API.`;
+Use curl to call the weather API.`;
 
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      expect(result.definition['name']).toBe('agentmail');
+      expect(result.definition['name']).toBe('weather-report');
       expect(result.definition['version']).toBe(1);
       expect(result.definition['tools']).toEqual(['shell', 'code', 'filesystem']);
-      expect(result.definition['credentials']).toEqual(['agentmail_api_key']);
-      expect(result.body).toContain('# AgentMail Skill');
+      expect(result.definition['credentials']).toEqual(['weather_api_key']);
+      expect(result.body).toContain('# Weather Report Skill');
     }
   });
 

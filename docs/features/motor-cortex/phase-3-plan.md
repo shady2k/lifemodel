@@ -90,7 +90,7 @@ HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
 - `logSecurityEvent()` — path traversal, blocked commands
 
 ### skill-types.ts / skill-loader.ts
-- `SkillDefinition.domains?: string[]` — accepted and validated, not enforced (Phase 4)
+- `SkillDefinition.domains?: string[]` — accepted, validated, and enforced via iptables (Phase 4)
 
 ### container.ts (DI)
 - Creates `ContainerManager`, passes to Motor Cortex deps

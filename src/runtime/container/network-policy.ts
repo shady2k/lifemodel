@@ -24,7 +24,7 @@ const execFileAsync = promisify(execFile);
  * Network policy for a Motor Cortex run.
  */
 export interface NetworkPolicy {
-  /** Domain names that are allowed (e.g., ['api.agentmail.dev']) */
+  /** Domain names that are allowed (e.g., ['api.example.com']) */
   domains: string[];
 
   /** Resolved IP addresses for each domain (all A records, not just first) */

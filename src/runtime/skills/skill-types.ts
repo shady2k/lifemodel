@@ -6,7 +6,7 @@
  *
  * YAML parser supports a strict subset:
  * - Single-level keys: `key: value`
- * - String values: `name: agentmail` (unquoted) or `name: "agent mail"` (quoted)
+ * - String values: `name: my-skill` (unquoted) or `name: "my skill"` (quoted)
  * - Number values: `version: 1`
  * - Boolean values: `required: true`
  * - Inline arrays: `tools: [shell, code, filesystem]`
@@ -37,7 +37,7 @@ export interface SkillDefinition {
   /** Credential names this skill needs (optional) */
   credentials?: string[];
 
-  /** Network domains this skill needs access to (optional, not enforced yet) */
+  /** Network domains this skill needs access to (optional, enforced via iptables) */
   domains?: string[];
 }
 

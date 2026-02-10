@@ -5,12 +5,12 @@ Per-skill network access with kernel-level enforcement. Containers that need ext
 ## User Flow
 
 ```
-Cognition: "I need to access api.agentmail.dev"
+Cognition: "I need to access api.example.com"
 User: "Sure"
-  → core.act({ domains: ['api.agentmail.dev'], task: "..." })
-  → Container: curl api.agentmail.dev ✅ | curl evil.com ❌ | curl 1.2.3.4 ❌
+  → core.act({ domains: ['api.example.com'], task: "..." })
+  → Container: curl api.example.com ✅ | curl evil.com ❌ | curl 1.2.3.4 ❌
 
-Mid-run discovery: motor cortex needs cdn.agentmail.dev too
+Mid-run discovery: motor cortex needs cdn.example.com too
   → Fails → Cognition asks user → retry with expanded domains
 ```
 

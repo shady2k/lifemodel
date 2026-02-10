@@ -7,13 +7,13 @@
  * File format:
  * ```
  * ---
- * name: agentmail
+ * name: weather-report
  * version: 1
- * description: Send and receive emails via AgentMail API
+ * description: Fetch weather data from a public API
  * tools: [shell, code, filesystem]
- * credentials: [agentmail_api_key]
+ * credentials: [weather_api_key]
  * ---
- * # AgentMail Skill
+ * # Weather Report Skill
  * Instructions for the LLM...
  * ```
  */
@@ -176,7 +176,7 @@ export function validateSkillDefinition(def: Record<string, unknown>): string[] 
     errors.push('"inputs" must be an array');
   }
 
-  // Optional: domains (array of strings — accepted but not enforced yet)
+  // Optional: domains (array of strings — enforced via iptables in container)
   if (def['domains'] != null) {
     if (!Array.isArray(def['domains'])) {
       errors.push('"domains" must be an array');
