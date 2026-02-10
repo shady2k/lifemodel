@@ -51,7 +51,7 @@ function formatDuration(ms: number): string {
  */
 export function createTimeTool(deps: TimeToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: now or since', required: true },
+    { name: 'action', type: 'string', description: 'Required. One of: now, since', required: true },
     { name: 'timezone', type: 'string', description: 'IANA timezone (for now)', required: false },
     {
       name: 'event',
@@ -65,8 +65,7 @@ export function createTimeTool(deps: TimeToolDeps): Tool {
   return {
     name: 'core.time',
     maxCallsPerTurn: 1,
-    description:
-      'Get time information. Actions: now (current time), since (elapsed time from event).',
+    description: 'Get time information. Example: {"action": "now", "timezone": "Europe/Moscow"}',
     tags: ['current-time', 'elapsed', 'timezone'],
     hasSideEffects: false,
     parameters,

@@ -486,6 +486,7 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
 Actions: add_source, remove_source, list_sources, get_news.
+Example: {"action": "get_news", "query": "technology"}
 
 **For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
 This searches articles from configured RSS feeds and Telegram channels.
@@ -495,8 +496,7 @@ Only fall back to web search if get_news returns no relevant results.`,
       {
         name: 'action',
         type: 'string',
-        description:
-          'Action to perform: "add_source", "remove_source", "list_sources", or "get_news"',
+        description: 'Required. One of: add_source, remove_source, list_sources, get_news',
         required: true,
         enum: ['add_source', 'remove_source', 'list_sources', 'get_news'],
       },

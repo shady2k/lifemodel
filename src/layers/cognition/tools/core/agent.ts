@@ -13,7 +13,7 @@ import { validateAgainstParameters } from '../validation.js';
  */
 export function createAgentTool(): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: update', required: true },
+    { name: 'action', type: 'string', description: 'Required. Must be: update', required: true },
     {
       name: 'field',
       type: 'string',
@@ -46,7 +46,7 @@ export function createAgentTool(): Tool {
     name: 'core.agent',
     maxCallsPerTurn: 1,
     description:
-      'Update agent internal state (curiosity, taskPressure). socialDebt and energy are automatic — do NOT update them. Subject to field policies (confidence thresholds, maxDelta). Values may be clamped.',
+      'Update agent internal state (curiosity, taskPressure). Example: {"action": "update", "field": "curiosity", "operation": "delta", "value": 0.1, "confidence": 0.8, "reason": "..."}\nsocialDebt and energy are automatic — do NOT update them. Subject to field policies (confidence thresholds, maxDelta). Values may be clamped.',
     tags: ['update', 'agent-state', 'internal'],
     hasSideEffects: true,
     parameters,

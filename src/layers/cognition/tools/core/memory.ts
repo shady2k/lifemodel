@@ -154,7 +154,12 @@ export interface MemoryToolDeps {
  */
 export function createMemoryTool(deps: MemoryToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'search|save|saveFact', required: true },
+    {
+      name: 'action',
+      type: 'string',
+      description: 'Required. One of: search, save, saveFact',
+      required: true,
+    },
     { name: 'query', type: 'string', description: 'Search query', required: false },
     { name: 'content', type: 'string', description: 'Content to save', required: false },
     {
@@ -213,6 +218,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     name: 'core.memory',
     maxCallsPerTurn: 4,
     description: `Long-term memory: search, save, or saveFact.
+Example: {"action": "search", "query": "user preferences"}
 
 Search returns paginated results (relevance + recency + confidence scoring).
 - Use limit (default: 10) and offset (default: 0) to paginate through results.

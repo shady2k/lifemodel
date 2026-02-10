@@ -34,13 +34,18 @@ export interface StateToolDeps {
  */
 export function createStateTool(deps: StateToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'agent|user', required: true },
+    {
+      name: 'action',
+      type: 'string',
+      description: 'Required. One of: agent, user',
+      required: true,
+    },
   ];
 
   return {
     name: 'core.state',
     maxCallsPerTurn: 1,
-    description: 'Get agent state (energy, mood) or user model.',
+    description: 'Get agent state (energy, mood) or user model. Example: {"action": "agent"}',
     tags: ['agent-state', 'user-model'],
     hasSideEffects: false,
     parameters,

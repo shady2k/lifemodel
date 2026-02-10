@@ -29,7 +29,7 @@ export function createSoulTool(deps: SoulToolDeps): Tool {
     {
       name: 'action',
       type: 'string',
-      description: 'Action: introspect | reflect | question',
+      description: 'Required. One of: introspect, reflect, question',
       required: true,
     },
     {
@@ -69,7 +69,7 @@ export function createSoulTool(deps: SoulToolDeps): Tool {
   return {
     name: 'core.soul',
     description:
-      'Introspect on your living identity. Use "introspect" to understand who you are, "reflect" to manually check alignment of a recent action, "question" to pose a self-inquiry question.',
+      'Introspect on your living identity. Example: {"action": "introspect", "focus": "health"}\nUse "introspect" to understand who you are, "reflect" to check alignment, "question" to pose a self-inquiry.',
     tags: ['identity', 'self', 'reflection', 'introspection'],
     hasSideEffects: true, // reflect and question can modify state
     parameters,

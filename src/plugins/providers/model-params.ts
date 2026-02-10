@@ -44,7 +44,8 @@ interface ModelParamRule {
  * Based on model documentation and OpenCode's empirical findings.
  */
 const BUILTIN_RULES: ModelParamRule[] = [
-  // GLM-4.7: temp 1.0 per official docs, thinking enabled by default (don't touch reasoning)
+  // GLM-4.7: temp 1.0 per official docs, thinking enabled by default — let it think
+  // Disabling thinking degrades tool call quality (mangled JSON args, retry loops)
   // GLM doesn't support OpenAI-style prompt caching
   {
     match: 'glm-4.7',

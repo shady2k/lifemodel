@@ -41,13 +41,14 @@ export interface ToolsMetaToolDeps {
  */
 export function createToolsMetaTool(deps: ToolsMetaToolDeps): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: describe', required: true },
+    { name: 'action', type: 'string', description: 'Required. Must be: describe', required: true },
     { name: 'name', type: 'string', description: 'Tool name to get schema for', required: true },
   ];
 
   return {
     name: 'core.tools',
-    description: 'Get detailed schema for any tool. Use when you need exact parameters.',
+    description:
+      'Get detailed schema for any tool. Example: {"action": "describe", "name": "core.memory"}',
     tags: ['meta', 'schema', 'help'],
     hasSideEffects: false,
     parameters,

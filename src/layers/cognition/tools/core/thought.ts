@@ -12,7 +12,7 @@ import { validateAgainstParameters } from '../validation.js';
  */
 export function createThoughtTool(): Tool {
   const parameters: ToolParameter[] = [
-    { name: 'action', type: 'string', description: 'Action: emit', required: true },
+    { name: 'action', type: 'string', description: 'Required. Must be: emit', required: true },
     {
       name: 'content',
       type: 'string',
@@ -26,7 +26,7 @@ export function createThoughtTool(): Tool {
     name: 'core.thought',
     maxCallsPerTurn: 3,
     description:
-      'Save a genuine unresolved question — something you want to FIGURE OUT, not something to DO. Not for action items ("check if resolved" → use core.schedule), not for narration ("User is..." → just respond), not for strategy ("I should..." → just do it). Good: "Why did the user seem deflated about Langflow — the tool itself or something deeper?" Good: "Mentioned chest pain last week — was that resolved or still ongoing?"',
+      'Save a genuine unresolved question — something you want to FIGURE OUT, not something to DO. Example: {"action": "emit", "content": "Why did user seem deflated about Langflow?"}\nNot for action items ("check if resolved" → use core.schedule), not for narration ("User is..." → just respond), not for strategy ("I should..." → just do it).',
     tags: ['follow-up', 'investigation'],
     hasSideEffects: true,
     parameters,
