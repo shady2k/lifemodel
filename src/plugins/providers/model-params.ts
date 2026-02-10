@@ -50,6 +50,14 @@ const BUILTIN_RULES: ModelParamRule[] = [
   {
     match: 'glm-4.7',
     params: { temperature: 1.0, reasoning: 'omit', supportsCacheControl: false },
+    // Prefer fastest providers (Cerebras: 158 tok/s, DeepInfra: 0.57s latency)
+    // Full ranking: https://openrouter.ai/models/z-ai/glm-4.7
+    provider: {
+      order: ['Cerebras', 'DeepInfra', 'Together', 'Google Vertex'],
+      allow_fallbacks: true,
+      // Require 30+ tok/s for responsive agent behavior
+      preferred_min_throughput: { p50: 30 },
+    },
   },
   {
     match: 'glm-4.6',
