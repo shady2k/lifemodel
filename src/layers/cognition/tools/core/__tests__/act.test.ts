@@ -59,10 +59,10 @@ describe('core.act tool', () => {
         task: '2 + 2',
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(true);
-      const data = result.data as Record<string, unknown>;
-      expect(data.mode).toBe('oneshot');
-      expect(data.result).toBe('42');
+      expect(result['success']).toBe(true);
+      const data = result['data'] as Record<string, unknown>;
+      expect(data['mode']).toBe('oneshot');
+      expect(data['result']).toBe('42');
     });
 
     it('handles execution errors', async () => {
@@ -75,8 +75,8 @@ describe('core.act tool', () => {
         task: 'invalid syntax',
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Syntax error');
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('Syntax error');
     });
   });
 
@@ -97,9 +97,9 @@ describe('core.act tool', () => {
         // No tools provided - should error
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('no approved policy');
-      expect(result.error).toContain('Provide tools explicitly');
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('no approved policy');
+      expect(result['error']).toContain('Provide tools explicitly');
     });
 
     it('uses policy defaults when trust is approved', async () => {
@@ -127,7 +127,7 @@ describe('core.act tool', () => {
         // No tools provided - should use policy defaults
       })) as Record<string, unknown>;
 
-      expect(executeResult.success).toBe(true);
+      expect(executeResult['success']).toBe(true);
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -250,7 +250,7 @@ describe('core.act tool', () => {
         task: 'test task',
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(true);
+      expect(result['success']).toBe(true);
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -286,8 +286,8 @@ describe('core.act tool', () => {
         // Missing task
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Missing required parameters');
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('Missing required parameters');
     });
 
     it('returns error for unknown mode', async () => {
@@ -296,8 +296,8 @@ describe('core.act tool', () => {
         task: 'test',
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Unknown mode');
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('Unknown mode');
     });
 
     it('returns error when skill fails to load', async () => {
@@ -311,8 +311,8 @@ describe('core.act tool', () => {
         skill: 'nonexistent',
       })) as Record<string, unknown>;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Skill not found');
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('Skill not found');
     });
   });
 

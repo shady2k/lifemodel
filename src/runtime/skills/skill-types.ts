@@ -39,16 +39,16 @@ export interface SkillFrontmatter {
   description: string;
 
   /** Optional license identifier (e.g., "MIT", "Apache-2.0") */
-  license?: string;
+  license?: string | undefined;
 
   /** Compatibility version or identifier */
-  compatibility?: string;
+  compatibility?: string | undefined;
 
   /** Additional metadata (arbitrary key-value pairs) */
-  metadata?: Record<string, string>;
+  metadata?: Record<string, string> | undefined;
 
   /** Optional: tools hint (non-standard, may be used by skill publishers) */
-  'allowed-tools'?: string;
+  'allowed-tools'?: string | undefined;
 }
 
 /**
@@ -73,31 +73,33 @@ export interface SkillPolicy {
   allowedTools: MotorTool[];
 
   /** Network domains this skill may access (enforced via iptables) */
-  allowedDomains?: string[];
+  allowedDomains?: string[] | undefined;
 
   /** Credential names this skill requires */
-  requiredCredentials?: string[];
+  requiredCredentials?: string[] | undefined;
 
   /** Input parameters the skill accepts (optional) */
-  inputs?: SkillInput[];
+  inputs?: SkillInput[] | undefined;
 
   /** Provenance: where this skill came from */
-  provenance?: {
-    /** Source URL or identifier */
-    source: string;
+  provenance?:
+    | {
+        /** Source URL or identifier */
+        source: string;
 
-    /** When this skill was fetched */
-    fetchedAt: string;
+        /** When this skill was fetched */
+        fetchedAt: string;
 
-    /** SHA-256 hash of SKILL.md content at approval time */
-    contentHash?: string;
-  };
+        /** SHA-256 hash of SKILL.md content at approval time */
+        contentHash?: string | undefined;
+      }
+    | undefined;
 
   /** Who approved this policy */
-  approvedBy?: 'user';
+  approvedBy?: 'user' | undefined;
 
   /** When this policy was approved */
-  approvedAt?: string;
+  approvedAt?: string | undefined;
 }
 
 /**
@@ -137,7 +139,7 @@ export interface SkillIndexEntry {
   hasPolicy: boolean;
 
   /** Last time this skill was used (ISO timestamp) */
-  lastUsed?: string;
+  lastUsed?: string | undefined;
 }
 
 /**
@@ -177,7 +179,7 @@ export interface LoadedSkill {
   frontmatter: SkillFrontmatter;
 
   /** Security policy from policy.json (if exists) */
-  policy?: SkillPolicy;
+  policy?: SkillPolicy | undefined;
 
   /** Markdown body (instructions for the LLM) */
   body: string;

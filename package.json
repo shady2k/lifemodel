@@ -25,6 +25,10 @@
     "proactive",
     "human-like"
   ],
+  "lint-staged": {
+    "*.ts": "eslint --max-warnings 0",
+    "*.{ts,json}": "prettier --check"
+  },
   "author": "",
   "license": "MIT",
   "devDependencies": {

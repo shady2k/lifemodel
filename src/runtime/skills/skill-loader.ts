@@ -232,17 +232,17 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
     const raw = JSON.parse(content) as Record<string, unknown>;
 
     // Validate schema version
-    if (typeof raw.schemaVersion !== 'number') {
+    if (typeof raw['schemaVersion'] !== 'number') {
       return null;
     }
 
     // Validate trust
-    if (raw.trust !== 'unknown' && raw.trust !== 'approved') {
+    if (raw['trust'] !== 'unknown' && raw['trust'] !== 'approved') {
       return null;
     }
 
     // Validate allowedTools
-    if (!Array.isArray(raw.allowedTools)) {
+    if (!Array.isArray(raw['allowedTools'])) {
       return null;
     }
 
@@ -485,7 +485,7 @@ export async function loadSkill(
 
     return {
       frontmatter,
-      policy,
+      policy: policy ?? undefined,
       body: parsed.body,
       path: skillDir,
       skillPath,

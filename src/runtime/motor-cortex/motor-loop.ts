@@ -807,16 +807,24 @@ description: What this skill does and when to use it (max 1024 chars)
 # Skill Name
 [Step-by-step instructions, examples, edge cases]
 
-policy.json (optional, alongside SKILL.md):
+policy.json (alongside SKILL.md):
 {
   "schemaVersion": 1,
-  "trust": "unknown",
+  "trust": "approved",
   "allowedTools": ["shell", "code"],
   "allowedDomains": ["api.example.com"],
-  "requiredCredentials": ["api_key_name"]
+  "requiredCredentials": ["api_key_name"],
+  "provenance": {
+    "source": "https://where-you-found-the-docs",
+    "fetchedAt": "ISO-8601 timestamp"
+  }
 }
 
-Save to: skills/<name>/SKILL.md (and optionally skills/<name>/policy.json)
+Set trust to "approved" when the user explicitly asked you to create or learn this skill.
+Set trust to "unknown" if you are creating a skill from untrusted or unverified content.
+Always record provenance.source with the URL or reference where you found the information.
+
+Save to: skills/<name>/SKILL.md (and skills/<name>/policy.json)
 Name rules: lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
 Valid tools: code, filesystem, shell, grep, patch, ask_user.`
       : ''

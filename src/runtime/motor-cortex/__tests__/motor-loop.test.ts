@@ -18,8 +18,10 @@ describe('buildMotorSystemPrompt', () => {
       status: 'running',
       attempts: [],
       currentAttemptIndex: 0,
-      createdAt: new Date(),
-    } as MotorRun;
+      maxAttempts: 3,
+      startedAt: new Date().toISOString(),
+      energyConsumed: 0,
+    } satisfies MotorRun;
   }
 
   function createMockSkill(): LoadedSkill {

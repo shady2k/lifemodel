@@ -19,6 +19,7 @@ import {
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { MotorTool } from '../../motor-cortex/motor-protocol.js';
 
 describe('parseSkillFile', () => {
   it('parses Agent Skills standard format', () => {
@@ -34,9 +35,9 @@ This is the body.
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      expect(result.frontmatter.name).toBe('test-skill');
-      expect(result.frontmatter.description).toBe('A test skill');
-      expect(result.frontmatter.license).toBe('MIT');
+      expect(result.frontmatter['name']).toBe('test-skill');
+      expect(result.frontmatter['description']).toBe('A test skill');
+      expect(result.frontmatter['license']).toBe('MIT');
       expect(result.body).toContain('# Test Skill');
     }
   });
@@ -50,8 +51,8 @@ Body`;
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      expect(result.frontmatter.name).toBe('minimal');
-      expect(result.frontmatter.description).toBe('Minimal skill');
+      expect(result.frontmatter['name']).toBe('minimal');
+      expect(result.frontmatter['description']).toBe('Minimal skill');
     }
   });
 
@@ -68,9 +69,9 @@ Body`;
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
       // Should skip the nested metadata block
-      expect(result.frontmatter.name).toBe('with-metadata');
+      expect(result.frontmatter['name']).toBe('with-metadata');
       // metadata should not be in frontmatter
-      expect(result.frontmatter.metadata).toBeUndefined();
+      expect(result.frontmatter['metadata']).toBeUndefined();
     }
   });
 
@@ -147,7 +148,7 @@ describe('policy.json operations', () => {
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code', 'shell'],
+      allowedTools: ['code', 'shell'] as MotorTool[],
       allowedDomains: ['api.example.com'],
       requiredCredentials: ['api_key'],
       approvedBy: 'user' as const,
@@ -272,7 +273,7 @@ Body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'],
+      allowedTools: ['code'] as MotorTool[],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {
@@ -307,7 +308,7 @@ Original body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'],
+      allowedTools: ['code'] as MotorTool[],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {
@@ -350,7 +351,7 @@ Body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'],
+      allowedTools: ['code'] as MotorTool[],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {

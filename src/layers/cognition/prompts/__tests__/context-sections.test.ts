@@ -41,14 +41,14 @@ describe('buildAvailableSkillsSection', () => {
   it('builds section with approved skills', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'agentmail', description: 'Email skill', trust: 'approved', hasPolicy: true },
+        { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
 
     expect(result).not.toBeNull();
     expect(result).toContain('<available_skills>');
-    expect(result).toContain('agentmail [approved]');
+    expect(result).toContain('web-scraper [approved]');
     expect(result).toContain('Email skill');
     expect(result).toContain('Use core.act with skill parameter');
   });
@@ -69,13 +69,13 @@ describe('buildAvailableSkillsSection', () => {
   it('builds section with mixed trust states', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'agentmail', description: 'Email skill', trust: 'approved', hasPolicy: true },
+        { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
         { name: 'weather', description: 'Weather skill', trust: 'unknown', hasPolicy: false },
       ],
     });
     const result = buildAvailableSkillsSection(context);
 
-    expect(result).toContain('agentmail [approved]');
+    expect(result).toContain('web-scraper [approved]');
     expect(result).toContain('weather [unknown]');
     expect(result).toContain('(needs onboarding)');
   });

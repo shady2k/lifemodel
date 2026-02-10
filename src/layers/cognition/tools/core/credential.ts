@@ -10,7 +10,7 @@
  * for placeholder resolution during Motor Cortex execution.
  */
 
-import type { CredentialStore } from '../../../runtime/vault/credential-store.js';
+import type { CredentialStore } from '../../../../runtime/vault/credential-store.js';
 import type { Tool, ToolParameter } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 
@@ -42,7 +42,6 @@ export interface CredentialToolDeps {
  * Create the core.credential tool.
  */
 export function createCredentialTool(deps: CredentialToolDeps): Tool {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- ESLint cannot resolve CredentialStore across module boundary
   const store: CredentialStore = deps.credentialStore;
 
   const parameters: ToolParameter[] = [
@@ -112,7 +111,6 @@ export function createCredentialTool(deps: CredentialToolDeps): Tool {
           });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- ESLint cannot resolve CredentialStore type
         store.set(name, value);
         return Promise.resolve({
           success: true,
@@ -130,7 +128,6 @@ export function createCredentialTool(deps: CredentialToolDeps): Tool {
           });
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- ESLint cannot resolve CredentialStore type
         const existed: boolean = store.delete(name);
         return Promise.resolve({
           success: true,
@@ -142,7 +139,6 @@ export function createCredentialTool(deps: CredentialToolDeps): Tool {
 
       // Handle list action
       if (action === 'list') {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- ESLint cannot resolve CredentialStore type
         const names: string[] = store.list();
         return Promise.resolve({
           success: true,
@@ -159,8 +155,3 @@ export function createCredentialTool(deps: CredentialToolDeps): Tool {
     },
   };
 }
-
-/**
- * Type export for tool registry.
- */
-export type { CredentialToolDeps };
