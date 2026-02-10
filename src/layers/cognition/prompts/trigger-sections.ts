@@ -80,7 +80,7 @@ export function buildPluginEventSection(data: Record<string, unknown> | undefine
 
   // Handle fact_batch events (news, interesting facts)
   if (kind === 'fact_batch' && Array.isArray(data['facts'])) {
-    const facts = data['facts'] as { content: string; url?: string; tags?: string[] }[];
+    const facts = data['facts'] as { content: string; provenance?: { url?: string } }[];
 
     if (facts.length === 0) {
       return `<trigger type="plugin_event">\n<task>Empty fact batch received.</task>\n</trigger>`;
@@ -88,10 +88,10 @@ export function buildPluginEventSection(data: Record<string, unknown> | undefine
 
     const isUrgent = urgent === true;
 
-    // Format facts with inline URLs
+    // Format facts with inline URLs (URL is in provenance.url per Fact type)
     const factSections = facts
       .map((fact, index) => {
-        const url = fact.url ? ` — ${fact.url}` : '';
+        const url = fact.provenance?.url ? ` — ${fact.provenance.url}` : '';
         return `${String(index + 1)}. ${fact.content}${url}`;
       })
       .join('\n');
