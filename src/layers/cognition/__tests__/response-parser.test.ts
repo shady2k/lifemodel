@@ -175,4 +175,39 @@ Some description
       expect(result.text).not.toContain('{"response":');
     });
   });
+
+  describe('XML tool-call detection', () => {
+    it('detects <core.say> tag pair as malformed', () => {
+      const result = parseResponseContent('<core.say>Hello there!</core.say>');
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+
+    it('detects multiple XML tool-call tags as malformed', () => {
+      const content =
+        '<core.say>text</core.say>\n\n<core.act>\n  <mode>agentic</mode>\n</core.act>';
+      const result = parseResponseContent(content);
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+
+    it('detects opening <core.act> tag at line start as malformed', () => {
+      const content = '<core.act>\n  <mode>agentic</mode>\n  <task>create a skill</task>';
+      const result = parseResponseContent(content);
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+
+    it('does not flag normal text mentioning core.act', () => {
+      const result = parseResponseContent('I used core.act to run the task');
+      expect(result).toEqual({ text: 'I used core.act to run the task' });
+    });
+
+    it('does not flag backtick-quoted tool references in normal text', () => {
+      const result = parseResponseContent('Use the `core.say` tool to respond');
+      expect(result).toEqual({ text: 'Use the `core.say` tool to respond' });
+    });
+
+    it('still rejects plain text when allowPlainText is false (existing behavior)', () => {
+      const result = parseResponseContent('Hello world', { allowPlainText: false });
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+  });
 });

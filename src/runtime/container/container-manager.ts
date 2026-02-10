@@ -339,7 +339,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
         throw new Error('Failed to build Motor Cortex container image');
       }
 
-      const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+      let hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
       let resolvedPolicy: NetworkPolicy | null = null;
 
       if (hasDomains) {
@@ -348,7 +348,14 @@ export function createContainerManager(logger: Logger): ContainerManager {
           log.info(msg);
         });
         if (!netpolicyBuilt) {
-          throw new Error('Failed to build network policy helper container image');
+          // Degrade gracefully: fall back to --network none instead of crashing.
+          // The task loses network access but can still use filesystem/code tools.
+          log.warn(
+            { runId },
+            'Network policy helper image failed to build — falling back to --network none (no network access)'
+          );
+          hasDomains = false;
+          resolvedPolicy = null;
         }
 
         // Resolve domains to IPs ONCE — reused for both --add-host and iptables

@@ -115,9 +115,10 @@ function processInputBuffer(): void {
 
     try {
       const request = JSON.parse(json) as ToolServerRequest;
+      const requestId = 'id' in request ? request.id : undefined;
       handleRequest(request).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        writeFrame({ type: 'error', message: msg });
+        writeFrame({ type: 'error', id: requestId, message: msg });
       });
     } catch {
       writeFrame({ type: 'error', message: `Invalid JSON: ${json.slice(0, 100)}` });
@@ -202,7 +203,7 @@ async function executeCode(
   if (!code) {
     return {
       ok: false,
-      output: '',
+      output: 'Missing "code" argument. Provide JavaScript code as a string.',
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -330,6 +331,19 @@ async function executeShell(
       output = output.slice(0, MAX_SHELL_OUTPUT) + '\n[... truncated]';
     }
 
+    // Detect network commands that returned empty output (likely DNS/iptables block)
+    if (validation.hasNetwork && !output && !stderr) {
+      return {
+        ok: false,
+        output:
+          'Network request returned empty response. The target domain may not be in the allowed domains list. Use ask_user to request access to additional domains.',
+        errorCode: 'execution_error',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
     return {
       ok: true,
       output: output || stderr || '(no output)',
@@ -342,16 +356,25 @@ async function executeShell(
     if (err.killed) {
       return {
         ok: false,
-        output: '',
+        output: 'Command timed out.',
         errorCode: 'timeout',
         retryable: true,
         provenance: 'internal',
         durationMs: timeout,
       };
     }
+
+    const errorOutput = err.stderr ?? err.message ?? String(error);
+
+    // Add hint for network errors
+    const networkHint =
+      validation.hasNetwork && /resolve|refused|reset|unreachable|Network/i.test(errorOutput)
+        ? '\nNote: The domain may not be in the allowed list. Use ask_user to request access to additional domains.'
+        : '';
+
     return {
       ok: false,
-      output: err.stderr ?? err.message ?? String(error),
+      output: errorOutput + networkHint,
       errorCode: 'execution_error',
       retryable: false,
       provenance: 'internal',
@@ -413,14 +436,33 @@ function pathError(startTime: number): MotorToolResult {
 }
 
 async function executeFilesystem(args: Record<string, unknown>): Promise<MotorToolResult> {
+  // Auto-fix common LLM arg mistakes: filesystem({read: "path"}) → {action: "read", path: "path"}
+  if (!args['action'] && !args['path']) {
+    for (const action of ['read', 'write', 'list']) {
+      if (typeof args[action] === 'string') {
+        args['action'] = action;
+        args['path'] = args[action];
+        break;
+      }
+    }
+  }
+
   const action = args['action'] as string;
   const path = args['path'] as string;
-  const content = args['content'] as string | undefined;
+  // Auto-stringify if model passes JSON object as content (common LLM behavior)
+  const rawContent = args['content'];
+  const content =
+    rawContent == null
+      ? undefined
+      : typeof rawContent === 'string'
+        ? rawContent
+        : JSON.stringify(rawContent, null, 2);
 
   if (!action || !path) {
     return {
       ok: false,
-      output: '',
+      output:
+        'Missing required arguments. Usage: filesystem({action: "read"|"write"|"list", path: "file/path", content: "..." (for write)})',
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -456,7 +498,7 @@ async function executeFilesystem(args: Record<string, unknown>): Promise<MotorTo
         if (resolvedContent == null) {
           return {
             ok: false,
-            output: '',
+            output: 'Missing "content" argument. Provide the file content as a string.',
             errorCode: 'invalid_args',
             retryable: false,
             provenance: 'internal',

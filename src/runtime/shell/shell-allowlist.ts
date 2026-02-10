@@ -26,6 +26,12 @@ export const DEFAULT_ALLOWLIST = new Set([
   'cut',
   'awk',
   'sed',
+  'tee',
+  'xargs',
+  'tr',
+  'diff',
+  'touch',
+  'chmod',
 
   // File operations
   'ls',
@@ -33,8 +39,19 @@ export const DEFAULT_ALLOWLIST = new Set([
   'mkdir',
   'cp',
   'mv',
+  'rm',
   'find',
   'date',
+
+  // Archive
+  'tar',
+  'gzip',
+  'gunzip',
+  'zip',
+  'unzip',
+
+  // Version control
+  'git',
 
   // Network (for provenance tagging)
   'curl',
@@ -53,7 +70,7 @@ export const DEFAULT_ALLOWLIST = new Set([
  * Commands that can make network requests should be tagged
  * with provenance='web' to indicate the data came from outside.
  */
-export const NETWORK_COMMANDS = new Set(['curl', 'wget']);
+export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git']);
 
 /**
  * Validation result.

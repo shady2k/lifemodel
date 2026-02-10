@@ -82,20 +82,45 @@ export function validateAgainstParameters(
       continue;
     }
 
-    // Check type
+    // Check type (with auto-coercion for common LLM mistakes)
+    let coerced = value;
     const actualType = Array.isArray(value) ? 'array' : typeof value;
     const expectedType = param.type;
 
-    if (expectedType === 'string' && actualType !== 'string') {
-      errors.push(`${param.name}: expected string, got ${actualType}`);
-    } else if (expectedType === 'number' && actualType !== 'number') {
-      errors.push(`${param.name}: expected number, got ${actualType}`);
-    } else if (expectedType === 'boolean' && actualType !== 'boolean') {
-      errors.push(`${param.name}: expected boolean, got ${actualType}`);
-    } else if (expectedType === 'array' && actualType !== 'array') {
-      errors.push(`${param.name}: expected array, got ${actualType}`);
-    } else if (expectedType === 'object' && (actualType !== 'object' || Array.isArray(value))) {
-      errors.push(`${param.name}: expected object, got ${actualType}`);
+    // Auto-coerce: string → array (some models serialize arrays as JSON strings)
+    if (expectedType === 'array' && actualType === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(value as string);
+        if (Array.isArray(parsed)) {
+          coerced = parsed;
+          args[param.name] = parsed; // Fix in-place so executor gets correct type
+        }
+      } catch {
+        // Not valid JSON — fall through to error
+      }
+    }
+
+    // Auto-coerce: string → number
+    if (expectedType === 'number' && actualType === 'string') {
+      const num = Number(value);
+      if (!isNaN(num)) {
+        coerced = num;
+        args[param.name] = num;
+      }
+    }
+
+    const coercedType = Array.isArray(coerced) ? 'array' : typeof coerced;
+
+    if (expectedType === 'string' && coercedType !== 'string') {
+      errors.push(`${param.name}: expected string, got ${coercedType}`);
+    } else if (expectedType === 'number' && coercedType !== 'number') {
+      errors.push(`${param.name}: expected number, got ${coercedType}`);
+    } else if (expectedType === 'boolean' && coercedType !== 'boolean') {
+      errors.push(`${param.name}: expected boolean, got ${coercedType}`);
+    } else if (expectedType === 'array' && coercedType !== 'array') {
+      errors.push(`${param.name}: expected array, got ${coercedType}`);
+    } else if (expectedType === 'object' && (coercedType !== 'object' || Array.isArray(coerced))) {
+      errors.push(`${param.name}: expected object, got ${coercedType}`);
     }
 
     // Check enum (for strings with enum constraint)

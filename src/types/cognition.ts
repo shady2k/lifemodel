@@ -592,6 +592,9 @@ export interface LoopState {
 
   /** Whether a malformed response retry has already been attempted */
   malformedRetried: boolean;
+
+  /** Whether a provider-error retry has already been attempted (prevents stripping tools on provider failures) */
+  providerErrorRetried: boolean;
 }
 
 /**
@@ -615,6 +618,7 @@ export function createLoopState(): LoopState {
     limitViolationCount: 0,
     collectedThoughts: [],
     malformedRetried: false,
+    providerErrorRetried: false,
   };
 }
 

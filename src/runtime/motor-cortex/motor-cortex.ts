@@ -20,6 +20,7 @@ import { type MotorStateManager, createMotorStateManager } from './motor-state.j
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
+import { existsSync } from 'node:fs';
 import type { ContainerManager, ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
@@ -428,8 +429,17 @@ export class MotorCortex {
       attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
-      // Create workspace once — shared between container mount and loop
-      const workspace = await createWorkspace();
+      // Reuse existing workspace on resume (preserves files from prior iterations),
+      // or create a fresh one for new runs.
+      let workspace: string;
+      if (run.workspacePath && existsSync(run.workspacePath)) {
+        workspace = run.workspacePath;
+        this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
+      } else {
+        workspace = await createWorkspace();
+        run.workspacePath = workspace;
+        await this.stateManager.updateRun(run);
+      }
 
       // Create container if Docker is available
       if (this.containerManager && (await this.isDockerAvailable())) {
@@ -471,20 +481,25 @@ export class MotorCortex {
         ...(containerHandle && { containerHandle }),
       });
     } catch (error) {
-      // Motor loop threw an unhandled error (e.g. LLM provider failure, storage failure).
+      // Motor loop threw an unhandled error (e.g. LLM provider failure, container failure, storage failure).
       // Mark attempt and run as failed, emit signal so cognition layer gets feedback.
       const message = error instanceof Error ? error.message : String(error);
+
+      // Classify: infrastructure errors (container, Docker, storage) vs model errors
+      const isInfraError = /container|docker|image|network policy|storage/i.test(message);
+      const category = isInfraError ? 'infra_failure' : 'model_failure';
+
       this.logger.error(
-        { runId: run.id, attemptId: attempt.id, error: message },
+        { runId: run.id, attemptId: attempt.id, error: message, category },
         'Motor loop crashed'
       );
 
       attempt.status = 'failed';
       attempt.completedAt = new Date().toISOString();
       attempt.failure = {
-        category: 'model_failure',
-        retryable: true,
-        suggestedAction: 'retry_with_guidance',
+        category,
+        retryable: !isInfraError, // Infra errors won't fix themselves with guidance
+        suggestedAction: isInfraError ? 'stop' : 'retry_with_guidance',
         lastToolResults: [],
         hint: message,
       };
@@ -614,10 +629,15 @@ export class MotorCortex {
 
   /**
    * Respond to a run that's awaiting input.
+   *
+   * @param runId - Run ID
+   * @param answer - User's answer text
+   * @param domains - Optional additional domains to allow (merged with existing)
    */
   async respondToRun(
     runId: string,
-    answer: string
+    answer: string,
+    domains?: string[]
   ): Promise<{
     runId: string;
     previousStatus: 'awaiting_input';
@@ -644,11 +664,40 @@ export class MotorCortex {
       throw new Error(`Run ${runId} has no current attempt`);
     }
 
+    // Auto-extract domains from the pending question if no explicit domains provided.
+    // The sub-agent often asks "I need access to github.com, api.example.com" —
+    // parse those out so the user/Cognition doesn't have to repeat them.
+    let effectiveDomains = domains;
+    if ((!effectiveDomains || effectiveDomains.length === 0) && attempt.pendingQuestion) {
+      const extracted = extractDomainsFromText(attempt.pendingQuestion);
+      if (extracted.length > 0) {
+        effectiveDomains = extracted;
+        this.logger.info(
+          { runId, extractedDomains: extracted },
+          'Auto-extracted domains from pending question'
+        );
+      }
+    }
+
+    // Merge domains with existing run domains (union, deduped)
+    if (effectiveDomains && effectiveDomains.length > 0) {
+      const existingDomains = run.domains ?? [];
+      run.domains = Array.from(new Set([...existingDomains, ...effectiveDomains]));
+      this.logger.info(
+        { runId, newDomains: effectiveDomains, mergedDomains: run.domains },
+        'Domains expanded on respond'
+      );
+    }
+
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)
     if (attempt.pendingToolCallId) {
+      const domainNote =
+        effectiveDomains && effectiveDomains.length > 0
+          ? ` Network access granted for: ${effectiveDomains.join(', ')}.`
+          : '';
       attempt.messages.push({
         role: 'tool',
-        content: JSON.stringify({ ok: true, output: `User answered: ${answer}` }),
+        content: JSON.stringify({ ok: true, output: `User answered: ${answer}${domainNote}` }),
         tool_call_id: attempt.pendingToolCallId,
       });
     }
@@ -931,6 +980,45 @@ export class MotorCortex {
 
     this.logger.info({ resumed, reEmitted }, 'Motor Cortex recovery complete');
   }
+}
+
+/**
+ * Extract domain names from free-text (e.g. "I need access to github.com and api.example.com").
+ *
+ * Matches patterns like: github.com, api.github.com, raw.githubusercontent.com
+ * Also expands github.com → includes raw.githubusercontent.com and api.github.com.
+ */
+export function extractDomainsFromText(text: string): string[] {
+  // Match domain-like patterns (2+ labels, TLD 2-10 chars)
+  const domainRegex = /\b([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,10}\b/gi;
+  const matches = text.match(domainRegex) ?? [];
+
+  // Deduplicate and lowercase
+  const domains = new Set(matches.map((d) => d.toLowerCase()));
+
+  // Filter out common false positives
+  const blocklist = new Set([
+    'e.g',
+    'i.e',
+    'etc.com',
+    'example.com',
+    'example.org',
+    'domain1.com',
+    'domain2.com',
+    'their.answer',
+  ]);
+  for (const blocked of blocklist) {
+    domains.delete(blocked);
+  }
+
+  // Auto-expand github.com to include common subdomains
+  if (domains.has('github.com')) {
+    domains.add('raw.githubusercontent.com');
+    domains.add('api.github.com');
+    domains.add('codeload.github.com');
+  }
+
+  return Array.from(domains);
 }
 
 /**

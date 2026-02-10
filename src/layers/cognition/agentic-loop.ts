@@ -89,6 +89,18 @@ function getTimeoutForTrigger(triggerType: SignalType): number | undefined {
 }
 
 /**
+ * Whether the given trigger type should allow plain-text (non-JSON) LLM responses.
+ *
+ * - user_message: someone is waiting — always accept plain text
+ * - motor_result: reporting task results to the user — accept plain text
+ * - proactive triggers (contact_urge, thought, etc.): reject plain text to
+ *   prevent prompt leakage from weaker models
+ */
+function shouldAllowPlainText(triggerType: SignalType): boolean {
+  return triggerType === 'user_message' || triggerType === 'motor_result';
+}
+
+/**
  * Agentic Loop implementation.
  */
 export class AgenticLoop {
@@ -234,7 +246,7 @@ export class AgenticLoop {
       // Capture chain-of-thought if present (cleaned from JSON wrapper)
       // Use same allowPlainText policy to avoid capturing leaked prompt text as thoughts
       if (response.content) {
-        const allowPlainText = context.triggerSignal.type === 'user_message';
+        const allowPlainText = shouldAllowPlainText(context.triggerSignal.type);
         const parsed = parseResponseContent(response.content, { allowPlainText });
         if (parsed.text) {
           state.thoughts.push(parsed.text);
@@ -257,6 +269,20 @@ export class AgenticLoop {
           state.forceRespond = true;
           continue;
         }
+      }
+
+      // Provider error — retry WITH tools (don't strip them via forceRespond)
+      if (response.finishReason === 'error' && response.toolCalls.length === 0) {
+        if (!state.providerErrorRetried) {
+          state.providerErrorRetried = true;
+          this.logger.warn(
+            { iteration: state.iteration, finishReason: response.finishReason },
+            'Provider error with no output — retrying with tools'
+          );
+          continue; // Retry same loop iteration, tools still available
+        }
+        // Already retried once — fall through to handleNaturalCompletion
+        this.logger.error({ iteration: state.iteration }, 'Provider error persists after retry');
       }
 
       // No tool calls = natural completion (Codex-style termination)
@@ -377,10 +403,10 @@ export class AgenticLoop {
     state: LoopState,
     context: LoopContext
   ): LoopResult | null {
-    // Only accept plain-text (non-JSON) responses for user messages.
+    // Allow plain text for user-facing triggers (user_message, motor_result).
     // Proactive triggers require JSON to prevent prompt leakage — weaker models
     // sometimes echo system instructions as plain text instead of responding.
-    const allowPlainText = context.triggerSignal.type === 'user_message';
+    const allowPlainText = shouldAllowPlainText(context.triggerSignal.type);
     const parseOpts: ParseOptions = { allowPlainText };
     const parsed = parseResponseContent(content, parseOpts);
     const messageText = parsed.text;

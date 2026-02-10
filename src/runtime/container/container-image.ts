@@ -8,8 +8,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -26,7 +27,12 @@ const execFileAsync = promisify(execFile);
  * - Minimal package set
  * - No package cache retained
  */
-const DOCKERFILE = `
+/**
+ * Build a Dockerfile string with an embedded source hash label.
+ * The label allows `ensureImage()` to detect stale images when source changes.
+ */
+function buildDockerfile(sourceHash: string): string {
+  return `
 FROM node:24-alpine
 
 # Install shell tools needed by motor skills
@@ -35,6 +41,10 @@ RUN apk add --no-cache \\
     jq \\
     grep \\
     coreutils \\
+    git \\
+    unzip \\
+    zip \\
+    tar \\
     && rm -rf /var/cache/apk/*
 
 # Create tool-server directory
@@ -47,12 +57,17 @@ COPY . /opt/motor/
 # Create workspace and skills dirs (will be bind-mounted)
 RUN mkdir -p /workspace /skills && chown node:node /workspace /skills
 
+LABEL com.lifemodel.source-hash="${sourceHash}"
+
 USER node
 WORKDIR /workspace
 
 # Entrypoint runs the tool-server (compiled JS)
 ENTRYPOINT ["node", "/opt/motor/tool-server.js"]
 `.trim();
+}
+
+const SOURCE_HASH_LABEL = 'com.lifemodel.source-hash';
 
 let imageBuilt = false;
 
@@ -91,9 +106,11 @@ function getRuntimeDir(subdir: string): string {
  * `node /opt/motor/tool-server.js`). In dev mode, we look for a compiled
  * dist/ directory. If dist/ doesn't exist, the build fails with a clear error.
  *
- * Returns the path to the temporary directory (caller must clean up).
+ * Returns the path to the temporary directory and a content hash (caller must clean up).
  */
-async function assembleBuildContext(log: (msg: string) => void): Promise<string | null> {
+async function assembleBuildContext(
+  log: (msg: string) => void
+): Promise<{ contextDir: string; sourceHash: string } | null> {
   const currentFile = fileURLToPath(import.meta.url);
   const isDev = currentFile.endsWith('.ts');
 
@@ -117,19 +134,28 @@ async function assembleBuildContext(log: (msg: string) => void): Promise<string 
   }
 
   const toolServerFile = join(containerDir, 'tool-server.js');
+  const toolServerUtilsFile = join(containerDir, 'tool-server-utils.js');
   const sandboxWorkerFile = join(sandboxDir, 'sandbox-worker.js');
 
   // Create temp build context
   const contextDir = await mkdtemp(join(tmpdir(), 'motor-image-'));
 
   try {
-    // Copy tool-server.js
+    // Copy tool-server.js and its local dependencies
     await copyFile(toolServerFile, join(contextDir, 'tool-server.js'));
+    await copyFile(toolServerUtilsFile, join(contextDir, 'tool-server-utils.js'));
 
     // Copy sandbox-worker.js (needed by tool-server for code execution)
     await copyFile(sandboxWorkerFile, join(contextDir, 'sandbox-worker.js'));
 
-    return contextDir;
+    // Compute content hash of source files for staleness detection
+    const hash = createHash('sha256');
+    hash.update(await readFile(toolServerFile));
+    hash.update(await readFile(toolServerUtilsFile));
+    hash.update(await readFile(sandboxWorkerFile));
+    const sourceHash = hash.digest('hex').slice(0, 16);
+
+    return { contextDir, sourceHash };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isDev) {
@@ -145,44 +171,74 @@ async function assembleBuildContext(log: (msg: string) => void): Promise<string 
 }
 
 /**
+ * Get the source hash label from the existing Docker image.
+ * Returns null if image doesn't exist or has no label.
+ */
+async function getImageSourceHash(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['inspect', '--format', `{{index .Config.Labels "${SOURCE_HASH_LABEL}"}}`, CONTAINER_IMAGE],
+      { timeout: 10_000 }
+    );
+    const hash = stdout.trim();
+    return hash && hash !== '<no value>' ? hash : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the Motor Cortex Docker image.
  *
  * Assembles a build context with tool-server + sandbox-worker, then
  * pipes the Dockerfile via stdin to `docker build`.
  *
- * Idempotent — checks if image exists first.
+ * Detects stale images via source hash label — rebuilds automatically
+ * when tool-server or sandbox-worker source changes.
  *
  * @param logger - Optional logging function
- * @returns true if build succeeded (or image already exists)
+ * @returns true if build succeeded (or image already exists and is up-to-date)
  */
 export async function ensureImage(logger?: (msg: string) => void): Promise<boolean> {
   if (imageBuilt) return true;
-
-  // Check if image already exists
-  if (await imageExists()) {
-    imageBuilt = true;
-    return true;
-  }
 
   const log =
     logger ??
     (() => {
       /* No-op logger */
     });
-  log('Building Motor Cortex container image...');
 
-  const contextDir = await assembleBuildContext(log);
-  if (!contextDir) return false;
+  // Assemble build context first — we need the source hash to check staleness
+  const buildResult = await assembleBuildContext(log);
+  if (!buildResult) return false;
+
+  const { contextDir, sourceHash } = buildResult;
 
   try {
-    // Pipe Dockerfile via stdin to docker build
+    // Check if image exists and is up-to-date
+    if (await imageExists()) {
+      const existingHash = await getImageSourceHash();
+      if (existingHash === sourceHash) {
+        imageBuilt = true;
+        return true;
+      }
+      log(
+        `Motor Cortex image is stale (source changed: ${existingHash ?? 'none'} → ${sourceHash}), rebuilding...`
+      );
+    } else {
+      log('Building Motor Cortex container image...');
+    }
+
+    // Build the image
+    const dockerfile = buildDockerfile(sourceHash);
     const buildProcess = execFile(
       'docker',
       ['build', '-t', CONTAINER_IMAGE, '-f', '-', contextDir],
       { timeout: 120_000, maxBuffer: 1024 * 1024 }
     );
 
-    buildProcess.stdin?.write(DOCKERFILE);
+    buildProcess.stdin?.write(dockerfile);
     buildProcess.stdin?.end();
 
     await new Promise<void>((resolve, reject) => {

@@ -36,14 +36,15 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'mode',
       type: 'string' as const,
       description:
-        'Execution mode: "oneshot" for synchronous JS code, "agentic" for async sub-agent task',
+        'Execution mode: "oneshot" for executable JavaScript only (eval), "agentic" for all other tasks (file ops, research, skill creation)',
       required: true,
       enum: ['oneshot', 'agentic'] as const,
     },
     {
       name: 'task',
       type: 'string' as const,
-      description: 'JS code (oneshot) or natural language task (agentic)',
+      description:
+        'Executable JavaScript code (oneshot) or natural language task description (agentic). Never pass non-JS content to oneshot.',
       required: true,
     },
     {
@@ -84,7 +85,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously. "agentic" starts an async sub-agent with tools like code, filesystem, shell, grep, patch, ask_user. Skills with approved policy provide tools/domains automatically. To create a new skill, include filesystem in tools and describe what to learn. Results arrive via motor_result signal.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: code, filesystem, shell, grep, patch, ask_user. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with filesystem tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -192,6 +193,11 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             tools = explicitTools ?? ['code'];
           }
 
+          // Auto-include shell if domains are specified (network access requires shell for curl/git)
+          if (domains.length > 0 && !tools.includes('shell')) {
+            tools = [...tools, 'shell'];
+          }
+
           // Build task with inputs if provided
           let fullTask = task;
           if (Object.keys(inputs).length > 0) {
@@ -231,7 +237,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
               status: 'started',
               ...(skillName && { skill: skillName }),
               ...(warnings.length > 0 && { warnings }),
-              message: 'Task started in background. Results will arrive via motor_result signal.',
+              message: `Task started in background (run: ${runId}). Results will arrive via motor_result signal. Include the run ID when telling the user.`,
             },
           };
         } catch (error) {

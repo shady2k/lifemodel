@@ -8,6 +8,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -75,21 +76,32 @@ export async function ensureNetpolicyImage(logger?: (msg: string) => void): Prom
 
   try {
     // Pipe Dockerfile via stdin to docker build
-    const buildProcess = execFile(
-      'docker',
-      ['build', '-t', NETPOLICY_IMAGE, '-f', '-', '/dev/null'],
-      { timeout: 120_000, maxBuffer: 1024 * 1024 }
-    );
+    // Use '.' context with a temp dir to avoid /dev/null which fails on macOS
+    const buildProcess = execFile('docker', ['build', '-t', NETPOLICY_IMAGE, '-f', '-', '.'], {
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      cwd: tmpdir(),
+    });
 
     buildProcess.stdin?.write(DOCKERFILE);
     buildProcess.stdin?.end();
+
+    // Capture stderr for diagnostic logging
+    let stderr = '';
+    buildProcess.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
 
     await new Promise<void>((resolve, reject) => {
       buildProcess.on('close', (code) => {
         if (code === 0) {
           resolve();
         } else {
-          reject(new Error(`Docker build failed with code ${String(code)}`));
+          reject(
+            new Error(
+              `Docker build failed with code ${String(code)}${stderr ? `: ${stderr.trim().slice(0, 300)}` : ''}`
+            )
+          );
         }
       });
       buildProcess.on('error', reject);

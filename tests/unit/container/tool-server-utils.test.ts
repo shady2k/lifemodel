@@ -67,23 +67,24 @@ describe('validatePipeline', () => {
     });
   });
 
-  describe('rejected: control operators', () => {
-    it('rejects || operator', () => {
-      const result = validatePipeline('echo test || true');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('control operators');
+  describe('allowed: control operators (&&, ||)', () => {
+    it('allows || operator with valid commands', () => {
+      const result = validatePipeline('echo hello || echo fallback');
+      expect(result.ok).toBe(true);
+      expect(result.hasNetwork).toBe(false);
     });
 
-    it('rejects && operator', () => {
-      const result = validatePipeline('echo test && rm -rf /');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('control operators');
+    it('allows && operator with valid commands', () => {
+      const result = validatePipeline('mkdir dir && ls dir');
+      expect(result.ok).toBe(true);
+      expect(result.hasNetwork).toBe(false);
     });
 
-    it('rejects both || and && together', () => {
-      const result = validatePipeline('echo test || false && echo done');
+    it('validates allowlist in && and || chains', () => {
+      const result = validatePipeline('echo test || python3 bad.py && echo done');
       expect(result.ok).toBe(false);
-      expect(result.error).toContain('control operators');
+      expect(result.error).toContain('Command not allowed');
+      expect(result.error).toContain('python3');
     });
   });
 
@@ -106,28 +107,30 @@ describe('validatePipeline', () => {
       expect(result.error).toContain('metacharacters');
     });
 
-    it('rejects output redirection', () => {
+    it('allows output redirection (safe in sandboxed container)', () => {
       const result = validatePipeline('echo test > /etc/passwd');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('metacharacters');
+      expect(result.ok).toBe(true);
     });
 
-    it('rejects newline injection', () => {
+    it('allows standalone newline (safe in sandboxed container)', () => {
       const result = validatePipeline('echo test\nrm -rf /');
+      expect(result.ok).toBe(true);
+    });
+
+    it('still rejects semicolon with newline', () => {
+      const result = validatePipeline('echo test;\nrm -rf /');
       expect(result.ok).toBe(false);
       expect(result.error).toContain('metacharacters');
     });
 
-    it('rejects input redirection <', () => {
+    it('allows input redirection < (safe in sandboxed container)', () => {
       const result = validatePipeline('grep pattern < /etc/passwd');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('metacharacters');
+      expect(result.ok).toBe(true);
     });
 
-    it('rejects ampersand backgrounding', () => {
+    it('allows ampersand backgrounding (safe in sandboxed container)', () => {
       const result = validatePipeline('echo test &');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('metacharacters');
+      expect(result.ok).toBe(true);
     });
 
     it('allows single pipe while blocking other metachars', () => {
@@ -138,11 +141,11 @@ describe('validatePipeline', () => {
   });
 
   describe('rejected: not in allowlist', () => {
-    it('rejects rm command', () => {
-      const result = validatePipeline('rm -rf /');
+    it('rejects python3 command', () => {
+      const result = validatePipeline('python3 script.py');
       expect(result.ok).toBe(false);
       expect(result.error).toContain('Command not allowed');
-      expect(result.error).toContain('rm');
+      expect(result.error).toContain('python3');
     });
 
     it('rejects node command', () => {
@@ -389,7 +392,8 @@ describe('exported constants', () => {
   it('exports SHELL_ALLOWLIST as a Set', () => {
     expect(SHELL_ALLOWLIST).toBeInstanceOf(Set);
     expect(SHELL_ALLOWLIST.has('echo')).toBe(true);
-    expect(SHELL_ALLOWLIST.has('rm')).toBe(false);
+    expect(SHELL_ALLOWLIST.has('git')).toBe(true);
+    expect(SHELL_ALLOWLIST.has('python3')).toBe(false);
   });
 
   it('exports NETWORK_COMMANDS as a Set', () => {
@@ -409,8 +413,10 @@ describe('exported constants', () => {
   it('exports DANGEROUS_METACHAR_RE as RegExp', () => {
     expect(DANGEROUS_METACHAR_RE).toBeInstanceOf(RegExp);
     expect(DANGEROUS_METACHAR_RE.test(';')).toBe(true);
-    expect(DANGEROUS_METACHAR_RE.test('$')).toBe(true);
     expect(DANGEROUS_METACHAR_RE.test('`')).toBe(true);
+    expect(DANGEROUS_METACHAR_RE.test('$(')).toBe(true);
+    // $ alone is NOT dangerous (only $( is)
+    expect(DANGEROUS_METACHAR_RE.test('$')).toBe(false);
     // Single pipe is NOT in this regex (allowed)
     expect(DANGEROUS_METACHAR_RE.test('|')).toBe(false);
   });

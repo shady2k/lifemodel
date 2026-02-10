@@ -133,7 +133,7 @@ function pathTraversalError(startTime: number): MotorToolResult {
 /**
  * Tool definitions in OpenAI function calling format.
  */
-const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
+export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
   code: {
     type: 'function',
     function: {
@@ -331,7 +331,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
     if (!code) {
       return {
         ok: false,
-        output: '',
+        output: 'Missing "code" argument. Provide JavaScript code as a string.',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -343,10 +343,22 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   filesystem: async (args, ctx): Promise<MotorToolResult> => {
+    // Auto-fix common LLM arg mistakes: filesystem({read: "path"}) → {action: "read", path: "path"}
+    if (!args['action'] && !args['path']) {
+      for (const action of ['read', 'write', 'list'] as const) {
+        if (typeof args[action] === 'string') {
+          args['action'] = action;
+          args['path'] = args[action];
+          break;
+        }
+      }
+    }
+
     if (!args['action'] || !args['path']) {
       return {
         ok: false,
-        output: '',
+        output:
+          'Missing required arguments. Usage: filesystem({action: "read"|"write"|"list", path: "file/path", content: "..." (for write)})',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -356,7 +368,14 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
 
     const action = args['action'] as 'read' | 'write' | 'list';
     const path = args['path'] as string;
-    const content = args['content'] as string | undefined;
+    // Auto-stringify if model passes JSON object as content (common LLM behavior)
+    const rawContent = args['content'];
+    const content =
+      rawContent == null
+        ? undefined
+        : typeof rawContent === 'string'
+          ? rawContent
+          : JSON.stringify(rawContent, null, 2);
 
     const startTime = Date.now();
 
@@ -379,7 +398,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
           if (content == null) {
             return {
               ok: false,
-              output: '',
+              output: 'Missing "content" argument. Provide the file content as a string.',
               errorCode: 'invalid_args',
               retryable: false,
               provenance: 'internal',

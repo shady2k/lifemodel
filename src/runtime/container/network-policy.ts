@@ -308,7 +308,6 @@ export async function applyNetworkPolicy(
         '--network',
         `container:${containerId}`,
         'lifemodel-netpolicy:latest',
-        'sh',
         '-c',
         script,
       ],

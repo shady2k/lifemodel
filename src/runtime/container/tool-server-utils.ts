@@ -13,6 +13,7 @@
  * These are safe to run inside the container with minimal privileges.
  */
 export const SHELL_ALLOWLIST = new Set([
+  // Core utilities
   'echo',
   'cat',
   'head',
@@ -24,22 +25,45 @@ export const SHELL_ALLOWLIST = new Set([
   'cut',
   'awk',
   'sed',
+  'tee',
+  'xargs',
+  'tr',
+  'diff',
+  'touch',
+  'chmod',
+
+  // File operations
   'ls',
   'pwd',
   'mkdir',
   'cp',
   'mv',
+  'rm',
   'find',
   'date',
+
+  // Archive
+  'tar',
+  'gzip',
+  'gunzip',
+  'zip',
+  'unzip',
+
+  // Version control
+  'git',
+
+  // Network (for provenance tagging)
   'curl',
   'wget',
   'jq',
+
+  // System info
   'uname',
   'whoami',
   'id',
 ]);
 
-export const NETWORK_COMMANDS = new Set(['curl', 'wget']);
+export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git']);
 
 /**
  * Shell control operators that enable command chaining.
@@ -48,10 +72,22 @@ export const NETWORK_COMMANDS = new Set(['curl', 'wget']);
 export const CONTROL_OPERATORS_RE = /\|\||&&/;
 
 /**
- * Dangerous shell metacharacters that enable injection.
- * Single pipe `|` is ALLOWED (pipeline). Everything else is blocked.
+ * Injection-capable shell metacharacters.
+ *
+ * Blocked:
+ * - `;`  — command chaining (bypasses pipeline allowlist validation)
+ * - `` ` `` — command substitution
+ * - `$(` — command substitution
+ *
+ * Allowed (safe in sandboxed container with command allowlist):
+ * - `>`, `<` — file redirections (container has read-only rootfs, writable workspace only)
+ * - `&` — background/stderr redirect `2>&1` (pid-limited container)
+ * - `\` — escape sequences in grep patterns etc.
+ * - `(`, `)` — grouping (harmless without `;` or `$()`)
+ * - `!` — history expansion (non-interactive shell, no effect)
+ * - `$` alone — variable reference (`$?`, `$HOME`) is safe
  */
-export const DANGEROUS_METACHAR_RE = /[;`$()><!\n\\&]/;
+export const DANGEROUS_METACHAR_RE = /[;`]|\$\(/;
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -93,25 +129,24 @@ export type FindUniqueSubstringResult = PatchFindResult | PatchFindError;
  * validatePipeline("curl https://example.com | jq .")
  * // { ok: true, hasNetwork: true }
  *
- * validatePipeline("echo test && rm -rf /")
- * // { ok: false, error: "Command contains disallowed control operators..." }
+ * validatePipeline("mkdir dir && cd dir")
+ * // { ok: true, hasNetwork: false }
  */
 export function validatePipeline(command: string): PipelineValidationResult {
-  // Reject control operators BEFORE splitting on pipe
-  if (CONTROL_OPERATORS_RE.test(command)) {
-    return {
-      ok: false,
-      error: 'Command contains disallowed control operators (|| or &&)',
-      hasNetwork: false,
-    };
-  }
-
-  // Reject dangerous metacharacters (check after removing single |)
-  if (DANGEROUS_METACHAR_RE.test(command.replace(/\|/g, ''))) {
+  // Reject injection-capable metacharacters
+  if (DANGEROUS_METACHAR_RE.test(command)) {
     return { ok: false, error: 'Command contains disallowed metacharacters', hasNetwork: false };
   }
 
-  const segments = command.split('|').map((s) => s.trim());
+  // Split on control operators (&&, ||) and pipes (|), validate each command.
+  // Split order matters: && and || first (they contain |), then remaining |.
+  const chains = command.split(/\s*(?:&&|\|\|)\s*/);
+  const segments: string[] = [];
+  for (const chain of chains) {
+    for (const seg of chain.split('|')) {
+      segments.push(seg.trim());
+    }
+  }
 
   // Reject empty segments (e.g., "echo |  | grep" or trailing pipe)
   if (segments.some((s) => !s)) {

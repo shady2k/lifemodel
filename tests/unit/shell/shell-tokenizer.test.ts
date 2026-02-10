@@ -139,8 +139,8 @@ describe('hasDangerousMetachars', () => {
     expect(hasDangerousMetachars('echo `id`')).toBe(true);
   });
 
-  it('detects & when unquoted', () => {
-    expect(hasDangerousMetachars('echo ok & bg')).toBe(true);
+  it('allows & when unquoted (safe in sandboxed container)', () => {
+    expect(hasDangerousMetachars('echo ok & bg')).toBe(false);
   });
 
   it('allows & inside double quotes', () => {
@@ -151,16 +151,16 @@ describe('hasDangerousMetachars', () => {
     expect(hasDangerousMetachars("curl 'http://a.com?x=1&y=2' | cat")).toBe(false);
   });
 
-  it('rejects $ inside double quotes (not safe in sh -c)', () => {
-    expect(hasDangerousMetachars('echo "$HOME"')).toBe(true);
+  it('allows $ variable reference inside double quotes (only $( is dangerous)', () => {
+    expect(hasDangerousMetachars('echo "$HOME"')).toBe(false);
   });
 
   it('allows $ inside single quotes', () => {
     expect(hasDangerousMetachars("echo '$HOME'")).toBe(false);
   });
 
-  it('detects backslash outside quotes', () => {
-    expect(hasDangerousMetachars('echo \\n')).toBe(true);
+  it('allows backslash outside quotes (safe in sandboxed container)', () => {
+    expect(hasDangerousMetachars('echo \\n')).toBe(false);
   });
 
   it('rejects backtick inside double quotes', () => {

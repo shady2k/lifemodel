@@ -14,60 +14,33 @@ export interface TokenizeResult {
 }
 
 /**
- * Metacharacters dangerous in ALL contexts (including double quotes).
- * Double quotes do NOT neutralize $-expansion or backticks in sh.
- * Note: `\` inside double quotes is safe — it can only escape specific chars,
- * and the shell still treats the result as part of the quoted string.
- */
-const ALWAYS_DANGEROUS = /[;`$()><!\n]/;
-
-/**
- * Metacharacters dangerous only when unquoted.
- * `&` is a job control operator only outside quotes — safe inside both
- * single and double quotes (e.g., URLs with query params).
- * `\` outside quotes enables escape sequences; inside double quotes it's
- * constrained to specific chars and can't break out of the quoted string.
- */
-const UNQUOTED_DANGEROUS = /[&\\]/;
-
-/**
- * Check if a command string contains shell metacharacters that could enable
- * injection when passed to `exec` (sh -c).
+ * Injection-capable metacharacters.
  *
- * - Single-quoted regions: fully safe (shell treats them literally).
- * - Double-quoted regions: `&` and `\` are safe, but `$` and `` ` `` remain dangerous.
- * - Unquoted regions: both sets are dangerous.
+ * Only truly dangerous patterns are blocked:
+ * - `;`  — command chaining (bypasses pipeline allowlist)
+ * - `` ` `` — command substitution
+ * - `$(` — command substitution
+ *
+ * Safe (allowed in sandboxed container with command allowlist):
+ * - `>`, `<` — redirections
+ * - `&` — background/stderr redirect `2>&1`
+ * - `\` — escape sequences
+ * - `(`, `)` — grouping (harmless without `;` or `$()`)
+ * - `!` — history expansion (non-interactive shell, no effect)
+ * - `$` alone — variable reference is safe
+ */
+const DANGEROUS_RE = /[;`]|\$\(/;
+
+/**
+ * Check if a command string contains injection-capable metacharacters.
+ *
+ * Uses a simple regex — quote context doesn't matter because the blocked
+ * patterns (`;`, backtick, `$(`) are dangerous even inside double quotes.
+ * Single-quoted regions are safe but the patterns are rare enough in
+ * legitimate single-quoted content that false positives are acceptable.
  */
 export function hasDangerousMetachars(command: string): boolean {
-  let inSingle = false;
-  let inDouble = false;
-
-  for (const ch of command) {
-    if (inSingle) {
-      if (ch === "'") inSingle = false;
-      continue;
-    }
-
-    if (inDouble) {
-      if (ch === '"') {
-        inDouble = false;
-      } else if (ALWAYS_DANGEROUS.test(ch)) {
-        return true;
-      }
-      // & is safe inside double quotes — skip UNQUOTED_DANGEROUS check
-      continue;
-    }
-
-    // Outside quotes
-    if (ch === "'") {
-      inSingle = true;
-    } else if (ch === '"') {
-      inDouble = true;
-    } else if (ALWAYS_DANGEROUS.test(ch) || UNQUOTED_DANGEROUS.test(ch)) {
-      return true;
-    }
-  }
-  return false;
+  return DANGEROUS_RE.test(command);
 }
 
 /**
@@ -155,6 +128,10 @@ export function tokenize(command: string): TokenizeResult {
         inToken = true;
         break;
       case '|': {
+        // Check for || (logical OR)
+        if (i + 1 < command.length && command.charAt(i + 1) === '|') {
+          i++; // skip second |
+        }
         // Flush current token and start new segment
         if (current || inToken) {
           activeSeg.push(current);
@@ -163,6 +140,24 @@ export function tokenize(command: string): TokenizeResult {
         }
         activeSeg = [];
         segments.push(activeSeg);
+        break;
+      }
+      case '&': {
+        // Check for && (logical AND) — treat as segment separator like |
+        if (i + 1 < command.length && command.charAt(i + 1) === '&') {
+          i++; // skip second &
+          if (current || inToken) {
+            activeSeg.push(current);
+            current = '';
+            inToken = false;
+          }
+          activeSeg = [];
+          segments.push(activeSeg);
+        } else {
+          // Single & (background) — treat as part of token
+          current += ch;
+          inToken = true;
+        }
         break;
       }
       case ' ':

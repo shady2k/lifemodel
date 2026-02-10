@@ -104,8 +104,8 @@ export async function runShell(
   if (!validation.valid) {
     return {
       ok: false,
-      output: '',
-      errorCode: 'invalid_args',
+      output: validation.reason ?? 'Command not allowed by shell policy.',
+      errorCode: 'permission_denied',
       retryable: false,
       provenance: 'internal',
       durationMs: Date.now() - startTime,

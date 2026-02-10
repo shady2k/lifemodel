@@ -80,7 +80,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
       name: 'domains',
       type: 'array' as const,
       description:
-        'Optional additional network domains to allow for retry (merged with existing run domains)',
+        'Optional additional network domains to allow (for respond or retry actions). Merged with existing run domains. Use when the sub-agent asked for network access via ask_user.',
       required: false,
     },
   ];
@@ -219,6 +219,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
         case 'respond': {
           const runId = args['runId'] as string;
           const answer = args['answer'] as string;
+          const domains = args['domains'] as string[] | undefined;
           if (!runId) {
             return {
               success: false,
@@ -233,7 +234,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
           }
 
           try {
-            const result = await motorCortex.respondToRun(runId, answer);
+            const result = await motorCortex.respondToRun(runId, answer, domains);
             return {
               success: true,
               data: result,

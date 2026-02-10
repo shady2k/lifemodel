@@ -47,6 +47,7 @@ export interface MotorToolResult {
     | 'permission_denied'
     | 'invalid_args'
     | 'execution_error'
+    | 'tool_not_available'
     | 'unknown';
 
   /** Whether the error is retryable (same tool + args might work) */
@@ -176,6 +177,7 @@ export interface RunTrace {
 export type FailureCategory =
   | 'tool_failure'
   | 'model_failure'
+  | 'infra_failure'
   | 'budget_exhausted'
   | 'invalid_task'
   | 'unknown';
@@ -334,6 +336,9 @@ export interface MotorRun {
 
   /** Docker container ID (if running in container isolation) */
   containerId?: string;
+
+  /** Host-side workspace path (persisted for resume after restart) */
+  workspacePath?: string;
 
   /** Allowed network domains for this run (merged from skill + explicit) */
   domains?: string[];

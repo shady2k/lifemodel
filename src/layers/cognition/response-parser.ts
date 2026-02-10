@@ -147,5 +147,10 @@ export function parseResponseContent(
     return { text: null, malformed: true };
   }
 
+  // Detect tool-call-like XML — model tried to invoke tools as text (e.g., tools were stripped)
+  if (/^<core\.\w+[\s>]/m.test(trimmed) || /<core\.\w+>[\s\S]*?<\/core\.\w+>/m.test(trimmed)) {
+    return { text: null, malformed: true };
+  }
+
   return { text: stripLeadingTimestamp(trimmed) };
 }

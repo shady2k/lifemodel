@@ -257,7 +257,7 @@ export function buildMotorResultSection(data: MotorResultData): string {
       }
 
       // Build task
-      let task = 'Report the result to the user concisely.';
+      let task = `Report the result to the user concisely. Include the run ID (${runId}) so the user can reference it.`;
       if (
         installedSkills &&
         (installedSkills.created.length > 0 || installedSkills.updated.length > 0)
@@ -281,7 +281,7 @@ export function buildMotorResultSection(data: MotorResultData): string {
         const errorMsg = data.error?.message ?? 'Unknown error';
         return `<trigger type="motor_result_failed">
 <context>Task run ${runId}${attemptLabel} failed. Error: ${errorMsg}</context>
-<task>Report the failure to the user clearly.</task>
+<task>Report the failure to the user clearly. Include the run ID (${runId}).</task>
 </trigger>`;
       }
 
@@ -305,7 +305,7 @@ A background task failed. Follow this protocol:
 1. Review the failure summary above.
 2. If retryable and you can provide useful guidance, call core.task(action:"retry", runId:"${runId}", guidance:"your corrective instructions").
 3. If you need more detail, call core.task(action:"log", runId:"${runId}") first.
-4. If not retryable or after 2 failed attempts, report the failure to the user clearly.
+4. If not retryable or after 2 failed attempts, report the failure to the user clearly. Include the run ID (${runId}).
 Do NOT create a new core.act run for the same task. Use retry to continue the existing run.
 </task>
 </trigger>`;
@@ -317,6 +317,10 @@ Do NOT create a new core.act run for the same task. Use retry to continue the ex
 <context>Task run ${runId} needs user input: "${question}"</context>
 <task>
 Relay this question to the user naturally. When they respond, call core.task(action:"respond", runId:"${runId}", answer:"their answer").
+
+If the sub-agent is asking for network/domain access, parse the needed domains from its question and include them:
+core.task(action:"respond", runId:"${runId}", answer:"Approved", domains:["domain1.com", "domain2.com"])
+Common GitHub patterns: include both "github.com" and "raw.githubusercontent.com" for repo access.
 </task>
 </trigger>`;
     }

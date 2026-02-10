@@ -14,13 +14,19 @@ import { createSignal } from '../../types/signal.js';
 import type {
   MotorRun,
   MotorAttempt,
+  MotorTool,
   StepTrace,
   TaskResult,
   FailureSummary,
   FailureCategory,
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
-import { getToolDefinitions, executeTool, createWorkspace } from './motor-tools.js';
+import {
+  getToolDefinitions,
+  executeTool,
+  createWorkspace,
+  TOOL_DEFINITIONS,
+} from './motor-tools.js';
 import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import type { ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
@@ -114,7 +120,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   await taskLog?.log(`  Task: ${run.task}`);
   await taskLog?.log(`  Tools: ${run.tools.join(', ')}`);
   if (attempt.recoveryContext) {
-    await taskLog?.log(`  Recovery guidance: ${attempt.recoveryContext.guidance.slice(0, 200)}`);
+    await taskLog?.log(`  Recovery guidance: ${attempt.recoveryContext.guidance.slice(0, 5000)}`);
   }
 
   // Build tool context with allowed roots (workspace + skills dir)
@@ -130,6 +136,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   // Get tool definitions
   const toolDefinitions = getToolDefinitions(run.tools);
+
+  // Always inject ask_user — the model needs it to request missing domains, credentials, etc.
+  // Without it in the tool schema, the system prompt's "call ask_user" instruction is impossible.
+  if (!run.tools.includes('ask_user')) {
+    toolDefinitions.push(TOOL_DEFINITIONS.ask_user);
+  }
 
   // Add request_approval tool if shell is granted (network access = needs approval gate)
   if (run.tools.includes('shell')) {
@@ -201,9 +213,26 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     if (!llmResponse) {
       throw new Error('LLM response is undefined after retries');
     }
-    await taskLog?.log(
-      `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls`
+    const contentPreview = llmResponse.content
+      ? redactCredentials(llmResponse.content.slice(0, 200)).replace(/\n/g, ' ')
+      : '(none)';
+    childLogger.debug(
+      {
+        iteration: i,
+        model: llmResponse.model,
+        toolCallCount: llmResponse.toolCalls?.length ?? 0,
+        finishReason: llmResponse.finishReason,
+        contentLength: llmResponse.content?.length ?? 0,
+        contentPreview,
+      },
+      'LLM response received'
     );
+    await taskLog?.log(
+      `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls, finish=${llmResponse.finishReason ?? 'unknown'}, content=${String(llmResponse.content?.length ?? 0)} chars`
+    );
+    if (llmResponse.content) {
+      await taskLog?.log(`  Content: ${contentPreview}`);
+    }
     const assistantMessage: Message = {
       role: 'assistant',
       content: llmResponse.content ?? null,
@@ -221,8 +250,75 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
     // Check if model made tool calls
     if (!llmResponse.toolCalls || llmResponse.toolCalls.length === 0) {
-      // No tool calls - task complete
-      childLogger.info({ iteration: i }, 'No tool calls - task complete');
+      const summaryText = llmResponse.content ?? '';
+
+      // Detect model outputting tool-call XML as text (tried to call tools without API support)
+      const looksLikeXmlToolCall =
+        /<invoke\s|<tool_call>|<\w+_call>/.test(summaryText) ||
+        (/^<\w+[\s>]/m.test(summaryText) && /<\/\w+>/m.test(summaryText));
+
+      // If there were errors in this attempt and the "summary" is empty or looks like
+      // failed tool-call XML, this is a failure, not a successful completion
+      if (attempt.trace.errors > 0 && (summaryText.trim().length === 0 || looksLikeXmlToolCall)) {
+        childLogger.warn(
+          { iteration: i, errors: attempt.trace.errors, hasXml: looksLikeXmlToolCall },
+          'Model stopped with errors and no valid summary — treating as failure'
+        );
+        await taskLog?.log(`\nFAILED: Model stopped after errors with no valid output`);
+
+        attempt.trace.steps.push(step);
+
+        const failure = buildFailureSummary(attempt.trace, 0, undefined, 'model_failure');
+        failure.hint = looksLikeXmlToolCall
+          ? 'Model attempted tool calls via XML text instead of the tool API. The requested tools may not be available.'
+          : 'Model stopped producing output after encountering errors.';
+
+        attempt.status = 'failed';
+        attempt.completedAt = new Date().toISOString();
+        attempt.stepCursor = i;
+        attempt.messages = messages;
+        attempt.trace.totalIterations = i + 1;
+        attempt.trace.totalDurationMs = Date.now() - new Date(attempt.startedAt).getTime();
+        attempt.failure = failure;
+
+        run.status = 'failed';
+        run.completedAt = new Date().toISOString();
+        await stateManager.updateRun(run);
+
+        pushSignal(
+          createSignal(
+            'motor_result',
+            'motor.cortex',
+            { value: 1, confidence: 1 },
+            {
+              data: {
+                kind: 'motor_result',
+                runId: run.id,
+                status: 'failed',
+                attemptIndex: attempt.index,
+                failure,
+                error: {
+                  message: 'Model stopped after errors with no valid completion',
+                  lastStep: `Iteration ${String(i)}`,
+                },
+              },
+            }
+          )
+        );
+
+        await taskLog?.log(`  Category: ${failure.category}`);
+        return;
+      }
+
+      // Genuine completion — model finished the task
+      childLogger.info(
+        {
+          iteration: i,
+          summaryLength: summaryText.length,
+          errorsInAttempt: attempt.trace.errors,
+        },
+        'No tool calls - task complete'
+      );
 
       // Persist workspace files as artifacts
       let artifacts: string[] | undefined;
@@ -332,12 +428,48 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       try {
         toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
       } catch {
+        childLogger.warn(
+          { tool: toolName, rawArgs: toolCall.function.arguments.slice(0, 200) },
+          'Failed to parse tool arguments as JSON — using raw string'
+        );
         toolArgs = { raw: toolCall.function.arguments };
       }
 
       childLogger.debug({ tool: toolName, args: toolArgs }, 'Executing tool');
       const argsSummary = redactCredentials(JSON.stringify(toolArgs)).slice(0, 200);
       await taskLog?.log(`  TOOL ${toolName}(${argsSummary})`);
+
+      // Validate tool is in granted tools (skip synthetic tools: ask_user, request_approval)
+      const syntheticTools = ['ask_user', 'request_approval'];
+      if (!syntheticTools.includes(toolName) && !run.tools.includes(toolName as MotorTool)) {
+        const toolMessage: Message = {
+          role: 'tool',
+          content: JSON.stringify({
+            ok: false,
+            output: `Tool "${toolName}" is not available. Granted tools: ${run.tools.join(', ')}. Use only the tools listed above.`,
+            error: 'tool_not_available',
+          }),
+          tool_call_id: toolCall.id,
+        };
+        messages.push(toolMessage);
+        step.toolCalls.push({
+          tool: toolName,
+          args: toolArgs,
+          result: {
+            ok: false,
+            output: `Tool "${toolName}" not in granted tools: ${run.tools.join(', ')}`,
+            errorCode: 'tool_not_available',
+            retryable: false,
+            provenance: 'internal',
+            durationMs: 0,
+          },
+          durationMs: 0,
+        });
+        await taskLog?.log(
+          `    → FAIL (0ms): Tool "${toolName}" not available. Granted: ${run.tools.join(', ')}`
+        );
+        continue;
+      }
 
       // Check for request_approval (internal tool, like ask_user with timeout)
       if (toolName === 'request_approval') {
@@ -384,7 +516,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       // Check for ask_user
       if (toolName === 'ask_user') {
-        const question = toolArgs['question'] as string;
+        // Accept both 'question' and 'message' — some models use 'message' despite schema
+        const rawQ = toolArgs['question'] ?? toolArgs['message'];
+        const question = typeof rawQ === 'string' ? rawQ : '';
         childLogger.info({ question }, 'Awaiting user input');
 
         // Update attempt state
@@ -519,6 +653,16 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           };
         }
 
+        childLogger.debug(
+          {
+            tool: toolName,
+            errorCode: toolResult.errorCode,
+            consecutiveCount: consecutiveFailures.count,
+            threshold: CONSECUTIVE_FAILURE_THRESHOLD,
+          },
+          'Tool failure recorded'
+        );
+
         // Auto-fail on consecutive failures
         if (consecutiveFailures.count >= CONSECUTIVE_FAILURE_THRESHOLD) {
           childLogger.warn(
@@ -626,13 +770,25 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     }
 
     // Persist state after tool execution
+    const stepErrors = step.toolCalls.filter((t) => !t.result.ok).length;
     attempt.stepCursor = i + 1;
     attempt.messages = messages;
     attempt.trace.steps.push(step);
     attempt.trace.totalIterations = i + 1;
     attempt.trace.llmCalls += 1;
     attempt.trace.toolCalls += step.toolCalls.length;
-    attempt.trace.errors = attempt.trace.errors + step.toolCalls.filter((t) => !t.result.ok).length;
+    attempt.trace.errors = attempt.trace.errors + stepErrors;
+
+    childLogger.debug(
+      {
+        iteration: i,
+        stepToolCalls: step.toolCalls.length,
+        stepErrors,
+        totalErrors: attempt.trace.errors,
+        totalToolCalls: attempt.trace.toolCalls,
+      },
+      'Iteration complete — state persisted'
+    );
 
     await stateManager.updateRun(run);
   }
@@ -698,7 +854,8 @@ export function buildFailureSummary(
   );
 
   const category: FailureCategory = categoryOverride ?? (lastError ? 'tool_failure' : 'unknown');
-  const retryable = category !== 'budget_exhausted' && category !== 'invalid_task';
+  const retryable =
+    category !== 'budget_exhausted' && category !== 'invalid_task' && category !== 'infra_failure';
 
   let suggestedAction: FailureSummary['suggestedAction'];
   if (!retryable) {
@@ -777,12 +934,15 @@ export function buildMotorSystemPrompt(
     code: '- code: Execute JavaScript code in a sandbox',
     filesystem: '- filesystem: Read/write/list files in workspace and skills directory',
     ask_user: '- ask_user: Ask the user a question (pauses execution)',
-    shell: '- shell: Run allowlisted commands (curl, jq, grep, cat, ls, etc.). Supports pipes.',
+    shell:
+      '- shell: Run allowlisted commands (git, curl, jq, grep, cat, ls, tar, unzip, rm, etc.). Supports pipes.',
     grep: '- grep: Search patterns across workspace files (regex, max 50 matches)',
     patch: '- patch: Find-and-replace text in a file (exact match, must be unique)',
   };
 
-  const toolsDesc = run.tools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
+  // Always include ask_user in the description (it's always available as a synthetic tool)
+  const allTools = run.tools.includes('ask_user') ? run.tools : [...run.tools, 'ask_user'];
+  const toolsDesc = allTools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
 
   // Recovery context injection for retry attempts
   const recoverySection = recoveryContext
@@ -806,14 +966,21 @@ ${toolsDesc}
 Guidelines:
 - Break down complex tasks into steps
 - Use code for calculations and data processing
-- Use filesystem to manage files
+- Use filesystem({action: "read"|"write"|"list", path: "...", content: "..."}) to manage files
 - Use shell for network requests (curl) and text processing
 - Use grep to find content across files
 - Use patch for precise edits (prefer over full file rewrites)
-- Ask the user if you need clarification or approval
 - Be concise and direct in your responses
 - Report what you did and the result
 - Credentials can be referenced as <credential:name> placeholders
+${
+  run.domains && run.domains.length > 0
+    ? `
+Network access is restricted to these domains only: ${run.domains.join(', ')}
+If you need access to a domain not in this list (e.g., a subdomain like api.X or cdn.X), you MUST call ask_user to request it. Do NOT fabricate content from memory when network access fails — always ask_user for the needed domain first.`
+    : `
+Network access is disabled. All tasks must be completed using local tools only.`
+}
 
 Maximum iterations: ${String(maxIterationsOverride ?? run.attempts[run.currentAttemptIndex]?.maxIterations ?? 20)}
 
