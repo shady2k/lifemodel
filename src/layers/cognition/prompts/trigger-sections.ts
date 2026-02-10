@@ -54,10 +54,11 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 You are initiating contact with the user. This is not a response to anything.
 You already have: Runtime Snapshot (agent/user state) and conversation history.
 Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring. Asking follow-up questions about something discussed minutes ago feels intrusive.
-Decide: send a message or defer. A casual check-in is valid if nothing specific comes to mind.
 
-To send a message: output {"response": "your message"}
-To defer: call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...") then output {"response": ""}
+You MUST choose ONE action:
+• Send a message: output {"response": "your message"}
+• Skip messaging: call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
+
 Tool budget: 0-3 calls maximum.
 </task>
 </trigger>`;
