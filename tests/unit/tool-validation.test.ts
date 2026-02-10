@@ -9,7 +9,6 @@ import { describe, it, expect } from 'vitest';
 import { validateAgainstParameters } from '../../src/layers/cognition/tools/validation.js';
 import type { ToolParameter } from '../../src/layers/cognition/tools/types.js';
 import { createEscalateTool } from '../../src/layers/cognition/tools/core/escalate.js';
-import { createConversationStatusTool } from '../../src/layers/cognition/tools/core/conversation-status.js';
 
 describe('validateAgainstParameters', () => {
   const parameters: ToolParameter[] = [
@@ -151,39 +150,6 @@ describe('core.escalate validation', () => {
   it('accepts valid escalation request', () => {
     const tool = createEscalateTool();
     const result = tool.validate({ reason: 'Complex multi-step reasoning needed' });
-    expect(result.success).toBe(true);
-  });
-});
-
-describe('core.conversationStatus validation', () => {
-  it('rejects missing status parameter', () => {
-    const tool = createConversationStatusTool();
-    const result = tool.validate({}); // No status provided
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error).toContain('Missing required parameter');
-      expect(result.error).toContain('"status"');
-    }
-  });
-
-  it('rejects invalid status value', () => {
-    const tool = createConversationStatusTool();
-    const result = tool.validate({ status: 'invalid_status' });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error).toContain('must be one of');
-    }
-  });
-
-  it('accepts valid awaiting_answer status', () => {
-    const tool = createConversationStatusTool();
-    const result = tool.validate({ status: 'awaiting_answer' });
-    expect(result.success).toBe(true);
-  });
-
-  it('accepts valid closed status', () => {
-    const tool = createConversationStatusTool();
-    const result = tool.validate({ status: 'closed' });
     expect(result.success).toBe(true);
   });
 });
