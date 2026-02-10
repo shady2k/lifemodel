@@ -217,6 +217,7 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
         content: JSON.stringify({
           error:
             errorDetail +
@@ -260,6 +261,7 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
         content: JSON.stringify({
           success: false,
           error: `${toolName} limit reached (max ${String(maxCalls)} per turn). Use the results you already have.`,
@@ -328,6 +330,7 @@ export async function executeToolCalls(
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
+          tool_name: toolCall.function.name,
           content: JSON.stringify({ success: false, error: 'Text cannot be empty' }),
         });
         continue;
@@ -372,6 +375,7 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
         content: JSON.stringify({
           success: true,
           delivered_text: text,
@@ -411,6 +415,7 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
         content: JSON.stringify(
           resultData ?? { success: false, error: 'Thought processing failed' }
         ),
@@ -504,6 +509,7 @@ export async function executeToolCalls(
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
+        tool_name: toolCall.function.name,
         content: JSON.stringify(result.data),
       });
     }
@@ -566,6 +572,7 @@ function processToolValidationFailure(
   messages.push({
     role: 'tool',
     tool_call_id: toolCall.id,
+    tool_name: toolCall.function.name,
     content: JSON.stringify(errorContent),
   });
 
@@ -621,6 +628,7 @@ function processRepeatedIdenticalCall(
   messages.push({
     role: 'tool',
     tool_call_id: toolCall.id,
+    tool_name: toolCall.function.name,
     content: JSON.stringify(loopWarning),
   });
 
@@ -671,6 +679,7 @@ function processRepeatedFailure(
   messages.push({
     role: 'tool',
     tool_call_id: toolCall.id,
+    tool_name: toolCall.function.name,
     content: JSON.stringify(errorContent),
   });
 

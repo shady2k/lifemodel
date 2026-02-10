@@ -38,6 +38,8 @@ export interface Message {
   tool_calls?: ToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */
   tool_call_id?: string;
+  /** Tool name for tool results (fallback when tool_calls are trimmed) */
+  tool_name?: string;
 }
 
 /**
@@ -145,6 +147,8 @@ export interface CompletionResponse {
         completionTokens: number;
         totalTokens: number;
         reasoningTokens?: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
       }
     | undefined;
 
@@ -153,6 +157,9 @@ export interface CompletionResponse {
 
   /** Finish reason */
   finishReason?: 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'error' | undefined;
+
+  /** Raw finish reason from provider (e.g., AI SDK 6's rawFinishReason) */
+  rawFinishReason?: string | undefined;
 }
 
 /**

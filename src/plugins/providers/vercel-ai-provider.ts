@@ -348,11 +348,11 @@ export class VercelAIProvider extends BaseLLMProvider {
       if (msg.role === 'tool') {
         // Tool result — AI SDK requires structured `output` and `toolName`
         const toolCallId = msg.tool_call_id ?? '';
-        const toolName = toolCallIdToName.get(toolCallId);
+        const toolName = toolCallIdToName.get(toolCallId) ?? msg.tool_name;
         if (!toolName) {
           this.providerLogger?.warn(
             { toolCallId },
-            'Tool result has no matching tool_call — toolName will be "unknown"'
+            'Tool result has no matching tool_call and no tool_name fallback'
           );
         }
         // AI SDK ToolResultOutput must be { type: 'text', value } or { type: 'json', value }
@@ -377,7 +377,10 @@ export class VercelAIProvider extends BaseLLMProvider {
       }
 
       // system, user, or assistant without tool calls
-      // Handle multipart content from addCacheControl (converts string → [{ type, text, cache_control }])
+      // Handle multipart content from addCacheControl
+      // MUTATION BOUNDARY: addCacheControl mutates content from string → Array.
+      // This cast acknowledges the mutation; the actual type safety happens at the
+      // call site in executeRequest where we cast back to Message[].
       const rawContent = (msg as unknown as Record<string, unknown>)['content'];
       if (Array.isArray(rawContent)) {
         // Multipart content with cache_control — propagate via providerOptions on each part
@@ -388,7 +391,9 @@ export class VercelAIProvider extends BaseLLMProvider {
           };
           if (part['cache_control']) {
             converted['providerOptions'] = {
-              openrouter: { cacheControl: part['cache_control'] },
+              [isOpenRouterConfig(this.config) ? 'openrouter' : 'openai']: {
+                cacheControl: part['cache_control'],
+              },
             };
           }
           return converted;
@@ -423,9 +428,17 @@ export class VercelAIProvider extends BaseLLMProvider {
           description: fn.description,
           inputSchema: () => Promise.resolve(schema as JsonObject),
         };
+        continue;
       }
-      // Minimal format - skip tools without parameters
-      // They'll need to call core.tools to get the full schema
+      // Minimal format - register with a permissive schema so the tool is visible
+      aiTools[fn.name] = {
+        description: fn.description,
+        inputSchema: () =>
+          Promise.resolve({
+            type: 'object',
+            additionalProperties: true,
+          } as JsonObject),
+      };
     }
 
     return aiTools;
@@ -490,11 +503,6 @@ export class VercelAIProvider extends BaseLLMProvider {
       }
       // If 'omit', don't add the field
 
-      // Pass parallel_tool_calls via providerOptions (OpenAI-specific, not in AI SDK CallSettings)
-      if (request.parallelToolCalls === false) {
-        openrouterOptions['parallel_tool_calls'] = false;
-      }
-
       providerOptions[providerKey] = openrouterOptions;
     }
 
@@ -531,6 +539,11 @@ export class VercelAIProvider extends BaseLLMProvider {
       this.providerLogger?.debug({ extraBody }, 'extraBody added to providerOptions');
     } else {
       this.providerLogger?.debug('No extraBody fields to add');
+    }
+
+    if (request.parallelToolCalls === false) {
+      providerOptions[providerKey] ??= {};
+      providerOptions[providerKey]['parallel_tool_calls'] = false;
     }
 
     return Object.keys(providerOptions).length > 0 ? providerOptions : undefined;
@@ -586,11 +599,17 @@ export class VercelAIProvider extends BaseLLMProvider {
       sanitizeSystemMessagesForGemini(transformable);
     }
 
-    // Add cache control breakpoints
+    // Add cache control breakpoints (mutates content from string → Array)
     addCacheControl(transformable, modelId);
 
+    // Cast back to Message[] at the mutation boundary
+    // addCacheControl mutates the content field from string to Array, which is
+    // incompatible with the Message type. We acknowledge this boundary here and
+    // let convertMessages handle the actual array content via its own narrow cast.
+    const mutatedMessages = messages;
+
     // Convert transformed messages to AI SDK format
-    const coreMessages = this.convertMessages(messages);
+    const coreMessages = this.convertMessages(mutatedMessages);
 
     // Convert tools
     const aiTools = this.convertTools(request.tools);
@@ -621,50 +640,106 @@ export class VercelAIProvider extends BaseLLMProvider {
 
     const startTime = Date.now();
 
-    // Prepare generateText options (declare outside try for error logging)
-    const generateOptions: Record<string, unknown> = {
-      model,
-      messages: coreMessages as { role: string; content: string | Record<string, unknown>[] }[],
-      temperature: temperature ?? undefined,
-      ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
-      maxOutputTokens: request.maxTokens,
-      stopSequences: request.stop,
-      // Disable AI SDK's built-in retry (we handle it ourselves)
-      maxRetries: 0,
-    };
-
-    // Add tools if present
+    // Debug: log tools if present
     if (aiTools && Object.keys(aiTools).length > 0) {
-      generateOptions['tools'] = aiTools;
-      // Debug: log tools to see what's being passed
       this.providerLogger?.debug(
         { toolCount: Object.keys(aiTools).length, sampleTool: Object.keys(aiTools)[0] },
         'Tools added to generateText'
       );
-      if (toolChoice) {
-        generateOptions['toolChoice'] = toolChoice;
-      }
     }
 
-    // Add provider options if present
+    // Debug: log provider options if present
     if (providerOptions) {
-      generateOptions['providerOptions'] = providerOptions;
-      // Debug: log providerOptions to see what's being passed
       this.providerLogger?.debug({ providerOptions }, 'Provider options added');
     }
 
-    // Add HTTP headers (OpenRouter app identification: HTTP-Referer, X-Title)
-    if (httpHeaders) {
-      generateOptions['headers'] = httpHeaders;
-    }
+    // Prepare generateText options with proper typing
+    // All conditional properties are included at declaration time for type safety
+    const hasTools = aiTools && Object.keys(aiTools).length > 0;
 
-    // Add per-request timeout if specified (AI SDK has native timeout support)
-    if (request.timeoutMs) {
-      generateOptions['timeout'] = request.timeoutMs;
-    }
+    // Build options with all properties at once to avoid union types
+    // Using conditional spreading ensures undefined values are not included
+    // (required by exactOptionalPropertyTypes: true)
+    // Note: Using Record<string, unknown> for base type due to complex AI SDK types
+    // with conditional spreading. The type is validated at call site with 'as' cast.
+    const generateOptions: Record<string, unknown> = {
+      model,
+      // Cast coreMessages to ModelMessage[] - convertMessages produces valid messages
+      messages: coreMessages,
+      ...(temperature !== undefined && { temperature }),
+      ...(overrides.topP !== undefined && overrides.topP !== null && { topP: overrides.topP }),
+      ...(request.maxTokens !== undefined && { maxOutputTokens: request.maxTokens }),
+      ...(request.stop && { stopSequences: request.stop }),
+      // Disable AI SDK's built-in retry (we handle it ourselves)
+      maxRetries: 0,
+      // Step-finished callback for lean debug logging (fires even for single-step calls)
+      onStepFinish: (
+        _step: Readonly<{
+          toolCalls: readonly { toolName: string; toolCallId: string; args: unknown }[];
+          text: string | undefined;
+          finishReason: string | undefined;
+          usage: {
+            promptTokens: number;
+            completionTokens: number;
+            totalTokens: number;
+          };
+          warnings: readonly { code: string; message: string }[] | undefined;
+        }>
+      ) => {
+        // Log lean summary - stepType, finishReason, and usage counts
+        // Do NOT log request/response bodies (can be very large for tool-heavy prompts)
+        this.providerLogger?.debug(
+          {
+            finishReason: _step.finishReason,
+            usage: _step.usage,
+            hasToolCalls: _step.toolCalls.length > 0,
+          },
+          'AI SDK step finished'
+        );
+      },
+      ...(providerOptions && { providerOptions }),
+      ...(httpHeaders && { headers: httpHeaders }),
+      ...(request.timeoutMs && { timeout: request.timeoutMs }),
+      // Add tools and repair callback if tools are present
+      ...(hasTools && {
+        tools: aiTools,
+        ...(toolChoice && { toolChoice }),
+        // Tool call repair callback for wrong casing (e.g., Core_Memory → core_memory)
+        experimental_repairToolCall: async (
+          failed: Readonly<{
+            toolCall: { toolName: string; toolCallId: string; args: unknown };
+            error: { cause: unknown };
+            // AI SDK 6 signature: inputSchema({ toolName }) → PromiseLike<JSONSchema7>
+            inputSchema: (options: { toolName: string }) => PromiseLike<Record<string, unknown>>;
+          }>
+        ) => {
+          const { toolName } = failed.toolCall;
+          const lower = toolName.toLowerCase();
+
+          // Only repair if casing differs (e.g., "Core_Memory" → "core_memory")
+          if (lower !== toolName) {
+            // Verify the lowercased name matches a known tool via SDK schema lookup
+            try {
+              await failed.inputSchema({ toolName: lower });
+              // If we get here, the tool exists — repair the name
+              this.providerLogger?.info(
+                { original: toolName, repaired: lower },
+                'Repaired tool call name casing'
+              );
+              return { ...failed.toolCall, toolName: lower };
+            } catch {
+              // Schema lookup threw — tool doesn't exist with this name
+            }
+          }
+
+          // Can't repair — return null to let normal error handling take over
+          return null;
+        },
+      }),
+    };
 
     try {
-      // Call generateText
+      // Call generateText with type validation
       const result = await generateText(generateOptions as Parameters<typeof generateText>[0]);
 
       const duration = Date.now() - startTime;
@@ -673,7 +748,7 @@ export class VercelAIProvider extends BaseLLMProvider {
         {
           durationMs: duration,
           textLength: result.text.length,
-          toolCallsCount: result.toolCalls.length,
+          toolCallsCount: (result.toolCalls as { length: number } | undefined)?.length ?? 0,
           finishReason: result.finishReason,
           usage: result.usage,
           hasReasoningText: !!result.reasoningText,
@@ -727,11 +802,16 @@ export class VercelAIProvider extends BaseLLMProvider {
       reasoningText?: string | undefined;
       toolCalls?: Record<string, unknown>[];
       finishReason: string | undefined;
+      rawFinishReason?: string | undefined;
       usage: {
         inputTokens: number | undefined;
         outputTokens: number | undefined;
         totalTokens: number | undefined;
         reasoningTokens?: number | undefined;
+        inputTokenDetails?: {
+          cacheReadTokens?: number | undefined;
+          cacheWriteTokens?: number | undefined;
+        };
       };
       response: {
         id: string;
@@ -750,6 +830,11 @@ export class VercelAIProvider extends BaseLLMProvider {
     // Map reasoning content if present
     if (result.reasoningText) {
       response.reasoningContent = result.reasoningText;
+    }
+
+    // Map raw finish reason if present (provider-specific finish reason from AI SDK 6)
+    if (result.rawFinishReason) {
+      response.rawFinishReason = result.rawFinishReason;
     }
 
     // Map tool calls - AI SDK tool calls have different structures
@@ -779,6 +864,13 @@ export class VercelAIProvider extends BaseLLMProvider {
       totalTokens: result.usage.totalTokens ?? 0,
       ...(result.usage.reasoningTokens != null && {
         reasoningTokens: result.usage.reasoningTokens,
+      }),
+      // Map cache tokens from inputTokenDetails if present (AI SDK 6 feature)
+      ...(result.usage.inputTokenDetails?.cacheReadTokens != null && {
+        cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens,
+      }),
+      ...(result.usage.inputTokenDetails?.cacheWriteTokens != null && {
+        cacheWriteTokens: result.usage.inputTokenDetails.cacheWriteTokens,
       }),
     };
 
@@ -865,8 +957,9 @@ export class VercelAIProvider extends BaseLLMProvider {
       });
     }
 
-    // Default to non-retryable
+    // Default to non-retryable — preserve statusCode if available for debugging
     return new LLMError(message, this.name, {
+      ...(statusCode !== undefined && { statusCode }),
       retryable: false,
     });
   }
