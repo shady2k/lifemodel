@@ -15,6 +15,12 @@ import { execFile } from 'node:child_process';
 import { readFile, writeFile, readdir, mkdir, lstat, realpath } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, dirname } from 'node:path';
 import { promisify } from 'node:util';
+import {
+  validatePipeline,
+  matchesGlob,
+  resolveCredentialPlaceholders as resolveCredentialPlaceholdersUtil,
+  findUniqueSubstring,
+} from './tool-server-utils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -279,87 +285,6 @@ async function executeCode(
 
 // ─── Shell Execution ─────────────────────────────────────────────
 
-// Allowlisted commands (same as host shell-allowlist.ts)
-const SHELL_ALLOWLIST = new Set([
-  'echo',
-  'cat',
-  'head',
-  'tail',
-  'wc',
-  'grep',
-  'sort',
-  'uniq',
-  'cut',
-  'awk',
-  'sed',
-  'ls',
-  'pwd',
-  'mkdir',
-  'cp',
-  'mv',
-  'find',
-  'date',
-  'curl',
-  'wget',
-  'jq',
-  'uname',
-  'whoami',
-  'id',
-]);
-
-const NETWORK_COMMANDS = new Set(['curl', 'wget']);
-
-// Shell control operators that enable command chaining
-const CONTROL_OPERATORS_RE = /\|\||&&/;
-
-// Dangerous shell metacharacters that enable injection (excluding single |, which is a pipe)
-const DANGEROUS_METACHAR_RE = /[;`$()><!\n\\&]/;
-
-/**
- * Validate all commands in a pipeline against the allowlist.
- * Splits on single `|` and checks each segment's first token.
- *
- * Rejects: control operators (||, &&), dangerous metacharacters,
- * and any pipeline segment without a valid command.
- */
-function validatePipeline(command: string): { ok: boolean; error?: string; hasNetwork: boolean } {
-  // Reject control operators BEFORE splitting on pipe
-  if (CONTROL_OPERATORS_RE.test(command)) {
-    return {
-      ok: false,
-      error: 'Command contains disallowed control operators (|| or &&)',
-      hasNetwork: false,
-    };
-  }
-
-  // Reject dangerous metacharacters (check after removing single |)
-  if (DANGEROUS_METACHAR_RE.test(command.replace(/\|/g, ''))) {
-    return { ok: false, error: 'Command contains disallowed metacharacters', hasNetwork: false };
-  }
-
-  const segments = command.split('|').map((s) => s.trim());
-
-  // Reject empty segments (e.g., "echo |  | grep" or trailing pipe)
-  if (segments.some((s) => !s)) {
-    return { ok: false, error: 'Empty pipeline segment', hasNetwork: false };
-  }
-  let hasNetwork = false;
-
-  for (const segment of segments) {
-    const cmd = segment.split(/\s+/)[0]?.replace(/^.*\//, '') ?? '';
-    if (!SHELL_ALLOWLIST.has(cmd)) {
-      return {
-        ok: false,
-        error: `Command not allowed: ${cmd}. Allowed: ${[...SHELL_ALLOWLIST].join(', ')}`,
-        hasNetwork: false,
-      };
-    }
-    if (NETWORK_COMMANDS.has(cmd)) hasNetwork = true;
-  }
-
-  return { ok: true, hasNetwork };
-}
-
 async function executeShell(
   args: Record<string, unknown>,
   timeoutMs: number
@@ -506,7 +431,8 @@ async function executeFilesystem(args: Record<string, unknown>): Promise<MotorTo
   const startTime = Date.now();
 
   // Resolve credential placeholders in content
-  const resolvedContent = content != null ? resolveCredentialPlaceholders(content) : undefined;
+  const resolvedContent =
+    content != null ? resolveCredentialPlaceholdersUtil(content, credentials) : undefined;
 
   try {
     switch (action) {
@@ -603,11 +529,6 @@ async function walkDir(dir: string, basePath = ''): Promise<string[]> {
     }
   }
   return files;
-}
-
-function matchesGlob(filename: string, pattern: string): boolean {
-  if (pattern.startsWith('*.')) return filename.endsWith(pattern.slice(1));
-  return filename === pattern;
 }
 
 async function executeGrep(args: Record<string, unknown>): Promise<MotorToolResult> {
@@ -708,39 +629,30 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
 
     const content = await readFile(fullPath, 'utf-8');
 
-    let count = 0;
-    let searchStart = 0;
-    let idx = -1;
-    while ((idx = content.indexOf(oldText, searchStart)) !== -1) {
-      count++;
-      searchStart = idx + 1;
-      if (count > 1) break;
-    }
+    const findResult = findUniqueSubstring(content, oldText);
 
-    if (count === 0) {
+    if (!findResult.ok) {
+      const errorCode = findResult.error === 'not_found' ? 'not_found' : 'invalid_args';
+      const output =
+        findResult.error === 'not_found'
+          ? 'old_text not found in file'
+          : findResult.error === 'ambiguous'
+            ? 'old_text found 2+ times (must be exactly 1)'
+            : 'old_text cannot be empty';
       return {
         ok: false,
-        output: 'old_text not found in file',
-        errorCode: 'not_found',
-        retryable: false,
+        output,
+        errorCode,
+        retryable: findResult.error === 'ambiguous',
         provenance: 'internal',
         durationMs: Date.now() - startTime,
       };
     }
 
-    if (count > 1) {
-      return {
-        ok: false,
-        output: `old_text found ${String(count)}+ times (must be exactly 1)`,
-        errorCode: 'invalid_args',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    const firstIdx = content.indexOf(oldText);
-    const patched = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length);
+    const patched =
+      content.slice(0, findResult.index) +
+      newText +
+      content.slice(findResult.index + oldText.length);
     await writeFile(fullPath, patched, 'utf-8');
 
     const linesRemoved = oldText.split('\n').length;
@@ -786,17 +698,6 @@ function executeAskUser(args: Record<string, unknown>): MotorToolResult {
     provenance: 'internal',
     durationMs: 0,
   };
-}
-
-// ─── Credential Resolution ───────────────────────────────────────
-
-const CREDENTIAL_PLACEHOLDER = /<credential:([a-zA-Z0-9_]+)>/g;
-
-function resolveCredentialPlaceholders(text: string): string {
-  return text.replace(CREDENTIAL_PLACEHOLDER, (_match, name: string) => {
-    const value = credentials.get(name);
-    return value ?? `<credential:${name}>`;
-  });
 }
 
 // ─── Main ────────────────────────────────────────────────────────
