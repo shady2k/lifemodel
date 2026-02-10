@@ -237,9 +237,38 @@ export function buildMotorResultSection(data: MotorResultData): string {
       const statsLine = stats
         ? `${String(stats.iterations)} iterations, ${(stats.durationMs / 1000).toFixed(1)}s`
         : '';
+      const installedSkills = result?.installedSkills;
+
+      // Build context
+      let context = `Task run ${runId} completed. Summary: ${summary}. Stats: ${statsLine}.`;
+      if (
+        installedSkills &&
+        (installedSkills.created.length > 0 || installedSkills.updated.length > 0)
+      ) {
+        const createdStr =
+          installedSkills.created.length > 0
+            ? `Skills created: ${installedSkills.created.join(', ')}.`
+            : '';
+        const updatedStr =
+          installedSkills.updated.length > 0
+            ? `Skills updated: ${installedSkills.updated.join(', ')}.`
+            : '';
+        context += ` ${createdStr} ${updatedStr} These are installed with trust: "pending_review" and need user approval.`;
+      }
+
+      // Build task
+      let task = 'Report the result to the user concisely.';
+      if (
+        installedSkills &&
+        (installedSkills.created.length > 0 || installedSkills.updated.length > 0)
+      ) {
+        task +=
+          '\n\nFor each new/updated skill, present what it does and what permissions it needs.\nAsk the user to approve each skill before it can be used.';
+      }
+
       return `<trigger type="motor_result">
-<context>Task run ${runId} completed. Summary: ${summary}. Stats: ${statsLine}.</context>
-<task>Report the result to the user concisely.</task>
+<context>${context}</context>
+<task>${task}</task>
 </trigger>`;
     }
 

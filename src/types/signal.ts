@@ -497,6 +497,7 @@ export interface MotorResultData {
     summary: string;
     stats: { iterations: number; durationMs: number; energyCost: number; errors: number };
     artifacts?: string[];
+    installedSkills?: { created: string[]; updated: string[] };
   };
 
   /** Error details (present when status=failed, legacy compat) */

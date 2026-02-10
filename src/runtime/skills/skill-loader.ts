@@ -27,7 +27,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, stat } from 'node:fs/promises';
+import { readFile, readdir, mkdir, stat, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { JSONStorage } from '../../storage/json-storage.js';
 import type {
@@ -50,10 +50,72 @@ const DEFAULT_SKILLS_DIR = 'data/skills';
 const INDEX_SCHEMA_VERSION = 1;
 
 /**
- * Compute SHA-256 hash of content.
+ * Recursively collect all files in a directory, excluding policy.json.
+ *
+ * @param dirPath - Absolute path to directory
+ * @param relativeDir - Relative path from base (for recursion)
+ * @returns Array of relative file paths
  */
-function sha256(content: string): string {
-  return `sha256:${createHash('sha256').update(content, 'utf-8').digest('hex')}`;
+async function collectFiles(dirPath: string, relativeDir = ''): Promise<string[]> {
+  const files: string[] = [];
+  const entries = await readdir(dirPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = join(dirPath, entry.name);
+    const relativePath = join(relativeDir, entry.name);
+
+    // Reject symlinks - use lstat to detect symlinks (stat follows them)
+    const stats = await lstat(fullPath);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Symlink detected and rejected: ${relativePath}`);
+    }
+
+    if (entry.isDirectory()) {
+      // Skip directories starting with dot (e.g., .git)
+      if (entry.name.startsWith('.')) continue;
+      // Recursively collect files
+      const nested = await collectFiles(fullPath, relativePath);
+      files.push(...nested);
+    } else {
+      // Skip policy.json (excluded from content hash)
+      if (entry.name === 'policy.json') continue;
+      // Skip dotfiles (e.g., .DS_Store)
+      if (entry.name.startsWith('.')) continue;
+      files.push(relativePath);
+    }
+  }
+
+  return files;
+}
+
+/**
+ * Compute SHA-256 hash of a directory's content.
+ *
+ * Recursively hashes all files in the directory, excluding policy.json.
+ * File paths are sorted lexicographically for determinism.
+ * Rejects any symlinks during traversal.
+ *
+ * @param dirPath - Absolute path to directory
+ * @returns Hash string in format "sha256:<hex>"
+ */
+export async function computeDirectoryHash(dirPath: string): Promise<string> {
+  const hash = createHash('sha256');
+
+  // Collect all files (excludes policy.json, dotfiles, dotdirs)
+  const files = await collectFiles(dirPath);
+
+  // Sort lexicographically for deterministic hashing
+  files.sort();
+
+  // Feed each file's content into the hash
+  for (const relativePath of files) {
+    const fullPath = join(dirPath, relativePath);
+    const content = await readFile(fullPath, 'utf-8');
+    // Format: "relativePath\0content" for uniqueness
+    hash.update(relativePath + '\0' + content, 'utf-8');
+  }
+
+  return `sha256:${hash.digest('hex')}`;
 }
 
 /**
@@ -179,10 +241,17 @@ export function validateSkillFrontmatter(frontmatter: Record<string, unknown>): 
   const errors: string[] = [];
 
   // Required: name
+  // Rules: must start with letter, lowercase a-z, numbers, hyphens allowed
+  // No leading/trailing/consecutive hyphens, max 64 chars
+  // Pattern: [a-z][a-z0-9]*(-[a-z0-9]+)*
   if (!frontmatter['name'] || typeof frontmatter['name'] !== 'string') {
     errors.push('Missing or invalid "name" (must be a string)');
-  } else if (!/^[a-z0-9-]+$/.test(frontmatter['name'])) {
-    errors.push('Invalid "name": must be lowercase alphanumeric with hyphens');
+  } else if (frontmatter['name'].length > 64) {
+    errors.push('Invalid "name": must be at most 64 characters');
+  } else if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(frontmatter['name'])) {
+    errors.push(
+      'Invalid "name": must start with a letter, contain only lowercase letters, numbers, and hyphens (no consecutive/leading/trailing hyphens)'
+    );
   }
 
   // Required: description
@@ -237,7 +306,11 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
     }
 
     // Validate trust
-    if (raw['trust'] !== 'unknown' && raw['trust'] !== 'approved') {
+    if (
+      raw['trust'] !== 'unknown' &&
+      raw['trust'] !== 'pending_review' &&
+      raw['trust'] !== 'approved'
+    ) {
       return null;
     }
 
@@ -342,7 +415,7 @@ export async function removeFromSkillIndex(baseDir: string, name: string): Promi
  *
  * @param baseDir - Skills base directory
  */
-async function rebuildSkillIndex(baseDir: string): Promise<void> {
+export async function rebuildSkillIndex(baseDir: string): Promise<void> {
   const dir = resolve(baseDir);
 
   try {
@@ -472,7 +545,7 @@ export async function loadSkill(
 
     // Content hash verification
     if (policy?.provenance?.contentHash) {
-      const currentHash = sha256(content);
+      const currentHash = await computeDirectoryHash(skillDir);
       if (currentHash !== policy.provenance.contentHash) {
         // Reset trust to unknown
         policy = { ...policy, trust: 'unknown' };

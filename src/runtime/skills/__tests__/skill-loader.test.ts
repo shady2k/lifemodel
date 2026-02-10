@@ -15,11 +15,12 @@ import {
   saveSkillIndex,
   updateSkillIndex,
   loadSkill,
+  computeDirectoryHash,
 } from '../skill-loader.js';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import type { MotorTool } from '../../motor-cortex/motor-protocol.js';
+import { mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { MotorTool } from '../../motor-cortex/motor-protocol.js';
 
 describe('parseSkillFile', () => {
   it('parses Agent Skills standard format', () => {
@@ -123,13 +124,58 @@ describe('validateSkillFrontmatter', () => {
     expect(errors.some((e) => e.includes('description'))).toBe(true);
   });
 
-  it('validates name format', () => {
+  it('validates name format - must start with letter', () => {
     const frontmatter = {
-      name: 'Invalid Name!',
+      name: '123starts-with-number',
       description: 'Test',
     };
     const errors = validateSkillFrontmatter(frontmatter);
-    expect(errors.some((e) => e.includes('lowercase alphanumeric'))).toBe(true);
+    expect(errors.some((e) => e.includes('start with a letter'))).toBe(true);
+  });
+
+  it('validates name format - rejects leading hyphen', () => {
+    const frontmatter = {
+      name: '-leading-hyphen',
+      description: 'Test',
+    };
+    const errors = validateSkillFrontmatter(frontmatter);
+    expect(errors.some((e) => e.includes('leading'))).toBe(true);
+  });
+
+  it('validates name format - rejects trailing hyphen', () => {
+    const frontmatter = {
+      name: 'trailing-hyphen-',
+      description: 'Test',
+    };
+    const errors = validateSkillFrontmatter(frontmatter);
+    expect(errors.some((e) => e.includes('trailing'))).toBe(true);
+  });
+
+  it('validates name format - rejects consecutive hyphens', () => {
+    const frontmatter = {
+      name: 'consecutive--hyphens',
+      description: 'Test',
+    };
+    const errors = validateSkillFrontmatter(frontmatter);
+    expect(errors.some((e) => e.includes('consecutive'))).toBe(true);
+  });
+
+  it('validates name format - rejects names over 64 chars', () => {
+    const frontmatter = {
+      name: 'a'.repeat(65),
+      description: 'Test',
+    };
+    const errors = validateSkillFrontmatter(frontmatter);
+    expect(errors.some((e) => e.includes('64 characters'))).toBe(true);
+  });
+
+  it('accepts valid name format', () => {
+    const frontmatter = {
+      name: 'valid-skill-name-123',
+      description: 'Test',
+    };
+    const errors = validateSkillFrontmatter(frontmatter);
+    expect(errors).toHaveLength(0);
   });
 });
 
@@ -301,9 +347,8 @@ description: Original content
 Original body`;
     await writeFile(join(testDir, 'test-skill', 'SKILL.md'), originalContent, 'utf-8');
 
-    // Create policy with hash of original content
-    const { createHash } = await import('node:crypto');
-    const originalHash = `sha256:${createHash('sha256').update(originalContent, 'utf-8').digest('hex')}`;
+    // Create policy with hash of original directory
+    const originalHash = await computeDirectoryHash(join(testDir, 'test-skill'));
 
     const policy = {
       schemaVersion: 1,
@@ -344,9 +389,8 @@ description: Stable content
 Body`;
     await writeFile(join(testDir, 'test-skill', 'SKILL.md'), content, 'utf-8');
 
-    // Create policy with correct hash
-    const { createHash } = await import('node:crypto');
-    const correctHash = `sha256:${createHash('sha256').update(content, 'utf-8').digest('hex')}`;
+    // Create policy with correct hash (directory hash)
+    const correctHash = await computeDirectoryHash(join(testDir, 'test-skill'));
 
     const policy = {
       schemaVersion: 1,
@@ -373,5 +417,146 @@ Body`;
   it('returns error for missing skill', async () => {
     const result = await loadSkill('nonexistent', testDir);
     expect('error' in result).toBe(true);
+  });
+});
+
+describe('computeDirectoryHash', () => {
+  const testDir = join(tmpdir(), `hash-test-${String(Date.now())}`);
+
+  beforeEach(async () => {
+    await mkdir(testDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it('computes hash over all files excluding policy.json', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+    await writeFile(join(skillDir, 'script.sh'), 'echo test', 'utf-8');
+    await writeFile(join(skillDir, 'policy.json'), '{"trust": "approved"}', 'utf-8');
+
+    const hash = await computeDirectoryHash(skillDir);
+    expect(hash).toMatch(/^sha256:[a-f0-9]+$/);
+  });
+
+  it('produces different hash when content changes', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Original', 'utf-8');
+
+    const hash1 = await computeDirectoryHash(skillDir);
+
+    // Modify content
+    await writeFile(join(skillDir, 'SKILL.md'), '# Modified', 'utf-8');
+
+    const hash2 = await computeDirectoryHash(skillDir);
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('produces same hash for identical content (deterministic)', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Same Content', 'utf-8');
+    await writeFile(join(skillDir, 'script.sh'), 'echo test', 'utf-8');
+
+    const hash1 = await computeDirectoryHash(skillDir);
+    const hash2 = await computeDirectoryHash(skillDir);
+
+    expect(hash1).toBe(hash2);
+  });
+
+  it('excludes policy.json from hash', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+    await writeFile(join(skillDir, 'policy.json'), '{"trust": "approved"}', 'utf-8');
+
+    const hash1 = await computeDirectoryHash(skillDir);
+
+    // Modify policy.json - hash should not change
+    await writeFile(join(skillDir, 'policy.json'), '{"trust": "unknown"}', 'utf-8');
+
+    const hash2 = await computeDirectoryHash(skillDir);
+
+    expect(hash1).toBe(hash2);
+  });
+
+  it('includes subdirectories in hash', async () => {
+    const skillDir = join(testDir, 'skill');
+    const scriptsDir = join(skillDir, 'scripts');
+    await mkdir(scriptsDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+    await writeFile(join(scriptsDir, 'run.sh'), 'echo run', 'utf-8');
+
+    const hash = await computeDirectoryHash(skillDir);
+    expect(hash).toMatch(/^sha256:[a-f0-9]+$/);
+  });
+
+  it('produces different hash when subdirectory content changes', async () => {
+    const skillDir = join(testDir, 'skill');
+    const scriptsDir = join(skillDir, 'scripts');
+    await mkdir(scriptsDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+    await writeFile(join(scriptsDir, 'run.sh'), 'echo original', 'utf-8');
+
+    const hash1 = await computeDirectoryHash(skillDir);
+
+    // Modify script in subdirectory
+    await writeFile(join(scriptsDir, 'run.sh'), 'echo modified', 'utf-8');
+
+    const hash2 = await computeDirectoryHash(skillDir);
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('rejects symlinks in directory tree', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+
+    try {
+      await symlink('/etc/passwd', join(skillDir, 'link'));
+    } catch {
+      // Skip test if symlinks not supported
+      return;
+    }
+
+    await expect(computeDirectoryHash(skillDir)).rejects.toThrow('Symlink detected');
+  });
+
+  it('returns hash for empty directory (no files)', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    const hash = await computeDirectoryHash(skillDir);
+    expect(hash).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  });
+
+  it('skips dotfiles in hash computation', async () => {
+    const skillDir = join(testDir, 'skill');
+    await mkdir(skillDir, { recursive: true });
+
+    await writeFile(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8');
+    await writeFile(join(skillDir, '.DS_Store'), 'x', 'utf-8');
+
+    const hash1 = await computeDirectoryHash(skillDir);
+
+    // Remove dotfile - hash should be the same
+    await rm(join(skillDir, '.DS_Store'));
+
+    const hash2 = await computeDirectoryHash(skillDir);
+
+    expect(hash1).toBe(hash2);
   });
 });

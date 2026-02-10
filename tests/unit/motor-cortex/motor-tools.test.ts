@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeFile, mkdir, rm, symlink } from 'node:fs/promises';
+import { writeFile, mkdir, rm, symlink, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
@@ -62,7 +62,7 @@ describe('grep tool', () => {
 
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
-    ctx = { workspace, allowedRoots: [workspace] };
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
 
     // Create test files
     await writeFile(join(workspace, 'hello.ts'), 'const foo = "hello";\nconst bar = "world";\n');
@@ -108,7 +108,7 @@ describe('patch tool', () => {
 
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
-    ctx = { workspace, allowedRoots: [workspace] };
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
   });
 
   afterEach(async () => {
@@ -166,7 +166,7 @@ describe('shell tool', () => {
 
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
-    ctx = { workspace, allowedRoots: [workspace] };
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
   });
 
   afterEach(async () => {
@@ -287,7 +287,7 @@ describe('filesystem tool with multiple roots', () => {
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
     skillsDir = await mkdtemp(join(tmpdir(), 'motor-skills-'));
-    ctx = { workspace, allowedRoots: [workspace, skillsDir] };
+    ctx = { workspace, allowedRoots: [workspace, skillsDir], writeRoots: [workspace] };
   });
 
   afterEach(async () => {
@@ -295,20 +295,82 @@ describe('filesystem tool with multiple roots', () => {
     await rm(skillsDir, { recursive: true, force: true });
   });
 
-  it('writes to skills directory', async () => {
-    // Use a relative path — it will be resolved against each allowed root
-    await mkdir(join(skillsDir, 'test-skill'), { recursive: true });
+  it('reads from skills directory (allowedRoots)', async () => {
+    // Create a file in workspace first
+    await mkdir(join(workspace, 'read-test'), { recursive: true });
+    await writeFile(join(workspace, 'read-test', 'file.txt'), 'content from workspace', 'utf-8');
+
+    const result = await executeTool(
+      'filesystem',
+      {
+        action: 'read',
+        path: 'read-test/file.txt',
+      },
+      ctx
+    );
+    // Read uses allowedRoots, and workspace is first, so it reads from workspace
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('content from workspace');
+  });
+
+  it('writes are constrained to writeRoots', async () => {
+    // Write should only go to writeRoots (workspace), even if a directory exists in skillsDir
+    await mkdir(join(skillsDir, 'write-test'), { recursive: true });
+
     const result = await executeTool(
       'filesystem',
       {
         action: 'write',
-        path: 'test-skill/SKILL.md',
-        content: '---\nname: test\n---\nBody',
+        path: 'write-test/file.txt',
+        content: 'content in workspace',
       },
-      // Create context with skills dir as workspace (relative paths resolve against it)
-      { workspace: skillsDir, allowedRoots: [workspace, skillsDir] }
+      ctx
     );
     expect(result.ok).toBe(true);
+
+    // Verify the file was written to workspace, not skillsDir
+    const workspaceFile = await readFile(join(workspace, 'write-test', 'file.txt'), 'utf-8').catch(() => null);
+    const skillsFile = await readFile(join(skillsDir, 'write-test', 'file.txt'), 'utf-8').catch(() => null);
+    expect(workspaceFile).toBe('content in workspace');
+    expect(skillsFile).toBeNull(); // Not written to skillsDir
+  });
+
+  it('writes use writeRoots, not allowedRoots', async () => {
+    // Create a file in skillsDir that doesn't exist in workspace
+    const uniqueFile = `only-in-skills-${Date.now()}.txt`;
+    await writeFile(join(skillsDir, uniqueFile), 'original in skills', 'utf-8');
+
+    // Try to write to the same filename - it should go to workspace (writeRoots)
+    const result = await executeTool(
+      'filesystem',
+      {
+        action: 'write',
+        path: uniqueFile,
+        content: 'new in workspace',
+      },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+
+    // Verify write went to workspace, not skillsDir
+    const workspaceFile = await readFile(join(workspace, uniqueFile), 'utf-8').catch(() => null);
+    const skillsFile = await readFile(join(skillsDir, uniqueFile), 'utf-8').catch(() => null);
+    expect(workspaceFile).toBe('new in workspace');
+    expect(skillsFile).toBe('original in skills'); // Unchanged
+  });
+
+  it('allows writes to workspace directory (writeRoots)', async () => {
+    const result = await executeTool(
+      'filesystem',
+      {
+        action: 'write',
+        path: 'file.txt',
+        content: 'hello',
+      },
+      ctx
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('Wrote');
   });
 
   it('creates parent directories on write', async () => {
@@ -323,5 +385,74 @@ describe('filesystem tool with multiple roots', () => {
     );
     expect(result.ok).toBe(true);
     expect(result.output).toContain('Wrote');
+  });
+});
+
+describe('filesystem tool writeRoots security', () => {
+  let workspace: string;
+  let skillsDir: string;
+  let ctx: ToolContext;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
+    skillsDir = await mkdtemp(join(tmpdir(), 'motor-skills-'));
+    ctx = { workspace, allowedRoots: [workspace, skillsDir], writeRoots: [workspace] };
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(skillsDir, { recursive: true, force: true });
+  });
+
+  it('rejects writes via symlink pointing outside writeRoots', async () => {
+    // Create a file in skillsDir (outside writeRoots)
+    await writeFile(join(skillsDir, 'target.txt'), 'secret', 'utf-8');
+
+    // Create a symlink in workspace pointing to skillsDir
+    try {
+      await symlink(join(skillsDir, 'target.txt'), join(workspace, 'link.txt'));
+    } catch {
+      // Skip test if symlinks not supported
+      return;
+    }
+
+    // Try to write through the symlink
+    const result = await executeTool(
+      'filesystem',
+      {
+        action: 'write',
+        path: 'link.txt',
+        content: 'modified',
+      },
+      ctx
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
+  });
+
+  it('rejects write to existing symlink in workspace', async () => {
+    // Create a file in workspace
+    await writeFile(join(workspace, 'original.txt'), 'original', 'utf-8');
+
+    // Create a symlink in workspace pointing to skillsDir
+    try {
+      await symlink(join(skillsDir, 'outside.txt'), join(workspace, 'symlink.txt'));
+    } catch {
+      // Skip test if symlinks not supported
+      return;
+    }
+
+    // Try to write to the symlink
+    const result = await executeTool(
+      'filesystem',
+      {
+        action: 'write',
+        path: 'symlink.txt',
+        content: 'should not write',
+      },
+      ctx
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
   });
 });

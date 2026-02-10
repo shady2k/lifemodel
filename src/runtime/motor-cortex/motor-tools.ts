@@ -22,8 +22,11 @@ import { tmpdir } from 'node:os';
  * Tool context passed to executors.
  */
 export interface ToolContext {
-  /** Allowed root directories for file operations */
+  /** Allowed root directories for read operations */
   allowedRoots: string[];
+
+  /** Allowed root directories for write operations (subset of allowedRoots) */
+  writeRoots: string[];
 
   /** Primary workspace directory (first allowed root) */
   workspace: string;
@@ -383,8 +386,24 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
               durationMs: Date.now() - startTime,
             };
           }
-          const fullPath = await resolveSafePath(ctx.allowedRoots, path);
+          const fullPath = await resolveSafePath(ctx.writeRoots, path);
           if (!fullPath) return pathTraversalError(startTime);
+          // Reject writes to symlinks
+          try {
+            const stats = await lstat(fullPath);
+            if (stats.isSymbolicLink()) {
+              return {
+                ok: false,
+                output: 'Cannot write to symlink',
+                errorCode: 'permission_denied',
+                retryable: false,
+                provenance: 'internal',
+                durationMs: Date.now() - startTime,
+              };
+            }
+          } catch {
+            // File doesn't exist yet - that's fine for writes
+          }
           // Ensure parent directory exists
           await mkdir(dirname(fullPath), { recursive: true });
           await writeFile(fullPath, content, 'utf-8');

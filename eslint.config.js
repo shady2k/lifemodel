@@ -40,6 +40,18 @@ export default tseslint.config(
     },
   },
   {
+    // Relax strict rules for test files — tests naturally use JSON.parse, template literals, etc.
+    files: ['**/*.test.ts', '**/__tests__/**/*.ts', 'tests/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/restrict-template-expressions': 'off',
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', 'data/'],
   },
   eslintConfigPrettier

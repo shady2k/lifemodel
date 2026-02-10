@@ -196,13 +196,7 @@ export class MotorCortex {
     recoveryContext?: MotorAttempt['recoveryContext']
   ): MotorAttempt {
     const attemptId = `att_${String(index)}`;
-    const messages = buildInitialMessages(
-      run,
-      skill,
-      recoveryContext,
-      maxIterations,
-      this.skillsDir
-    );
+    const messages = buildInitialMessages(run, skill, recoveryContext, maxIterations);
 
     return {
       id: attemptId,

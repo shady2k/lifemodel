@@ -78,6 +78,9 @@ export interface TaskResult {
   /** Files produced by the run (copied to artifacts dir) */
   artifacts?: string[];
 
+  /** Skills extracted from workspace and installed to data/skills/ */
+  installedSkills?: { created: string[]; updated: string[] };
+
   /** Execution statistics */
   stats: {
     /** Number of loop iterations */

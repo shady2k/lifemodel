@@ -53,8 +53,12 @@ export interface SkillFrontmatter {
 
 /**
  * Trust state for a skill's security policy.
+ *
+ * - unknown: No user approval yet
+ * - pending_review: User has not yet approved this skill (extracted from Motor Cortex)
+ * - approved: User has approved these permissions
  */
-export type SkillTrust = 'unknown' | 'approved';
+export type SkillTrust = 'unknown' | 'pending_review' | 'approved';
 
 /**
  * Security policy sidecar (policy.json).

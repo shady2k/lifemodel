@@ -21,6 +21,7 @@ import type {
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
 import { getToolDefinitions, executeTool, createWorkspace } from './motor-tools.js';
+import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import type { ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
@@ -119,9 +120,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Build tool context with allowed roots (workspace + skills dir)
   const skillsDir = params.skillsDir;
   const allowedRoots = skillsDir ? [workspace, skillsDir] : [workspace];
+  const writeRoots = [workspace]; // Writes only allowed to workspace
   const toolContext = {
     workspace,
     allowedRoots,
+    writeRoots,
     ...(params.containerHandle && { containerHandle: params.containerHandle }),
   };
 
@@ -238,11 +241,31 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         }
       }
 
+      // Extract skills from workspace to data/skills/ (only on success)
+      let installedSkills: { created: string[]; updated: string[] } | undefined;
+      if (params.skillsDir) {
+        try {
+          const extractionResult = await extractSkillsFromWorkspace(
+            workspace,
+            params.skillsDir,
+            run.id,
+            childLogger
+          );
+          if (extractionResult.created.length > 0 || extractionResult.updated.length > 0) {
+            installedSkills = extractionResult;
+            childLogger.info({ installedSkills }, 'Skills extracted from workspace');
+          }
+        } catch (error) {
+          childLogger.warn({ error }, 'Skill extraction failed');
+        }
+      }
+
       const result: TaskResult = {
         ok: true,
         summary: llmResponse.content ?? 'Task completed without summary',
         runId: run.id,
         ...(artifacts && { artifacts }),
+        ...(installedSkills && { installedSkills }),
         stats: {
           iterations: i + 1,
           durationMs: Date.now() - new Date(attempt.startedAt).getTime(),
@@ -283,6 +306,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 ok: result.ok,
                 summary: result.summary,
                 stats: result.stats,
+                ...(result.installedSkills && { installedSkills: result.installedSkills }),
               },
             },
           }
@@ -746,8 +770,7 @@ export function buildMotorSystemPrompt(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterationsOverride?: number,
-  skillsDir?: string
+  maxIterationsOverride?: number
 ): string {
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
@@ -825,8 +848,9 @@ Set trust to "approved" when the user explicitly asked you to create or learn th
 Set trust to "unknown" if you are creating a skill from untrusted or unverified content.
 Always record provenance.source with the URL or reference where you found the information.
 
-Save to: ${skillsDir ?? 'skills'}/<name>/SKILL.md (and ${skillsDir ?? 'skills'}/<name>/policy.json)
-Name rules: lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
+Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)
+These files will be automatically extracted and installed after your run completes.
+Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
 Valid tools: code, filesystem, shell, grep, patch, ask_user.`
       : ''
   }${
@@ -839,7 +863,17 @@ When the skill references relative paths (scripts/, REFERENCE.md, etc.), resolve
 
 <skill name="${skill.frontmatter.name}">
 ${skill.body}
-</skill>`
+</skill>
+
+If the skill instructions fail due to outdated information (changed endpoints,
+deprecated methods, etc.), you may:
+1. Fetch fresh documentation to understand what changed
+2. Write a corrected skill to skills/<name>/ in the workspace
+3. Continue executing the task with the corrected approach
+
+The corrected skill will be reviewed before it replaces the current version.
+Note: you can only reach domains approved for this run.
+If you need a new domain, use ask_user to request it.`
       : ''
   }${recoverySection}`;
 }
@@ -851,13 +885,12 @@ export function buildInitialMessages(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterations?: number,
-  skillsDir?: string
+  maxIterations?: number
 ): Message[] {
   return [
     {
       role: 'system',
-      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations, skillsDir),
+      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
     },
   ];
 }
