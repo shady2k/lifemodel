@@ -84,7 +84,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously. "agentic" starts an async sub-agent with tools like code, filesystem, shell, grep, patch. Skills with approved policy provide tools/domains automatically. Results arrive via motor_result signal.',
+      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously. "agentic" starts an async sub-agent with tools like code, filesystem, shell, grep, patch, ask_user. Skills with approved policy provide tools/domains automatically. To create a new skill, include filesystem in tools and describe what to learn. Results arrive via motor_result signal.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,

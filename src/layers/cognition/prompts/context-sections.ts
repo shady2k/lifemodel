@@ -351,13 +351,35 @@ export function buildAvailableSkillsSection(context: LoopContext): string | null
   }
 
   const lines = skills.map((skill) => {
-    const trustBadge = skill.trust === 'approved' ? '[approved]' : '[unknown]';
-    const hint = skill.trust === 'unknown' ? ' (needs onboarding)' : '';
-    return `- ${skill.name} ${trustBadge}: ${skill.description}${hint}`;
+    const trustBadge =
+      skill.trust === 'approved'
+        ? '[approved]'
+        : skill.trust === 'pending_review'
+          ? '[pending_review]'
+          : '[unknown]';
+
+    const hint =
+      skill.trust === 'pending_review'
+        ? ' (awaiting user approval)'
+        : skill.trust === 'unknown' && skill.hasPolicy
+          ? ' (content changed, re-approve)'
+          : skill.trust === 'unknown'
+            ? ' (needs onboarding)'
+            : '';
+
+    let lastUsedStr = '';
+    if (skill.lastUsed) {
+      const ageMs = Date.now() - new Date(skill.lastUsed).getTime();
+      if (Number.isFinite(ageMs) && ageMs >= 0) {
+        lastUsedStr = ` (used ${formatAge(ageMs)} ago)`;
+      }
+    }
+
+    return `- ${skill.name} ${trustBadge}: ${skill.description}${hint}${lastUsedStr}`;
   });
 
   return `<available_skills>
 ${lines.join('\n')}
-Use core.act with skill parameter to invoke. Skills without approved policy need explicit tools/domains or onboarding first.
+Invoke via core.act with skill parameter.
 </available_skills>`;
 }
