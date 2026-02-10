@@ -98,22 +98,26 @@ describe('buildMotorSystemPrompt', () => {
 
 describe('skill injection into system prompt', () => {
   const skill: LoadedSkill = {
-    definition: {
+    frontmatter: {
       name: 'weather-report',
-      version: 1,
       description: 'Fetch weather data from a public API',
-      tools: ['shell', 'code'],
-      credentials: ['weather_api_key'],
+    },
+    policy: {
+      schemaVersion: 1,
+      trust: 'approved',
+      allowedTools: ['shell', 'code'],
+      requiredCredentials: ['weather_api_key'],
     },
     body: '# Weather Report\n\nUse curl -H "Authorization: Bearer <credential:weather_api_key>" to call the API.',
-    path: '/data/skills/weather-report/SKILL.md',
+    path: '/data/skills/weather-report',
+    skillPath: '/data/skills/weather-report/SKILL.md',
   };
 
   it('injects skill body in <skill> XML tags', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('<skill name="weather-report" version="1">');
+    expect(prompt).toContain('<skill name="weather-report">');
     expect(prompt).toContain('# Weather Report');
     expect(prompt).toContain('</skill>');
   });
@@ -139,19 +143,18 @@ describe('buildInitialMessages', () => {
   it('creates system message with skill when provided', () => {
     const run = makeRun();
     const skill: LoadedSkill = {
-      definition: {
+      frontmatter: {
         name: 'test',
-        version: 1,
         description: 'Test',
-        tools: ['code'],
       },
       body: 'Skill body',
       path: '/test',
+      skillPath: '/test/SKILL.md',
     };
 
     const messages = buildInitialMessages(run, skill);
     expect(messages).toHaveLength(1);
-    expect(messages[0]?.content).toContain('<skill name="test"');
+    expect(messages[0]?.content).toContain('<skill name="test">');
     expect(messages[0]?.content).toContain('Skill body');
   });
 

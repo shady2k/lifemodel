@@ -103,7 +103,7 @@ ENTRYPOINT ["sh"]
 Domains flow from multiple sources, merged (union, deduplicated, lowercased) at each stage:
 
 ```
-SKILL.md frontmatter    core.act({ domains })    core.task({ action:'retry', domains })
+policy.json domains    core.act({ domains })    core.task({ action:'retry', domains })
          \                      |                         /
           └────── mergeDomains() ─── MotorRun.domains ──┘
                                           |

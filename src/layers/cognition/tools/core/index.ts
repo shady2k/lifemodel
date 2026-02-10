@@ -18,6 +18,7 @@ export { createSoulTool } from './soul.js';
 export { createEscalateTool } from './escalate.js';
 export { createDeferTool } from './defer.js';
 export { createSayTool } from './say.js';
+export { createCredentialTool } from './credential.js';
 
 // Types
 export type {
@@ -34,3 +35,4 @@ export type { ConversationProvider, TimeToolDeps } from './time.js';
 export type { AgentStateProvider, UserModelProvider, StateToolDeps } from './state.js';
 export type { ToolSchema, SchemaProvider, ToolsMetaToolDeps } from './tools-meta.js';
 export type { SoulToolDeps } from './soul.js';
+export type { CredentialToolDeps } from './credential.js';

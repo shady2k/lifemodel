@@ -14,6 +14,7 @@ import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { MemoryEntry } from './tools/registry.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
+import type { DiscoveredSkill } from '../../runtime/skills/skill-types.js';
 
 /**
  * Request for LLM completion with native tool calling.
@@ -175,6 +176,9 @@ export interface LoopContext {
 
   /** Current conversation status (for thought processing context) */
   conversationStatus?: string | undefined;
+
+  /** Available skills for Motor Cortex execution */
+  availableSkills?: DiscoveredSkill[] | undefined;
 
   /** Callback to drain pending user messages for mid-loop injection */
   drainPendingUserMessages: (() => Signal[]) | undefined;

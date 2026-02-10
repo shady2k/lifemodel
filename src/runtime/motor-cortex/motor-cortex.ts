@@ -271,8 +271,8 @@ export class MotorCortex {
     const now = new Date().toISOString();
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
-    // Merge skill domains with explicit domains
-    const skillDomains = params.skill?.definition.domains;
+    // Merge skill policy domains with explicit domains
+    const skillDomains = params.skill?.policy?.allowedDomains;
     const explicitDomains = params.domains;
     const mergedDomains = mergeDomains(skillDomains, explicitDomains);
 
@@ -291,7 +291,7 @@ export class MotorCortex {
 
     // Set skill name on the run if one was provided
     if (params.skill) {
-      run.skill = params.skill.definition.name;
+      run.skill = params.skill.frontmatter.name;
     }
 
     // Create initial attempt (index 0, no recovery context)

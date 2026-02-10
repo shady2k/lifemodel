@@ -15,6 +15,7 @@ Architecture mirrors the human body: Channels = senses, Signals = neural impulse
 5. **No Backward Compatibility** — Remove dead code. Clean breaks over compatibility shims.
 6. **No Attribute Prefix Routing** — Never encode behavior in attribute names (e.g., `interest_crypto`). Create dedicated tools with explicit fields. ID prefixes (`mem_`, `core.*`) are fine — they identify types, not encode behavior.
 7. **Restart-Safe Scheduling** — Preserve existing schedules on restart. Past-due schedules fire immediately.
+8. **Long-Term Architecture Over Quick Wins** — Build proper, standards-aligned systems that can be enhanced later. Adopt open standards and extend via separate policy layers rather than forking formats.
 
 ## Lessons Learned
 

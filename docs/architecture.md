@@ -101,7 +101,7 @@ src/layers/cognition/
   prompts/
     system-prompt.ts           # Identity, rules, time awareness (runtime-dynamic)
     trigger-prompt.ts          # Assembles context sections + trigger-specific section
-    context-sections.ts        # User profile, thoughts, soul, tensions, runtime snapshot
+    context-sections.ts        # User profile, thoughts, soul, behavioral rules, available skills, runtime snapshot
     trigger-sections.ts        # Proactive contact, plugin events, thought, reaction
     runtime-snapshot.ts        # State query detection, level descriptions, scope
 
@@ -126,7 +126,8 @@ Key design decisions:
 src/
 ├── core/           # CoreLoop, Agent, energy, event-bus
 ├── layers/         # autonomic/, aggregation/, cognition/
-├── runtime/        # Motor Cortex service, sandbox, shell, container isolation
+├── runtime/        # Motor Cortex, sandbox, shell, container, skills
+│   └── skills/     # Agent Skills standard: loader, types, policy.json, index.json
 ├── llm/            # LLM provider interface, tool schema conversion
 ├── plugins/        # Modular extensions
 ├── channels/       # Sensory organs (Telegram, etc.)

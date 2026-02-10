@@ -1,28 +1,43 @@
 /**
  * Skill Loader
  *
- * Parses SKILL.md files, validates definitions, and discovers available skills.
- * Skills are stored in `data/skills/<name>/SKILL.md`.
+ * Parses SKILL.md files (Agent Skills standard), manages policy.json sidecars,
+ * and maintains the central skills index for fast discovery.
  *
- * File format:
+ * ## File Format (Agent Skills Standard)
  * ```
  * ---
  * name: weather-report
- * version: 1
  * description: Fetch weather data from a public API
- * tools: [shell, code, filesystem]
- * credentials: [weather_api_key]
+ * license: MIT
  * ---
  * # Weather Report Skill
  * Instructions for the LLM...
  * ```
+ *
+ * ## Policy Sidecar (policy.json)
+ * ```json
+ * {
+ *   "schemaVersion": 1,
+ *   "trust": "approved",
+ *   "allowedTools": ["shell", "code"],
+ *   "allowedDomains": ["api.weather.com"]
+ * }
+ * ```
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import type { MotorTool } from '../motor-cortex/motor-protocol.js';
-import type { SkillDefinition, SkillInput, LoadedSkill } from './skill-types.js';
-import { VALID_MOTOR_TOOLS } from './skill-types.js';
+import { JSONStorage } from '../../storage/json-storage.js';
+import type {
+  SkillFrontmatter,
+  SkillPolicy,
+  SkillIndex,
+  SkillIndexEntry,
+  DiscoveredSkill,
+  LoadedSkill,
+} from './skill-types.js';
 
 /**
  * Default skills base directory.
@@ -30,13 +45,26 @@ import { VALID_MOTOR_TOOLS } from './skill-types.js';
 const DEFAULT_SKILLS_DIR = 'data/skills';
 
 /**
- * Parse a SKILL.md file content into definition + body.
+ * Schema version for index.json.
+ */
+const INDEX_SCHEMA_VERSION = 1;
+
+/**
+ * Compute SHA-256 hash of content.
+ */
+function sha256(content: string): string {
+  return `sha256:${createHash('sha256').update(content, 'utf-8').digest('hex')}`;
+}
+
+/**
+ * Parse a SKILL.md file content into frontmatter + body.
  *
- * Uses inline regex-based YAML parser (strict subset, no dependencies).
+ * Uses inline regex-based YAML parser (lenient — skips nested blocks).
+ * This allows the Agent Skills standard format while handling extensions gracefully.
  */
 export function parseSkillFile(
   content: string
-): { definition: Record<string, unknown>; body: string } | { error: string } {
+): { frontmatter: Record<string, unknown>; body: string } | { error: string } {
   // Split on --- delimiters
   const trimmed = content.trimStart();
   if (!trimmed.startsWith('---')) {
@@ -51,38 +79,56 @@ export function parseSkillFile(
   const yamlBlock = trimmed.slice(3, secondDelimiter).trim();
   const body = trimmed.slice(secondDelimiter + 3).trim();
 
-  // Parse YAML (strict subset)
-  const definition: Record<string, unknown> = {};
+  // Parse YAML (lenient — skip nested blocks)
+  const frontmatter: Record<string, unknown> = {};
   const lines = yamlBlock.split('\n');
+  let skipNested = false;
 
   for (const line of lines) {
     const trimmedLine = line.trim();
-    if (!trimmedLine || trimmedLine.startsWith('#')) continue;
+    if (!trimmedLine || trimmedLine.startsWith('#')) {
+      // Skip blank lines and comments
+      continue;
+    }
+
+    // Check for nested block (skip it leniently)
+    if (skipNested) {
+      if (line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
+        // Back to root level
+        skipNested = false;
+      } else {
+        // Still in nested block — skip this line
+        continue;
+      }
+    }
 
     const colonIdx = trimmedLine.indexOf(':');
     if (colonIdx === -1) {
-      return { error: `Invalid YAML line (no colon): ${trimmedLine}` };
+      // No colon — invalid YAML line, skip it leniently
+      continue;
     }
 
     const key = trimmedLine.slice(0, colonIdx).trim();
     const rawValue = trimmedLine.slice(colonIdx + 1).trim();
 
-    // Check for multi-line nested objects (reject them)
-    if (!rawValue && lines.indexOf(line) < lines.length - 1) {
-      // Could be a multi-line value — check next line for indentation
-      const nextIdx = lines.indexOf(line) + 1;
-      if (
-        nextIdx < lines.length &&
-        (lines[nextIdx]?.startsWith('  ') || lines[nextIdx]?.startsWith('\t'))
-      ) {
-        return { error: `Nested YAML objects not supported. Key: ${key}` };
+    // Check if this key starts a nested block (value empty + next line indented)
+    if (!rawValue) {
+      const lineIdx = lines.indexOf(line);
+      const nextIdx = lineIdx + 1;
+      if (nextIdx < lines.length) {
+        const nextLine = lines[nextIdx];
+        if (nextLine !== undefined && (nextLine.startsWith('  ') || nextLine.startsWith('\t'))) {
+          // This is a nested block header (like metadata:) — skip it
+          skipNested = true;
+          continue;
+        }
       }
     }
 
-    definition[key] = parseYamlValue(rawValue);
+    frontmatter[key] = parseYamlValue(rawValue);
   }
 
-  return { definition, body };
+  return { frontmatter, body };
 }
 
 /**
@@ -123,103 +169,282 @@ function parseYamlValue(raw: string): unknown {
 }
 
 /**
- * Validate a parsed skill definition.
+ * Validate skill frontmatter (Agent Skills standard).
+ *
+ * Only name and description are required.
  *
  * @returns Array of validation errors (empty = valid)
  */
-export function validateSkillDefinition(def: Record<string, unknown>): string[] {
+export function validateSkillFrontmatter(frontmatter: Record<string, unknown>): string[] {
   const errors: string[] = [];
 
   // Required: name
-  if (!def['name'] || typeof def['name'] !== 'string') {
+  if (!frontmatter['name'] || typeof frontmatter['name'] !== 'string') {
     errors.push('Missing or invalid "name" (must be a string)');
-  } else if (!/^[a-z0-9-]+$/.test(def['name'])) {
+  } else if (!/^[a-z0-9-]+$/.test(frontmatter['name'])) {
     errors.push('Invalid "name": must be lowercase alphanumeric with hyphens');
   }
 
-  // Required: version
-  if (def['version'] == null || typeof def['version'] !== 'number') {
-    errors.push('Missing or invalid "version" (must be a number)');
+  // Required: description
+  if (!frontmatter['description'] || typeof frontmatter['description'] !== 'string') {
+    errors.push('Missing or invalid "description" (must be a string)');
   }
 
-  // Required: tools (non-empty array of valid MotorTool values)
-  if (!Array.isArray(def['tools']) || def['tools'].length === 0) {
-    errors.push('Missing or empty "tools" (must be a non-empty array)');
-  } else {
-    for (const tool of def['tools'] as unknown[]) {
-      if (typeof tool !== 'string' || !VALID_MOTOR_TOOLS.includes(tool)) {
-        errors.push(`Invalid tool: "${String(tool)}". Valid: ${VALID_MOTOR_TOOLS.join(', ')}`);
-      }
-    }
-  }
-
-  // Optional: description (string)
-  if (def['description'] != null && typeof def['description'] !== 'string') {
-    errors.push('"description" must be a string');
-  }
-
-  // Optional: credentials (array of strings)
-  if (def['credentials'] != null) {
-    if (!Array.isArray(def['credentials'])) {
-      errors.push('"credentials" must be an array');
-    } else {
-      for (const cred of def['credentials'] as unknown[]) {
-        if (typeof cred !== 'string') {
-          errors.push(`Invalid credential name: "${String(cred)}" (must be a string)`);
-        }
-      }
+  // Optional: allowed-tools (if present, validate)
+  if (frontmatter['allowed-tools'] != null) {
+    if (typeof frontmatter['allowed-tools'] !== 'string') {
+      errors.push('"allowed-tools" must be a string');
     }
   }
 
   // Optional: inputs (array — validated separately)
-  if (def['inputs'] != null && !Array.isArray(def['inputs'])) {
+  if (frontmatter['inputs'] != null && !Array.isArray(frontmatter['inputs'])) {
     errors.push('"inputs" must be an array');
-  }
-
-  // Optional: domains (array of strings — enforced via iptables in container)
-  if (def['domains'] != null) {
-    if (!Array.isArray(def['domains'])) {
-      errors.push('"domains" must be an array');
-    } else {
-      for (const domain of def['domains'] as unknown[]) {
-        if (typeof domain !== 'string') {
-          errors.push(`Invalid domain: "${String(domain)}" (must be a string)`);
-        }
-      }
-    }
   }
 
   return errors;
 }
 
 /**
- * Convert raw parsed definition to typed SkillDefinition.
+ * Convert raw parsed frontmatter to typed SkillFrontmatter.
  */
-function toSkillDefinition(raw: Record<string, unknown>): SkillDefinition {
-  const def: SkillDefinition = {
+function toSkillFrontmatter(raw: Record<string, unknown>): SkillFrontmatter {
+  return {
     name: raw['name'] as string,
-    version: raw['version'] as number,
-    description: (raw['description'] as string | undefined) ?? '',
-    tools: raw['tools'] as MotorTool[],
+    description: raw['description'] as string,
+    license: raw['license'] as string | undefined,
+    compatibility: raw['compatibility'] as string | undefined,
+    'allowed-tools': raw['allowed-tools'] as string | undefined,
   };
-  if (Array.isArray(raw['inputs'])) {
-    def.inputs = raw['inputs'] as SkillInput[];
+}
+
+/**
+ * Load policy.json from a skill directory.
+ *
+ * @param skillDir - Absolute path to skill directory
+ * @returns SkillPolicy or null if absent/invalid
+ */
+export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> {
+  const policyPath = join(skillDir, 'policy.json');
+
+  try {
+    const content = await readFile(policyPath, 'utf-8');
+    const raw = JSON.parse(content) as Record<string, unknown>;
+
+    // Validate schema version
+    if (typeof raw.schemaVersion !== 'number') {
+      return null;
+    }
+
+    // Validate trust
+    if (raw.trust !== 'unknown' && raw.trust !== 'approved') {
+      return null;
+    }
+
+    // Validate allowedTools
+    if (!Array.isArray(raw.allowedTools)) {
+      return null;
+    }
+
+    return raw as unknown as SkillPolicy;
+  } catch {
+    return null;
   }
-  if (Array.isArray(raw['credentials'])) {
-    def.credentials = raw['credentials'] as string[];
+}
+
+/**
+ * Save policy.json to a skill directory (atomic write via JSONStorage).
+ *
+ * @param skillDir - Absolute path to skill directory
+ * @param policy - Policy to save
+ */
+export async function savePolicy(skillDir: string, policy: SkillPolicy): Promise<void> {
+  // Ensure directory exists
+  await mkdir(skillDir, { recursive: true });
+
+  const storage = new JSONStorage({ basePath: skillDir, createBackup: false });
+  await storage.save('policy', policy);
+}
+
+/**
+ * Load the central skills index.
+ *
+ * @param baseDir - Skills base directory (default: data/skills)
+ * @returns SkillIndex (empty if missing/corrupt)
+ */
+export async function loadSkillIndex(baseDir?: string): Promise<SkillIndex> {
+  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
+  const indexPath = join(dir, 'index.json');
+
+  try {
+    const content = await readFile(indexPath, 'utf-8');
+    const index = JSON.parse(content) as SkillIndex;
+
+    // Validate schema
+    if (typeof index.schemaVersion !== 'number' || typeof index.skills !== 'object') {
+      return { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
+    }
+
+    return index;
+  } catch {
+    // Missing or corrupt — return empty index
+    return { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
   }
-  if (Array.isArray(raw['domains'])) {
-    def.domains = raw['domains'] as string[];
+}
+
+/**
+ * Save the central skills index (atomic write).
+ *
+ * @param baseDir - Skills base directory
+ * @param index - Index to save
+ */
+export async function saveSkillIndex(baseDir: string, index: SkillIndex): Promise<void> {
+  await mkdir(baseDir, { recursive: true });
+
+  const storage = new JSONStorage({ basePath: baseDir, createBackup: false });
+  await storage.save('index', index);
+}
+
+/**
+ * Update a single entry in the skills index.
+ *
+ * @param baseDir - Skills base directory
+ * @param name - Skill name
+ * @param entry - Index entry to upsert
+ */
+export async function updateSkillIndex(
+  baseDir: string,
+  name: string,
+  entry: SkillIndexEntry
+): Promise<void> {
+  const index = await loadSkillIndex(baseDir);
+  index.skills[name] = entry;
+  await saveSkillIndex(baseDir, index);
+}
+
+/**
+ * Remove a skill from the index.
+ *
+ * @param baseDir - Skills base directory
+ * @param name - Skill name to remove
+ */
+export async function removeFromSkillIndex(baseDir: string, name: string): Promise<void> {
+  const index = await loadSkillIndex(baseDir);
+  const { [name]: _, ...remaining } = index.skills;
+  index.skills = remaining;
+  await saveSkillIndex(baseDir, index);
+}
+
+/**
+ * Rebuild the skills index from directory scan.
+ *
+ * Called when index.json is missing or needs refresh.
+ *
+ * @param baseDir - Skills base directory
+ */
+async function rebuildSkillIndex(baseDir: string): Promise<void> {
+  const dir = resolve(baseDir);
+
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const index: SkillIndex = { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const skillDir = join(dir, entry.name);
+      const skillMdPath = join(skillDir, 'SKILL.md');
+
+      try {
+        // Check for SKILL.md
+        await stat(skillMdPath);
+
+        // Load frontmatter for description
+        const content = await readFile(skillMdPath, 'utf-8');
+        const parsed = parseSkillFile(content);
+
+        if ('error' in parsed) continue;
+
+        const frontmatter = toSkillFrontmatter(parsed.frontmatter);
+
+        // Check for policy
+        const policy = await loadPolicy(skillDir);
+
+        index.skills[entry.name] = {
+          description: frontmatter.description,
+          trust: policy?.trust ?? 'unknown',
+          hasPolicy: policy !== null,
+        };
+      } catch {
+        // Skip invalid entries
+      }
+    }
+
+    await saveSkillIndex(dir, index);
+  } catch {
+    // Base directory doesn't exist — save empty index
+    await saveSkillIndex(dir, { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} });
   }
-  return def;
+}
+
+/**
+ * Discover all available skills.
+ *
+ * Fast path: reads from index.json.
+ * Fallback: directory scan and rebuild index if missing.
+ *
+ * Returns entries with name attached (preserves the Record key).
+ *
+ * @param baseDir - Base directory (default: data/skills)
+ * @returns Array of discovered skills with names
+ */
+export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[]> {
+  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
+
+  try {
+    // Try loading from index first (fast path)
+    let index = await loadSkillIndex(dir);
+
+    // If index is empty, try rebuilding from directory scan
+    if (Object.keys(index.skills).length === 0) {
+      await rebuildSkillIndex(dir);
+      index = await loadSkillIndex(dir);
+    }
+
+    return Object.entries(index.skills).map(([name, entry]) => ({ name, ...entry }));
+  } catch {
+    // Skills directory doesn't exist yet
+    return [];
+  }
+}
+
+/**
+ * Get skill names as a simple array.
+ *
+ * Convenience wrapper around discoverSkills().
+ */
+export async function getSkillNames(baseDir?: string): Promise<string[]> {
+  const index = await loadSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
+
+  // If index is empty, try rebuild
+  if (Object.keys(index.skills).length === 0) {
+    await rebuildSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
+    const rebuilt = await loadSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
+    return Object.keys(rebuilt.skills).sort();
+  }
+
+  return Object.keys(index.skills).sort();
 }
 
 /**
  * Load a skill by name from the skills directory.
  *
+ * Returns frontmatter + optional policy + body.
+ * Verifies content hash if policy exists — resets trust to 'unknown' on mismatch.
+ *
  * @param skillName - Skill name (directory name under data/skills/)
  * @param baseDir - Base directory (default: data/skills)
- * @returns LoadedSkill or error string
+ * @returns LoadedSkill or error object
  */
 export async function loadSkill(
   skillName: string,
@@ -236,54 +461,39 @@ export async function loadSkill(
       return { error: `Parse error in ${skillName}/SKILL.md: ${parsed.error}` };
     }
 
-    const errors = validateSkillDefinition(parsed.definition);
+    const errors = validateSkillFrontmatter(parsed.frontmatter);
     if (errors.length > 0) {
       return { error: `Validation errors in ${skillName}/SKILL.md: ${errors.join('; ')}` };
     }
 
+    const frontmatter = toSkillFrontmatter(parsed.frontmatter);
+    const skillDir = join(dir, skillName);
+    let policy = await loadPolicy(skillDir);
+
+    // Content hash verification
+    if (policy?.provenance?.contentHash) {
+      const currentHash = sha256(content);
+      if (currentHash !== policy.provenance.contentHash) {
+        // Reset trust to unknown
+        policy = { ...policy, trust: 'unknown' };
+        await savePolicy(skillDir, policy);
+
+        // Skill content changed since approval — trust reset to unknown
+        // Hash mismatch is logged via the updated policy.json
+      }
+    }
+
     return {
-      definition: toSkillDefinition(parsed.definition),
+      frontmatter,
+      policy,
       body: parsed.body,
-      path: skillPath,
+      path: skillDir,
+      skillPath,
     };
   } catch (error) {
     return {
       error: `Failed to load skill "${skillName}": ${error instanceof Error ? error.message : String(error)}`,
     };
-  }
-}
-
-/**
- * Discover all available skills in the skills directory.
- *
- * Scans for subdirectories containing SKILL.md files.
- *
- * @param baseDir - Base directory (default: data/skills)
- * @returns Array of skill names
- */
-export async function discoverSkills(baseDir?: string): Promise<string[]> {
-  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
-
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    const skillNames: string[] = [];
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      // Check if SKILL.md exists in this directory
-      try {
-        await readFile(join(dir, entry.name, 'SKILL.md'), 'utf-8');
-        skillNames.push(entry.name);
-      } catch {
-        // No SKILL.md — skip
-      }
-    }
-
-    return skillNames.sort();
-  } catch {
-    // Skills directory doesn't exist yet
-    return [];
   }
 }
 
@@ -296,7 +506,7 @@ export async function discoverSkills(baseDir?: string): Promise<string[]> {
  */
 export function validateSkillInputs(skill: LoadedSkill, inputs: Record<string, unknown>): string[] {
   const errors: string[] = [];
-  const inputDefs = skill.definition.inputs ?? [];
+  const inputDefs = skill.policy?.inputs ?? [];
 
   // Check required inputs
   for (const def of inputDefs) {

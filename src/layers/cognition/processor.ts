@@ -22,6 +22,7 @@ import type { EventBus } from '../../core/event-bus.js';
 import type { Agent } from '../../core/agent.js';
 import type { LoopConfig } from '../../types/cognition.js';
 import { emitTypingIndicator } from '../shared/index.js';
+import { discoverSkills } from '../../runtime/skills/skill-loader.js';
 
 import type { AgenticLoop, LoopCallbacks } from './agentic-loop.js';
 import {
@@ -379,6 +380,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get behavioral rules learned from user feedback
     const behaviorRules = await this.getBehaviorRules(recipientId);
 
+    // Load available skills for Motor Cortex
+    const availableSkills = await discoverSkills();
+
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:
     // - They're not conversation continuations
@@ -406,6 +410,7 @@ export class CognitionProcessor implements CognitionLayer {
       pendingIntentions: pendingIntentions.length > 0 ? pendingIntentions : undefined,
       soulState,
       behaviorRules: behaviorRules.length > 0 ? behaviorRules : undefined,
+      availableSkills: availableSkills.length > 0 ? availableSkills : undefined,
       runtimeConfig: {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },

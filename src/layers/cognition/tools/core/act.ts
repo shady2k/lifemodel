@@ -4,13 +4,28 @@
  * Execute tasks via Motor Cortex.
  * "oneshot" runs JS code synchronously.
  * "agentic" starts an async sub-agent task.
+ *
+ * Policy-aware skill loading:
+ * - Skills with approved policy use policy.allowedTools as default
+ * - Skills without policy or unknown trust require explicit tools/domains
+ * - Content hash verification triggers trust reset on mismatch
  */
 
 import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
 import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
-import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
+import {
+  loadSkill,
+  validateSkillInputs,
+  updateSkillIndex,
+} from '../../../../runtime/skills/skill-loader.js';
+import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
+
+/**
+ * Default skills base directory.
+ */
+const DEFAULT_SKILLS_DIR = 'data/skills';
 
 /**
  * Create the core.act tool.
@@ -35,7 +50,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'tools',
       type: 'array' as const,
       description:
-        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user). Default: [code]',
+        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user). Required if skill has no approved policy.',
       required: false,
     },
     {
@@ -48,7 +63,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'skill',
       type: 'string' as const,
       description:
-        'Skill name to load and inject (loads from data/skills/<name>/SKILL.md). Overrides tools with skill-defined tools.',
+        'Skill name to load (from data/skills/<name>/SKILL.md). If skill has approved policy, tools/domains from policy are used automatically.',
       required: false,
     },
     {
@@ -61,7 +76,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'domains',
       type: 'array' as const,
       description:
-        'Network domains to allow access to (e.g., ["api.example.com"]). Merged with skill-defined domains if provided.',
+        'Network domains to allow access to (e.g., ["api.example.com"]). Merged with skill policy domains if provided.',
       required: false,
     },
   ];
@@ -69,7 +84,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously and returns the result. "agentic" starts an async sub-agent task that can use tools like code, filesystem, shell, grep, and patch. Agentic tasks run in the background and results come back via signals. Optionally load a skill for guided execution.',
+      'Execute a task via Motor Cortex. "oneshot" runs JS code synchronously. "agentic" starts an async sub-agent with tools like code, filesystem, shell, grep, patch. Skills with approved policy provide tools/domains automatically. Results arrive via motor_result signal.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -110,12 +125,16 @@ export function createActTool(motorCortex: MotorCortex): Tool {
         try {
           const skillName = args['skill'] as string | undefined;
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
-          let tools = (args['tools'] as MotorTool[] | undefined) ?? ['code'];
+          const explicitTools = args['tools'] as MotorTool[] | undefined;
           const maxIterations = (args['maxIterations'] as number | undefined) ?? 20;
-          const domains = (args['domains'] as string[] | undefined) ?? [];
+          const explicitDomains = (args['domains'] as string[] | undefined) ?? [];
 
           // Load skill if specified
-          let loadedSkill = undefined;
+          let loadedSkill: LoadedSkill | undefined = undefined;
+          let tools: MotorTool[];
+          let domains = explicitDomains;
+          const warnings: string[] = [];
+
           if (skillName) {
             const skillResult = await loadSkill(skillName);
             if ('error' in skillResult) {
@@ -126,8 +145,39 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             }
             loadedSkill = skillResult;
 
-            // Override tools with skill-defined tools
-            tools = loadedSkill.definition.tools;
+            const policy = loadedSkill.policy;
+
+            // Policy-aware tool/domain resolution
+            if (policy?.trust === 'approved') {
+              // Use policy defaults
+              tools = explicitTools ?? policy.allowedTools;
+
+              // Merge domains: policy + explicit
+              if (policy.allowedDomains) {
+                domains = [...new Set([...policy.allowedDomains, ...explicitDomains])];
+              }
+
+              // Note: credentials are handled by Motor Cortex via CredentialStore
+            } else {
+              // No policy or unknown trust — require explicit tools
+              if (!explicitTools) {
+                return {
+                  success: false,
+                  error:
+                    `Skill "${skillName}" has no approved policy. ` +
+                    `Provide tools explicitly or run onboarding. ` +
+                    `Example: tools: ["code", "shell"]`,
+                };
+              }
+              tools = explicitTools;
+
+              if (policy?.trust === 'unknown') {
+                warnings.push(
+                  `Skill "${skillName}" trust state is "unknown". ` +
+                    `Content may have changed since approval. Re-approval recommended.`
+                );
+              }
+            }
 
             // Validate inputs against skill schema
             const inputErrors = validateSkillInputs(loadedSkill, inputs);
@@ -137,6 +187,9 @@ export function createActTool(motorCortex: MotorCortex): Tool {
                 error: `Skill input validation failed: ${inputErrors.join('; ')}`,
               };
             }
+          } else {
+            // No skill — use explicit tools or default
+            tools = explicitTools ?? ['code'];
           }
 
           // Build task with inputs if provided
@@ -156,6 +209,20 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             ...(domains.length > 0 && { domains }),
           });
 
+          // Update index.json with lastUsed timestamp
+          if (skillName && loadedSkill) {
+            try {
+              await updateSkillIndex(DEFAULT_SKILLS_DIR, skillName, {
+                description: loadedSkill.frontmatter.description,
+                trust: loadedSkill.policy?.trust ?? 'unknown',
+                hasPolicy: loadedSkill.policy !== undefined,
+                lastUsed: new Date().toISOString(),
+              });
+            } catch {
+              // Non-fatal: skill index update failed, run continues
+            }
+          }
+
           return {
             success: true,
             data: {
@@ -163,6 +230,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
               runId,
               status: 'started',
               ...(skillName && { skill: skillName }),
+              ...(warnings.length > 0 && { warnings }),
               message: 'Task started in background. Results will arrive via motor_result signal.',
             },
           };

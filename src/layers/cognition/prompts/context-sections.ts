@@ -339,3 +339,25 @@ ${formatted.join('\n')}
 These actions were already executed. Do NOT call these tools again for the same data.
 </completed_actions>`;
 }
+
+/**
+ * Build available skills section for Motor Cortex.
+ * Shows skills with their trust state for progressive disclosure.
+ */
+export function buildAvailableSkillsSection(context: LoopContext): string | null {
+  const skills = context.availableSkills;
+  if (!skills || skills.length === 0) {
+    return null;
+  }
+
+  const lines = skills.map((skill) => {
+    const trustBadge = skill.trust === 'approved' ? '[approved]' : '[unknown]';
+    const hint = skill.trust === 'unknown' ? ' (needs onboarding)' : '';
+    return `- ${skill.name} ${trustBadge}: ${skill.description}${hint}`;
+  });
+
+  return `<available_skills>
+${lines.join('\n')}
+Use core.act with skill parameter to invoke. Skills without approved policy need explicit tools/domains or onboarding first.
+</available_skills>`;
+}

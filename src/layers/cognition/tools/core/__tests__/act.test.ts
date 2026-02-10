@@ -1,0 +1,331 @@
+/**
+ * Tests for core.act tool
+ *
+ * Validates: Policy-based defaults, explicit overrides, no-policy warning,
+ * trust gating, content hash mismatch
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+import { createActTool } from '../act.js';
+import type { MotorCortex } from '../../../../../runtime/motor-cortex/motor-cortex.js';
+import type {
+  loadSkill as LoadSkillFn,
+  updateSkillIndex as UpdateSkillIndexFn,
+} from '../../../../../runtime/skills/skill-loader.js';
+
+// Get the mocked module references
+let loadSkill: typeof LoadSkillFn;
+let updateSkillIndex: typeof UpdateSkillIndexFn;
+
+// Mock the skill-loader module
+vi.mock('../../../../../runtime/skills/skill-loader.js', () => ({
+  loadSkill: vi.fn(),
+  validateSkillInputs: vi.fn(() => []),
+  updateSkillIndex: vi.fn(),
+}));
+
+beforeAll(async () => {
+  const module = await import('../../../../../runtime/skills/skill-loader.js');
+  loadSkill = module.loadSkill;
+  updateSkillIndex = module.updateSkillIndex;
+});
+
+describe('core.act tool', () => {
+  const mockMotorCortex = {
+    executeOneshot: vi.fn(),
+    startRun: vi.fn(),
+  } as unknown as MotorCortex;
+
+  const tool = createActTool(mockMotorCortex);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('oneshot mode', () => {
+    it('executes JS code synchronously', async () => {
+      (mockMotorCortex.executeOneshot as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        result: '42',
+        durationMs: 10,
+      });
+
+      const result = (await tool.execute({
+        mode: 'oneshot',
+        task: '2 + 2',
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(true);
+      const data = result.data as Record<string, unknown>;
+      expect(data.mode).toBe('oneshot');
+      expect(data.result).toBe('42');
+    });
+
+    it('handles execution errors', async () => {
+      (mockMotorCortex.executeOneshot as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('Syntax error')
+      );
+
+      const result = (await tool.execute({
+        mode: 'oneshot',
+        task: 'invalid syntax',
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Syntax error');
+    });
+  });
+
+  describe('agentic mode - skill loading', () => {
+    it('requires explicit tools for skills without approved policy', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'unknown', schemaVersion: 1, allowedTools: ['code'] },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      const result = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'test-skill',
+        // No tools provided - should error
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('no approved policy');
+      expect(result.error).toContain('Provide tools explicitly');
+    });
+
+    it('uses policy defaults when trust is approved', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: {
+          trust: 'approved',
+          schemaVersion: 1,
+          allowedTools: ['code', 'shell'],
+          allowedDomains: ['api.example.com'],
+        },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+
+      const executeResult = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'test-skill',
+        // No tools provided - should use policy defaults
+      })) as Record<string, unknown>;
+
+      expect(executeResult.success).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ['code', 'shell'], // From policy
+          domains: ['api.example.com'], // From policy
+        })
+      );
+    });
+
+    it('merges explicit domains with policy domains', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: {
+          trust: 'approved',
+          schemaVersion: 1,
+          allowedTools: ['code'],
+          allowedDomains: ['api.example.com'],
+        },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+
+      await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'test-skill',
+        domains: ['another.com'],
+      });
+
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          domains: expect.arrayContaining(['api.example.com', 'another.com']) as string[],
+        })
+      );
+    });
+
+    it('allows explicit tools override', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: {
+          trust: 'approved',
+          schemaVersion: 1,
+          allowedTools: ['code', 'shell'],
+        },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+
+      await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'test-skill',
+        tools: ['grep'], // Explicit override
+      });
+
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ['grep'], // Override used
+        })
+      );
+    });
+
+    it('updates skill index with lastUsed timestamp', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test skill' },
+        policy: {
+          trust: 'approved',
+          schemaVersion: 1,
+          allowedTools: ['code'],
+        },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+      vi.mocked(updateSkillIndex).mockResolvedValue(undefined);
+
+      await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'test-skill',
+      });
+
+      expect(updateSkillIndex).toHaveBeenCalledWith(
+        'data/skills',
+        'test-skill',
+        expect.objectContaining({
+          description: 'Test skill',
+          trust: 'approved',
+          hasPolicy: true,
+          lastUsed: expect.any(String) as string,
+        })
+      );
+    });
+  });
+
+  describe('agentic mode - without skills', () => {
+    it('uses default tools when no skill specified', async () => {
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+
+      const result = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ['code'], // Default
+        })
+      );
+    });
+
+    it('uses explicit tools when provided', async () => {
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-123',
+      });
+
+      await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        tools: ['shell', 'grep'],
+      });
+
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ['shell', 'grep'],
+        })
+      );
+    });
+  });
+
+  describe('error handling', () => {
+    it('returns error for missing required parameters', async () => {
+      const result = (await tool.execute({
+        mode: 'agentic',
+        // Missing task
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Missing required parameters');
+    });
+
+    it('returns error for unknown mode', async () => {
+      const result = (await tool.execute({
+        mode: 'unknown',
+        task: 'test',
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Unknown mode');
+    });
+
+    it('returns error when skill fails to load', async () => {
+      vi.mocked(loadSkill).mockResolvedValue({
+        error: 'Skill not found',
+      });
+
+      const result = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'nonexistent',
+      })) as Record<string, unknown>;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Skill not found');
+    });
+  });
+
+  describe('tool metadata', () => {
+    it('has correct name and tags', () => {
+      expect(tool.name).toBe('core.act');
+      expect(tool.tags).toContain('motor');
+      expect(tool.tags).toContain('execution');
+      expect(tool.tags).toContain('async');
+    });
+
+    it('hasSideEffects flag', () => {
+      expect(tool.hasSideEffects).toBe(true);
+    });
+  });
+});

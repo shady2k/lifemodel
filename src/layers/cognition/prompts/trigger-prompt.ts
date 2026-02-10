@@ -16,6 +16,7 @@ import {
   buildBehaviorRulesSection,
   buildRuntimeSnapshotSection,
   buildCompletedActionsSection,
+  buildAvailableSkillsSection,
 } from './context-sections.js';
 import {
   buildProactiveContactSection,
@@ -75,6 +76,12 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
   const runtimeSnapshot = buildRuntimeSnapshotSection(context, useSmart);
   if (runtimeSnapshot) {
     sections.push(runtimeSnapshot);
+  }
+
+  // Available skills (for Motor Cortex execution)
+  const skillsSection = buildAvailableSkillsSection(context);
+  if (skillsSection) {
+    sections.push(skillsSection);
   }
 
   // Completed actions (for non-user-message triggers to prevent re-execution)
