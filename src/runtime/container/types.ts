@@ -161,6 +161,12 @@ export interface ContainerConfig {
 
   /** Container lifetime cap in ms (default: 30 minutes) */
   maxLifetimeMs?: number;
+
+  /** Allowed domains for network access (empty = no network) */
+  allowedDomains?: string[];
+
+  /** Allowed ports for network access (default: [80, 443]) */
+  allowedPorts?: number[];
 }
 
 /**

@@ -24,6 +24,7 @@ import type { ContainerManager, ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
 import { loadSkill } from '../skills/skill-loader.js';
+import { mergeDomains } from '../container/network-policy.js';
 
 /**
  * Default max iterations per attempt.
@@ -236,6 +237,7 @@ export class MotorCortex {
     maxIterations?: number;
     timeout?: number;
     skill?: LoadedSkill;
+    domains?: string[];
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -269,6 +271,11 @@ export class MotorCortex {
     const now = new Date().toISOString();
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
+    // Merge skill domains with explicit domains
+    const skillDomains = params.skill?.definition.domains;
+    const explicitDomains = params.domains;
+    const mergedDomains = mergeDomains(skillDomains, explicitDomains);
+
     const run: MotorRun = {
       id: runId,
       status: 'created',
@@ -279,6 +286,7 @@ export class MotorCortex {
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       startedAt: now,
       energyConsumed: energyBefore - this.energyModel.getEnergy(),
+      ...(mergedDomains.length > 0 && { domains: mergedDomains }),
     };
 
     // Set skill name on the run if one was provided
@@ -312,12 +320,14 @@ export class MotorCortex {
    * @param runId - Run to retry
    * @param guidance - Corrective instructions from Cognition
    * @param constraints - Optional constraints for the retry
+   * @param domains - Optional additional domains to allow (merged with existing)
    * @returns Run ID and new attempt index
    */
   async retryRun(
     runId: string,
     guidance: string,
-    constraints?: string[]
+    constraints?: string[],
+    domains?: string[]
   ): Promise<{ runId: string; attemptIndex: number; status: 'running' }> {
     const run = await this.stateManager.getRun(runId);
     if (!run) {
@@ -367,6 +377,13 @@ export class MotorCortex {
     // Set currentAttemptIndex BEFORE createAttempt (buildMotorSystemPrompt reads it for maxIterations)
     const newIndex = run.attempts.length;
     run.currentAttemptIndex = newIndex;
+
+    // Merge new domains with existing run domains (union, deduped)
+    if (domains && domains.length > 0) {
+      const existingDomains = run.domains ?? [];
+      const allDomains = [...existingDomains, ...domains];
+      run.domains = Array.from(new Set(allDomains));
+    }
 
     // Create new attempt with fresh messages but recovery context
     const newAttempt = this.createAttempt(
@@ -419,6 +436,10 @@ export class MotorCortex {
         containerHandle = await this.containerManager.create(run.id, {
           workspacePath: workspace,
           ...(this.skillsDir && { skillsPath: this.skillsDir }),
+          ...(run.domains &&
+            run.domains.length > 0 && {
+              allowedDomains: run.domains,
+            }),
         });
         run.containerId = containerHandle.containerId;
         await this.stateManager.updateRun(run);

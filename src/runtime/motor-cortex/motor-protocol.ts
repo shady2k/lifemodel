@@ -331,4 +331,7 @@ export interface MotorRun {
 
   /** Docker container ID (if running in container isolation) */
   containerId?: string;
+
+  /** Allowed network domains for this run (merged from skill + explicit) */
+  domains?: string[];
 }

@@ -57,6 +57,13 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       description: 'Input values for skill execution (validated against skill input schema)',
       required: false,
     },
+    {
+      name: 'domains',
+      type: 'array' as const,
+      description:
+        'Network domains to allow access to (e.g., ["api.example.com"]). Merged with skill-defined domains if provided.',
+      required: false,
+    },
   ];
 
   return {
@@ -105,6 +112,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
           let tools = (args['tools'] as MotorTool[] | undefined) ?? ['code'];
           const maxIterations = (args['maxIterations'] as number | undefined) ?? 20;
+          const domains = (args['domains'] as string[] | undefined) ?? [];
 
           // Load skill if specified
           let loadedSkill = undefined;
@@ -145,6 +153,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             tools,
             maxIterations,
             ...(loadedSkill && { skill: loadedSkill }),
+            ...(domains.length > 0 && { domains }),
           });
 
           return {

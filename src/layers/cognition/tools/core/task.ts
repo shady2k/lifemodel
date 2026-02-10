@@ -76,6 +76,13 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
         'Optional constraints for retry attempt (e.g. "do not retry login more than once")',
       required: false,
     },
+    {
+      name: 'domains',
+      type: 'array' as const,
+      description:
+        'Optional additional network domains to allow for retry (merged with existing run domains)',
+      required: false,
+    },
   ];
 
   return {
@@ -336,7 +343,8 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
 
           try {
             const constraints = args['constraints'] as string[] | undefined;
-            const result = await motorCortex.retryRun(runId, guidance, constraints);
+            const domains = args['domains'] as string[] | undefined;
+            const result = await motorCortex.retryRun(runId, guidance, constraints, domains);
             return {
               success: true,
               data: result,

@@ -150,10 +150,10 @@ describe('Proactive Contact', () => {
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
       // Prompt gives agent decision guidance with tool budget
-      expect(fullPrompt).toContain('send a message or defer');
+      expect(fullPrompt).toContain('You MUST choose ONE action');
       expect(fullPrompt).toContain('Tool budget');
-      expect(fullPrompt).toContain('To send a message');
-      expect(fullPrompt).toContain('To defer');
+      expect(fullPrompt).toContain('Send a message');
+      expect(fullPrompt).toContain('Skip messaging');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {

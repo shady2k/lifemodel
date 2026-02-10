@@ -32,6 +32,8 @@ import {
   REQUEST_TIMEOUT_BUFFER_MS,
 } from './types.js';
 import { ensureImage } from './container-image.js';
+import { ensureNetpolicyImage } from './netpolicy-image.js';
+import { type NetworkPolicy, resolveNetworkPolicy, applyNetworkPolicy } from './network-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -219,11 +221,21 @@ class DockerContainerHandle implements ContainerHandle {
 
 /**
  * Build the `docker create` arguments with all security flags.
+ *
+ * Network mode selection:
+ * - No allowedDomains → --network none (default, most secure)
+ * - Has allowedDomains → --network bridge with DNS intercept + iptables
  */
-function buildCreateArgs(containerName: string, config: ContainerConfig): string[] {
+function buildCreateArgs(
+  containerName: string,
+  config: ContainerConfig,
+  resolvedHosts: Map<string, string[]>
+): string[] {
   const memoryLimit = config.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
   const cpuLimit = config.cpuLimit ?? DEFAULT_CPU_LIMIT;
   const pidsLimit = config.pidsLimit ?? DEFAULT_PIDS_LIMIT;
+
+  const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
 
   const args: string[] = [
     'create',
@@ -234,8 +246,6 @@ function buildCreateArgs(containerName: string, config: ContainerConfig): string
 
     // Security flags
     '--read-only',
-    '--network',
-    'none',
     '--cap-drop',
     'ALL',
     '--security-opt',
@@ -257,11 +267,34 @@ function buildCreateArgs(containerName: string, config: ContainerConfig): string
 
     // Interactive mode for stdin/stdout IPC
     '-i',
-
-    // Workspace bind mount (writable, no exec)
-    '-v',
-    `${config.workspacePath}:/workspace:rw`,
   ];
+
+  // Network configuration
+  if (hasDomains) {
+    // Bridge mode with DNS intercept
+    args.push('--network', 'bridge');
+
+    // Block normal DNS (use local resolver that will fail)
+    args.push('--dns', '127.0.0.1');
+
+    // Disable IPv6 (simplifies iptables rules)
+    args.push('--sysctl', 'net.ipv6.conf.all.disable_ipv6=1');
+
+    // Add --add-host entries for each resolved domain (all A records)
+    // This ensures declared domains work even with DNS disabled.
+    // Docker supports multiple --add-host for the same domain (appends to /etc/hosts).
+    for (const [domain, ips] of resolvedHosts.entries()) {
+      for (const ip of ips) {
+        args.push('--add-host', `${domain}:${ip}`);
+      }
+    }
+  } else {
+    // No network access (default, most secure)
+    args.push('--network', 'none');
+  }
+
+  // Workspace bind mount (writable, no exec)
+  args.push('-v', `${config.workspacePath}:/workspace:rw`);
 
   // Skills bind mount (read-only)
   if (config.skillsPath) {
@@ -298,7 +331,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
     },
 
     async create(runId: string, config: ContainerConfig): Promise<ContainerHandle> {
-      // Ensure image exists
+      // Ensure images exist
       const built = await ensureImage((msg) => {
         log.info(msg);
       });
@@ -306,13 +339,46 @@ export function createContainerManager(logger: Logger): ContainerManager {
         throw new Error('Failed to build Motor Cortex container image');
       }
 
+      const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+      let resolvedPolicy: NetworkPolicy | null = null;
+
+      if (hasDomains) {
+        // Ensure netpolicy helper image exists
+        const netpolicyBuilt = await ensureNetpolicyImage((msg) => {
+          log.info(msg);
+        });
+        if (!netpolicyBuilt) {
+          throw new Error('Failed to build network policy helper container image');
+        }
+
+        // Resolve domains to IPs ONCE — reused for both --add-host and iptables
+        try {
+          resolvedPolicy = await resolveNetworkPolicy(
+            config.allowedDomains ?? [],
+            config.allowedPorts
+          );
+          log.info(
+            {
+              domains: resolvedPolicy.domains,
+              resolvedCount: resolvedPolicy.resolvedHosts.size,
+              ports: resolvedPolicy.ports,
+            },
+            'Network policy resolved'
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to resolve network policy: ${message}`);
+        }
+      }
+
       // Generate unique container name
       const random = randomBytes(4).toString('hex');
       const containerName = `motor-${runId.slice(0, 8)}-${random}`;
 
-      // Create container
-      const createArgs = buildCreateArgs(containerName, config);
-      log.info({ containerName, runId }, 'Creating container');
+      // Create container (uses resolvedPolicy.resolvedHosts for --add-host entries)
+      const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
+      const createArgs = buildCreateArgs(containerName, config, resolvedHosts);
+      log.info({ containerName, runId, hasDomains }, 'Creating container');
 
       const { stdout: containerId } = await execFileAsync('docker', createArgs, {
         timeout: 30_000,
@@ -320,21 +386,81 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
       const trimmedId = containerId.trim();
 
-      // Start container with attached stdin/stdout
-      const proc = spawn('docker', ['start', '-ai', trimmedId], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      if (hasDomains && resolvedPolicy) {
+        // Pause/unpause flow for network policy application.
+        // This ensures iptables are applied before any user code runs.
+        //
+        // Note: The tool-server entrypoint blocks on stdin before doing any work,
+        // so the start→pause window has no network activity in practice.
+        // The pause is defense-in-depth against future entrypoint changes.
+        try {
+          // 1. Start container (detached, not -ai)
+          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Starting container (detached)');
+          await execFileAsync('docker', ['start', trimmedId], { timeout: 10_000 });
 
-      const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
-      const handle = new DockerContainerHandle(trimmedId, proc, log, maxLifetimeMs);
+          // 2. Pause container (freeze before any code runs)
+          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Pausing container');
+          await execFileAsync('docker', ['pause', trimmedId], { timeout: 10_000 });
 
-      activeContainers.set(runId, handle);
-      log.info(
-        { containerId: trimmedId.slice(0, 12), containerName },
-        'Container created and started'
-      );
+          // 3. Apply iptables rules via helper container (reuse already-resolved policy)
+          await applyNetworkPolicy(trimmedId, resolvedPolicy, log);
 
-      return handle;
+          // 4. Unpause container (resume with network locked down)
+          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Unpausing container');
+          await execFileAsync('docker', ['unpause', trimmedId], { timeout: 10_000 });
+        } catch (error) {
+          // Cleanup: destroy the container if policy application fails.
+          // A paused container with no iptables is a security risk.
+          log.error(
+            { containerId: trimmedId.slice(0, 12), error },
+            'Network policy setup failed, destroying container'
+          );
+          try {
+            await execFileAsync('docker', ['rm', '-f', trimmedId], { timeout: 10_000 });
+          } catch {
+            // Best-effort cleanup
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to set up network policy: ${message}`);
+        }
+
+        // 5. Attach stdin/stdout via docker attach for IPC
+        log.debug({ containerId: trimmedId.slice(0, 12) }, 'Attaching to container');
+        const proc = spawn('docker', ['attach', trimmedId], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
+        const handle = new DockerContainerHandle(trimmedId, proc, log, maxLifetimeMs);
+
+        activeContainers.set(runId, handle);
+        log.info(
+          {
+            containerId: trimmedId.slice(0, 12),
+            containerName,
+            domains: resolvedPolicy.domains,
+          },
+          'Container created with network policy'
+        );
+
+        return handle;
+      } else {
+        // No domains: use original flow (docker start -ai)
+        const proc = spawn('docker', ['start', '-ai', trimmedId], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
+        const handle = new DockerContainerHandle(trimmedId, proc, log, maxLifetimeMs);
+
+        activeContainers.set(runId, handle);
+        log.info(
+          { containerId: trimmedId.slice(0, 12), containerName },
+          'Container created and started (no network)'
+        );
+
+        return handle;
+      }
     },
 
     async destroy(runId: string): Promise<void> {
