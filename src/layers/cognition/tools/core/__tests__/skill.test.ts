@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { createSkillTool } from '../skill.js';
 import type { SkillResult } from '../skill.js';
 import type { SkillPolicy } from '../../../../../runtime/skills/skill-types.js';
+import { loadSkill } from '../../../../../runtime/skills/skill-loader.js';
 
 /** Minimal valid SKILL.md content */
 const SKILL_MD = `---
@@ -158,6 +159,32 @@ describe('core.skill tool', () => {
       const saved = await readPolicy('test-skill');
       expect(saved.trust).toBe('approved');
       expect(saved.approvedBy).toBe('user');
+    });
+
+    it('stamps contentHash so approval survives subsequent loads', async () => {
+      // Simulate a skill with a stale contentHash (content changed after extraction)
+      const policy = makePolicy('unknown');
+      policy.provenance = {
+        source: 'https://example.com',
+        fetchedAt: '2026-01-01T00:00:00Z',
+        contentHash: 'sha256:stale-hash-that-does-not-match',
+      };
+      await setupSkill('test-skill', policy);
+
+      // Approve
+      const result = (await tool.execute({
+        action: 'approve',
+        name: 'test-skill',
+      })) as SkillResult;
+      expect(result.success).toBe(true);
+      expect(result.trust).toBe('approved');
+
+      // Reload — loadSkill() checks contentHash; approval must survive
+      const reloaded = await loadSkill('test-skill', skillsDir);
+      expect('error' in reloaded).toBe(false);
+      if (!('error' in reloaded)) {
+        expect(reloaded.policy?.trust).toBe('approved');
+      }
     });
 
     it('errors if skill is already approved', async () => {

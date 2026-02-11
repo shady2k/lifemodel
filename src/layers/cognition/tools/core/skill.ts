@@ -16,6 +16,7 @@ import {
   loadSkill,
   savePolicy,
   updateSkillIndex,
+  computeDirectoryHash,
 } from '../../../../runtime/skills/skill-loader.js';
 import type { SkillPolicy } from '../../../../runtime/skills/skill-types.js';
 
@@ -129,6 +130,12 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         updatedPolicy.trust = 'approved';
         updatedPolicy.approvedBy = 'user';
         updatedPolicy.approvedAt = new Date().toISOString();
+
+        // Stamp the current content hash so loadSkill() won't reset trust on next load
+        const currentHash = await computeDirectoryHash(loaded.path);
+        if (updatedPolicy.provenance) {
+          updatedPolicy.provenance = { ...updatedPolicy.provenance, contentHash: currentHash };
+        }
       } else {
         updatedPolicy.trust = 'unknown';
         delete updatedPolicy.approvedBy;
