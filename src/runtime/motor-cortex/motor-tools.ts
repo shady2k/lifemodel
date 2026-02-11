@@ -456,8 +456,8 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
             description: 'HTTP headers as key-value pairs.',
           },
           body: {
-            type: 'string',
-            description: 'Request body (for POST/PUT/PATCH).',
+            type: ['string', 'object'],
+            description: 'Request body (for POST/PUT/PATCH). Pass a JSON object or a JSON string.',
           },
         },
         required: ['url'],
@@ -1188,7 +1188,10 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
     } else if (rawHeaders && typeof rawHeaders === 'object') {
       headers = rawHeaders as Record<string, string>;
     }
-    const body = args['body'] as string | undefined;
+    // Weak models sometimes pass body as an object instead of a JSON string
+    const rawBody = args['body'];
+    const body =
+      rawBody == null ? undefined : typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody);
 
     try {
       const result = await ctx.fetchFn(url, {

@@ -1082,7 +1082,7 @@ export function buildMotorSystemPrompt(
 ): string {
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
-    code: '- code: Execute JavaScript code in a sandbox',
+    code: '- code: Execute JavaScript code in a sandbox (sync only, no await — use fetch tool for HTTP)',
     read: '- read: Read a file (line numbers, offset/limit for pagination, max 2000 lines)',
     write: '- write: Write content to a file (auto-creates directories)',
     list: '- list: List files and directories (optional recursive mode)',
@@ -1126,7 +1126,8 @@ Guidelines:
 - Use list/glob to discover workspace structure
 - Use grep to find content across files
 - Use patch for precise edits (prefer over full file rewrites)
-- Use shell for network requests (curl) and text processing
+- Use fetch for HTTP requests (preferred over shell+curl — handles credentials, domain checks, HTML→markdown)
+- Use shell for text processing, piping, and when you need curl-specific features (e.g. -v for debugging)
 - Be concise and direct in your responses
 - Report what you did and the result
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt"). Skill directory paths are absolute and READ-ONLY. Write all output to the workspace using relative paths.
@@ -1187,20 +1188,19 @@ Valid tools: code, read, write, list, glob, shell, grep, patch, ask_user, fetch,
 A skill is available for this task. Read its files before starting work.
 Skill: ${skill.frontmatter.name} — ${skill.frontmatter.description}
 Skill directory: ${containerMode ? `/skills/${skill.frontmatter.name}` : skill.path}
-Start by reading SKILL.md in the skill directory for setup and usage instructions. Check for reference files too (list the directory).
-IMPORTANT: The skill directory is read-only. To modify skill files, use write or patch with a RELATIVE path: "skills/${skill.frontmatter.name}/SKILL.md" (NOT the absolute "/skills/..." path). Changes are automatically extracted and installed after your run completes.
+Start by reading SKILL.md: read({path: "${containerMode ? `/skills/${skill.frontmatter.name}/SKILL.md` : `${skill.path}/SKILL.md`}"}). Check for reference files too: list({path: "${containerMode ? `/skills/${skill.frontmatter.name}` : skill.path}"}).
+IMPORTANT: The skill directory is read-only. To modify skill files, first read the file from the skill directory, then write the modified version to the workspace using a RELATIVE path: write({path: "skills/${skill.frontmatter.name}/SKILL.md", content: "...modified content..."}). Do NOT use patch on skill files — the file does not exist in the workspace yet. Changes are automatically extracted and installed after your run completes.
 ${
   skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0
     ? `\nAvailable credentials for this skill:\n${skill.policy.requiredCredentials.map((c) => `- <credential:${c}> — use this placeholder in API calls (e.g. Authorization header, code variables)`).join('\n')}\nExample: fetch(url, {headers: {"Authorization": "Bearer <credential:${String(skill.policy.requiredCredentials[0])}>"}})`
     : ''
 }
 
-If the skill instructions fail due to outdated information (changed endpoints, deprecated methods, etc.), you may:
-1. Fetch fresh documentation to understand what changed
-2. Write a corrected skill to skills/<name>/ in the workspace
-3. Continue executing the task with the corrected approach
-
-The corrected skill will be reviewed before it replaces the current version.
+If you encounter errors while following the skill instructions (wrong endpoints, incorrect parameters, deprecated methods, missing steps, etc.):
+1. Figure out what went wrong and how to fix it
+2. Complete the task using the corrected approach
+3. ALSO update the skill files: read the affected files from the skill directory, fix the incorrect parts, and write corrected versions to skills/${skill.frontmatter.name}/ in the workspace (e.g. SKILL.md, reference docs, scripts — whatever needs fixing)
+This way the skill stays accurate for future use. The updated files will be reviewed before they replace the current version.
 Note: you can only reach domains approved for this run.
 If you need a new domain, use ask_user to request it.`
       : ''

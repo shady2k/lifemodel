@@ -289,6 +289,19 @@ export function validateToolArgs(
       }
     }
 
+    // Auto-coerce: string → object (JSON string)
+    if (expectedTypes.includes('object') && actualType === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(value as string);
+        if (isPlainObject(parsed)) {
+          coerced = parsed;
+          args[key] = parsed;
+        }
+      } catch {
+        // fall through to type check error
+      }
+    }
+
     // Auto-coerce: string → number
     if (expectedTypes.includes('number') && actualType === 'string') {
       const num = Number(value);

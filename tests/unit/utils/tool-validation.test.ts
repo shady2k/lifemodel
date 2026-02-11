@@ -279,8 +279,27 @@ describe('validateToolArgs', () => {
       }
     });
 
-    it('rejects wrong type for object', () => {
+    it('coerces JSON string to object', () => {
+      const result = validateToolArgs(
+        { question: 'Hi', data: '{"Authorization": "Bearer token123"}' },
+        basicSchema
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.data).toEqual({ Authorization: 'Bearer token123' });
+      }
+    });
+
+    it('rejects non-JSON string for object param', () => {
       const result = validateToolArgs({ question: 'Hi', data: 'string' }, basicSchema);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('data: expected object, got string');
+      }
+    });
+
+    it('does not coerce JSON array string to object', () => {
+      const result = validateToolArgs({ question: 'Hi', data: '[1, 2, 3]' }, basicSchema);
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error).toContain('data: expected object, got string');

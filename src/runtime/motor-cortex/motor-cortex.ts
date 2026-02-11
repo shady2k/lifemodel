@@ -378,9 +378,9 @@ export class MotorCortex {
       );
     }
 
-    // Check mutex: no other active run
+    // Check mutex: no other active run (allow self-retry for auto-retry path)
     const activeRun = await this.stateManager.getActiveRun();
-    if (activeRun) {
+    if (activeRun && activeRun.id !== runId) {
       throw new Error(
         `Cannot retry: active run exists (${activeRun.id}, status: ${activeRun.status})`
       );
