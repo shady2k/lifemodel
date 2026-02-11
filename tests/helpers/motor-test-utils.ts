@@ -223,7 +223,7 @@ export interface TestLoopParamsOptions {
  * - Real temp workspace (via mkdtemp)
  * - Mock logger, mock pushSignal, mock state manager
  * - Scripted LLM (caller provides)
- * - Default tools: ['filesystem', 'code']
+ * - Default tools: ['read', 'write', 'list', 'code']
  *
  * IMPORTANT: Caller must clean up the workspace using cleanupTestLoopParams().
  */

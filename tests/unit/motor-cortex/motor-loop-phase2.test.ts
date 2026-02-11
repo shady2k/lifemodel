@@ -39,7 +39,7 @@ function makeRun(overrides?: Partial<MotorRun>): MotorRun {
     id: 'test-run',
     status: 'running',
     task: 'Test task',
-    tools: ['code', 'shell', 'filesystem'],
+    tools: ['code', 'shell', 'read', 'write', 'list'],
     attempts: [attempt],
     currentAttemptIndex: 0,
     maxAttempts: 3,
@@ -56,7 +56,7 @@ describe('buildMotorSystemPrompt', () => {
 
     expect(prompt).toContain('code:');
     expect(prompt).toContain('shell:');
-    expect(prompt).toContain('filesystem:');
+    expect(prompt).toContain('read:');
   });
 
   it('includes new Phase 2 tools in descriptions', () => {

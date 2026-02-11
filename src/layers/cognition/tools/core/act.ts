@@ -51,7 +51,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'tools',
       type: 'array' as const,
       description:
-        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user, fetch, search). Required if skill has no approved policy.',
+        'Tools for agentic mode (code, read, write, list, glob, shell, grep, patch, fetch, search). Required if skill has no approved policy.',
       required: false,
     },
     {

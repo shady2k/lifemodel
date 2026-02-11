@@ -7,7 +7,7 @@
 
 import type { Logger } from '../../types/index.js';
 import type { Storage } from '../../storage/storage.js';
-import type { MotorRun, RunStatus } from './motor-protocol.js';
+import type { MotorRun, MotorTool, RunStatus } from './motor-protocol.js';
 
 /**
  * Storage key for motor runs.
@@ -27,6 +27,22 @@ interface StoredRuns {
 const EMPTY_STORED: StoredRuns = {
   runs: [],
 };
+
+/**
+ * Migrate legacy tool names to current MotorTool values.
+ *
+ * - `filesystem` → `read`, `write`, `list`
+ * - `ask_user` → removed (synthetic, injected by motor-loop)
+ * - Deduplicates to handle runs that already had both `filesystem` and `read`.
+ */
+function migrateTools(tools: string[]): MotorTool[] {
+  const result = tools.flatMap((t) => {
+    if (t === 'filesystem') return ['read', 'write', 'list'] as MotorTool[];
+    if (t === 'ask_user') return [];
+    return [t as MotorTool];
+  });
+  return [...new Set(result)];
+}
 
 /**
  * Motor Cortex State Manager.
@@ -131,6 +147,13 @@ export class MotorStateManager {
     if (!Array.isArray(stored.runs)) {
       this.logger.warn('Invalid stored runs structure, resetting');
       return { ...EMPTY_STORED };
+    }
+
+    // Migrate legacy tool names (filesystem → read/write/list, remove ask_user)
+    for (const run of stored.runs) {
+      if (run.tools.some((t: string) => t === 'filesystem' || t === 'ask_user')) {
+        run.tools = migrateTools(run.tools);
+      }
     }
 
     return stored;

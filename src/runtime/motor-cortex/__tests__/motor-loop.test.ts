@@ -33,8 +33,8 @@ describe('buildMotorSystemPrompt', () => {
     } as LoadedSkill;
   }
 
-  it('includes skill creation instructions when filesystem tool is granted', () => {
-    const run = createMockRun(['code', 'filesystem']);
+  it('includes skill creation instructions when write tool is granted', () => {
+    const run = createMockRun(['code', 'read', 'write', 'list']);
     const prompt = buildMotorSystemPrompt(run);
 
     expect(prompt).toContain('When creating skills, use the Agent Skills standard');
@@ -42,10 +42,12 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).toContain('description: What this skill does');
     expect(prompt).toContain('policy.json');
     expect(prompt).toContain('skills/<name>/SKILL.md');
-    expect(prompt).toContain('Valid tools: code, filesystem, shell, grep, patch, ask_user');
+    expect(prompt).toContain(
+      'Valid tools: code, read, write, list, glob, shell, grep, patch, ask_user'
+    );
   });
 
-  it('does NOT include skill creation instructions when filesystem is not granted', () => {
+  it('does NOT include skill creation instructions when write is not granted', () => {
     const run = createMockRun(['code', 'shell']);
     const prompt = buildMotorSystemPrompt(run);
 

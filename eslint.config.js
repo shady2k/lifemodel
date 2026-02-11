@@ -25,6 +25,8 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-exports': 'error',
       // Use Pino logger instead of console
       'no-console': 'error',
+      // Disable: contradicts no-non-null-assertion (strict wants no `!`, stylistic wants `!` over `as T`)
+      '@typescript-eslint/non-nullable-type-assertion-style': 'off',
       // Allow || on primitives where falsy-coalescing is intentional (e.g. empty string fallback)
       '@typescript-eslint/prefer-nullish-coalescing': [
         'error',

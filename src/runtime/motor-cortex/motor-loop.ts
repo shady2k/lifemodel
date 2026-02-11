@@ -25,7 +25,7 @@ import {
   getToolDefinitions,
   executeTool,
   createWorkspace,
-  TOOL_DEFINITIONS,
+  SYNTHETIC_TOOL_DEFINITIONS,
 } from './motor-tools.js';
 import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import type { ContainerHandle } from '../container/types.js';
@@ -159,30 +159,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   // Always inject ask_user — the model needs it to request missing domains, credentials, etc.
   // Without it in the tool schema, the system prompt's "call ask_user" instruction is impossible.
-  if (!run.tools.includes('ask_user')) {
-    toolDefinitions.push(TOOL_DEFINITIONS.ask_user);
-  }
+  toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.ask_user);
 
   // Add request_approval tool if shell is granted (network access = needs approval gate)
   if (run.tools.includes('shell')) {
-    toolDefinitions.push({
-      type: 'function',
-      function: {
-        name: 'request_approval',
-        description:
-          'Request approval before performing a potentially dangerous action (e.g., network requests that send data, destructive operations). Pauses execution until approved.',
-        parameters: {
-          type: 'object',
-          properties: {
-            action: {
-              type: 'string',
-              description: 'Description of the action needing approval.',
-            },
-          },
-          required: ['action'],
-        },
-      },
-    });
+    toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.request_approval);
   }
 
   // Use attempt's messages (already built by caller)
@@ -643,6 +624,11 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         resolvedArgs = Object.fromEntries(resolvedEntries);
       }
 
+      // Log shell description if provided
+      if (toolName === 'shell' && toolArgs['description']) {
+        await taskLog?.log(`    [${toolArgs['description'] as string}]`);
+      }
+
       // Execute other tools
       const toolResult = await executeTool(toolName, resolvedArgs, toolContext);
 
@@ -964,19 +950,20 @@ export function buildMotorSystemPrompt(
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
     code: '- code: Execute JavaScript code in a sandbox',
-    filesystem: '- filesystem: Read/write/list files in workspace and skills directory',
+    read: '- read: Read a file (line numbers, offset/limit for pagination, max 2000 lines)',
+    write: '- write: Write content to a file (auto-creates directories)',
+    list: '- list: List files and directories (optional recursive mode)',
+    glob: '- glob: Find files by glob pattern (e.g., "**/*.ts")',
     ask_user: '- ask_user: Ask the user a question (pauses execution)',
-    shell:
-      '- shell: Run allowlisted commands (git, curl, jq, grep, cat, ls, tar, unzip, rm, etc.). Supports pipes.',
-    grep: '- grep: Search patterns across workspace files (regex, max 50 matches)',
-    patch: '- patch: Find-and-replace text in a file (exact match, must be unique)',
-    fetch:
-      '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl for HTTP requests.',
-    search: '- search: Search the web for information. Returns titles, URLs, and snippets.',
+    shell: '- shell: Run allowlisted commands (curl, jq, grep, cat, ls, etc.). Supports pipes.',
+    grep: '- grep: Search patterns across files (regex, max 100 matches)',
+    patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
+    fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
+    search: '- search: Search the web for information.',
   };
 
   // Always include ask_user in the description (it's always available as a synthetic tool)
-  const allTools = run.tools.includes('ask_user') ? run.tools : [...run.tools, 'ask_user'];
+  const allTools: string[] = [...run.tools, 'ask_user'];
   const toolsDesc = allTools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
 
   // Recovery context injection for retry attempts
@@ -1001,10 +988,12 @@ ${toolsDesc}
 Guidelines:
 - Break down complex tasks into steps
 - Use code for calculations and data processing
-- Use filesystem({action: "read"|"write"|"list", path: "...", content: "..."}) to manage files
-- Use shell for network requests (curl) and text processing
+- Use read to inspect files (supports offset/limit for large files)
+- Use write to create or overwrite files
+- Use list/glob to discover workspace structure
 - Use grep to find content across files
 - Use patch for precise edits (prefer over full file rewrites)
+- Use shell for network requests (curl) and text processing
 - Be concise and direct in your responses
 - Report what you did and the result
 - Credentials can be referenced as <credential:name> placeholders
@@ -1022,7 +1011,7 @@ Network access is disabled. All tasks must be completed using local tools only.`
 Maximum iterations: ${String(maxIterationsOverride ?? run.attempts[run.currentAttemptIndex]?.maxIterations ?? 20)}
 
 Begin by analyzing the task and planning your approach. Then execute step by step.${
-    hasTool('filesystem', tools)
+    hasTool('write', tools)
       ? `
 
 When creating skills, use the Agent Skills standard:
@@ -1055,7 +1044,7 @@ Always record provenance.source with the URL or reference where you found the in
 Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)
 These files will be automatically extracted and installed after your run completes.
 Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
-Valid tools: code, filesystem, shell, grep, patch, ask_user, fetch, search.`
+Valid tools: code, read, write, list, glob, shell, grep, patch, ask_user, fetch, search.`
       : ''
   }${
     skill

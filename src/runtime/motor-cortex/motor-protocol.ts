@@ -27,8 +27,10 @@ export type RunStatus =
  */
 export type MotorTool =
   | 'code'
-  | 'filesystem'
-  | 'ask_user'
+  | 'read'
+  | 'write'
+  | 'list'
+  | 'glob'
   | 'shell'
   | 'grep'
   | 'patch'

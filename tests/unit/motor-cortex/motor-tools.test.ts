@@ -285,7 +285,7 @@ describe('shell tool', () => {
   });
 });
 
-describe('filesystem tool with multiple roots', () => {
+describe('read/write/list tools with multiple roots', () => {
   let workspace: string;
   let skillsDir: string;
   let ctx: ToolContext;
@@ -301,100 +301,89 @@ describe('filesystem tool with multiple roots', () => {
     await rm(skillsDir, { recursive: true, force: true });
   });
 
-  it('reads from skills directory (allowedRoots)', async () => {
-    // Create a file in workspace first
+  it('read tool reads from workspace (allowedRoots)', async () => {
     await mkdir(join(workspace, 'read-test'), { recursive: true });
     await writeFile(join(workspace, 'read-test', 'file.txt'), 'content from workspace', 'utf-8');
 
-    const result = await executeTool(
-      'filesystem',
-      {
-        action: 'read',
-        path: 'read-test/file.txt',
-      },
-      ctx
-    );
-    // Read uses allowedRoots, and workspace is first, so it reads from workspace
+    const result = await executeTool('read', { path: 'read-test/file.txt' }, ctx);
     expect(result.ok).toBe(true);
     expect(result.output).toContain('content from workspace');
   });
 
-  it('writes are constrained to writeRoots', async () => {
-    // Write should only go to writeRoots (workspace), even if a directory exists in skillsDir
+  it('read tool returns line numbers', async () => {
+    await writeFile(join(workspace, 'lines.txt'), 'line1\nline2\nline3\n', 'utf-8');
+    const result = await executeTool('read', { path: 'lines.txt' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('1| line1');
+    expect(result.output).toContain('2| line2');
+  });
+
+  it('read tool supports offset/limit', async () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n');
+    await writeFile(join(workspace, 'big.txt'), lines, 'utf-8');
+    const result = await executeTool('read', { path: 'big.txt', offset: 3, limit: 2 }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('line3');
+    expect(result.output).toContain('line4');
+    expect(result.output).not.toContain('line5');
+  });
+
+  it('read tool returns not_found for missing file', async () => {
+    const result = await executeTool('read', { path: 'nonexistent.txt' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('not_found');
+  });
+
+  it('write tool constrains to writeRoots', async () => {
     await mkdir(join(skillsDir, 'write-test'), { recursive: true });
 
     const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: 'write-test/file.txt',
-        content: 'content in workspace',
-      },
+      'write',
+      { path: 'write-test/file.txt', content: 'content in workspace' },
       ctx
     );
     expect(result.ok).toBe(true);
 
-    // Verify the file was written to workspace, not skillsDir
     const workspaceFile = await readFile(join(workspace, 'write-test', 'file.txt'), 'utf-8').catch(() => null);
     const skillsFile = await readFile(join(skillsDir, 'write-test', 'file.txt'), 'utf-8').catch(() => null);
     expect(workspaceFile).toBe('content in workspace');
-    expect(skillsFile).toBeNull(); // Not written to skillsDir
+    expect(skillsFile).toBeNull();
   });
 
-  it('writes use writeRoots, not allowedRoots', async () => {
-    // Create a file in skillsDir that doesn't exist in workspace
-    const uniqueFile = `only-in-skills-${Date.now()}.txt`;
-    await writeFile(join(skillsDir, uniqueFile), 'original in skills', 'utf-8');
-
-    // Try to write to the same filename - it should go to workspace (writeRoots)
+  it('write tool creates parent directories', async () => {
     const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: uniqueFile,
-        content: 'new in workspace',
-      },
-      ctx
-    );
-    expect(result.ok).toBe(true);
-
-    // Verify write went to workspace, not skillsDir
-    const workspaceFile = await readFile(join(workspace, uniqueFile), 'utf-8').catch(() => null);
-    const skillsFile = await readFile(join(skillsDir, uniqueFile), 'utf-8').catch(() => null);
-    expect(workspaceFile).toBe('new in workspace');
-    expect(skillsFile).toBe('original in skills'); // Unchanged
-  });
-
-  it('allows writes to workspace directory (writeRoots)', async () => {
-    const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: 'file.txt',
-        content: 'hello',
-      },
+      'write',
+      { path: 'subdir/deep/file.txt', content: 'hello' },
       ctx
     );
     expect(result.ok).toBe(true);
     expect(result.output).toContain('Wrote');
   });
 
-  it('creates parent directories on write', async () => {
-    const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: 'subdir/deep/file.txt',
-        content: 'hello',
-      },
-      ctx
-    );
+  it('list tool returns sorted entries with DIR/FILE markers', async () => {
+    await mkdir(join(workspace, 'adir'));
+    await writeFile(join(workspace, 'bfile.txt'), 'content');
+    const result = await executeTool('list', { path: '.' }, ctx);
     expect(result.ok).toBe(true);
-    expect(result.output).toContain('Wrote');
+    expect(result.output).toContain('[DIR]  adir');
+    expect(result.output).toContain('[FILE] bfile.txt');
+  });
+
+  it('list tool returns graceful message for missing dir', async () => {
+    const result = await executeTool('list', { path: 'nonexistent' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('does not exist');
+  });
+
+  it('filesystem compat shim routes to read/write/list', async () => {
+    await writeFile(join(workspace, 'compat.txt'), 'compat content', 'utf-8');
+    const result = await executeTool('filesystem', { action: 'read', path: 'compat.txt' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('compat content');
   });
 });
 
-describe('filesystem tool writeRoots security', () => {
+describe('write tool writeRoots security', () => {
   let workspace: string;
   let skillsDir: string;
   let ctx: ToolContext;
@@ -411,25 +400,17 @@ describe('filesystem tool writeRoots security', () => {
   });
 
   it('rejects writes via symlink pointing outside writeRoots', async () => {
-    // Create a file in skillsDir (outside writeRoots)
     await writeFile(join(skillsDir, 'target.txt'), 'secret', 'utf-8');
 
-    // Create a symlink in workspace pointing to skillsDir
     try {
       await symlink(join(skillsDir, 'target.txt'), join(workspace, 'link.txt'));
     } catch {
-      // Skip test if symlinks not supported
       return;
     }
 
-    // Try to write through the symlink
     const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: 'link.txt',
-        content: 'modified',
-      },
+      'write',
+      { path: 'link.txt', content: 'modified' },
       ctx
     );
     expect(result.ok).toBe(false);
@@ -437,29 +418,66 @@ describe('filesystem tool writeRoots security', () => {
   });
 
   it('rejects write to existing symlink in workspace', async () => {
-    // Create a file in workspace
     await writeFile(join(workspace, 'original.txt'), 'original', 'utf-8');
 
-    // Create a symlink in workspace pointing to skillsDir
     try {
       await symlink(join(skillsDir, 'outside.txt'), join(workspace, 'symlink.txt'));
     } catch {
-      // Skip test if symlinks not supported
       return;
     }
 
-    // Try to write to the symlink
     const result = await executeTool(
-      'filesystem',
-      {
-        action: 'write',
-        path: 'symlink.txt',
-        content: 'should not write',
-      },
+      'write',
+      { path: 'symlink.txt', content: 'should not write' },
       ctx
     );
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('permission_denied');
+  });
+});
+
+describe('glob tool', () => {
+  let workspace: string;
+  let ctx: ToolContext;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
+
+    await writeFile(join(workspace, 'index.ts'), 'export {};');
+    await writeFile(join(workspace, 'readme.md'), '# Hello');
+    await mkdir(join(workspace, 'src'));
+    await writeFile(join(workspace, 'src', 'main.ts'), 'console.log("hi")');
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('finds files matching glob pattern', async () => {
+    const result = await executeTool('glob', { pattern: '**/*.ts' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('index.ts');
+    expect(result.output).toContain('src/main.ts');
+    expect(result.output).not.toContain('readme.md');
+  });
+
+  it('rejects missing pattern', async () => {
+    const result = await executeTool('glob', {}, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('invalid_args');
+  });
+
+  it('rejects path escape in pattern', async () => {
+    const result = await executeTool('glob', { pattern: '../**/*.ts' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
+  });
+
+  it('returns no-match message for no results', async () => {
+    const result = await executeTool('glob', { pattern: '**/*.xyz' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('No files matched');
   });
 });
 

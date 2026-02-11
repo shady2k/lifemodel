@@ -29,12 +29,11 @@ import {
 } from '../helpers/motor-test-utils.js';
 
 describe('Motor Loop Scenario Tests', () => {
-  describe('Scenario 1: Happy Path — filesystem → complete', () => {
+  describe('Scenario 1: Happy Path — write → complete', () => {
     it('completes successfully with tool execution and result', async () => {
       const scriptedLLM = createScriptedLLM([
         // First call: model writes a file
-        toolCallResponse('filesystem', {
-          action: 'write',
+        toolCallResponse('write', {
           path: 'output.txt',
           content: 'hello world',
         }),
@@ -44,7 +43,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
 
       await runMotorLoop(params);
@@ -80,7 +79,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
 
       await runMotorLoop(params);
@@ -122,7 +121,7 @@ describe('Motor Loop Scenario Tests', () => {
       const { params: pauseParams, cleanup: cleanupPause, stateManager } =
         await createTestLoopParams({
           llm: pauseLLM,
-          tools: ['filesystem'],
+          tools: ['read', 'write', 'list'],
         });
 
       await runMotorLoop(pauseParams);
@@ -136,8 +135,7 @@ describe('Motor Loop Scenario Tests', () => {
       // Create a new script that resumes and completes
       const resumeLLM = createScriptedLLM([
         // Model writes file with user's answer
-        toolCallResponse('filesystem', {
-          action: 'write',
+        toolCallResponse('write', {
           path: 'greeting.txt',
           content: 'Hello, Alice!',
         }),
@@ -168,7 +166,7 @@ describe('Motor Loop Scenario Tests', () => {
         id: pauseParams.run.id,
         status: 'awaiting_input',
         workspacePath: pauseParams.workspace,
-        tools: ['filesystem'], // Explicitly set tools to match original run
+        tools: ['read', 'write', 'list'], // Explicitly set tools to match original run
         attempts: [resumeAttempt],
         currentAttemptIndex: 0,
       });
@@ -178,7 +176,7 @@ describe('Motor Loop Scenario Tests', () => {
           llm: resumeLLM,
           run: resumeRun,
           attempt: resumeAttempt,
-          tools: ['filesystem'],
+          tools: ['read', 'write', 'list'],
           // Reuse the same state manager and workspace
           stateManager,
           workspace: pauseParams.workspace,
@@ -193,7 +191,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       // Assert state preservation: workspace path unchanged, tools unchanged
       expect(finalRun?.workspacePath).toBe(pauseParams.workspace);
-      expect(finalRun?.tools).toEqual(['filesystem']);
+      expect(finalRun?.tools).toEqual(['read', 'write', 'list']);
 
       // Assert file was created
       const filePath = join(resumeParams.workspace, 'greeting.txt');
@@ -219,7 +217,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['filesystem'], // Only filesystem granted
+        tools: ['read', 'write', 'list'], // Only read/write/list granted
       });
 
       await runMotorLoop(params);
@@ -314,14 +312,13 @@ describe('Motor Loop Scenario Tests', () => {
       // Pre-create a file to read
       const { params: setupParams, cleanup: cleanupSetup } = await createTestLoopParams({
         llm: createScriptedLLM([textResponse('setup')]),
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
 
       const testFile = join(setupParams.workspace, 'test.txt');
       await writeFile(testFile, 'file content');
 
-      // Model uses wrong format - should be { action: 'read', path: '...' }
-      // but uses { read: 'file.txt' } format
+      // Model uses legacy filesystem tool with wrong format — compat shim handles it
       const scriptedLLM = createScriptedLLM([
         toolCallResponse('filesystem', { read: 'test.txt' }),
         textResponse('Read the file successfully'),
@@ -329,7 +326,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
         workspace: setupParams.workspace,
       });
 
@@ -348,14 +345,14 @@ describe('Motor Loop Scenario Tests', () => {
     it('detects and fails on XML tool calls without tool_calls field', async () => {
       // First call causes an error
       const scriptedLLM = createScriptedLLM([
-        toolCallResponse('filesystem', { action: 'read', path: 'nonexistent.txt' }),
+        toolCallResponse('read', { path: 'nonexistent.txt' }),
         // Model responds with XML-like text instead of proper tool_calls
-        textResponse('<invoke name="filesystem"><arg>read</arg></invoke>'),
+        textResponse('<invoke name="read"><arg>path</arg></invoke>'),
       ]);
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
 
       await runMotorLoop(params);
@@ -377,13 +374,13 @@ describe('Motor Loop Scenario Tests', () => {
   describe('Scenario 9: Max Iterations Exhausted', () => {
     it('fails when max iterations is reached', async () => {
       const scriptedLLM = createScriptedLLM([
-        toolCallResponse('filesystem', { action: 'list', path: '.' }),
-        toolCallResponse('filesystem', { action: 'list', path: '.' }),
-        toolCallResponse('filesystem', { action: 'list', path: '.' }),
+        toolCallResponse('list', { path: '.' }),
+        toolCallResponse('list', { path: '.' }),
+        toolCallResponse('list', { path: '.' }),
       ]);
 
       const run = createTestMotorRun({
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
       const attempt = createTestAttempt({
         maxIterations: 2, // Low limit to trigger exhaustion
@@ -393,7 +390,7 @@ describe('Motor Loop Scenario Tests', () => {
         llm: scriptedLLM,
         run,
         attempt,
-        tools: ['filesystem'],
+        tools: ['read', 'write', 'list'],
       });
 
       await runMotorLoop(params);

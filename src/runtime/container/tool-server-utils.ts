@@ -265,6 +265,105 @@ export function matchesGlob(filename: string, pattern: string): boolean {
   return filename === pattern;
 }
 
+// Enhanced glob matching supporting **, *, and ? wildcards.
+// - `*` matches any sequence within a single path segment
+// - `**` matches any sequence across path segments (including /)
+// - `?` matches exactly one character
+export function matchesGlobPattern(filepath: string, pattern: string): boolean {
+  const segments = filepath.split('/');
+  const patternSegments = pattern.split('/');
+
+  // Pattern must have same number of segments or use ** for variable depth
+  let segIdx = 0;
+  let patternIdx = 0;
+
+  while (segIdx < segments.length && patternIdx < patternSegments.length) {
+    const segment = segments[segIdx];
+    const patternSegment = patternSegments[patternIdx];
+
+    if (patternSegment === '**') {
+      // ** matches zero or more directory segments
+      const remainingPatternSegments = patternSegments.slice(patternIdx + 1);
+      if (remainingPatternSegments.length === 0) {
+        // ** is last pattern segment — matches everything
+        return true;
+      }
+      // Try matching remaining pattern starting at every possible position
+      for (let tryIdx = segIdx; tryIdx < segments.length; tryIdx++) {
+        if (
+          matchesGlobPattern(segments.slice(tryIdx).join('/'), remainingPatternSegments.join('/'))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (!matchSegment(segment ?? '', patternSegment ?? '')) {
+      return false;
+    }
+
+    segIdx++;
+    patternIdx++;
+  }
+
+  // If we've exhausted pattern but not path, pattern could end with /**
+  if (patternIdx < patternSegments.length) {
+    const remaining = patternSegments.slice(patternIdx);
+    // If remaining is just **, it matches
+    if (remaining.length === 1 && remaining[0] === '**') {
+      return true;
+    }
+  }
+
+  // Must exhaust both pattern and path segments
+  return segIdx === segments.length && patternIdx === patternSegments.length;
+}
+
+/**
+ * Match a single path segment against a glob segment pattern.
+ */
+function matchSegment(segment: string, pattern: string): boolean {
+  if (pattern === '*') return true;
+
+  // Convert glob pattern to regex
+  let regexStr = '';
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i] as string;
+    if (ch === '*') {
+      regexStr += '[^/]*';
+      i++;
+    } else if (ch === '?') {
+      regexStr += '[^/]';
+      i++;
+    } else if (
+      ch === '.' ||
+      ch === '+' ||
+      ch === '(' ||
+      ch === ')' ||
+      ch === '[' ||
+      ch === ']' ||
+      ch === '{' ||
+      ch === '}' ||
+      ch === '|' ||
+      ch === '^' ||
+      ch === '$' ||
+      ch === '\\'
+    ) {
+      // Escape special regex chars
+      regexStr += '\\' + ch;
+      i++;
+    } else {
+      regexStr += ch;
+      i++;
+    }
+  }
+
+  const regex = new RegExp('^' + regexStr + '$');
+  return regex.test(segment);
+}
+
 // ─── Credential Placeholder Resolution ───────────────────────────
 
 /**
@@ -349,4 +448,128 @@ export function findUniqueSubstring(content: string, oldText: string): FindUniqu
   }
 
   return { ok: true, index: firstIdx, count: 1 };
+}
+
+/**
+ * Fuzzy matching strategies for patch tool.
+ *
+ * When exact match fails, tries increasingly flexible matching:
+ * 1. LineTrimmed: Trim trailing whitespace from each line
+ * 2. WhitespaceNormalized: Collapse consecutive whitespace to single space
+ * 3. IndentationFlexible: Strip common leading whitespace from all lines
+ *
+ * @param content - Full file content to search within
+ * @param oldText - Text to find (what we're replacing)
+ * @returns Find result with original content indices, or error
+ *
+ * @example
+ * fuzzyFindUnique("  a\\n  b\\n", "a\\n  b")
+ * // Returns exact match (both indented)
+ *
+ * fuzzyFindUnique("  a\\n  b\\n", "a\\n  b  ")
+ * // Returns LineTrimmed match (trailing space ignored)
+ */
+export function fuzzyFindUnique(content: string, oldText: string): FindUniqueSubstringResult {
+  if (!oldText) {
+    return { ok: false, error: 'invalid_args' };
+  }
+
+  const strategies = [
+    {
+      name: 'exact',
+      normalize: (s: string) => s,
+    },
+    {
+      name: 'LineTrimmed',
+      normalize: (s: string) =>
+        s
+          .split('\n')
+          .map((line) => line.trimEnd())
+          .join('\n'),
+    },
+    {
+      name: 'WhitespaceNormalized',
+      normalize: (s: string) => s.replace(/\s+/g, ' '),
+    },
+    {
+      name: 'IndentationFlexible',
+      normalize: (s: string) => {
+        const lines = s.split('\n');
+        // Find common leading whitespace
+        const nonEmptyLines = lines.filter((l) => l.trim().length > 0);
+        if (nonEmptyLines.length === 0) return s;
+
+        const commonPrefix = nonEmptyLines.reduce((prefix, line) => {
+          let i = 0;
+          while (
+            i < line.length &&
+            i < prefix.length &&
+            line[i] === prefix[i] &&
+            (line[i] === ' ' || line[i] === '\t')
+          ) {
+            i++;
+          }
+          return prefix.slice(0, i);
+        }, nonEmptyLines[0] ?? '');
+
+        // Strip common prefix from all lines
+        return lines
+          .map((line) => {
+            if (line.startsWith(commonPrefix)) {
+              return line.slice(commonPrefix.length);
+            }
+            return line;
+          })
+          .join('\n');
+      },
+    },
+  ];
+
+  // Try each strategy in order
+  for (const strategy of strategies) {
+    const normalized = strategy.normalize(oldText);
+    const normalizedContent = strategy.normalize(content);
+
+    // Find all occurrences
+    const indices: number[] = [];
+    let searchStart = 0;
+    let idx = -1;
+    while ((idx = normalizedContent.indexOf(normalized, searchStart)) !== -1) {
+      indices.push(idx);
+      searchStart = idx + 1;
+      if (indices.length > 1) break; // Stop after finding 2+ (ambiguous)
+    }
+
+    if (indices.length === 1) {
+      // Found unique match — map index back to original content
+      const normalizedIdx = indices[0] ?? 0;
+
+      // To map back correctly, we find the substring at the normalized position
+      // and search for it in original content
+      const searchStartNormalized = Math.max(0, normalizedIdx - 50);
+      const searchEndNormalized = Math.min(
+        normalizedContent.length,
+        normalizedIdx + normalized.length + 50
+      );
+      const contextInNormalized = normalizedContent.slice(
+        searchStartNormalized,
+        searchEndNormalized
+      );
+
+      // Find this context in original content
+      const originalIdx = content.indexOf(contextInNormalized);
+      if (originalIdx !== -1) {
+        // Adjust to exact match position
+        const offset = normalizedIdx - searchStartNormalized;
+        return { ok: true, index: originalIdx + offset, count: 1 };
+      }
+    }
+  }
+
+  // Check if any strategy found multiple matches (ambiguous) vs none at all
+  if (content.includes(oldText)) {
+    return { ok: false, error: 'ambiguous' };
+  }
+
+  return { ok: false, error: 'not_found' };
 }

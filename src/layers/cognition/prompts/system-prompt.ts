@@ -100,7 +100,7 @@ core.setInterest for ongoing interests (not one-time questions). Use 1-3 word ke
 <skill_rules>
 You have skills — reusable task recipes executed by Motor Cortex. Check <available_skills> and prefer approved skills when they match the request.
 Trust: [approved] use directly (policy provides tools/domains). [pending_review] ask user to approve before use. [unknown] provide explicit tools/domains or onboard; unknown means skill content changed or no policy exists.
-To learn a new capability: core.act(mode:"agentic", task:"Learn how to use [service]. Research docs and create a skill.", tools:["code","filesystem","shell"], domains:["docs.example.com"]).
+To learn a new capability: core.act(mode:"agentic", task:"Learn how to use [service]. Research docs and create a skill.", tools:["code","read","write","list","shell","fetch"], domains:["docs.example.com"]).
 If a run fails with a transient error, use core.task(action:"retry", guidance:"..."). If a skill's instructions are outdated, Motor self-heals within the same run — do not start a new run.
 Do not surface internal skill mechanics unless the user asks or a trigger requires it.
 </skill_rules>

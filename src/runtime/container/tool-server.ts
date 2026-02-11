@@ -3,7 +3,7 @@
  *
  * Long-lived process that:
  * 1. Reads length-prefixed JSON requests from stdin
- * 2. Dispatches to tool executors (code, shell, filesystem, grep, patch)
+ * 2. Dispatches to tool executors (code, shell, read, write, list, glob, grep, patch)
  * 3. Writes length-prefixed JSON responses to stdout
  * 4. Holds credentials in memory (delivered via special request type)
  * 5. Self-exits after 5 minutes of inactivity (watchdog)
@@ -12,14 +12,15 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFile, writeFile, readdir, mkdir, lstat, realpath } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, lstat, realpath, stat } from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import {
   validatePipeline,
   matchesGlob,
+  matchesGlobPattern,
   resolveCredentialPlaceholders as resolveCredentialPlaceholdersUtil,
-  findUniqueSubstring,
+  fuzzyFindUnique,
 } from './tool-server-utils.js';
 
 const execFileAsync = promisify(execFile);
@@ -68,9 +69,15 @@ const WORKSPACE = '/workspace';
 const SKILLS_DIR = '/skills';
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RESULT_SIZE = 32 * 1024; // 32KB
-const MAX_GREP_MATCHES = 50;
+const MAX_GREP_MATCHES = 100;
+const MAX_GREP_LINE_LENGTH = 200;
 const MAX_SHELL_OUTPUT = 10 * 1024; // 10KB
-const MAX_READ_OUTPUT = 1024 * 1024; // 1MB cap for file reads (well under 10MB frame limit)
+const MAX_SHELL_TIMEOUT = 120_000;
+const MAX_READ_LINES = 2000;
+const MAX_READ_CHARS = 50 * 1024; // 50KB
+const MAX_LIST_ENTRIES = 200;
+const MAX_GLOB_RESULTS = 100;
+const MAX_GLOB_SCAN = 5000;
 
 // ─── Credential Store (in-memory) ────────────────────────────────
 
@@ -173,14 +180,39 @@ async function executeTool(request: ToolExecuteRequest): Promise<MotorToolResult
       return executeCode(request.args, request.timeoutMs);
     case 'shell':
       return executeShell(request.args, request.timeoutMs);
-    case 'filesystem':
-      return executeFilesystem(request.args);
+    case 'read':
+      return executeRead(request.args);
+    case 'write':
+      return executeWrite(request.args);
+    case 'list':
+      return executeList(request.args);
+    case 'glob':
+      return executeGlob(request.args);
     case 'grep':
       return executeGrep(request.args);
     case 'patch':
       return executePatch(request.args);
-    case 'ask_user':
-      return executeAskUser(request.args);
+
+    // Compat shim: route legacy 'filesystem' tool calls to read/write/list.
+    // Handles resumed runs with pending filesystem tool calls in their message history.
+    case 'filesystem': {
+      const args = request.args;
+      // Auto-fix common LLM arg mistakes
+      if (!args['action'] && !args['path']) {
+        for (const action of ['read', 'write', 'list']) {
+          if (typeof args[action] === 'string') {
+            args['action'] = action;
+            args['path'] = args[action];
+            break;
+          }
+        }
+      }
+      const action = args['action'] as string | undefined;
+      if (action === 'write') return executeWrite(args);
+      if (action === 'list') return executeList(args);
+      return executeRead(args); // Default to read
+    }
+
     default:
       return {
         ok: false,
@@ -303,7 +335,14 @@ async function executeShell(
   }
 
   const startTime = Date.now();
-  const timeout = (args['timeout'] as number | undefined) ?? timeoutMs;
+  const rawTimeout = (args['timeout'] as number | undefined) ?? timeoutMs;
+  const timeout = Math.min(rawTimeout, MAX_SHELL_TIMEOUT);
+
+  // Log description to stderr if provided
+  const description = args['description'] as string | undefined;
+  if (description) {
+    logToStderr(`[${description}]`);
+  }
 
   // Validate ALL commands in pipeline + reject dangerous metacharacters
   const validation = validatePipeline(command);
@@ -383,12 +422,14 @@ async function executeShell(
   }
 }
 
-// ─── Filesystem Operations ───────────────────────────────────────
+// ─── Path Safety ─────────────────────────────────────────────────
 
 const ALLOWED_ROOTS = [WORKSPACE, SKILLS_DIR];
+const WRITE_ROOTS = [WORKSPACE];
 
-async function resolveSafePath(relativePath: string): Promise<string | null> {
-  for (const root of ALLOWED_ROOTS) {
+async function resolveSafePath(relativePath: string, roots?: string[]): Promise<string | null> {
+  const allowedRoots = roots ?? ALLOWED_ROOTS;
+  for (const root of allowedRoots) {
     const resolved = resolve(root, relativePath);
     const rel = relative(root, resolved);
     if (rel.startsWith('..') || isAbsolute(rel)) continue;
@@ -407,7 +448,7 @@ async function resolveSafePath(relativePath: string): Promise<string | null> {
       }
 
       const real = await realpath(checkPath);
-      for (const r of ALLOWED_ROOTS) {
+      for (const r of allowedRoots) {
         try {
           const realRoot = await realpath(r);
           const rr = relative(realRoot, real);
@@ -435,21 +476,118 @@ function pathError(startTime: number): MotorToolResult {
   };
 }
 
-async function executeFilesystem(args: Record<string, unknown>): Promise<MotorToolResult> {
-  // Auto-fix common LLM arg mistakes: filesystem({read: "path"}) → {action: "read", path: "path"}
-  if (!args['action'] && !args['path']) {
-    for (const action of ['read', 'write', 'list']) {
-      if (typeof args[action] === 'string') {
-        args['action'] = action;
-        args['path'] = args[action];
-        break;
-      }
-    }
+// ─── Read ─────────────────────────────────────────────────────────
+
+function isBinaryBuffer(buf: Buffer): boolean {
+  for (let i = 0; i < Math.min(buf.length, 512); i++) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
+}
+
+async function executeRead(args: Record<string, unknown>): Promise<MotorToolResult> {
+  const path = args['path'] as string;
+  if (!path) {
+    return {
+      ok: false,
+      output: 'Missing "path" argument.',
+      errorCode: 'invalid_args',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: 0,
+    };
   }
 
-  const action = args['action'] as string;
+  const startTime = Date.now();
+
+  try {
+    const fullPath = await resolveSafePath(path);
+    if (!fullPath) return pathError(startTime);
+
+    // Binary detection
+    const fileBuffer = await readFile(fullPath);
+    if (isBinaryBuffer(fileBuffer)) {
+      return {
+        ok: true,
+        output: `Binary file (${String(fileBuffer.length)} bytes). Use shell to inspect.`,
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const data = fileBuffer.toString('utf-8');
+    const allLines = data.split('\n');
+    const totalLines = allLines.length;
+
+    // Clamp offset/limit
+    const rawOffset = args['offset'] as number | undefined;
+    const rawLimit = args['limit'] as number | undefined;
+    const offset = Math.max(1, Math.min(totalLines, Math.floor(rawOffset ?? 1)));
+    const limit = Math.max(1, Math.min(MAX_READ_LINES, Math.floor(rawLimit ?? MAX_READ_LINES)));
+
+    // Apply offset (1-based) and limit
+    const sliced = allLines.slice(offset - 1, offset - 1 + limit);
+
+    // Format with line numbers
+    const lineNumWidth = String(offset - 1 + sliced.length).length;
+    let output = sliced
+      .map((line, i) => {
+        const lineNum = String(offset + i).padStart(lineNumWidth, ' ');
+        return `${lineNum}| ${line}`;
+      })
+      .join('\n');
+
+    // Apply character cap
+    if (output.length > MAX_READ_CHARS) {
+      output = output.slice(0, MAX_READ_CHARS);
+      const lastNewline = output.lastIndexOf('\n');
+      if (lastNewline > 0) output = output.slice(0, lastNewline);
+    }
+
+    // Truncation notice
+    const endLine = offset - 1 + sliced.length;
+    if (endLine < totalLines) {
+      output += `\n[... truncated: ${String(totalLines)} total lines. Use offset=${String(endLine + 1)} to continue.]`;
+    }
+
+    return {
+      ok: true,
+      output,
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return {
+        ok: false,
+        output: `File not found: ${path}`,
+        errorCode: 'not_found',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+    return {
+      ok: false,
+      output: error instanceof Error ? error.message : String(error),
+      errorCode: 'not_found',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+// ─── Write ────────────────────────────────────────────────────────
+
+async function executeWrite(args: Record<string, unknown>): Promise<MotorToolResult> {
   const path = args['path'] as string;
-  // Auto-stringify if model passes JSON object as content (common LLM behavior)
   const rawContent = args['content'];
   const content =
     rawContent == null
@@ -458,11 +596,20 @@ async function executeFilesystem(args: Record<string, unknown>): Promise<MotorTo
         ? rawContent
         : JSON.stringify(rawContent, null, 2);
 
-  if (!action || !path) {
+  if (!path) {
     return {
       ok: false,
-      output:
-        'Missing required arguments. Usage: filesystem({action: "read"|"write"|"list", path: "file/path", content: "..." (for write)})',
+      output: 'Missing "path" argument.',
+      errorCode: 'invalid_args',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: 0,
+    };
+  }
+  if (content == null) {
+    return {
+      ok: false,
+      output: 'Missing "content" argument. Provide the file content as a string.',
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -473,77 +620,20 @@ async function executeFilesystem(args: Record<string, unknown>): Promise<MotorTo
   const startTime = Date.now();
 
   // Resolve credential placeholders in content
-  const resolvedContent =
-    content != null ? resolveCredentialPlaceholdersUtil(content, credentials) : undefined;
+  const resolvedContent = resolveCredentialPlaceholdersUtil(content, credentials);
 
   try {
-    switch (action) {
-      case 'read': {
-        const fullPath = await resolveSafePath(path);
-        if (!fullPath) return pathError(startTime);
-        let data = await readFile(fullPath, 'utf-8');
-        if (data.length > MAX_READ_OUTPUT) {
-          data = data.slice(0, MAX_READ_OUTPUT) + '\n[... truncated at 1MB]';
-        }
-        return {
-          ok: true,
-          output: data,
-          retryable: false,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      case 'write': {
-        if (resolvedContent == null) {
-          return {
-            ok: false,
-            output: 'Missing "content" argument. Provide the file content as a string.',
-            errorCode: 'invalid_args',
-            retryable: false,
-            provenance: 'internal',
-            durationMs: Date.now() - startTime,
-          };
-        }
-        const fullPath = await resolveSafePath(path);
-        if (!fullPath) return pathError(startTime);
-        await mkdir(dirname(fullPath), { recursive: true });
-        await writeFile(fullPath, resolvedContent, 'utf-8');
-        return {
-          ok: true,
-          output: `Wrote ${String(resolvedContent.length)} bytes to ${path}`,
-          retryable: false,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      case 'list': {
-        const fullPath = await resolveSafePath(path);
-        if (!fullPath) return pathError(startTime);
-        const entries = await readdir(fullPath, { withFileTypes: true });
-        const listing = entries
-          .map((e) => `${e.isDirectory() ? '[DIR] ' : '[FILE]'} ${e.name}`)
-          .join('\n');
-        return {
-          ok: true,
-          output: listing || '(empty directory)',
-          retryable: false,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      default:
-        return {
-          ok: false,
-          output: '',
-          errorCode: 'invalid_args',
-          retryable: false,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
-    }
+    const fullPath = await resolveSafePath(path, WRITE_ROOTS);
+    if (!fullPath) return pathError(startTime);
+    await mkdir(dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, resolvedContent, 'utf-8');
+    return {
+      ok: true,
+      output: `Wrote ${String(resolvedContent.length)} bytes to ${path}`,
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
   } catch (error) {
     return {
       ok: false,
@@ -556,16 +646,173 @@ async function executeFilesystem(args: Record<string, unknown>): Promise<MotorTo
   }
 }
 
+// ─── List ─────────────────────────────────────────────────────────
+
+async function executeList(args: Record<string, unknown>): Promise<MotorToolResult> {
+  const path = (args['path'] as string | undefined) ?? '.';
+  const recursive = (args['recursive'] as boolean | undefined) ?? false;
+  const startTime = Date.now();
+
+  try {
+    const fullPath = await resolveSafePath(path);
+    if (!fullPath) return pathError(startTime);
+
+    if (recursive) {
+      const files = await walkDir(fullPath, '', MAX_LIST_ENTRIES);
+      const capped = files.length >= MAX_LIST_ENTRIES;
+      const output =
+        files.join('\n') + (capped ? `\n[... capped at ${String(MAX_LIST_ENTRIES)} entries]` : '');
+      return {
+        ok: true,
+        output: output || '(empty directory)',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    let entries;
+    try {
+      entries = await readdir(fullPath, { withFileTypes: true });
+    } catch (e: unknown) {
+      if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          ok: true,
+          output: '(directory does not exist)',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+      throw e;
+    }
+
+    // Sort: directories first, then alphabetical
+    const sorted = [...entries].sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const listing = sorted
+      .slice(0, MAX_LIST_ENTRIES)
+      .map((e) => `${e.isDirectory() ? '[DIR] ' : '[FILE]'} ${e.name}`)
+      .join('\n');
+
+    const output = listing || '(empty directory)';
+    return {
+      ok: true,
+      output:
+        sorted.length > MAX_LIST_ENTRIES
+          ? output + `\n[... capped at ${String(MAX_LIST_ENTRIES)} entries]`
+          : output,
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      output: error instanceof Error ? error.message : String(error),
+      errorCode: 'not_found',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+// ─── Glob ─────────────────────────────────────────────────────────
+
+async function executeGlob(args: Record<string, unknown>): Promise<MotorToolResult> {
+  const pattern = args['pattern'] as string;
+  if (!pattern) {
+    return {
+      ok: false,
+      output: 'Missing "pattern" argument.',
+      errorCode: 'invalid_args',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: 0,
+    };
+  }
+
+  if (pattern.startsWith('..') || pattern.includes('../')) {
+    return {
+      ok: false,
+      output: 'Pattern must not escape the search directory.',
+      errorCode: 'permission_denied',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: 0,
+    };
+  }
+
+  const path = (args['path'] as string | undefined) ?? '.';
+  const startTime = Date.now();
+
+  try {
+    const fullPath = await resolveSafePath(path);
+    if (!fullPath) return pathError(startTime);
+
+    const allFiles = await walkDir(fullPath, '', MAX_GLOB_SCAN);
+
+    const matched: string[] = [];
+    for (const file of allFiles) {
+      if (matched.length >= MAX_GLOB_RESULTS) break;
+      if (matchesGlobPattern(file, pattern)) {
+        matched.push(file);
+      }
+    }
+
+    // Sort by mtime (newest first)
+    const withMtime: { file: string; mtime: number }[] = [];
+    for (const file of matched) {
+      try {
+        const s = await stat(join(fullPath, file));
+        withMtime.push({ file, mtime: s.mtimeMs });
+      } catch {
+        withMtime.push({ file, mtime: 0 });
+      }
+    }
+    withMtime.sort((a, b) => b.mtime - a.mtime);
+
+    const output = withMtime.map((f) => f.file).join('\n');
+    const capped = matched.length >= MAX_GLOB_RESULTS;
+
+    return {
+      ok: true,
+      output:
+        (output || 'No files matched') +
+        (capped ? `\n[... capped at ${String(MAX_GLOB_RESULTS)} files]` : ''),
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      output: error instanceof Error ? error.message : String(error),
+      errorCode: 'execution_error',
+      retryable: false,
+      provenance: 'internal',
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
 // ─── Grep ────────────────────────────────────────────────────────
 
-async function walkDir(dir: string, basePath = ''): Promise<string[]> {
+async function walkDir(dir: string, basePath = '', maxEntries?: number): Promise<string[]> {
   const files: string[] = [];
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
+    if (maxEntries != null && files.length >= maxEntries) break;
     const entryPath = basePath ? `${basePath}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-      files.push(...(await walkDir(join(dir, entry.name), entryPath)));
+      const remaining = maxEntries != null ? maxEntries - files.length : undefined;
+      files.push(...(await walkDir(join(dir, entry.name), entryPath, remaining)));
     } else if (entry.isFile()) {
       files.push(entryPath);
     }
@@ -608,8 +855,11 @@ async function executeGrep(args: Record<string, unknown>): Promise<MotorToolResu
         for (let lineNum = 0; lineNum < lines.length; lineNum++) {
           if (matches.length >= MAX_GREP_MATCHES) break;
           regex.lastIndex = 0;
-          const line = lines[lineNum] ?? '';
+          let line = lines[lineNum] ?? '';
           if (regex.test(line)) {
+            // Per-line truncation
+            const truncated = line.length > MAX_GREP_LINE_LENGTH;
+            if (truncated) line = line.slice(0, MAX_GREP_LINE_LENGTH) + '[line truncated]';
             matches.push(`${file}:${String(lineNum + 1)}: ${line}`);
           }
         }
@@ -671,13 +921,14 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
 
     const content = await readFile(fullPath, 'utf-8');
 
-    const findResult = findUniqueSubstring(content, oldText);
+    // Try exact match first, then fuzzy
+    const findResult = fuzzyFindUnique(content, oldText);
 
     if (!findResult.ok) {
       const errorCode = findResult.error === 'not_found' ? 'not_found' : 'invalid_args';
       const output =
         findResult.error === 'not_found'
-          ? 'old_text not found in file'
+          ? 'old_text not found in file (tried exact + fuzzy matching)'
           : findResult.error === 'ambiguous'
             ? 'old_text found 2+ times (must be exactly 1)'
             : 'old_text cannot be empty';
@@ -691,10 +942,8 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
       };
     }
 
-    const patched =
-      content.slice(0, findResult.index) +
-      newText +
-      content.slice(findResult.index + oldText.length);
+    const matchEnd = findResult.index + oldText.length;
+    const patched = content.slice(0, findResult.index) + newText + content.slice(matchEnd);
     await writeFile(fullPath, patched, 'utf-8');
 
     const linesRemoved = oldText.split('\n').length;
@@ -717,29 +966,6 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
       durationMs: Date.now() - startTime,
     };
   }
-}
-
-// ─── Ask User (pass-through) ─────────────────────────────────────
-
-function executeAskUser(args: Record<string, unknown>): MotorToolResult {
-  const question = args['question'] as string;
-  if (!question) {
-    return {
-      ok: false,
-      output: '',
-      errorCode: 'invalid_args',
-      retryable: false,
-      provenance: 'internal',
-      durationMs: 0,
-    };
-  }
-  return {
-    ok: true,
-    output: `ASK_USER: ${question}`,
-    retryable: false,
-    provenance: 'internal',
-    durationMs: 0,
-  };
 }
 
 // ─── Main ────────────────────────────────────────────────────────

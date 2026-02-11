@@ -319,7 +319,16 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
       return null;
     }
 
-    return raw as unknown as SkillPolicy;
+    // Migrate legacy tool names: filesystem → read, write, list (with dedup)
+    const policy = raw as unknown as SkillPolicy;
+    if (Array.isArray(policy.allowedTools) && policy.allowedTools.includes('filesystem' as never)) {
+      const expanded = policy.allowedTools.flatMap((t: string) =>
+        t === 'filesystem' ? ['read', 'write', 'list'] : [t]
+      );
+      policy.allowedTools = [...new Set(expanded)] as SkillPolicy['allowedTools'];
+    }
+
+    return policy;
   } catch {
     return null;
   }

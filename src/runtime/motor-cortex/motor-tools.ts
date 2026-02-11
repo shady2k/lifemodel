@@ -14,7 +14,17 @@ import type {
 } from '../container/types.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { runShell } from '../shell/shell-runner.js';
-import { readFile, writeFile, readdir, mkdir, mkdtemp, lstat, realpath } from 'node:fs/promises';
+import { fuzzyFindUnique, matchesGlobPattern } from '../container/tool-server-utils.js';
+import {
+  readFile,
+  writeFile,
+  readdir,
+  mkdir,
+  mkdtemp,
+  lstat,
+  realpath,
+  stat,
+} from 'node:fs/promises';
 import { join, relative, isAbsolute, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -161,6 +171,54 @@ function pathTraversalError(startTime: number): MotorToolResult {
 }
 
 /**
+ * Synthetic tool definitions (injected by motor-loop, NOT part of MotorTool union).
+ *
+ * ask_user and request_approval are synthetic because:
+ * - They're NOT dispatched to container (host-side only)
+ * - They're conditionally injected based on run state
+ * - They don't live in TOOL_EXECUTORS (special handling in loop)
+ */
+export const SYNTHETIC_TOOL_DEFINITIONS = {
+  ask_user: {
+    type: 'function',
+    function: {
+      name: 'ask_user',
+      description:
+        'Ask the user a question. Pauses execution until they respond. ' +
+        'Use when you need clarification, approval, or additional information.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'Question to ask the user. Be clear and specific.',
+          },
+        },
+        required: ['question'],
+      },
+    },
+  },
+  request_approval: {
+    type: 'function',
+    function: {
+      name: 'request_approval',
+      description:
+        'Request approval before performing a potentially dangerous action (e.g., network requests that send data, destructive operations). Pauses execution until approved.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            description: 'Description of the action needing approval.',
+          },
+        },
+        required: ['action'],
+      },
+    },
+  },
+} satisfies Record<string, OpenAIChatTool>;
+
+/**
  * Tool definitions in OpenAI function calling format.
  */
 export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
@@ -185,52 +243,97 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     },
   },
 
-  filesystem: {
+  read: {
     type: 'function',
     function: {
-      name: 'filesystem',
+      name: 'read',
       description:
-        'Read, write, or list files in the workspace directory or skill directory (data/skills/). ' +
-        'Use for managing data files, artifacts, and creating SKILL.md files.',
+        'Read a file. Returns content with line numbers (max 2000 lines). Use offset/limit for large files.',
       parameters: {
         type: 'object',
         properties: {
-          action: {
-            type: 'string',
-            enum: ['read', 'write', 'list'],
-            description: 'Action to perform',
-          },
           path: {
             type: 'string',
-            description:
-              'File path (relative to workspace). For skill files, use paths like "skills/<name>/SKILL.md".',
+            description: 'File path (relative to workspace).',
           },
-          content: {
-            type: 'string',
-            description: 'File content (for write action).',
+          offset: {
+            type: 'number',
+            description: 'Start line (1-based, default 1).',
+          },
+          limit: {
+            type: 'number',
+            description: 'Max lines to read (default 2000, max 2000).',
           },
         },
-        required: ['action', 'path'],
+        required: ['path'],
       },
     },
   },
 
-  ask_user: {
+  write: {
     type: 'function',
     function: {
-      name: 'ask_user',
-      description:
-        'Ask the user a question. Pauses execution until they respond. ' +
-        'Use when you need clarification, approval, or additional information.',
+      name: 'write',
+      description: 'Write content to a file. Creates parent directories automatically.',
       parameters: {
         type: 'object',
         properties: {
-          question: {
+          path: {
             type: 'string',
-            description: 'Question to ask the user. Be clear and specific.',
+            description: 'File path (relative to workspace).',
+          },
+          content: {
+            type: 'string',
+            description: 'File content to write.',
           },
         },
-        required: ['question'],
+        required: ['path', 'content'],
+      },
+    },
+  },
+
+  list: {
+    type: 'function',
+    function: {
+      name: 'list',
+      description:
+        'List files and directories. Returns entries with [DIR]/[FILE] markers. Use to discover workspace structure.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'Directory path (relative to workspace, default ".").',
+          },
+          recursive: {
+            type: 'boolean',
+            description: 'List files recursively (default false).',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+
+  glob: {
+    type: 'function',
+    function: {
+      name: 'glob',
+      description:
+        'Find files by glob pattern (e.g., "**/*.ts"). Returns paths sorted by modification time (newest first).',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'Glob pattern to match files (e.g., "**/*.ts", "*.md").',
+          },
+          path: {
+            type: 'string',
+            description: 'Directory to search in (relative to workspace, default ".").',
+          },
+        },
+        required: ['pattern'],
       },
     },
   },
@@ -253,7 +356,11 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in milliseconds (default: 60000).',
+            description: 'Timeout in milliseconds (default: 60000, max: 120000).',
+          },
+          description: {
+            type: 'string',
+            description: 'Brief description of what this command does (for logging).',
           },
         },
         required: ['command'],
@@ -267,7 +374,7 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
       name: 'grep',
       description:
         'Search for patterns across workspace files. ' +
-        'Returns matching lines in "file:line: content" format (max 50 matches).',
+        'Returns matching lines in "file:line: content" format (max 100 matches, 200 chars per line).',
       parameters: {
         type: 'object',
         properties: {
@@ -294,8 +401,9 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     function: {
       name: 'patch',
       description:
-        'Find-and-replace text in a file. Matches must be exact and unique (exactly 1 occurrence). ' +
-        'More precise than full file rewrites via filesystem.',
+        'Find-and-replace text in a file. First tries exact match (must be unique). ' +
+        'Falls back to fuzzy matching (trimmed trailing whitespace, normalized whitespace, flexible indentation) if exact not found. ' +
+        'More precise than full file rewrites via write.',
       parameters: {
         type: 'object',
         properties: {
@@ -378,7 +486,42 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
 /**
  * Maximum grep matches to return.
  */
-const MAX_GREP_MATCHES = 50;
+const MAX_GREP_MATCHES = 100;
+
+/**
+ * Maximum characters per grep match line.
+ */
+const MAX_GREP_LINE_LENGTH = 200;
+
+/**
+ * Maximum lines for read tool output.
+ */
+const MAX_READ_LINES = 2000;
+
+/**
+ * Maximum characters for read tool output.
+ */
+const MAX_READ_CHARS = 50 * 1024; // 50KB
+
+/**
+ * Maximum entries for list tool (recursive mode).
+ */
+const MAX_LIST_ENTRIES = 200;
+
+/**
+ * Maximum files for glob tool output.
+ */
+const MAX_GLOB_RESULTS = 100;
+
+/**
+ * Maximum files scanned by glob before early termination.
+ */
+const MAX_GLOB_SCAN = 5000;
+
+/**
+ * Maximum shell timeout in milliseconds.
+ */
+const MAX_SHELL_TIMEOUT = 120_000;
 
 /**
  * Tools that MUST execute on the host (never dispatched to container).
@@ -387,17 +530,19 @@ const MAX_GREP_MATCHES = 50;
 const HOST_ONLY_TOOLS = new Set(['fetch', 'search']);
 
 /**
- * Recursively list all files in a directory.
+ * Recursively list all files in a directory with optional early termination.
  */
-async function walkDir(dir: string, basePath = ''): Promise<string[]> {
+async function walkDir(dir: string, basePath = '', maxEntries?: number): Promise<string[]> {
   const files: string[] = [];
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
+    if (maxEntries != null && files.length >= maxEntries) break;
     const entryPath = basePath ? `${basePath}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
       // Skip node_modules and hidden dirs
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-      files.push(...(await walkDir(join(dir, entry.name), entryPath)));
+      const remaining = maxEntries != null ? maxEntries - files.length : undefined;
+      files.push(...(await walkDir(join(dir, entry.name), entryPath, remaining)));
     } else if (entry.isFile()) {
       files.push(entryPath);
     }
@@ -413,6 +558,16 @@ function matchesGlob(filename: string, pattern: string): boolean {
     return filename.endsWith(pattern.slice(1));
   }
   return filename === pattern;
+}
+
+/**
+ * Check if a buffer contains null bytes (binary detection).
+ */
+function isBinaryBuffer(buf: Buffer): boolean {
+  for (let i = 0; i < Math.min(buf.length, 512); i++) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -435,23 +590,12 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
     return runSandbox(code, 30_000); // 30s timeout for agentic code steps
   },
 
-  filesystem: async (args, ctx): Promise<MotorToolResult> => {
-    // Auto-fix common LLM arg mistakes: filesystem({read: "path"}) → {action: "read", path: "path"}
-    if (!args['action'] && !args['path']) {
-      for (const action of ['read', 'write', 'list'] as const) {
-        if (typeof args[action] === 'string') {
-          args['action'] = action;
-          args['path'] = args[action];
-          break;
-        }
-      }
-    }
-
-    if (!args['action'] || !args['path']) {
+  read: async (args, ctx): Promise<MotorToolResult> => {
+    const path = args['path'] as string;
+    if (!path) {
       return {
         ok: false,
-        output:
-          'Missing required arguments. Usage: filesystem({action: "read"|"write"|"list", path: "file/path", content: "..." (for write)})',
+        output: 'Missing "path" argument.',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -459,9 +603,96 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       };
     }
 
-    const action = args['action'] as 'read' | 'write' | 'list';
+    const startTime = Date.now();
+
+    try {
+      const fullPath = await resolveSafePath(ctx.allowedRoots, path);
+      if (!fullPath) return pathTraversalError(startTime);
+
+      // Binary detection: read first 512 bytes as buffer
+      const fileHandle = await readFile(fullPath);
+      if (isBinaryBuffer(fileHandle)) {
+        return {
+          ok: true,
+          output: `Binary file (${String(fileHandle.length)} bytes). Use shell to inspect.`,
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      const data = fileHandle.toString('utf-8');
+      const allLines = data.split('\n');
+      const totalLines = allLines.length;
+
+      // Clamp offset/limit
+      const rawOffset = args['offset'] as number | undefined;
+      const rawLimit = args['limit'] as number | undefined;
+      const offset = Math.max(1, Math.min(totalLines, Math.floor(rawOffset ?? 1)));
+      const limit = Math.max(1, Math.min(MAX_READ_LINES, Math.floor(rawLimit ?? MAX_READ_LINES)));
+
+      // Apply offset (1-based) and limit
+      const sliced = allLines.slice(offset - 1, offset - 1 + limit);
+
+      // Format with line numbers
+      const lineNumWidth = String(offset - 1 + sliced.length).length;
+      let output = sliced
+        .map((line, i) => {
+          const lineNum = String(offset + i).padStart(lineNumWidth, ' ');
+          return `${lineNum}| ${line}`;
+        })
+        .join('\n');
+
+      // Apply 50KB character cap
+      if (output.length > MAX_READ_CHARS) {
+        output = output.slice(0, MAX_READ_CHARS);
+        // Find last complete line
+        const lastNewline = output.lastIndexOf('\n');
+        if (lastNewline > 0) output = output.slice(0, lastNewline);
+      }
+
+      // Truncation notice
+      const endLine = offset - 1 + sliced.length;
+      if (endLine < totalLines) {
+        output += `\n[... truncated: ${String(totalLines)} total lines. Use offset=${String(endLine + 1)} to continue.]`;
+      }
+
+      return {
+        ok: true,
+        output,
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return {
+          ok: false,
+          output: `File not found: ${path}`,
+          errorCode: 'not_found',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'not_found',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+  },
+
+  write: async (args, ctx): Promise<MotorToolResult> => {
     const path = args['path'] as string;
-    // Auto-stringify if model passes JSON object as content (common LLM behavior)
+    // Auto-stringify if model passes JSON object as content
     const rawContent = args['content'];
     const content =
       rawContent == null
@@ -470,105 +701,58 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
           ? rawContent
           : JSON.stringify(rawContent, null, 2);
 
+    if (!path) {
+      return {
+        ok: false,
+        output: 'Missing "path" argument.',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+    if (content == null) {
+      return {
+        ok: false,
+        output: 'Missing "content" argument. Provide the file content as a string.',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+
     const startTime = Date.now();
 
     try {
-      switch (action) {
-        case 'read': {
-          const fullPath = await resolveSafePath(ctx.allowedRoots, path);
-          if (!fullPath) return pathTraversalError(startTime);
-          const data = await readFile(fullPath, 'utf-8');
-          return {
-            ok: true,
-            output: data,
-            retryable: false,
-            provenance: 'internal',
-            durationMs: Date.now() - startTime,
-          };
-        }
-
-        case 'write': {
-          if (content == null) {
-            return {
-              ok: false,
-              output: 'Missing "content" argument. Provide the file content as a string.',
-              errorCode: 'invalid_args',
-              retryable: false,
-              provenance: 'internal',
-              durationMs: Date.now() - startTime,
-            };
-          }
-          const fullPath = await resolveSafePath(ctx.writeRoots, path);
-          if (!fullPath) return pathTraversalError(startTime);
-          // Reject writes to symlinks
-          try {
-            const stats = await lstat(fullPath);
-            if (stats.isSymbolicLink()) {
-              return {
-                ok: false,
-                output: 'Cannot write to symlink',
-                errorCode: 'permission_denied',
-                retryable: false,
-                provenance: 'internal',
-                durationMs: Date.now() - startTime,
-              };
-            }
-          } catch {
-            // File doesn't exist yet - that's fine for writes
-          }
-          // Ensure parent directory exists
-          await mkdir(dirname(fullPath), { recursive: true });
-          await writeFile(fullPath, content, 'utf-8');
-          return {
-            ok: true,
-            output: `Wrote ${String(content.length)} bytes to ${path}`,
-            retryable: false,
-            provenance: 'internal',
-            durationMs: Date.now() - startTime,
-          };
-        }
-
-        case 'list': {
-          const fullPath = await resolveSafePath(ctx.allowedRoots, path);
-          if (!fullPath) return pathTraversalError(startTime);
-          let entries;
-          try {
-            entries = await readdir(fullPath, { withFileTypes: true });
-          } catch (e: unknown) {
-            if (e instanceof Error && 'code' in e && e.code === 'ENOENT') {
-              return {
-                ok: true,
-                output:
-                  '(directory does not exist yet — use filesystem write to create files here)',
-                retryable: false,
-                provenance: 'internal',
-                durationMs: Date.now() - startTime,
-              };
-            }
-            throw e;
-          }
-          const listing = entries
-            .map((e) => `${e.isDirectory() ? '[DIR] ' : '[FILE]'} ${e.name}`)
-            .join('\n');
-          return {
-            ok: true,
-            output: listing || '(empty directory)',
-            retryable: false,
-            provenance: 'internal',
-            durationMs: Date.now() - startTime,
-          };
-        }
-
-        default:
+      const fullPath = await resolveSafePath(ctx.writeRoots, path);
+      if (!fullPath) return pathTraversalError(startTime);
+      // Reject writes to symlinks
+      try {
+        const stats = await lstat(fullPath);
+        if (stats.isSymbolicLink()) {
           return {
             ok: false,
-            output: '',
-            errorCode: 'invalid_args',
+            output: 'Cannot write to symlink',
+            errorCode: 'permission_denied',
             retryable: false,
             provenance: 'internal',
             durationMs: Date.now() - startTime,
           };
+        }
+      } catch {
+        // File doesn't exist yet - that's fine for writes
       }
+      // Ensure parent directory exists
+      await mkdir(dirname(fullPath), { recursive: true });
+      await writeFile(fullPath, content, 'utf-8');
+      return {
+        ok: true,
+        output: `Wrote ${String(content.length)} bytes to ${path}`,
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
     } catch (error) {
       return {
         ok: false,
@@ -581,29 +765,159 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
     }
   },
 
-  // Not async — returns a plain value. The loop handles the pause logic.
-  ask_user: (args, _ctx): Promise<MotorToolResult> => {
-    const question = args['question'] as string;
-    if (!question) {
-      return Promise.resolve({
+  list: async (args, ctx): Promise<MotorToolResult> => {
+    const path = (args['path'] as string | undefined) ?? '.';
+    const recursive = (args['recursive'] as boolean | undefined) ?? false;
+    const startTime = Date.now();
+
+    try {
+      const fullPath = await resolveSafePath(ctx.allowedRoots, path);
+      if (!fullPath) return pathTraversalError(startTime);
+
+      if (recursive) {
+        const files = await walkDir(fullPath, '', MAX_LIST_ENTRIES);
+        const capped = files.length >= MAX_LIST_ENTRIES;
+        const output =
+          files.join('\n') +
+          (capped ? `\n[... capped at ${String(MAX_LIST_ENTRIES)} entries]` : '');
+        return {
+          ok: true,
+          output: output || '(empty directory)',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      let entries;
+      try {
+        entries = await readdir(fullPath, { withFileTypes: true });
+      } catch (e: unknown) {
+        if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+          return {
+            ok: true,
+            output: '(directory does not exist)',
+            retryable: false,
+            provenance: 'internal',
+            durationMs: Date.now() - startTime,
+          };
+        }
+        throw e;
+      }
+
+      // Sort: directories first, then alphabetical
+      const sorted = [...entries].sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1;
+        if (!a.isDirectory() && b.isDirectory()) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      const listing = sorted
+        .slice(0, MAX_LIST_ENTRIES)
+        .map((e) => `${e.isDirectory() ? '[DIR] ' : '[FILE]'} ${e.name}`)
+        .join('\n');
+
+      const output = listing || '(empty directory)';
+      return {
+        ok: true,
+        output:
+          sorted.length > MAX_LIST_ENTRIES
+            ? output + `\n[... capped at ${String(MAX_LIST_ENTRIES)} entries]`
+            : output,
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
         ok: false,
-        output: '',
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'not_found',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+  },
+
+  glob: async (args, ctx): Promise<MotorToolResult> => {
+    const pattern = args['pattern'] as string;
+    if (!pattern) {
+      return {
+        ok: false,
+        output: 'Missing "pattern" argument.',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
         durationMs: 0,
-      });
+      };
     }
 
-    // This is handled specially in the loop - we return the question
-    // and the loop will pause and emit a signal
-    return Promise.resolve({
-      ok: true,
-      output: `ASK_USER: ${question}`,
-      retryable: false,
-      provenance: 'internal',
-      durationMs: 0,
-    });
+    // Validate pattern: reject path escape attempts
+    if (pattern.startsWith('..') || pattern.includes('../')) {
+      return {
+        ok: false,
+        output: 'Pattern must not escape the search directory.',
+        errorCode: 'permission_denied',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+
+    const path = (args['path'] as string | undefined) ?? '.';
+    const startTime = Date.now();
+
+    try {
+      const fullPath = await resolveSafePath(ctx.allowedRoots, path);
+      if (!fullPath) return pathTraversalError(startTime);
+
+      // Walk directory with early termination
+      const allFiles = await walkDir(fullPath, '', MAX_GLOB_SCAN);
+
+      // Filter using glob matching
+      const matched: string[] = [];
+      for (const file of allFiles) {
+        if (matched.length >= MAX_GLOB_RESULTS) break;
+        if (matchesGlobPattern(file, pattern)) {
+          matched.push(file);
+        }
+      }
+
+      // Sort by mtime (newest first) — only stat matched files
+      const withMtime: { file: string; mtime: number }[] = [];
+      for (const file of matched) {
+        try {
+          const s = await stat(join(fullPath, file));
+          withMtime.push({ file, mtime: s.mtimeMs });
+        } catch {
+          withMtime.push({ file, mtime: 0 });
+        }
+      }
+      withMtime.sort((a, b) => b.mtime - a.mtime);
+
+      const output = withMtime.map((f) => f.file).join('\n');
+      const capped = matched.length >= MAX_GLOB_RESULTS;
+
+      return {
+        ok: true,
+        output:
+          (output || 'No files matched') +
+          (capped ? `\n[... capped at ${String(MAX_GLOB_RESULTS)} files]` : ''),
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'execution_error',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
   },
 
   shell: async (args, ctx): Promise<MotorToolResult> => {
@@ -619,7 +933,8 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       };
     }
 
-    const timeout = args['timeout'] as number | undefined;
+    const rawTimeout = args['timeout'] as number | undefined;
+    const timeout = rawTimeout != null ? Math.min(rawTimeout, MAX_SHELL_TIMEOUT) : undefined;
     return runShell(command, { ...(timeout != null && { timeout }), cwd: ctx.workspace });
   },
 
@@ -658,8 +973,11 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
           for (let lineNum = 0; lineNum < lines.length; lineNum++) {
             if (matches.length >= MAX_GREP_MATCHES) break;
             regex.lastIndex = 0;
-            const line = lines[lineNum] ?? '';
+            let line = lines[lineNum] ?? '';
             if (regex.test(line)) {
+              // Per-line truncation
+              const truncated = line.length > MAX_GREP_LINE_LENGTH;
+              if (truncated) line = line.slice(0, MAX_GREP_LINE_LENGTH) + '[line truncated]';
               matches.push(`${file}:${String(lineNum + 1)}: ${line}`);
             }
           }
@@ -719,42 +1037,37 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
 
       const content = await readFile(fullPath, 'utf-8');
 
-      // Count occurrences
-      let count = 0;
-      let idx = -1;
-      let searchStart = 0;
-      while ((idx = content.indexOf(oldText, searchStart)) !== -1) {
-        count++;
-        searchStart = idx + 1;
-        if (count > 1) break; // No need to count further
-      }
+      // Try exact match first, then fuzzy
+      const findResult = fuzzyFindUnique(content, oldText);
 
-      if (count === 0) {
+      if (!findResult.ok) {
+        const errorCode = findResult.error === 'not_found' ? 'not_found' : 'invalid_args';
+        const output =
+          findResult.error === 'not_found'
+            ? 'old_text not found in file (tried exact + fuzzy matching)'
+            : findResult.error === 'ambiguous'
+              ? 'old_text found 2+ times (must be exactly 1). Provide more context to make the match unique.'
+              : 'old_text cannot be empty';
         return {
           ok: false,
-          output: 'old_text not found in file',
-          errorCode: 'not_found',
-          retryable: false,
+          output,
+          errorCode,
+          retryable: findResult.error === 'ambiguous',
           provenance: 'internal',
           durationMs: Date.now() - startTime,
         };
       }
 
-      if (count > 1) {
-        return {
-          ok: false,
-          output: `old_text found ${String(count)}+ times (must be exactly 1). Provide more context to make the match unique.`,
-          errorCode: 'invalid_args',
-          retryable: true,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      // Single match — apply patch
-      const firstIdx = content.indexOf(oldText);
-      const patched =
-        content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length);
+      // Apply patch at the found position
+      // For fuzzy matches, we need to find the actual text in the content at that position
+      // The index points to where the match starts in the original content
+      // We need to determine how long the matched segment is in the original content
+      // For exact strategy, it's oldText.length. For fuzzy, we need the original span.
+      // Since fuzzyFindUnique returns the index in the normalized content mapped back,
+      // we use the oldText length for replacement (the strategies normalize for matching but
+      // the index maps back to original positions)
+      const matchEnd = findResult.index + oldText.length;
+      const patched = content.slice(0, findResult.index) + newText + content.slice(matchEnd);
       await writeFile(fullPath, patched, 'utf-8');
 
       // Build summary
@@ -962,6 +1275,25 @@ export async function executeTool(
   args: Record<string, unknown>,
   ctx: ToolContext
 ): Promise<MotorToolResult> {
+  // Compat shim: route legacy 'filesystem' tool calls to read/write/list.
+  // Handles in-flight resumed runs with pending filesystem tool calls in their message history.
+  if (name === 'filesystem') {
+    // Auto-fix common LLM arg mistakes: filesystem({read: "path"}) → {action: "read", path: "path"}
+    if (!args['action'] && !args['path']) {
+      for (const action of ['read', 'write', 'list'] as const) {
+        if (typeof args[action] === 'string') {
+          args['action'] = action;
+          args['path'] = args[action];
+          break;
+        }
+      }
+    }
+    const action = args['action'] as string | undefined;
+    if (action === 'write') return TOOL_EXECUTORS.write(args, ctx);
+    if (action === 'list') return TOOL_EXECUTORS.list(args, ctx);
+    return TOOL_EXECUTORS.read(args, ctx); // Default to read
+  }
+
   if (!(name in TOOL_EXECUTORS)) {
     return {
       ok: false,

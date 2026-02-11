@@ -12,8 +12,10 @@ import { describe, it, expect } from 'vitest';
 import {
   validatePipeline,
   matchesGlob,
+  matchesGlobPattern,
   resolveCredentialPlaceholders,
   findUniqueSubstring,
+  fuzzyFindUnique,
   splitOnUnquotedPipe,
   SHELL_ALLOWLIST,
   NETWORK_COMMANDS,
@@ -501,5 +503,59 @@ describe('splitOnUnquotedPipe', () => {
   it('handles leading pipe with trim', () => {
     const result = splitOnUnquotedPipe('| grep test');
     expect(result).toEqual(['', 'grep test']);
+  });
+});
+
+describe('matchesGlobPattern', () => {
+  it('matches ** wildcard across directories', () => {
+    expect(matchesGlobPattern('src/index.ts', '**/*.ts')).toBe(true);
+    expect(matchesGlobPattern('src/foo/bar.ts', '**/*.ts')).toBe(true);
+    expect(matchesGlobPattern('index.ts', '**/*.ts')).toBe(true);
+  });
+
+  it('matches single * within a segment', () => {
+    expect(matchesGlobPattern('file.ts', '*.ts')).toBe(true);
+    expect(matchesGlobPattern('file.js', '*.ts')).toBe(false);
+  });
+
+  it('matches ? for single character', () => {
+    expect(matchesGlobPattern('file1.ts', 'file?.ts')).toBe(true);
+    expect(matchesGlobPattern('file12.ts', 'file?.ts')).toBe(false);
+  });
+
+  it('matches prefix paths', () => {
+    expect(matchesGlobPattern('src/foo/bar.ts', 'src/**/*.ts')).toBe(true);
+    expect(matchesGlobPattern('lib/foo/bar.ts', 'src/**/*.ts')).toBe(false);
+  });
+
+  it('rejects non-matching patterns', () => {
+    expect(matchesGlobPattern('file.txt', '*.ts')).toBe(false);
+    expect(matchesGlobPattern('src/file.js', '**/*.ts')).toBe(false);
+  });
+});
+
+describe('fuzzyFindUnique', () => {
+  it('finds exact match', () => {
+    const result = fuzzyFindUnique('hello world', 'world');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.index).toBe(6);
+    }
+  });
+
+  it('returns not_found for completely missing text', () => {
+    const result = fuzzyFindUnique('hello world', 'goodbye');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('not_found');
+    }
+  });
+
+  it('returns invalid_args for empty oldText', () => {
+    const result = fuzzyFindUnique('hello world', '');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('invalid_args');
+    }
   });
 });
