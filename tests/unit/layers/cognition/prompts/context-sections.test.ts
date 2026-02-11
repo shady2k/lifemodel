@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { buildAvailableSkillsSection } from '../context-sections.js';
-import type { LoopContext } from '../../agentic-loop-types.js';
+import { buildAvailableSkillsSection } from '../../../../../src/layers/cognition/prompts/context-sections.js';
+import type { LoopContext } from '../../../../../src/layers/cognition/agentic-loop-types.js';
 
 describe('buildAvailableSkillsSection', () => {
   function createMockContext(override?: Partial<LoopContext>): LoopContext {

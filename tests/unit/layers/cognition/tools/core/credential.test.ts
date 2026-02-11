@@ -8,9 +8,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createCredentialTool } from '../credential.js';
-import type { CredentialResult } from '../credential.js';
-import { createEnvCredentialStore } from '../../../../../runtime/vault/credential-store.js';
+import { createCredentialTool } from '../../../../../../src/layers/cognition/tools/core/credential.js';
+import type { CredentialResult } from '../../../../../../src/layers/cognition/tools/core/credential.js';
+import { createEnvCredentialStore } from '../../../../../../src/runtime/vault/credential-store.js';
 
 // Generate unique test names to avoid conflicts with system env vars
 const testId = `${String(Date.now())}${Math.random().toString(36).slice(2, 8)}`;

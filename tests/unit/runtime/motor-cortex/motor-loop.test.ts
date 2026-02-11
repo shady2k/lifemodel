@@ -5,9 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildMotorSystemPrompt } from '../motor-loop.js';
-import type { MotorRun } from '../motor-protocol.js';
-import type { LoadedSkill } from '../../skills/skill-types.js';
+import { buildMotorSystemPrompt } from '../../../../src/runtime/motor-cortex/motor-loop.js';
+import type { MotorRun } from '../../../../src/runtime/motor-cortex/motor-protocol.js';
+import type { LoadedSkill } from '../../../../src/runtime/skills/skill-types.js';
 
 describe('buildMotorSystemPrompt', () => {
   function createMockRun(tools: string[] = ['code']): MotorRun {

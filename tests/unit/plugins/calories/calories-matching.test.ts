@@ -9,8 +9,8 @@ import {
   levenshtein,
   matchCandidates,
   decideMatch,
-} from './calories-matching.js';
-import type { FoodItem } from './calories-types.js';
+} from '../../../../src/plugins/calories/calories-matching.js';
+import type { FoodItem } from '../../../../src/plugins/calories/calories-types.js';
 
 describe('normalizeRu', () => {
   it('converts to lowercase', () => {

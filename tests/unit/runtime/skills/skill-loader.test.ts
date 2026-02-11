@@ -16,8 +16,8 @@ import {
   updateSkillIndex,
   loadSkill,
   computeDirectoryHash,
-} from '../skill-loader.js';
-import type { MotorTool } from '../../motor-cortex/motor-protocol.js';
+} from '../../../../src/runtime/skills/skill-loader.js';
+import type { MotorTool } from '../../../../src/runtime/motor-cortex/motor-protocol.js';
 import { mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -31,7 +31,7 @@ license: MIT
 ---
 # Test Skill
 
-This is the body.
+This is body.
 `;
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
@@ -69,7 +69,7 @@ Body`;
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      // Should skip the nested metadata block
+      // Should skip nested metadata block
       expect(result.frontmatter['name']).toBe('with-metadata');
       // metadata should not be in frontmatter
       expect(result.frontmatter['metadata']).toBeUndefined();
@@ -552,7 +552,7 @@ describe('computeDirectoryHash', () => {
 
     const hash1 = await computeDirectoryHash(skillDir);
 
-    // Remove dotfile - hash should be the same
+    // Remove dotfile - hash should be same
     await rm(join(skillDir, '.DS_Store'));
 
     const hash2 = await computeDirectoryHash(skillDir);

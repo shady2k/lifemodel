@@ -1,13 +1,13 @@
 /**
  * Prevalidation Tests
  *
- * Tests for the prevalidateToolArgs middleware that validates
+ * Tests for prevalidateToolArgs middleware that validates
  * tool arguments before per-tool validation.
  */
 
 import { describe, it, expect } from 'vitest';
-import { prevalidateToolArgs } from '../validation.js';
-import type { ToolParameter } from '../types.js';
+import { prevalidateToolArgs } from '../../../../../src/layers/cognition/tools/validation.js';
+import type { ToolParameter } from '../../../../../src/layers/cognition/tools/types.js';
 
 describe('prevalidateToolArgs', () => {
   const mockParameters: ToolParameter[] = [

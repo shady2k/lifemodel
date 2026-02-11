@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseResponseContent } from '../response-parser.js';
+import { parseResponseContent } from '../../../../src/layers/cognition/response-parser.js';
 
 describe('parseResponseContent', () => {
   it('parses valid JSON with response and status', () => {
@@ -131,15 +131,15 @@ describe('parseResponseContent', () => {
 
   describe('JSON at end of content (model leak)', () => {
     it('extracts JSON from end of content when model outputs text then JSON', () => {
-      const leaked = `Here are the articles:
+      const leaked = `Here are articles:
 
 1. Article one
 2. Article two
 
-{"response":"Here are the articles:\\n\\n1. Article one\\n2. Article two"}`;
+{"response":"Here are articles:\\n\\n1. Article one\\n2. Article two"}`;
       const result = parseResponseContent(leaked);
       expect(result).toEqual({
-        text: 'Here are the articles:\n\n1. Article one\n2. Article two',
+        text: 'Here are articles:\n\n1. Article one\n2. Article two',
       });
     });
 
@@ -171,7 +171,7 @@ Some description
       const result = parseResponseContent(leaked);
       expect(result.text).toContain('ИИ повис на стекловолокне');
       expect(result.text).toContain('Тебе какая‑то из них особенно интересна?');
-      // Should NOT contain the JSON wrapper
+      // Should NOT contain JSON wrapper
       expect(result.text).not.toContain('{"response":');
     });
   });
@@ -196,13 +196,13 @@ Some description
     });
 
     it('does not flag normal text mentioning core.act', () => {
-      const result = parseResponseContent('I used core.act to run the task');
-      expect(result).toEqual({ text: 'I used core.act to run the task' });
+      const result = parseResponseContent('I used core.act to run task');
+      expect(result).toEqual({ text: 'I used core.act to run task' });
     });
 
     it('does not flag backtick-quoted tool references in normal text', () => {
-      const result = parseResponseContent('Use the `core.say` tool to respond');
-      expect(result).toEqual({ text: 'Use the `core.say` tool to respond' });
+      const result = parseResponseContent('Use `core.say` tool to respond');
+      expect(result).toEqual({ text: 'Use `core.say` tool to respond' });
     });
 
     it('still rejects plain text when allowPlainText is false (existing behavior)', () => {

@@ -25,8 +25,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, writeFile, readFile, symlink, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { extractSkillsFromWorkspace } from '../skill-extraction.js';
-import { computeDirectoryHash } from '../../skills/skill-loader.js';
+import { extractSkillsFromWorkspace } from '../../../../src/runtime/motor-cortex/skill-extraction.js';
+import { computeDirectoryHash } from '../../../../src/runtime/skills/skill-loader.js';
 
 // Test logger
 const mockLogger = {
@@ -439,6 +439,119 @@ description: Updated version
       // Verify skill was updated
       const updatedContent = await readFile(join(installedDir, 'SKILL.md'), 'utf-8');
       expect(updatedContent).toContain('Updated version');
+    });
+
+    it('preserves existing policy fields when Motor does not write policy.json', async () => {
+      const skillName = 'keep-policy';
+      const installedDir = join(skillsDir, skillName);
+      await mkdir(installedDir, { recursive: true });
+
+      // Create existing skill with approved policy
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        `---
+name: keep-policy
+description: Old version
+---
+# Old`,
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedTools: ['shell', 'code'],
+          allowedDomains: ['api.example.com'],
+          requiredCredentials: ['api_key'],
+        }),
+        'utf-8'
+      );
+
+      // Motor writes only SKILL.md (no policy.json)
+      const skillDir = join(workspace, 'skills', skillName);
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(
+        join(skillDir, 'SKILL.md'),
+        `---
+name: keep-policy
+description: Updated version
+---
+# Updated`,
+        'utf-8'
+      );
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      expect(result.updated).toEqual(['keep-policy']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // Trust is always reset
+      expect(policy.trust).toBe('pending_review');
+      // But permissions are preserved from existing policy
+      expect(policy.allowedTools).toEqual(['shell', 'code']);
+      expect(policy.allowedDomains).toEqual(['api.example.com']);
+      expect(policy.requiredCredentials).toEqual(['api_key']);
+    });
+
+    it('Motor-written policy takes precedence over existing policy on update', async () => {
+      const skillName = 'motor-wins';
+      const installedDir = join(skillsDir, skillName);
+      await mkdir(installedDir, { recursive: true });
+
+      // Create existing skill with old policy
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        `---
+name: motor-wins
+description: Old version
+---
+# Old`,
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedTools: ['shell'],
+          allowedDomains: ['old.example.com'],
+        }),
+        'utf-8'
+      );
+
+      // Motor writes SKILL.md + policy.json with new tools
+      const skillDir = join(workspace, 'skills', skillName);
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(
+        join(skillDir, 'SKILL.md'),
+        `---
+name: motor-wins
+description: Updated version
+---
+# Updated`,
+        'utf-8'
+      );
+      await writeFile(
+        join(skillDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedTools: ['code', 'fetch'],
+          allowedDomains: ['new.example.com'],
+        }),
+        'utf-8'
+      );
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      expect(result.updated).toEqual(['motor-wins']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.trust).toBe('pending_review');
+      // Motor's values take precedence
+      expect(policy.allowedTools).toEqual(['code', 'fetch']);
+      expect(policy.allowedDomains).toEqual(['new.example.com']);
     });
   });
 

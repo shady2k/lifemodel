@@ -9,10 +9,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSkillTool } from '../skill.js';
-import type { SkillResult } from '../skill.js';
-import type { SkillPolicy } from '../../../../../runtime/skills/skill-types.js';
-import { loadSkill } from '../../../../../runtime/skills/skill-loader.js';
+import { createSkillTool } from '../../../../../../src/layers/cognition/tools/core/skill.js';
+import type { SkillResult } from '../../../../../../src/layers/cognition/tools/core/skill.js';
+import type { SkillPolicy } from '../../../../../../src/runtime/skills/skill-types.js';
+import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
 
 /** Minimal valid SKILL.md content */
 const SKILL_MD = `---

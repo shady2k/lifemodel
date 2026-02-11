@@ -5,30 +5,21 @@
  * trust gating, content hash mismatch
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { createActTool } from '../act.js';
-import type { MotorCortex } from '../../../../../runtime/motor-cortex/motor-cortex.js';
-import type {
-  loadSkill as LoadSkillFn,
-  updateSkillIndex as UpdateSkillIndexFn,
-} from '../../../../../runtime/skills/skill-loader.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createActTool } from '../../../../../../src/layers/cognition/tools/core/act.js';
+import type { MotorCortex } from '../../../../../../src/runtime/motor-cortex/motor-cortex.js';
 
-// Get the mocked module references
-let loadSkill: typeof LoadSkillFn;
-let updateSkillIndex: typeof UpdateSkillIndexFn;
-
-// Mock the skill-loader module
-vi.mock('../../../../../runtime/skills/skill-loader.js', () => ({
+// Mock skill-loader module with path that matches production code's import resolution
+// The production code at src/layers/cognition/tools/core/act.ts imports
+// from '../../../../runtime/skills/skill-loader.js' which resolves to src/runtime/skills/skill-loader.js
+vi.mock('../../../../../../src/runtime/skills/skill-loader.js', () => ({
   loadSkill: vi.fn(),
   validateSkillInputs: vi.fn(() => []),
   updateSkillIndex: vi.fn(),
 }));
 
-beforeAll(async () => {
-  const module = await import('../../../../../runtime/skills/skill-loader.js');
-  loadSkill = module.loadSkill;
-  updateSkillIndex = module.updateSkillIndex;
-});
+// Import the mocked functions
+import { loadSkill, updateSkillIndex } from '../../../../../../src/runtime/skills/skill-loader.js';
 
 describe('core.act tool', () => {
   const mockMotorCortex = {
@@ -82,7 +73,7 @@ describe('core.act tool', () => {
 
   describe('agentic mode - skill loading', () => {
     it('requires explicit tools for skills without approved policy', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: { trust: 'unknown', schemaVersion: 1, allowedTools: ['code'] },
         body: 'instructions',
@@ -103,7 +94,7 @@ describe('core.act tool', () => {
     });
 
     it('uses policy defaults when trust is approved', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
           trust: 'approved',
@@ -138,7 +129,7 @@ describe('core.act tool', () => {
     });
 
     it('merges explicit domains with policy domains', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
           trust: 'approved',
@@ -171,7 +162,7 @@ describe('core.act tool', () => {
     });
 
     it('allows explicit tools override', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
           trust: 'approved',
@@ -203,7 +194,7 @@ describe('core.act tool', () => {
     });
 
     it('updates skill index with lastUsed timestamp', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test skill' },
         policy: {
           trust: 'approved',
@@ -301,7 +292,8 @@ describe('core.act tool', () => {
     });
 
     it('returns error when skill fails to load', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
+      // Use the mock directly instead of vi.mocked
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         error: 'Skill not found',
       });
 

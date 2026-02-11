@@ -21,7 +21,7 @@ import { readdir, readFile, stat, lstat, cp, rename, unlink, rm } from 'node:fs/
 import { join } from 'node:path';
 import type { Logger } from '../../types/logger.js';
 import type { MotorTool } from './motor-protocol.js';
-import type { SkillInput } from '../skills/skill-types.js';
+import type { SkillInput, SkillPolicy } from '../skills/skill-types.js';
 import {
   computeDirectoryHash,
   parseSkillFile,
@@ -222,6 +222,37 @@ export async function extractSkillsFromWorkspace(
         .then(() => true)
         .catch(() => false);
 
+      // Step f2: Read existing policy for merge (update only)
+      let existingPolicy: Record<string, unknown> | null = null;
+      if (isUpdate) {
+        try {
+          const existing = await readFile(join(targetDir, 'policy.json'), 'utf-8');
+          const parsed = JSON.parse(existing) as Record<string, unknown>;
+          if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+            // Validate that provenance has correct structure before using
+            // Destructure to exclude provenance from spread, avoiding type errors
+            const { provenance, ...restOfParsed } = parsed;
+            const hasValidProvenance =
+              provenance &&
+              typeof provenance === 'object' &&
+              'source' in provenance &&
+              typeof provenance.source === 'string' &&
+              'fetchedAt' in provenance &&
+              typeof provenance.fetchedAt === 'string';
+            // Type assertion to satisfy TypeScript - provenance is either valid Motor type or undefined
+            existingPolicy = {
+              ...restOfParsed,
+              // Ensure provenance is valid or undefined
+              provenance: hasValidProvenance
+                ? (provenance as SkillPolicy['provenance'])
+                : undefined,
+            };
+          }
+        } catch {
+          // No valid existing policy
+        }
+      }
+
       // Step g: Atomic copy
       const tempDir = join(skillsDir, `.tmp-${skillName}-${runId}`);
       const backupDir = join(skillsDir, `.old-${skillName}-${String(Date.now())}`);
@@ -292,21 +323,44 @@ export async function extractSkillsFromWorkspace(
       const motorRequiredCredentials = motorPolicy?.['requiredCredentials'] as string[] | undefined;
       const motorInputs = motorPolicy?.['inputs'] as SkillInput[] | undefined;
 
+      // On updates where Motor didn't write a policy, preserve existing permissions
+      const fallbackTools = existingPolicy?.['allowedTools'] as string[] | undefined;
+      const fallbackDomains = existingPolicy?.['allowedDomains'] as string[] | undefined;
+      const fallbackCredentials = existingPolicy?.['requiredCredentials'] as string[] | undefined;
+      const fallbackInputs = existingPolicy?.['inputs'] as SkillInput[] | undefined;
+      const fallbackProvenance = existingPolicy?.['provenance'] as
+        | Record<string, unknown>
+        | undefined;
+
+      // Build effective provenance: Motor > existing > none
+      let effectiveProvenance: SkillPolicy['provenance'] = undefined;
+      if (hasValidProvenance) {
+        effectiveProvenance = {
+          source: motorProvenance['source'] as string,
+          fetchedAt: motorProvenance['fetchedAt'] as string,
+          contentHash,
+        };
+      } else if (
+        fallbackProvenance &&
+        typeof fallbackProvenance['source'] === 'string' &&
+        typeof fallbackProvenance['fetchedAt'] === 'string'
+      ) {
+        effectiveProvenance = {
+          source: fallbackProvenance['source'],
+          fetchedAt: fallbackProvenance['fetchedAt'],
+          contentHash,
+        };
+      }
+
       // Generate new policy with pending_review trust
       const newPolicy = {
         schemaVersion: 1,
         trust: 'pending_review' as const,
-        allowedTools: (motorAllowedTools ?? []) as MotorTool[],
-        allowedDomains: motorAllowedDomains,
-        requiredCredentials: motorRequiredCredentials,
-        inputs: motorInputs,
-        ...(hasValidProvenance && {
-          provenance: {
-            source: motorProvenance['source'] as string,
-            fetchedAt: motorProvenance['fetchedAt'] as string,
-            contentHash,
-          },
-        }),
+        allowedTools: (motorAllowedTools ?? fallbackTools ?? []) as MotorTool[],
+        allowedDomains: motorAllowedDomains ?? fallbackDomains,
+        requiredCredentials: motorRequiredCredentials ?? fallbackCredentials,
+        inputs: motorInputs ?? fallbackInputs,
+        ...(effectiveProvenance && { provenance: effectiveProvenance }),
         extractedFrom: {
           runId,
           timestamp: new Date().toISOString(),
