@@ -25,6 +25,7 @@ import type { Message, ToolCall } from '../../llm/provider.js';
 import type { ToolRegistry } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
+import { prevalidateToolArgs } from './tools/validation.js';
 
 /**
  * Robust JSON parser for LLM-generated tool arguments.
@@ -232,6 +233,22 @@ export async function executeToolCalls(
     // Validate args against tool schema before execution
     const tool = toolRegistry.getTools().find((t) => t.name === toolName);
     if (tool) {
+      const prevalidation = prevalidateToolArgs(args, tool.parameters, tool.rawParameterSchema);
+      if (!prevalidation.success) {
+        const outcome = processToolValidationFailure(
+          toolCall,
+          toolName,
+          args,
+          prevalidation.error,
+          state,
+          messages,
+          logger
+        );
+        if (outcome) return outcome;
+        continue;
+      }
+      args = prevalidation.data;
+
       const validation = tool.validate(args);
       if (!validation.success) {
         const outcome = processToolValidationFailure(

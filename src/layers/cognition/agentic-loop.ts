@@ -204,6 +204,26 @@ export class AgenticLoop {
         }
 
         if (state.forceRespondAttempts >= 3) {
+          const requiresResponse =
+            context.triggerSignal.type === 'user_message' ||
+            context.triggerSignal.type === 'motor_result';
+
+          if (requiresResponse && context.recipientId) {
+            this.logger.warn(
+              { attempts: state.forceRespondAttempts, iteration: state.iteration },
+              'Model refused to respond after forced attempts — sending error to user'
+            );
+            const terminal: Terminal = {
+              type: 'respond',
+              text: 'Извини, произошла техническая ошибка. Попробуй ещё раз через минуту.',
+              conversationStatus: 'active',
+              confidence: 0.3,
+            };
+            const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+            return { success: true, terminal, intents, state };
+          }
+
+          // Proactive trigger or no recipient — silent noAction
           this.logger.warn(
             { attempts: state.forceRespondAttempts, iteration: state.iteration },
             'Model refused to respond after forced attempts - terminating with noAction'
@@ -281,8 +301,26 @@ export class AgenticLoop {
           );
           continue; // Retry same loop iteration, tools still available
         }
-        // Already retried once — fall through to handleNaturalCompletion
-        this.logger.error({ iteration: state.iteration }, 'Provider error persists after retry');
+        // Already retried once with same model — escalate to smart model if not already
+        if (!useSmart) {
+          useSmart = true;
+          state.providerErrorRetried = false; // Allow one retry on smart model too
+          this.logger.warn(
+            { iteration: state.iteration },
+            'Provider error persists — escalating to smart model'
+          );
+          messages = buildInitialMessages(context, useSmart, promptBuilders);
+          if (context.previousAttempt) {
+            addPreviousAttemptMessages(messages, context.previousAttempt, state);
+          }
+          messages = validateToolCallPairs(messages, this.logger);
+          continue;
+        }
+        // Smart model also failed — fall through to handleNaturalCompletion
+        this.logger.error(
+          { iteration: state.iteration },
+          'Provider error persists after smart escalation'
+        );
       }
 
       // No tool calls = natural completion (Codex-style termination)

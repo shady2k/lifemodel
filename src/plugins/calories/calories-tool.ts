@@ -1032,7 +1032,8 @@ KEY RULES:
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
       }
 
-      // Early validation for log action - catch Gemini string-entries bug here
+      // Action-specific required parameter validation
+      // (Global unknown key checks are handled by prevalidateToolArgs middleware)
       if (a['action'] === 'log') {
         const entriesRaw = a['entries'];
         // Allow null (strict mode) but not missing when action is log
@@ -1045,6 +1046,17 @@ KEY RULES:
         }
         // Store validated entries for execute()
         a['_validatedEntries'] = parsed.entries;
+      }
+
+      if (a['action'] === 'delete') {
+        // entry_id is required for delete (no aliases — middleware handles fuzzy suggestions)
+        const entryId = a['entry_id'];
+        if (!entryId || typeof entryId !== 'string') {
+          return {
+            success: false,
+            error: 'entry_id: required for delete action (string, e.g. "food_abc123")',
+          };
+        }
       }
 
       return { success: true, data: a };

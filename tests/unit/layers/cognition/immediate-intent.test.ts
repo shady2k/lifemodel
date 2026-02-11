@@ -67,11 +67,35 @@ function createTestContext(overrides: Partial<LoopContext> = {}): LoopContext {
 }
 
 // Mock tool that always succeeds
-function createMockTool(name: string, hasSideEffects: boolean, resultData: Record<string, unknown>) {
+function createMockTool(
+  name: string,
+  hasSideEffects: boolean,
+  resultData: Record<string, unknown>,
+  paramNames: string[] = []
+) {
+  // Build ToolParameter[] from paramNames
+  const parameters = paramNames.map((p) => ({
+    name: p,
+    type: 'string' as const,
+    description: `Mock ${p} parameter`,
+    required: false,
+  }));
+
+  // Build rawParameterSchema with properties for each param
+  const properties: Record<string, unknown> = {};
+  for (const p of paramNames) {
+    properties[p] = { type: ['string', 'null'] };
+  }
+
   return {
     name,
     description: `Mock ${name} tool`,
-    parameters: {},
+    parameters,
+    rawParameterSchema: {
+      type: 'object',
+      properties,
+      required: [],
+    },
     hasSideEffects,
     validate: () => ({ success: true }),
     execute: vi.fn().mockResolvedValue({
@@ -178,7 +202,7 @@ describe('Immediate Intent Processing', () => {
         confidence: 0.95,
         source: 'user_explicit',
         isUserFact: true,
-      });
+      }, ['subject', 'action']);
 
       mockLlm = createMockLlm([{ name: 'core.remember', args: { subject: 'user' } }]);
       mockToolRegistry = createMockToolRegistry([rememberTool]);
@@ -213,7 +237,7 @@ describe('Immediate Intent Processing', () => {
         intensity: 'strong_positive',
         urgent: true,
         source: 'user_explicit',
-      });
+      }, ['topic']);
 
       mockLlm = createMockLlm([{ name: 'core.setInterest', args: { topic: 'crypto' } }]);
       mockToolRegistry = createMockToolRegistry([setInterestTool]);
@@ -245,7 +269,7 @@ describe('Immediate Intent Processing', () => {
       const memoryTool = createMockTool('core.memory', false, {
         action: 'search',
         results: [],
-      });
+      }, ['action', 'query']);
 
       mockLlm = createMockLlm([{ name: 'core.memory', args: { action: 'search', query: 'test' } }]);
       mockToolRegistry = createMockToolRegistry([memoryTool]);
@@ -265,7 +289,7 @@ describe('Immediate Intent Processing', () => {
       const stateTool = createMockTool('core.state', false, {
         action: 'get',
         state: { energy: 0.8 },
-      });
+      }, ['action']);
 
       mockLlm = createMockLlm([{ name: 'core.state', args: { action: 'get' } }]);
       mockToolRegistry = createMockToolRegistry([stateTool]);
@@ -284,18 +308,22 @@ describe('Immediate Intent Processing', () => {
 
   describe('failed tools do NOT trigger callback', () => {
     it('does NOT call onImmediateIntent when core.remember fails', async () => {
-      // Create a failing tool
-      const failingRememberTool = {
-        name: 'core.remember',
-        description: 'Mock failing tool',
-        parameters: {},
-        hasSideEffects: true,
-        validate: () => ({ success: true }),
-        execute: vi.fn().mockResolvedValue({
-          success: false,
-          error: 'Database error',
-        }),
-      };
+      // Create a failing tool (use createMockTool helper with proper params)
+      const failingRememberTool = createMockTool('core.remember', true, {
+        action: 'remember',
+        subject: 'user',
+        attribute: 'birthday',
+        value: 'January 15',
+        confidence: 0.95,
+        source: 'user_explicit',
+        isUserFact: true,
+      }, ['subject', 'action']);
+
+      // Override execute to fail
+      failingRememberTool.execute = vi.fn().mockResolvedValue({
+        success: false,
+        error: 'Database error',
+      });
 
       mockLlm = createMockLlm([{ name: 'core.remember', args: { subject: 'user' } }]);
       mockToolRegistry = createMockToolRegistry([failingRememberTool]);
@@ -322,7 +350,7 @@ describe('Immediate Intent Processing', () => {
         confidence: 0.95,
         source: 'user_explicit',
         isUserFact: true,
-      });
+      }, ['subject', 'action']);
 
       mockLlm = createMockLlm([{ name: 'core.remember', args: {} }]);
       mockToolRegistry = createMockToolRegistry([rememberTool]);
@@ -354,7 +382,7 @@ describe('Immediate Intent Processing', () => {
         intensity: 'weak_positive',
         urgent: false,
         source: 'user_implicit',
-      });
+      }, ['topic']);
 
       mockLlm = createMockLlm([{ name: 'core.setInterest', args: {} }]);
       mockToolRegistry = createMockToolRegistry([setInterestTool]);
@@ -386,7 +414,7 @@ describe('Immediate Intent Processing', () => {
         confidence: 0.9,
         source: 'user_explicit',
         isUserFact: true,
-      });
+      }, ['subject', 'action']);
 
       const setInterestTool = createMockTool('core.setInterest', true, {
         action: 'setInterest',
@@ -394,7 +422,7 @@ describe('Immediate Intent Processing', () => {
         intensity: 'strong_positive',
         urgent: false,
         source: 'user_explicit',
-      });
+      }, ['topic']);
 
       mockLlm = createMockLlm([
         { name: 'core.remember', args: {} },
@@ -439,7 +467,7 @@ describe('Immediate Intent Processing', () => {
 
   describe('core.say tool result includes delivered text', () => {
     it('echoes delivered_text and do-not-repeat note in tool result messages', async () => {
-      const sayTool = createMockTool('core.say', true, {});
+      const sayTool = createMockTool('core.say', true, {}, ['text']);
 
       const sayText = 'Доброе утро! Помню про калории.';
       mockLlm = createMockLlm([{ name: 'core.say', args: { text: sayText } }]);
@@ -495,7 +523,7 @@ describe('Immediate Intent Processing', () => {
         confidence: 0.85,
         source: 'user_explicit',
         isUserFact: true,
-      });
+      }, ['subject', 'action']);
 
       mockLlm = createMockLlm([{ name: 'core.remember', args: {} }]);
       mockToolRegistry = createMockToolRegistry([rememberTool]);
@@ -524,7 +552,7 @@ describe('Immediate Intent Processing', () => {
         confidence: 0.9,
         source: 'user_explicit',
         isUserFact: true,
-      });
+      }, ['subject', 'action']);
 
       mockLlm = createMockLlm([{ name: 'core.remember', args: {} }]);
       mockToolRegistry = createMockToolRegistry([rememberTool]);
