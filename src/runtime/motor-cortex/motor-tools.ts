@@ -19,6 +19,27 @@ import { join, relative, isAbsolute, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
 /**
+ * DI callback for web fetch (provided by web-fetch plugin).
+ */
+export type MotorFetchFn = (
+  url: string,
+  opts?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  }
+) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
+
+/**
+ * DI callback for web search (provided by web-search plugin).
+ */
+export type MotorSearchFn = (
+  query: string,
+  limit?: number
+) => Promise<{ title: string; url: string; snippet: string }[]>;
+
+/**
  * Tool context passed to executors.
  */
 export interface ToolContext {
@@ -33,6 +54,15 @@ export interface ToolContext {
 
   /** Container handle for dispatching tools via Docker isolation (optional) */
   containerHandle?: ContainerHandle;
+
+  /** Allowed network domains for this run (from run.domains) */
+  allowedDomains?: string[];
+
+  /** DI callback for web fetch (provided by web-fetch plugin) */
+  fetchFn?: MotorFetchFn;
+
+  /** DI callback for web search (provided by web-search plugin) */
+  searchFn?: MotorSearchFn;
 }
 
 /**
@@ -286,12 +316,75 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
       },
     },
   },
+
+  fetch: {
+    type: 'function',
+    function: {
+      name: 'fetch',
+      description:
+        'Fetch a URL (GET/POST/PUT/DELETE). Returns content (HTML→Markdown for web pages, raw for JSON/text). ' +
+        'Domain-restricted. Prefer over shell curl for HTTP requests.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'URL to fetch (must be in allowed domains list).',
+          },
+          method: {
+            type: 'string',
+            description: 'HTTP method (default: GET).',
+            enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+          },
+          headers: {
+            type: 'object',
+            description: 'HTTP headers as key-value pairs.',
+          },
+          body: {
+            type: 'string',
+            description: 'Request body (for POST/PUT/PATCH).',
+          },
+        },
+        required: ['url'],
+      },
+    },
+  },
+
+  search: {
+    type: 'function',
+    function: {
+      name: 'search',
+      description:
+        'Search the web for information. Returns titles, URLs, and snippets. ' +
+        'Use to find documentation, APIs, etc.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search query.',
+          },
+          limit: {
+            type: 'number',
+            description: 'Number of results (default: 5, max: 10).',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
 };
 
 /**
  * Maximum grep matches to return.
  */
 const MAX_GREP_MATCHES = 50;
+
+/**
+ * Tools that MUST execute on the host (never dispatched to container).
+ * fetch and search use DI callbacks that only exist on the host side.
+ */
+const HOST_ONLY_TOOLS = new Set(['fetch', 'search']);
 
 /**
  * Recursively list all files in a directory.
@@ -671,6 +764,156 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       };
     }
   },
+
+  fetch: async (args, ctx): Promise<MotorToolResult> => {
+    const url = args['url'] as string;
+    if (!url) {
+      return {
+        ok: false,
+        output: 'Missing "url" argument. Provide a URL to fetch.',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+
+    const startTime = Date.now();
+
+    // Check domain is allowed
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+      const allowed = ctx.allowedDomains ?? [];
+
+      if (!allowed.includes(hostname) && !allowed.some((d) => hostname.endsWith(`.${d}`))) {
+        return {
+          ok: false,
+          output: `Domain ${hostname} not allowed. Allowed domains: ${allowed.join(', ')}. Call ask_user to request access.`,
+          errorCode: 'permission_denied',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
+    } catch {
+      return {
+        ok: false,
+        output: 'Invalid URL format',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // Check fetch function is available
+    if (!ctx.fetchFn) {
+      return {
+        ok: false,
+        output: 'Fetch not configured (web-fetch plugin not available)',
+        errorCode: 'tool_not_available',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // Call fetch function
+    const method = (args['method'] as string | undefined) ?? 'GET';
+    const headers = args['headers'] as Record<string, string> | undefined;
+    const body = args['body'] as string | undefined;
+
+    try {
+      const result = await ctx.fetchFn(url, {
+        method,
+        ...(headers && { headers }),
+        ...(body && { body }),
+      });
+
+      // Truncate response to 10KB
+      const maxLength = 10 * 1024;
+      const truncated =
+        result.content.length > maxLength
+          ? result.content.slice(0, maxLength) +
+            `\n\n[... response truncated to ${String(maxLength)} bytes]`
+          : result.content;
+
+      return {
+        ok: result.ok,
+        output: truncated,
+        retryable: false,
+        provenance: 'web',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'execution_error',
+        retryable: true,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+  },
+
+  search: async (args, ctx): Promise<MotorToolResult> => {
+    const query = args['query'] as string;
+    if (!query) {
+      return {
+        ok: false,
+        output: 'Missing "query" argument. Provide a search query.',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+
+    const startTime = Date.now();
+
+    // Check search function is available
+    if (!ctx.searchFn) {
+      return {
+        ok: false,
+        output: 'Search not configured (web-search plugin not available)',
+        errorCode: 'tool_not_available',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    // Call search function
+    const limit = Math.min(10, (args['limit'] as number | undefined) ?? 5);
+
+    try {
+      const results = await ctx.searchFn(query, limit);
+
+      // Format results as numbered list
+      const formatted = results
+        .map((r, i) => `${String(i + 1)}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
+        .join('\n\n');
+
+      return {
+        ok: true,
+        output: formatted || 'No results found',
+        retryable: false,
+        provenance: 'web',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'execution_error',
+        retryable: true,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+  },
 };
 
 /**
@@ -716,7 +959,8 @@ export async function executeTool(
   }
 
   // Container dispatch path: serialize and send to container
-  if (ctx.containerHandle) {
+  // EXCEPTION: fetch and search are HOST_ONLY (use DI callbacks that don't exist in container)
+  if (ctx.containerHandle && !HOST_ONLY_TOOLS.has(name)) {
     const request: ToolExecuteRequest = {
       type: 'execute',
       id: crypto.randomUUID(),

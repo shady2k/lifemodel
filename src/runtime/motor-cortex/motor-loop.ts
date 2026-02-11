@@ -75,6 +75,23 @@ export interface MotorLoopParams {
 
   /** Pre-created workspace directory (optional — if not provided, one is created) */
   workspace?: string;
+
+  /** DI callback for web fetch (optional) */
+  fetchFn?: (
+    url: string,
+    opts?: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      timeoutMs?: number;
+    }
+  ) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
+
+  /** DI callback for web search (optional) */
+  searchFn?: (
+    query: string,
+    limit?: number
+  ) => Promise<{ title: string; url: string; snippet: string }[]>;
 }
 
 /**
@@ -132,6 +149,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     allowedRoots,
     writeRoots,
     ...(params.containerHandle && { containerHandle: params.containerHandle }),
+    ...(params.run.domains && { allowedDomains: params.run.domains }),
+    ...(params.fetchFn && { fetchFn: params.fetchFn }),
+    ...(params.searchFn && { searchFn: params.searchFn }),
   };
 
   // Get tool definitions
@@ -626,6 +646,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       // Execute other tools
       const toolResult = await executeTool(toolName, resolvedArgs, toolContext);
 
+      // Enrich domain-block errors with allowed domains list
+      if (
+        !toolResult.ok &&
+        toolResult.output &&
+        (toolResult.output.toLowerCase().includes('domain') ||
+          toolResult.output.toLowerCase().includes('allowed')) &&
+        run.domains &&
+        run.domains.length > 0
+      ) {
+        toolResult.output += `\nAllowed domains: ${run.domains.join(', ')}. Call ask_user to request access.`;
+      }
+
       // Record in step trace
       step.toolCalls.push({
         tool: toolName,
@@ -938,6 +970,9 @@ export function buildMotorSystemPrompt(
       '- shell: Run allowlisted commands (git, curl, jq, grep, cat, ls, tar, unzip, rm, etc.). Supports pipes.',
     grep: '- grep: Search patterns across workspace files (regex, max 50 matches)',
     patch: '- patch: Find-and-replace text in a file (exact match, must be unique)',
+    fetch:
+      '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl for HTTP requests.',
+    search: '- search: Search the web for information. Returns titles, URLs, and snippets.',
   };
 
   // Always include ask_user in the description (it's always available as a synthetic tool)
@@ -976,8 +1011,10 @@ Guidelines:
 ${
   run.domains && run.domains.length > 0
     ? `
-Network access is restricted to these domains only: ${run.domains.join(', ')}
-If you need access to a domain not in this list (e.g., a subdomain like api.X or cdn.X), you MUST call ask_user to request it. Do NOT fabricate content from memory when network access fails — always ask_user for the needed domain first.`
+Allowed network domains:
+${run.domains.map((d) => `- ${d}`).join('\n')}
+Requests to any other domain will fail. On first failure, immediately call ask_user to request the domain.
+Do NOT retry failed domains. Do NOT fabricate content.`
     : `
 Network access is disabled. All tasks must be completed using local tools only.`
 }
@@ -1018,7 +1055,7 @@ Always record provenance.source with the URL or reference where you found the in
 Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)
 These files will be automatically extracted and installed after your run completes.
 Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
-Valid tools: code, filesystem, shell, grep, patch, ask_user.`
+Valid tools: code, filesystem, shell, grep, patch, ask_user, fetch, search.`
       : ''
   }${
     skill

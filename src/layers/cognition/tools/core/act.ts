@@ -51,7 +51,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'tools',
       type: 'array' as const,
       description:
-        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user). Required if skill has no approved policy.',
+        'Tools for agentic mode (code, filesystem, shell, grep, patch, ask_user, fetch, search). Required if skill has no approved policy.',
       required: false,
     },
     {
@@ -85,7 +85,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: code, filesystem, shell, grep, patch, ask_user. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with filesystem tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: code, filesystem, shell, grep, patch, ask_user, fetch, search. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with filesystem tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -196,6 +196,11 @@ export function createActTool(motorCortex: MotorCortex): Tool {
           // Auto-include shell if domains are specified (network access requires shell for curl/git)
           if (domains.length > 0 && !tools.includes('shell')) {
             tools = [...tools, 'shell'];
+          }
+
+          // Auto-include fetch if domains are specified (network access requires fetch for HTTP)
+          if (domains.length > 0 && !tools.includes('fetch')) {
+            tools = [...tools, 'fetch'];
           }
 
           // Build task with inputs if provided

@@ -131,7 +131,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['code', 'shell'], // From policy
+          tools: ['code', 'shell', 'fetch'], // From policy + auto-included fetch (domains present)
           domains: ['api.example.com'], // From policy
         })
       );

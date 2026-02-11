@@ -14,6 +14,7 @@ import {
   matchesGlob,
   resolveCredentialPlaceholders,
   findUniqueSubstring,
+  splitOnUnquotedPipe,
   SHELL_ALLOWLIST,
   NETWORK_COMMANDS,
   CONTROL_OPERATORS_RE,
@@ -428,5 +429,77 @@ describe('exported constants', () => {
     const match = '<credential:api_key>'.match(nonGlobalRegex);
     expect(match).toBeTruthy();
     expect(match?.[1]).toBe('api_key');
+  });
+});
+
+describe('splitOnUnquotedPipe', () => {
+  it('handles command without pipes', () => {
+    const result = splitOnUnquotedPipe('echo hello');
+    expect(result).toEqual(['echo hello']);
+  });
+
+  it('handles simple pipe', () => {
+    const result = splitOnUnquotedPipe('echo hello | grep pattern');
+    expect(result).toEqual(['echo hello', 'grep pattern']);
+  });
+
+  it('handles pipe in single quotes - grep -E pattern', () => {
+    const result = splitOnUnquotedPipe("grep -E 'api|doc' file");
+    expect(result).toEqual(["grep -E 'api|doc' file"]);
+  });
+
+  it('handles pipe in double quotes', () => {
+    const result = splitOnUnquotedPipe('grep -i "api\\|doc" | head');
+    expect(result).toEqual(['grep -i "api\\|doc"', 'head']);
+  });
+
+  it('handles pipe in double quotes with spaces', () => {
+    const result = splitOnUnquotedPipe('grep "a|b" | head');
+    expect(result).toEqual(['grep "a|b"', 'head']);
+  });
+
+  it('handles complex pipe in quotes case from the issue', () => {
+    const result = splitOnUnquotedPipe(`curl url | grep -E '(mailto:|api\\.|inbox)' | head`);
+    expect(result).toEqual([`curl url`, `grep -E '(mailto:|api\\.|inbox)'`, `head`]);
+  });
+
+  it('handles multiple pipes - some quoted, some not', () => {
+    const result = splitOnUnquotedPipe(`echo "a|b" | grep "c|d" | cat file`);
+    expect(result).toEqual([`echo "a|b"`, `grep "c|d"`, 'cat file']);
+  });
+
+  it('handles escaped quote inside single quotes', () => {
+    const result = splitOnUnquotedPipe("echo 'it\\'s fine'");
+    expect(result).toEqual(["echo 'it\\'s fine'"]);
+  });
+
+  it('handles escaped backslash inside single quotes', () => {
+    const result = splitOnUnquotedPipe("echo 'test\\\\|case'");
+    expect(result).toEqual(['echo \'test\\\\|case\'']);
+  });
+
+  it('handles double-quote state surviving pipe', () => {
+    const result = splitOnUnquotedPipe('echo "test|pattern" | grep foo');
+    expect(result).toEqual(['echo "test|pattern"', 'grep foo']);
+  });
+
+  it('handles escaped double-quote inside double quotes', () => {
+    const result = splitOnUnquotedPipe('echo "test\\"|still"');
+    expect(result).toEqual(['echo "test\\"|still"']);
+  });
+
+  it('handles empty segments from pipes', () => {
+    const result = splitOnUnquotedPipe('echo || cat file | | grep');
+    expect(result).toEqual(['echo', '', 'cat file', '', 'grep']);
+  });
+
+  it('handles trailing pipe - preserves empty segment', () => {
+    const result = splitOnUnquotedPipe('echo test |');
+    expect(result).toEqual(['echo test', '']);
+  });
+
+  it('handles leading pipe with trim', () => {
+    const result = splitOnUnquotedPipe('| grep test');
+    expect(result).toEqual(['', 'grep test']);
   });
 });

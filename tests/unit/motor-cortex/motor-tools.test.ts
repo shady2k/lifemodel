@@ -2,12 +2,18 @@
  * Unit tests for Motor Cortex Phase 2 tools: shell, grep, patch, and expanded filesystem.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { writeFile, mkdir, rm, symlink, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtemp } from 'node:fs/promises';
-import { executeTool, resolveSafePath, type ToolContext } from '../../../src/runtime/motor-cortex/motor-tools.js';
+import {
+  executeTool,
+  resolveSafePath,
+  type ToolContext,
+  type MotorFetchFn,
+  type MotorSearchFn,
+} from '../../../src/runtime/motor-cortex/motor-tools.js';
 
 describe('resolveSafePath', () => {
   let workspace: string;
@@ -454,5 +460,192 @@ describe('filesystem tool writeRoots security', () => {
     );
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('permission_denied');
+  });
+});
+
+describe('fetch tool', () => {
+  let workspace: string;
+  let ctx: ToolContext;
+  let mockFetchFn: MotorFetchFn;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
+    mockFetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      content: '<html>response content</html>',
+      contentType: 'text/html',
+    });
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('rejects missing url', async () => {
+    const result = await executeTool('fetch', {}, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('invalid_args');
+  });
+
+  it('checks domain against allowedDomains - allows exact match', async () => {
+    ctx.allowedDomains = ['api.example.com'];
+    ctx.fetchFn = mockFetchFn;
+
+    const result = await executeTool('fetch', { url: 'https://api.example.com/data' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(mockFetchFn).toHaveBeenCalledWith('https://api.example.com/data', expect.anything());
+  });
+
+  it('checks domain against allowedDomains - allows subdomain match', async () => {
+    ctx.allowedDomains = ['example.com'];
+    ctx.fetchFn = mockFetchFn;
+
+    const result = await executeTool('fetch', { url: 'https://api.example.com/data' }, ctx);
+    expect(result.ok).toBe(true);
+  });
+
+  it('blocks domain not in allowedDomains list', async () => {
+    ctx.allowedDomains = ['api.example.com'];
+    ctx.fetchFn = mockFetchFn;
+
+    const result = await executeTool('fetch', { url: 'https://other.com/data' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
+    expect(result.output).toContain('Domain other.com not allowed');
+    expect(result.output).toContain('Allowed domains: api.example.com');
+  });
+
+  it('rejects invalid URL format', async () => {
+    ctx.allowedDomains = ['example.com'];
+    ctx.fetchFn = mockFetchFn;
+
+    const result = await executeTool('fetch', { url: 'not-a-url' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('invalid_args');
+  });
+
+  it('returns tool_not_available when fetchFn is undefined', async () => {
+    ctx.allowedDomains = ['example.com'];
+    // @ts-expect-error - intentionally not providing fetchFn
+    delete (ctx as Partial<ToolContext>).fetchFn;
+
+    const result = await executeTool('fetch', { url: 'https://example.com' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('tool_not_available');
+    expect(result.output).toContain('Fetch not configured');
+  });
+
+  it('truncates response to 10KB', async () => {
+    ctx.allowedDomains = ['example.com'];
+    const longContent = 'x'.repeat(15 * 1024); // 15KB
+    ctx.fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      content: longContent,
+      contentType: 'text/plain',
+    });
+
+    const result = await executeTool('fetch', { url: 'https://example.com/data' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output.length).toBeLessThanOrEqual(10 * 1024 + 100); // +100 for truncation message
+    expect(result.output).toContain('response truncated');
+  });
+
+  it('handles fetch errors', async () => {
+    ctx.allowedDomains = ['example.com'];
+    ctx.fetchFn = vi.fn().mockRejectedValue(new Error('Network timeout'));
+
+    const result = await executeTool('fetch', { url: 'https://example.com/data' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('execution_error');
+    expect(result.output).toContain('Network timeout');
+  });
+});
+
+describe('search tool', () => {
+  let workspace: string;
+  let ctx: ToolContext;
+  let mockSearchFn: MotorSearchFn;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
+    mockSearchFn = vi.fn().mockResolvedValue([
+      { title: 'Test Result', url: 'https://example.com/test', snippet: 'Test snippet' },
+    ]);
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('rejects missing query', async () => {
+    const result = await executeTool('search', {}, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('invalid_args');
+  });
+
+  it('returns tool_not_available when searchFn is undefined', async () => {
+    // @ts-expect-error - intentionally not providing searchFn
+    delete (ctx as Partial<ToolContext>).searchFn;
+
+    const result = await executeTool('search', { query: 'test query' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('tool_not_available');
+    expect(result.output).toContain('Search not configured');
+  });
+
+  it('calls searchFn with query and default limit', async () => {
+    ctx.searchFn = mockSearchFn;
+
+    const result = await executeTool('search', { query: 'test query' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(mockSearchFn).toHaveBeenCalledWith('test query', 5);
+  });
+
+  it('respects custom limit up to 10', async () => {
+    ctx.searchFn = mockSearchFn;
+
+    const result = await executeTool('search', { query: 'test', limit: 8 }, ctx);
+    expect(result.ok).toBe(true);
+    expect(mockSearchFn).toHaveBeenCalledWith('test', 8);
+  });
+
+  it('caps limit at 10', async () => {
+    ctx.searchFn = mockSearchFn;
+
+    const result = await executeTool('search', { query: 'test', limit: 15 }, ctx);
+    expect(result.ok).toBe(true);
+    expect(mockSearchFn).toHaveBeenCalledWith('test', 10);
+  });
+
+  it('formats results as numbered list', async () => {
+    ctx.searchFn = mockSearchFn;
+
+    const result = await executeTool('search', { query: 'test' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('1. Test Result');
+    expect(result.output).toContain('URL: https://example.com/test');
+    expect(result.output).toContain('Test snippet');
+  });
+
+  it('handles empty results', async () => {
+    const emptyMock: MotorSearchFn = vi.fn().mockResolvedValue([]);
+    ctx.searchFn = emptyMock;
+
+    const result = await executeTool('search', { query: 'nothing' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe('No results found');
+  });
+
+  it('handles search errors', async () => {
+    ctx.searchFn = vi.fn().mockRejectedValue(new Error('Search API error'));
+
+    const result = await executeTool('search', { query: 'test' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('execution_error');
+    expect(result.output).toContain('Search API error');
   });
 });

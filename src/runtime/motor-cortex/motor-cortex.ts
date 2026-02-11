@@ -16,6 +16,7 @@ import { createSignal } from '../../types/signal.js';
 import type { EnergyModel } from '../../core/energy.js';
 import type { MotorRun, MotorTool, RunStatus, MotorAttempt } from './motor-protocol.js';
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
+import type { MotorFetchFn, MotorSearchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
@@ -64,6 +65,12 @@ export interface MotorCortexDeps {
 
   /** Container manager for Docker isolation (optional) */
   containerManager?: ContainerManager;
+
+  /** DI callback for web fetch (provided by web-fetch plugin) */
+  fetchFn?: MotorFetchFn;
+
+  /** DI callback for web search (provided by web-search plugin) */
+  searchFn?: MotorSearchFn;
 }
 
 /**
@@ -86,6 +93,8 @@ export class MotorCortex {
   private readonly skillsDir: string | undefined;
   private readonly artifactsBaseDir: string | undefined;
   private readonly containerManager: ContainerManager | undefined;
+  private readonly fetchFn: MotorFetchFn | undefined;
+  private readonly searchFn: MotorSearchFn | undefined;
 
   /** Whether Docker isolation is available */
   private dockerAvailable: boolean | null = null;
@@ -105,6 +114,8 @@ export class MotorCortex {
     this.skillsDir = deps.skillsDir;
     this.artifactsBaseDir = deps.artifactsBaseDir;
     this.containerManager = deps.containerManager;
+    this.fetchFn = deps.fetchFn;
+    this.searchFn = deps.searchFn;
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -479,6 +490,8 @@ export class MotorCortex {
         ...(this.credentialStore && { credentialStore: this.credentialStore }),
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
         ...(containerHandle && { containerHandle }),
+        ...(this.fetchFn && { fetchFn: this.fetchFn }),
+        ...(this.searchFn && { searchFn: this.searchFn }),
       });
     } catch (error) {
       // Motor loop threw an unhandled error (e.g. LLM provider failure, container failure, storage failure).

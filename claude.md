@@ -82,3 +82,8 @@ These are requirements, not suggestions.
 - **Poisoned history:** Bad response saved in conversation history → model copies pattern. Check for bad text in prior ASSISTANT messages in the conversation log. Fix: clean `data/state/` conversation files.
 - **Truncated response:** `finishReason: "length"` — model hit token limit. Agentic loop retries with smart model.
 - **Container issues:** Search logs for `component: "container-manager"`. `docker ps -a --filter label=com.lifemodel.component=motor-cortex` lists all Motor Cortex containers. Stale containers are pruned on restart. If Docker is unavailable, agentic runs fail unless `MOTOR_CORTEX_UNSAFE=true`.
+
+## Codex MCP
+
+- Don't pass `model` parameter to the codex MCP tool — it selects automatically.
+- Use `codex-reply` (with the threadId) to continue the same topic instead of starting a new codex session.

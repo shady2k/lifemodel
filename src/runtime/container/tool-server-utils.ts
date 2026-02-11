@@ -113,6 +113,77 @@ export type FindUniqueSubstringResult = PatchFindResult | PatchFindError;
 // ─── Shell Pipeline Validation ───────────────────────────────────
 
 /**
+ * Split a shell command on unquoted pipe characters.
+ *
+ * Walks the string tracking quote state (' and "), only splitting on
+ * bare unquoted |. This handles patterns like `grep -E 'api|doc'` where
+ * the pipe inside quotes should NOT be treated as a command separator.
+ *
+ * @param command - Shell command that may contain pipes
+ * @returns Array of command segments split on unquoted pipes
+ *
+ * @example
+ * splitOnUnquotedPipe("echo hello") // ["echo hello"]
+ * splitOnUnquotedPipe("grep -E 'api|doc' file") // ["grep -E 'api|doc' file"]
+ * splitOnUnquotedPipe("curl url | grep pattern") // ["curl url ", " grep pattern"]
+ * splitOnUnquotedPipe(`grep "a|b" | head`) // [`grep "a|b" `, " head`]
+ */
+export function splitOnUnquotedPipe(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (const ch of command) {
+    if (escapeNext) {
+      current += ch;
+      escapeNext = false;
+      continue;
+    }
+
+    switch (ch) {
+      case '\\':
+        escapeNext = true;
+        current += ch;
+        break;
+      case "'":
+        if (!inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+        }
+        current += ch;
+        break;
+      case '"':
+        if (!inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+        }
+        current += ch;
+        break;
+      case '|':
+        if (!inSingleQuote && !inDoubleQuote) {
+          // Unquoted pipe - split here
+          segments.push(current.trim());
+          current = '';
+        } else {
+          // Quoted pipe - part of the current segment
+          current += ch;
+        }
+        break;
+      default:
+        current += ch;
+        break;
+    }
+  }
+
+  // Always add the last segment (even if empty — lets validatePipeline detect trailing pipes)
+  segments.push(current.trim());
+
+  return segments;
+}
+
+// ─── Shell Pipeline Validation ───────────────────────────────────
+
+/**
  * Validate all commands in a pipeline against the allowlist.
  * Splits on single `|` and checks each segment's first token.
  *
@@ -138,12 +209,12 @@ export function validatePipeline(command: string): PipelineValidationResult {
     return { ok: false, error: 'Command contains disallowed metacharacters', hasNetwork: false };
   }
 
-  // Split on control operators (&&, ||) and pipes (|), validate each command.
-  // Split order matters: && and || first (they contain |), then remaining |.
+  // Split on control operators (&&, ||), then on unquoted pipes within each chain.
+  // Split order matters: && and || first (they contain |), then remaining | via quote-aware split.
   const chains = command.split(/\s*(?:&&|\|\|)\s*/);
   const segments: string[] = [];
   for (const chain of chains) {
-    for (const seg of chain.split('|')) {
+    for (const seg of splitOnUnquotedPipe(chain)) {
       segments.push(seg.trim());
     }
   }
