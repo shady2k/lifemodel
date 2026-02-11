@@ -57,6 +57,117 @@ describe('validateToolArgs', () => {
       const result = validateToolArgs({ question: 'Hi' }, basicSchema);
       expect(result.success).toBe(true);
     });
+
+    it('treats nullable required fields as optional (OpenAI strict mode compat)', () => {
+      // OpenAI strict mode lists ALL fields as required, with type:['T','null'] for optional ones.
+      // Non-OpenAI models omit optional fields entirely instead of sending null.
+      // Our validator treats required + type:[...,'null'] as semantically optional.
+      const strictSchema = {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string' },
+          entries: { type: ['array', 'null'] },
+          date: { type: ['string', 'null'] },
+        },
+        required: ['action', 'entries', 'date'] as string[],
+      };
+
+      // Omitting nullable fields entirely → should pass
+      const result1 = validateToolArgs({ action: 'summary' }, strictSchema);
+      expect(result1.success).toBe(true);
+
+      // Sending null for nullable fields → should also pass
+      const result2 = validateToolArgs(
+        { action: 'summary', entries: null, date: null },
+        strictSchema
+      );
+      expect(result2.success).toBe(true);
+
+      // Omitting non-nullable required field → should fail
+      const result3 = validateToolArgs({ entries: null, date: null }, strictSchema);
+      expect(result3.success).toBe(false);
+      if (!result3.success) {
+        expect(result3.error).toContain('"action"');
+      }
+    });
+
+    // Reproduces: conversation-2026-02-11T22-15-56-482Z.log
+    // LLM called plugin_calories({ action: 'summary', date: '2025-02-12' }) and got
+    // "Missing required parameter" for entries, meal_type, limit, daily_target, etc.
+    // because CALORIES_RAW_SCHEMA lists all fields in required[] (OpenAI strict mode).
+    describe('real-world: plugin_calories OpenAI strict mode schema', () => {
+      const caloriesSchema = {
+        type: 'object' as const,
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'],
+          },
+          entries: { type: ['array', 'null'] },
+          date: { type: ['string', 'null'] },
+          meal_type: { type: ['string', 'null'], enum: ['breakfast', 'lunch', 'dinner', 'snack', null] },
+          limit: { type: ['number', 'null'] },
+          daily_target: { type: ['number', 'null'] },
+          calculate_from_stats: { type: ['boolean', 'null'] },
+          weight: { type: ['number', 'null'] },
+          entry_id: { type: ['string', 'null'] },
+        },
+        required: [
+          'action', 'entries', 'date', 'meal_type', 'limit',
+          'daily_target', 'calculate_from_stats', 'weight', 'entry_id',
+        ] as string[],
+        additionalProperties: false,
+      };
+
+      it('summary with date — omits all nullable fields', () => {
+        const result = validateToolArgs({ action: 'summary', date: '2025-02-12' }, caloriesSchema);
+        expect(result.success).toBe(true);
+      });
+
+      it('summary with keyword date', () => {
+        const result = validateToolArgs({ action: 'summary', date: 'yesterday' }, caloriesSchema);
+        expect(result.success).toBe(true);
+      });
+
+      it('list with date and meal_type', () => {
+        const result = validateToolArgs(
+          { action: 'list', date: 'today', meal_type: 'lunch' },
+          caloriesSchema
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('log with date only — no entries', () => {
+        const result = validateToolArgs({ action: 'log', date: '2025-02-12' }, caloriesSchema);
+        expect(result.success).toBe(true);
+      });
+
+      it('still rejects missing action (truly required, non-nullable)', () => {
+        const result = validateToolArgs({ date: 'yesterday' }, caloriesSchema);
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error).toContain('"action"');
+        }
+      });
+
+      it('accepts all fields sent as null (OpenAI strict mode response)', () => {
+        const result = validateToolArgs(
+          {
+            action: 'summary',
+            entries: null,
+            date: 'yesterday',
+            meal_type: null,
+            limit: null,
+            daily_target: null,
+            calculate_from_stats: null,
+            weight: null,
+            entry_id: null,
+          },
+          caloriesSchema
+        );
+        expect(result.success).toBe(true);
+      });
+    });
   });
 
   describe('required + unknown cross-reference', () => {

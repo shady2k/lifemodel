@@ -212,11 +212,29 @@ export function validateToolArgs(
   const unknownKeysForHint = unknownKeys.filter((k) => !k.startsWith('_'));
 
   // Check 6: Required fields must be present (check ALL required fields, not just provided ones)
+  // OpenAI strict mode pattern: required + type:['string','null'] means "must be in JSON, can be null".
+  // Only enforce non-null when the schema type does NOT include 'null'.
   const required = Array.isArray(schema['required']) ? (schema['required'] as unknown[]) : [];
   for (const rawKey of required) {
     const requiredKey = String(rawKey);
     const value = args[requiredKey];
-    if (value === undefined || value === null) {
+
+    // Check if this field's type allows null
+    const propSchema = properties[requiredKey];
+    const typeAllowsNull =
+      isPlainObject(propSchema) &&
+      Array.isArray(propSchema['type']) &&
+      (propSchema['type'] as unknown[]).includes('null');
+
+    // If type allows null, the field is semantically optional — skip required check entirely.
+    // OpenAI strict mode lists all fields as required with type:['T','null'] for optional ones.
+    // Non-OpenAI models omit optional fields instead of sending null.
+    if (typeAllowsNull) continue;
+
+    // For non-nullable required fields, reject both undefined and null
+    const isMissing = value === undefined || value === null;
+
+    if (isMissing) {
       let errorMsg = `Missing required parameter: "${requiredKey}"`;
       // Cross-reference with unknown keys for actionable hints
       if (unknownKeysForHint.length > 0) {
