@@ -9,287 +9,65 @@
  */
 
 import type { ToolParameter } from './types.js';
+import {
+  validateToolArgs,
+  looksLikePlaceholder,
+  truncatePreview,
+  buildTypeMismatchError,
+  type ValidationResult,
+} from '../../../utils/tool-validation.js';
+
+export type { ValidationResult };
 
 /**
- * Patterns that indicate placeholder values from LLM output.
- * Some LLMs (e.g., Haiku) fill optional parameters with placeholders instead of omitting them.
+ * Build a raw JSON Schema from ToolParameter[].
+ * Used when rawParameterSchema is not provided.
  */
-const PLACEHOLDER_PATTERNS = ['<UNKNOWN>', '<VALUE>', '<TODO>', '<MISSING>', '<N/A>'];
+function buildSchemaFromParameters(parameters: ToolParameter[]): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
 
-/** Max chars for value preview in error messages. */
-const PREVIEW_MAX_LENGTH = 80;
-
-/**
- * Truncate a value for error message preview.
- * Shows enough for the model to recognize what it sent.
- */
-function truncatePreview(value: unknown): string {
-  const str = typeof value === 'string' ? `"${value}"` : JSON.stringify(value);
-  if (str.length <= PREVIEW_MAX_LENGTH) return str;
-  return str.slice(0, PREVIEW_MAX_LENGTH) + '…';
-}
-
-/**
- * Build an actionable type mismatch error with what was received and how to fix it.
- */
-function buildTypeMismatchError(
-  paramName: string,
-  expected: string,
-  actual: string,
-  preview: string
-): string {
-  let msg = `${paramName}: expected ${expected}, got ${actual} (received: ${preview})`;
-
-  // Add specific fix hints for common model mistakes
-  if (expected === 'array' && actual === 'string') {
-    msg += '. Pass a JSON array directly, not a stringified JSON string.';
-  } else if (expected === 'number' && actual === 'string') {
-    msg += '. Pass a number without quotes.';
-  } else if (expected === 'object' && actual === 'string') {
-    msg += '. Pass a JSON object directly, not a stringified JSON string.';
-  }
-
-  return msg;
-}
-
-/**
- * Check if a value looks like a placeholder that should be omitted.
- */
-function looksLikePlaceholder(value: unknown): boolean {
-  if (typeof value !== 'string') return false;
-  const upper = value.toUpperCase();
-  return PLACEHOLDER_PATTERNS.some((p) => upper.includes(p));
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function normalizeSchemaType(type: string): 'string' | 'number' | 'boolean' | 'object' | 'array' {
-  if (type === 'integer' || type === 'number') return 'number';
-  if (type === 'array') return 'array';
-  if (type === 'object') return 'object';
-  if (type === 'boolean') return 'boolean';
-  return 'string';
-}
-
-function getTypeListFromSchema(
-  value: unknown
-): ('string' | 'number' | 'boolean' | 'object' | 'array')[] {
-  if (typeof value === 'string') {
-    return [normalizeSchemaType(value)];
-  }
-  if (Array.isArray(value)) {
-    const out: ('string' | 'number' | 'boolean' | 'object' | 'array')[] = [];
-    for (const item of value) {
-      if (typeof item === 'string') out.push(normalizeSchemaType(item));
+  for (const param of parameters) {
+    const propSchema: Record<string, unknown> = { type: param.type };
+    if (param.enum && param.enum.length > 0) {
+      propSchema['enum'] = param.enum;
     }
-    return out;
-  }
-  return [];
-}
-
-function levenshtein(a: string, b: string): number {
-  const aLen = a.length;
-  const bLen = b.length;
-  if (aLen === 0) return bLen;
-  if (bLen === 0) return aLen;
-
-  const prev: number[] = [];
-  const curr: number[] = [];
-
-  for (let j = 0; j <= bLen; j++) prev[j] = j;
-
-  for (let i = 1; i <= aLen; i++) {
-    curr[0] = i;
-    const aChar = a.charCodeAt(i - 1);
-    for (let j = 1; j <= bLen; j++) {
-      const cost = aChar === b.charCodeAt(j - 1) ? 0 : 1;
-      const prevVal = prev[j] ?? 0;
-      const currPrev = curr[j - 1] ?? 0;
-      const prevPrev = prev[j - 1] ?? 0;
-      curr[j] = Math.min(prevVal + 1, currPrev + 1, prevPrev + cost);
-    }
-    for (let j = 0; j <= bLen; j++) prev[j] = curr[j] ?? 0;
-  }
-
-  return prev[bLen] ?? 0;
-}
-
-function suggestClosestKey(key: string, candidates: string[]): string | null {
-  const keyLower = key.toLowerCase();
-
-  let bestMatch: string | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const candidate of candidates) {
-    const candidateLower = candidate.toLowerCase();
-
-    if (keyLower.length >= 2) {
-      if (
-        candidateLower === keyLower ||
-        candidateLower.startsWith(keyLower) ||
-        candidateLower.endsWith(keyLower) ||
-        candidateLower.includes(`_${keyLower}`) ||
-        candidateLower.includes(`${keyLower}_`)
-      ) {
-        return candidate;
-      }
-    }
-
-    const distance = levenshtein(keyLower, candidateLower);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestMatch = candidate;
+    properties[param.name] = propSchema;
+    if (param.required) {
+      required.push(param.name);
     }
   }
 
-  if (bestMatch === null) return null;
-  const threshold = Math.min(3, Math.max(1, Math.floor(keyLower.length * 0.4)));
-  if (bestDistance <= threshold) return bestMatch;
-  return null;
+  return {
+    type: 'object',
+    properties,
+    required,
+  };
 }
 
 /**
- * Result of validating tool arguments.
- */
-export type ValidationResult<T = unknown> =
-  | { success: true; data: T }
-  | { success: false; error: string };
-
-/**
- * Pre-validate args against raw JSON Schema properties or ToolParameter[].
- * Focuses on:
- * - Unknown/misnamed parameters
- * - Basic type checks (with light coercion for common LLM mistakes)
+ * Pre-validate args against raw JSON Schema or ToolParameter[].
+ *
+ * This is a thin wrapper around validateToolArgs that:
+ * - Uses rawParameterSchema directly if provided
+ * - Builds a raw JSON Schema from ToolParameter[] if not
+ * - Delegates to validateToolArgs for actual validation
+ *
+ * Checks performed:
+ * - Unknown/misnamed parameters with fuzzy suggestions
+ * - Required fields are present
+ * - Basic type checks (with auto-coercion for common LLM mistakes)
+ * - Placeholder detection
+ * - Enum validation
  */
 export function prevalidateToolArgs(
   args: unknown,
   parameters: ToolParameter[],
   rawParameterSchema?: Record<string, unknown>
 ): ValidationResult<Record<string, unknown>> {
-  if (!isPlainObject(args)) {
-    return { success: false, error: 'Tool arguments must be a JSON object.' };
-  }
-
-  const errors: string[] = [];
-  const knownKeys: string[] = [];
-  const schemaProperties =
-    rawParameterSchema &&
-    isPlainObject(rawParameterSchema) &&
-    rawParameterSchema['type'] === 'object' &&
-    isPlainObject(rawParameterSchema['properties'])
-      ? rawParameterSchema['properties']
-      : null;
-
-  if (schemaProperties) {
-    knownKeys.push(...Object.keys(schemaProperties));
-  } else {
-    knownKeys.push(...parameters.map((p) => p.name));
-  }
-
-  const providedKeys = Object.keys(args);
-  const knownKeySet = new Set(knownKeys);
-  // Skip _-prefixed internal keys (used for cross-phase data like _validatedEntries)
-  const unknownKeys = providedKeys.filter((k) => !k.startsWith('_') && !knownKeySet.has(k));
-
-  for (const unknownKey of unknownKeys) {
-    const suggestion = suggestClosestKey(unknownKey, knownKeys);
-    if (suggestion) {
-      errors.push(`Unknown parameter "${unknownKey}". Did you mean "${suggestion}"?`);
-    } else {
-      errors.push(`Unknown parameter "${unknownKey}".`);
-    }
-  }
-
-  for (const key of providedKeys) {
-    if (!knownKeySet.has(key)) continue;
-    const value = args[key];
-    if (value === undefined || value === null) continue;
-
-    // Skip placeholder values; downstream validateAgainstParameters will handle these.
-    if (looksLikePlaceholder(value)) continue;
-
-    let expectedTypes: ('string' | 'number' | 'boolean' | 'object' | 'array')[] = [];
-    let enumValues: readonly string[] | undefined;
-
-    if (schemaProperties) {
-      const propSchema = schemaProperties[key];
-      if (isPlainObject(propSchema)) {
-        expectedTypes = getTypeListFromSchema(propSchema['type']);
-        if (Array.isArray(propSchema['enum'])) {
-          enumValues = propSchema['enum'].filter((v) => typeof v === 'string');
-        }
-      }
-    } else {
-      const param = parameters.find((p) => p.name === key);
-      if (param) {
-        expectedTypes = [param.type];
-        enumValues = param.enum;
-      }
-    }
-
-    if (expectedTypes.length === 0) continue;
-
-    let coerced = value;
-    const actualType = Array.isArray(value) ? 'array' : typeof value;
-
-    // Auto-coerce: string → array (JSON string)
-    if (expectedTypes.includes('array') && actualType === 'string') {
-      try {
-        const parsed: unknown = JSON.parse(value as string);
-        if (Array.isArray(parsed)) {
-          coerced = parsed;
-          args[key] = parsed;
-        }
-      } catch {
-        // fall through to type check error
-      }
-    }
-
-    // Auto-coerce: string → number
-    if (expectedTypes.includes('number') && actualType === 'string') {
-      const num = Number(value);
-      if (!isNaN(num)) {
-        coerced = num;
-        args[key] = num;
-      }
-    }
-
-    const coercedType: 'string' | 'number' | 'boolean' | 'object' | 'array' = Array.isArray(coerced)
-      ? 'array'
-      : typeof coerced === 'object'
-        ? 'object'
-        : typeof coerced === 'boolean'
-          ? 'boolean'
-          : typeof coerced === 'number'
-            ? 'number'
-            : 'string';
-    const isTypeOk = expectedTypes.some((t) => {
-      if (t === 'array') return coercedType === 'array';
-      if (t === 'object') return coercedType === 'object' && !Array.isArray(coerced);
-      return coercedType === t;
-    });
-
-    if (!isTypeOk) {
-      const preview = truncatePreview(value);
-      const expectedLabel =
-        expectedTypes.length === 1 ? (expectedTypes[0] ?? 'unknown') : expectedTypes.join(' | ');
-      errors.push(buildTypeMismatchError(key, expectedLabel, coercedType, preview));
-    }
-
-    if (enumValues && enumValues.length > 0 && typeof value === 'string') {
-      if (!enumValues.includes(value)) {
-        errors.push(`${key}: must be one of [${enumValues.join(', ')}], got "${value}"`);
-      }
-    }
-  }
-
-  if (errors.length > 0) {
-    return { success: false, error: errors.join('; ') };
-  }
-
-  return { success: true, data: args };
+  // Use provided raw schema, or build one from ToolParameter[]
+  const schema = rawParameterSchema ?? buildSchemaFromParameters(parameters);
+  return validateToolArgs(args, schema);
 }
 
 /**
@@ -334,10 +112,9 @@ export function validateAgainstParameters(
 
     // Detect placeholder values (e.g., "<UNKNOWN>" from some LLMs)
     // These should be treated as if the parameter wasn't provided
-    if (looksLikePlaceholder(value)) {
-      const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+    if (typeof value === 'string' && looksLikePlaceholder(value)) {
       errors.push(
-        `${param.name}: received placeholder "${valueStr}" - omit optional parameters you don't need`
+        `${param.name}: received placeholder "${value}" - omit optional parameters you don't need`
       );
       continue;
     }
@@ -380,13 +157,13 @@ export function validateAgainstParameters(
       typeMismatch = true;
 
     if (typeMismatch) {
-      const preview = truncatePreview(value);
+      const preview = truncatePreview(value as string | number | boolean | object | unknown[]);
       errors.push(buildTypeMismatchError(param.name, expectedType, coercedType, preview));
     }
 
     // Check enum (for strings with enum constraint)
-    if (param.enum && param.enum.length > 0 && actualType === 'string') {
-      const strValue = value as string;
+    if (param.enum && param.enum.length > 0 && typeof value === 'string') {
+      const strValue = value;
       if (!param.enum.includes(strValue)) {
         errors.push(`${param.name}: must be one of [${param.enum.join(', ')}], got "${strValue}"`);
       }

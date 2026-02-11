@@ -63,7 +63,7 @@ describe('prevalidateToolArgs', () => {
 
   describe('internal key handling', () => {
     it('ignores _validatedEntries internal key', () => {
-      const args = { _validatedEntries: [], entry_id: 'food_abc' };
+      const args = { _validatedEntries: [], entry_id: 'food_abc', action: 'delete' };
       const result = prevalidateToolArgs(args, mockParameters, mockRawSchema);
 
       expect(result.success).toBe(true);
@@ -220,13 +220,30 @@ describe('prevalidateToolArgs', () => {
     });
   });
 
-  describe('empty args object', () => {
-    it('passes empty object (required param check is per-tool validate)', () => {
+  describe('required field validation', () => {
+    it('checks required fields - now enabled via shared validator', () => {
       const args = {};
       const result = prevalidateToolArgs(args, mockParameters, mockRawSchema);
 
-      // prevalidateToolArgs does NOT check required parameters - that's done in per-tool validate()
-      // It only checks for unknown keys and type issues
+      // prevalidateToolArgs NOW checks required parameters via shared validateToolArgs
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('Missing required parameter');
+        expect(result.error).toContain('"action"');
+      }
+    });
+
+    it('passes when required field is provided', () => {
+      const args = { action: 'delete' };
+      const result = prevalidateToolArgs(args, mockParameters, mockRawSchema);
+
+      expect(result.success).toBe(true);
+    });
+
+    it('passes with required field and optional field', () => {
+      const args = { action: 'delete', entry_id: 'food_abc' };
+      const result = prevalidateToolArgs(args, mockParameters, mockRawSchema);
+
       expect(result.success).toBe(true);
     });
   });

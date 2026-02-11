@@ -35,6 +35,7 @@ import { resolveCredentials } from '../vault/credential-store.js';
 import { readdir, cp, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTaskLogger, redactCredentials } from './task-logger.js';
+import { validateToolArgs } from '../../utils/tool-validation.js';
 
 /**
  * Parameters for running the motor loop.
@@ -199,6 +200,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Add request_approval tool if shell is granted (network access = needs approval gate)
   if (run.tools.includes('shell')) {
     toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.request_approval);
+  }
+
+  // Build schema map for validation
+  const toolSchemaMap = new Map<string, Record<string, unknown>>();
+  for (const def of toolDefinitions) {
+    toolSchemaMap.set(def.function.name, def.function.parameters as Record<string, unknown>);
   }
 
   // Use attempt's messages (already built by caller)
@@ -453,16 +460,131 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       try {
         toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
       } catch {
+        // Return specific error — don't validate { raw } against schema
         childLogger.warn(
           { tool: toolName, rawArgs: toolCall.function.arguments.slice(0, 200) },
-          'Failed to parse tool arguments as JSON — using raw string'
+          'Failed to parse tool arguments as JSON'
         );
-        toolArgs = { raw: toolCall.function.arguments };
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify({
+            ok: false,
+            output: 'Invalid JSON in tool arguments. Provide valid JSON.',
+            error: 'invalid_args',
+          }),
+          tool_call_id: toolCall.id,
+        });
+        step.toolCalls.push({
+          tool: toolName,
+          args: { raw: toolCall.function.arguments },
+          result: {
+            ok: false,
+            output: 'Invalid JSON in tool arguments. Provide valid JSON.',
+            errorCode: 'invalid_args',
+            retryable: true,
+            provenance: 'internal',
+            durationMs: 0,
+          },
+          durationMs: 0,
+        });
+        await taskLog?.log(`    → FAIL (0ms): Invalid JSON arguments`);
+        continue;
+      }
+
+      // Normalize ask_user alias: message → question (before validation)
+      if (toolName === 'ask_user' && toolArgs['message'] && !toolArgs['question']) {
+        toolArgs['question'] = toolArgs['message'];
+        delete toolArgs['message'];
       }
 
       childLogger.debug({ tool: toolName, args: toolArgs }, 'Executing tool');
       const argsSummary = redactCredentials(JSON.stringify(toolArgs)).slice(0, 200);
       await taskLog?.log(`  TOOL ${toolName}(${argsSummary})`);
+
+      // Validate tool arguments against schema
+      const toolSchema = toolSchemaMap.get(toolName);
+      if (toolSchema) {
+        const validation = validateToolArgs(toolArgs, toolSchema);
+        if (!validation.success) {
+          childLogger.warn(
+            { tool: toolName, error: validation.error },
+            'Tool argument validation failed'
+          );
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output: validation.error,
+              error: 'invalid_args',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: toolName,
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: validation.error,
+              errorCode: 'invalid_args',
+              retryable: true,
+              provenance: 'internal',
+              durationMs: 0,
+            },
+            durationMs: 0,
+          });
+          await taskLog?.log(`    → FAIL (0ms): ${validation.error}`);
+
+          // Track consecutive failures so auto-fail guard triggers
+          const argsKey = JSON.stringify(toolArgs);
+          if (
+            consecutiveFailures !== null &&
+            consecutiveFailures.tool === toolName &&
+            consecutiveFailures.errorCode === 'invalid_args' &&
+            consecutiveFailures.argsKey === argsKey
+          ) {
+            consecutiveFailures.count++;
+          } else {
+            consecutiveFailures = { tool: toolName, errorCode: 'invalid_args', argsKey, count: 1 };
+          }
+
+          if (consecutiveFailures.count >= CONSECUTIVE_FAILURE_THRESHOLD) {
+            childLogger.warn(
+              { tool: toolName, errorCode: 'invalid_args', count: consecutiveFailures.count },
+              'Consecutive validation failures detected - auto-failing'
+            );
+            await taskLog?.log(
+              `\nFAILED: ${toolName} failed ${String(consecutiveFailures.count)}x with invalid_args`
+            );
+
+            attempt.trace.steps.push(step);
+            const failure = buildFailureSummary(attempt.trace, consecutiveFailures.count, {
+              tool: toolName,
+              errorCode: 'invalid_args',
+            });
+            const hint = await getFailureHint(
+              llm,
+              messages,
+              `Tool ${toolName} failed ${String(consecutiveFailures.count)} times with invalid_args`,
+              childLogger
+            );
+            if (hint) failure.hint = hint;
+
+            attempt.status = 'failed';
+            attempt.completedAt = new Date().toISOString();
+            attempt.stepCursor = i;
+            attempt.messages = messages;
+            attempt.trace.totalIterations = i;
+            attempt.trace.totalDurationMs = Date.now() - new Date(attempt.startedAt).getTime();
+            attempt.trace.errors += step.toolCalls.filter((t) => !t.result.ok).length;
+            attempt.failure = failure;
+            await stateManager.updateRun(run);
+            return;
+          }
+
+          continue;
+        }
+        toolArgs = validation.data; // Use coerced args
+      }
 
       // Validate tool is in granted tools (skip synthetic tools: ask_user, request_approval)
       const syntheticTools = ['ask_user', 'request_approval'];
@@ -541,8 +663,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       // Check for ask_user
       if (toolName === 'ask_user') {
-        // Accept both 'question' and 'message' — some models use 'message' despite schema
-        const rawQ = toolArgs['question'] ?? toolArgs['message'];
+        const rawQ = toolArgs['question'];
         const question = typeof rawQ === 'string' ? rawQ : '';
         childLogger.info({ question }, 'Awaiting user input');
 

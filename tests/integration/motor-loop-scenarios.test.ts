@@ -307,56 +307,36 @@ describe('Motor Loop Scenario Tests', () => {
     });
   });
 
-  describe('Scenario 6b: Wrong Param Names — Alias Resolution', () => {
-    it('resolves read({file: ...}) and list({directory: ...}) aliases in skillsDir', async () => {
-      // Create a separate skills directory (NOT inside workspace) — this is
-      // the real scenario: skill files live in skillsDir, workspace is empty.
-      const skillsDir = join(tmpdir(), `motor-test-skills-${Date.now()}`);
-      const skillDir = join(skillsDir, 'agentmail');
-      await mkdir(skillDir, { recursive: true });
-      await writeFile(join(skillDir, 'SKILL.md'), '# AgentMail Skill\nSend emails via API.');
-      await writeFile(join(skillDir, 'policy.json'), '{"trust":"approved"}');
-
-      // Model uses wrong param names — reproduces the real bug where
-      // minimax-m2.1 sent list({"directory": "/skills/agentmail"})
-      // and read({"file": "/skills/agentmail/SKILL.md"})
+  describe('Scenario 6b: Wrong Param Names — Validation Rejects with Suggestions', () => {
+    it('rejects wrong param names and suggests correct ones', async () => {
+      // Model uses wrong param names — validation middleware catches them
+      // and returns actionable error messages with fuzzy suggestions
       const scriptedLLM = createScriptedLLM([
-        // list with "directory" instead of "path" — targets skillsDir, not workspace
-        toolCallResponse('list', { directory: join(skillsDir, 'agentmail') }),
-        // read with "file" instead of "path" — targets skill file
-        toolCallResponse('read', { file: join(skillsDir, 'agentmail', 'SKILL.md') }),
+        // list with "directory" instead of "path" — validation rejects
+        toolCallResponse('list', { directory: '.' }),
+        // Model retries with correct param name after seeing suggestion
+        toolCallResponse('list', { path: '.' }),
         // Complete
-        textResponse('Found the skill files.'),
+        textResponse('Listed the directory.'),
       ]);
 
       const { params, cleanup, stateManager } = await createTestLoopParams({
         llm: scriptedLLM,
         tools: ['read', 'write', 'list'],
-        skillsDir,
       });
 
       await runMotorLoop(params);
 
-      // Assert completed — aliases were resolved and skillsDir was accessible
       const finalRun = stateManager.findRun(params.run.id);
       expect(finalRun?.status).toBe('completed');
-      expect(finalRun?.result?.ok).toBe(true);
 
-      // Verify the list tool returned skill directory contents (not empty workspace)
+      // Verify the first call was rejected with a suggestion
       const attempt = finalRun?.attempts[finalRun.currentAttemptIndex];
-      const listToolResult = attempt?.messages?.find(
-        (m) => m.role === 'tool' && m.content?.includes('SKILL.md')
+      const validationError = attempt?.messages?.find(
+        (m) => m.role === 'tool' && m.content?.includes('invalid_args')
       );
-      expect(listToolResult).toBeTruthy();
+      expect(validationError).toBeTruthy();
 
-      // Verify the read tool returned file content (not "Missing path" error)
-      const readToolResult = attempt?.messages?.find(
-        (m) => m.role === 'tool' && m.content?.includes('AgentMail Skill')
-      );
-      expect(readToolResult).toBeTruthy();
-
-      // Cleanup
-      await rm(skillsDir, { recursive: true, force: true });
       await cleanup();
     });
   });

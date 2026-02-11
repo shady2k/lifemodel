@@ -193,6 +193,10 @@ export const SYNTHETIC_TOOL_DEFINITIONS = {
             type: 'string',
             description: 'Question to ask the user. Be clear and specific.',
           },
+          message: {
+            type: 'string',
+            description: 'Alias for question.',
+          },
         },
         required: ['question'],
       },
@@ -594,13 +598,11 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   read: async (args, ctx): Promise<MotorToolResult> => {
-    // Accept common aliases for 'path' (weak models often use intuitive names)
-    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
+    const path = args['path'] as string;
     if (!path) {
-      const received = Object.keys(args).join(', ');
       return {
         ok: false,
-        output: `Missing "path" argument. Usage: read({path: "file.txt"}).${received ? ` You passed: {${received}}. Use "path" instead.` : ''}`,
+        output: 'Missing required parameter: "path". Usage: read({path: "file.txt"}).',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -696,8 +698,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   write: async (args, ctx): Promise<MotorToolResult> => {
-    // Accept common aliases for 'path' (weak models often use intuitive names)
-    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
+    const path = args['path'] as string;
     // Auto-stringify if model passes JSON object as content
     const rawContent = args['content'];
     const content =
@@ -786,9 +787,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   list: async (args, ctx): Promise<MotorToolResult> => {
-    // Accept 'directory' as alias for 'path' (weak models often use intuitive names)
-    const path =
-      (args['path'] as string | undefined) ?? (args['directory'] as string | undefined) ?? '.';
+    const path = (args['path'] as string | undefined) ?? '.';
     const recursive = (args['recursive'] as boolean | undefined) ?? false;
     const startTime = Date.now();
 
@@ -975,8 +974,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       };
     }
 
-    const searchPath =
-      ((args['path'] ?? args['directory'] ?? args['dir']) as string | undefined) ?? '.';
+    const searchPath = (args['path'] as string | undefined) ?? '.';
     const globPattern = args['glob'] as string | undefined;
     const startTime = Date.now();
 
@@ -1039,19 +1037,9 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   patch: async (args, ctx): Promise<MotorToolResult> => {
-    // Accept common aliases for 'path' (weak models often use intuitive names)
-    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as
-      | string
-      | undefined;
-    const oldText = (args['old_text'] ??
-      args['oldText'] ??
-      args['search'] ??
-      args['match'] ??
-      args['text']) as string | undefined;
-    const newText = (args['new_text'] ??
-      args['newText'] ??
-      args['replace'] ??
-      args['replacement']) as string | undefined;
+    const path = args['path'] as string | undefined;
+    const oldText = args['old_text'] as string | undefined;
+    const newText = args['new_text'] as string | undefined;
 
     if (!path || oldText == null || newText == null) {
       const received = Object.keys(args).join(', ');
