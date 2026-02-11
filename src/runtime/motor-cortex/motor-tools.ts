@@ -531,7 +531,22 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
         case 'list': {
           const fullPath = await resolveSafePath(ctx.allowedRoots, path);
           if (!fullPath) return pathTraversalError(startTime);
-          const entries = await readdir(fullPath, { withFileTypes: true });
+          let entries;
+          try {
+            entries = await readdir(fullPath, { withFileTypes: true });
+          } catch (e: unknown) {
+            if (e instanceof Error && 'code' in e && e.code === 'ENOENT') {
+              return {
+                ok: true,
+                output:
+                  '(directory does not exist yet — use filesystem write to create files here)',
+                retryable: false,
+                provenance: 'internal',
+                durationMs: Date.now() - startTime,
+              };
+            }
+            throw e;
+          }
           const listing = entries
             .map((e) => `${e.isDirectory() ? '[DIR] ' : '[FILE]'} ${e.name}`)
             .join('\n');

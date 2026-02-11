@@ -433,7 +433,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       await taskLog?.log(
         `\nCOMPLETED (${(result.stats.durationMs / 1000).toFixed(1)}s, ${String(result.stats.iterations)} iterations, ${String(result.stats.errors)} errors)`
       );
-      await taskLog?.log(`  Summary: ${result.summary.slice(0, 200)}`);
+      await taskLog?.log(`  Summary: ${result.summary.slice(0, 2000)}`);
       return;
     }
 

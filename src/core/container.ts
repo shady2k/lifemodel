@@ -65,6 +65,11 @@ import { createContainerManager } from '../runtime/container/container-manager.j
 import { resolve } from 'node:path';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
+import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
+import { createApproveSkillTool } from '../layers/cognition/tools/core/approve-skill.js';
+import { fetchPage } from '../plugins/web-fetch/fetcher.js';
+import { createProviderInstances } from '../plugins/web-search/providers/registry.js';
+import type { MotorFetchFn, MotorSearchFn } from '../runtime/motor-cortex/motor-tools.js';
 
 /**
  * Application configuration.
@@ -485,10 +490,41 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create Motor Cortex service (for code execution)
   let motorCortex: MotorCortex | null = null;
   const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
+  const credentialStore = createEnvCredentialStore();
+  const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
   if (llmProvider) {
-    const credentialStore = createEnvCredentialStore();
-    const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
     const containerMgr = createContainerManager(logger);
+
+    // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape
+    const motorFetchFn: MotorFetchFn = async (url, opts) => {
+      const response = await fetchPage({ url, timeoutMs: opts?.timeoutMs }, logger);
+      if (response.ok) {
+        return {
+          ok: true,
+          status: response.data.status,
+          content: response.data.markdown,
+          contentType: response.data.contentType,
+        };
+      }
+      return {
+        ok: false,
+        status: 0,
+        content: response.error.message,
+        contentType: '',
+      };
+    };
+
+    // Wire search adapter: uses first available search provider
+    const searchProviders = createProviderInstances(logger);
+    const defaultProvider = searchProviders.values().next().value;
+
+    const motorSearchFn: MotorSearchFn | undefined = defaultProvider
+      ? async (query, limit) => {
+          const result = await defaultProvider.search({ query, limit: limit ?? 5 });
+          if (!result.ok) throw new Error(result.error.message);
+          return result.results.map((r) => ({ title: r.title, url: r.url, snippet: r.snippet }));
+        }
+      : undefined;
 
     motorCortex = createMotorCortex({
       llm: llmProvider,
@@ -499,9 +535,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       skillsDir,
       artifactsBaseDir,
       containerManager: containerMgr,
+      fetchFn: motorFetchFn,
+      ...(motorSearchFn && { searchFn: motorSearchFn }),
     });
 
-    logger.info('Motor Cortex service initialized');
+    logger.info({ hasFetch: true, hasSearch: !!motorSearchFn }, 'Motor Cortex service initialized');
   }
 
   // Create recipient registry for message routing (with persistence)
@@ -741,6 +779,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   if (motorCortex) {
     layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
     layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex, artifactsBaseDir));
+    layers.cognition.getToolRegistry().registerTool(createCredentialTool({ credentialStore }));
+    layers.cognition.getToolRegistry().registerTool(createApproveSkillTool({ skillsDir }));
     logger.info('Motor Cortex tools registered');
   }
 

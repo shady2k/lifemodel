@@ -28,8 +28,8 @@ export const MAX_REDIRECTS = 5;
 
 /** Hard limits enforced server-side regardless of input */
 export const HARD_LIMITS = {
-  /** Maximum response body size (1MB) */
-  maxBytes: 1_000_000,
+  /** Maximum response body size (5MB) */
+  maxBytes: 5_000_000,
   /** Maximum markdown output size (64KB) */
   maxMarkdownBytes: 64_000,
   /** Maximum timeout (30 seconds) */

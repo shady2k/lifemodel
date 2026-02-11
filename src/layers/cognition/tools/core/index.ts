@@ -19,6 +19,7 @@ export { createEscalateTool } from './escalate.js';
 export { createDeferTool } from './defer.js';
 export { createSayTool } from './say.js';
 export { createCredentialTool } from './credential.js';
+export { createApproveSkillTool } from './approve-skill.js';
 
 // Types
 export type {
