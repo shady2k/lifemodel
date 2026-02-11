@@ -142,6 +142,8 @@ calories({
 4. Если status="ambiguous", уточни у пользователя и повтори с chooseItemId
 
 5. НЕ создавай новый продукт только из-за другой порции
+
+6. Дата поддерживает относительные форматы: "today", "yesterday", "tomorrow", или YYYY-MM-DD
 ```
 
 ## Matching Algorithm
@@ -187,6 +189,9 @@ User: "запиши американо и йогурт на завтрак"
 
 User: "что я ел сегодня?"
 → list with date=today
+
+User: "что было на завтраке вчера?"
+→ list with date=yesterday, meal_type=breakfast
 
 User: "сколько калорий осталось?"
 → summary with date=today

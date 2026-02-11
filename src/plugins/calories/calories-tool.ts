@@ -56,6 +56,42 @@ interface UserModelData {
 type GetUserModelFunc = (recipientId: string) => Promise<UserModelData | null>;
 
 /**
+ * Parse a relative date keyword to YYYY-MM-DD format.
+ *
+ * Supports:
+ * - "today" → current food date (sleep-aware)
+ * - "yesterday" → previous day
+ * - "tomorrow" → next day
+ * - YYYY-MM-DD → passthrough (already formatted)
+ */
+function parseRelativeDate(
+  dateInput: string,
+  timezone: string,
+  userPatterns: { wakeHour?: number; sleepHour?: number } | null
+): string {
+  // Check if it's an absolute date (YYYY-MM-DD)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+    return dateInput;
+  }
+
+  const normalized = dateInput.toLowerCase().trim();
+  const baseDate = getCurrentFoodDate(timezone, userPatterns);
+  const baseDt = DateTime.fromISO(baseDate, { zone: timezone });
+
+  switch (normalized) {
+    case 'today':
+      return baseDate;
+    case 'yesterday':
+      return baseDt.minus({ days: 1 }).toFormat('yyyy-MM-dd');
+    case 'tomorrow':
+      return baseDt.plus({ days: 1 }).toFormat('yyyy-MM-dd');
+    default:
+      // Unknown keyword — return base date as fallback
+      return baseDate;
+  }
+}
+
+/**
  * Get the current "food day" based on user's sleep patterns.
  */
 function getCurrentFoodDate(
@@ -866,7 +902,8 @@ export function createCaloriesTool(
       },
       date: {
         type: ['string', 'null'],
-        description: 'Date YYYY-MM-DD (default: today based on sleep patterns)',
+        description:
+          'Date: "today", "yesterday", "tomorrow", or YYYY-MM-DD (default: today based on sleep patterns)',
       },
       meal_type: {
         type: ['string', 'null'],
@@ -917,7 +954,8 @@ KEY RULES:
 - name = pure food name, no quantities ("Americano", not "Americano 200ml")
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
 - If status="ambiguous", resolve via chooseItemId — do NOT create a new item for a different portion
-- log supports entries array for multiple items in one call`;
+- log supports entries array for multiple items in one call
+- date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
@@ -942,7 +980,8 @@ KEY RULES:
       {
         name: 'date',
         type: 'string',
-        description: 'Date YYYY-MM-DD (default: today based on sleep patterns)',
+        description:
+          'Date: "today", "yesterday", "tomorrow", or YYYY-MM-DD (default: today based on sleep patterns)',
         required: false,
       },
       {
@@ -1025,7 +1064,9 @@ KEY RULES:
       const userPatterns = getUserPatterns(recipientId);
       const dateArg = args['date'];
       const effectiveDate =
-        typeof dateArg === 'string' ? dateArg : getCurrentFoodDate(timezone, userPatterns);
+        typeof dateArg === 'string'
+          ? parseRelativeDate(dateArg, timezone, userPatterns)
+          : getCurrentFoodDate(timezone, userPatterns);
 
       switch (action) {
         case 'log': {
