@@ -949,8 +949,21 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
   const startTime = Date.now();
 
   try {
-    const fullPath = await resolveSafePath(path);
-    if (!fullPath) return pathError(startTime);
+    // Patch mutates files — resolve against writable roots only
+    const fullPath = await resolveSafePath(path, WRITE_ROOTS);
+    if (!fullPath) {
+      const hint = path.startsWith('/skills/')
+        ? ` The /skills/ directory is read-only. Use a relative path instead: "${path.replace(/^\/skills\//, 'skills/')}".`
+        : ' Use a relative path (e.g. "output.txt", "skills/name/file.md").';
+      return {
+        ok: false,
+        output: `Cannot patch: path is outside the writable workspace.${hint}`,
+        errorCode: 'permission_denied',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
 
     const content = await readFile(fullPath, 'utf-8');
 

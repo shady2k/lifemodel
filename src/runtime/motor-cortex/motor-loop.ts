@@ -1067,7 +1067,7 @@ A skill is available for this task. Read its files before starting work.
 Skill: ${skill.frontmatter.name} — ${skill.frontmatter.description}
 Skill directory: ${containerMode ? `/skills/${skill.frontmatter.name}` : skill.path}
 Start by reading SKILL.md in the skill directory for setup and usage instructions. Check for reference files too (list the directory).
-IMPORTANT: The skill directory is read-only. To modify skill files, write the updated version to skills/${skill.frontmatter.name}/ in the workspace (relative path, e.g. write to "skills/${skill.frontmatter.name}/SKILL.md"). Changes are automatically installed after your run completes.
+IMPORTANT: The skill directory is read-only. To modify skill files, use write or patch with a RELATIVE path: "skills/${skill.frontmatter.name}/SKILL.md" (NOT the absolute "/skills/..." path). Changes are automatically extracted and installed after your run completes.
 ${
   skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0
     ? `\nAvailable credentials for this skill:\n${skill.policy.requiredCredentials.map((c) => `- <credential:${c}> — use this placeholder in API calls (e.g. Authorization header, code variables)`).join('\n')}\nExample: fetch(url, {headers: {"Authorization": "Bearer <credential:${String(skill.policy.requiredCredentials[0])}>"}})`
