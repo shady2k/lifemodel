@@ -66,7 +66,7 @@ import { resolve } from 'node:path';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
 import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
-import { createApproveSkillTool } from '../layers/cognition/tools/core/approve-skill.js';
+import { createSkillTool } from '../layers/cognition/tools/core/skill.js';
 import { fetchPage } from '../plugins/web-fetch/fetcher.js';
 import { createProviderInstances } from '../plugins/web-search/providers/registry.js';
 import type { MotorFetchFn, MotorSearchFn } from '../runtime/motor-cortex/motor-tools.js';
@@ -821,7 +821,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
     layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex, artifactsBaseDir));
     layers.cognition.getToolRegistry().registerTool(createCredentialTool({ credentialStore }));
-    layers.cognition.getToolRegistry().registerTool(createApproveSkillTool({ skillsDir }));
+    layers.cognition.getToolRegistry().registerTool(createSkillTool({ skillsDir }));
     logger.info('Motor Cortex tools registered');
   }
 
