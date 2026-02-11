@@ -531,7 +531,7 @@ describe('fetch tool', () => {
     const result = await executeTool('fetch', { url: 'https://other.com/data' }, ctx);
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('permission_denied');
-    expect(result.output).toContain('Domain other.com not allowed');
+    expect(result.output).toContain('Domain other.com is not in the allowed list');
     expect(result.output).toContain('Allowed domains: api.example.com');
   });
 

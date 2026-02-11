@@ -71,7 +71,7 @@ export function createCredentialTool(deps: CredentialToolDeps): Tool {
     name: 'core.credential',
     maxCallsPerTurn: 3,
     description:
-      'Manage credentials for Motor Cortex skills. Set API keys and tokens. List shows names only (values never exposed). Credentials are referenced as <credential:name> in skill arguments.',
+      'Manage credentials for Motor Cortex skills. List shows names only (values never exposed). Credentials are referenced as <credential:name> in skill arguments. IMPORTANT: Never ask users to paste API keys in chat. Tell them to set VAULT_<NAME> env var and restart instead.',
     tags: ['credentials', 'motor', 'security'],
     hasSideEffects: true,
     parameters,

@@ -1675,16 +1675,19 @@ export class PluginLoader {
       const prefixedTool: PluginTool = {
         ...tool,
         name: `plugin.${tool.name}`,
-        // Wrap validation to enforce schema validation on all plugin tools
+        // Wrap validation: schema coercion first, then custom semantic checks
         validate: (args) => {
-          // First run plugin's custom validation (semantic checks)
-          const customResult = tool.validate(args);
-          if (!customResult.success) return customResult;
-
-          // Then run schema validation (type/required checks)
-          // This catches invalid placeholder values like "<UNKNOWN>" for number params
+          // 1. Schema validation with type coercion (string→array, string→number)
+          // Must run first so custom validators receive coerced types
           const parameters = tool.parameters as ToolParameter[];
-          return validateAgainstParameters(args as Record<string, unknown>, parameters);
+          const schemaResult = validateAgainstParameters(
+            args as Record<string, unknown>,
+            parameters
+          );
+          if (!schemaResult.success) return schemaResult;
+
+          // 2. Custom validation (semantic checks on coerced data)
+          return tool.validate(args);
         },
       };
       this.toolRegisterCallback(prefixedTool);

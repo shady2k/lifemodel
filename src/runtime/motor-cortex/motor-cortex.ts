@@ -22,6 +22,7 @@ import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ContainerManager, ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
@@ -104,6 +105,9 @@ export class MotorCortex {
 
   /** Awaiting input timeout timer */
   private awaitingInputTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Abort controllers for in-flight runs (keyed by runId) */
+  private readonly runAbortControllers = new Map<string, AbortController>();
 
   constructor(deps: MotorCortexDeps) {
     this.llm = deps.llm;
@@ -208,7 +212,15 @@ export class MotorCortex {
     recoveryContext?: MotorAttempt['recoveryContext']
   ): MotorAttempt {
     const attemptId = `att_${String(index)}`;
-    const messages = buildInitialMessages(run, skill, recoveryContext, maxIterations);
+    // When container manager exists, remap host paths to container paths in system prompt
+    const containerMode = !!this.containerManager;
+    const messages = buildInitialMessages(
+      run,
+      skill,
+      recoveryContext,
+      maxIterations,
+      containerMode
+    );
 
     return {
       id: attemptId,
@@ -284,9 +296,14 @@ export class MotorCortex {
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
     // Merge skill policy domains with explicit domains
+    // Auto-add package registry domains so skills can install SDKs
+    const PACKAGE_REGISTRY_DOMAINS = ['registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org'];
     const skillDomains = params.skill?.policy?.allowedDomains;
     const explicitDomains = params.domains;
-    const mergedDomains = mergeDomains(skillDomains, explicitDomains);
+    const baseDomains = mergeDomains(skillDomains, explicitDomains);
+    const mergedDomains = params.skill
+      ? Array.from(new Set([...baseDomains, ...PACKAGE_REGISTRY_DOMAINS]))
+      : baseDomains;
 
     const run: MotorRun = {
       id: runId,
@@ -434,18 +451,33 @@ export class MotorCortex {
   private async runLoopInBackground(run: MotorRun, attempt: MotorAttempt): Promise<void> {
     let containerHandle: ContainerHandle | undefined;
 
+    // Create abort controller for this run (allows cancelRun to interrupt the loop)
+    const abortController = new AbortController();
+    this.runAbortControllers.set(run.id, abortController);
+
     try {
       // Transition to running
       run.status = 'running';
       attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
-      // Reuse existing workspace on resume (preserves files from prior iterations),
-      // or create a fresh one for new runs.
+      // Reuse existing workspace on resume (preserves files from prior iterations).
+      // For skill-based runs, use a persistent workspace under the skill directory
+      // so installed packages (node_modules/, etc.) carry over between runs.
       let workspace: string;
       if (run.workspacePath && existsSync(run.workspacePath)) {
         workspace = run.workspacePath;
         this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
+      } else if (run.skill && this.skillsDir) {
+        const { mkdir } = await import('node:fs/promises');
+        workspace = join(this.skillsDir, run.skill, 'workspace');
+        await mkdir(workspace, { recursive: true });
+        run.workspacePath = workspace;
+        await this.stateManager.updateRun(run);
+        this.logger.info(
+          { runId: run.id, workspace, skill: run.skill },
+          'Using persistent skill workspace'
+        );
       } else {
         workspace = await createWorkspace();
         run.workspacePath = workspace;
@@ -486,6 +518,7 @@ export class MotorCortex {
         },
         logger: this.logger,
         workspace,
+        abortSignal: abortController.signal,
         ...(this.skillsDir && { skillsDir: this.skillsDir }),
         ...(this.credentialStore && { credentialStore: this.credentialStore }),
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
@@ -493,6 +526,81 @@ export class MotorCortex {
         ...(this.fetchFn && { fetchFn: this.fetchFn }),
         ...(this.searchFn && { searchFn: this.searchFn }),
       });
+
+      // Auto-retry for retryable failures: if loop returned without signal but attempt failed,
+      // check if we should auto-retry before emitting failure signal
+      // runMotorLoop mutates run.status and attempt.status by reference,
+      // but TS narrows both to 'running' from the assignments above.
+      // Cast to string for the post-loop status check.
+      if ((attempt.status as string) === 'failed' && (run.status as string) === 'running') {
+        const canRetry = run.attempts.length < run.maxAttempts;
+        const isRetryable = attempt.failure?.retryable === true;
+        if (canRetry && isRetryable) {
+          // Generate appropriate auto-guidance based on failure category
+          let autoGuidance: string;
+          if (attempt.failure?.category === 'model_failure') {
+            autoGuidance =
+              'Previous attempt failed: model produced XML text instead of tool calls. Use the tool API to call tools.';
+          } else if (attempt.failure?.category === 'tool_failure') {
+            const lastError = attempt.failure.lastErrorCode ?? 'unknown';
+            autoGuidance = `Previous attempt failed: tool error "${lastError}". Try a different approach.`;
+          } else {
+            autoGuidance = 'Previous attempt failed. Try again with a different approach.';
+          }
+
+          this.logger.info(
+            {
+              runId: run.id,
+              attemptIndex: attempt.index,
+              failureCategory: attempt.failure?.category,
+            },
+            'Auto-retrying retryable failure'
+          );
+
+          // Clean up container before retry
+          if (containerHandle && this.containerManager) {
+            try {
+              await this.containerManager.destroy(run.id);
+              this.logger.info({ runId: run.id }, 'Container destroyed before auto-retry');
+            } catch (destroyError) {
+              this.logger.warn(
+                { runId: run.id, error: destroyError },
+                'Failed to destroy container'
+              );
+            }
+          }
+
+          // Retry via retryRun (creates new attempt, re-creates container)
+          await this.retryRun(run.id, autoGuidance);
+          return; // Exit this function — retryRun handles the rest
+        }
+
+        // Not retryable or max attempts reached — emit failure signal
+        run.status = 'failed';
+        run.completedAt = new Date().toISOString();
+        await this.stateManager.updateRun(run);
+
+        this.pushSignal(
+          createSignal(
+            'motor_result',
+            'motor.cortex',
+            { value: 1, confidence: 1 },
+            {
+              data: {
+                kind: 'motor_result',
+                runId: run.id,
+                status: 'failed',
+                attemptIndex: attempt.index,
+                ...(attempt.failure && { failure: attempt.failure }),
+                error: {
+                  message: attempt.failure?.hint ?? 'Model execution failed',
+                  lastStep: `Iteration ${String(attempt.stepCursor)}`,
+                },
+              },
+            }
+          )
+        );
+      }
     } catch (error) {
       // Motor loop threw an unhandled error (e.g. LLM provider failure, container failure, storage failure).
       // Mark attempt and run as failed, emit signal so cognition layer gets feedback.
@@ -547,6 +655,9 @@ export class MotorCortex {
         )
       );
     } finally {
+      // Clean up abort controller
+      this.runAbortControllers.delete(run.id);
+
       // Always destroy container when run completes or fails
       // Use containerManager.destroy() to also clean up the activeContainers map
       if (containerHandle && this.containerManager) {
@@ -617,23 +728,16 @@ export class MotorCortex {
 
     await this.stateManager.updateRun(run);
 
-    // Emit canceled signal
-    this.pushSignal(
-      createSignal(
-        'motor_result',
-        'motor.cortex',
-        { value: 1, confidence: 1 },
-        {
-          data: {
-            kind: 'motor_result',
-            runId,
-            status: 'failed',
-            attemptIndex: run.currentAttemptIndex,
-            error: { message: 'Run canceled by user' },
-          },
-        }
-      )
-    );
+    // Abort the in-flight motor loop (if running)
+    const abortController = this.runAbortControllers.get(runId);
+    if (abortController) {
+      abortController.abort();
+      this.runAbortControllers.delete(runId);
+    }
+
+    // No signal emitted here — the cognition layer already knows (it called core.task.cancel
+    // and got the tool result). Emitting a signal would trigger a redundant tick and duplicate message.
+    // The aborted motor loop also won't emit a signal because run.status is already 'failed'.
 
     this.logger.info({ runId, previousStatus }, 'Motor Cortex run canceled');
 

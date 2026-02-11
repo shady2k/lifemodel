@@ -55,14 +55,15 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).not.toContain('policy.json');
   });
 
-  it('includes skill section with frontmatter when skill is provided', () => {
+  it('includes skill reference with path when skill is provided', () => {
     const run = createMockRun();
     const skill = createMockSkill();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('<skill name="test-skill">');
-    expect(prompt).toContain('Skill instructions here.');
-    expect(prompt).toContain('</skill>');
+    expect(prompt).toContain('Skill: test-skill');
+    expect(prompt).toContain('Skill directory:');
+    expect(prompt).toContain('Read its files before starting work');
+    expect(prompt).toContain('reading SKILL.md');
   });
 
   it('does NOT include skill section when no skill provided', () => {
@@ -86,7 +87,7 @@ describe('buildMotorSystemPrompt', () => {
 
     expect(prompt).toContain('Guidelines:');
     expect(prompt).toContain('Break down complex tasks into steps');
-    expect(prompt).toContain('Credentials can be referenced as <credential:name>');
+    expect(prompt).toContain('<credential:NAME>');
   });
 
   it('includes maximum iterations', () => {

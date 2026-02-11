@@ -288,6 +288,7 @@ export async function applyNetworkPolicy(
     // ip6tables-restore may fail on hosts without IPv6 support — that's fine
     // (if there's no IPv6, there's nothing to block).
     const script = [
+      'set -e',
       `iptables-restore <<'RULES4'`,
       ipv4Rules,
       'RULES4',

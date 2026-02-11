@@ -11,7 +11,8 @@ import { tokenize } from './shell-tokenizer.js';
  * Default allowlist of safe commands.
  *
  * These commands are safe to run in a controlled environment.
- * Intentionally excluded: node, npx, python, etc. (use code tool instead)
+ * node/npm/npx are allowed because skills often require SDK installation.
+ * Container isolation (read-only rootfs, network policy, pid/mem limits) provides security.
  */
 export const DEFAULT_ALLOWLIST = new Set([
   // Core utilities
@@ -58,6 +59,15 @@ export const DEFAULT_ALLOWLIST = new Set([
   'wget',
   'jq',
 
+  // Runtime (container-isolated, needed for SDK-based skills)
+  'node',
+  'npm',
+  'npx',
+  'python',
+  'python3',
+  'pip',
+  'pip3',
+
   // System info
   'uname',
   'whoami',
@@ -70,7 +80,7 @@ export const DEFAULT_ALLOWLIST = new Set([
  * Commands that can make network requests should be tagged
  * with provenance='web' to indicate the data came from outside.
  */
-export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git']);
+export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git', 'npm', 'npx', 'pip', 'pip3']);
 
 /**
  * Validation result.

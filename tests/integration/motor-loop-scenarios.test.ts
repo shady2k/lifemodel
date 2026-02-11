@@ -10,8 +10,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { runMotorLoop } from '../../src/runtime/motor-cortex/motor-loop.js';
 import type { MotorTool } from '../../src/runtime/motor-cortex/motor-protocol.js';
 import {
@@ -260,17 +261,16 @@ describe('Motor Loop Scenario Tests', () => {
 
       await runMotorLoop(params);
 
-      // Assert failed status
+      // Assert attempt failed but run stays 'running' (caller decides retry vs fail)
       const finalRun = stateManager.findRun(params.run.id);
-      expect(finalRun?.status).toBe('failed');
+      expect(finalRun?.status).toBe('running');
 
       const attempt = finalRun?.attempts[finalRun.currentAttemptIndex];
       expect(attempt?.status).toBe('failed');
       expect(attempt?.failure?.category).toBe('tool_failure');
 
-      // Assert signal emitted with failed status
-      expect(pushSignal.getLastSignal()?.data?.status).toBe('failed');
-      expect(pushSignal.getLastSignal()?.data?.failure?.category).toBe('tool_failure');
+      // No signal emitted — runLoopInBackground handles signal emission after retry decision
+      expect(pushSignal.count()).toBe(0);
 
       await cleanup();
     });
@@ -303,6 +303,60 @@ describe('Motor Loop Scenario Tests', () => {
       const finalRun = stateManager.findRun(params.run.id);
       expect(finalRun?.status).toBe('completed');
 
+      await cleanup();
+    });
+  });
+
+  describe('Scenario 6b: Wrong Param Names — Alias Resolution', () => {
+    it('resolves read({file: ...}) and list({directory: ...}) aliases in skillsDir', async () => {
+      // Create a separate skills directory (NOT inside workspace) — this is
+      // the real scenario: skill files live in skillsDir, workspace is empty.
+      const skillsDir = join(tmpdir(), `motor-test-skills-${Date.now()}`);
+      const skillDir = join(skillsDir, 'agentmail');
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(join(skillDir, 'SKILL.md'), '# AgentMail Skill\nSend emails via API.');
+      await writeFile(join(skillDir, 'policy.json'), '{"trust":"approved"}');
+
+      // Model uses wrong param names — reproduces the real bug where
+      // minimax-m2.1 sent list({"directory": "/skills/agentmail"})
+      // and read({"file": "/skills/agentmail/SKILL.md"})
+      const scriptedLLM = createScriptedLLM([
+        // list with "directory" instead of "path" — targets skillsDir, not workspace
+        toolCallResponse('list', { directory: join(skillsDir, 'agentmail') }),
+        // read with "file" instead of "path" — targets skill file
+        toolCallResponse('read', { file: join(skillsDir, 'agentmail', 'SKILL.md') }),
+        // Complete
+        textResponse('Found the skill files.'),
+      ]);
+
+      const { params, cleanup, stateManager } = await createTestLoopParams({
+        llm: scriptedLLM,
+        tools: ['read', 'write', 'list'],
+        skillsDir,
+      });
+
+      await runMotorLoop(params);
+
+      // Assert completed — aliases were resolved and skillsDir was accessible
+      const finalRun = stateManager.findRun(params.run.id);
+      expect(finalRun?.status).toBe('completed');
+      expect(finalRun?.result?.ok).toBe(true);
+
+      // Verify the list tool returned skill directory contents (not empty workspace)
+      const attempt = finalRun?.attempts[finalRun.currentAttemptIndex];
+      const listToolResult = attempt?.messages?.find(
+        (m) => m.role === 'tool' && m.content?.includes('SKILL.md')
+      );
+      expect(listToolResult).toBeTruthy();
+
+      // Verify the read tool returned file content (not "Missing path" error)
+      const readToolResult = attempt?.messages?.find(
+        (m) => m.role === 'tool' && m.content?.includes('AgentMail Skill')
+      );
+      expect(readToolResult).toBeTruthy();
+
+      // Cleanup
+      await rm(skillsDir, { recursive: true, force: true });
       await cleanup();
     });
   });
@@ -357,15 +411,15 @@ describe('Motor Loop Scenario Tests', () => {
 
       await runMotorLoop(params);
 
-      // Assert failed
+      // Assert attempt failed but run stays 'running' (caller decides retry vs fail)
       const finalRun = stateManager.findRun(params.run.id);
-      expect(finalRun?.status).toBe('failed');
+      expect(finalRun?.status).toBe('running');
 
       const attempt = finalRun?.attempts[finalRun.currentAttemptIndex];
       expect(attempt?.failure?.hint).toContain('XML');
 
-      // Assert signal
-      expect(pushSignal.getLastSignal()?.data?.status).toBe('failed');
+      // No signal emitted — runLoopInBackground handles signal emission after retry decision
+      expect(pushSignal.count()).toBe(0);
 
       await cleanup();
     });

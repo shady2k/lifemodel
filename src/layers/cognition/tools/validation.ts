@@ -16,6 +16,42 @@ import type { ToolParameter } from './types.js';
  */
 const PLACEHOLDER_PATTERNS = ['<UNKNOWN>', '<VALUE>', '<TODO>', '<MISSING>', '<N/A>'];
 
+/** Max chars for value preview in error messages. */
+const PREVIEW_MAX_LENGTH = 80;
+
+/**
+ * Truncate a value for error message preview.
+ * Shows enough for the model to recognize what it sent.
+ */
+function truncatePreview(value: unknown): string {
+  const str = typeof value === 'string' ? `"${value}"` : JSON.stringify(value);
+  if (str.length <= PREVIEW_MAX_LENGTH) return str;
+  return str.slice(0, PREVIEW_MAX_LENGTH) + '…';
+}
+
+/**
+ * Build an actionable type mismatch error with what was received and how to fix it.
+ */
+function buildTypeMismatchError(
+  paramName: string,
+  expected: string,
+  actual: string,
+  preview: string
+): string {
+  let msg = `${paramName}: expected ${expected}, got ${actual} (received: ${preview})`;
+
+  // Add specific fix hints for common model mistakes
+  if (expected === 'array' && actual === 'string') {
+    msg += '. Pass a JSON array directly, not a stringified JSON string.';
+  } else if (expected === 'number' && actual === 'string') {
+    msg += '. Pass a number without quotes.';
+  } else if (expected === 'object' && actual === 'string') {
+    msg += '. Pass a JSON object directly, not a stringified JSON string.';
+  }
+
+  return msg;
+}
+
 /**
  * Check if a value looks like a placeholder that should be omitted.
  */
@@ -96,7 +132,7 @@ export function validateAgainstParameters(
           args[param.name] = parsed; // Fix in-place so executor gets correct type
         }
       } catch {
-        // Not valid JSON — fall through to error
+        // Not valid JSON — fall through to error with actionable message
       }
     }
 
@@ -111,16 +147,17 @@ export function validateAgainstParameters(
 
     const coercedType = Array.isArray(coerced) ? 'array' : typeof coerced;
 
-    if (expectedType === 'string' && coercedType !== 'string') {
-      errors.push(`${param.name}: expected string, got ${coercedType}`);
-    } else if (expectedType === 'number' && coercedType !== 'number') {
-      errors.push(`${param.name}: expected number, got ${coercedType}`);
-    } else if (expectedType === 'boolean' && coercedType !== 'boolean') {
-      errors.push(`${param.name}: expected boolean, got ${coercedType}`);
-    } else if (expectedType === 'array' && coercedType !== 'array') {
-      errors.push(`${param.name}: expected array, got ${coercedType}`);
-    } else if (expectedType === 'object' && (coercedType !== 'object' || Array.isArray(coerced))) {
-      errors.push(`${param.name}: expected object, got ${coercedType}`);
+    let typeMismatch = false;
+    if (expectedType === 'string' && coercedType !== 'string') typeMismatch = true;
+    else if (expectedType === 'number' && coercedType !== 'number') typeMismatch = true;
+    else if (expectedType === 'boolean' && coercedType !== 'boolean') typeMismatch = true;
+    else if (expectedType === 'array' && coercedType !== 'array') typeMismatch = true;
+    else if (expectedType === 'object' && (coercedType !== 'object' || Array.isArray(coerced)))
+      typeMismatch = true;
+
+    if (typeMismatch) {
+      const preview = truncatePreview(value);
+      errors.push(buildTypeMismatchError(param.name, expectedType, coercedType, preview));
     }
 
     // Check enum (for strings with enum constraint)

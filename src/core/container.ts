@@ -496,7 +496,48 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     const containerMgr = createContainerManager(logger);
 
     // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape
+    // For API-style requests (custom method/headers/body), use direct fetch()
+    // instead of fetchPage() which is a web scraper (HTML→markdown, robots.txt, etc.)
     const motorFetchFn: MotorFetchFn = async (url, opts) => {
+      const isApiRequest =
+        opts != null &&
+        (Boolean(opts.method && opts.method !== 'GET') ||
+          opts.headers != null ||
+          opts.body != null);
+
+      if (isApiRequest) {
+        const timeoutMs = opts.timeoutMs ?? 30_000;
+        const controller = new AbortController();
+        const timer = setTimeout(() => {
+          controller.abort();
+        }, timeoutMs);
+        try {
+          const response = await fetch(url, {
+            method: opts.method ?? 'GET',
+            ...(opts.headers && { headers: opts.headers }),
+            ...(opts.body && { body: opts.body }),
+            signal: controller.signal,
+          });
+          const contentType = response.headers.get('content-type') ?? '';
+          const text = await response.text();
+          if (!response.ok) {
+            return {
+              ok: false,
+              status: response.status,
+              content: `HTTP ${String(response.status)}: ${text}`,
+              contentType,
+            };
+          }
+          return { ok: true, status: response.status, content: text, contentType };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { ok: false, status: 0, content: message, contentType: '' };
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      // Web page fetch: HTML→markdown conversion, redirect following, robots.txt
       const response = await fetchPage({ url, timeoutMs: opts?.timeoutMs }, logger);
       if (response.ok) {
         return {

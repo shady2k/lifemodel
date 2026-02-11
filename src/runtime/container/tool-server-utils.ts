@@ -57,13 +57,22 @@ export const SHELL_ALLOWLIST = new Set([
   'wget',
   'jq',
 
+  // Runtime (container-isolated, needed for SDK-based skills)
+  'node',
+  'npm',
+  'npx',
+  'python',
+  'python3',
+  'pip',
+  'pip3',
+
   // System info
   'uname',
   'whoami',
   'id',
 ]);
 
-export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git']);
+export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git', 'npm', 'npx', 'pip', 'pip3']);
 
 /**
  * Shell control operators that enable command chaining.

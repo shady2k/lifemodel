@@ -84,10 +84,10 @@ describe('validatePipeline', () => {
     });
 
     it('validates allowlist in && and || chains', () => {
-      const result = validatePipeline('echo test || python3 bad.py && echo done');
+      const result = validatePipeline('echo test || bash bad.sh && echo done');
       expect(result.ok).toBe(false);
       expect(result.error).toContain('Command not allowed');
-      expect(result.error).toContain('python3');
+      expect(result.error).toContain('bash');
     });
   });
 
@@ -143,28 +143,25 @@ describe('validatePipeline', () => {
     });
   });
 
-  describe('rejected: not in allowlist', () => {
-    it('rejects python3 command', () => {
+  describe('allowed: container-isolated runtimes', () => {
+    it('allows python3 command', () => {
       const result = validatePipeline('python3 script.py');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
-      expect(result.error).toContain('python3');
+      expect(result.ok).toBe(true);
     });
 
-    it('rejects node command', () => {
+    it('allows node command', () => {
       const result = validatePipeline('node script.js');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
-      expect(result.error).toContain('node');
+      expect(result.ok).toBe(true);
     });
 
-    it('rejects python command', () => {
-      const result = validatePipeline('python3 script.py');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
-      expect(result.error).toContain('python3');
+    it('allows npm command', () => {
+      const result = validatePipeline('npm install express');
+      expect(result.ok).toBe(true);
+      expect(result.hasNetwork).toBe(true);
     });
+  });
 
+  describe('rejected: not in allowlist', () => {
     it('rejects bash command', () => {
       const result = validatePipeline('bash -c "echo test"');
       expect(result.ok).toBe(false);
@@ -177,6 +174,12 @@ describe('validatePipeline', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('Command not allowed');
       expect(result.error).toContain('sh');
+    });
+
+    it('rejects arbitrary binary', () => {
+      const result = validatePipeline('malware');
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Command not allowed');
     });
   });
 
@@ -396,7 +399,8 @@ describe('exported constants', () => {
     expect(SHELL_ALLOWLIST).toBeInstanceOf(Set);
     expect(SHELL_ALLOWLIST.has('echo')).toBe(true);
     expect(SHELL_ALLOWLIST.has('git')).toBe(true);
-    expect(SHELL_ALLOWLIST.has('python3')).toBe(false);
+    expect(SHELL_ALLOWLIST.has('python3')).toBe(true);
+    expect(SHELL_ALLOWLIST.has('bash')).toBe(false);
   });
 
   it('exports NETWORK_COMMANDS as a Set', () => {

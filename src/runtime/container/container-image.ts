@@ -118,10 +118,20 @@ async function assembleBuildContext(
   let containerDir: string;
   let sandboxDir: string;
 
+  // Source .ts files — used for hash computation in dev mode
+  let srcToolServerFile: string | undefined;
+  let srcToolServerUtilsFile: string | undefined;
+  let srcSandboxWorkerFile: string | undefined;
+
   if (isDev) {
-    // In dev mode: look for compiled output in dist/
-    // The project compiles src/runtime/container/ → dist/runtime/container/
+    // In dev mode: compile dist/ first, then use compiled output for the image.
+    // Hash the SOURCE .ts files (not dist/) so any src change triggers a rebuild.
     const srcContainerDir = getRuntimeDir('container');
+    const srcSandboxDir = getRuntimeDir('sandbox');
+    srcToolServerFile = join(srcContainerDir, 'tool-server.ts');
+    srcToolServerUtilsFile = join(srcContainerDir, 'tool-server-utils.ts');
+    srcSandboxWorkerFile = join(srcSandboxDir, 'sandbox-worker.ts');
+
     const distBase = srcContainerDir.replace('/src/runtime/', '/dist/runtime/');
     containerDir = distBase;
     sandboxDir = distBase.replace('/container', '/sandbox');
@@ -148,11 +158,19 @@ async function assembleBuildContext(
     // Copy sandbox-worker.js (needed by tool-server for code execution)
     await copyFile(sandboxWorkerFile, join(contextDir, 'sandbox-worker.js'));
 
-    // Compute content hash of source files for staleness detection
+    // Compute content hash for staleness detection.
+    // In dev mode: hash the SOURCE .ts files so any src change triggers a rebuild.
+    // In prod mode: hash the compiled .js files (they ARE the source of truth).
     const hash = createHash('sha256');
-    hash.update(await readFile(toolServerFile));
-    hash.update(await readFile(toolServerUtilsFile));
-    hash.update(await readFile(sandboxWorkerFile));
+    if (isDev && srcToolServerFile && srcToolServerUtilsFile && srcSandboxWorkerFile) {
+      hash.update(await readFile(srcToolServerFile));
+      hash.update(await readFile(srcToolServerUtilsFile));
+      hash.update(await readFile(srcSandboxWorkerFile));
+    } else {
+      hash.update(await readFile(toolServerFile));
+      hash.update(await readFile(toolServerUtilsFile));
+      hash.update(await readFile(sandboxWorkerFile));
+    }
     const sourceHash = hash.digest('hex').slice(0, 16);
 
     return { contextDir, sourceHash };
@@ -213,7 +231,8 @@ export async function ensureImage(logger?: (msg: string) => void): Promise<boole
   const buildResult = await assembleBuildContext(log);
   if (!buildResult) return false;
 
-  const { contextDir, sourceHash } = buildResult;
+  let { contextDir } = buildResult;
+  const { sourceHash } = buildResult;
 
   try {
     // Check if image exists and is up-to-date
@@ -228,6 +247,28 @@ export async function ensureImage(logger?: (msg: string) => void): Promise<boole
       );
     } else {
       log('Building Motor Cortex container image...');
+    }
+
+    // In dev mode, recompile dist/ before building the image.
+    // Source hash changed → dist/ is stale → compile first.
+    const currentFile = fileURLToPath(import.meta.url);
+    if (currentFile.endsWith('.ts')) {
+      log('Compiling TypeScript before building container image...');
+      try {
+        await execFileAsync('npx', ['tsc'], { timeout: 60_000 });
+      } catch (compileError) {
+        const errMsg = compileError instanceof Error ? compileError.message : String(compileError);
+        log(`TypeScript compilation failed: ${errMsg}`);
+        return false;
+      }
+
+      // Reassemble build context with freshly compiled files
+      await rm(contextDir, { recursive: true, force: true }).catch(() => {
+        /* ignore cleanup errors */
+      });
+      const freshBuild = await assembleBuildContext(log);
+      if (!freshBuild) return false;
+      contextDir = freshBuild.contextDir;
     }
 
     // Build the image

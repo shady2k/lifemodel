@@ -274,13 +274,16 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     type: 'function',
     function: {
       name: 'write',
-      description: 'Write content to a file. Creates parent directories automatically.',
+      description:
+        'Write content to a file. Creates parent directories automatically. ' +
+        'Writes to workspace only — use relative paths (e.g. "output.txt", "skills/name/SKILL.md").',
       parameters: {
         type: 'object',
         properties: {
           path: {
             type: 'string',
-            description: 'File path (relative to workspace).',
+            description:
+              'File path relative to workspace (e.g. "output.txt"). Do NOT use absolute paths like /skills/.',
           },
           content: {
             type: 'string',
@@ -591,11 +594,13 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   read: async (args, ctx): Promise<MotorToolResult> => {
-    const path = args['path'] as string;
+    // Accept common aliases for 'path' (weak models often use intuitive names)
+    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
     if (!path) {
+      const received = Object.keys(args).join(', ');
       return {
         ok: false,
-        output: 'Missing "path" argument.',
+        output: `Missing "path" argument. Usage: read({path: "file.txt"}).${received ? ` You passed: {${received}}. Use "path" instead.` : ''}`,
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -691,7 +696,8 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   write: async (args, ctx): Promise<MotorToolResult> => {
-    const path = args['path'] as string;
+    // Accept common aliases for 'path' (weak models often use intuitive names)
+    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
     // Auto-stringify if model passes JSON object as content
     const rawContent = args['content'];
     const content =
@@ -702,9 +708,10 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
           : JSON.stringify(rawContent, null, 2);
 
     if (!path) {
+      const received = Object.keys(args).join(', ');
       return {
         ok: false,
-        output: 'Missing "path" argument.',
+        output: `Missing "path" argument. Usage: write({path: "file.txt", content: "..."}).${received ? ` You passed: {${received}}. Use "path" instead.` : ''}`,
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -726,7 +733,20 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
 
     try {
       const fullPath = await resolveSafePath(ctx.writeRoots, path);
-      if (!fullPath) return pathTraversalError(startTime);
+      if (!fullPath) {
+        // Give specific guidance when model uses absolute /skills/ path
+        const hint = path.startsWith('/skills/')
+          ? ` The /skills/ directory is read-only. Use a relative path instead: "${path.replace(/^\/skills\//, 'skills/')}".`
+          : ' Use a relative path (e.g. "output.txt", "skills/name/file.md").';
+        return {
+          ok: false,
+          output: `Write denied: "${path}" is outside the workspace.${hint}`,
+          errorCode: 'permission_denied',
+          retryable: false,
+          provenance: 'internal',
+          durationMs: Date.now() - startTime,
+        };
+      }
       // Reject writes to symlinks
       try {
         const stats = await lstat(fullPath);
@@ -766,7 +786,9 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   list: async (args, ctx): Promise<MotorToolResult> => {
-    const path = (args['path'] as string | undefined) ?? '.';
+    // Accept 'directory' as alias for 'path' (weak models often use intuitive names)
+    const path =
+      (args['path'] as string | undefined) ?? (args['directory'] as string | undefined) ?? '.';
     const recursive = (args['recursive'] as boolean | undefined) ?? false;
     const startTime = Date.now();
 
@@ -921,11 +943,12 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   shell: async (args, ctx): Promise<MotorToolResult> => {
-    const command = args['command'] as string;
+    // Accept common aliases: models often pass {"curl":"..."} or {"cmd":"..."} instead of {"command":"..."}
+    const command = (args['command'] ?? args['cmd'] ?? args['curl'] ?? args['run']) as string;
     if (!command) {
       return {
         ok: false,
-        output: '',
+        output: 'Missing "command" argument. Provide a shell command string.',
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -941,9 +964,10 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   grep: async (args, ctx): Promise<MotorToolResult> => {
     const pattern = args['pattern'] as string;
     if (!pattern) {
+      const received = Object.keys(args).join(', ');
       return {
         ok: false,
-        output: '',
+        output: `Missing "pattern" argument. Usage: grep({pattern: "regex", path: "dir"}).${received ? ` You passed: {${received}}.` : ''}`,
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -951,7 +975,8 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       };
     }
 
-    const searchPath = (args['path'] as string | undefined) ?? '.';
+    const searchPath =
+      ((args['path'] ?? args['directory'] ?? args['dir']) as string | undefined) ?? '.';
     const globPattern = args['glob'] as string | undefined;
     const startTime = Date.now();
 
@@ -1014,14 +1039,28 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
   },
 
   patch: async (args, ctx): Promise<MotorToolResult> => {
-    const path = args['path'] as string | undefined;
-    const oldText = args['old_text'] as string | undefined;
-    const newText = args['new_text'] as string | undefined;
+    // Accept common aliases for 'path' (weak models often use intuitive names)
+    const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as
+      | string
+      | undefined;
+    const oldText = (args['old_text'] ??
+      args['oldText'] ??
+      args['search'] ??
+      args['match'] ??
+      args['text']) as string | undefined;
+    const newText = (args['new_text'] ??
+      args['newText'] ??
+      args['replace'] ??
+      args['replacement']) as string | undefined;
 
     if (!path || oldText == null || newText == null) {
+      const received = Object.keys(args).join(', ');
+      const missing = [!path && '"path"', !oldText && '"old_text"', !newText && '"new_text"']
+        .filter(Boolean)
+        .join(', ');
       return {
         ok: false,
-        output: '',
+        output: `Missing required arguments: ${missing}. Usage: patch({path: "file.txt", old_text: "find this", new_text: "replace with"}).${received ? ` You passed: {${received}}.` : ''}`,
         errorCode: 'invalid_args',
         retryable: false,
         provenance: 'internal',
@@ -1117,7 +1156,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       if (!allowed.includes(hostname) && !allowed.some((d) => hostname.endsWith(`.${d}`))) {
         return {
           ok: false,
-          output: `Domain ${hostname} not allowed. Allowed domains: ${allowed.join(', ')}. Call ask_user to request access.`,
+          output: `BLOCKED: Domain ${hostname} is not in the allowed list. You MUST call ask_user now to request access to this domain. Do not try alternative URLs or workarounds. Allowed domains: ${allowed.join(', ')}.`,
           errorCode: 'permission_denied',
           retryable: false,
           provenance: 'internal',
@@ -1149,7 +1188,18 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
 
     // Call fetch function
     const method = (args['method'] as string | undefined) ?? 'GET';
-    const headers = args['headers'] as Record<string, string> | undefined;
+    // Weak models sometimes pass headers as a JSON string instead of an object
+    const rawHeaders = args['headers'];
+    let headers: Record<string, string> | undefined;
+    if (typeof rawHeaders === 'string') {
+      try {
+        headers = JSON.parse(rawHeaders) as Record<string, string>;
+      } catch {
+        // Malformed JSON string — ignore headers
+      }
+    } else if (rawHeaders && typeof rawHeaders === 'object') {
+      headers = rawHeaders as Record<string, string>;
+    }
     const body = args['body'] as string | undefined;
 
     try {

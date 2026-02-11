@@ -486,11 +486,13 @@ function isBinaryBuffer(buf: Buffer): boolean {
 }
 
 async function executeRead(args: Record<string, unknown>): Promise<MotorToolResult> {
-  const path = args['path'] as string;
+  // Accept common aliases for 'path' (weak models often use intuitive names)
+  const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
   if (!path) {
+    const received = Object.keys(args).join(', ');
     return {
       ok: false,
-      output: 'Missing "path" argument.',
+      output: `Missing "path" argument. Usage: read({path: "file.txt"}).${received ? ` You passed: {${received}}. Use "path" instead.` : ''}`,
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -587,7 +589,8 @@ async function executeRead(args: Record<string, unknown>): Promise<MotorToolResu
 // ─── Write ────────────────────────────────────────────────────────
 
 async function executeWrite(args: Record<string, unknown>): Promise<MotorToolResult> {
-  const path = args['path'] as string;
+  // Accept common aliases for 'path' (weak models often use intuitive names)
+  const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as string;
   const rawContent = args['content'];
   const content =
     rawContent == null
@@ -597,9 +600,10 @@ async function executeWrite(args: Record<string, unknown>): Promise<MotorToolRes
         : JSON.stringify(rawContent, null, 2);
 
   if (!path) {
+    const received = Object.keys(args).join(', ');
     return {
       ok: false,
-      output: 'Missing "path" argument.',
+      output: `Missing "path" argument. Usage: write({path: "file.txt", content: "..."}).${received ? ` You passed: {${received}}. Use "path" instead.` : ''}`,
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -624,7 +628,19 @@ async function executeWrite(args: Record<string, unknown>): Promise<MotorToolRes
 
   try {
     const fullPath = await resolveSafePath(path, WRITE_ROOTS);
-    if (!fullPath) return pathError(startTime);
+    if (!fullPath) {
+      const hint = path.startsWith('/skills/')
+        ? ` The /skills/ directory is read-only. Use a relative path instead: "${path.replace(/^\/skills\//, 'skills/')}".`
+        : ' Use a relative path (e.g. "output.txt", "skills/name/file.md").';
+      return {
+        ok: false,
+        output: `Write denied: "${path}" is outside the workspace.${hint}`,
+        errorCode: 'permission_denied',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
     await mkdir(dirname(fullPath), { recursive: true });
     await writeFile(fullPath, resolvedContent, 'utf-8');
     return {
@@ -649,7 +665,9 @@ async function executeWrite(args: Record<string, unknown>): Promise<MotorToolRes
 // ─── List ─────────────────────────────────────────────────────────
 
 async function executeList(args: Record<string, unknown>): Promise<MotorToolResult> {
-  const path = (args['path'] as string | undefined) ?? '.';
+  // Accept 'directory' as alias for 'path' (weak models often use intuitive names)
+  const path =
+    (args['path'] as string | undefined) ?? (args['directory'] as string | undefined) ?? '.';
   const recursive = (args['recursive'] as boolean | undefined) ?? false;
   const startTime = Date.now();
 
@@ -823,9 +841,10 @@ async function walkDir(dir: string, basePath = '', maxEntries?: number): Promise
 async function executeGrep(args: Record<string, unknown>): Promise<MotorToolResult> {
   const pattern = args['pattern'] as string;
   if (!pattern) {
+    const received = Object.keys(args).join(', ');
     return {
       ok: false,
-      output: '',
+      output: `Missing "pattern" argument. Usage: grep({pattern: "regex", path: "dir"}).${received ? ` You passed: {${received}}.` : ''}`,
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',
@@ -898,14 +917,28 @@ async function executeGrep(args: Record<string, unknown>): Promise<MotorToolResu
 // ─── Patch ───────────────────────────────────────────────────────
 
 async function executePatch(args: Record<string, unknown>): Promise<MotorToolResult> {
-  const path = args['path'] as string | undefined;
-  const oldText = args['old_text'] as string | undefined;
-  const newText = args['new_text'] as string | undefined;
+  // Accept common aliases (weak models often use camelCase or intuitive names)
+  const path = (args['path'] ?? args['file'] ?? args['filename'] ?? args['filepath']) as
+    | string
+    | undefined;
+  const oldText = (args['old_text'] ??
+    args['oldText'] ??
+    args['search'] ??
+    args['match'] ??
+    args['text']) as string | undefined;
+  const newText = (args['new_text'] ??
+    args['newText'] ??
+    args['replace'] ??
+    args['replacement']) as string | undefined;
 
   if (!path || !oldText || !newText) {
+    const received = Object.keys(args).join(', ');
+    const missing = [!path && '"path"', !oldText && '"old_text"', !newText && '"new_text"']
+      .filter(Boolean)
+      .join(', ');
     return {
       ok: false,
-      output: '',
+      output: `Missing required arguments: ${missing}. Usage: patch({path: "file.txt", old_text: "find this", new_text: "replace with"}).${received ? ` You passed: {${received}}.` : ''}`,
       errorCode: 'invalid_args',
       retryable: false,
       provenance: 'internal',

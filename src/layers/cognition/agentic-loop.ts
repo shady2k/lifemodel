@@ -483,9 +483,12 @@ export class AgenticLoop {
       state.conversationStatus = parsed.status;
     }
 
-    // Edge case: user message but no response text
-    if (!messageText && context.triggerSignal.type === 'user_message') {
-      this.logger.debug('No response text for user message, forcing response');
+    // Edge case: user message or motor_result but no response text
+    const requiresResponse =
+      context.triggerSignal.type === 'user_message' ||
+      context.triggerSignal.type === 'motor_result';
+    if (!messageText && requiresResponse) {
+      this.logger.debug('No response text for motor/user trigger, forcing response');
       state.forceRespond = true;
       return null; // Signal caller to continue loop
     }
@@ -508,8 +511,30 @@ export class AgenticLoop {
       }
     }
 
-    // Thought trigger response routing
+    // Fallback notification for motor_result with no response text
     let effectiveMessageText = messageText;
+    if (!messageText && context.triggerSignal.type === 'motor_result') {
+      const data = context.triggerSignal.data as
+        | { status?: string; runId?: string; result?: { summary?: string } }
+        | undefined;
+      const runId = data?.runId ?? 'unknown';
+      const status = data?.status ?? 'unknown';
+
+      if (status === 'failed') {
+        effectiveMessageText = `Background task (${runId}) failed. Use core.task(action:"status") for details.`;
+      } else if (status === 'completed') {
+        const summary = data?.result?.summary;
+        effectiveMessageText = summary
+          ? `Task ${runId} completed: ${summary.slice(0, 300)}`
+          : `Background task (${runId}) completed.`;
+      } else if (status === 'awaiting_input') {
+        effectiveMessageText = `Background task (${runId}) needs your input. Use core.task(action:"status") for details.`;
+      } else if (status === 'awaiting_approval') {
+        effectiveMessageText = `Background task (${runId}) needs your approval. Use core.task(action:"status") for details.`;
+      }
+    }
+
+    // Thought trigger response routing
     if (context.triggerSignal.type === 'thought' && messageText) {
       if (parsed.urgent) {
         this.logger.info(

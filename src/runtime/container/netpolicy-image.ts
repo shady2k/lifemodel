@@ -2,7 +2,7 @@
  * Network Policy Helper Container Image Builder
  *
  * Builds the `lifemodel-netpolicy:latest` helper image used to apply
- * iptables rules to Motor Cortex containers. Tiny Alpine + iptables.
+ * iptables rules to Motor Cortex containers. Tiny Alpine + iptables (nft backend).
  *
  * Lazy build on first use, same pattern as container-image.ts.
  */
@@ -41,8 +41,8 @@ export async function netpolicyImageExists(): Promise<boolean> {
 const DOCKERFILE = `
 FROM alpine:3.21
 
-# Install iptables-legacy (more stable in containers than nftables)
-RUN apk add --no-cache iptables-legacy && \\
+# Install iptables (nftables backend — works in modern container runtimes)
+RUN apk add --no-cache iptables && \\
     rm -rf /var/cache/apk/*
 
 # Use sh as entrypoint (commands passed via docker run)

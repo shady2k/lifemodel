@@ -316,10 +316,13 @@ Do NOT create a new core.act run for the same task. Use retry to continue the ex
       return `<trigger type="motor_awaiting_input">
 <context>Task run ${runId} needs user input: "${question}"</context>
 <task>
-Relay this question to the user naturally. When they respond, call core.task(action:"respond", runId:"${runId}", answer:"their answer").
+You MUST ask the user this question and WAIT for their answer. Do NOT auto-approve or answer on behalf of the user.
+1. Send the question to the user in your response (rephrase naturally).
+2. STOP — do not call core.task.respond yet. Wait for the user to reply in a follow-up message.
+3. Only after the user replies, call core.task(action:"respond", runId:"${runId}", answer:"their answer").
 
-If the sub-agent is asking for network/domain access, parse the needed domains from its question and include them:
-core.task(action:"respond", runId:"${runId}", answer:"Approved", domains:["domain1.com", "domain2.com"])
+If the question is about network/domain access: when the user approves, parse the needed domains and include them:
+core.task(action:"respond", runId:"${runId}", answer:"their answer", domains:["domain1.com"])
 Common GitHub patterns: include both "github.com" and "raw.githubusercontent.com" for repo access.
 </task>
 </trigger>`;

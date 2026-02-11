@@ -70,7 +70,7 @@ describe('buildMotorSystemPrompt', () => {
   it('includes credential placeholder guidance', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run);
-    expect(prompt).toContain('<credential:name>');
+    expect(prompt).toContain('<credential:NAME>');
   });
 
   it('includes recovery context when provided', () => {
@@ -113,21 +113,21 @@ describe('skill injection into system prompt', () => {
     skillPath: '/data/skills/weather-report/SKILL.md',
   };
 
-  it('injects skill body in <skill> XML tags', () => {
+  it('includes skill reference with directory path', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('<skill name="weather-report">');
-    expect(prompt).toContain('# Weather Report');
-    expect(prompt).toContain('</skill>');
+    expect(prompt).toContain('Skill: weather-report');
+    expect(prompt).toContain('Skill directory:');
+    expect(prompt).toContain('/data/skills/weather-report');
+    expect(prompt).toContain('reading SKILL.md');
   });
 
-  it('includes skill prompt injection warning', () => {
+  it('includes credential guidance when skill has required credentials', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('user-provided instructions');
-    expect(prompt).toContain('never override your safety rules');
+    expect(prompt).toContain('<credential:weather_api_key>');
   });
 
   it('does not inject skill tags when no skill provided', () => {
@@ -140,7 +140,7 @@ describe('skill injection into system prompt', () => {
 });
 
 describe('buildInitialMessages', () => {
-  it('creates system message with skill when provided', () => {
+  it('creates system message with skill reference when provided', () => {
     const run = makeRun();
     const skill: LoadedSkill = {
       frontmatter: {
@@ -154,8 +154,8 @@ describe('buildInitialMessages', () => {
 
     const messages = buildInitialMessages(run, skill);
     expect(messages).toHaveLength(1);
-    expect(messages[0]?.content).toContain('<skill name="test">');
-    expect(messages[0]?.content).toContain('Skill body');
+    expect(messages[0]?.content).toContain('Skill: test');
+    expect(messages[0]?.content).toContain('Skill directory:');
   });
 
   it('creates system message without skill', () => {
