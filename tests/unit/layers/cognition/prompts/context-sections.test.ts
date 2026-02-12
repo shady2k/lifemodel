@@ -1,7 +1,8 @@
 /**
  * Tests for context-sections.ts
  *
- * Validates: buildAvailableSkillsSection() with trust states, empty state
+ * Validates: buildAvailableSkillsSection() renders name + description only,
+ * no trust badges regardless of trust state, lastUsed preserved, empty state
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -38,7 +39,7 @@ describe('buildAvailableSkillsSection', () => {
     expect(result).toBeNull();
   });
 
-  it('builds section with approved skills', () => {
+  it('renders skill as name: description with no trust badge', () => {
     const context = createMockContext({
       availableSkills: [
         { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
@@ -48,38 +49,15 @@ describe('buildAvailableSkillsSection', () => {
 
     expect(result).not.toBeNull();
     expect(result).toContain('<available_skills>');
-    expect(result).toContain('web-scraper [approved]');
-    expect(result).toContain('Email skill');
+    expect(result).toContain('- web-scraper: Email skill');
     expect(result).toContain('Invoke via core.act with skill parameter');
+    // No trust badges
+    expect(result).not.toContain('[approved]');
+    expect(result).not.toContain('[pending_review]');
+    expect(result).not.toContain('[needs_reapproval]');
   });
 
-  it('builds section with needs_reapproval trust skills (no policy)', () => {
-    const context = createMockContext({
-      availableSkills: [
-        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
-      ],
-    });
-    const result = buildAvailableSkillsSection(context);
-
-    expect(result).not.toBeNull();
-    expect(result).toContain('weather [needs_reapproval]');
-    expect(result).toContain('(needs onboarding)');
-  });
-
-  it('builds section with needs_reapproval trust skills (has policy - content changed)', () => {
-    const context = createMockContext({
-      availableSkills: [
-        { name: 'outdated-skill', description: 'Old skill', trust: 'needs_reapproval', hasPolicy: true },
-      ],
-    });
-    const result = buildAvailableSkillsSection(context);
-
-    expect(result).not.toBeNull();
-    expect(result).toContain('outdated-skill [needs_reapproval]');
-    expect(result).toContain('(content changed, ask user to re-approve)');
-  });
-
-  it('builds section with pending_review trust skills', () => {
+  it('renders pending_review skill without badge or hint', () => {
     const context = createMockContext({
       availableSkills: [
         { name: 'new-skill', description: 'New skill', trust: 'pending_review', hasPolicy: true },
@@ -87,12 +65,39 @@ describe('buildAvailableSkillsSection', () => {
     });
     const result = buildAvailableSkillsSection(context);
 
-    expect(result).not.toBeNull();
-    expect(result).toContain('new-skill [pending_review]');
-    expect(result).toContain('(new skill, ask user to review and approve)');
+    expect(result).toContain('- new-skill: New skill');
+    expect(result).not.toContain('[pending_review]');
+    expect(result).not.toContain('ask user to review');
   });
 
-  it('builds section with mixed trust states', () => {
+  it('renders needs_reapproval skill without badge or hint', () => {
+    const context = createMockContext({
+      availableSkills: [
+        { name: 'outdated-skill', description: 'Old skill', trust: 'needs_reapproval', hasPolicy: true },
+      ],
+    });
+    const result = buildAvailableSkillsSection(context);
+
+    expect(result).toContain('- outdated-skill: Old skill');
+    expect(result).not.toContain('[needs_reapproval]');
+    expect(result).not.toContain('content changed');
+    expect(result).not.toContain('needs onboarding');
+  });
+
+  it('renders needs_reapproval without policy — no badge, no hint', () => {
+    const context = createMockContext({
+      availableSkills: [
+        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
+      ],
+    });
+    const result = buildAvailableSkillsSection(context);
+
+    expect(result).toContain('- weather: Weather skill');
+    expect(result).not.toContain('[needs_reapproval]');
+    expect(result).not.toContain('needs onboarding');
+  });
+
+  it('renders mixed trust states uniformly — no badges anywhere', () => {
     const context = createMockContext({
       availableSkills: [
         { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
@@ -102,11 +107,13 @@ describe('buildAvailableSkillsSection', () => {
     });
     const result = buildAvailableSkillsSection(context);
 
-    expect(result).toContain('web-scraper [approved]');
-    expect(result).toContain('weather [needs_reapproval]');
-    expect(result).toContain('(needs onboarding)');
-    expect(result).toContain('new-skill [pending_review]');
-    expect(result).toContain('(new skill, ask user to review and approve)');
+    expect(result).toContain('- web-scraper: Email skill');
+    expect(result).toContain('- weather: Weather skill');
+    expect(result).toContain('- new-skill: New skill');
+    // No badges of any kind
+    expect(result).not.toContain('[approved]');
+    expect(result).not.toContain('[pending_review]');
+    expect(result).not.toContain('[needs_reapproval]');
   });
 
   it('includes XML tags', () => {
@@ -155,7 +162,7 @@ describe('buildAvailableSkillsSection', () => {
       });
       const result = buildAvailableSkillsSection(context);
 
-      expect(result).toContain('unused-skill [approved]');
+      expect(result).toContain('- unused-skill: Never used skill');
       expect(result).not.toContain('(used');
     });
 
@@ -173,7 +180,7 @@ describe('buildAvailableSkillsSection', () => {
       });
       const result = buildAvailableSkillsSection(context);
 
-      expect(result).toContain('invalid-skill [approved]');
+      expect(result).toContain('- invalid-skill: Invalid timestamp skill');
       expect(result).not.toContain('(used');
     });
 

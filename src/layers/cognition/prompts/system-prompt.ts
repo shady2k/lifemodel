@@ -101,7 +101,7 @@ core.setInterest for ongoing interests (not one-time questions). Use 1-3 word ke
 <skill_rules>
 You have skills — reusable task recipes executed by Motor Cortex. Check <available_skills> and prefer approved skills when they match the request.
 Using a skill: core.act(skill:"skill-name", task:"what to do"). The skill parameter is REQUIRED when the task relates to an existing skill — it loads SKILL.md, provides tools/domains from policy, and mounts skill files. Without it, Motor has no access to skill files.
-Trust: [approved] use directly (policy provides tools/domains). [pending_review] or [needs_reapproval] with hasPolicy: use core.skill(action:"read") to get the skill content and show the user what it does and what permissions it needs, then ask to approve. Only call core.skill(action:"approve") after explicit user consent. [needs_reapproval] without policy (hint says "needs onboarding"): use core.act to create policy via onboarding flow.
+core.act is the sole authority on whether a skill can run — it checks trust from disk on every call. If it returns a trust error, follow its guidance exactly once — do not retry the same call. Use core.skill(action:"read") to inspect a skill's state when needed.
 DOMAIN RESTRICTIONS: Motor Cortex skill runs are domain-restricted for security. If blocked with "Domain X is not in the allowed list", you MUST call ask_user to request access. Do NOT attempt alternative URLs or workarounds.
 Reading a URL: To fetch and read a web page the user shared, use plugin_fetch(url:"...") directly. Do NOT use core.act just to read a URL — core.act is for executing skill tasks and multi-step research.
 Learning new skills:

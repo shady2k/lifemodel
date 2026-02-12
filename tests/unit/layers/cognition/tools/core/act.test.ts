@@ -72,7 +72,7 @@ describe('core.act tool', () => {
   });
 
   describe('agentic mode - skill loading', () => {
-    it('requires explicit tools for skills without approved policy', async () => {
+    it('returns trust-specific error for needs_reapproval skill without explicit tools', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedTools: ['code'] },
@@ -85,12 +85,59 @@ describe('core.act tool', () => {
         mode: 'agentic',
         task: 'test task',
         skill: 'test-skill',
-        // No tools provided - should error
       })) as Record<string, unknown>;
 
       expect(result['success']).toBe(false);
-      expect(result['error']).toContain('needs re-approval');
+      expect(result['error']).toContain('needs re-approval (content changed)');
       expect(result['error']).toContain('core.skill');
+      expect(result['error']).toContain('Do not retry');
+    });
+
+    it('returns trust-specific error for pending_review skill without explicit tools', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'pending_review', schemaVersion: 1, allowedTools: ['bash'] },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      const result = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'pending-skill',
+      })) as Record<string, unknown>;
+
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('pending approval (new skill)');
+      expect(result['error']).toContain('core.skill');
+      expect(result['error']).toContain('Do not retry');
+    });
+
+    it('succeeds for approved skill without explicit tools', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: {
+          trust: 'approved',
+          schemaVersion: 1,
+          allowedTools: ['bash'],
+        },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-ok',
+      });
+
+      const result = (await tool.execute({
+        mode: 'agentic',
+        task: 'test task',
+        skill: 'approved-skill',
+      })) as Record<string, unknown>;
+
+      expect(result['success']).toBe(true);
     });
 
     it('uses policy defaults when trust is approved', async () => {

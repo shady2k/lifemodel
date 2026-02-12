@@ -342,7 +342,8 @@ These actions were already executed. Do NOT call these tools again for the same 
 
 /**
  * Build available skills section for Motor Cortex.
- * Shows skills with their trust state for progressive disclosure.
+ * Shows only names and descriptions — no trust badges or state hints.
+ * core.act is the sole authority on whether a skill can run (checks trust from disk).
  */
 export function buildAvailableSkillsSection(context: LoopContext): string | null {
   const skills = context.availableSkills;
@@ -351,22 +352,6 @@ export function buildAvailableSkillsSection(context: LoopContext): string | null
   }
 
   const lines = skills.map((skill) => {
-    const trustBadge =
-      skill.trust === 'approved'
-        ? '[approved]'
-        : skill.trust === 'pending_review'
-          ? '[pending_review]'
-          : '[needs_reapproval]';
-
-    const hint =
-      skill.trust === 'pending_review'
-        ? ' (new skill, ask user to review and approve)'
-        : skill.trust === 'needs_reapproval' && skill.hasPolicy
-          ? ' (content changed, ask user to re-approve)'
-          : skill.trust === 'needs_reapproval'
-            ? ' (needs onboarding)'
-            : '';
-
     let lastUsedStr = '';
     if (skill.lastUsed) {
       const ageMs = Date.now() - new Date(skill.lastUsed).getTime();
@@ -375,7 +360,7 @@ export function buildAvailableSkillsSection(context: LoopContext): string | null
       }
     }
 
-    return `- ${skill.name} ${trustBadge}: ${skill.description}${hint}${lastUsedStr}`;
+    return `- ${skill.name}: ${skill.description}${lastUsedStr}`;
   });
 
   return `<available_skills>

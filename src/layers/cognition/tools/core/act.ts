@@ -163,13 +163,18 @@ export function createActTool(motorCortex: MotorCortex): Tool {
               // No policy or needs_reapproval trust — require explicit tools
               if (!explicitTools) {
                 if (policy) {
-                  // Has policy but not approved — needs user re-approval
+                  // Has policy but not approved — trust-specific error with recovery path
+                  const trustLabel =
+                    policy.trust === 'pending_review'
+                      ? 'pending approval (new skill)'
+                      : 'needs re-approval (content changed)';
                   return {
                     success: false,
                     error:
-                      `Skill "${skillName}" needs re-approval (trust: needs_reapproval). ` +
+                      `Skill "${skillName}" is ${trustLabel}. ` +
                       `Use core.skill(action:"read", name:"${skillName}") to show the user ` +
-                      `its content and permissions, then core.skill(action:"approve") after user consent.`,
+                      `its content and permissions, then core.skill(action:"approve") after user consent. ` +
+                      `Do not retry this call until the skill is approved.`,
                   };
                 } else {
                   // No policy at all — needs onboarding
