@@ -26,12 +26,11 @@ export type RunStatus =
  * Tools available to the Motor Cortex sub-agent.
  */
 export type MotorTool =
-  | 'code'
   | 'read'
   | 'write'
   | 'list'
   | 'glob'
-  | 'shell'
+  | 'bash'
   | 'grep'
   | 'patch'
   | 'fetch'

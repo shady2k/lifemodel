@@ -247,16 +247,16 @@ describe('Motor Loop Scenario Tests', () => {
     it('auto-fails after 3 consecutive identical failures', async () => {
       const scriptedLLM = createScriptedLLM([
         // First failure
-        toolCallResponse('code', { code: 'INVALID_SYNTAX' }),
+        toolCallResponse('bash', { command: 'INVALID_COMMAND' }),
         // Retry with same error
-        toolCallResponse('code', { code: 'INVALID_SYNTAX' }),
+        toolCallResponse('bash', { command: 'INVALID_COMMAND' }),
         // Third time - should trigger auto-fail
-        toolCallResponse('code', { code: 'INVALID_SYNTAX' }),
+        toolCallResponse('bash', { command: 'INVALID_COMMAND' }),
       ]);
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['code'],
+        tools: ['bash'],
       });
 
       await runMotorLoop(params);
@@ -280,21 +280,21 @@ describe('Motor Loop Scenario Tests', () => {
     it('resets counter on success, never reaches threshold', async () => {
       const scriptedLLM = createScriptedLLM([
         // First failure
-        toolCallResponse('code', { code: 'throw new Error("fail")' }),
+        toolCallResponse('bash', { command: 'false' }),
         // Second failure
-        toolCallResponse('code', { code: 'throw new Error("fail")' }),
+        toolCallResponse('bash', { command: 'false' }),
         // Success - resets counter
-        toolCallResponse('code', { code: '1 + 1' }),
+        toolCallResponse('bash', { command: 'true' }),
         // Two more failures (new streak)
-        toolCallResponse('code', { code: 'throw new Error("fail")' }),
-        toolCallResponse('code', { code: 'throw new Error("fail")' }),
+        toolCallResponse('bash', { command: 'false' }),
+        toolCallResponse('bash', { command: 'false' }),
         // Complete normally (counter was reset)
         textResponse('Done after some retries'),
       ]);
 
       const { params, cleanup, stateManager } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['code'],
+        tools: ['bash'],
       });
 
       await runMotorLoop(params);
@@ -447,7 +447,7 @@ describe('Motor Loop Scenario Tests', () => {
   describe('Scenario 10: Credential Placeholder Resolution', () => {
     it('resolves credential placeholders in tool args', async () => {
       const scriptedLLM = createScriptedLLM([
-        toolCallResponse('shell', {
+        toolCallResponse('bash', {
           command: 'curl -H "Authorization: Bearer <credential:api_key>" https://api.example.com',
         }),
         textResponse('Request sent'),
@@ -455,7 +455,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['shell'],
+        tools: ['bash'],
         credentialStore: { api_key: 'secret123' },
       });
 
@@ -477,7 +477,7 @@ describe('Motor Loop Scenario Tests', () => {
   describe('Scenario 11: Missing Credential Error', () => {
     it('returns error for missing credentials', async () => {
       const scriptedLLM = createScriptedLLM([
-        toolCallResponse('shell', {
+        toolCallResponse('bash', {
           command: 'curl -H "Authorization: <credential:missing_key>" https://api.example.com',
         }),
         textResponse('Got credential error, skipping'),
@@ -485,7 +485,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['shell'],
+        tools: ['bash'],
         credentialStore: {}, // Empty store
       });
 
@@ -520,7 +520,7 @@ describe('Motor Loop Scenario Tests', () => {
 
       const { params, cleanup, stateManager, pushSignal } = await createTestLoopParams({
         llm: scriptedLLM,
-        tools: ['shell'], // Shell grants request_approval
+        tools: ['bash'], // Bash grants request_approval
       });
 
       await runMotorLoop(params);

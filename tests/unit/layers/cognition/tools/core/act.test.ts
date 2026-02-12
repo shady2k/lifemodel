@@ -99,7 +99,7 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['code', 'shell'],
+          allowedTools: ['bash'],
           allowedDomains: ['api.example.com'],
         },
         body: 'instructions',
@@ -122,7 +122,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['code', 'shell', 'fetch'], // From policy + auto-included fetch (domains present)
+          tools: ['bash', 'fetch'], // From policy + auto-included fetch (domains present)
           domains: ['api.example.com'], // From policy
         })
       );
@@ -134,7 +134,7 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['code'],
+          allowedTools: ['bash'],
           allowedDomains: ['api.example.com'],
         },
         body: 'instructions',
@@ -167,7 +167,7 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['code', 'shell'],
+          allowedTools: ['bash'],
         },
         body: 'instructions',
         path: '/path',
@@ -199,7 +199,7 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['code'],
+          allowedTools: ['bash'],
         },
         body: 'instructions',
         path: '/path',
@@ -245,7 +245,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['code'], // Default
+          tools: ['bash'], // Default
         })
       );
     });
@@ -258,13 +258,13 @@ describe('core.act tool', () => {
       await tool.execute({
         mode: 'agentic',
         task: 'test task',
-        tools: ['shell', 'grep'],
+        tools: ['bash', 'grep'],
       });
 
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['shell', 'grep'],
+          tools: ['bash', 'grep'],
         })
       );
     });

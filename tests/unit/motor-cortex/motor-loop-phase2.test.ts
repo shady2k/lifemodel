@@ -39,7 +39,7 @@ function makeRun(overrides?: Partial<MotorRun>): MotorRun {
     id: 'test-run',
     status: 'running',
     task: 'Test task',
-    tools: ['code', 'shell', 'read', 'write', 'list'],
+    tools: ['bash', 'read', 'write', 'list'],
     attempts: [attempt],
     currentAttemptIndex: 0,
     maxAttempts: 3,
@@ -54,8 +54,7 @@ describe('buildMotorSystemPrompt', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run);
 
-    expect(prompt).toContain('code:');
-    expect(prompt).toContain('shell:');
+    expect(prompt).toContain('bash:');
     expect(prompt).toContain('read:');
   });
 

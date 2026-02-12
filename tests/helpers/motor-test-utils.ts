@@ -88,7 +88,7 @@ export function createTestMotorRun(overrides?: Partial<MotorRun>): MotorRun {
     id: 'test-run',
     status: 'running',
     task: 'Test task',
-    tools: ['code', 'filesystem'],
+    tools: ['bash', 'filesystem'],
     attempts: [attempt],
     currentAttemptIndex: 0,
     maxAttempts: 3,

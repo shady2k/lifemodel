@@ -12,7 +12,6 @@ import type {
   ToolExecuteRequest,
   ToolExecuteResponse,
 } from '../container/types.js';
-import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { runShell } from '../shell/shell-runner.js';
 import { fuzzyFindUnique, matchesGlobPattern } from '../container/tool-server-utils.js';
 import {
@@ -226,27 +225,6 @@ export const SYNTHETIC_TOOL_DEFINITIONS = {
  * Tool definitions in OpenAI function calling format.
  */
 export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
-  code: {
-    type: 'function',
-    function: {
-      name: 'code',
-      description:
-        'Execute JavaScript code in a sandboxed environment. ' +
-        'Use for calculations, data processing, and simple algorithms. ' +
-        'Returns the result of the last expression.',
-      parameters: {
-        type: 'object',
-        properties: {
-          code: {
-            type: 'string',
-            description: 'JavaScript code to execute. Can use Math, JSON, Date, console.log.',
-          },
-        },
-        required: ['code'],
-      },
-    },
-  },
-
   read: {
     type: 'function',
     function: {
@@ -345,21 +323,21 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     },
   },
 
-  shell: {
+  bash: {
     type: 'function',
     function: {
-      name: 'shell',
+      name: 'bash',
       description:
-        'Run allowlisted shell commands (curl, jq, grep, cat, ls, etc.). ' +
-        'Supports pipes (e.g., "curl url | jq .data"). ' +
-        'Use for fetching URLs, processing text, and file inspection.',
+        'Run commands (node, npm, npx, python, pip, curl, jq, grep, cat, head, tail, ls, git, etc.). ' +
+        'Full async Node.js via "node script.js". Supports pipes (e.g., "curl url | jq .data"). ' +
+        'Use for HTTP requests, package management, running scripts, and file processing.',
       parameters: {
         type: 'object',
         properties: {
           command: {
             type: 'string',
             description:
-              'Shell command to run. Only allowlisted commands: curl, jq, grep, cat, head, tail, ls, etc.',
+              'Shell command to run. Supports node, npm, npx, python, pip, curl, jq, grep, cat, ls, git, etc.',
           },
           timeout: {
             type: 'number',
@@ -581,22 +559,6 @@ function isBinaryBuffer(buf: Buffer): boolean {
  * Tool executors.
  */
 const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
-  code: async (args, _ctx): Promise<MotorToolResult> => {
-    const code = args['code'] as string;
-    if (!code) {
-      return {
-        ok: false,
-        output: 'Missing "code" argument. Provide JavaScript code as a string.',
-        errorCode: 'invalid_args',
-        retryable: false,
-        provenance: 'internal',
-        durationMs: 0,
-      };
-    }
-
-    return runSandbox(code, 30_000); // 30s timeout for agentic code steps
-  },
-
   read: async (args, ctx): Promise<MotorToolResult> => {
     const path = args['path'] as string;
     if (!path) {
@@ -621,7 +583,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       if (isBinaryBuffer(fileHandle)) {
         return {
           ok: true,
-          output: `Binary file (${String(fileHandle.length)} bytes). Use shell to inspect.`,
+          output: `Binary file (${String(fileHandle.length)} bytes). Use bash to inspect.`,
           retryable: false,
           provenance: 'internal',
           durationMs: Date.now() - startTime,
@@ -941,7 +903,7 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
     }
   },
 
-  shell: async (args, ctx): Promise<MotorToolResult> => {
+  bash: async (args, ctx): Promise<MotorToolResult> => {
     // Accept common aliases: models often pass {"curl":"..."} or {"cmd":"..."} instead of {"command":"..."}
     const command = (args['command'] ?? args['cmd'] ?? args['curl'] ?? args['run']) as string;
     if (!command) {

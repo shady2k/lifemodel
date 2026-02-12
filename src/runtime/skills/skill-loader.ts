@@ -20,7 +20,7 @@
  * {
  *   "schemaVersion": 1,
  *   "trust": "approved",
- *   "allowedTools": ["shell", "code"],
+ *   "allowedTools": ["bash"],
  *   "allowedDomains": ["api.weather.com"]
  * }
  * ```

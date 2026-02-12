@@ -180,25 +180,25 @@ describe('shell tool', () => {
   });
 
   it('runs allowlisted commands', async () => {
-    const result = await executeTool('shell', { command: 'echo hello' }, ctx);
+    const result = await executeTool('bash', { command: 'echo hello' }, ctx);
     expect(result.ok).toBe(true);
     expect(result.output).toContain('hello');
   });
 
   it('rejects non-allowlisted commands', async () => {
-    const result = await executeTool('shell', { command: 'node -e "process.exit(1)"' }, ctx);
+    const result = await executeTool('bash', { command: 'node -e "process.exit(1)"' }, ctx);
     expect(result.ok).toBe(false);
   });
 
   it('rejects missing command', async () => {
-    const result = await executeTool('shell', {}, ctx);
+    const result = await executeTool('bash', {}, ctx);
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('invalid_args');
   });
 
   it('handles double-quoted arguments', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "hello world"' },
       ctx
     );
@@ -208,7 +208,7 @@ describe('shell tool', () => {
 
   it('handles single-quoted arguments', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: "echo 'hello world'" },
       ctx
     );
@@ -218,7 +218,7 @@ describe('shell tool', () => {
 
   it('does not treat pipe inside quotes as pipeline', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "a|b"' },
       ctx
     );
@@ -228,7 +228,7 @@ describe('shell tool', () => {
 
   it('rejects unterminated quotes', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "hello' },
       ctx
     );
@@ -237,7 +237,7 @@ describe('shell tool', () => {
 
   it('rejects shell injection in pipelines', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo ok; rm -rf / | cat' },
       ctx
     );
@@ -246,7 +246,7 @@ describe('shell tool', () => {
 
   it('rejects $() expansion in pipelines', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "$(id)" | cat' },
       ctx
     );
@@ -255,7 +255,7 @@ describe('shell tool', () => {
 
   it('preserves backslash in double-quoted non-special chars', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "hello\\nworld"' },
       ctx
     );
@@ -266,7 +266,7 @@ describe('shell tool', () => {
 
   it('preserves empty quoted arguments', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "" "hello"' },
       ctx
     );
@@ -276,7 +276,7 @@ describe('shell tool', () => {
 
   it('allows & inside double quotes in pipelines', async () => {
     const result = await executeTool(
-      'shell',
+      'bash',
       { command: 'echo "a&b" | cat' },
       ctx
     );

@@ -3,7 +3,7 @@
  *
  * Long-lived process that:
  * 1. Reads length-prefixed JSON requests from stdin
- * 2. Dispatches to tool executors (code, shell, read, write, list, glob, grep, patch)
+ * 2. Dispatches to tool executors (bash, read, write, list, glob, grep, patch)
  * 3. Writes length-prefixed JSON responses to stdout
  * 4. Holds credentials in memory (delivered via special request type)
  * 5. Self-exits after 5 minutes of inactivity (watchdog)
@@ -19,7 +19,6 @@ import {
   validatePipeline,
   matchesGlob,
   matchesGlobPattern,
-  resolveCredentialPlaceholders as resolveCredentialPlaceholdersUtil,
   fuzzyFindUnique,
 } from './tool-server-utils.js';
 
@@ -68,7 +67,6 @@ type ToolServerRequest = ToolExecuteRequest | CredentialDeliverRequest | Shutdow
 const WORKSPACE = '/workspace';
 const SKILLS_DIR = '/skills';
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_RESULT_SIZE = 32 * 1024; // 32KB
 const MAX_GREP_MATCHES = 100;
 const MAX_GREP_LINE_LENGTH = 200;
 const MAX_SHELL_OUTPUT = 10 * 1024; // 10KB
@@ -176,10 +174,8 @@ async function executeTool(request: ToolExecuteRequest): Promise<MotorToolResult
   const startTime = Date.now();
 
   switch (request.tool) {
-    case 'code':
-      return executeCode(request.args, request.timeoutMs);
-    case 'shell':
-      return executeShell(request.args, request.timeoutMs);
+    case 'bash':
+      return executeBash(request.args, request.timeoutMs);
     case 'read':
       return executeRead(request.args);
     case 'write':
@@ -225,100 +221,9 @@ async function executeTool(request: ToolExecuteRequest): Promise<MotorToolResult
   }
 }
 
-// ─── Code Execution ──────────────────────────────────────────────
+// ─── Bash Execution ─────────────────────────────────────────────
 
-async function executeCode(
-  args: Record<string, unknown>,
-  timeoutMs: number
-): Promise<MotorToolResult> {
-  const code = args['code'] as string;
-  if (!code) {
-    return {
-      ok: false,
-      output: 'Missing "code" argument. Provide JavaScript code as a string.',
-      errorCode: 'invalid_args',
-      retryable: false,
-      provenance: 'internal',
-      durationMs: 0,
-    };
-  }
-
-  const startTime = Date.now();
-  const workerPath = join(dirname(new URL(import.meta.url).pathname), 'sandbox-worker.js');
-
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath, // Use absolute path to node binary
-      [workerPath, '--eval', code],
-      {
-        timeout: timeoutMs,
-        env: {}, // Empty environment
-        maxBuffer: MAX_RESULT_SIZE * 2,
-      }
-    );
-
-    // Worker protocol: JSON result on stdout
-    try {
-      const result = JSON.parse(stdout) as {
-        ok: boolean;
-        output: string;
-        error: string;
-        durationMs: number;
-      };
-      if (result.ok) {
-        return {
-          ok: true,
-          output: result.output,
-          retryable: false,
-          provenance: 'internal',
-          durationMs: result.durationMs,
-        };
-      } else {
-        return {
-          ok: false,
-          output: result.output || result.error,
-          errorCode: 'execution_error',
-          retryable: false,
-          provenance: 'internal',
-          durationMs: result.durationMs,
-        };
-      }
-    } catch {
-      // Fallback: treat stdout as raw output
-      return {
-        ok: true,
-        output: stdout || stderr || '(no output)',
-        retryable: false,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      };
-    }
-  } catch (error) {
-    const err = error as { killed?: boolean; message?: string };
-    if (err.killed) {
-      return {
-        ok: false,
-        output: '',
-        errorCode: 'timeout',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: timeoutMs,
-      };
-    }
-    return {
-      ok: false,
-      output: err.message ?? String(error),
-      errorCode: 'execution_error',
-      retryable: true,
-      provenance: 'internal',
-      durationMs: Date.now() - startTime,
-    };
-  }
-}
-
-// ─── Shell Execution ─────────────────────────────────────────────
-
-async function executeShell(
+async function executeBash(
   args: Record<string, unknown>,
   timeoutMs: number
 ): Promise<MotorToolResult> {
@@ -623,8 +528,10 @@ async function executeWrite(args: Record<string, unknown>): Promise<MotorToolRes
 
   const startTime = Date.now();
 
-  // Resolve credential placeholders in content
-  const resolvedContent = resolveCredentialPlaceholdersUtil(content, credentials);
+  // Do NOT resolve credential placeholders in file content.
+  // Credentials must stay as <credential:X> placeholders on disk to prevent key leakage.
+  // They are only resolved at execution time (fetch headers, shell commands).
+  const resolvedContent = content;
 
   try {
     const fullPath = await resolveSafePath(path, WRITE_ROOTS);

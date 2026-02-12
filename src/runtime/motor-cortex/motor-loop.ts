@@ -198,7 +198,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.ask_user);
 
   // Add request_approval tool if shell is granted (network access = needs approval gate)
-  if (run.tools.includes('shell')) {
+  if (run.tools.includes('bash')) {
     toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.request_approval);
   }
 
@@ -726,6 +726,14 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       // Resolve credential placeholders in tool args (AFTER state persistence, BEFORE execution)
       // Always resolve on the host side — both container and direct execution paths need resolved args
       // Recurses into nested objects (e.g. headers: {"Authorization": "Bearer <credential:key>"})
+      // IMPORTANT: Skip resolution for file content fields (write.content, patch.new_text) to prevent
+      // credential values from being persisted to disk. Placeholders stay as-is in files.
+      const SKIP_CREDENTIAL_RESOLUTION: Record<string, Set<string>> = {
+        write: new Set(['content']),
+        patch: new Set(['new_text', 'replacement']),
+      };
+      const skipFields = SKIP_CREDENTIAL_RESOLUTION[toolName];
+
       let resolvedArgs = toolArgs;
       if (params.credentialStore) {
         const store = params.credentialStore;
@@ -745,7 +753,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           return val;
         };
         resolvedArgs = Object.fromEntries(
-          Object.entries(toolArgs).map(([k, v]) => [k, resolveValue(v)])
+          Object.entries(toolArgs).map(([k, v]) => [k, skipFields?.has(k) ? v : resolveValue(v)])
         );
         if (allMissing.length > 0) {
           // Return error for missing credentials — don't crash
@@ -777,7 +785,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       }
 
       // Log shell description if provided
-      if (toolName === 'shell' && toolArgs['description']) {
+      if (toolName === 'bash' && toolArgs['description']) {
         await taskLog?.log(`    [${toolArgs['description'] as string}]`);
       }
 
@@ -1082,13 +1090,12 @@ export function buildMotorSystemPrompt(
 ): string {
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
-    code: '- code: Execute JavaScript code in a sandbox (sync only, no await — use fetch tool for HTTP)',
     read: '- read: Read a file (line numbers, offset/limit for pagination, max 2000 lines)',
     write: '- write: Write content to a file (auto-creates directories)',
     list: '- list: List files and directories (optional recursive mode)',
     glob: '- glob: Find files by glob pattern (e.g., "**/*.ts")',
     ask_user: '- ask_user: Ask the user a question (pauses execution)',
-    shell: '- shell: Run allowlisted commands (curl, jq, grep, cat, ls, etc.). Supports pipes.',
+    bash: '- bash: Run commands (node, npm, npx, python, pip, curl, jq, grep, git, etc.). Full async Node.js via "node script.js". Supports pipes.',
     grep: '- grep: Search patterns across files (regex, max 100 matches)',
     patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
     fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
@@ -1120,14 +1127,13 @@ ${toolsDesc}
 
 Guidelines:
 - Break down complex tasks into steps
-- Use code for calculations and data processing
 - Use read to inspect files (supports offset/limit for large files)
 - Use write to create or overwrite files (workspace only)
 - Use list/glob to discover workspace structure
 - Use grep to find content across files
 - Use patch for precise edits (prefer over full file rewrites)
-- Use fetch for HTTP requests (preferred over shell+curl — handles credentials, domain checks, HTML→markdown)
-- Use shell for text processing, piping, and when you need curl-specific features (e.g. -v for debugging)
+- Use fetch for HTTP requests (preferred over bash+curl — handles credentials, domain checks, HTML→markdown)
+- Use bash for runtime execution (node scripts, npm install, python, pip) and text processing with pipes
 - Be concise and direct in your responses
 - Report what you did and the result
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt"). Skill directory paths are absolute and READ-ONLY. Write all output to the workspace using relative paths.
@@ -1163,7 +1169,7 @@ policy.json (alongside SKILL.md):
 {
   "schemaVersion": 1,
   "trust": "approved",
-  "allowedTools": ["shell", "code"],
+  "allowedTools": ["bash"],
   "allowedDomains": ["api.example.com"],
   "requiredCredentials": ["api_key_name"],
   "provenance": {
@@ -1179,7 +1185,7 @@ Always record provenance.source with the URL or reference where you found the in
 Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)
 These files will be automatically extracted and installed after your run completes.
 Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
-Valid tools: code, read, write, list, glob, shell, grep, patch, ask_user, fetch, search.`
+Valid tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search.`
       : ''
   }${
     skill

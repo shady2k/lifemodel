@@ -191,7 +191,7 @@ describe('recovery context in system prompt', () => {
       id: 'test-run',
       status: 'running',
       task: 'Fetch data from API',
-      tools: ['shell', 'code'],
+      tools: ['bash'],
       attempts: [
         {
           id: 'att_0',

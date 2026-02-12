@@ -10,7 +10,7 @@ import type { MotorRun } from '../../../../src/runtime/motor-cortex/motor-protoc
 import type { LoadedSkill } from '../../../../src/runtime/skills/skill-types.js';
 
 describe('buildMotorSystemPrompt', () => {
-  function createMockRun(tools: string[] = ['code']): MotorRun {
+  function createMockRun(tools: string[] = ['bash']): MotorRun {
     return {
       id: 'test-run',
       task: 'Test task',
@@ -43,12 +43,12 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).toContain('policy.json');
     expect(prompt).toContain('skills/<name>/SKILL.md');
     expect(prompt).toContain(
-      'Valid tools: code, read, write, list, glob, shell, grep, patch, ask_user'
+      'Valid tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search'
     );
   });
 
   it('does NOT include skill creation instructions when write is not granted', () => {
-    const run = createMockRun(['code', 'shell']);
+    const run = createMockRun(['bash', 'read']);
     const prompt = buildMotorSystemPrompt(run);
 
     expect(prompt).not.toContain('When creating skills, use the Agent Skills standard');
@@ -74,11 +74,10 @@ describe('buildMotorSystemPrompt', () => {
   });
 
   it('includes tool descriptions', () => {
-    const run = createMockRun(['code', 'shell']);
+    const run = createMockRun(['bash']);
     const prompt = buildMotorSystemPrompt(run);
 
-    expect(prompt).toContain('- code:');
-    expect(prompt).toContain('- shell:');
+    expect(prompt).toContain('- bash:');
   });
 
   it('includes guidelines section', () => {
