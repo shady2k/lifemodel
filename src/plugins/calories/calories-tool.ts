@@ -267,6 +267,31 @@ export function createCaloriesTool(
 
       const entry = item as Record<string, unknown>;
 
+      // Auto-correct common camelCase / flat-field variants from weak models
+      if (('weight' in entry || 'grams' in entry) && !('portion' in entry)) {
+        const val = entry['weight'] ?? entry['grams'];
+        if (typeof val === 'number') {
+          entry['portion'] = { quantity: val, unit: 'g' };
+        }
+        delete entry['weight'];
+        delete entry['grams'];
+      }
+      if ('calories' in entry && !('calories_estimate' in entry)) {
+        entry['calories_estimate'] = entry['calories'];
+        delete entry['calories'];
+      }
+      if ('caloriesPer100g' in entry || 'caloriesper100g' in entry || 'calories_per100g' in entry) {
+        entry['calories_per_100g'] =
+          entry['caloriesPer100g'] ?? entry['caloriesper100g'] ?? entry['calories_per100g'];
+        delete entry['caloriesPer100g'];
+        delete entry['caloriesper100g'];
+        delete entry['calories_per100g'];
+      }
+      if ('mealType' in entry && !('meal_type' in entry)) {
+        entry['meal_type'] = entry['mealType'];
+        delete entry['mealType'];
+      }
+
       // Detect unknown fields — weak models send flat fields instead of nested `portion`
       const KNOWN_FIELDS = new Set([
         'name',
@@ -289,6 +314,12 @@ export function createCaloriesTool(
         }
         if (unknownFields.includes('calories')) {
           hints.push('use "calories_estimate" instead of "calories"');
+        }
+        if (
+          unknownFields.includes('caloriesPer100g') ||
+          unknownFields.includes('caloriesper100g')
+        ) {
+          hints.push('use "calories_per_100g" instead of "caloriesPer100g"');
         }
         const hintSuffix = hints.length > 0 ? `. Hint: ${hints.join('; ')}` : '';
         return {
