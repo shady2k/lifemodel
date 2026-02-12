@@ -53,6 +53,42 @@ function convert(md: string): string {
     return placeholder(`<pre><code${cls}>${escaped}</code></pre>`);
   });
 
+  // 1b. Convert markdown tables to monospace <pre> blocks
+  //     Telegram doesn't render markdown tables — use fixed-width code block
+  text = text.replace(/(?:^|\n)((?:\|[^\n]+\|\n?)+)/g, (_m, tableBlock: string) => {
+    const rows = tableBlock
+      .trim()
+      .split('\n')
+      .filter((r) => r.trim().length > 0);
+    // Must have at least header + separator + 1 data row
+    // Separator row looks like |---|---| or | :---: | --- |
+    const sepIdx = rows.findIndex((r) => /^\|[\s:]*-{2,}[\s:|-]*\|$/.test(r.trim()));
+    if (sepIdx < 1 || rows.length < sepIdx + 2) return _m; // not a valid table
+
+    // Parse cells (drop separator row)
+    const dataRows = rows.filter((_, i) => i !== sepIdx);
+    const parsed = dataRows.map((r) =>
+      r
+        .split('|')
+        .slice(1, -1)
+        .map((c) => c.trim())
+    );
+
+    // Compute column widths
+    const colCount = Math.max(...parsed.map((r) => r.length));
+    const widths: number[] = [];
+    for (let c = 0; c < colCount; c++) {
+      widths.push(Math.max(...parsed.map((r) => (r[c] ?? '').length), 1));
+    }
+
+    // Format aligned rows
+    const formatted = parsed.map((cells) =>
+      cells.map((cell, c) => cell.padEnd(widths[c] ?? 1)).join('  ')
+    );
+
+    return placeholder(`<pre>${escapeHtml(formatted.join('\n'))}</pre>`);
+  });
+
   // 2. Extract inline code BEFORE escaping
   //    `code` → <code>escaped</code>
   text = text.replace(/`([^`]+)`/g, (_m, code: string) => {

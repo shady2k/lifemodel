@@ -160,6 +160,81 @@ describe('markdownToTelegramHtml', () => {
     });
   });
 
+  describe('markdown tables', () => {
+    it('converts a simple table to aligned monospace <pre>', () => {
+      const input = [
+        '| Блюдо | Калории |',
+        '|-------|---------|',
+        '| Йогурт | 180 ккал |',
+        '| Кофе | 5 ккал |',
+      ].join('\n');
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('<pre>');
+      expect(result).toContain('Йогурт');
+      expect(result).toContain('Кофе');
+      // Should NOT contain pipe characters
+      expect(result).not.toContain('|');
+    });
+
+    it('aligns columns with padding', () => {
+      const input = [
+        '| Name | Value |',
+        '|------|-------|',
+        '| A | 1 |',
+        '| Long name | 2 |',
+      ].join('\n');
+      const result = markdownToTelegramHtml(input);
+      // Both "Name" and "Long name" rows should be inside <pre>
+      expect(result).toMatch(/<pre>[\s\S]*Name[\s\S]*Long name[\s\S]*<\/pre>/);
+    });
+
+    it('preserves text around the table', () => {
+      const input = 'Header text\n| A | B |\n|---|---|\n| 1 | 2 |\nFooter text';
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('Header text');
+      expect(result).toContain('Footer text');
+      expect(result).toContain('<pre>');
+    });
+
+    it('escapes HTML inside table cells', () => {
+      const input = '| Name | Value |\n|------|-------|\n| <script> | ok |';
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('&lt;script&gt;');
+      expect(result).not.toContain('<script>');
+    });
+
+    it('ignores lines with pipes that are not tables (no separator row)', () => {
+      const input = '| this is not | a table |';
+      const result = markdownToTelegramHtml(input);
+      // Without separator row, should pass through (HTML-escaped)
+      expect(result).not.toContain('<pre>');
+    });
+
+    it('handles the exact LLM output from the bug report', () => {
+      const input = [
+        'Калории за сегодня:',
+        '',
+        '| Блюдо | Калорийность |',
+        '|-------|--------------|',
+        '| Йогурт с вареньем | 180 ккал |',
+        '| Кофе американо | 5 ккал |',
+        '| Конфета Vitok (неглазированная) | 68 ккал |',
+        '| Овощи жареные | 58 ккал |',
+        '| Фрикадельки | 197 ккал |',
+        '| Соус сливочный | 208 ккал |',
+        '',
+        'Итого: 716 ккал / 2200',
+      ].join('\n');
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('<pre>');
+      expect(result).toContain('Йогурт с вареньем');
+      expect(result).toContain('Фрикадельки');
+      expect(result).toContain('Итого: 716 ккал / 2200');
+      // Pipes should be gone
+      expect(result).not.toMatch(/\|.*ккал/);
+    });
+  });
+
   describe('fallback on error', () => {
     it('returns HTML-escaped text if conversion somehow throws', () => {
       // The function should never throw — it catches internally.
