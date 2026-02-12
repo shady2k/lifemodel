@@ -139,9 +139,17 @@ export function createActTool(motorCortex: MotorCortex): Tool {
           if (skillName) {
             const skillResult = await loadSkill(skillName);
             if ('error' in skillResult) {
+              // Guide the model: if skill doesn't exist, it needs to be created
+              // via core.act WITHOUT skill param (Scenario 7 from skill-lifecycle.md)
+              const isNotFound = skillResult.error.includes('ENOENT');
               return {
                 success: false,
-                error: skillResult.error,
+                error: isNotFound
+                  ? `Skill "${skillName}" does not exist yet. ` +
+                    `To CREATE a new skill, call core.act WITHOUT the skill parameter: ` +
+                    `core.act(mode:"agentic", task:"Fetch skill from [URL]...", tools:["fetch","read","write","list"], domains:[...]).` +
+                    ` The skill param is only for loading EXISTING skills.`
+                  : skillResult.error,
               };
             }
             loadedSkill = skillResult;

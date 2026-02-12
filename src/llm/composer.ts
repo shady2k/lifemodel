@@ -152,7 +152,7 @@ export class MessageComposer {
       const response = await this.provider.complete({
         messages,
         role,
-        temperature: 0.7,
+        temperature: 1,
         // Higher limit for reasoning models that use tokens for thinking
         maxTokens: 5000,
       });
@@ -230,7 +230,7 @@ export class MessageComposer {
       const response = await this.provider.complete({
         messages,
         role: 'fast', // Use fast model for classification
-        temperature: 0.3, // Lower temperature for more consistent classification
+        temperature: 1, // Most models (especially reasoning ones) require temperature 1
         maxTokens: 5000, // Higher limit for "thinking" models that use tokens for reasoning
         responseFormat: {
           type: 'json_schema',
@@ -594,8 +594,8 @@ Respond ONLY with valid JSON:
           { role: 'user', content: userPrompt },
         ],
         role: 'fast',
-        temperature: 0.2,
-        maxTokens: 200,
+        temperature: 1,
+        maxTokens: 512,
         responseFormat: {
           type: 'json_schema',
           json_schema: {

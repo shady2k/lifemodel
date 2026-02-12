@@ -78,6 +78,20 @@ export function buildInitialMessages(
   // Proactive/system triggers → 'system' role (instructions to the model)
   const triggerPrompt = promptBuilders.buildTriggerPrompt(context, useSmart);
   const isUserMessage = context.triggerSignal.type === 'user_message';
+
+  // For non-user triggers (proactive, motor_result, etc.), inject a boundary marker
+  // between conversation history and the trigger. Weak models (glm-4.7-flash) treat
+  // the last assistant message as "what I just said" and continue from there,
+  // echoing <msg_time> tags and ignoring the trigger. A user-role boundary breaks
+  // this continuation pattern.
+  if (!isUserMessage && context.conversationHistory.length > 0) {
+    messages.push({
+      role: 'user',
+      content:
+        '[End of conversation history. A new system event follows. Do not continue the conversation above.]',
+    });
+  }
+
   messages.push({ role: isUserMessage ? 'user' : 'system', content: triggerPrompt });
 
   return messages;

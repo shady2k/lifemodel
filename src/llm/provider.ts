@@ -260,27 +260,31 @@ export abstract class BaseLLMProvider implements LLMProvider {
       this.logger?.trace({ requestId, tools: request.tools }, '🤖 LLM request tools');
     }
 
-    // Log new messages: summary at debug, individual messages at trace
+    // Log new messages: non-tool messages at debug, tool messages at trace
     if (this.logger) {
       const debugStart = this.lastLoggedMessageCount;
       const newCount = request.messages.length - debugStart;
       if (debugStart > 0 || newCount > 0) {
         this.logger.debug(
           { requestId, skipped: debugStart, newMessages: newCount },
-          `🤖 LLM messages: ${String(debugStart)} history (already logged), ${String(newCount)} new`
+          `🤖 LLM messages: ${String(debugStart)} history, ${String(newCount)} new`
         );
       }
       for (let i = debugStart; i < request.messages.length; i++) {
         const msg = request.messages[i];
         if (!msg) continue;
-        this.logger.trace(
+        const isToolMsg = msg.role === 'tool' || (msg.tool_calls?.length ?? 0) > 0;
+        const logFn = isToolMsg
+          ? this.logger.trace.bind(this.logger)
+          : this.logger.debug.bind(this.logger);
+        logFn(
           {
             requestId,
             index: i,
             role: msg.role,
             contentLength: msg.content?.length ?? 0,
-            content: msg.content,
-            toolCalls: msg.tool_calls,
+            contentPreview: msg.content?.slice(0, 200) ?? null,
+            hasToolCalls: (msg.tool_calls?.length ?? 0) > 0,
             toolCallId: msg.tool_call_id,
           },
           `🤖 LLM message [${String(i)}] ${msg.role}`

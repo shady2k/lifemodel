@@ -108,6 +108,9 @@ export class MotorCortex {
   /** Abort controllers for in-flight runs (keyed by runId) */
   private readonly runAbortControllers = new Map<string, AbortController>();
 
+  /** Active container handles for paused runs (keyed by runId) */
+  private readonly activeContainers = new Map<string, ContainerHandle>();
+
   constructor(deps: MotorCortexDeps) {
     this.llm = deps.llm;
     this.logger = deps.logger.child({ component: 'motor-cortex' });
@@ -472,8 +475,14 @@ export class MotorCortex {
         await this.stateManager.updateRun(run);
       }
 
-      // Create container if Docker is available
-      if (this.containerManager && (await this.isDockerAvailable())) {
+      // Reuse existing container (kept alive during pause) or create a new one
+      containerHandle = this.activeContainers.get(run.id);
+      if (containerHandle) {
+        this.logger.info(
+          { runId: run.id, containerId: containerHandle.containerId.slice(0, 12) },
+          'Reusing existing container for resumed run'
+        );
+      } else if (this.containerManager && (await this.isDockerAvailable())) {
         containerHandle = await this.containerManager.create(run.id, {
           workspacePath: workspace,
           ...(this.skillsDir && { skillsPath: this.skillsDir }),
@@ -483,6 +492,7 @@ export class MotorCortex {
             }),
         });
         run.containerId = containerHandle.containerId;
+        this.activeContainers.set(run.id, containerHandle);
         await this.stateManager.updateRun(run);
         this.logger.info(
           { runId: run.id, containerId: containerHandle.containerId.slice(0, 12) },
@@ -643,12 +653,14 @@ export class MotorCortex {
         )
       );
     } finally {
-      // Clean up abort controller
       this.runAbortControllers.delete(run.id);
 
-      // Always destroy container when run completes or fails
-      // Use containerManager.destroy() to also clean up the activeContainers map
-      if (containerHandle && this.containerManager) {
+      // Keep container alive when paused (awaiting_input / awaiting_approval) —
+      // respondToRun / respondToApproval will call runLoopInBackground again,
+      // which reuses the container. Only destroy on terminal states.
+      const paused = run.status === 'awaiting_input' || run.status === 'awaiting_approval';
+      if (containerHandle && this.containerManager && !paused) {
+        this.activeContainers.delete(run.id);
         try {
           await this.containerManager.destroy(run.id);
           this.logger.info({ runId: run.id }, 'Container destroyed');
@@ -721,6 +733,17 @@ export class MotorCortex {
     if (abortController) {
       abortController.abort();
       this.runAbortControllers.delete(runId);
+    }
+
+    // Destroy container if kept alive from a paused state
+    if (this.activeContainers.has(runId) && this.containerManager) {
+      this.activeContainers.delete(runId);
+      try {
+        await this.containerManager.destroy(runId);
+        this.logger.info({ runId }, 'Container destroyed on cancel');
+      } catch (destroyError) {
+        this.logger.warn({ runId, error: destroyError }, 'Failed to destroy container on cancel');
+      }
     }
 
     // No signal emitted here — the cognition layer already knows (it called core.task.cancel

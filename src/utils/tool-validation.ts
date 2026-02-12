@@ -302,6 +302,13 @@ export function validateToolArgs(
       }
     }
 
+    // Auto-coerce: object/array → string (JSON.stringify)
+    // Weak models (glm-4.7-flash) pass JSON objects where strings are expected (e.g., write tool content)
+    if (expectedTypes.includes('string') && (actualType === 'object' || actualType === 'array')) {
+      coerced = JSON.stringify(value, null, 2);
+      args[key] = coerced;
+    }
+
     // Auto-coerce: string → number
     if (expectedTypes.includes('number') && actualType === 'string') {
       const num = Number(value);

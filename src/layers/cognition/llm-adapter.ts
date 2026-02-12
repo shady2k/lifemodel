@@ -51,7 +51,7 @@ export interface LLMAdapterConfig {
 const DEFAULT_CONFIG: LLMAdapterConfig = {
   role: 'fast', // Use fast/cheap model for COGNITION layer
   smartRole: 'smart', // Use smart/powerful model for retries
-  temperature: 0.3,
+  temperature: 1,
 };
 
 /**

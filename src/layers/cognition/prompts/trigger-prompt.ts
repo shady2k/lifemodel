@@ -41,10 +41,15 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
     sections.push(userProfile);
   }
 
-  // Recent thoughts (internal context) - after user profile, before soul
-  const thoughtsSection = buildRecentThoughtsSection(context);
-  if (thoughtsSection) {
-    sections.push(thoughtsSection);
+  // Recent thoughts — only for internal thought triggers (self-reflection chains).
+  // Excluded from user_message and contact_urge: weak models copy quoted response
+  // text and XML tags from reflections verbatim. Pending intentions (below) already
+  // surfaces actionable insights for user-facing triggers.
+  if (context.triggerSignal.type === 'thought') {
+    const thoughtsSection = buildRecentThoughtsSection(context);
+    if (thoughtsSection) {
+      sections.push(thoughtsSection);
+    }
   }
 
   // Pending intentions (insights from thought processing to weave into conversation)

@@ -41,6 +41,11 @@ These are requirements, not suggestions.
 - `docs/plugins/` - Neurons, channels, plugin overview
 - `docs/adr/` - Architecture Decision Records
 
+## Testing
+
+- All tests live in `tests/` (unit, integration, helpers). Never create test files inside `src/`.
+- Run tests: `npx vitest run tests/unit/path/to/test.test.ts`
+
 ## Data & Logs
 
 - `data/logs/agent-<timestamp>.log` — Structured pino logs: system events, LLM requests/responses, tool calls, errors
