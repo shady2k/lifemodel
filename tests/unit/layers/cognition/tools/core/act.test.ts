@@ -89,8 +89,8 @@ describe('core.act tool', () => {
 
       expect(result['success']).toBe(false);
       expect(result['error']).toContain('needs re-approval (content changed)');
-      expect(result['error']).toContain('core.skill');
-      expect(result['error']).toContain('Do not retry');
+      expect(result['error']).toContain('core.skill(action:"approve"');
+      expect(result['error']).toContain('Do not retry core.act');
     });
 
     it('returns trust-specific error for pending_review skill without explicit tools', async () => {
@@ -110,8 +110,8 @@ describe('core.act tool', () => {
 
       expect(result['success']).toBe(false);
       expect(result['error']).toContain('pending approval (new skill)');
-      expect(result['error']).toContain('core.skill');
-      expect(result['error']).toContain('Do not retry');
+      expect(result['error']).toContain('core.skill(action:"approve"');
+      expect(result['error']).toContain('Do not retry core.act');
     });
 
     it('succeeds for approved skill without explicit tools', async () => {

@@ -50,8 +50,12 @@ export function parseResponseContent(
       ) // Legacy [HH:MM], [yesterday HH:MM], [Feb 4, HH:MM]
       .trimStart();
 
+  // Step 0: Strip leading timestamps BEFORE structural detection.
+  // Weak models (GLM) prepend <msg_time> tags even when json_schema is enforced,
+  // which defeats the code-fence and JSON-start checks below.
+  let jsonStr = stripLeadingTimestamp(trimmed);
+
   // Step 1: Strip code-fence wrapper if present (```json ... ```)
-  let jsonStr = trimmed;
   if (jsonStr.startsWith('```')) {
     const match = /^```(?:json)?\s*([\s\S]*?)```\s*$/.exec(jsonStr);
     if (match) {

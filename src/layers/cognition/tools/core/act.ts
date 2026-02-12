@@ -172,9 +172,9 @@ export function createActTool(motorCortex: MotorCortex): Tool {
                     success: false,
                     error:
                       `Skill "${skillName}" is ${trustLabel}. ` +
-                      `Use core.skill(action:"read", name:"${skillName}") to show the user ` +
-                      `its content and permissions, then core.skill(action:"approve") after user consent. ` +
-                      `Do not retry this call until the skill is approved.`,
+                      `If the user has already consented, call core.skill(action:"approve", name:"${skillName}") now. ` +
+                      `Otherwise, use core.skill(action:"read", name:"${skillName}") to show them what it does first. ` +
+                      `Do not retry core.act until the skill is approved.`,
                   };
                 } else {
                   // No policy at all — needs onboarding

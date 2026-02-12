@@ -20,6 +20,7 @@ import {
   matchesGlob,
   matchesGlobPattern,
   fuzzyFindUnique,
+  resolveCredentialPlaceholders,
 } from './tool-server-utils.js';
 
 const execFileAsync = promisify(execFile);
@@ -221,6 +222,59 @@ async function executeTool(request: ToolExecuteRequest): Promise<MotorToolResult
   }
 }
 
+// ─── Shell Environment ──────────────────────────────────────────
+
+/**
+ * Build a sanitized environment for shell subprocesses.
+ *
+ * Inherits container ENV vars (NPM_CONFIG_CACHE, PIP_*, PYTHONUSERBASE, PATH, HOME)
+ * so that `npm install` and `pip install` work on the read-only root filesystem.
+ * Credentials are excluded — they are injected via <credential:X> placeholder
+ * resolution, not leaked into the shell environment.
+ */
+function buildShellEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  // Inherit safe container environment variables
+  const INHERITED_KEYS = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LANG',
+    'TERM',
+    // npm
+    'NPM_CONFIG_CACHE',
+    // pip / Python
+    'PIP_USER',
+    'PYTHONUSERBASE',
+    'PIP_CACHE_DIR',
+    'PIP_BREAK_SYSTEM_PACKAGES',
+    // Node.js
+    'NODE_VERSION',
+    'NODE_PATH',
+  ];
+
+  for (const key of INHERITED_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+
+  // Fallback PATH if not set
+  if (!env['PATH']) {
+    env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+  }
+
+  // Inject credentials as env vars so scripts can use process.env.NAME or $NAME.
+  // This is the runtime-only path — credentials never touch disk.
+  for (const [name, value] of credentials) {
+    env[name] = value;
+  }
+
+  return env;
+}
+
 // ─── Bash Execution ─────────────────────────────────────────────
 
 async function executeBash(
@@ -249,8 +303,12 @@ async function executeBash(
     logToStderr(`[${description}]`);
   }
 
+  // Resolve <credential:NAME> placeholders in the command string.
+  // File content keeps placeholders (no disk leakage); resolution happens here at execution time.
+  const resolved = resolveCredentialPlaceholders(command, credentials);
+
   // Validate ALL commands in pipeline + reject dangerous metacharacters
-  const validation = validatePipeline(command);
+  const validation = validatePipeline(resolved);
   if (!validation.ok) {
     return {
       ok: false,
@@ -263,10 +321,10 @@ async function executeBash(
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync('sh', ['-c', command], {
+    const { stdout, stderr } = await execFileAsync('sh', ['-c', resolved], {
       cwd: WORKSPACE,
       timeout,
-      env: { PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin' },
+      env: buildShellEnv(),
       maxBuffer: MAX_SHELL_OUTPUT * 2,
     });
 
@@ -530,7 +588,8 @@ async function executeWrite(args: Record<string, unknown>): Promise<MotorToolRes
 
   // Do NOT resolve credential placeholders in file content.
   // Credentials must stay as <credential:X> placeholders on disk to prevent key leakage.
-  // They are only resolved at execution time (fetch headers, shell commands).
+  // They are resolved at execution time in executeBash() via resolveCredentialPlaceholders()
+  // and also injected as env vars via buildShellEnv().
   const resolvedContent = content;
 
   try {
@@ -924,6 +983,9 @@ async function executePatch(args: Record<string, unknown>): Promise<MotorToolRes
 // ─── Main ────────────────────────────────────────────────────────
 
 logToStderr('Tool-server starting');
+logToStderr(
+  `  env: HOME=${process.env['HOME'] ?? '(unset)'} PATH=${(process.env['PATH'] ?? '(unset)').slice(0, 80)} NPM_CONFIG_CACHE=${process.env['NPM_CONFIG_CACHE'] ?? '(unset)'} PIP_USER=${process.env['PIP_USER'] ?? '(unset)'} PYTHONUSERBASE=${process.env['PYTHONUSERBASE'] ?? '(unset)'}`
+);
 resetWatchdog();
 
 process.stdin.on('data', (chunk: Buffer) => {

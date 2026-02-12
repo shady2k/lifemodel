@@ -22,7 +22,6 @@ import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import type { ContainerManager, ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
@@ -462,22 +461,11 @@ export class MotorCortex {
       await this.stateManager.updateRun(run);
 
       // Reuse existing workspace on resume (preserves files from prior iterations).
-      // For skill-based runs, use a persistent workspace under the skill directory
-      // so installed packages (node_modules/, etc.) carry over between runs.
+      // Always use temp dir — skill directories are for authored content only.
       let workspace: string;
       if (run.workspacePath && existsSync(run.workspacePath)) {
         workspace = run.workspacePath;
         this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
-      } else if (run.skill && this.skillsDir) {
-        const { mkdir } = await import('node:fs/promises');
-        workspace = join(this.skillsDir, run.skill, 'workspace');
-        await mkdir(workspace, { recursive: true });
-        run.workspacePath = workspace;
-        await this.stateManager.updateRun(run);
-        this.logger.info(
-          { runId: run.id, workspace, skill: run.skill },
-          'Using persistent skill workspace'
-        );
       } else {
         workspace = await createWorkspace();
         run.workspacePath = workspace;

@@ -129,6 +129,29 @@ describe('parseResponseContent', () => {
     });
   });
 
+  describe('<msg_time> prefix handling', () => {
+    it('strips <msg_time> before code-fence detection', () => {
+      const content =
+        '<msg_time>just now</msg_time>\n<msg_time>just now</msg_time>\n```json\n{"response":"Да, всегда буду показывать полный список."}\n```';
+      const result = parseResponseContent(content);
+      expect(result).toEqual({ text: 'Да, всегда буду показывать полный список.' });
+    });
+
+    it('strips <msg_time> before JSON-start detection', () => {
+      const content =
+        '<msg_time>just now</msg_time>\n{"response":"Hello","status":"active"}';
+      const result = parseResponseContent(content);
+      expect(result).toEqual({ text: 'Hello', status: 'active' });
+    });
+
+    it('marks <msg_time> + single-quoted JSON as malformed', () => {
+      const content =
+        "<msg_time>just now</msg_time>\n{'response': 'Hello'}";
+      const result = parseResponseContent(content);
+      expect(result).toEqual({ text: null, malformed: true });
+    });
+  });
+
   describe('JSON at end of content (model leak)', () => {
     it('extracts JSON from end of content when model outputs text then JSON', () => {
       const leaked = `Here are articles:
