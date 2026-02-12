@@ -26,6 +26,14 @@ import type { FoodEntry } from './calories-types.js';
 import { CALORIES_STORAGE_KEYS } from './calories-types.js';
 import { getCurrentFoodDate } from './calories-tool.js';
 
+const NEURON_STATE_KEY = 'calories_deficit_neuron_state';
+
+interface PersistedNeuronState {
+  lastEmittedAt: string | null; // ISO string
+  previousValue: number | null;
+  lastComputedDate: string | null; // YYYY-MM-DD
+}
+
 /**
  * Configuration for calories deficit neuron.
  */
@@ -212,22 +220,41 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
       // Store for logging
       const currentValue = pressure;
 
-      // First tick - initialize but don't emit unless already high
+      // First tick - try to restore persisted state from before restart
       if (this.previousValue === undefined) {
-        this.updatePrevious(currentValue);
-        if (currentValue >= this.config.moderateDeficitThreshold && localHour >= 14) {
-          this.pendingSignal = this.createSignal(
-            currentValue,
-            deficit,
-            consumed,
-            goal,
-            correlationId
-          );
+        const persisted = await this.loadPersistedState();
+        if (persisted?.lastComputedDate === today && persisted.previousValue != null) {
+          // Same day with valid previous value — restore and fall through to normal change detection
+          this.previousValue = persisted.previousValue;
+          this.lastEmittedAt = persisted.lastEmittedAt
+            ? new Date(persisted.lastEmittedAt)
+            : undefined;
         } else {
-          this.pendingSignal = undefined;
+          // Fresh day or no persisted state — original first-tick behavior
+          this.updatePrevious(currentValue);
+          if (currentValue >= this.config.moderateDeficitThreshold && localHour >= 14) {
+            this.pendingSignal = this.createSignal(
+              currentValue,
+              deficit,
+              consumed,
+              goal,
+              correlationId
+            );
+          } else {
+            this.pendingSignal = undefined;
+          }
+          this.persistState(today).catch((err: unknown) => {
+            this.logger.warn(
+              { error: err instanceof Error ? err.message : String(err) },
+              'Failed to persist neuron state'
+            );
+          });
+          return;
         }
-        return;
       }
+
+      // At this point previousValue is guaranteed to be set (either from prior tick or restored)
+      const prevValue = this.previousValue;
 
       // Check refractory period
       if (this.isInRefractoryPeriod(this.config.refractoryPeriodMs)) {
@@ -238,22 +265,22 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
       // Use Weber-Fechner change detection
       const changeResult = detectChange(
         currentValue,
-        this.previousValue,
+        prevValue,
         0.5, // Use neutral alertness for change detection
         this.config.changeConfig
       );
 
       // Check for threshold crossings
       const crossedModerate =
-        (this.previousValue < this.config.moderateDeficitThreshold &&
+        (prevValue < this.config.moderateDeficitThreshold &&
           currentValue >= this.config.moderateDeficitThreshold) ||
-        (this.previousValue >= this.config.moderateDeficitThreshold &&
+        (prevValue >= this.config.moderateDeficitThreshold &&
           currentValue < this.config.moderateDeficitThreshold);
 
       const crossedHigh =
-        (this.previousValue < this.config.highDeficitThreshold &&
+        (prevValue < this.config.highDeficitThreshold &&
           currentValue >= this.config.highDeficitThreshold) ||
-        (this.previousValue >= this.config.highDeficitThreshold &&
+        (prevValue >= this.config.highDeficitThreshold &&
           currentValue < this.config.highDeficitThreshold);
 
       // Only emit after 2 PM and if deficit is significant
@@ -264,6 +291,12 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
 
       if (!shouldEmit) {
         this.updatePrevious(currentValue);
+        this.persistState(today).catch((err: unknown) => {
+          this.logger.warn(
+            { error: err instanceof Error ? err.message : String(err) },
+            'Failed to persist neuron state'
+          );
+        });
         this.pendingSignal = undefined;
         return;
       }
@@ -272,7 +305,7 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
 
       this.logger.debug(
         {
-          previous: this.previousValue.toFixed(2),
+          previous: prevValue.toFixed(2),
           current: currentValue.toFixed(2),
           deficit: deficit.toFixed(2),
           consumed,
@@ -286,6 +319,12 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
 
       this.updatePrevious(currentValue);
       this.recordEmission();
+      this.persistState(today).catch((err: unknown) => {
+        this.logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to persist neuron state'
+        );
+      });
       this.pendingSignal = signal;
     } catch (error) {
       this.logger.error(
@@ -297,6 +336,36 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
       );
       this.pendingSignal = undefined;
     }
+  }
+
+  private async loadPersistedState(): Promise<PersistedNeuronState | null> {
+    try {
+      const raw = await this.storage.get<PersistedNeuronState>(NEURON_STATE_KEY);
+      if (
+        raw &&
+        typeof raw === 'object' &&
+        'lastComputedDate' in raw &&
+        'previousValue' in raw &&
+        'lastEmittedAt' in raw
+      ) {
+        return raw;
+      }
+      return null;
+    } catch (err) {
+      this.logger.warn(
+        { error: err instanceof Error ? err.message : String(err) },
+        'Failed to load persisted neuron state'
+      );
+      return null;
+    }
+  }
+
+  private async persistState(today: string): Promise<void> {
+    await this.storage.set(NEURON_STATE_KEY, {
+      lastEmittedAt: this.lastEmittedAt?.toISOString() ?? null,
+      previousValue: this.previousValue ?? null,
+      lastComputedDate: today,
+    } satisfies PersistedNeuronState);
   }
 
   private createSignal(
