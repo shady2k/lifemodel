@@ -41,14 +41,6 @@ export type MotorFetchFn = (
 ) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
 
 /**
- * DI callback for web search (provided by web-search plugin).
- */
-export type MotorSearchFn = (
-  query: string,
-  limit?: number
-) => Promise<{ title: string; url: string; snippet: string }[]>;
-
-/**
  * Tool context passed to executors.
  */
 export interface ToolContext {
@@ -69,9 +61,6 @@ export interface ToolContext {
 
   /** DI callback for web fetch (provided by web-fetch plugin) */
   fetchFn?: MotorFetchFn;
-
-  /** DI callback for web search (provided by web-search plugin) */
-  searchFn?: MotorSearchFn;
 }
 
 /**
@@ -442,30 +431,6 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
       },
     },
   },
-
-  search: {
-    type: 'function',
-    function: {
-      name: 'search',
-      description:
-        'Search the web for information. Returns titles, URLs, and snippets. ' +
-        'Use to find documentation, APIs, etc.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Search query.',
-          },
-          limit: {
-            type: 'number',
-            description: 'Number of results (default: 5, max: 10).',
-          },
-        },
-        required: ['query'],
-      },
-    },
-  },
 };
 
 /**
@@ -510,9 +475,9 @@ const MAX_SHELL_TIMEOUT = 120_000;
 
 /**
  * Tools that MUST execute on the host (never dispatched to container).
- * fetch and search use DI callbacks that only exist on the host side.
+ * fetch uses a DI callback that only exists on the host side.
  */
-const HOST_ONLY_TOOLS = new Set(['fetch', 'search']);
+const HOST_ONLY_TOOLS = new Set(['fetch']);
 
 /**
  * Recursively list all files in a directory with optional early termination.
@@ -1173,63 +1138,6 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       return {
         ok: result.ok,
         output: truncated,
-        retryable: false,
-        provenance: 'web',
-        durationMs: Date.now() - startTime,
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        output: error instanceof Error ? error.message : String(error),
-        errorCode: 'execution_error',
-        retryable: true,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      };
-    }
-  },
-
-  search: async (args, ctx): Promise<MotorToolResult> => {
-    const query = args['query'] as string;
-    if (!query) {
-      return {
-        ok: false,
-        output: 'Missing "query" argument. Provide a search query.',
-        errorCode: 'invalid_args',
-        retryable: false,
-        provenance: 'internal',
-        durationMs: 0,
-      };
-    }
-
-    const startTime = Date.now();
-
-    // Check search function is available
-    if (!ctx.searchFn) {
-      return {
-        ok: false,
-        output: 'Search not configured (web-search plugin not available)',
-        errorCode: 'tool_not_available',
-        retryable: false,
-        provenance: 'internal',
-        durationMs: Date.now() - startTime,
-      };
-    }
-
-    // Call search function
-    const limit = Math.min(10, (args['limit'] as number | undefined) ?? 5);
-
-    try {
-      const results = await ctx.searchFn(query, limit);
-
-      // Format results as numbered list
-      const formatted = results
-        .map((r, i) => `${String(i + 1)}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
-        .join('\n\n');
-
-      return {
-        ok: true,
-        output: formatted || 'No results found',
         retryable: false,
         provenance: 'web',
         durationMs: Date.now() - startTime,

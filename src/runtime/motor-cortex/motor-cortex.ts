@@ -16,13 +16,16 @@ import { createSignal } from '../../types/signal.js';
 import type { EnergyModel } from '../../core/energy.js';
 import type { MotorRun, MotorTool, RunStatus, MotorAttempt } from './motor-protocol.js';
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
-import type { MotorFetchFn, MotorSearchFn } from './motor-tools.js';
+import type { MotorFetchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
+import { cp } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ContainerManager, ContainerHandle } from '../container/types.js';
+import { generateBaseline } from './skill-extraction.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
 import { loadSkill } from '../skills/skill-loader.js';
@@ -68,9 +71,6 @@ export interface MotorCortexDeps {
 
   /** DI callback for web fetch (provided by web-fetch plugin) */
   fetchFn?: MotorFetchFn;
-
-  /** DI callback for web search (provided by web-search plugin) */
-  searchFn?: MotorSearchFn;
 }
 
 /**
@@ -94,7 +94,6 @@ export class MotorCortex {
   private readonly artifactsBaseDir: string | undefined;
   private readonly containerManager: ContainerManager | undefined;
   private readonly fetchFn: MotorFetchFn | undefined;
-  private readonly searchFn: MotorSearchFn | undefined;
 
   /** Whether Docker isolation is available */
   private dockerAvailable: boolean | null = null;
@@ -121,7 +120,6 @@ export class MotorCortex {
     this.artifactsBaseDir = deps.artifactsBaseDir;
     this.containerManager = deps.containerManager;
     this.fetchFn = deps.fetchFn;
-    this.searchFn = deps.searchFn;
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -156,13 +154,6 @@ export class MotorCortex {
     }
     this.dockerAvailable = await this.containerManager.isAvailable();
     return this.dockerAvailable;
-  }
-
-  /**
-   * Check if unsafe mode is explicitly enabled.
-   */
-  private isUnsafeMode(): boolean {
-    return process.env['MOTOR_CORTEX_UNSAFE'] === 'true';
   }
 
   /**
@@ -214,15 +205,7 @@ export class MotorCortex {
     recoveryContext?: MotorAttempt['recoveryContext']
   ): MotorAttempt {
     const attemptId = `att_${String(index)}`;
-    // When container manager exists, remap host paths to container paths in system prompt
-    const containerMode = !!this.containerManager;
-    const messages = buildInitialMessages(
-      run,
-      skill,
-      recoveryContext,
-      maxIterations,
-      containerMode
-    );
+    const messages = buildInitialMessages(run, skill, recoveryContext, maxIterations);
 
     return {
       id: attemptId,
@@ -273,16 +256,12 @@ export class MotorCortex {
       );
     }
 
-    // Check Docker availability for agentic runs
+    // Check Docker availability for agentic runs (Docker is required)
     const dockerReady = await this.isDockerAvailable();
-    if (!dockerReady && !this.isUnsafeMode()) {
+    if (!dockerReady) {
       throw new Error(
-        'Docker required for Motor Cortex isolation. ' +
-          'Install Docker or set MOTOR_CORTEX_UNSAFE=true to bypass (not recommended).'
+        'Docker required for Motor Cortex isolation. Install Docker to use agentic mode.'
       );
-    }
-    if (!dockerReady && this.isUnsafeMode()) {
-      this.logger.warn('MOTOR_CORTEX_UNSAFE: Running without Docker isolation');
     }
 
     // Check energy
@@ -298,14 +277,9 @@ export class MotorCortex {
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
     // Merge skill policy domains with explicit domains
-    // Auto-add package registry domains so skills can install SDKs
-    const PACKAGE_REGISTRY_DOMAINS = ['registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org'];
     const skillDomains = params.skill?.policy?.allowedDomains;
     const explicitDomains = params.domains;
-    const baseDomains = mergeDomains(skillDomains, explicitDomains);
-    const mergedDomains = params.skill
-      ? Array.from(new Set([...baseDomains, ...PACKAGE_REGISTRY_DOMAINS]))
-      : baseDomains;
+    const mergedDomains = mergeDomains(skillDomains, explicitDomains);
 
     const run: MotorRun = {
       id: runId,
@@ -464,14 +438,37 @@ export class MotorCortex {
       await this.stateManager.updateRun(run);
 
       // Reuse existing workspace on resume (preserves files from prior iterations).
-      // Always use temp dir — skill directories are for authored content only.
       let workspace: string;
       if (run.workspacePath && existsSync(run.workspacePath)) {
         workspace = run.workspacePath;
         this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
       } else {
+        // Fresh workspace - create it
         workspace = await createWorkspace();
         run.workspacePath = workspace;
+
+        // Copy skill files to workspace root on fresh init (only on first init, not on resume)
+        // The baseline existence check prevents re-copying on resume (workspace is reused)
+        const baselinePath = join(workspace, '.motor-baseline.json');
+        if (run.skill && this.skillsDir && !existsSync(baselinePath)) {
+          const skillSourceDir = join(this.skillsDir, run.skill);
+          try {
+            await cp(skillSourceDir, workspace, { recursive: true });
+            const baseline = await generateBaseline(workspace);
+            const { writeFile } = await import('node:fs/promises');
+            await writeFile(baselinePath, JSON.stringify(baseline, null, 2));
+            this.logger.info(
+              { runId: run.id, skill: run.skill, filesCount: Object.keys(baseline.files).length },
+              'Skill files copied to workspace root, baseline generated'
+            );
+          } catch (error) {
+            this.logger.warn(
+              { runId: run.id, skill: run.skill, error },
+              'Failed to copy skill files to workspace, continuing without them'
+            );
+          }
+        }
+
         await this.stateManager.updateRun(run);
       }
 
@@ -485,11 +482,7 @@ export class MotorCortex {
       } else if (this.containerManager && (await this.isDockerAvailable())) {
         containerHandle = await this.containerManager.create(run.id, {
           workspacePath: workspace,
-          ...(this.skillsDir && { skillsPath: this.skillsDir }),
-          ...(run.domains &&
-            run.domains.length > 0 && {
-              allowedDomains: run.domains,
-            }),
+          ...(run.domains && run.domains.length > 0 && { allowedDomains: run.domains }),
         });
         run.containerId = containerHandle.containerId;
         this.activeContainers.set(run.id, containerHandle);
@@ -497,11 +490,6 @@ export class MotorCortex {
         this.logger.info(
           { runId: run.id, containerId: containerHandle.containerId.slice(0, 12) },
           'Container created for run'
-        );
-      } else if (this.isUnsafeMode()) {
-        this.logger.warn(
-          { runId: run.id },
-          'MOTOR_CORTEX_UNSAFE: Executing without container isolation'
         );
       }
 
@@ -522,7 +510,6 @@ export class MotorCortex {
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
         ...(containerHandle && { containerHandle }),
         ...(this.fetchFn && { fetchFn: this.fetchFn }),
-        ...(this.searchFn && { searchFn: this.searchFn }),
       });
 
       // Auto-retry for retryable failures: if loop returned without signal but attempt failed,

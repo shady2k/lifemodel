@@ -15,11 +15,10 @@ import type { MotorCortex } from '../../../../../../src/runtime/motor-cortex/mot
 vi.mock('../../../../../../src/runtime/skills/skill-loader.js', () => ({
   loadSkill: vi.fn(),
   validateSkillInputs: vi.fn(() => []),
-  updateSkillIndex: vi.fn(),
 }));
 
 // Import the mocked functions
-import { loadSkill, updateSkillIndex } from '../../../../../../src/runtime/skills/skill-loader.js';
+import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
 
 describe('core.act tool', () => {
   const mockMotorCortex = {
@@ -140,7 +139,7 @@ describe('core.act tool', () => {
       expect(result['success']).toBe(true);
     });
 
-    it('uses policy defaults when trust is approved', async () => {
+    it('uses policy defaults when trust is approved (with auto-included read/list for skill)', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
@@ -169,7 +168,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['bash', 'fetch'], // From policy + auto-included fetch (domains present)
+          tools: ['bash'], // From policy (no auto-includes)
           domains: ['api.example.com'], // From policy
         })
       );
@@ -235,43 +234,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['grep'], // Override used
-        })
-      );
-    });
-
-    it('updates skill index with lastUsed timestamp', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test skill' },
-        policy: {
-          trust: 'approved',
-          schemaVersion: 1,
-          allowedTools: ['bash'],
-        },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
-
-      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
-        runId: 'run-123',
-      });
-      vi.mocked(updateSkillIndex).mockResolvedValue(undefined);
-
-      await tool.execute({
-        mode: 'agentic',
-        task: 'test task',
-        skill: 'test-skill',
-      });
-
-      expect(updateSkillIndex).toHaveBeenCalledWith(
-        'data/skills',
-        'test-skill',
-        expect.objectContaining({
-          description: 'Test skill',
-          trust: 'approved',
-          hasPolicy: true,
-          lastUsed: expect.any(String) as string,
+          tools: ['grep'], // Override only (no auto-includes)
         })
       );
     });

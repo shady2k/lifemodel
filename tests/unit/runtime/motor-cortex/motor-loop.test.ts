@@ -1,7 +1,7 @@
 /**
  * Tests for motor-loop.ts
  *
- * Validates: Skill creation format in system prompt when filesystem granted
+ * Validates: System prompt content with new workspace-root skill model
  */
 
 import { describe, it, expect } from 'vitest';
@@ -37,13 +37,13 @@ describe('buildMotorSystemPrompt', () => {
     const run = createMockRun(['code', 'read', 'write', 'list']);
     const prompt = buildMotorSystemPrompt(run);
 
-    expect(prompt).toContain('When creating skills, use the Agent Skills standard');
+    expect(prompt).toContain('You create and maintain Agent Skills');
     expect(prompt).toContain('name: skill-name');
     expect(prompt).toContain('description: What this skill does');
     expect(prompt).toContain('policy.json');
-    expect(prompt).toContain('skills/<name>/SKILL.md');
+    expect(prompt).toContain('Save files at the workspace root');
     expect(prompt).toContain(
-      'Valid tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search'
+      'Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.'
     );
   });
 
@@ -51,19 +51,19 @@ describe('buildMotorSystemPrompt', () => {
     const run = createMockRun(['bash', 'read']);
     const prompt = buildMotorSystemPrompt(run);
 
-    expect(prompt).not.toContain('When creating skills, use the Agent Skills standard');
+    expect(prompt).not.toContain('You create and maintain Agent Skills');
     expect(prompt).not.toContain('policy.json');
   });
 
-  it('includes skill reference with path when skill is provided', () => {
+  it('includes skill reference with workspace root paths when skill is provided', () => {
     const run = createMockRun();
     const skill = createMockSkill();
     const prompt = buildMotorSystemPrompt(run, skill);
 
     expect(prompt).toContain('Skill: test-skill');
-    expect(prompt).toContain('Skill directory:');
-    expect(prompt).toContain('Read its files before starting work');
-    expect(prompt).toContain('reading SKILL.md');
+    expect(prompt).toContain('Start by reading SKILL.md');
+    expect(prompt).toContain('read({path: "SKILL.md"})');
+    expect(prompt).toContain('modify skill files directly in the workspace');
   });
 
   it('does NOT include skill section when no skill provided', () => {
@@ -94,5 +94,15 @@ describe('buildMotorSystemPrompt', () => {
     const prompt = buildMotorSystemPrompt(run);
 
     expect(prompt).toContain('Maximum iterations:');
+  });
+
+  it('does NOT include search tool in valid tools list', () => {
+    const run = createMockRun(['write', 'bash', 'search']);
+    const prompt = buildMotorSystemPrompt(run);
+
+    // search should not appear in the prompt's valid tools list
+    expect(prompt).toContain('Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.');
+    // the word "search" may appear in the context of web search but not as a tool
+    expect(prompt).not.toContain('- search:');
   });
 });

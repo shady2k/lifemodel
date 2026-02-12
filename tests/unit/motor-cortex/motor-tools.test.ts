@@ -12,7 +12,6 @@ import {
   resolveSafePath,
   type ToolContext,
   type MotorFetchFn,
-  type MotorSearchFn,
 } from '../../../src/runtime/motor-cortex/motor-tools.js';
 
 describe('resolveSafePath', () => {
@@ -582,88 +581,3 @@ describe('fetch tool', () => {
   });
 });
 
-describe('search tool', () => {
-  let workspace: string;
-  let ctx: ToolContext;
-  let mockSearchFn: MotorSearchFn;
-
-  beforeEach(async () => {
-    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
-    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
-    mockSearchFn = vi.fn().mockResolvedValue([
-      { title: 'Test Result', url: 'https://example.com/test', snippet: 'Test snippet' },
-    ]);
-  });
-
-  afterEach(async () => {
-    await rm(workspace, { recursive: true, force: true });
-  });
-
-  it('rejects missing query', async () => {
-    const result = await executeTool('search', {}, ctx);
-    expect(result.ok).toBe(false);
-    expect(result.errorCode).toBe('invalid_args');
-  });
-
-  it('returns tool_not_available when searchFn is undefined', async () => {
-    // @ts-expect-error - intentionally not providing searchFn
-    delete (ctx as Partial<ToolContext>).searchFn;
-
-    const result = await executeTool('search', { query: 'test query' }, ctx);
-    expect(result.ok).toBe(false);
-    expect(result.errorCode).toBe('tool_not_available');
-    expect(result.output).toContain('Search not configured');
-  });
-
-  it('calls searchFn with query and default limit', async () => {
-    ctx.searchFn = mockSearchFn;
-
-    const result = await executeTool('search', { query: 'test query' }, ctx);
-    expect(result.ok).toBe(true);
-    expect(mockSearchFn).toHaveBeenCalledWith('test query', 5);
-  });
-
-  it('respects custom limit up to 10', async () => {
-    ctx.searchFn = mockSearchFn;
-
-    const result = await executeTool('search', { query: 'test', limit: 8 }, ctx);
-    expect(result.ok).toBe(true);
-    expect(mockSearchFn).toHaveBeenCalledWith('test', 8);
-  });
-
-  it('caps limit at 10', async () => {
-    ctx.searchFn = mockSearchFn;
-
-    const result = await executeTool('search', { query: 'test', limit: 15 }, ctx);
-    expect(result.ok).toBe(true);
-    expect(mockSearchFn).toHaveBeenCalledWith('test', 10);
-  });
-
-  it('formats results as numbered list', async () => {
-    ctx.searchFn = mockSearchFn;
-
-    const result = await executeTool('search', { query: 'test' }, ctx);
-    expect(result.ok).toBe(true);
-    expect(result.output).toContain('1. Test Result');
-    expect(result.output).toContain('URL: https://example.com/test');
-    expect(result.output).toContain('Test snippet');
-  });
-
-  it('handles empty results', async () => {
-    const emptyMock: MotorSearchFn = vi.fn().mockResolvedValue([]);
-    ctx.searchFn = emptyMock;
-
-    const result = await executeTool('search', { query: 'nothing' }, ctx);
-    expect(result.ok).toBe(true);
-    expect(result.output).toBe('No results found');
-  });
-
-  it('handles search errors', async () => {
-    ctx.searchFn = vi.fn().mockRejectedValue(new Error('Search API error'));
-
-    const result = await executeTool('search', { query: 'test' }, ctx);
-    expect(result.ok).toBe(false);
-    expect(result.errorCode).toBe('execution_error');
-    expect(result.output).toContain('Search API error');
-  });
-});

@@ -127,10 +127,9 @@ export interface SkillInput {
 }
 
 /**
- * Central skill index entry (cached metadata).
+ * Skill index entry (metadata for discovery).
  *
- * The index.json file provides fast skill discovery without directory scanning.
- * Treated as a cache — rebuilt from directory scan if missing/corrupt.
+ * Used by discoverSkills() which scans data/skills/ on each call (auto-discovery).
  */
 export interface SkillIndexEntry {
   /** Skill description */
@@ -149,26 +148,11 @@ export interface SkillIndexEntry {
 /**
  * Discovered skill entry — index entry with name attached.
  *
- * Used by discoverSkills() so consumers don't lose the skill name
- * (which is the Record key in SkillIndex, lost by Object.values()).
+ * Used by discoverSkills() — attaches the directory name to the index entry.
  */
 export interface DiscoveredSkill extends SkillIndexEntry {
   /** Skill name (directory name) */
   name: string;
-}
-
-/**
- * Central skill index file.
- *
- * Stored at data/skills/index.json.
- * Updated atomically on skill install/remove.
- */
-export interface SkillIndex {
-  /** Index schema version */
-  schemaVersion: number;
-
-  /** Map of skill name → index entry */
-  skills: Record<string, SkillIndexEntry>;
 }
 
 /**

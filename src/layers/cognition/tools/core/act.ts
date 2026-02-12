@@ -15,17 +15,8 @@ import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
 import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
-import {
-  loadSkill,
-  validateSkillInputs,
-  updateSkillIndex,
-} from '../../../../runtime/skills/skill-loader.js';
+import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
-
-/**
- * Default skills base directory.
- */
-const DEFAULT_SKILLS_DIR = 'data/skills';
 
 /**
  * Create the core.act tool.
@@ -51,7 +42,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'tools',
       type: 'array' as const,
       description:
-        'Tools for agentic mode (read, write, list, glob, bash, grep, patch, fetch, search). Required if skill has no approved policy.',
+        'Tools for agentic mode (read, write, list, glob, bash, grep, patch, fetch). Required if skill has no approved policy.',
       required: false,
     },
     {
@@ -85,7 +76,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with bash tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: read, write, list, glob, bash, grep, patch, ask_user, fetch. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with bash tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -218,15 +209,8 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             tools = explicitTools ?? ['bash'];
           }
 
-          // Auto-include bash if domains are specified (network access requires bash for curl/git)
-          if (domains.length > 0 && !tools.includes('bash')) {
-            tools = [...tools, 'bash'];
-          }
-
-          // Auto-include fetch if domains are specified (network access requires fetch for HTTP)
-          if (domains.length > 0 && !tools.includes('fetch')) {
-            tools = [...tools, 'fetch'];
-          }
+          // Note: Auto-include removed - tools must be explicitly provided
+          // Trust gating (pending_review/needs_reapproval) still enforced separately
 
           // Build task with inputs if provided
           let fullTask = task;
@@ -245,19 +229,8 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             ...(domains.length > 0 && { domains }),
           });
 
-          // Update index.json with lastUsed timestamp
-          if (skillName && loadedSkill) {
-            try {
-              await updateSkillIndex(DEFAULT_SKILLS_DIR, skillName, {
-                description: loadedSkill.frontmatter.description,
-                trust: loadedSkill.policy?.trust ?? 'needs_reapproval',
-                hasPolicy: loadedSkill.policy !== undefined,
-                lastUsed: new Date().toISOString(),
-              });
-            } catch {
-              // Non-fatal: skill index update failed, run continues
-            }
-          }
+          // Note: Auto-discovery mode - no index.json to update
+          // Skill metadata is read directly from SKILL.md on each access
 
           return {
             success: true,

@@ -66,7 +66,6 @@ type ToolServerRequest = ToolExecuteRequest | CredentialDeliverRequest | Shutdow
 // ─── Constants ───────────────────────────────────────────────────
 
 const WORKSPACE = '/workspace';
-const SKILLS_DIR = '/skills';
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_GREP_MATCHES = 100;
 const MAX_GREP_LINE_LENGTH = 200;
@@ -387,7 +386,7 @@ async function executeBash(
 
 // ─── Path Safety ─────────────────────────────────────────────────
 
-const ALLOWED_ROOTS = [WORKSPACE, SKILLS_DIR];
+const ALLOWED_ROOTS = [WORKSPACE];
 const WRITE_ROOTS = [WORKSPACE];
 
 async function resolveSafePath(relativePath: string, roots?: string[]): Promise<string | null> {

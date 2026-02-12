@@ -4,8 +4,8 @@
  * Extracts skills from Motor Cortex workspace to data/skills/.
  *
  * After Motor Cortex creates a skill in its workspace, this module:
- * - Validates skill frontmatter and structure
- * - Performs atomic copy to data/skills/
+ * - Compares workspace files against baseline manifest
+ * - Extracts only changed/added files to data/skills/
  * - Forces trust to "pending_review" for user approval
  * - Rebuilds the skills index
  *
@@ -13,12 +13,22 @@
  *
  * - Symlinks are rejected throughout the skill tree
  * - Size limits enforced (1MB per file, 10MB total)
- * - Name must match directory name
+ * - Name must match frontmatter name
  * - Atomic copy prevents race conditions
+ *
+ * ## Baseline-Diff Extraction
+ *
+ * Skills are copied to workspace root on init. A baseline manifest (.motor-baseline.json)
+ * records the hash of each copied file. On extraction, we:
+ * - Read the baseline to know what was originally copied
+ * - Scan workspace for current skill files
+ * - Extract files that changed or were added
+ * - Skip if no changes (prevents trust churn)
  */
 
-import { readdir, readFile, stat, lstat, cp, rename, unlink, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir, readFile, stat, lstat, cp, rename, rm, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { Logger } from '../../types/logger.js';
 import type { MotorTool } from './motor-protocol.js';
 import type { SkillInput, SkillPolicy } from '../skills/skill-types.js';
@@ -27,14 +37,102 @@ import {
   parseSkillFile,
   validateSkillFrontmatter,
   savePolicy,
-  rebuildSkillIndex,
 } from '../skills/skill-loader.js';
+
+/**
+ * Baseline manifest format.
+ */
+export interface MotorBaseline {
+  files: Record<string, string>; // path -> sha256 hash
+}
+
+/**
+ * Generate a baseline manifest for skill files in a directory.
+ *
+ * Scans for files matching SKILL_FILE_ALLOWLIST, excludes SKILL_FILE_DENYLIST,
+ * and returns a map of relative paths to SHA-256 hashes.
+ *
+ * @param dir - Absolute path to scan
+ * @returns Baseline manifest
+ */
+export function generateBaseline(dir: string): Promise<MotorBaseline> {
+  return scanSkillFiles(dir).then((files) => ({ files }));
+}
+
+/**
+ * Skill file allowlist for baseline generation and extraction.
+ */
+const SKILL_FILE_ALLOWLIST = ['SKILL.md', 'policy.json', 'references/**', 'scripts/**'];
+
+/**
+ * Denylist of paths to never include in skill baseline or extraction.
+ */
+const SKILL_FILE_DENYLIST = [
+  'node_modules/**',
+  '.cache/**',
+  '.local/**',
+  '*.log',
+  '.git/**',
+  '.motor-baseline.json', // Baseline file itself
+];
 
 /**
  * Size limits for skill extraction.
  */
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB per file
 const MAX_TOTAL_SIZE = 10 * 1024 * 1024; // 10MB total
+
+/**
+ * Scan a directory for skill files, returning relative paths and their hashes.
+ *
+ * @param dir - Absolute path to scan
+ * @returns Map of relative paths to SHA-256 hashes
+ */
+async function scanSkillFiles(dir: string): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+
+  async function scanDirectory(currentPath: string, relativePath: string): Promise<void> {
+    const entries = await readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const entryPath = join(currentPath, entry.name);
+      const entryRelative = join(relativePath, entry.name);
+
+      // Skip dotfiles/directories
+      if (entry.name.startsWith('.')) continue;
+
+      if (entry.isDirectory()) {
+        await scanDirectory(entryPath, entryRelative);
+      } else if (entry.isFile()) {
+        // Check denylist patterns
+        const isDenied = SKILL_FILE_DENYLIST.some((pattern) => {
+          const regex = new RegExp(
+            '^' + pattern.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*') + '$'
+          );
+          return regex.test(entryRelative);
+        });
+        if (isDenied) return;
+
+        // Check allowlist patterns
+        const isAllowed = SKILL_FILE_ALLOWLIST.some((pattern) => {
+          const regex = new RegExp(
+            '^' + pattern.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*') + '$'
+          );
+          return regex.test(entryRelative);
+        });
+
+        if (isAllowed) {
+          const content = await readFile(entryPath);
+          const hash = createHash('sha256').update(content).digest('hex');
+          files[entryRelative] = hash;
+        }
+      }
+    }
+  }
+
+  await scanDirectory(dir, '');
+  return files;
+}
 
 /**
  * Recursively check for symlinks in a directory tree.
@@ -119,12 +217,260 @@ async function checkFileSizeLimit(dirPath: string): Promise<void> {
 }
 
 /**
+ * Extract a single skill from workspace root to data/skills/.
+ *
+ * Uses baseline-diff to determine what changed. Only extracts if changes detected.
+ *
+ * @param workspace - Absolute path to workspace root (where skill files are)
+ * @param baseline - Baseline manifest from workspace init
+ * @param currentFiles - Current workspace files (path -> hash)
+ * @param skillsDir - Absolute path to data/skills/
+ * @param skillName - Name of the skill (from SKILL.md frontmatter)
+ * @param runId - Run identifier for temp file naming
+ * @param logger - Logger instance
+ * @returns true if skill was extracted, false if skipped (no changes)
+ */
+async function extractSingleSkill(
+  workspace: string,
+  baseline: MotorBaseline,
+  currentFiles: Record<string, string>,
+  skillsDir: string,
+  skillName: string,
+  runId: string,
+  logger: Logger
+): Promise<{ extracted: boolean; isUpdate: boolean }> {
+  const skillMdPath = join(workspace, 'SKILL.md');
+
+  // Step 1: Check SKILL.md exists
+  let skillMdContent: string;
+  try {
+    skillMdContent = await readFile(skillMdPath, 'utf-8');
+  } catch {
+    logger.debug({ skillName }, 'SKILL.md missing in workspace, skipping extraction');
+    return { extracted: false, isUpdate: false };
+  }
+
+  // Step 2: Parse and validate SKILL.md
+  const parsed = parseSkillFile(skillMdContent);
+  if ('error' in parsed) {
+    logger.warn({ skillName, error: parsed.error }, 'SKILL.md parse error, skipping');
+    return { extracted: false, isUpdate: false };
+  }
+
+  const validationErrors = validateSkillFrontmatter(parsed.frontmatter);
+  if (validationErrors.length > 0) {
+    logger.warn({ skillName, errors: validationErrors }, 'Frontmatter validation failed, skipping');
+    return { extracted: false, isUpdate: false };
+  }
+
+  const nameFromFrontmatter = parsed.frontmatter['name'] as string;
+  if (nameFromFrontmatter && nameFromFrontmatter !== skillName) {
+    logger.warn(
+      { skillName, nameFromFrontmatter },
+      'Name mismatch (frontmatter vs passed name), using frontmatter name'
+    );
+    skillName = nameFromFrontmatter;
+  }
+
+  // Step 3: Determine what changed (three-way diff)
+  const changedFiles: string[] = [];
+  const deletedFiles: string[] = [];
+
+  // CHANGED: file in baseline with different hash → extract
+  // ADDED: file in current but not in baseline → extract
+  // DELETED: file in baseline but not in current → remove from installed skill
+  for (const [path, currentHash] of Object.entries(currentFiles)) {
+    const baselineHash = baseline.files[path];
+    if (baselineHash === undefined || baselineHash !== currentHash) {
+      changedFiles.push(path);
+    }
+  }
+
+  for (const path of Object.keys(baseline.files)) {
+    if (currentFiles[path] === undefined) {
+      deletedFiles.push(path);
+    }
+  }
+
+  // If no changes → skip (no trust churn)
+  if (changedFiles.length === 0 && deletedFiles.length === 0) {
+    logger.debug({ skillName }, 'No skill changes detected, skipping extraction');
+    return { extracted: false, isUpdate: false };
+  }
+
+  logger.info(
+    { skillName, changed: changedFiles.length, deleted: deletedFiles.length },
+    'Skill changes detected, extracting'
+  );
+
+  // Step 4: Copy ALL current skill files to temp dir (baseline-diff only detects changes,
+  // the installed skill must be complete)
+  const tempDir = join(skillsDir, `.tmp-${skillName}-${runId}`);
+  const targetDir = join(skillsDir, skillName);
+  const backupDir = join(skillsDir, `.old-${skillName}-${String(Date.now())}`);
+  const isUpdate = await stat(targetDir)
+    .then(() => true)
+    .catch(() => false);
+
+  try {
+    // Copy only allowlisted skill files from workspace to temp
+    await mkdir(tempDir, { recursive: true });
+    for (const relativePath of Object.keys(currentFiles)) {
+      const src = join(workspace, relativePath);
+      const dest = join(tempDir, relativePath);
+      await mkdir(dirname(dest), { recursive: true });
+      await cp(src, dest);
+    }
+
+    // Step 5: Recursive symlink check on workspace (catch symlinks in non-allowlisted paths too)
+    await rejectSymlinks(workspace);
+
+    // Step 6: Size check on temp (only allowlisted skill files)
+    await checkFileSizeLimit(tempDir);
+    const totalSize = await computeTotalSize(tempDir);
+    if (totalSize > MAX_TOTAL_SIZE) {
+      throw new Error(`Total size exceeds limit (${String(MAX_TOTAL_SIZE)} bytes)`);
+    }
+
+    // Step 7: Atomic install
+    if (isUpdate) {
+      await rename(targetDir, backupDir);
+    }
+    await rename(tempDir, targetDir);
+
+    // Remove backup on success
+    if (isUpdate) {
+      await rm(backupDir, { recursive: true, force: true });
+    }
+
+    // Step 8: Merge and update policy
+    const policyPath = join(targetDir, 'policy.json');
+    let motorPolicy: Record<string, unknown> | null = null;
+
+    try {
+      const policyContent = await readFile(policyPath, 'utf-8');
+      motorPolicy = JSON.parse(policyContent) as Record<string, unknown>;
+      if (typeof motorPolicy !== 'object') {
+        motorPolicy = null;
+      }
+    } catch {
+      // No valid policy from Motor
+    }
+
+    // Read existing policy for merge (update only)
+    let existingPolicy: Record<string, unknown> | null = null;
+    if (isUpdate) {
+      try {
+        const existing = await readFile(join(targetDir, 'policy.json'), 'utf-8');
+        const parsed = JSON.parse(existing) as Record<string, unknown>;
+        if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const { provenance, ...restOfParsed } = parsed;
+          const hasValidProvenance =
+            provenance &&
+            typeof provenance === 'object' &&
+            'source' in provenance &&
+            typeof provenance.source === 'string' &&
+            'fetchedAt' in provenance &&
+            typeof provenance.fetchedAt === 'string';
+          existingPolicy = {
+            ...restOfParsed,
+            provenance: hasValidProvenance ? (provenance as SkillPolicy['provenance']) : undefined,
+          };
+        }
+      } catch {
+        // No valid existing policy
+      }
+    }
+
+    // Compute content hash
+    const contentHash = await computeDirectoryHash(targetDir);
+
+    // Build effective provenance: Motor > existing > none
+    const motorProvenance = motorPolicy?.['provenance'] as Record<string, unknown> | undefined;
+    const hasValidProvenance =
+      motorProvenance &&
+      typeof motorProvenance['source'] === 'string' &&
+      typeof motorProvenance['fetchedAt'] === 'string';
+
+    let effectiveProvenance: SkillPolicy['provenance'] = undefined;
+    if (hasValidProvenance) {
+      effectiveProvenance = {
+        source: motorProvenance['source'] as string,
+        fetchedAt: motorProvenance['fetchedAt'] as string,
+        contentHash,
+      };
+    } else if (existingPolicy) {
+      const fallbackProvenance = existingPolicy['provenance'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        fallbackProvenance &&
+        typeof fallbackProvenance['source'] === 'string' &&
+        typeof fallbackProvenance['fetchedAt'] === 'string'
+      ) {
+        effectiveProvenance = {
+          source: fallbackProvenance['source'],
+          fetchedAt: fallbackProvenance['fetchedAt'],
+          contentHash,
+        };
+      }
+    }
+
+    // Build new policy
+    const motorAllowedTools = motorPolicy?.['allowedTools'] as string[] | undefined;
+    const motorAllowedDomains = motorPolicy?.['allowedDomains'] as string[] | undefined;
+    const motorRequiredCredentials = motorPolicy?.['requiredCredentials'] as string[] | undefined;
+    const motorInputs = motorPolicy?.['inputs'] as SkillInput[] | undefined;
+
+    const fallbackTools = existingPolicy?.['allowedTools'] as string[] | undefined;
+    const fallbackDomains = existingPolicy?.['allowedDomains'] as string[] | undefined;
+    const fallbackCredentials = existingPolicy?.['requiredCredentials'] as string[] | undefined;
+    const fallbackInputs = existingPolicy?.['inputs'] as SkillInput[] | undefined;
+
+    const newPolicy = {
+      schemaVersion: 1,
+      trust: 'pending_review' as const,
+      allowedTools: (motorAllowedTools ?? fallbackTools ?? []) as MotorTool[],
+      allowedDomains: motorAllowedDomains ?? fallbackDomains,
+      requiredCredentials: motorRequiredCredentials ?? fallbackCredentials,
+      inputs: motorInputs ?? fallbackInputs,
+      ...(effectiveProvenance && { provenance: effectiveProvenance }),
+      extractedFrom: {
+        runId,
+        timestamp: new Date().toISOString(),
+        changedFiles,
+        deletedFiles,
+      },
+    };
+
+    await savePolicy(targetDir, newPolicy);
+
+    logger.info(
+      { skillName, isUpdate, changedFiles, deletedFiles },
+      'Skill extracted successfully'
+    );
+    return { extracted: true, isUpdate };
+  } catch (error) {
+    // Clean up temp dir if something went wrong (FIX: use rm with recursive force)
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw error;
+  }
+}
+
+/**
  * Extract skills from Motor Cortex workspace to data/skills/.
  *
- * This function is called after a successful Motor Cortex run to harvest
- * any skills that were created during execution.
+ * Uses baseline-diff approach:
+ * - Reads baseline manifest from workspace
+ * - Scans workspace for current skill files
+ * - Extracts only changed/added files
+ * - Skips if no changes detected
  *
- * @param workspace - Absolute path to Motor Cortex workspace
+ * @param workspace - Absolute path to Motor Cortex workspace root
  * @param skillsDir - Absolute path to data/skills/
  * @param runId - Run identifier for temp file naming
  * @param logger - Logger instance
@@ -139,256 +485,68 @@ export async function extractSkillsFromWorkspace(
   const created: string[] = [];
   const updated: string[] = [];
 
-  const workspaceSkillsDir = join(workspace, 'skills');
+  // Read baseline manifest
+  const baselinePath = join(workspace, '.motor-baseline.json');
+  let baseline: MotorBaseline;
 
-  // If no skills/ directory in workspace, return empty results
   try {
-    await stat(workspaceSkillsDir);
+    const baselineContent = await readFile(baselinePath, 'utf-8');
+    baseline = JSON.parse(baselineContent) as MotorBaseline;
   } catch {
-    logger.debug({ workspaceSkillsDir }, 'No skills directory in workspace');
+    // No baseline = fresh workspace (new skill creation).
+    // Treat all files as new additions.
+    baseline = { files: {} };
+  }
+
+  // Scan current workspace files
+  const currentFiles = await scanSkillFiles(workspace);
+
+  // Check if SKILL.md exists (required for extraction)
+  if (!currentFiles['SKILL.md']) {
+    logger.debug({ workspace }, 'No SKILL.md in workspace, skipping extraction');
     return { created: [], updated: [] };
   }
 
-  // Read all subdirectories in workspace/skills/
-  const entries = await readdir(workspaceSkillsDir, { withFileTypes: true });
+  // Extract skill name from SKILL.md frontmatter
+  const skillMdPath = join(workspace, 'SKILL.md');
+  const skillMdContent = await readFile(skillMdPath, 'utf-8');
+  const parsed = parseSkillFile(skillMdContent);
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+  if ('error' in parsed) {
+    logger.warn({ error: parsed.error }, 'Failed to parse SKILL.md, skipping extraction');
+    return { created: [], updated: [] };
+  }
 
-    const skillName = entry.name;
-    const sourceDir = join(workspaceSkillsDir, skillName);
-    const skillMdPath = join(sourceDir, 'SKILL.md');
+  const skillName = parsed.frontmatter['name'] as string;
+  if (!skillName) {
+    logger.warn('SKILL.md missing name in frontmatter, skipping extraction');
+    return { created: [], updated: [] };
+  }
 
-    try {
-      // Step a: SKILL.md check
-      let skillMdContent: string;
-      try {
-        skillMdContent = await readFile(skillMdPath, 'utf-8');
-      } catch {
-        logger.warn({ skillName }, 'SKILL.md missing, skipping');
-        continue;
-      }
+  // Extract the skill
+  try {
+    const result = await extractSingleSkill(
+      workspace,
+      baseline,
+      currentFiles,
+      skillsDir,
+      skillName,
+      runId,
+      logger
+    );
 
-      // Step b: Parse via parseSkillFile()
-      const parsed = parseSkillFile(skillMdContent);
-      if ('error' in parsed) {
-        logger.warn({ skillName, error: parsed.error }, 'SKILL.md parse error, skipping');
-        continue;
-      }
-
-      // Step c: Name validation - must match directory name
-      const validationErrors = validateSkillFrontmatter(parsed.frontmatter);
-      if (validationErrors.length > 0) {
-        logger.warn(
-          { skillName, errors: validationErrors },
-          'Frontmatter validation failed, skipping'
-        );
-        continue;
-      }
-
-      const nameFromFrontmatter = parsed.frontmatter['name'] as string;
-      if (nameFromFrontmatter !== skillName) {
-        logger.warn(
-          { skillName, nameFromFrontmatter },
-          'Name mismatch (frontmatter vs directory), skipping'
-        );
-        continue;
-      }
-
-      // Step d: Recursive symlink check
-      try {
-        await rejectSymlinks(sourceDir);
-      } catch (error) {
-        logger.warn({ skillName, error }, 'Symlink detected, skipping');
-        continue;
-      }
-
-      // Step e: Size check
-      try {
-        await checkFileSizeLimit(sourceDir);
-        const totalSize = await computeTotalSize(sourceDir);
-        if (totalSize > MAX_TOTAL_SIZE) {
-          logger.warn({ skillName, totalSize }, 'Total size exceeds limit, skipping');
-          continue;
-        }
-      } catch (error) {
-        logger.warn({ skillName, error }, 'Size check failed, skipping');
-        continue;
-      }
-
-      // Step f: Determine create vs update
-      const targetDir = join(skillsDir, skillName);
-      const isUpdate = await stat(targetDir)
-        .then(() => true)
-        .catch(() => false);
-
-      // Step f2: Read existing policy for merge (update only)
-      let existingPolicy: Record<string, unknown> | null = null;
-      if (isUpdate) {
-        try {
-          const existing = await readFile(join(targetDir, 'policy.json'), 'utf-8');
-          const parsed = JSON.parse(existing) as Record<string, unknown>;
-          if (typeof parsed === 'object' && !Array.isArray(parsed)) {
-            // Validate that provenance has correct structure before using
-            // Destructure to exclude provenance from spread, avoiding type errors
-            const { provenance, ...restOfParsed } = parsed;
-            const hasValidProvenance =
-              provenance &&
-              typeof provenance === 'object' &&
-              'source' in provenance &&
-              typeof provenance.source === 'string' &&
-              'fetchedAt' in provenance &&
-              typeof provenance.fetchedAt === 'string';
-            // Type assertion to satisfy TypeScript - provenance is either valid Motor type or undefined
-            existingPolicy = {
-              ...restOfParsed,
-              // Ensure provenance is valid or undefined
-              provenance: hasValidProvenance
-                ? (provenance as SkillPolicy['provenance'])
-                : undefined,
-            };
-          }
-        } catch {
-          // No valid existing policy
-        }
-      }
-
-      // Step g: Atomic copy
-      const tempDir = join(skillsDir, `.tmp-${skillName}-${runId}`);
-      const backupDir = join(skillsDir, `.old-${skillName}-${String(Date.now())}`);
-
-      try {
-        // Copy to temp dir
-        await cp(sourceDir, tempDir, { recursive: true });
-
-        // Validate the copy
-        const copiedSkillMd = await readFile(join(tempDir, 'SKILL.md'), 'utf-8');
-        const copiedParsed = parseSkillFile(copiedSkillMd);
-        if ('error' in copiedParsed) {
-          throw new Error(`Invalid SKILL.md in copy: ${copiedParsed.error}`);
-        }
-
-        // If target exists, rename to backup
-        if (isUpdate) {
-          await rename(targetDir, backupDir);
-        }
-
-        // Rename temp → target
-        await rename(tempDir, targetDir);
-
-        // Remove backup on success
-        if (isUpdate) {
-          await rm(backupDir, { recursive: true, force: true });
-        }
-      } catch (error) {
-        // Clean up temp dir if something went wrong
-        try {
-          await unlink(tempDir);
-        } catch {
-          // Ignore
-        }
-        throw error;
-      }
-
-      // Step h: Force policy
-      const policyPath = join(targetDir, 'policy.json');
-      let motorPolicy: Record<string, unknown> | null = null;
-
-      // Read Motor-written policy.json if present and valid
-      try {
-        const policyContent = await readFile(policyPath, 'utf-8');
-        motorPolicy = JSON.parse(policyContent) as Record<string, unknown>;
-
-        // Basic validation
-        if (typeof motorPolicy !== 'object') {
-          motorPolicy = null;
-        }
-      } catch {
-        // No valid policy from Motor
-      }
-
-      // Compute content hash
-      const contentHash = await computeDirectoryHash(targetDir);
-
-      // Extract provenance from Motor policy if valid
-      const motorProvenance = motorPolicy?.['provenance'] as Record<string, unknown> | undefined;
-      const hasValidProvenance =
-        motorProvenance &&
-        typeof motorProvenance['source'] === 'string' &&
-        typeof motorProvenance['fetchedAt'] === 'string';
-
-      // Prepare policy fields from Motor policy
-      const motorAllowedTools = motorPolicy?.['allowedTools'] as string[] | undefined;
-      const motorAllowedDomains = motorPolicy?.['allowedDomains'] as string[] | undefined;
-      const motorRequiredCredentials = motorPolicy?.['requiredCredentials'] as string[] | undefined;
-      const motorInputs = motorPolicy?.['inputs'] as SkillInput[] | undefined;
-
-      // On updates where Motor didn't write a policy, preserve existing permissions
-      const fallbackTools = existingPolicy?.['allowedTools'] as string[] | undefined;
-      const fallbackDomains = existingPolicy?.['allowedDomains'] as string[] | undefined;
-      const fallbackCredentials = existingPolicy?.['requiredCredentials'] as string[] | undefined;
-      const fallbackInputs = existingPolicy?.['inputs'] as SkillInput[] | undefined;
-      const fallbackProvenance = existingPolicy?.['provenance'] as
-        | Record<string, unknown>
-        | undefined;
-
-      // Build effective provenance: Motor > existing > none
-      let effectiveProvenance: SkillPolicy['provenance'] = undefined;
-      if (hasValidProvenance) {
-        effectiveProvenance = {
-          source: motorProvenance['source'] as string,
-          fetchedAt: motorProvenance['fetchedAt'] as string,
-          contentHash,
-        };
-      } else if (
-        fallbackProvenance &&
-        typeof fallbackProvenance['source'] === 'string' &&
-        typeof fallbackProvenance['fetchedAt'] === 'string'
-      ) {
-        effectiveProvenance = {
-          source: fallbackProvenance['source'],
-          fetchedAt: fallbackProvenance['fetchedAt'],
-          contentHash,
-        };
-      }
-
-      // Generate new policy with pending_review trust
-      const newPolicy = {
-        schemaVersion: 1,
-        trust: 'pending_review' as const,
-        allowedTools: (motorAllowedTools ?? fallbackTools ?? []) as MotorTool[],
-        allowedDomains: motorAllowedDomains ?? fallbackDomains,
-        requiredCredentials: motorRequiredCredentials ?? fallbackCredentials,
-        inputs: motorInputs ?? fallbackInputs,
-        ...(effectiveProvenance && { provenance: effectiveProvenance }),
-        extractedFrom: {
-          runId,
-          timestamp: new Date().toISOString(),
-        },
-      };
-
-      // Save policy via savePolicy
-      await savePolicy(targetDir, newPolicy);
-
-      // Track result
-      if (isUpdate) {
+    if (result.extracted) {
+      if (result.isUpdate) {
         updated.push(skillName);
       } else {
         created.push(skillName);
       }
-
-      logger.info({ skillName, isUpdate }, 'Skill extracted successfully');
-    } catch (error) {
-      logger.warn({ skillName, error }, 'Skill extraction failed, skipping');
     }
+  } catch (error) {
+    logger.warn({ skillName, error }, 'Skill extraction failed, skipping');
   }
 
-  // Step 3: Rebuild skill index
-  try {
-    await rebuildSkillIndex(skillsDir);
-  } catch (error) {
-    logger.warn({ error, skillsDir }, 'Failed to rebuild skill index');
-  }
+  // Note: Auto-discovery mode - no index.json to rebuild
 
   return { created, updated };
 }

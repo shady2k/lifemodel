@@ -56,8 +56,8 @@ RUN mkdir -p /opt/motor && chown node:node /opt/motor
 # Copy all runtime files (tool-server + sandbox-worker)
 COPY . /opt/motor/
 
-# Create workspace and skills dirs (will be bind-mounted)
-RUN mkdir -p /workspace /skills && chown node:node /workspace /skills
+# Create workspace dir (will be bind-mounted)
+RUN mkdir -p /workspace && chown node:node /workspace
 
 # Redirect npm/pip to writable workspace (root fs is read-only)
 ENV NPM_CONFIG_CACHE=/workspace/.cache/npm

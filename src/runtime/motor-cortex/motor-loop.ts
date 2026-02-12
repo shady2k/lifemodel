@@ -88,12 +88,6 @@ export interface MotorLoopParams {
     }
   ) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
 
-  /** DI callback for web search (optional) */
-  searchFn?: (
-    query: string,
-    limit?: number
-  ) => Promise<{ title: string; url: string; snippet: string }[]>;
-
   /** Abort signal for cancellation (optional) */
   abortSignal?: AbortSignal;
 }
@@ -176,9 +170,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     return result;
   };
 
-  // Build tool context with allowed roots (workspace + skills dir)
-  const skillsDir = params.skillsDir;
-  const allowedRoots = skillsDir ? [workspace, skillsDir] : [workspace];
+  // Build tool context with allowed roots (workspace only - skills copied to root)
+  const allowedRoots = [workspace];
   const writeRoots = [workspace]; // Writes only allowed to workspace
   const toolContext = {
     workspace,
@@ -187,7 +180,6 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     ...(params.containerHandle && { containerHandle: params.containerHandle }),
     ...(params.run.domains && { allowedDomains: params.run.domains }),
     ...(params.fetchFn && { fetchFn: params.fetchFn }),
-    ...(params.searchFn && { searchFn: params.searchFn }),
   };
 
   // Get tool definitions
@@ -1084,9 +1076,7 @@ export function buildMotorSystemPrompt(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterationsOverride?: number,
-  /** When true, remap host paths to container paths (/workspace, /skills) */
-  containerMode?: boolean
+  maxIterationsOverride?: number
 ): string {
   const tools = run.tools;
   const toolDescriptions: Record<string, string> = {
@@ -1099,7 +1089,6 @@ export function buildMotorSystemPrompt(
     grep: '- grep: Search patterns across files (regex, max 100 matches)',
     patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
     fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
-    search: '- search: Search the web for information.',
   };
 
   // Always include ask_user in the description (it's always available as a synthetic tool)
@@ -1136,7 +1125,7 @@ Guidelines:
 - Use bash for runtime execution (node scripts, npm install, python, pip) and text processing with pipes
 - Be concise and direct in your responses
 - Report what you did and the result
-- File paths: use RELATIVE paths for workspace files (e.g. "output.txt"). Skill directory paths are absolute and READ-ONLY. Write all output to the workspace using relative paths.
+- File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
 - Credentials: use <credential:NAME> as a placeholder in tool arguments (e.g. in curl headers, code strings). The system resolves them to actual values before execution. NEVER search for API keys in the filesystem or environment — use the placeholder syntax instead.
 ${
   run.domains && run.domains.length > 0
@@ -1155,21 +1144,42 @@ Begin by analyzing the task and planning your approach. Then execute step by ste
     hasTool('write', tools)
       ? `
 
-When creating skills, use the Agent Skills standard:
+You create and maintain Agent Skills — modular, filesystem-based capabilities. A Skill packages instructions, metadata, and optional resources (scripts, templates, reference docs) so the agent can reuse them automatically.
 
-SKILL.md (required):
+Skill directory structure:
+  SKILL.md           — required: frontmatter metadata + step-by-step instructions
+  policy.json        — required: security policy (tools, domains, credentials)
+  references/        — optional: API docs, schemas, examples
+  scripts/           — optional: helper scripts the instructions reference
+
+SKILL.md format:
 ---
 name: skill-name
-description: What this skill does and when to use it (max 1024 chars)
+description: What this skill does and when to use it (max 1024 chars). Include BOTH what the skill does AND when the agent should trigger it.
 ---
 # Skill Name
-[Step-by-step instructions, examples, edge cases]
 
-policy.json (alongside SKILL.md):
+## Quick start
+[Minimal working example]
+
+## Instructions
+[Step-by-step procedures, organized by task type]
+
+## Examples
+[Concrete usage examples with expected inputs/outputs]
+
+## Edge cases
+[Error handling, fallbacks, known limitations]
+
+The frontmatter (name + description) is always loaded at startup so the agent knows the skill exists.
+The body is only loaded when the skill is triggered, so keep it focused and actionable.
+Reference files (references/, scripts/) are loaded on demand — link to them from the instructions.
+
+policy.json format:
 {
   "schemaVersion": 1,
   "trust": "approved",
-  "allowedTools": ["bash"],
+  "allowedTools": ["bash", "read", "write", "fetch"],
   "allowedDomains": ["api.example.com"],
   "requiredCredentials": ["api_key_name"],
   "provenance": {
@@ -1182,10 +1192,11 @@ Set trust to "approved" when the user explicitly asked you to create or learn th
 Set trust to "needs_reapproval" if you are creating a skill from untrusted or unverified content.
 Always record provenance.source with the URL or reference where you found the information.
 
-Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)
+Save files at the workspace root (e.g. write({path: "SKILL.md", content: "..."}) and write({path: "policy.json", content: "..."})).
+Reference files go in subdirectories: write({path: "references/api-docs.md", content: "..."}).
 These files will be automatically extracted and installed after your run completes.
 Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
-Valid tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search.`
+Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.`
       : ''
   }${
     skill
@@ -1193,9 +1204,8 @@ Valid tools: read, write, list, glob, bash, grep, patch, ask_user, fetch, search
 
 A skill is available for this task. Read its files before starting work.
 Skill: ${skill.frontmatter.name} — ${skill.frontmatter.description}
-Skill directory: ${containerMode ? `/skills/${skill.frontmatter.name}` : skill.path}
-Start by reading SKILL.md: read({path: "${containerMode ? `/skills/${skill.frontmatter.name}/SKILL.md` : `${skill.path}/SKILL.md`}"}). Check for reference files too: list({path: "${containerMode ? `/skills/${skill.frontmatter.name}` : skill.path}"}).
-IMPORTANT: The skill directory is read-only. To modify skill files, first read the file from the skill directory, then write the modified version to the workspace using a RELATIVE path: write({path: "skills/${skill.frontmatter.name}/SKILL.md", content: "...modified content..."}). Do NOT use patch on skill files — the file does not exist in the workspace yet. Changes are automatically extracted and installed after your run completes.
+Start by reading SKILL.md: read({path: "SKILL.md"}). Check for reference files too: list({path: "."}).
+You can modify skill files directly in the workspace using write or patch. Changes are automatically extracted and installed after your run completes.
 ${
   skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0
     ? `\nAvailable credentials for this skill:\n${skill.policy.requiredCredentials.map((c) => `- <credential:${c}> — use this placeholder in API calls (e.g. Authorization header, code variables)`).join('\n')}\nExample: fetch(url, {headers: {"Authorization": "Bearer <credential:${String(skill.policy.requiredCredentials[0])}>"}})`
@@ -1205,7 +1215,7 @@ ${
 If you encounter errors while following the skill instructions (wrong endpoints, incorrect parameters, deprecated methods, missing steps, etc.):
 1. Figure out what went wrong and how to fix it
 2. Complete the task using the corrected approach
-3. ALSO update the skill files: read the affected files from the skill directory, fix the incorrect parts, and write corrected versions to skills/${skill.frontmatter.name}/ in the workspace (e.g. SKILL.md, reference docs, scripts — whatever needs fixing)
+3. ALSO update the skill files directly in the workspace (e.g. SKILL.md, reference docs, scripts — whatever needs fixing)
 This way the skill stays accurate for future use. The updated files will be reviewed before they replace the current version.
 Note: you can only reach domains approved for this run.
 If you need a new domain, use ask_user to request it.`
@@ -1220,13 +1230,12 @@ export function buildInitialMessages(
   run: MotorRun,
   skill?: LoadedSkill,
   recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterations?: number,
-  containerMode?: boolean
+  maxIterations?: number
 ): Message[] {
   return [
     {
       role: 'system',
-      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations, containerMode),
+      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
     },
   ];
 }

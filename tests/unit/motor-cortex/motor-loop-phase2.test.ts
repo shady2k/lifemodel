@@ -112,14 +112,13 @@ describe('skill injection into system prompt', () => {
     skillPath: '/data/skills/weather-report/SKILL.md',
   };
 
-  it('includes skill reference with directory path', () => {
+  it('includes skill reference with workspace root paths', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
     expect(prompt).toContain('Skill: weather-report');
-    expect(prompt).toContain('Skill directory:');
-    expect(prompt).toContain('/data/skills/weather-report');
-    expect(prompt).toContain('reading SKILL.md');
+    expect(prompt).toContain('read({path: "SKILL.md"})');
+    expect(prompt).toContain('list({path: "."})');
   });
 
   it('includes credential guidance when skill has required credentials', () => {
@@ -154,7 +153,8 @@ describe('buildInitialMessages', () => {
     const messages = buildInitialMessages(run, skill);
     expect(messages).toHaveLength(1);
     expect(messages[0]?.content).toContain('Skill: test');
-    expect(messages[0]?.content).toContain('Skill directory:');
+    expect(messages[0]?.content).toContain('read({path: "SKILL.md"})');
+
   });
 
   it('creates system message without skill', () => {

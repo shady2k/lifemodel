@@ -11,9 +11,6 @@ import {
   validateSkillFrontmatter,
   loadPolicy,
   savePolicy,
-  loadSkillIndex,
-  saveSkillIndex,
-  updateSkillIndex,
   loadSkill,
   computeDirectoryHash,
 } from '../../../../src/runtime/skills/skill-loader.js';
@@ -218,63 +215,6 @@ describe('policy.json operations', () => {
     await writeFile(join(testDir, 'policy.json'), 'invalid json', 'utf-8');
     const loaded = await loadPolicy(testDir);
     expect(loaded).toBeNull();
-  });
-});
-
-describe('index.json operations', () => {
-  const testDir = join(tmpdir(), `skill-index-test-${String(Date.now())}`);
-
-  beforeEach(async () => {
-    await mkdir(testDir, { recursive: true });
-  });
-
-  afterEach(async () => {
-    await rm(testDir, { recursive: true, force: true });
-  });
-
-  it('saves and loads index', async () => {
-    const index = {
-      schemaVersion: 1,
-      skills: {
-        'test-skill': {
-          description: 'Test skill',
-          trust: 'approved' as const,
-          hasPolicy: true,
-          lastUsed: new Date().toISOString(),
-        },
-      },
-    };
-
-    await saveSkillIndex(testDir, index);
-    const loaded = await loadSkillIndex(testDir);
-
-    expect(loaded.schemaVersion).toBe(1);
-    expect(loaded.skills['test-skill']).toBeDefined();
-    expect(loaded.skills['test-skill']?.trust).toBe('approved');
-  });
-
-  it('returns empty index for missing file', async () => {
-    const loaded = await loadSkillIndex(testDir);
-    expect(loaded.schemaVersion).toBe(1);
-    expect(Object.keys(loaded.skills)).toHaveLength(0);
-  });
-
-  it('updates single entry in index', async () => {
-    const index = {
-      schemaVersion: 1,
-      skills: {},
-    };
-    await saveSkillIndex(testDir, index);
-
-    await updateSkillIndex(testDir, 'new-skill', {
-      description: 'New skill',
-      trust: 'needs_reapproval' as const,
-      hasPolicy: false,
-    });
-
-    const loaded = await loadSkillIndex(testDir);
-    expect(loaded.skills['new-skill']).toBeDefined();
-    expect(loaded.skills['new-skill']?.trust).toBe('needs_reapproval');
   });
 });
 

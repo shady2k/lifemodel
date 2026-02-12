@@ -11,7 +11,7 @@ Extraction (install)  — copies validated skill dirs from workspace → data/sk
 User (authority)      — approves skills before they become executable
 ```
 
-**Key constraint:** Motor Cortex runs in a Docker sandbox. It can READ existing skills (`/skills:ro`) but CANNOT write to the live skill directory. All new/modified skill files go to the workspace. Post-run extraction handles installation.
+**Key constraint:** Motor Cortex runs in a Docker sandbox. Skill files are copied to the workspace root on init (with a baseline manifest for change detection). Motor reads and modifies them in place. Post-run extraction compares against the baseline, extracts only changed files to `data/skills/`, and forces `pending_review` trust.
 
 ## Security Model
 
@@ -21,7 +21,7 @@ The safety boundary for Motor Cortex is **infrastructure-level, not honor-system
 
 **Implications for self-healing (Scenario 4):** If Motor fixes a broken skill and the fix requires a NEW domain (e.g., API moved from `api.agentmail.to` to `api-v2.agentmail.to`), the iptables rules block the request. Motor must use the `ask_user` tool to request the new domain. Cognition relays this to the user for approval, then retries the run with the expanded domain list.
 
-**Write isolation:** Motor writes to workspace only. The live `data/skills/` directory is never directly writable by Motor. Extraction is the only path from workspace to live skills, and it forces `pending_review` trust.
+**Write isolation:** Motor writes to workspace only (`/workspace`). The live `data/skills/` directory is never directly writable by Motor. Skill files are copied INTO the workspace at run start; extraction is the only path from workspace back to live skills, and it forces `pending_review` trust.
 
 ## Trust States
 
@@ -69,31 +69,36 @@ User: "I came across AgentMail, learn how to work with it"
               Write SKILL.md with setup instructions, API usage, examples.
               Write policy.json with appropriate tools and domains.
               If there are helper scripts or reference docs, include them.",
-       tools: ["shell", "filesystem"],
+       tools: ["bash", "read", "write", "fetch"],
        domains: ["agentmail.dev", "docs.agentmail.dev", "api.agentmail.to"]
      })
 
 2. MOTOR CORTEX executes (sandbox, multiple iterations)
    - curl https://agentmail.dev/docs → fetch documentation
    - Analyze API structure, endpoints, auth requirements
-   - Write to workspace:
-       skills/agentmail/SKILL.md        (instructions)
-       skills/agentmail/policy.json     (tools: shell+code, domains: api.agentmail.to)
-       skills/agentmail/REFERENCE.md    (full API reference)
-       skills/agentmail/scripts/        (helper scripts if needed)
+   - Write to workspace root:
+       SKILL.md                         (instructions)
+       policy.json                      (tools: bash+read+write+fetch, domains: api.agentmail.to)
+       references/api-docs.md           (full API reference)
+       scripts/                         (helper scripts if needed)
    - Complete with summary of what was created
 
-3. POST-RUN EXTRACTION (automatic)
-   - Scan workspace for skills/*/SKILL.md
-   - For each found skill directory:
+3. POST-RUN EXTRACTION (automatic, baseline-diff)
+   - Read .motor-baseline.json from workspace (generated at init)
+   - Scan workspace for current skill files (SKILL.md, policy.json, references/**, scripts/**)
+   - Three-way diff against baseline:
+     a. CHANGED: file in baseline with different hash → extract
+     b. ADDED: file in current but not in baseline → extract
+     c. DELETED: file in baseline but not in current → remove from installed skill
+   - If no changes → skip (prevents trust churn)
+   - For changed/new skills:
      a. Validate SKILL.md: parse frontmatter, check name+description exist
      b. Validate policy.json if present: check schema
      c. Sanitize skill name: lowercase, no path traversal
      d. FORCE trust to "pending_review" (ignore what Motor wrote)
-     e. Copy entire directory to data/skills/<name>/
+     e. Atomic copy to data/skills/<name>/
      f. Compute and store content hash in policy.json
-   - Rebuild skill index
-   - Include created skill names in result
+   - Include created/updated skill names in result
 
 4. COGNITION receives motor_result signal
    - Result includes created skill names
@@ -182,20 +187,20 @@ User: "Send an email via AgentMail"
 ```
 1. MOTOR CORTEX executes skill → API returns 404 (endpoint moved)
    - Motor recognizes: "endpoint /v1/send doesn't exist anymore"
-   - Motor has READ access to current skill files (/skills:ro)
+   - Motor has skill files at workspace root (copied at init)
    - Motor self-heals within the same run:
-     a. Reads current SKILL.md from /skills/agentmail/SKILL.md
+     a. Reads SKILL.md from workspace root (copied there at init)
      b. Fetches fresh docs: curl https://agentmail.dev/docs
         (agentmail.dev is already in the approved domain list)
      c. Identifies change: endpoint moved from /v1/send to /v2/messages
         (still on api.agentmail.to — same approved domain)
-     d. Writes CORRECTED skill to workspace:
-        skills/agentmail/SKILL.md (updated instructions)
-        skills/agentmail/policy.json (same domains)
+     d. Writes CORRECTED skill in-place at workspace root:
+        SKILL.md (updated instructions)
+        policy.json (same domains)
      e. Retries task with corrected approach → succeeds
 
-2. POST-RUN EXTRACTION
-   - Detects skills/agentmail/ in workspace
+2. POST-RUN EXTRACTION (baseline-diff)
+   - Compares workspace SKILL.md hash against .motor-baseline.json
    - Validates updated SKILL.md
    - Overwrites data/skills/agentmail/ with updated version
    - Resets trust to "pending_review" (content changed = re-review needed)
@@ -242,7 +247,7 @@ User: "Send an email via AgentMail"
        mode: "agentic",
        task: "The agentmail skill is broken — endpoint /v1/send returns 404.
               Research the current AgentMail API and write an updated skill.",
-       tools: ["shell", "filesystem"],
+       tools: ["bash", "read", "write", "fetch"],
        domains: ["agentmail.dev", "docs.agentmail.dev"]
      })
    - This is a dedicated research run, not a task execution
@@ -265,7 +270,7 @@ User: "Learn how AgentMail works — my other agent will need this"
 5. Skill is stored in data/skills/agentmail/
    - Any agent instance using the same data/ directory sees it
    - Skill is self-contained: SKILL.md + policy.json + scripts/
-   - Another agent's discoverSkills() finds it in index.json
+   - Another agent's discoverSkills() scans data/skills/ and finds it
 ```
 
 **Current limitation:** Skills are local to this `data/` directory. Cross-agent sharing requires shared filesystem (same `data/skills/` mount). Trust decisions are per-agent — another agent must independently approve the skill's policy. Future: skill registry/marketplace (out of scope for now).
@@ -324,15 +329,15 @@ User: "Check out https://skills.sh/agentmail — add that skill"
               Download SKILL.md and any supporting files.
               Create policy.json with appropriate security settings.
               Record provenance: source URL and fetch timestamp.",
-       tools: ["shell", "filesystem"],
+       tools: ["bash", "read", "write", "fetch"],
        domains: ["skills.sh"]
      })
 
 2. MOTOR fetches the skill
-   - curl https://skills.sh/agentmail/SKILL.md
+   - fetch https://skills.sh/agentmail/SKILL.md
    - Downloads supporting files if referenced
    - Creates policy.json with provenance.source = URL
-   - Writes everything to workspace skills/agentmail/
+   - Writes everything to workspace root (SKILL.md, policy.json, references/)
 
 3. EXTRACTION installs with trust: "pending_review"
    - provenance.source preserved for audit trail
@@ -352,32 +357,37 @@ After `runMotorLoop` completes successfully, before container teardown.
 
 ```
 extractSkillsFromWorkspace(workspace, skillsDir, runId):
-  1. List workspace/skills/ directory
-     - If doesn't exist → return { created: [], updated: [] }
+  1. Read .motor-baseline.json from workspace
+     - If missing → treat as fresh workspace (all files are new)
 
-  2. For each subdirectory in workspace/skills/:
-     a. Check for SKILL.md — skip if missing
-     b. Parse SKILL.md frontmatter:
-        - Must have 'name' and 'description'
-        - name must match directory name
-        - name must pass validation: /^[a-z][a-z0-9-]*[a-z0-9]$/, max 64 chars
-        - If invalid → log warning, skip
-     c. Parse policy.json if present:
-        - Validate schemaVersion
-        - If invalid → log warning, skip policy (skill still installs without policy)
-     d. Check if skill exists in data/skills/<name>/:
-        - Exists → mark as "updated"
-        - New → mark as "created"
-     e. Copy ENTIRE directory to data/skills/<name>/ (recursive, overwrite)
-     f. Force policy.json changes:
+  2. Scan workspace for skill files matching allowlist:
+     SKILL.md, policy.json, references/**, scripts/**
+     Hard denylist: node_modules/**, .cache/**, .local/**, *.log, .git/**
+
+  3. Check SKILL.md exists — skip if missing
+
+  4. Parse SKILL.md frontmatter:
+     - Must have 'name' and 'description'
+     - name must pass validation: /^[a-z][a-z0-9-]*[a-z0-9]$/, max 64 chars
+     - If invalid → log warning, skip
+
+  5. Three-way diff against baseline:
+     - CHANGED: file in baseline with different hash → extract
+     - ADDED: file in current but not in baseline → extract
+     - DELETED: file in baseline but not in current → remove from installed skill
+     - If no changes → skip (prevents trust churn on unchanged skill runs)
+
+  6. Copy ALL current skill files to temp dir, then atomic install:
+     a. Recursive symlink check on workspace
+     b. Size limits: 1MB per file, 10MB total
+     c. Atomic rename: temp → target (with backup/rollback)
+     d. Force policy.json changes:
         - Set trust: "pending_review"
-        - Compute contentHash over ALL files in directory (excluding policy.json)
+        - Compute contentHash over all skill files
         - Preserve provenance if Motor wrote it
-        - Add extractedFrom: { runId, timestamp }
+        - Add extractedFrom: { runId, timestamp, changedFiles, deletedFiles }
 
-  3. Rebuild skill index
-
-  4. Return { created: string[], updated: string[] }
+  7. Return { created: string[], updated: string[] }
 ```
 
 ### Concurrency
@@ -406,36 +416,39 @@ Motor Cortex enforces a mutex — only one agentic run at a time. Extraction run
 
 ### For Skill Creation/Research Runs
 
-Motor prompt tells sub-agent:
+Motor prompt teaches the sub-agent the Agent Skills standard:
 ```
-Save skills to: skills/<name>/ (relative to workspace)
-  skills/<name>/SKILL.md       — required
-  skills/<name>/policy.json    — recommended
-  skills/<name>/scripts/       — optional helper scripts
-  skills/<name>/REFERENCE.md   — optional reference docs
+Skill files go at the workspace root:
+  SKILL.md           — required: frontmatter (name, description) + instructions
+  policy.json        — required: security policy (tools, domains, credentials)
+  references/        — optional: API docs, schemas, examples
+  scripts/           — optional: helper scripts
+
+SKILL.md uses YAML frontmatter for metadata, then markdown for instructions.
+The description should explain both what the skill does and when to trigger it.
 ```
 
 ### For Skill Execution Runs
 
-Motor prompt tells sub-agent:
+Skill files are copied to workspace root at init. Motor prompt tells sub-agent:
 ```
-You are executing the following skill. If the instructions fail due to
-outdated information (changed endpoints, deprecated methods, etc.),
-you may:
-1. Fetch fresh documentation to understand what changed
-2. Write a corrected skill to skills/<name>/ in the workspace
-3. Continue executing the task with the corrected approach
+A skill is available for this task. Read its files before starting work.
+Start by reading SKILL.md: read({path: "SKILL.md"}).
+Check for reference files: list({path: "."}).
+You can modify skill files directly. Changes are extracted after completion.
 
-The corrected skill will be reviewed before it replaces the current version.
-Note: you can only reach domains that were approved for this run.
-If you need a new domain, use ask_user to request it.
+If instructions fail due to outdated info (changed endpoints, deprecated methods):
+1. Figure out what went wrong
+2. Complete the task with the corrected approach
+3. Update the skill files in-place (SKILL.md, references, scripts)
+The updated files will be reviewed before replacing the current version.
 ```
 
-### allowedRoots Split
+### allowedRoots
 
 ```
-Read roots:  [workspace, skillsDir]  — Motor can read existing skills
-Write roots: [workspace]             — Motor can only write to workspace
+Read roots:  [workspace]  — skill files are copied here at init
+Write roots: [workspace]  — Motor reads and writes in the same place
 ```
 
 ## Result Handoff to Cognition

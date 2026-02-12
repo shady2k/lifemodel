@@ -6,7 +6,7 @@ Phase 3 wraps Motor Cortex tool execution in Docker containers with read-only ro
 
 ```
 HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
-  motor-cortex.ts                          tool-server (long-lived process)
+ motor-cortex.ts                          tool-server (long-lived process)
     ├── ContainerManager                     ├── code execution (execFile)
     │     create/destroy per run             ├── shell execution (allowlisted)
     │                                        └── filesystem ops (/workspace only)
@@ -26,7 +26,7 @@ HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
 - Console output redirected to stderr (only framed JSON on stdout)
 - In-memory credential store (`Map`), delivered via special request type
 - 5-minute idle watchdog (self-exits)
-- Implements all motor tools: code, shell, filesystem, grep, patch, ask_user
+- Implements all motor tools: code, shell, filesystem, grep, patch, ask_user, fetch
 - Shell validation: rejects dangerous metacharacters and validates all pipeline segments against allowlist
 
 ### Container Image (`src/runtime/container/container-image.ts`)
@@ -34,6 +34,7 @@ HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
 - Alpine + Node 24 + shell tools (curl, jq, grep, coreutils)
 - Non-root user `motor` (UID 1000), ~50MB
 - Build context assembled in temp dir: tool-server + sandbox-worker
+- Workspace directory created for writable output
 
 ### Container Manager (`src/runtime/container/container-manager.ts`)
 - Docker CLI wrapper (zero deps)
@@ -55,26 +56,40 @@ HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
 | `--cpus 1.0` | CPU quota |
 | `--tmpfs /tmp:rw,noexec,nosuid,size=64m` | Writable temp, no exec |
 | `-v <workspace>:/workspace:rw` | Only writable mount |
-| `-v <skills>:/skills:ro` | Read-only skills access |
+
+## Workspace-Root Skill Model
+
+Skills are copied to the workspace root on initialization:
+- `.motor-baseline.json` records file hashes for change detection
+- On resume, existing workspace is reused (preserves agent edits)
+- Extraction uses baseline-diff: only extracts changed files to data/skills/
+- Agent can modify skill files directly in the workspace
 
 ## Modified Components
 
 ### motor-protocol.ts
 - `MotorRun.containerId?: string` — tracks Docker container ID
+- `MotorTool` union: removed `search` tool
 
 ### motor-tools.ts
 - `ToolContext.containerHandle?: ContainerHandle` — optional container dispatch
 - `executeTool()` — container path serializes request as IPC, direct path unchanged
+- `search` tool removed — cognition layer searches first, then dispatches with URL
+- `HOST_ONLY_TOOLS` = `['fetch']` only (fetch still runs on host)
 
 ### motor-loop.ts
 - `MotorLoopParams.containerHandle` + `MotorLoopParams.workspace` — threaded from cortex
-- Credentials delivered to container AND resolved on host (dual path)
+- `buildMotorSystemPrompt()` — updated for workspace-root skill paths
+- `allowedRoots` = `[workspace]` only (no skillsDir mount)
+- Skill files at root: `read({path: "SKILL.md"})`, `list({path: "."})`
+- Agent can modify skill files directly (no read-only restriction)
 
 ### motor-cortex.ts
-- `MotorCortexDeps.containerManager` — optional Docker manager
-- `startRun()` — checks Docker availability, blocks if unavailable (unless `MOTOR_CORTEX_UNSAFE=true`)
-- `runLoopInBackground()` — creates workspace once, creates/destroys container in try/finally
-- `recoverOnRestart()` — prunes stale containers on startup
+- `MotorCortexDeps.containerManager` — Docker manager (required)
+- `startRun()` — requires Docker, throws if unavailable (no UNSAFE mode)
+- `runLoopInBackground()` — creates workspace, copies skill files to root, generates baseline
+- `extractSingleSkill()` — baseline-diff extraction, unchanged skill skip
+- Removed implicit domain widening (package registry domains no longer auto-added)
 
 ### sandbox-runner.ts
 - Refactored from `fork()` to `execFile('node', [workerPath, '--eval', code])`
@@ -90,21 +105,17 @@ HOST (trusted controller)                DOCKER CONTAINER (untrusted worker)
 - `logSecurityEvent()` — path traversal, blocked commands
 
 ### skill-types.ts / skill-loader.ts
-- `SkillDefinition.domains?: string[]` — accepted, validated, and enforced via iptables (Phase 4)
+- `SkillDefinition.domains?: string[]` — accepted, validated, and enforced via iptables
+- `discoverSkills()` — auto-discovery mode, always scans directory (no index.json)
+- `getSkillNames()` — uses `discoverSkills()` directly
 
 ### container.ts (DI)
 - Creates `ContainerManager`, passes to Motor Cortex deps
-
-## Unsafe Mode
-
-- Docker unavailable → agentic runs blocked with clear error
-- Oneshot mode (pure computation) still works without Docker
-- `MOTOR_CORTEX_UNSAFE=true` env var enables direct execution with WARN on every call
-- This is NOT a dev convenience — it's an explicit security bypass
 
 ## Test Coverage
 
 - IPC framing: encodeFrame, FrameDecoder (partial frames, multi-frame, byte-by-byte, errors)
 - Container constants and configuration
 - Sandbox refactor: expression evaluation, error handling, timeouts, guard
-- All 835 existing tests pass with zero regressions
+- Baseline-diff extraction: unchanged skill skip, rm fix, workspace-root model
+- All tests updated for workspace-root model, tool simplification, auto-discovery

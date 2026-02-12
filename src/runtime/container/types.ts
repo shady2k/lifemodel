@@ -147,9 +147,6 @@ export interface ContainerConfig {
   /** Workspace directory on the host (bind-mounted as /workspace) */
   workspacePath: string;
 
-  /** Skills directory on the host (bind-mounted as /skills, read-only) */
-  skillsPath?: string;
-
   /** Memory limit (default: '512m') */
   memoryLimit?: string;
 

@@ -15,7 +15,6 @@ import { validateAgainstParameters } from '../validation.js';
 import {
   loadSkill,
   savePolicy,
-  updateSkillIndex,
   computeDirectoryHash,
 } from '../../../../runtime/skills/skill-loader.js';
 import type { SkillPolicy } from '../../../../runtime/skills/skill-types.js';
@@ -144,11 +143,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
 
       await savePolicy(loaded.path, updatedPolicy);
 
-      await updateSkillIndex(skillsDir, skillName, {
-        description: loaded.frontmatter.description,
-        trust: updatedPolicy.trust,
-        hasPolicy: true,
-      });
+      // No index.json update needed — auto-discovery reads from disk directly
 
       return {
         success: true,

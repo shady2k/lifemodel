@@ -296,11 +296,6 @@ function buildCreateArgs(
   // Workspace bind mount (writable, no exec)
   args.push('-v', `${config.workspacePath}:/workspace:rw`);
 
-  // Skills bind mount (read-only)
-  if (config.skillsPath) {
-    args.push('-v', `${config.skillsPath}:/skills:ro`);
-  }
-
   // Image
   args.push(CONTAINER_IMAGE);
 

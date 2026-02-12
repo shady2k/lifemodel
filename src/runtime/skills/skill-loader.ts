@@ -2,7 +2,7 @@
  * Skill Loader
  *
  * Parses SKILL.md files (Agent Skills standard), manages policy.json sidecars,
- * and maintains the central skills index for fast discovery.
+ * and discovers skills via directory scan (auto-discovery, no index.json).
  *
  * ## File Format (Agent Skills Standard)
  * ```
@@ -33,7 +33,6 @@ import { JSONStorage } from '../../storage/json-storage.js';
 import type {
   SkillFrontmatter,
   SkillPolicy,
-  SkillIndex,
   SkillIndexEntry,
   DiscoveredSkill,
   LoadedSkill,
@@ -43,11 +42,6 @@ import type {
  * Default skills base directory.
  */
 const DEFAULT_SKILLS_DIR = 'data/skills';
-
-/**
- * Schema version for index.json.
- */
-const INDEX_SCHEMA_VERSION = 1;
 
 /**
  * Recursively collect all files in a directory, excluding policy.json.
@@ -355,133 +349,9 @@ export async function savePolicy(skillDir: string, policy: SkillPolicy): Promise
 }
 
 /**
- * Load the central skills index.
+ * Discover all available skills by scanning the skills directory.
  *
- * @param baseDir - Skills base directory (default: data/skills)
- * @returns SkillIndex (empty if missing/corrupt)
- */
-export async function loadSkillIndex(baseDir?: string): Promise<SkillIndex> {
-  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
-  const indexPath = join(dir, 'index.json');
-
-  try {
-    const content = await readFile(indexPath, 'utf-8');
-    const index = JSON.parse(content) as SkillIndex;
-
-    // Validate schema
-    if (typeof index.schemaVersion !== 'number' || typeof index.skills !== 'object') {
-      return { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
-    }
-
-    return index;
-  } catch {
-    // Missing or corrupt — return empty index
-    return { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
-  }
-}
-
-/**
- * Save the central skills index (atomic write).
- *
- * @param baseDir - Skills base directory
- * @param index - Index to save
- */
-export async function saveSkillIndex(baseDir: string, index: SkillIndex): Promise<void> {
-  await mkdir(baseDir, { recursive: true });
-
-  const storage = new JSONStorage({ basePath: baseDir, createBackup: false });
-  await storage.save('index', index);
-}
-
-/**
- * Update a single entry in the skills index.
- *
- * @param baseDir - Skills base directory
- * @param name - Skill name
- * @param entry - Index entry to upsert
- */
-export async function updateSkillIndex(
-  baseDir: string,
-  name: string,
-  entry: SkillIndexEntry
-): Promise<void> {
-  const index = await loadSkillIndex(baseDir);
-  index.skills[name] = entry;
-  await saveSkillIndex(baseDir, index);
-}
-
-/**
- * Remove a skill from the index.
- *
- * @param baseDir - Skills base directory
- * @param name - Skill name to remove
- */
-export async function removeFromSkillIndex(baseDir: string, name: string): Promise<void> {
-  const index = await loadSkillIndex(baseDir);
-  const { [name]: _, ...remaining } = index.skills;
-  index.skills = remaining;
-  await saveSkillIndex(baseDir, index);
-}
-
-/**
- * Rebuild the skills index from directory scan.
- *
- * Called when index.json is missing or needs refresh.
- *
- * @param baseDir - Skills base directory
- */
-export async function rebuildSkillIndex(baseDir: string): Promise<void> {
-  const dir = resolve(baseDir);
-
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    const index: SkillIndex = { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} };
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      const skillDir = join(dir, entry.name);
-      const skillMdPath = join(skillDir, 'SKILL.md');
-
-      try {
-        // Check for SKILL.md
-        await stat(skillMdPath);
-
-        // Load frontmatter for description
-        const content = await readFile(skillMdPath, 'utf-8');
-        const parsed = parseSkillFile(content);
-
-        if ('error' in parsed) continue;
-
-        const frontmatter = toSkillFrontmatter(parsed.frontmatter);
-
-        // Check for policy
-        const policy = await loadPolicy(skillDir);
-
-        index.skills[entry.name] = {
-          description: frontmatter.description,
-          trust: policy?.trust ?? 'needs_reapproval',
-          hasPolicy: policy !== null,
-        };
-      } catch {
-        // Skip invalid entries
-      }
-    }
-
-    await saveSkillIndex(dir, index);
-  } catch {
-    // Base directory doesn't exist — save empty index
-    await saveSkillIndex(dir, { schemaVersion: INDEX_SCHEMA_VERSION, skills: {} });
-  }
-}
-
-/**
- * Discover all available skills.
- *
- * Fast path: reads from index.json.
- * Fallback: directory scan and rebuild index if missing.
- *
- * Returns entries with name attached (preserves the Record key).
+ * Auto-discovery mode: always scans the directory, no index.json caching.
  *
  * @param baseDir - Base directory (default: data/skills)
  * @returns Array of discovered skills with names
@@ -490,16 +360,47 @@ export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[
   const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
 
   try {
-    // Try loading from index first (fast path)
-    let index = await loadSkillIndex(dir);
+    const entries = await readdir(dir, { withFileTypes: true });
+    const skills: DiscoveredSkill[] = [];
 
-    // If index is empty, try rebuilding from directory scan
-    if (Object.keys(index.skills).length === 0) {
-      await rebuildSkillIndex(dir);
-      index = await loadSkillIndex(dir);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const skillDir = join(dir, entry.name);
+      const skillMdPath = join(skillDir, 'SKILL.md');
+
+      try {
+        const statResult = await stat(skillMdPath);
+        if (!statResult.isFile()) continue;
+
+        const content = await readFile(skillMdPath, 'utf-8');
+        const parsed = parseSkillFile(content);
+
+        if ('error' in parsed) continue;
+
+        const frontmatter = toSkillFrontmatter(parsed.frontmatter);
+        const policy = await loadPolicy(skillDir);
+
+        // Build index entry
+        // extractedFrom is an ad-hoc field added by skill-extraction.ts (not in SkillPolicy type)
+        const extractedFrom = (policy as Record<string, unknown> | null)?.['extractedFrom'] as
+          | { timestamp?: string }
+          | undefined;
+        const indexEntry: SkillIndexEntry = {
+          description: frontmatter.description,
+          hasPolicy: policy !== null,
+          trust: policy?.trust ?? 'needs_reapproval',
+          lastUsed: extractedFrom?.timestamp,
+        };
+
+        skills.push({ name: entry.name, ...indexEntry });
+      } catch {
+        // Skip invalid skills
+        continue;
+      }
     }
 
-    return Object.entries(index.skills).map(([name, entry]) => ({ name, ...entry }));
+    return skills;
   } catch {
     // Skills directory doesn't exist yet
     return [];
@@ -512,16 +413,8 @@ export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[
  * Convenience wrapper around discoverSkills().
  */
 export async function getSkillNames(baseDir?: string): Promise<string[]> {
-  const index = await loadSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
-
-  // If index is empty, try rebuild
-  if (Object.keys(index.skills).length === 0) {
-    await rebuildSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
-    const rebuilt = await loadSkillIndex(resolve(baseDir ?? DEFAULT_SKILLS_DIR));
-    return Object.keys(rebuilt.skills).sort();
-  }
-
-  return Object.keys(index.skills).sort();
+  const skills = await discoverSkills(baseDir);
+  return skills.map((s) => s.name).sort();
 }
 
 /**

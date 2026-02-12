@@ -2,30 +2,25 @@
  * Skill Extraction Tests
  *
  * Tests for extractSkillsFromWorkspace() covering:
- * - Empty workspace (no skills/ dir)
- * - Valid skill with SKILL.md + policy.json
- * - Valid skill without policy.json
- * - Invalid frontmatter (missing name)
- * - Name mismatch with directory name
- * - Symlink at top level
- * - Symlink in nested subdir
- * - File over 1MB
- * - Directory over 10MB total
- * - Dotfiles skipped
- * - Existing skill (marked as "updated")
- * - Multiple skills in one workspace
+ * - Empty workspace (no SKILL.md)
+ * - New skill creation (no baseline, SKILL.md at root)
+ * - Existing skill with baseline-diff (unchanged = skip, changed = extract)
+ * - Policy handling (Motor policy, no policy, invalid policy)
+ * - Symlink rejection
+ * - Size limits
  * - Trust forced to "pending_review"
- * - Content hash computed over full directory
- * - Atomic copy validation
- * - Motor provenance preserved
- * - Invalid Motor policy.json
+ * - Content hash computed
+ * - Provenance preserved
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, writeFile, readFile, symlink, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { extractSkillsFromWorkspace } from '../../../../src/runtime/motor-cortex/skill-extraction.js';
+import {
+  extractSkillsFromWorkspace,
+  generateBaseline,
+} from '../../../../src/runtime/motor-cortex/skill-extraction.js';
 import { computeDirectoryHash } from '../../../../src/runtime/skills/skill-loader.js';
 
 // Test logger
@@ -34,7 +29,7 @@ const mockLogger = {
   warn: vi.fn(),
   debug: vi.fn(),
   error: vi.fn(),
-} as needs_reapproval as import('pino').Logger; // eslint-disable-line @typescript-eslint/consistent-type-imports
+} as unknown as import('pino').Logger; // eslint-disable-line @typescript-eslint/consistent-type-imports
 
 describe('skill-extraction', () => {
   let workspace: string;
@@ -42,7 +37,6 @@ describe('skill-extraction', () => {
   let runId: string;
 
   beforeEach(async () => {
-    // Create temp directories
     const base = tmpdir();
     workspace = join(base, `.test-workspace-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     skillsDir = join(base, `.test-skills-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -53,69 +47,73 @@ describe('skill-extraction', () => {
   });
 
   afterEach(async () => {
-    // Cleanup
     await rm(workspace, { recursive: true, force: true });
     await rm(skillsDir, { recursive: true, force: true });
   });
 
-  describe('empty workspace', () => {
-    it('returns empty arrays when no skills/ directory exists', async () => {
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+  /** Helper: write SKILL.md at workspace root */
+  async function writeSkillMd(name: string, description: string, body = '# Skill'): Promise<void> {
+    await writeFile(
+      join(workspace, 'SKILL.md'),
+      `---\nname: ${name}\ndescription: ${description}\n---\n${body}`,
+      'utf-8'
+    );
+  }
 
+  /** Helper: write policy.json at workspace root */
+  async function writePolicy(policy: Record<string, unknown>): Promise<void> {
+    await writeFile(join(workspace, 'policy.json'), JSON.stringify(policy), 'utf-8');
+  }
+
+  /** Helper: generate and write baseline from current workspace state */
+  async function writeBaseline(): Promise<void> {
+    const baseline = await generateBaseline(workspace);
+    await writeFile(
+      join(workspace, '.motor-baseline.json'),
+      JSON.stringify(baseline, null, 2),
+      'utf-8'
+    );
+  }
+
+  /** Helper: write an empty baseline (simulates fresh workspace with no pre-existing skill files) */
+  async function writeEmptyBaseline(): Promise<void> {
+    await writeFile(
+      join(workspace, '.motor-baseline.json'),
+      JSON.stringify({ files: {} }),
+      'utf-8'
+    );
+  }
+
+  describe('empty workspace', () => {
+    it('returns empty arrays when no SKILL.md exists', async () => {
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
       expect(result).toEqual({ created: [], updated: [] });
     });
 
-    it('returns empty arrays when skills/ directory is empty', async () => {
-      const skillsWorkspace = join(workspace, 'skills');
-      await mkdir(skillsWorkspace, { recursive: true });
-
+    it('returns empty arrays when workspace has non-skill files only', async () => {
+      await writeFile(join(workspace, 'output.txt'), 'hello', 'utf-8');
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result).toEqual({ created: [], updated: [] });
     });
   });
 
-  describe('valid skill with SKILL.md and policy.json', () => {
-    it('extracts skill with valid Motor policy.json', async () => {
-      const skillName = 'weather';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      // Write SKILL.md
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: weather
-description: Fetch weather data from wttr.in
----
-# Weather Skill
-
-Fetch weather data using curl.`,
-        'utf-8'
-      );
-
-      // Write Motor's policy.json
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedTools: ['shell'],
-          allowedDomains: ['wttr.in'],
-          provenance: {
-            source: 'https://wttr.in',
-            fetchedAt: new Date().toISOString(),
-          },
-        }),
-        'utf-8'
-      );
+  describe('new skill creation (no baseline)', () => {
+    it('extracts new skill with SKILL.md at workspace root', async () => {
+      await writeSkillMd('weather', 'Fetch weather data from wttr.in');
+      await writePolicy({
+        schemaVersion: 1,
+        trust: 'approved',
+        allowedTools: ['bash'],
+        allowedDomains: ['wttr.in'],
+        provenance: { source: 'https://wttr.in', fetchedAt: new Date().toISOString() },
+      });
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
 
       expect(result.created).toEqual(['weather']);
       expect(result.updated).toEqual([]);
 
-      // Verify skill was installed
+      // Verify installed
       const installedDir = join(skillsDir, 'weather');
       const skillMd = await readFile(join(installedDir, 'SKILL.md'), 'utf-8');
       expect(skillMd).toContain('name: weather');
@@ -126,31 +124,14 @@ Fetch weather data using curl.`,
       expect(policy.provenance.source).toBe('https://wttr.in');
       expect(policy.extractedFrom.runId).toBe(runId);
     });
-  });
 
-  describe('valid skill without policy.json', () => {
-    it('extracts skill and generates minimal policy', async () => {
-      const skillName = 'hello';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: hello
-description: Say hello to the world
----
-# Hello Skill
-
-Say hello.`,
-        'utf-8'
-      );
+    it('extracts new skill without policy.json and generates minimal policy', async () => {
+      await writeSkillMd('hello', 'Say hello to the world');
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
 
       expect(result.created).toEqual(['hello']);
 
-      // Verify policy was generated
       const installedDir = join(skillsDir, 'hello');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
@@ -160,474 +141,128 @@ Say hello.`,
     });
   });
 
+  describe('baseline-diff extraction (existing skill)', () => {
+    it('skips extraction when no changes detected', async () => {
+      // Simulate: skill copied to workspace, baseline generated, no edits
+      await writeSkillMd('existing', 'An existing skill');
+      await writeBaseline();
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      expect(result.created).toEqual([]);
+      expect(result.updated).toEqual([]);
+    });
+
+    it('extracts when SKILL.md is modified after baseline', async () => {
+      // Pre-install the skill so it counts as update
+      const installedDir = join(skillsDir, 'existing');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(join(installedDir, 'SKILL.md'), '---\nname: existing\ndescription: Old\n---\n# Old', 'utf-8');
+
+      // Simulate: skill copied, baseline generated
+      await writeSkillMd('existing', 'An existing skill', '# Original');
+      await writeBaseline();
+
+      // Agent modifies SKILL.md
+      await writeSkillMd('existing', 'An existing skill', '# Updated with fixes');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      expect(result.updated).toEqual(['existing']);
+
+      const updatedMd = await readFile(join(installedDir, 'SKILL.md'), 'utf-8');
+      expect(updatedMd).toContain('Updated with fixes');
+    });
+
+    it('detects added files (agent added new references)', async () => {
+      await writeSkillMd('existing', 'Skill with refs');
+      await writeBaseline();
+
+      // Agent adds a reference file
+      await mkdir(join(workspace, 'references'), { recursive: true });
+      await writeFile(join(workspace, 'references', 'api.md'), '# API Docs', 'utf-8');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      // New skill (not pre-installed in skillsDir)
+      expect(result.created).toEqual(['existing']);
+    });
+  });
+
   describe('validation failures', () => {
-    it('skips skill with missing SKILL.md', async () => {
-      const skillName = 'invalid';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        { skillName: 'invalid' },
-        'SKILL.md missing, skipping'
-      );
-    });
-
-    it('skips skill with invalid frontmatter (missing name)', async () => {
-      const skillName = 'bad-frontend';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
+    it('skips extraction when SKILL.md has invalid frontmatter (missing name)', async () => {
       await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-description: Missing name
----
-# Bad Skill`,
+        join(workspace, 'SKILL.md'),
+        '---\ndescription: Missing name\n---\n# Bad Skill',
         'utf-8'
       );
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalled();
     });
 
-    it('skips skill with name mismatch (directory vs frontmatter)', async () => {
-      const skillName = 'directory-name';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: different-name
-description: Name mismatch
----
-# Mismatch Skill`,
-        'utf-8'
-      );
+    it('skips extraction when SKILL.md has invalid name format', async () => {
+      await writeSkillMd('-invalid-name', 'Invalid name format');
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        { skillName: 'directory-name', nameFromFrontmatter: 'different-name' },
-        'Name mismatch (frontmatter vs directory), skipping'
-      );
-    });
-
-    it('skips skill with invalid name format', async () => {
-      const skillName = '-invalid-name';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: -invalid-name
-description: Invalid name format
----
-# Invalid Skill`,
-        'utf-8'
-      );
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalled();
     });
   });
 
   describe('symlink rejection', () => {
     it('rejects skill with symlink at top level', async () => {
-      const skillName = 'with-symlink';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
+      await writeSkillMd('with-symlink', 'Has symlink');
 
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: with-symlink
-description: Has symlink
----
-# Symlink Skill`,
-        'utf-8'
-      );
-
-      // Create a symlink
       try {
-        await symlink('/etc/passwd', join(skillDir, 'link'));
+        await symlink('/etc/passwd', join(workspace, 'link'));
       } catch {
-        // Skip test if symlinks not supported
-        return;
+        return; // Skip if symlinks not supported
       }
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        { skillName: 'with-symlink', error: expect.any(Error) },
-        'Symlink detected, skipping'
-      );
     });
 
     it('rejects skill with symlink in nested subdirectory', async () => {
-      const skillName = 'nested-symlink';
-      const skillDir = join(workspace, 'skills', skillName);
-      const scriptsDir = join(skillDir, 'scripts');
+      await writeSkillMd('nested-symlink', 'Has nested symlink');
+      const scriptsDir = join(workspace, 'scripts');
       await mkdir(scriptsDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: nested-symlink
-description: Has nested symlink
----
-# Nested Symlink Skill`,
-        'utf-8'
-      );
-
       await writeFile(join(scriptsDir, 'script.sh'), 'echo hello', 'utf-8');
 
-      // Create symlink in nested dir
       try {
         await symlink('/etc/passwd', join(scriptsDir, 'link'));
       } catch {
-        // Skip test if symlinks not supported
         return;
       }
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        { skillName: 'nested-symlink', error: expect.any(Error) },
-        'Symlink detected, skipping'
-      );
     });
   });
 
   describe('size limits', () => {
-    it('rejects skill with file over 1MB', async () => {
-      const skillName = 'large-file';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: large-file
-description: Has large file
----
-# Large File Skill`,
-        'utf-8'
-      );
-
-      // Create a file larger than 1MB
-      const largeContent = 'x'.repeat(1024 * 1024 + 1);
-      await writeFile(join(skillDir, 'large.txt'), largeContent, 'utf-8');
+    it('rejects skill with SKILL.md over 1MB', async () => {
+      // Write an oversized SKILL.md (skill files are allowlisted, non-skill files are ignored)
+      const largeBody = 'x'.repeat(1024 * 1024 + 1);
+      await writeSkillMd('large-file', 'Has large body', largeBody);
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual([]);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        { skillName: 'large-file', error: expect.any(Error) },
-        'Size check failed, skipping'
-      );
-    });
-
-    it('rejects skill with total size over 10MB', async () => {
-      const skillName = 'large-total';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: large-total
-description: Total size over limit
----
-# Large Total Skill`,
-        'utf-8'
-      );
-
-      // Create multiple files that together exceed 10MB
-      const chunkSize = 1024 * 1024; // 1MB each
-      for (let i = 0; i < 11; i++) {
-        await writeFile(join(skillDir, `file${i}.txt`), 'x'.repeat(chunkSize), 'utf-8');
-      }
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      // Should be skipped due to size limit
-      expect(result.created).toEqual([]);
-      // Verify the skill was NOT installed
-      const installedDir = join(skillsDir, 'large-total');
-      const exists = await readFile(join(installedDir, 'SKILL.md'), 'utf-8').catch(() => null);
-      expect(exists).toBeNull();
-    });
-  });
-
-  describe('dotfiles', () => {
-    it('skips .DS_Store files', async () => {
-      const skillName = 'clean';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: clean
-description: Clean skill
----
-# Clean Skill`,
-        'utf-8'
-      );
-
-      await writeFile(join(skillDir, '.DS_Store'), 'x', 'utf-8');
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.created).toEqual(['clean']);
-
-      // Note: Dotfiles are copied (cp copies everything), but skipped during hash computation
-      const installedDir = join(skillsDir, 'clean');
-      const exists = await readFile(join(installedDir, '.DS_Store'), 'utf-8').catch(() => null);
-      expect(exists).toBe('x'); // Dotfile IS copied
-    });
-  });
-
-  describe('existing skill update', () => {
-    it('marks existing skill as updated', async () => {
-      const skillName = 'existing';
-      const installedDir = join(skillsDir, skillName);
-      await mkdir(installedDir, { recursive: true });
-
-      // Create existing skill
-      await writeFile(
-        join(installedDir, 'SKILL.md'),
-        `---
-name: existing
-description: Old version
----
-# Old`,
-        'utf-8'
-      );
-
-      // Create new version in workspace
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: existing
-description: Updated version
----
-# Updated`,
-        'utf-8'
-      );
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.created).toEqual([]);
-      expect(result.updated).toEqual(['existing']);
-
-      // Verify skill was updated
-      const updatedContent = await readFile(join(installedDir, 'SKILL.md'), 'utf-8');
-      expect(updatedContent).toContain('Updated version');
-    });
-
-    it('preserves existing policy fields when Motor does not write policy.json', async () => {
-      const skillName = 'keep-policy';
-      const installedDir = join(skillsDir, skillName);
-      await mkdir(installedDir, { recursive: true });
-
-      // Create existing skill with approved policy
-      await writeFile(
-        join(installedDir, 'SKILL.md'),
-        `---
-name: keep-policy
-description: Old version
----
-# Old`,
-        'utf-8'
-      );
-      await writeFile(
-        join(installedDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedTools: ['shell', 'code'],
-          allowedDomains: ['api.example.com'],
-          requiredCredentials: ['api_key'],
-        }),
-        'utf-8'
-      );
-
-      // Motor writes only SKILL.md (no policy.json)
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: keep-policy
-description: Updated version
----
-# Updated`,
-        'utf-8'
-      );
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.updated).toEqual(['keep-policy']);
-
-      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      // Trust is always reset
-      expect(policy.trust).toBe('pending_review');
-      // But permissions are preserved from existing policy
-      expect(policy.allowedTools).toEqual(['shell', 'code']);
-      expect(policy.allowedDomains).toEqual(['api.example.com']);
-      expect(policy.requiredCredentials).toEqual(['api_key']);
-    });
-
-    it('Motor-written policy takes precedence over existing policy on update', async () => {
-      const skillName = 'motor-wins';
-      const installedDir = join(skillsDir, skillName);
-      await mkdir(installedDir, { recursive: true });
-
-      // Create existing skill with old policy
-      await writeFile(
-        join(installedDir, 'SKILL.md'),
-        `---
-name: motor-wins
-description: Old version
----
-# Old`,
-        'utf-8'
-      );
-      await writeFile(
-        join(installedDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedTools: ['shell'],
-          allowedDomains: ['old.example.com'],
-        }),
-        'utf-8'
-      );
-
-      // Motor writes SKILL.md + policy.json with new tools
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: motor-wins
-description: Updated version
----
-# Updated`,
-        'utf-8'
-      );
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedTools: ['code', 'fetch'],
-          allowedDomains: ['new.example.com'],
-        }),
-        'utf-8'
-      );
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.updated).toEqual(['motor-wins']);
-
-      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      expect(policy.trust).toBe('pending_review');
-      // Motor's values take precedence
-      expect(policy.allowedTools).toEqual(['code', 'fetch']);
-      expect(policy.allowedDomains).toEqual(['new.example.com']);
-    });
-  });
-
-  describe('multiple skills', () => {
-    it('extracts all valid skills from workspace', async () => {
-      // Skill 1
-      const skill1Dir = join(workspace, 'skills', 'skill1');
-      await mkdir(skill1Dir, { recursive: true });
-      await writeFile(
-        join(skill1Dir, 'SKILL.md'),
-        `---
-name: skill1
-description: First skill
----
-# Skill 1`,
-        'utf-8'
-      );
-
-      // Skill 2
-      const skill2Dir = join(workspace, 'skills', 'skill2');
-      await mkdir(skill2Dir, { recursive: true });
-      await writeFile(
-        join(skill2Dir, 'SKILL.md'),
-        `---
-name: skill2
-description: Second skill
----
-# Skill 2`,
-        'utf-8'
-      );
-
-      // Invalid skill (should be skipped)
-      const invalidDir = join(workspace, 'skills', 'invalid');
-      await mkdir(invalidDir, { recursive: true });
-      // No SKILL.md
-
-      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
-      expect(result.created).toContain('skill1');
-      expect(result.created).toContain('skill2');
-      expect(result.created).not.toContain('invalid');
-      expect(result.created.length).toBe(2);
     });
   });
 
   describe('trust forced to pending_review', () => {
     it('forces trust to pending_review even if Motor wrote approved', async () => {
-      const skillName = 'approved-skill';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: approved-skill
-description: Motor wrote approved
----
-# Approved`,
-        'utf-8'
-      );
-
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedTools: ['shell'],
-        }),
-        'utf-8'
-      );
+      await writeSkillMd('approved-skill', 'Motor wrote approved');
+      await writePolicy({
+        schemaVersion: 1,
+        trust: 'approved',
+        allowedTools: ['bash'],
+      });
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual(['approved-skill']);
 
-      // Verify trust was forced to pending_review
       const installedDir = join(skillsDir, 'approved-skill');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
@@ -635,64 +270,32 @@ description: Motor wrote approved
   });
 
   describe('content hash', () => {
-    it('computes hash over full directory excluding policy.json', async () => {
-      const skillName = 'hashed';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: hashed
-description: Hash test
----
-# Hashed`,
-        'utf-8'
-      );
-
-      await writeFile(join(skillDir, 'script.sh'), 'echo test', 'utf-8');
-
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'needs_reapproval',
-          allowedTools: [],
-          provenance: { source: 'test', fetchedAt: '2024-01-01T00:00:00Z' },
-        }),
-        'utf-8'
-      );
+    it('computes hash over installed directory', async () => {
+      await writeSkillMd('hashed', 'Hash test');
+      await mkdir(join(workspace, 'scripts'), { recursive: true });
+      await writeFile(join(workspace, 'scripts', 'run.sh'), 'echo test', 'utf-8');
+      await writePolicy({
+        schemaVersion: 1,
+        trust: 'approved',
+        allowedTools: [],
+        provenance: { source: 'test', fetchedAt: '2024-01-01T00:00:00Z' },
+      });
 
       await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
 
-      // Verify hash was computed
       const installedDir = join(skillsDir, 'hashed');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.provenance.contentHash).toMatch(/^sha256:/);
 
-      // Verify hash excludes policy.json
       const directHash = await computeDirectoryHash(installedDir);
       expect(policy.provenance.contentHash).toBe(directHash);
     });
   });
 
   describe('atomic copy', () => {
-    it('cleans up temp dir on validation failure', async () => {
-      const skillName = 'atomic-test';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
+    it('cleans up temp dir on success', async () => {
+      await writeSkillMd('atomic-test', 'Atomic copy test');
 
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: atomic-test
-description: Atomic copy test
----
-# Atomic`,
-        'utf-8'
-      );
-
-      // This should succeed normally
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
       expect(result.created).toEqual(['atomic-test']);
 
@@ -704,35 +307,16 @@ description: Atomic copy test
 
   describe('Motor provenance', () => {
     it('preserves valid Motor provenance', async () => {
-      const skillName = 'provenance';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: provenance
-description: Provenance test
----
-# Provenance`,
-        'utf-8'
-      );
-
-      const motorProvenance = {
-        source: 'https://example.com/docs',
-        fetchedAt: '2024-01-01T00:00:00Z',
-      };
-
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({
-          schemaVersion: 1,
-          trust: 'needs_reapproval',
-          allowedTools: ['shell'],
-          provenance: motorProvenance,
-        }),
-        'utf-8'
-      );
+      await writeSkillMd('provenance', 'Provenance test');
+      await writePolicy({
+        schemaVersion: 1,
+        trust: 'approved',
+        allowedTools: ['bash'],
+        provenance: {
+          source: 'https://example.com/docs',
+          fetchedAt: '2024-01-01T00:00:00Z',
+        },
+      });
 
       await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
 
@@ -740,35 +324,18 @@ description: Provenance test
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.provenance.source).toBe('https://example.com/docs');
       expect(policy.provenance.fetchedAt).toBe('2024-01-01T00:00:00Z');
-      // Note: contentHash is added by the extraction process
       expect(policy.provenance.contentHash).toBeDefined();
     });
   });
 
   describe('invalid Motor policy.json', () => {
     it('generates minimal policy when Motor policy is invalid JSON', async () => {
-      const skillName = 'bad-policy';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: bad-policy
-description: Bad policy
----
-# Bad Policy`,
-        'utf-8'
-      );
-
-      // Write invalid JSON
-      await writeFile(join(skillDir, 'policy.json'), '{ invalid json', 'utf-8');
+      await writeSkillMd('bad-policy', 'Bad policy');
+      await writeFile(join(workspace, 'policy.json'), '{ invalid json', 'utf-8');
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual(['bad-policy']);
 
-      // Verify minimal policy was generated
       const installedDir = join(skillsDir, 'bad-policy');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
@@ -776,34 +343,73 @@ description: Bad policy
     });
 
     it('generates minimal policy when Motor policy has wrong schema version', async () => {
-      const skillName = 'wrong-schema';
-      const skillDir = join(workspace, 'skills', skillName);
-      await mkdir(skillDir, { recursive: true });
-
-      await writeFile(
-        join(skillDir, 'SKILL.md'),
-        `---
-name: wrong-schema
-description: Wrong schema
----
-# Wrong Schema`,
-        'utf-8'
-      );
-
-      await writeFile(
-        join(skillDir, 'policy.json'),
-        JSON.stringify({ schemaVersion: 'wrong', trust: 'needs_reapproval', allowedTools: [] }),
-        'utf-8'
-      );
+      await writeSkillMd('wrong-schema', 'Wrong schema');
+      await writePolicy({ schemaVersion: 'wrong', trust: 'approved', allowedTools: [] });
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
-
       expect(result.created).toEqual(['wrong-schema']);
 
       const installedDir = join(skillsDir, 'wrong-schema');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.schemaVersion).toBe(1);
       expect(policy.trust).toBe('pending_review');
+    });
+  });
+
+  describe('existing skill update', () => {
+    it('marks existing skill as updated', async () => {
+      // Pre-install old version
+      const installedDir = join(skillsDir, 'existing');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: existing\ndescription: Old version\n---\n# Old',
+        'utf-8'
+      );
+
+      // Write new version at workspace root
+      await writeSkillMd('existing', 'Updated version', '# Updated');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      expect(result.created).toEqual([]);
+      expect(result.updated).toEqual(['existing']);
+
+      const updatedContent = await readFile(join(installedDir, 'SKILL.md'), 'utf-8');
+      expect(updatedContent).toContain('Updated version');
+    });
+
+    it('Motor-written policy takes precedence over existing policy on update', async () => {
+      // Pre-install with old policy
+      const installedDir = join(skillsDir, 'motor-wins');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: motor-wins\ndescription: Old\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({ schemaVersion: 1, trust: 'approved', allowedTools: ['bash'], allowedDomains: ['old.example.com'] }),
+        'utf-8'
+      );
+
+      // Write updated version at workspace root
+      await writeSkillMd('motor-wins', 'Updated version', '# Updated');
+      await writePolicy({
+        schemaVersion: 1,
+        trust: 'approved',
+        allowedTools: ['fetch'],
+        allowedDomains: ['new.example.com'],
+      });
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['motor-wins']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.trust).toBe('pending_review');
+      expect(policy.allowedTools).toEqual(['fetch']);
+      expect(policy.allowedDomains).toEqual(['new.example.com']);
     });
   });
 });
