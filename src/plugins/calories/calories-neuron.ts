@@ -230,19 +230,11 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
             ? new Date(persisted.lastEmittedAt)
             : undefined;
         } else {
-          // Fresh day or no persisted state — original first-tick behavior
+          // Fresh day or no persisted state — initialize only, never emit on first tick.
+          // Emitting here bypasses the refractory period and causes duplicates after restart.
+          // Natural day-progress changes will trigger normal change detection within ~1 hour.
           this.updatePrevious(currentValue);
-          if (currentValue >= this.config.moderateDeficitThreshold && localHour >= 14) {
-            this.pendingSignal = this.createSignal(
-              currentValue,
-              deficit,
-              consumed,
-              goal,
-              correlationId
-            );
-          } else {
-            this.pendingSignal = undefined;
-          }
+          this.pendingSignal = undefined;
           this.persistState(today).catch((err: unknown) => {
             this.logger.warn(
               { error: err instanceof Error ? err.message : String(err) },

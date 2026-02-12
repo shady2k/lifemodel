@@ -124,7 +124,7 @@ describe('CaloriesDeficitNeuron persistence', () => {
     expect(signal).toBeUndefined();
   });
 
-  it('should treat different-day persisted state as fresh first tick', async () => {
+  it('should NOT emit on first tick even with different-day persisted state', async () => {
     const YESTERDAY = '2025-06-14';
     const storage = createMockStorage({
       [NEURON_STATE_KEY]: {
@@ -132,23 +132,22 @@ describe('CaloriesDeficitNeuron persistence', () => {
         previousValue: 0.6,
         lastComputedDate: YESTERDAY,
       },
-      // No food today → full deficit
+      // No food today → full deficit, high pressure at 3 PM
     });
 
     setFakeNow(NOW_3PM);
     const neuron = createNeuron(storage);
 
-    // First tick — persisted date doesn't match today, so first-tick path
+    // First tick — persisted date doesn't match today, initializes only
     neuron.check(createAgentState(), 0.8, 'test-1');
     await vi.waitFor(() => {
       expect(storage.get).toHaveBeenCalledWith(NEURON_STATE_KEY);
     });
     await new Promise(resolve => setTimeout(resolve, 10));
 
-    // Second tick — should have a pending signal (first-tick emission for high deficit at 3 PM)
+    // Second tick — first tick only initializes, never emits
     const signal = neuron.check(createAgentState(), 0.8, 'test-2');
-    expect(signal).toBeDefined();
-    expect(signal!.data?.eventKind).toBe('calories:deficit');
+    expect(signal).toBeUndefined();
   });
 
   it('should restore previousValue and use normal change detection when persisted state is same-day with expired refractory', async () => {
@@ -206,15 +205,15 @@ describe('CaloriesDeficitNeuron persistence', () => {
     setFakeNow(NOW_3PM);
     const neuron = createNeuron(storage);
 
-    // Should fall back to normal first-tick behavior
+    // Should fall back to initialize-only first-tick behavior
     neuron.check(createAgentState(), 0.8, 'test-1');
     await vi.waitFor(() => {
       expect(storage.get).toHaveBeenCalledWith(NEURON_STATE_KEY);
     });
     await new Promise(resolve => setTimeout(resolve, 10));
 
-    // Second tick — should have pending signal from first-tick path (high deficit at 3 PM)
+    // Second tick — first tick only initialized, no emission
     const signal = neuron.check(createAgentState(), 0.8, 'test-2');
-    expect(signal).toBeDefined();
+    expect(signal).toBeUndefined();
   });
 });
