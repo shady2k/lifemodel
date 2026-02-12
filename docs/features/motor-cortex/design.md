@@ -658,8 +658,8 @@ Only `name` and `description` are required per the standard. Additional fields (
 **Key properties:**
 - **Optional** — skills work without a policy (onboarding generates it on first use)
 - **User-approved** — Cognition infers needed tools/domains/credentials from the skill body, presents to user conversationally, saves after confirmation
-- **Content hash binding** — stores SHA-256 of SKILL.md at approval time. On load, if hash mismatches → trust resets to `unknown`, requiring re-approval
-- **Two trust states:** `unknown` (not reviewed) → `approved` (user confirmed)
+- **Content hash binding** — stores SHA-256 of SKILL.md at approval time. On load, if hash mismatches → trust resets to `needs_reapproval`, requiring re-approval
+- **Three trust states:** `needs_reapproval` (not reviewed or content changed) → `pending_review` (Motor extracted, awaiting user) → `approved` (user confirmed)
 
 ### index.json (Central Skill Index)
 
@@ -683,7 +683,7 @@ Avoids directory scanning for fast skill discovery. Updated atomically on skill 
 
 | Field | Purpose |
 |-------|---------|
-| `trust` | `'unknown'` or `'approved'` — controls whether policy defaults are used |
+| `trust` | `'needs_reapproval'` or `'approved'` — controls whether policy defaults are used |
 | `allowedTools` | Motor tools this skill may use (`code`, `shell`, `filesystem`, etc.) |
 | `allowedDomains` | Network domains for iptables enforcement |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
@@ -698,9 +698,9 @@ Avoids directory scanning for fast skill discovery. Updated atomically on skill 
 **Loading (on use):** When Cognition calls `core.act({ skill: "agentmail", ... })`:
 1. Load `SKILL.md` → parse standard frontmatter + body (lenient parser)
 2. Load `policy.json` → verify content hash against SKILL.md
-3. If hash mismatches → reset trust to `unknown`, warn user
+3. If hash mismatches → reset trust to `needs_reapproval`, warn user
 4. If policy exists and trust is `approved` → use policy defaults for tools/domains
-5. If no policy or trust is `unknown` → require explicit tools/domains or trigger onboarding
+5. If no policy or trust is `needs_reapproval` → require explicit tools/domains or trigger onboarding
 6. Markdown body injected into Motor Cortex sub-agent's system prompt
 7. Update `index.json` with `lastUsed` timestamp
 
@@ -751,7 +751,7 @@ interface StepTrace {
   llmModel: string;
   toolCalls: {
     tool: string;
-    args: Record<string, unknown>;
+    args: Record<string, needs_reapproval>;
     result: MotorToolResult;
     durationMs: number;
   }[];

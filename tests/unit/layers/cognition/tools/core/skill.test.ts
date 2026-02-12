@@ -24,7 +24,7 @@ Do something useful.
 `;
 
 /** Create a policy.json with given trust state */
-function makePolicy(trust: 'unknown' | 'pending_review' | 'approved'): SkillPolicy {
+function makePolicy(trust: 'needs_reapproval' | 'pending_review' | 'approved'): SkillPolicy {
   return {
     schemaVersion: 1,
     trust,
@@ -145,8 +145,8 @@ describe('core.skill tool', () => {
       expect(saved.approvedAt).toBeDefined();
     });
 
-    it('approves an unknown skill', async () => {
-      await setupSkill('test-skill', makePolicy('unknown'));
+    it('approves a needs_reapproval skill', async () => {
+      await setupSkill('test-skill', makePolicy('needs_reapproval'));
 
       const result = (await tool.execute({
         action: 'approve',
@@ -163,7 +163,7 @@ describe('core.skill tool', () => {
 
     it('stamps contentHash so approval survives subsequent loads', async () => {
       // Simulate a skill with a stale contentHash (content changed after extraction)
-      const policy = makePolicy('unknown');
+      const policy = makePolicy('needs_reapproval');
       policy.provenance = {
         source: 'https://example.com',
         fetchedAt: '2026-01-01T00:00:00Z',
@@ -213,7 +213,7 @@ describe('core.skill tool', () => {
   });
 
   describe('reject', () => {
-    it('rejects a pending_review skill back to unknown', async () => {
+    it('rejects a pending_review skill back to needs_reapproval', async () => {
       await setupSkill('test-skill', makePolicy('pending_review'));
 
       const result = (await tool.execute({
@@ -222,10 +222,10 @@ describe('core.skill tool', () => {
       })) as SkillResult;
 
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('unknown');
+      expect(result.trust).toBe('needs_reapproval');
 
       const saved = await readPolicy('test-skill');
-      expect(saved.trust).toBe('unknown');
+      expect(saved.trust).toBe('needs_reapproval');
       expect(saved.approvedBy).toBeUndefined();
       expect(saved.approvedAt).toBeUndefined();
     });

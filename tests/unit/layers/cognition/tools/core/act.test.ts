@@ -75,7 +75,7 @@ describe('core.act tool', () => {
     it('requires explicit tools for skills without approved policy', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'unknown', schemaVersion: 1, allowedTools: ['code'] },
+        policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedTools: ['code'] },
         body: 'instructions',
         path: '/path',
         skillPath: '/path/SKILL.md',
@@ -89,8 +89,8 @@ describe('core.act tool', () => {
       })) as Record<string, unknown>;
 
       expect(result['success']).toBe(false);
-      expect(result['error']).toContain('no approved policy');
-      expect(result['error']).toContain('Provide tools explicitly');
+      expect(result['error']).toContain('needs re-approval');
+      expect(result['error']).toContain('core.skill');
     });
 
     it('uses policy defaults when trust is approved', async () => {

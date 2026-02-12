@@ -29,9 +29,9 @@ The safety boundary for Motor Cortex is **infrastructure-level, not honor-system
 |-------|---------|--------------------------|
 | `pending_review` | Motor created/modified this skill, user hasn't reviewed yet | No — requires explicit tools param |
 | `approved` | User confirmed policy after reviewing | Yes — policy defaults apply |
-| `unknown` | Content hash mismatch detected at load time, or no policy exists | No — requires explicit tools or onboarding |
+| `needs_reapproval` | Content hash mismatch detected at load time, or no policy exists | No — requires explicit tools or onboarding |
 
-**Distinction:** `pending_review` means "Motor produced this, it's new to the user." `unknown` means "this was previously approved but something changed (content hash mismatch) or policy is missing." Both block implicit execution — the difference is provenance and what Cognition tells the user.
+**Distinction:** `pending_review` means "Motor produced this, it's new to the user." `needs_reapproval` means "this was previously approved but something changed (content hash mismatch) or policy is missing." Both block implicit execution — the difference is provenance and what Cognition tells the user.
 
 ### Content Hash Scope
 
@@ -44,10 +44,10 @@ The content hash covers **all files in the skill directory** (SKILL.md, scripts/
 pending_review + user approves  → approved
 pending_review + user rejects   → pending_review (stays, Cognition notes rejection)
 approved + content hash match   → approved (no change)
-approved + content hash mismatch → unknown (detected at load time)
+approved + content hash mismatch → needs_reapproval (detected at load time)
 approved + Motor updates skill  → pending_review (extraction forces reset)
-unknown + user re-approves      → approved
-unknown + onboarding completes  → approved
+needs_reapproval + user re-approves      → approved
+needs_reapproval + onboarding completes  → approved
 ```
 
 ## Scenario 1: User Discovers a New Service

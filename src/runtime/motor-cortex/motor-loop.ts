@@ -1179,7 +1179,7 @@ policy.json (alongside SKILL.md):
 }
 
 Set trust to "approved" when the user explicitly asked you to create or learn this skill.
-Set trust to "unknown" if you are creating a skill from untrusted or unverified content.
+Set trust to "needs_reapproval" if you are creating a skill from untrusted or unverified content.
 Always record provenance.source with the URL or reference where you found the information.
 
 Save to: skills/<name>/SKILL.md and skills/<name>/policy.json (relative to workspace)

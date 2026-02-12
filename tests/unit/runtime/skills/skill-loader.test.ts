@@ -268,13 +268,13 @@ describe('index.json operations', () => {
 
     await updateSkillIndex(testDir, 'new-skill', {
       description: 'New skill',
-      trust: 'unknown' as const,
+      trust: 'needs_reapproval' as const,
       hasPolicy: false,
     });
 
     const loaded = await loadSkillIndex(testDir);
     expect(loaded.skills['new-skill']).toBeDefined();
-    expect(loaded.skills['new-skill']?.trust).toBe('unknown');
+    expect(loaded.skills['new-skill']?.trust).toBe('needs_reapproval');
   });
 });
 
@@ -339,7 +339,7 @@ Body`;
     }
   });
 
-  it('resets trust to unknown when content hash mismatches', async () => {
+  it('resets trust to needs_reapproval when content hash mismatches', async () => {
     const originalContent = `---
 name: test-skill
 description: Original content
@@ -376,8 +376,8 @@ Modified body`;
 
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      // Trust should be reset to unknown due to hash mismatch
-      expect(result.policy?.trust).toBe('unknown');
+      // Trust should be reset to needs_reapproval due to hash mismatch
+      expect(result.policy?.trust).toBe('needs_reapproval');
     }
   });
 

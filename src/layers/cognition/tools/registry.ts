@@ -119,10 +119,24 @@ export class ToolRegistry {
       const result = await tool.execute(request.args, request.context);
       const duration = Date.now() - startTime;
 
-      this.logger.debug(
-        { tool: request.name, duration, toolCallId: request.toolCallId },
-        'Tool executed successfully'
-      );
+      // Check if tool returned success: false
+      const resultSuccess =
+        typeof result === 'object' &&
+        result !== null &&
+        'success' in result &&
+        !(result as { success: boolean }).success;
+
+      if (resultSuccess) {
+        this.logger.warn(
+          { tool: request.name, duration, toolCallId: request.toolCallId, resultSuccess: false },
+          'Tool returned error result'
+        );
+      } else {
+        this.logger.debug(
+          { tool: request.name, duration, toolCallId: request.toolCallId },
+          'Tool executed successfully'
+        );
+      }
 
       return createToolResult(request.toolCallId, request.name, true, result);
     } catch (error) {

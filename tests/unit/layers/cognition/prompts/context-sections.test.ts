@@ -53,30 +53,30 @@ describe('buildAvailableSkillsSection', () => {
     expect(result).toContain('Invoke via core.act with skill parameter');
   });
 
-  it('builds section with unknown trust skills (no policy)', () => {
+  it('builds section with needs_reapproval trust skills (no policy)', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'weather', description: 'Weather skill', trust: 'unknown', hasPolicy: false },
+        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
       ],
     });
     const result = buildAvailableSkillsSection(context);
 
     expect(result).not.toBeNull();
-    expect(result).toContain('weather [unknown]');
+    expect(result).toContain('weather [needs_reapproval]');
     expect(result).toContain('(needs onboarding)');
   });
 
-  it('builds section with unknown trust skills (has policy - content changed)', () => {
+  it('builds section with needs_reapproval trust skills (has policy - content changed)', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'outdated-skill', description: 'Old skill', trust: 'unknown', hasPolicy: true },
+        { name: 'outdated-skill', description: 'Old skill', trust: 'needs_reapproval', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
 
     expect(result).not.toBeNull();
-    expect(result).toContain('outdated-skill [unknown]');
-    expect(result).toContain('(content changed, re-approve)');
+    expect(result).toContain('outdated-skill [needs_reapproval]');
+    expect(result).toContain('(content changed, ask user to re-approve)');
   });
 
   it('builds section with pending_review trust skills', () => {
@@ -89,24 +89,24 @@ describe('buildAvailableSkillsSection', () => {
 
     expect(result).not.toBeNull();
     expect(result).toContain('new-skill [pending_review]');
-    expect(result).toContain('(awaiting user approval)');
+    expect(result).toContain('(new skill, ask user to review and approve)');
   });
 
   it('builds section with mixed trust states', () => {
     const context = createMockContext({
       availableSkills: [
         { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
-        { name: 'weather', description: 'Weather skill', trust: 'unknown', hasPolicy: false },
+        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
         { name: 'new-skill', description: 'New skill', trust: 'pending_review', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
 
     expect(result).toContain('web-scraper [approved]');
-    expect(result).toContain('weather [unknown]');
+    expect(result).toContain('weather [needs_reapproval]');
     expect(result).toContain('(needs onboarding)');
     expect(result).toContain('new-skill [pending_review]');
-    expect(result).toContain('(awaiting user approval)');
+    expect(result).toContain('(new skill, ask user to review and approve)');
   });
 
   it('includes XML tags', () => {

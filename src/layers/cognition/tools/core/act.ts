@@ -7,7 +7,7 @@
  *
  * Policy-aware skill loading:
  * - Skills with approved policy use policy.allowedTools as default
- * - Skills without policy or unknown trust require explicit tools/domains
+ * - Skills without policy or needs_reapproval trust require explicit tools/domains
  * - Content hash verification triggers trust reset on mismatch
  */
 
@@ -160,21 +160,33 @@ export function createActTool(motorCortex: MotorCortex): Tool {
 
               // Note: credentials are handled by Motor Cortex via CredentialStore
             } else {
-              // No policy or unknown trust — require explicit tools
+              // No policy or needs_reapproval trust — require explicit tools
               if (!explicitTools) {
-                return {
-                  success: false,
-                  error:
-                    `Skill "${skillName}" has no approved policy. ` +
-                    `Provide tools explicitly or run onboarding. ` +
-                    `Example: tools: ["bash", "read", "write"]`,
-                };
+                if (policy) {
+                  // Has policy but not approved — needs user re-approval
+                  return {
+                    success: false,
+                    error:
+                      `Skill "${skillName}" needs re-approval (trust: needs_reapproval). ` +
+                      `Use core.skill(action:"read", name:"${skillName}") to show the user ` +
+                      `its content and permissions, then core.skill(action:"approve") after user consent.`,
+                  };
+                } else {
+                  // No policy at all — needs onboarding
+                  return {
+                    success: false,
+                    error:
+                      `Skill "${skillName}" has no policy. ` +
+                      `Provide tools explicitly or run onboarding. ` +
+                      `Example: tools: ["bash", "read", "write"]`,
+                  };
+                }
               }
               tools = explicitTools;
 
-              if (policy?.trust === 'unknown') {
+              if (policy?.trust === 'needs_reapproval') {
                 warnings.push(
-                  `Skill "${skillName}" trust state is "unknown". ` +
+                  `Skill "${skillName}" trust state is "needs_reapproval". ` +
                     `Content may have changed since approval. Re-approval recommended.`
                 );
               }
@@ -225,7 +237,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             try {
               await updateSkillIndex(DEFAULT_SKILLS_DIR, skillName, {
                 description: loadedSkill.frontmatter.description,
-                trust: loadedSkill.policy?.trust ?? 'unknown',
+                trust: loadedSkill.policy?.trust ?? 'needs_reapproval',
                 hasPolicy: loadedSkill.policy !== undefined,
                 lastUsed: new Date().toISOString(),
               });

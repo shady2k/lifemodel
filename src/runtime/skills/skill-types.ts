@@ -13,7 +13,7 @@
  *
  * policy.json is an auto-generated, user-approved security policy:
  * - allowedTools, allowedDomains, requiredCredentials
- * - trust state: 'unknown' | 'approved'
+ * - trust state: 'needs_reapproval' | 'pending_review' | 'approved'
  * - contentHash binding to detect SKILL.md modifications
  *
  * ## Architecture
@@ -54,11 +54,11 @@ export interface SkillFrontmatter {
 /**
  * Trust state for a skill's security policy.
  *
- * - unknown: No user approval yet
+ * - needs_reapproval: Content hash changed since approval (has policy) or no policy exists
  * - pending_review: User has not yet approved this skill (extracted from Motor Cortex)
  * - approved: User has approved these permissions
  */
-export type SkillTrust = 'unknown' | 'pending_review' | 'approved';
+export type SkillTrust = 'needs_reapproval' | 'pending_review' | 'approved';
 
 /**
  * Security policy sidecar (policy.json).
@@ -176,7 +176,7 @@ export interface SkillIndex {
  *
  * The policy is optional — skills work without it (onboarding generates on first use).
  * Content hash is verified on load: if policy.contentHash !== sha256(SKILL.md),
- * the trust is reset to 'unknown'.
+ * the trust is reset to 'needs_reapproval'.
  */
 export interface LoadedSkill {
   /** Parsed frontmatter from SKILL.md */

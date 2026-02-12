@@ -34,7 +34,7 @@ const mockLogger = {
   warn: vi.fn(),
   debug: vi.fn(),
   error: vi.fn(),
-} as unknown as import('pino').Logger; // eslint-disable-line @typescript-eslint/consistent-type-imports
+} as needs_reapproval as import('pino').Logger; // eslint-disable-line @typescript-eslint/consistent-type-imports
 
 describe('skill-extraction', () => {
   let workspace: string;
@@ -656,7 +656,7 @@ description: Hash test
         join(skillDir, 'policy.json'),
         JSON.stringify({
           schemaVersion: 1,
-          trust: 'unknown',
+          trust: 'needs_reapproval',
           allowedTools: [],
           provenance: { source: 'test', fetchedAt: '2024-01-01T00:00:00Z' },
         }),
@@ -727,7 +727,7 @@ description: Provenance test
         join(skillDir, 'policy.json'),
         JSON.stringify({
           schemaVersion: 1,
-          trust: 'unknown',
+          trust: 'needs_reapproval',
           allowedTools: ['shell'],
           provenance: motorProvenance,
         }),
@@ -792,7 +792,7 @@ description: Wrong schema
 
       await writeFile(
         join(skillDir, 'policy.json'),
-        JSON.stringify({ schemaVersion: 'wrong', trust: 'unknown', allowedTools: [] }),
+        JSON.stringify({ schemaVersion: 'wrong', trust: 'needs_reapproval', allowedTools: [] }),
         'utf-8'
       );
 

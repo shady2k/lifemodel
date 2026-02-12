@@ -356,14 +356,14 @@ export function buildAvailableSkillsSection(context: LoopContext): string | null
         ? '[approved]'
         : skill.trust === 'pending_review'
           ? '[pending_review]'
-          : '[unknown]';
+          : '[needs_reapproval]';
 
     const hint =
       skill.trust === 'pending_review'
-        ? ' (awaiting user approval)'
-        : skill.trust === 'unknown' && skill.hasPolicy
-          ? ' (content changed, re-approve)'
-          : skill.trust === 'unknown'
+        ? ' (new skill, ask user to review and approve)'
+        : skill.trust === 'needs_reapproval' && skill.hasPolicy
+          ? ' (content changed, ask user to re-approve)'
+          : skill.trust === 'needs_reapproval'
             ? ' (needs onboarding)'
             : '';
 

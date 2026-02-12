@@ -3,8 +3,8 @@
  *
  * Unified tool for skill operations:
  * - read: inspect skill content (frontmatter, body, policy, trust)
- * - approve: approve a pending/unknown skill for Motor Cortex execution
- * - reject: reset trust to unknown
+ * - approve: approve a pending/needs_reapproval skill for Motor Cortex execution
+ * - reject: reset trust to needs_reapproval
  *
  * Replaces the old core.approveSkill tool, following the same merge pattern
  * used for core.task (formerly core.tasks).
@@ -57,7 +57,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       type: 'string',
       required: true,
       description:
-        'Action to perform: read (inspect skill content), approve (approve for execution), reject (reset trust to unknown)',
+        'Action to perform: read (inspect skill content), approve (approve for execution), reject (reset trust to needs_reapproval)',
       enum: ['read', 'approve', 'reject'],
     },
     {
@@ -137,7 +137,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
           updatedPolicy.provenance = { ...updatedPolicy.provenance, contentHash: currentHash };
         }
       } else {
-        updatedPolicy.trust = 'unknown';
+        updatedPolicy.trust = 'needs_reapproval';
         delete updatedPolicy.approvedBy;
         delete updatedPolicy.approvedAt;
       }

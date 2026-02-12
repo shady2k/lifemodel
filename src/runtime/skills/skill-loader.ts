@@ -305,13 +305,19 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
       return null;
     }
 
-    // Validate trust
+    // Validate trust (accept legacy 'unknown' for migration)
     if (
-      raw['trust'] !== 'unknown' &&
+      raw['trust'] !== 'needs_reapproval' &&
       raw['trust'] !== 'pending_review' &&
-      raw['trust'] !== 'approved'
+      raw['trust'] !== 'approved' &&
+      raw['trust'] !== 'unknown' // Accept legacy value for migration
     ) {
       return null;
+    }
+
+    // Migrate legacy trust name: unknown → needs_reapproval
+    if (raw['trust'] === 'unknown') {
+      raw['trust'] = 'needs_reapproval';
     }
 
     // Validate allowedTools
@@ -454,7 +460,7 @@ export async function rebuildSkillIndex(baseDir: string): Promise<void> {
 
         index.skills[entry.name] = {
           description: frontmatter.description,
-          trust: policy?.trust ?? 'unknown',
+          trust: policy?.trust ?? 'needs_reapproval',
           hasPolicy: policy !== null,
         };
       } catch {
@@ -522,7 +528,7 @@ export async function getSkillNames(baseDir?: string): Promise<string[]> {
  * Load a skill by name from the skills directory.
  *
  * Returns frontmatter + optional policy + body.
- * Verifies content hash if policy exists — resets trust to 'unknown' on mismatch.
+ * Verifies content hash if policy exists — resets trust to 'needs_reapproval' on mismatch.
  *
  * @param skillName - Skill name (directory name under data/skills/)
  * @param baseDir - Base directory (default: data/skills)
@@ -556,11 +562,11 @@ export async function loadSkill(
     if (policy?.provenance?.contentHash) {
       const currentHash = await computeDirectoryHash(skillDir);
       if (currentHash !== policy.provenance.contentHash) {
-        // Reset trust to unknown
-        policy = { ...policy, trust: 'unknown' };
+        // Reset trust to needs_reapproval
+        policy = { ...policy, trust: 'needs_reapproval' };
         await savePolicy(skillDir, policy);
 
-        // Skill content changed since approval — trust reset to unknown
+        // Skill content changed since approval — trust reset to needs_reapproval
         // Hash mismatch is logged via the updated policy.json
       }
     }
