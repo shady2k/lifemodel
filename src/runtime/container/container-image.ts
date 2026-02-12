@@ -31,7 +31,7 @@ const execFileAsync = promisify(execFile);
  * Build a Dockerfile string with an embedded source hash label.
  * The label allows `ensureImage()` to detect stale images when source changes.
  */
-function buildDockerfile(sourceHash: string): string {
+export function buildDockerfile(sourceHash: string): string {
   return `
 FROM node:24-alpine
 
@@ -45,6 +45,8 @@ RUN apk add --no-cache \\
     unzip \\
     zip \\
     tar \\
+    python3 \\
+    py3-pip \\
     && rm -rf /var/cache/apk/*
 
 # Create tool-server directory
@@ -56,6 +58,14 @@ COPY . /opt/motor/
 
 # Create workspace and skills dirs (will be bind-mounted)
 RUN mkdir -p /workspace /skills && chown node:node /workspace /skills
+
+# Redirect npm/pip to writable workspace (root fs is read-only)
+ENV NPM_CONFIG_CACHE=/workspace/.cache/npm
+ENV PIP_USER=1
+ENV PYTHONUSERBASE=/workspace/.local
+ENV PIP_CACHE_DIR=/workspace/.cache/pip
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV PATH="/workspace/.local/bin:$PATH"
 
 LABEL com.lifemodel.source-hash="${sourceHash}"
 
@@ -171,6 +181,8 @@ async function assembleBuildContext(
       hash.update(await readFile(toolServerUtilsFile));
       hash.update(await readFile(sandboxWorkerFile));
     }
+    // Include Dockerfile template so package/env-var changes trigger a rebuild
+    hash.update(buildDockerfile(''));
     const sourceHash = hash.digest('hex').slice(0, 16);
 
     return { contextDir, sourceHash };
