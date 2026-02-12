@@ -219,6 +219,7 @@ interface LLMProviderConfig {
         model?: string | null | undefined;
         useForFast?: boolean | undefined;
         useForSmart?: boolean | undefined;
+        useForMotor?: boolean | undefined;
       }
     | undefined;
 }
@@ -237,6 +238,8 @@ function createLLMProvider(
     config?.local?.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
   const useLocalForSmart =
     config?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
+  const useLocalForMotor =
+    config?.local?.useForMotor ?? process.env['LLM_LOCAL_USE_FOR_MOTOR'] === 'true';
 
   const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
   const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
@@ -278,7 +281,7 @@ function createLLMProvider(
       {
         fast: useLocalForFast ? localProvider : openRouterProvider,
         smart: useLocalForSmart ? localProvider : openRouterProvider,
-        motor: useLocalForFast ? localProvider : openRouterProvider, // Use fast provider for motor
+        motor: useLocalForMotor ? localProvider : openRouterProvider,
         default: openRouterProvider,
       },
       logger
@@ -287,7 +290,7 @@ function createLLMProvider(
       {
         fastProvider: useLocalForFast ? 'local' : 'openrouter',
         smartProvider: useLocalForSmart ? 'local' : 'openrouter',
-        motorProvider: useLocalForFast ? 'local' : 'openrouter',
+        motorProvider: useLocalForMotor ? 'local' : 'openrouter',
       },
       'MultiProvider configured'
     );

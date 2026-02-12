@@ -267,6 +267,36 @@ export function createCaloriesTool(
 
       const entry = item as Record<string, unknown>;
 
+      // Detect unknown fields — weak models send flat fields instead of nested `portion`
+      const KNOWN_FIELDS = new Set([
+        'name',
+        'portion',
+        'calories_estimate',
+        'calories_per_100g',
+        'meal_type',
+        'timestamp',
+        'chooseItemId',
+      ]);
+      const unknownFields = Object.keys(entry).filter((k) => !KNOWN_FIELDS.has(k));
+      if (unknownFields.length > 0) {
+        // Provide targeted hints for common misfields
+        const hints: string[] = [];
+        if (unknownFields.includes('weight') || unknownFields.includes('grams')) {
+          const val = entry['weight'] ?? entry['grams'];
+          hints.push(
+            `use portion: { "quantity": ${typeof val === 'number' ? String(val) : '...'}, "unit": "g" } instead of "${unknownFields.includes('weight') ? 'weight' : 'grams'}"`
+          );
+        }
+        if (unknownFields.includes('calories')) {
+          hints.push('use "calories_estimate" instead of "calories"');
+        }
+        const hintSuffix = hints.length > 0 ? `. Hint: ${hints.join('; ')}` : '';
+        return {
+          success: false,
+          error: `entries[${String(i)}]: unknown fields [${unknownFields.join(', ')}]${hintSuffix}`,
+        };
+      }
+
       // Validate required 'name' field
       if (typeof entry['name'] !== 'string' || entry['name'].trim() === '') {
         return {
@@ -343,7 +373,7 @@ export function createCaloriesTool(
         if (!portionUnit || (portionUnit !== 'g' && portionUnit !== 'kg')) {
           return {
             success: false,
-            error: `entries[${String(i)}].calories_per_100g: requires portion with unit 'g' or 'kg'`,
+            error: `entries[${String(i)}].calories_per_100g: requires portion with unit 'g' or 'kg'. Add portion: { "quantity": <weight_in_grams>, "unit": "g" }`,
           };
         }
         // Validate computed calories won't exceed max

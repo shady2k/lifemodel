@@ -99,6 +99,8 @@ export class VercelAIProvider extends BaseLLMProvider {
   private readonly config: VercelAIProviderConfig;
   private readonly providerLogger?: Logger | undefined;
   private readonly circuitBreaker: CircuitBreaker;
+  /** Reasoning content extracted from local provider responses via custom fetch */
+  private lastReasoningContent: string | null = null;
 
   constructor(config: VercelAIProviderConfig, logger?: Logger) {
     super(logger);
@@ -170,6 +172,32 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
+   * Create a fetch wrapper that intercepts Chat Completions responses
+   * to extract reasoning_content from local models (e.g., LM Studio with thinking enabled).
+   * The @ai-sdk/openai chat model doesn't parse this field, so we capture it here.
+   */
+  private createReasoningAwareFetch(): typeof globalThis.fetch {
+    return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const response = await globalThis.fetch(input, init);
+      if (!response.ok) return response;
+
+      // Clone to read body without consuming the original
+      const cloned = response.clone();
+      try {
+        const json = (await cloned.json()) as Record<string, unknown>;
+        const choices = json['choices'] as Record<string, unknown>[] | undefined;
+        const message = choices?.[0]?.['message'] as Record<string, unknown> | undefined;
+        const reasoning = message?.['reasoning_content'];
+        this.lastReasoningContent =
+          typeof reasoning === 'string' && reasoning.length > 0 ? reasoning : null;
+      } catch {
+        this.lastReasoningContent = null;
+      }
+      return response;
+    };
+  }
+
+  /**
    * Get the language model instance.
    */
   private getModel(modelId: string): LanguageModel {
@@ -180,7 +208,9 @@ export class VercelAIProvider extends BaseLLMProvider {
     } else {
       return createOpenAI({
         baseURL: this.config.baseUrl,
-      })(modelId);
+        apiKey: 'no-key-required',
+        fetch: this.createReasoningAwareFetch(),
+      }).chat(modelId);
     }
   }
 
@@ -742,7 +772,15 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Call generateText with type validation
       const result = await generateText(generateOptions as Parameters<typeof generateText>[0]);
 
+      // Capture reasoning from local provider's custom fetch if SDK didn't extract it
+      const interceptedReasoning = this.lastReasoningContent;
+      this.lastReasoningContent = null;
+
       const duration = Date.now() - startTime;
+
+      const hasReasoningText = !!(result.reasoningText || interceptedReasoning);
+      const reasoningPreview =
+        (result.reasoningText || interceptedReasoning)?.slice(0, 1000) || null;
 
       this.providerLogger?.debug(
         {
@@ -751,14 +789,14 @@ export class VercelAIProvider extends BaseLLMProvider {
           toolCallsCount: (result.toolCalls as { length: number } | undefined)?.length ?? 0,
           finishReason: result.finishReason,
           usage: result.usage,
-          hasReasoningText: !!result.reasoningText,
-          reasoningPreview: result.reasoningText?.slice(0, 1000) || null,
+          hasReasoningText,
+          reasoningPreview,
         },
         'AI SDK generateText response'
       );
 
-      // Map AI SDK result back to CompletionResponse
-      return this.mapAIResponseToCompletion(result, modelId);
+      // Map AI SDK result back to CompletionResponse, with intercepted reasoning as fallback
+      return this.mapAIResponseToCompletion(result, modelId, interceptedReasoning);
     } catch (error) {
       const duration = Date.now() - startTime;
 
@@ -818,7 +856,8 @@ export class VercelAIProvider extends BaseLLMProvider {
         headers?: Record<string, string>;
       };
     },
-    modelId: string
+    modelId: string,
+    interceptedReasoning?: string | null
   ): CompletionResponse {
     const response: CompletionResponse = {
       content: result.text || null,
@@ -827,9 +866,10 @@ export class VercelAIProvider extends BaseLLMProvider {
       finishReason: this.mapFinishReason(result.finishReason ?? 'error'),
     };
 
-    // Map reasoning content if present
-    if (result.reasoningText) {
-      response.reasoningContent = result.reasoningText;
+    // Map reasoning content: prefer SDK-native, fall back to intercepted from custom fetch
+    const reasoningText = result.reasoningText || interceptedReasoning;
+    if (reasoningText) {
+      response.reasoningContent = reasoningText;
     }
 
     // Map raw finish reason if present (provider-specific finish reason from AI SDK 6)

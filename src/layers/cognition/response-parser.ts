@@ -148,7 +148,12 @@ export function parseResponseContent(
   }
 
   // Detect tool-call-like XML — model tried to invoke tools as text (e.g., tools were stripped)
-  if (/^<core\.\w+[\s>]/m.test(trimmed) || /<core\.\w+>[\s\S]*?<\/core\.\w+>/m.test(trimmed)) {
+  // Covers: our <core.tool> format, GLM-native <tool_call>, and generic <function_call>/<tool_use>
+  if (
+    /^<core\.\w+[\s>]/m.test(trimmed) ||
+    /<core\.\w+>[\s\S]*?<\/core\.\w+>/m.test(trimmed) ||
+    /<tool_call>|<function_call>|<tool_use>/m.test(trimmed)
+  ) {
     return { text: null, malformed: true };
   }
 

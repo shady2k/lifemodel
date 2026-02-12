@@ -165,6 +165,7 @@ export interface MergedConfig {
       model: string | null;
       useForFast: boolean;
       useForSmart: boolean;
+      useForMotor: boolean;
     };
   };
 
@@ -262,6 +263,7 @@ export const DEFAULT_CONFIG: MergedConfig = {
       model: null,
       useForFast: true, // Default: use local for fast if configured
       useForSmart: false, // Default: use cloud for smart
+      useForMotor: false, // Default: use cloud for motor cortex
     },
   },
   logging: {

@@ -247,6 +247,11 @@ export class ConfigLoader {
       config.llm.local.useForSmart = localUseForSmart === 'true';
     }
 
+    const localUseForMotor = process.env['LLM_LOCAL_USE_FOR_MOTOR'];
+    if (localUseForMotor !== undefined) {
+      config.llm.local.useForMotor = localUseForMotor === 'true';
+    }
+
     // Log level
     const logLevel = process.env['LOG_LEVEL'];
     if (logLevel && ['debug', 'info', 'warn', 'error'].includes(logLevel)) {
