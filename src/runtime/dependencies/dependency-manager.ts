@@ -256,10 +256,14 @@ async function installNpm(
 
     // Build verification: test -d for each declared package
     const verifyChecks = packages
-      .map((p) => `test -d /workspace/deps/node_modules/${p.name}`)
+      .map((p) => `test -d /workspace/node_modules/${p.name}`)
       .join(' && ');
 
-    // Install into a named Docker volume — no host filesystem involvement
+    // Install into a named Docker volume — no host filesystem involvement.
+    // Mount at /workspace (not a subdirectory) because Docker initializes new
+    // named volumes with the image directory's ownership. The Dockerfile has
+    // `RUN mkdir -p /workspace && chown node:node /workspace`, so the volume
+    // starts writable by the non-root 'node' user.
     const args = [
       'run',
       '--name',
@@ -279,10 +283,10 @@ async function installNpm(
       '--tmpfs',
       '/tmp:rw,noexec,nosuid,size=64m',
       '-v',
-      `${volumeName}:/workspace/deps`,
+      `${volumeName}:/workspace`,
       CONTAINER_IMAGE,
       '-c',
-      `printf '%s' '${escapedJson}' > /workspace/deps/package.json && cd /workspace/deps && npm install --ignore-scripts --no-audit --no-fund --omit=optional 2>&1 && ${verifyChecks}`,
+      `printf '%s' '${escapedJson}' > /workspace/package.json && cd /workspace && npm install --ignore-scripts --no-audit --no-fund --omit=optional 2>&1 && ${verifyChecks}`,
     ];
 
     logger.info(
@@ -357,7 +361,7 @@ async function installPip(
   const containerName = `prep-pip-${randomBytes(4).toString('hex')}`;
 
   try {
-    // Install into named volume
+    // Install into named volume (mount at /workspace for correct ownership)
     const args = [
       'run',
       '--name',
@@ -377,10 +381,10 @@ async function installPip(
       '--tmpfs',
       '/tmp:rw,noexec,nosuid,size=64m',
       '-v',
-      `${volumeName}:/workspace/deps`,
+      `${volumeName}:/workspace`,
       CONTAINER_IMAGE,
       '-c',
-      `printf '%s\\n' ${packages.map((p) => `'${p.name}==${p.version}'`).join(' ')} > /workspace/deps/requirements.txt && pip install --target /workspace/deps/site-packages --only-binary :all: -r /workspace/deps/requirements.txt 2>&1 && test -d /workspace/deps/site-packages && test $(ls /workspace/deps/site-packages | wc -l) -gt 0`,
+      `printf '%s\\n' ${packages.map((p) => `'${p.name}==${p.version}'`).join(' ')} > /workspace/requirements.txt && pip install --target /workspace/site-packages --only-binary :all: -r /workspace/requirements.txt 2>&1 && test -d /workspace/site-packages && test $(ls /workspace/site-packages | wc -l) -gt 0`,
     ];
 
     logger.info(

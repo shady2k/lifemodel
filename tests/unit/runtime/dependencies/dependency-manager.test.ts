@@ -488,10 +488,10 @@ describe('npm prep container commands', () => {
     expect(vIdx).toBeGreaterThan(-1);
     const mountArg = runCall!.args[vIdx + 1];
     // Named volume: starts with "lifemodel-deps-", NOT with "/"
-    expect(mountArg).toMatch(/^lifemodel-deps-npm-[0-9a-f]+:\/workspace\/deps$/);
+    expect(mountArg).toMatch(/^lifemodel-deps-npm-[0-9a-f]+:\/workspace$/);
   });
 
-  it('uses /workspace/deps inside container (not /deps)', async () => {
+  it('uses /workspace inside container for install paths', async () => {
     await installSkillDependencies(
       { npm: { packages: [{ name: 'agentmail', version: '0.2.13' }] } },
       '/tmp/cache',
@@ -503,8 +503,8 @@ describe('npm prep container commands', () => {
       (c) => c.cmd === 'docker' && c.args[0] === 'run'
     );
     const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('/workspace/deps');
-    expect(shellCmd).not.toMatch(/(^|\s)\/deps\//);
+    expect(shellCmd).toContain('/workspace/package.json');
+    expect(shellCmd).toContain('cd /workspace');
   });
 
   it('does not use docker cp (no host filesystem involvement)', async () => {
@@ -548,7 +548,7 @@ describe('npm prep container commands', () => {
       (c) => c.cmd === 'docker' && c.args[0] === 'run'
     );
     const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('test -d /workspace/deps/node_modules/agentmail');
+    expect(shellCmd).toContain('test -d /workspace/node_modules/agentmail');
   });
 
   it('removes named container in finally block', async () => {
@@ -629,10 +629,10 @@ describe('pip prep container commands', () => {
     const vIdx = runCall!.args.indexOf('-v');
     expect(vIdx).toBeGreaterThan(-1);
     const mountArg = runCall!.args[vIdx + 1];
-    expect(mountArg).toMatch(/^lifemodel-deps-pip-[0-9a-f]+:\/workspace\/deps$/);
+    expect(mountArg).toMatch(/^lifemodel-deps-pip-[0-9a-f]+:\/workspace$/);
   });
 
-  it('uses /workspace/deps inside container for pip', async () => {
+  it('uses /workspace inside container for pip', async () => {
     await installSkillDependencies(
       { pip: { packages: [{ name: 'requests', version: '2.32.3' }] } },
       '/tmp/cache',
@@ -644,8 +644,8 @@ describe('pip prep container commands', () => {
       (c) => c.cmd === 'docker' && c.args[0] === 'run'
     );
     const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('/workspace/deps');
-    expect(shellCmd).not.toMatch(/(^|\s)\/deps\//);
+    expect(shellCmd).toContain('/workspace/requirements.txt');
+    expect(shellCmd).toContain('/workspace/site-packages');
   });
 
   it('does not use docker cp for pip', async () => {
