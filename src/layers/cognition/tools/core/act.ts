@@ -5,10 +5,8 @@
  * "oneshot" runs JS code synchronously.
  * "agentic" starts an async sub-agent task.
  *
- * Policy-aware skill loading:
- * - Skills with approved policy use policy.allowedTools as default
- * - Skills without policy or needs_reapproval trust require explicit tools/domains
- * - Content hash verification triggers trust reset on mismatch
+ * All sandboxed tools are always granted — container isolation is the security boundary.
+ * Policy-aware skill loading handles trust gating and domain resolution.
  */
 
 import type { Tool } from '../types.js';
@@ -17,6 +15,23 @@ import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.
 import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
 import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
+
+/**
+ * All sandboxed tools are always granted.
+ * Container isolation (--read-only, --network none, --cap-drop ALL) is the security boundary.
+ * Restricting tools at the policy level caused the agent to waste iterations
+ * (e.g., doing `cat` via bash when `read` tool was not granted).
+ */
+const ALL_MOTOR_TOOLS: MotorTool[] = [
+  'read',
+  'write',
+  'list',
+  'glob',
+  'bash',
+  'grep',
+  'patch',
+  'fetch',
+];
 
 /**
  * Create the core.act tool.
@@ -39,13 +54,6 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       required: true,
     },
     {
-      name: 'tools',
-      type: 'array' as const,
-      description:
-        'Tools for agentic mode (read, write, list, glob, bash, grep, patch, fetch). Required if skill has no approved policy.',
-      required: false,
-    },
-    {
       name: 'maxIterations',
       type: 'number' as const,
       description: 'Max iterations for agentic mode (default: 20)',
@@ -55,7 +63,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'skill',
       type: 'string' as const,
       description:
-        'Skill name to load (from data/skills/<name>/SKILL.md). If skill has approved policy, tools/domains from policy are used automatically.',
+        'Skill name to load (from data/skills/<name>/SKILL.md). Skill must have approved policy. Domains from policy are used automatically.',
       required: false,
     },
     {
@@ -76,7 +84,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. Tools: read, write, list, glob, bash, grep, patch, ask_user, fetch. Skills with approved policy provide tools/domains automatically. To save or create a skill, use agentic mode with bash tool. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. All tools are always available: read, write, list, glob, bash, grep, patch, ask_user, fetch. Skills with approved policy provide domains automatically. To save or create a skill, use agentic mode. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -117,13 +125,12 @@ export function createActTool(motorCortex: MotorCortex): Tool {
         try {
           const skillName = args['skill'] as string | undefined;
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
-          const explicitTools = args['tools'] as MotorTool[] | undefined;
           const maxIterations = (args['maxIterations'] as number | undefined) ?? 20;
           const explicitDomains = (args['domains'] as string[] | undefined) ?? [];
 
           // Load skill if specified
           let loadedSkill: LoadedSkill | undefined = undefined;
-          let tools: MotorTool[];
+          const tools: MotorTool[] = ALL_MOTOR_TOOLS;
           let domains = explicitDomains;
           const warnings: string[] = [];
 
@@ -138,7 +145,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
                 error: isNotFound
                   ? `Skill "${skillName}" does not exist yet. ` +
                     `To CREATE a new skill, call core.act WITHOUT the skill parameter: ` +
-                    `core.act(mode:"agentic", task:"Fetch skill from [URL]...", tools:["fetch","read","write","list"], domains:[...]).` +
+                    `core.act(mode:"agentic", task:"Fetch skill from [URL]...", domains:[...]).` +
                     ` The skill param is only for loading EXISTING skills.`
                   : skillResult.error,
               };
@@ -147,54 +154,39 @@ export function createActTool(motorCortex: MotorCortex): Tool {
 
             const policy = loadedSkill.policy;
 
-            // Policy-aware tool/domain resolution
-            if (policy?.trust === 'approved') {
-              // Use policy defaults
-              tools = explicitTools ?? policy.allowedTools;
-
-              // Merge domains: policy + explicit
-              if (policy.allowedDomains) {
-                domains = [...new Set([...policy.allowedDomains, ...explicitDomains])];
-              }
-
-              // Note: credentials are handled by Motor Cortex via CredentialStore
-            } else {
-              // No policy or needs_reapproval trust — require explicit tools
-              if (!explicitTools) {
-                if (policy) {
-                  // Has policy but not approved — trust-specific error with recovery path
-                  const trustLabel =
-                    policy.trust === 'pending_review'
-                      ? 'pending approval (new skill)'
-                      : 'needs re-approval (content changed)';
-                  return {
-                    success: false,
-                    error:
-                      `Skill "${skillName}" is ${trustLabel}. ` +
-                      `If the user has already consented, call core.skill(action:"approve", name:"${skillName}") now. ` +
-                      `Otherwise, use core.skill(action:"read", name:"${skillName}") to show them what it does first. ` +
-                      `Do not retry core.act until the skill is approved.`,
-                  };
-                } else {
-                  // No policy at all — needs onboarding
-                  return {
-                    success: false,
-                    error:
-                      `Skill "${skillName}" has no policy. ` +
-                      `Provide tools explicitly or run onboarding. ` +
-                      `Example: tools: ["bash", "read", "write"]`,
-                  };
-                }
-              }
-              tools = explicitTools;
-
-              if (policy?.trust === 'needs_reapproval') {
-                warnings.push(
-                  `Skill "${skillName}" trust state is "needs_reapproval". ` +
-                    `Content may have changed since approval. Re-approval recommended.`
-                );
-              }
+            // Trust gating — block unapproved skills
+            if (policy && policy.trust !== 'approved') {
+              const trustLabel =
+                policy.trust === 'pending_review'
+                  ? 'pending approval (new skill)'
+                  : 'needs re-approval (content changed)';
+              return {
+                success: false,
+                error:
+                  `Skill "${skillName}" is ${trustLabel}. ` +
+                  `If the user has already consented, call core.skill(action:"approve", name:"${skillName}") now. ` +
+                  `Otherwise, use core.skill(action:"read", name:"${skillName}") to show them what it does first. ` +
+                  `Do not retry core.act until the skill is approved.`,
+              };
             }
+
+            if (!policy) {
+              // No policy at all — needs onboarding
+              return {
+                success: false,
+                error:
+                  `Skill "${skillName}" has no policy. ` +
+                  `Run onboarding first. ` +
+                  `Example: core.skill(action:"read", name:"${skillName}") to inspect it.`,
+              };
+            }
+
+            // Merge domains: policy + explicit
+            if (policy.allowedDomains) {
+              domains = [...new Set([...policy.allowedDomains, ...explicitDomains])];
+            }
+
+            // Note: credentials are handled by Motor Cortex via CredentialStore
 
             // Validate inputs against skill schema
             const inputErrors = validateSkillInputs(loadedSkill, inputs);
@@ -204,13 +196,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
                 error: `Skill input validation failed: ${inputErrors.join('; ')}`,
               };
             }
-          } else {
-            // No skill — use explicit tools or default
-            tools = explicitTools ?? ['bash'];
           }
-
-          // Note: Auto-include removed - tools must be explicitly provided
-          // Trust gating (pending_review/needs_reapproval) still enforced separately
 
           // Build task with inputs if provided
           let fullTask = task;

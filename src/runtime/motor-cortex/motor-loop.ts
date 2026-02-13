@@ -1133,9 +1133,12 @@ ${
 Allowed network domains:
 ${run.domains.map((d) => `- ${d}`).join('\n')}
 Requests to any other domain will fail. On first failure, immediately call ask_user to request the domain.
-Do NOT retry failed domains. Do NOT fabricate content.`
+Do NOT retry failed domains. Do NOT fabricate content.
+Package managers (npm, pip) cannot reach their registries — only declared domains are reachable.
+Use curl, fetch, or built-in libraries (urllib, node https) for API calls instead of installing SDK packages.`
     : `
-Network access is disabled. All tasks must be completed using local tools only.`
+Network access is disabled. All tasks must be completed using local tools only.
+Package managers (npm, pip) will fail — there is no network access. Use built-in libraries only.`
 }
 
 Maximum iterations: ${String(maxIterationsOverride ?? run.attempts[run.currentAttemptIndex]?.maxIterations ?? 20)}

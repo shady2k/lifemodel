@@ -1,8 +1,8 @@
 /**
  * Tests for core.act tool
  *
- * Validates: Policy-based defaults, explicit overrides, no-policy warning,
- * trust gating, content hash mismatch
+ * Validates: All tools always granted, trust gating, domain resolution,
+ * skill loading errors
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -19,6 +19,8 @@ vi.mock('../../../../../../src/runtime/skills/skill-loader.js', () => ({
 
 // Import the mocked functions
 import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
+
+const ALL_MOTOR_TOOLS = ['read', 'write', 'list', 'glob', 'bash', 'grep', 'patch', 'fetch'];
 
 describe('core.act tool', () => {
   const mockMotorCortex = {
@@ -71,7 +73,7 @@ describe('core.act tool', () => {
   });
 
   describe('agentic mode - skill loading', () => {
-    it('returns trust-specific error for needs_reapproval skill without explicit tools', async () => {
+    it('blocks needs_reapproval skill', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedTools: ['code'] },
@@ -92,7 +94,7 @@ describe('core.act tool', () => {
       expect(result['error']).toContain('Do not retry core.act');
     });
 
-    it('returns trust-specific error for pending_review skill without explicit tools', async () => {
+    it('blocks pending_review skill', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: { trust: 'pending_review', schemaVersion: 1, allowedTools: ['bash'] },
@@ -113,7 +115,7 @@ describe('core.act tool', () => {
       expect(result['error']).toContain('Do not retry core.act');
     });
 
-    it('succeeds for approved skill without explicit tools', async () => {
+    it('succeeds for approved skill with all tools granted', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
@@ -137,15 +139,21 @@ describe('core.act tool', () => {
       })) as Record<string, unknown>;
 
       expect(result['success']).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ALL_MOTOR_TOOLS, // All tools always granted
+        })
+      );
     });
 
-    it('uses policy defaults when trust is approved (with auto-included read/list for skill)', async () => {
+    it('uses all tools regardless of policy.allowedTools', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['bash'],
+          allowedTools: ['bash'], // Policy only declares bash
           allowedDomains: ['api.example.com'],
         },
         body: 'instructions',
@@ -161,15 +169,14 @@ describe('core.act tool', () => {
         mode: 'agentic',
         task: 'test task',
         skill: 'test-skill',
-        // No tools provided - should use policy defaults
       })) as Record<string, unknown>;
 
       expect(executeResult['success']).toBe(true);
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['bash'], // From policy (no auto-includes)
-          domains: ['api.example.com'], // From policy
+          tools: ALL_MOTOR_TOOLS, // All tools, not just policy's ['bash']
+          domains: ['api.example.com'],
         })
       );
     });
@@ -207,41 +214,28 @@ describe('core.act tool', () => {
       );
     });
 
-    it('allows explicit tools override', async () => {
+    it('blocks skill with no policy', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
-        policy: {
-          trust: 'approved',
-          schemaVersion: 1,
-          allowedTools: ['bash'],
-        },
+        policy: undefined,
         body: 'instructions',
         path: '/path',
         skillPath: '/path/SKILL.md',
       });
 
-      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
-        runId: 'run-123',
-      });
-
-      await tool.execute({
+      const result = (await tool.execute({
         mode: 'agentic',
         task: 'test task',
-        skill: 'test-skill',
-        tools: ['grep'], // Explicit override
-      });
+        skill: 'no-policy-skill',
+      })) as Record<string, unknown>;
 
-      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
-      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tools: ['grep'], // Override only (no auto-includes)
-        })
-      );
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('has no policy');
     });
   });
 
   describe('agentic mode - without skills', () => {
-    it('uses default tools when no skill specified', async () => {
+    it('grants all tools when no skill specified', async () => {
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'run-123',
       });
@@ -255,26 +249,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ['bash'], // Default
-        })
-      );
-    });
-
-    it('uses explicit tools when provided', async () => {
-      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
-        runId: 'run-123',
-      });
-
-      await tool.execute({
-        mode: 'agentic',
-        task: 'test task',
-        tools: ['bash', 'grep'],
-      });
-
-      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
-      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tools: ['bash', 'grep'],
+          tools: ALL_MOTOR_TOOLS,
         })
       );
     });
@@ -328,6 +303,11 @@ describe('core.act tool', () => {
 
     it('hasSideEffects flag', () => {
       expect(tool.hasSideEffects).toBe(true);
+    });
+
+    it('does not have tools parameter', () => {
+      const paramNames = tool.parameters?.map((p) => p.name) ?? [];
+      expect(paramNames).not.toContain('tools');
     });
   });
 });
