@@ -22,9 +22,10 @@ import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
-import { cp } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { ContainerManager, ContainerHandle } from '../container/types.js';
+import { cp, readFile as readFileAsync } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
+import type { PreparedDeps, SkillDependencies } from '../dependencies/dependency-manager.js';
 import { generateBaseline } from './skill-extraction.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
@@ -472,6 +473,35 @@ export class MotorCortex {
         await this.stateManager.updateRun(run);
       }
 
+      // Install skill dependencies (cache-first, prep container on miss)
+      let preparedDeps: PreparedDeps | null = null;
+      if (run.skill && this.skillsDir) {
+        const policyPath = join(workspace, 'policy.json');
+        if (existsSync(policyPath)) {
+          try {
+            const policyRaw = JSON.parse(await readFileAsync(policyPath, 'utf8')) as Record<
+              string,
+              unknown
+            >;
+            if (policyRaw['dependencies']) {
+              const { installSkillDependencies } =
+                await import('../dependencies/dependency-manager.js');
+              const cacheDir = join(dirname(this.skillsDir), 'dependency-cache');
+              preparedDeps = await installSkillDependencies(
+                policyRaw['dependencies'] as SkillDependencies,
+                cacheDir,
+                run.skill,
+                this.logger
+              );
+            }
+          } catch (error) {
+            throw new Error(
+              `Dependency installation failed for skill "${run.skill}": ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+      }
+
       // Reuse existing container (kept alive during pause) or create a new one
       containerHandle = this.activeContainers.get(run.id);
       if (containerHandle) {
@@ -480,15 +510,49 @@ export class MotorCortex {
           'Reusing existing container for resumed run'
         );
       } else if (this.containerManager && (await this.isDockerAvailable())) {
-        containerHandle = await this.containerManager.create(run.id, {
+        // Build container config with optional dependency mounts
+        const containerConfig: ContainerConfig = {
           workspacePath: workspace,
           ...(run.domains && run.domains.length > 0 && { allowedDomains: run.domains }),
-        });
+          ...(preparedDeps && {
+            extraMounts: [
+              ...(preparedDeps.npmDir
+                ? [
+                    {
+                      hostPath: preparedDeps.npmDir,
+                      containerPath: '/workspace/node_modules',
+                      mode: 'ro' as const,
+                    },
+                  ]
+                : []),
+              ...(preparedDeps.pipDir
+                ? [
+                    {
+                      hostPath: preparedDeps.pipDir,
+                      containerPath: '/workspace/.local',
+                      mode: 'ro' as const,
+                    },
+                  ]
+                : []),
+            ],
+            extraEnv: {
+              ...(preparedDeps.npmDir && { NODE_PATH: '/workspace/node_modules' }),
+              ...(preparedDeps.pipDir &&
+                preparedDeps.pipPythonPath && { PYTHONPATH: preparedDeps.pipPythonPath }),
+            },
+          }),
+        };
+
+        containerHandle = await this.containerManager.create(run.id, containerConfig);
         run.containerId = containerHandle.containerId;
         this.activeContainers.set(run.id, containerHandle);
         await this.stateManager.updateRun(run);
         this.logger.info(
-          { runId: run.id, containerId: containerHandle.containerId.slice(0, 12) },
+          {
+            runId: run.id,
+            containerId: containerHandle.containerId.slice(0, 12),
+            hasDeps: preparedDeps !== null,
+          },
           'Container created for run'
         );
       }
@@ -592,7 +656,10 @@ export class MotorCortex {
       const message = error instanceof Error ? error.message : String(error);
 
       // Classify: infrastructure errors (container, Docker, storage) vs model errors
-      const isInfraError = /container|docker|image|network policy|storage/i.test(message);
+      const isInfraError =
+        /container|docker|image|network policy|storage|dependency|npm install|pip install/i.test(
+          message
+        );
       const category = isInfraError ? 'infra_failure' : 'model_failure';
 
       this.logger.error(

@@ -164,6 +164,12 @@ export interface ContainerConfig {
 
   /** Allowed ports for network access (default: [80, 443]) */
   allowedPorts?: number[];
+
+  /** Extra bind mounts (e.g. pre-installed dependency packs) */
+  extraMounts?: { hostPath: string; containerPath: string; mode: 'ro' | 'rw' }[];
+
+  /** Extra environment variables (e.g. NODE_PATH, PYTHONPATH for dependency mounts) */
+  extraEnv?: Record<string, string>;
 }
 
 /**

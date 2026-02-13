@@ -251,6 +251,8 @@ function buildShellEnv(): Record<string, string> {
     // Node.js
     'NODE_VERSION',
     'NODE_PATH',
+    // Python (for pre-installed dependency mounts)
+    'PYTHONPATH',
   ];
 
   for (const key of INHERITED_KEYS) {

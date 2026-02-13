@@ -296,6 +296,20 @@ function buildCreateArgs(
   // Workspace bind mount (writable, no exec)
   args.push('-v', `${config.workspacePath}:/workspace:rw`);
 
+  // Extra bind mounts (e.g. pre-installed dependency packs)
+  if (config.extraMounts) {
+    for (const mount of config.extraMounts) {
+      args.push('-v', `${mount.hostPath}:${mount.containerPath}:${mount.mode}`);
+    }
+  }
+
+  // Extra environment variables (e.g. NODE_PATH, PYTHONPATH)
+  if (config.extraEnv) {
+    for (const [key, value] of Object.entries(config.extraEnv)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
   // Image
   args.push(CONTAINER_IMAGE);
 

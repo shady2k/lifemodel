@@ -687,9 +687,16 @@ Avoids directory scanning for fast skill discovery. Updated atomically on skill 
 | `allowedTools` | Motor tools this skill may use (`code`, `shell`, `filesystem`, etc.) |
 | `allowedDomains` | Network domains for iptables enforcement |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
+| `dependencies` | npm/pip packages pre-installed before container starts (Phase 4) |
 | `inputs` | Typed parameters — validated before starting the LLM loop |
 | `provenance` | Source URL, fetch time, content hash for integrity verification |
 | `approvedBy` | `'user'` — records that this policy was explicitly approved |
+
+### Skill Dependencies
+
+Skills can declare npm/pip packages in `policy.json` under the `dependencies` field. These are pre-installed via a short-lived prep container and mounted read-only into the runtime container. The agent can `require()` or `import` packages directly without running `npm install` or `pip install` (which would fail due to `--network none`).
+
+See [phase-4-plan.md](phase-4-plan.md) for details on the cache-first architecture, security model, and hash strategy.
 
 ### Skill Discovery and Loading
 

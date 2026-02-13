@@ -11,7 +11,7 @@ Extraction (install)  — copies validated skill dirs from workspace → data/sk
 User (authority)      — approves skills before they become executable
 ```
 
-**Key constraint:** Motor Cortex runs in a Docker sandbox. Skill files are copied to the workspace root on init (with a baseline manifest for change detection). Motor reads and modifies them in place. Post-run extraction compares against the baseline, extracts only changed files to `data/skills/`, and forces `pending_review` trust.
+**Key constraint:** Motor Cortex runs in a Docker sandbox. Skill files are copied to the workspace root on init (with a baseline manifest for change detection). If the skill declares dependencies in `policy.json`, they are pre-installed via a prep container and mounted read-only before the runtime container starts (cache hit = instant, cache miss = 5-30s prep). Motor reads and modifies skill files in place. Post-run extraction compares against the baseline, extracts only changed files to `data/skills/`, and forces `pending_review` trust.
 
 ## Security Model
 

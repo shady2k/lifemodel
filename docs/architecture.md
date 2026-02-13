@@ -42,6 +42,7 @@ Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cogn
 - **Mutex**: Only one agentic run at a time (including `awaiting_input`)
 - **Energy gated**: 0.05 (oneshot), 0.15 (agentic)
 - **Docker isolation**: Agentic runs execute inside per-run Docker containers with `--read-only`, `--network none`, `--cap-drop ALL`, resource limits (512MB, 1 CPU, 64 PIDs). Falls back to direct execution only with explicit `MOTOR_CORTEX_UNSAFE=true`.
+- **Dependency pre-installation**: Skills declare npm/pip packages in `policy.json`. A prep container installs them (cache-first, content-addressed) and mounts them read-only into the runtime container via `NODE_PATH`/`PYTHONPATH`.
 - **IPC**: Host communicates with container via length-prefixed JSON on stdin/stdout (long-lived tool-server process).
 
 See [docs/features/motor-cortex/](features/motor-cortex/) for full design.

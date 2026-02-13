@@ -1,7 +1,7 @@
 # ADR-002: Persistent Skill Dependency Packs
 
 **Date:** 2026-02-13
-**Status:** Proposed
+**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented)
 **Affects:** `src/runtime/container/`, `src/runtime/motor-cortex/`, `src/runtime/skills/`
 
 ## Problem

@@ -82,6 +82,14 @@ export interface SkillPolicy {
   /** Credential names this skill requires */
   requiredCredentials?: string[] | undefined;
 
+  /** Pre-installed dependency packages (npm/pip) */
+  dependencies?:
+    | {
+        npm?: { packages: { name: string; version: string }[] } | undefined;
+        pip?: { packages: { name: string; version: string }[] } | undefined;
+      }
+    | undefined;
+
   /** Input parameters the skill accepts (optional) */
   inputs?: SkillInput[] | undefined;
 

@@ -282,6 +282,84 @@ function toSkillFrontmatter(raw: Record<string, unknown>): SkillFrontmatter {
 }
 
 /**
+ * Valid npm/pip package name pattern.
+ * Supports scoped packages (@org/pkg) and plain packages.
+ */
+const PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
+
+/**
+ * Exact version pin pattern (digits and dots only, e.g. "1.0.0", "2.3").
+ * Rejects ranges (^, ~, >=, *), URLs, git refs, and local paths.
+ */
+const EXACT_VERSION_REGEX = /^\d+(\.\d+)*$/;
+
+/**
+ * Known dependency ecosystems.
+ */
+const KNOWN_ECOSYSTEMS = new Set(['npm', 'pip']);
+
+/**
+ * Validate the `dependencies` field of a skill policy.
+ *
+ * Rules:
+ * - Only `npm` and `pip` ecosystems allowed
+ * - Package names must be valid (scoped @org/pkg or plain)
+ * - Versions must be exact pins (no ^, ~, *, >=, URLs, git refs)
+ *
+ * @returns Array of validation errors (empty = valid)
+ */
+export function validateDependencies(dependencies: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+
+  for (const [ecosystem, value] of Object.entries(dependencies)) {
+    if (!KNOWN_ECOSYSTEMS.has(ecosystem)) {
+      errors.push(`Unknown dependency ecosystem: "${ecosystem}" (allowed: npm, pip)`);
+      continue;
+    }
+
+    if (typeof value !== 'object' || value === null || !('packages' in value)) {
+      errors.push(`"${ecosystem}" must have a "packages" array`);
+      continue;
+    }
+
+    const eco = value as { packages: unknown };
+    if (!Array.isArray(eco.packages)) {
+      errors.push(`"${ecosystem}.packages" must be an array`);
+      continue;
+    }
+
+    for (const pkg of eco.packages) {
+      if (typeof pkg !== 'object' || pkg === null) {
+        errors.push(`${ecosystem}: package entry must be an object`);
+        continue;
+      }
+      const p = pkg as Record<string, unknown>;
+
+      // Validate name
+      if (typeof p['name'] !== 'string') {
+        errors.push(`${ecosystem}: package missing "name"`);
+      } else if (!PACKAGE_NAME_REGEX.test(p['name'])) {
+        errors.push(
+          `${ecosystem}: invalid package name "${p['name']}" (must match ${String(PACKAGE_NAME_REGEX)})`
+        );
+      }
+
+      // Validate version — exact pin only
+      if (typeof p['version'] !== 'string') {
+        const pkgName = typeof p['name'] === 'string' ? p['name'] : '?';
+        errors.push(`${ecosystem}: package "${pkgName}" missing "version"`);
+      } else if (!EXACT_VERSION_REGEX.test(p['version'])) {
+        errors.push(
+          `${ecosystem}: package "${String(p['name'])}" version "${p['version']}" must be an exact pin (e.g. "1.0.0"). Ranges (^, ~, *, >=), URLs, and git refs are not allowed.`
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
  * Load policy.json from a skill directory.
  *
  * @param skillDir - Absolute path to skill directory
