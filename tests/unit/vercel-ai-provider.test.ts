@@ -6,11 +6,22 @@ import { generateText } from 'ai';
 
 vi.mock('ai', () => ({ generateText: vi.fn() }));
 vi.mock('@openrouter/ai-sdk-provider', () => ({ createOpenRouter: () => () => ({}) }));
-vi.mock('@ai-sdk/openai', () => ({ createOpenAI: () => () => ({}) }));
+
+// Mock createOpenAI to track whether .chat() or .responses() is called
+const mockChatModel = vi.fn(() => ({}));
+const mockResponsesModel = vi.fn(() => ({}));
+vi.mock('@ai-sdk/openai', () => ({
+  createOpenAI: () => ({
+    chat: mockChatModel,
+    responses: mockResponsesModel,
+  }),
+}));
 
 describe('VercelAIProvider', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockChatModel.mockReturnValue({});
+    mockResponsesModel.mockReturnValue({});
   });
 
   it('includes minimal tools with permissive inputSchema', async () => {
@@ -109,5 +120,44 @@ describe('VercelAIProvider', () => {
     const parts = converted[0]?.content as Record<string, unknown>[];
     const providerOptions = parts[0]?.['providerOptions'] as Record<string, unknown>;
     expect(providerOptions?.['openai']).toEqual({ cacheControl: { type: 'ephemeral' } });
+  });
+
+  it('local provider uses .chat() not .responses()', async () => {
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+
+    (generateText as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
+      text: 'ok',
+      finishReason: 'stop',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      response: { id: 'resp_1' },
+    });
+
+    const request: CompletionRequest = {
+      messages: [{ role: 'user', content: 'hello' }],
+    };
+
+    await provider.complete(request);
+
+    // Local provider should use .chat() (officially recommended for LM Studio)
+    expect(mockChatModel).toHaveBeenCalledWith('test');
+    expect(mockResponsesModel).not.toHaveBeenCalled();
+  });
+
+  it('strips Harmony tokens from local provider responses', () => {
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const strip = (
+      provider as unknown as { stripHarmonyTokens: (s: string) => string }
+    ).stripHarmonyTokens.bind(provider);
+
+    // Typical Harmony output with tools + JSON constraint
+    expect(strip('<|channel|>final <|constrain|>JSON<|message|>{"response":"Hi!"}')).toBe(
+      '{"response":"Hi!"}'
+    );
+
+    // Plain text — no stripping
+    expect(strip('Hello world')).toBe('Hello world');
+
+    // Already clean JSON — no stripping
+    expect(strip('{"action":"search"}')).toBe('{"action":"search"}');
   });
 });

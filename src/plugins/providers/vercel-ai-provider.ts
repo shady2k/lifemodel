@@ -199,6 +199,11 @@ export class VercelAIProvider extends BaseLLMProvider {
 
   /**
    * Get the language model instance.
+   *
+   * Local providers use .chat() targeting /v1/chat/completions — the officially
+   * recommended path for gpt-oss on LM Studio. LM Studio handles Harmony format
+   * parsing internally on this endpoint. addCacheControl is skipped separately
+   * to avoid multipart system messages that @ai-sdk/openai rejects.
    */
   private getModel(modelId: string): LanguageModel {
     if (isOpenRouterConfig(this.config)) {
@@ -630,7 +635,10 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Add cache control breakpoints (mutates content from string → Array)
-    addCacheControl(transformable, modelId);
+    // Only for OpenRouter — local providers use /v1/responses which handles multipart correctly
+    if (isOpenRouterConfig(this.config)) {
+      addCacheControl(transformable, modelId);
+    }
 
     // Cast back to Message[] at the mutation boundary
     // addCacheControl mutates the content field from string to Array, which is
@@ -796,7 +804,16 @@ export class VercelAIProvider extends BaseLLMProvider {
       );
 
       // Map AI SDK result back to CompletionResponse, with intercepted reasoning as fallback
-      return this.mapAIResponseToCompletion(result, modelId, interceptedReasoning);
+      const response = this.mapAIResponseToCompletion(result, modelId, interceptedReasoning);
+
+      // Strip Harmony protocol tokens from local provider responses.
+      // LM Studio bug: gpt-oss models leak <|channel|>final <|constrain|>JSON<|message|>
+      // when tools are present and the model responds with constrained JSON output.
+      if (!isOpenRouterConfig(this.config) && response.content) {
+        response.content = this.stripHarmonyTokens(response.content);
+      }
+
+      return response;
     } catch (error) {
       const duration = Date.now() - startTime;
 
@@ -1002,6 +1019,24 @@ export class VercelAIProvider extends BaseLLMProvider {
       ...(statusCode !== undefined && { statusCode }),
       retryable: false,
     });
+  }
+
+  /**
+   * Strip Harmony protocol tokens from model output.
+   * Known LM Studio/TensorRT-LLM bug: gpt-oss models leak Harmony tokens when
+   * tools are present and the model responds with constrained output.
+   * See: https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/942
+   *
+   * Format: <|channel|>final <|constrain|>JSON<|message|>{actual content}
+   * Extract content after the last <|message|> token.
+   */
+  private stripHarmonyTokens(content: string): string {
+    const messageIdx = content.lastIndexOf('<|message|>');
+    if (messageIdx !== -1) {
+      return content.slice(messageIdx + '<|message|>'.length);
+    }
+    // Strip standalone channel/constrain tokens if <|message|> is absent
+    return content.replace(/<\|(?:channel|constrain|return|call)\|>\S*/g, '').trim();
   }
 
   /**
