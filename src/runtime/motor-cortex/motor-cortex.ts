@@ -520,7 +520,7 @@ export class MotorCortex {
                 ? [
                     {
                       hostPath: preparedDeps.npmDir,
-                      containerPath: '/workspace/node_modules',
+                      containerPath: '/opt/skill-deps/npm',
                       mode: 'ro' as const,
                     },
                   ]
@@ -529,14 +529,16 @@ export class MotorCortex {
                 ? [
                     {
                       hostPath: preparedDeps.pipDir,
-                      containerPath: '/workspace/.local',
+                      containerPath: '/opt/skill-deps/pip',
                       mode: 'ro' as const,
                     },
                   ]
                 : []),
             ],
             extraEnv: {
-              ...(preparedDeps.npmDir && { NODE_PATH: '/workspace/node_modules' }),
+              ...(preparedDeps.npmDir && {
+                NODE_PATH: '/opt/skill-deps/npm/node_modules',
+              }),
               ...(preparedDeps.pipDir &&
                 preparedDeps.pipPythonPath && { PYTHONPATH: preparedDeps.pipPythonPath }),
             },

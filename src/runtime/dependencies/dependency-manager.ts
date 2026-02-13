@@ -3,21 +3,20 @@
  *
  * Skills declare npm/pip packages in policy.json. This module:
  * 1. Computes a content-addressed cache key (hash of packages + image + platform)
- * 2. On cache hit: returns the cached directory paths (instant)
- * 3. On cache miss: runs a short-lived prep container to install packages
- * 4. Atomically publishes the result to the cache
- * 5. Returns mount paths for the runtime container
+ * 2. On cache hit: returns the Docker volume name (instant)
+ * 3. On cache miss: runs a prep container that installs into a named Docker volume
+ * 4. Returns volume names for the runtime container to mount
  *
- * The runtime container mounts these as read-only volumes with NODE_PATH/PYTHONPATH.
+ * Uses Docker named volumes (not bind mounts) to avoid macOS com.apple.provenance
+ * xattr issues entirely — files never touch the host filesystem.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readdir, rename, rm, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, rm, writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolve4 } from 'node:dns/promises';
 import type { Logger } from '../../types/index.js';
 import { CONTAINER_IMAGE } from '../container/types.js';
 
@@ -31,23 +30,12 @@ export interface SkillDependencies {
 }
 
 export interface PreparedDeps {
-  /** Path to cached node_modules dir (for bind mount) */
+  /** Docker volume name containing node_modules */
   npmDir?: string;
-  /** Path to cached site-packages dir (for bind mount) */
+  /** Docker volume name containing site-packages */
   pipDir?: string;
-  /** Dynamic site-packages path inside container (from python3 -c "import site; ...") */
+  /** Container-side path for PYTHONPATH */
   pipPythonPath?: string;
-}
-
-interface CacheManifest {
-  schemaVersion: number;
-  ecosystem: 'npm' | 'pip';
-  hash: string;
-  packages: { name: string; version: string }[];
-  imageId: string;
-  platform: string;
-  installedAt: string;
-  pythonPath?: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────
@@ -55,17 +43,8 @@ interface CacheManifest {
 /** Schema version — bump when install flags change to invalidate cache */
 const CACHE_SCHEMA_VERSION = 1;
 
-/** npm registry hostname for DNS resolution */
-const NPM_REGISTRY = 'registry.npmjs.org';
-
-/** pip registry hostname for DNS resolution */
-const PIP_REGISTRY = 'pypi.org';
-
-/** Additional pip CDN hostname */
-const PIP_FILES = 'files.pythonhosted.org';
-
-/** Stale temp directory threshold (1 hour) */
-const STALE_TMP_THRESHOLD_MS = 60 * 60 * 1000;
+/** Volume name prefix */
+const VOLUME_PREFIX = 'lifemodel-deps';
 
 /** Stale lock threshold (10 minutes) */
 const STALE_LOCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -112,69 +91,39 @@ async function getImageId(): Promise<string> {
   }
 }
 
-// ─── DNS Resolution ──────────────────────────────────────────────
+// ─── Docker Volume ───────────────────────────────────────────────
 
-async function resolveRegistryIps(
-  hostnames: string[],
-  logger: Logger
-): Promise<Map<string, string[]>> {
-  const resolved = new Map<string, string[]>();
-  for (const hostname of hostnames) {
-    try {
-      const ips = await resolve4(hostname);
-      resolved.set(hostname, ips);
-      logger.debug({ hostname, ips }, 'Resolved registry DNS');
-    } catch (error) {
-      logger.warn({ hostname, error }, 'Failed to resolve registry DNS');
-      // Don't fail — Docker's DNS may resolve it at runtime
-    }
+async function volumeExists(volumeName: string): Promise<boolean> {
+  try {
+    await execFileAsync('docker', ['volume', 'inspect', volumeName], {
+      timeout: 10_000,
+    });
+    return true;
+  } catch {
+    return false;
   }
-  return resolved;
 }
 
-// ─── Cleanup ─────────────────────────────────────────────────────
-
 /**
- * Clean up stale temp directories and lock files.
+ * Check that a dependency volume is fully installed (not just created).
+ *
+ * Docker auto-creates named volumes when a container starts, even if the
+ * install command fails. A host-side `.ready` marker (written only after
+ * successful install) distinguishes "volume exists" from "install complete."
  */
-async function cleanupStale(cacheDir: string, logger: Logger): Promise<void> {
-  if (!existsSync(cacheDir)) return;
+function isVolumeReady(lockDir: string, ecosystem: string, hash: string): boolean {
+  return existsSync(join(lockDir, `${ecosystem}-${hash}.ready`));
+}
 
+async function markVolumeReady(lockDir: string, ecosystem: string, hash: string): Promise<void> {
+  await writeFile(join(lockDir, `${ecosystem}-${hash}.ready`), '', { flag: 'w' });
+}
+
+async function clearVolumeReady(lockDir: string, ecosystem: string, hash: string): Promise<void> {
   try {
-    const entries = await readdir(cacheDir);
-    const now = Date.now();
-
-    for (const entry of entries) {
-      const fullPath = join(cacheDir, entry);
-
-      // Clean stale tmp-* directories
-      if (entry.startsWith('tmp-')) {
-        try {
-          const s = await stat(fullPath);
-          if (now - s.mtimeMs > STALE_TMP_THRESHOLD_MS) {
-            await rm(fullPath, { recursive: true, force: true });
-            logger.debug({ path: fullPath }, 'Cleaned stale temp dir');
-          }
-        } catch {
-          // Ignore
-        }
-      }
-
-      // Clean stale lock files
-      if (entry.endsWith('.lock')) {
-        try {
-          const s = await stat(fullPath);
-          if (now - s.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
-            await rm(fullPath, { force: true });
-            logger.debug({ path: fullPath }, 'Cleaned stale lock file');
-          }
-        } catch {
-          // Ignore
-        }
-      }
-    }
+    await rm(join(lockDir, `${ecosystem}-${hash}.ready`), { force: true });
   } catch {
-    // Ignore cleanup errors
+    // Best-effort
   }
 }
 
@@ -182,19 +131,18 @@ async function cleanupStale(cacheDir: string, logger: Logger): Promise<void> {
 
 async function acquireLock(lockPath: string): Promise<boolean> {
   try {
-    // Check for stale lock
     if (existsSync(lockPath)) {
       const s = await stat(lockPath);
       if (Date.now() - s.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
         await rm(lockPath, { force: true });
       } else {
-        return false; // Lock held by another process
+        return false;
       }
     }
-    await writeFile(lockPath, String(process.pid), { flag: 'wx' }); // Exclusive create
+    await writeFile(lockPath, String(process.pid), { flag: 'wx' });
     return true;
   } catch {
-    return false; // Lock exists or creation failed
+    return false;
   }
 }
 
@@ -206,63 +154,116 @@ async function releaseLock(lockPath: string): Promise<void> {
   }
 }
 
+// ─── Container Cleanup ───────────────────────────────────────────
+
+async function removeContainer(name: string): Promise<void> {
+  try {
+    await execFileAsync('docker', ['rm', '-f', name], { timeout: 10_000 });
+  } catch {
+    // Best-effort
+  }
+}
+
+// ─── Verification (exported for unit tests) ──────────────────────
+
+/**
+ * Verify that npm install produced the expected packages.
+ * Checks: node_modules exists + each declared package has a subdirectory.
+ */
+export function verifyNpmInstall(
+  tmpDir: string,
+  packages: { name: string; version: string }[]
+): void {
+  const nodeModulesPath = join(tmpDir, 'node_modules');
+  if (!existsSync(nodeModulesPath)) {
+    throw new Error('npm install did not produce node_modules directory');
+  }
+  const missingPkgs = packages.filter((p) => !existsSync(join(nodeModulesPath, p.name)));
+  if (missingPkgs.length > 0) {
+    const names = missingPkgs.map((p) => `${p.name}@${p.version}`).join(', ');
+    throw new Error(`npm install completed but missing packages: ${names}`);
+  }
+}
+
+/**
+ * Verify that pip install produced a non-empty site-packages directory.
+ */
+export async function verifyPipInstall(tmpDir: string): Promise<void> {
+  const { readdir } = await import('node:fs/promises');
+  const sitePackagesPath = join(tmpDir, 'site-packages');
+  if (!existsSync(sitePackagesPath)) {
+    throw new Error('pip install did not produce site-packages directory');
+  }
+  const entries = await readdir(sitePackagesPath);
+  if (entries.length === 0) {
+    throw new Error('pip install produced empty site-packages directory');
+  }
+}
+
 // ─── Install: npm ────────────────────────────────────────────────
 
 async function installNpm(
   packages: { name: string; version: string }[],
-  cacheDir: string,
+  lockDir: string,
   hash: string,
-  imageId: string,
+  _imageId: string,
   logger: Logger
 ): Promise<string> {
-  const ecosystemDir = join(cacheDir, 'npm');
-  await mkdir(ecosystemDir, { recursive: true });
+  const volumeName = `${VOLUME_PREFIX}-npm-${hash}`;
 
-  // Check cache
-  const cachePath = join(ecosystemDir, hash);
-  if (existsSync(join(cachePath, 'manifest.json'))) {
-    logger.info({ hash, ecosystem: 'npm' }, 'Dependency cache hit');
-    return join(cachePath, 'node_modules');
+  // Cache check: volume exists AND was fully installed
+  if (isVolumeReady(lockDir, 'npm', hash) && (await volumeExists(volumeName))) {
+    logger.info({ hash, volumeName, ecosystem: 'npm' }, 'Dependency cache hit (volume exists)');
+    return volumeName;
   }
 
-  // Clean stale entries
-  await cleanupStale(ecosystemDir, logger);
+  // Stale volume without ready marker — remove and re-install
+  if (await volumeExists(volumeName)) {
+    logger.warn({ hash, volumeName }, 'Removing stale npm volume (no ready marker)');
+    try {
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+    } catch {
+      // Best-effort
+    }
+  }
 
-  // Acquire lock
-  const lockPath = join(ecosystemDir, `${hash}.lock`);
+  // Acquire lock (lock files are tiny, no bind-mount issue)
+  const lockPath = join(lockDir, `npm-${hash}.lock`);
   const locked = await acquireLock(lockPath);
   if (!locked) {
-    // Another process is installing — wait and check cache again
     logger.info({ hash }, 'Waiting for concurrent npm install');
     await new Promise((resolve) => setTimeout(resolve, 5000));
-    if (existsSync(join(cachePath, 'manifest.json'))) {
-      return join(cachePath, 'node_modules');
+    if (isVolumeReady(lockDir, 'npm', hash) && (await volumeExists(volumeName))) {
+      return volumeName;
     }
     throw new Error('Concurrent npm install did not complete');
   }
 
-  try {
-    // Create temp dir
-    const tmpDir = join(ecosystemDir, `tmp-${randomBytes(4).toString('hex')}`);
-    await mkdir(tmpDir, { recursive: true });
+  const containerName = `prep-npm-${randomBytes(4).toString('hex')}`;
 
-    // Write package.json
+  try {
+    // Build package.json content inline
     const deps: Record<string, string> = {};
     for (const pkg of packages) {
       deps[pkg.name] = pkg.version;
     }
-    await writeFile(
-      join(tmpDir, 'package.json'),
-      JSON.stringify({ name: 'skill-deps', version: '1.0.0', dependencies: deps }, null, 2)
-    );
+    const packageJson = JSON.stringify({
+      name: 'skill-deps',
+      version: '1.0.0',
+      dependencies: deps,
+    });
+    const escapedJson = packageJson.replace(/'/g, "'\\''");
 
-    // Resolve registry DNS
-    const registryHosts = await resolveRegistryIps([NPM_REGISTRY], logger);
+    // Build verification: test -d for each declared package
+    const verifyChecks = packages
+      .map((p) => `test -d /workspace/deps/node_modules/${p.name}`)
+      .join(' && ');
 
-    // Build docker run args
+    // Install into a named Docker volume — no host filesystem involvement
     const args = [
       'run',
-      '--rm',
+      '--name',
+      containerName,
       '--entrypoint',
       'sh',
       '--cap-drop',
@@ -275,29 +276,17 @@ async function installNpm(
       '64',
       '--network',
       'bridge',
-      '--dns',
-      '127.0.0.1',
       '--tmpfs',
       '/tmp:rw,noexec,nosuid,size=64m',
       '-v',
-      `${tmpDir}:/deps:rw`,
-    ];
-
-    // Add --add-host entries for registry
-    for (const [hostname, ips] of registryHosts.entries()) {
-      for (const ip of ips) {
-        args.push('--add-host', `${hostname}:${ip}`);
-      }
-    }
-
-    args.push(
+      `${volumeName}:/workspace/deps`,
       CONTAINER_IMAGE,
       '-c',
-      'cd /deps && npm install --ignore-scripts --no-audit --no-fund --no-optional 2>&1'
-    );
+      `printf '%s' '${escapedJson}' > /workspace/deps/package.json && cd /workspace/deps && npm install --ignore-scripts --no-audit --no-fund --omit=optional 2>&1 && ${verifyChecks}`,
+    ];
 
     logger.info(
-      { hash, packageCount: packages.length, ecosystem: 'npm' },
+      { hash, packageCount: packages.length, ecosystem: 'npm', containerName, volumeName },
       'Installing npm dependencies via prep container'
     );
 
@@ -308,29 +297,20 @@ async function installNpm(
     if (stdout) logger.debug({ output: stdout.slice(0, 500) }, 'npm install stdout');
     if (stderr) logger.debug({ output: stderr.slice(0, 500) }, 'npm install stderr');
 
-    // Verify node_modules was created
-    if (!existsSync(join(tmpDir, 'node_modules'))) {
-      throw new Error('npm install did not produce node_modules directory');
+    await markVolumeReady(lockDir, 'npm', hash);
+    logger.info({ hash, volumeName, ecosystem: 'npm' }, 'npm dependencies cached in volume');
+    return volumeName;
+  } catch (error) {
+    // Clean up the volume and ready marker on failure
+    await clearVolumeReady(lockDir, 'npm', hash);
+    try {
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+    } catch {
+      // Best-effort
     }
-
-    // Write manifest
-    const manifest: CacheManifest = {
-      schemaVersion: CACHE_SCHEMA_VERSION,
-      ecosystem: 'npm',
-      hash,
-      packages,
-      imageId,
-      platform: `${process.platform}-${process.arch}`,
-      installedAt: new Date().toISOString(),
-    };
-    await writeFile(join(tmpDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-    // Atomic rename
-    await rename(tmpDir, cachePath);
-    logger.info({ hash, cachePath, ecosystem: 'npm' }, 'npm dependencies cached');
-
-    return join(cachePath, 'node_modules');
+    throw error;
   } finally {
+    await removeContainer(containerName);
     await releaseLock(lockPath);
   }
 }
@@ -339,62 +319,49 @@ async function installNpm(
 
 async function installPip(
   packages: { name: string; version: string }[],
-  cacheDir: string,
+  lockDir: string,
   hash: string,
-  imageId: string,
+  _imageId: string,
   logger: Logger
-): Promise<{ pipDir: string; pythonPath: string }> {
-  const ecosystemDir = join(cacheDir, 'pip');
-  await mkdir(ecosystemDir, { recursive: true });
+): Promise<{ volumeName: string; pythonPath: string }> {
+  const volumeName = `${VOLUME_PREFIX}-pip-${hash}`;
 
-  // Check cache
-  const cachePath = join(ecosystemDir, hash);
-  if (existsSync(join(cachePath, 'manifest.json'))) {
-    logger.info({ hash, ecosystem: 'pip' }, 'Dependency cache hit');
-    const manifestRaw = await readFile(join(cachePath, 'manifest.json'), 'utf-8');
-    const manifest = JSON.parse(manifestRaw) as CacheManifest;
-    return {
-      pipDir: join(cachePath, 'site-packages'),
-      pythonPath: manifest.pythonPath ?? '/deps/site-packages',
-    };
+  // Cache check: volume exists AND was fully installed
+  if (isVolumeReady(lockDir, 'pip', hash) && (await volumeExists(volumeName))) {
+    logger.info({ hash, volumeName, ecosystem: 'pip' }, 'Dependency cache hit (volume exists)');
+    return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
   }
 
-  // Clean stale entries
-  await cleanupStale(ecosystemDir, logger);
+  // Stale volume without ready marker — remove and re-install
+  if (await volumeExists(volumeName)) {
+    logger.warn({ hash, volumeName }, 'Removing stale pip volume (no ready marker)');
+    try {
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+    } catch {
+      // Best-effort
+    }
+  }
 
   // Acquire lock
-  const lockPath = join(ecosystemDir, `${hash}.lock`);
+  const lockPath = join(lockDir, `pip-${hash}.lock`);
   const locked = await acquireLock(lockPath);
   if (!locked) {
     logger.info({ hash }, 'Waiting for concurrent pip install');
     await new Promise((resolve) => setTimeout(resolve, 5000));
-    if (existsSync(join(cachePath, 'manifest.json'))) {
-      const manifestRaw = await readFile(join(cachePath, 'manifest.json'), 'utf-8');
-      const manifest = JSON.parse(manifestRaw) as CacheManifest;
-      return {
-        pipDir: join(cachePath, 'site-packages'),
-        pythonPath: manifest.pythonPath ?? '/deps/site-packages',
-      };
+    if (isVolumeReady(lockDir, 'pip', hash) && (await volumeExists(volumeName))) {
+      return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
     }
     throw new Error('Concurrent pip install did not complete');
   }
 
+  const containerName = `prep-pip-${randomBytes(4).toString('hex')}`;
+
   try {
-    // Create temp dir
-    const tmpDir = join(ecosystemDir, `tmp-${randomBytes(4).toString('hex')}`);
-    await mkdir(tmpDir, { recursive: true });
-
-    // Write requirements.txt
-    const requirements = packages.map((p) => `${p.name}==${p.version}`).join('\n');
-    await writeFile(join(tmpDir, 'requirements.txt'), requirements);
-
-    // Resolve registry DNS
-    const registryHosts = await resolveRegistryIps([PIP_REGISTRY, PIP_FILES], logger);
-
-    // Build docker run args
+    // Install into named volume
     const args = [
       'run',
-      '--rm',
+      '--name',
+      containerName,
       '--entrypoint',
       'sh',
       '--cap-drop',
@@ -407,28 +374,17 @@ async function installPip(
       '64',
       '--network',
       'bridge',
-      '--dns',
-      '127.0.0.1',
       '--tmpfs',
       '/tmp:rw,noexec,nosuid,size=64m',
       '-v',
-      `${tmpDir}:/deps:rw`,
-    ];
-
-    for (const [hostname, ips] of registryHosts.entries()) {
-      for (const ip of ips) {
-        args.push('--add-host', `${hostname}:${ip}`);
-      }
-    }
-
-    args.push(
+      `${volumeName}:/workspace/deps`,
       CONTAINER_IMAGE,
       '-c',
-      'pip install --target /deps/site-packages --only-binary :all: -r /deps/requirements.txt 2>&1 && python3 -c "import sysconfig; print(sysconfig.get_path(\'purelib\'))" > /deps/.python-path'
-    );
+      `printf '%s\\n' ${packages.map((p) => `'${p.name}==${p.version}'`).join(' ')} > /workspace/deps/requirements.txt && pip install --target /workspace/deps/site-packages --only-binary :all: -r /workspace/deps/requirements.txt 2>&1 && test -d /workspace/deps/site-packages && test $(ls /workspace/deps/site-packages | wc -l) -gt 0`,
+    ];
 
     logger.info(
-      { hash, packageCount: packages.length, ecosystem: 'pip' },
+      { hash, packageCount: packages.length, ecosystem: 'pip', containerName, volumeName },
       'Installing pip dependencies via prep container'
     );
 
@@ -439,41 +395,19 @@ async function installPip(
     if (stdout) logger.debug({ output: stdout.slice(0, 500) }, 'pip install stdout');
     if (stderr) logger.debug({ output: stderr.slice(0, 500) }, 'pip install stderr');
 
-    // Verify site-packages was created
-    if (!existsSync(join(tmpDir, 'site-packages'))) {
-      throw new Error('pip install did not produce site-packages directory');
-    }
-
-    // Read python path
-    let pythonPath = '/deps/site-packages';
+    await markVolumeReady(lockDir, 'pip', hash);
+    logger.info({ hash, volumeName, ecosystem: 'pip' }, 'pip dependencies cached in volume');
+    return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
+  } catch (error) {
+    await clearVolumeReady(lockDir, 'pip', hash);
     try {
-      const pathContent = await readFile(join(tmpDir, '.python-path'), 'utf-8');
-      if (pathContent.trim()) {
-        pythonPath = pathContent.trim();
-      }
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
     } catch {
-      // Use default
+      // Best-effort
     }
-
-    // Write manifest
-    const manifest: CacheManifest = {
-      schemaVersion: CACHE_SCHEMA_VERSION,
-      ecosystem: 'pip',
-      hash,
-      packages,
-      imageId,
-      platform: `${process.platform}-${process.arch}`,
-      installedAt: new Date().toISOString(),
-      pythonPath,
-    };
-    await writeFile(join(tmpDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-    // Atomic rename
-    await rename(tmpDir, cachePath);
-    logger.info({ hash, cachePath, ecosystem: 'pip' }, 'pip dependencies cached');
-
-    return { pipDir: join(cachePath, 'site-packages'), pythonPath };
+    throw error;
   } finally {
+    await removeContainer(containerName);
     await releaseLock(lockPath);
   }
 }
@@ -483,11 +417,14 @@ async function installPip(
 /**
  * Install skill dependencies (cache-first, prep container on miss).
  *
+ * Returns PreparedDeps with Docker volume names. The runtime container
+ * mounts these volumes (Docker treats non-absolute -v sources as named volumes).
+ *
  * @param deps - Declared dependencies from policy.json
- * @param cacheBaseDir - Base directory for the dependency cache
+ * @param cacheBaseDir - Base directory for lock files
  * @param skillName - Skill name (for logging)
  * @param logger - Logger instance
- * @returns PreparedDeps with mount paths, or null if no dependencies
+ * @returns PreparedDeps with volume names, or null if no dependencies
  * @throws Error if installation fails (skill cannot run without its deps)
  */
 export async function installSkillDependencies(
@@ -505,23 +442,22 @@ export async function installSkillDependencies(
     return null;
   }
 
+  // Lock dir for concurrency control (tiny files, no bind-mount issue)
   await mkdir(cacheBaseDir, { recursive: true });
   const imageId = await getImageId();
   const result: PreparedDeps = {};
 
-  // Install npm dependencies
   if (hasNpm && deps.npm) {
     const hash = computeDepsHash('npm', deps.npm.packages, imageId);
     log.info({ hash, packages: deps.npm.packages }, 'Preparing npm dependencies');
     result.npmDir = await installNpm(deps.npm.packages, cacheBaseDir, hash, imageId, log);
   }
 
-  // Install pip dependencies
   if (hasPip && deps.pip) {
     const hash = computeDepsHash('pip', deps.pip.packages, imageId);
     log.info({ hash, packages: deps.pip.packages }, 'Preparing pip dependencies');
     const pipResult = await installPip(deps.pip.packages, cacheBaseDir, hash, imageId, log);
-    result.pipDir = pipResult.pipDir;
+    result.pipDir = pipResult.volumeName;
     result.pipPythonPath = pipResult.pythonPath;
   }
 

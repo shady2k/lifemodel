@@ -394,7 +394,16 @@ export function createContainerManager(logger: Logger): ContainerManager {
       // Create container (uses resolvedPolicy.resolvedHosts for --add-host entries)
       const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
       const createArgs = buildCreateArgs(containerName, config, resolvedHosts);
-      log.info({ containerName, runId, hasDomains }, 'Creating container');
+      log.info(
+        {
+          containerName,
+          runId,
+          hasDomains,
+          extraMounts: config.extraMounts,
+          extraEnv: config.extraEnv,
+        },
+        'Creating container'
+      );
 
       const { stdout: containerId } = await execFileAsync('docker', createArgs, {
         timeout: 30_000,
