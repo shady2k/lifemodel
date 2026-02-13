@@ -51,6 +51,26 @@ const CREDENTIAL_PLACEHOLDER = /<credential:([a-zA-Z0-9_]+)>/g;
 const ENV_VAR_REFERENCE = /\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)/g;
 
 /**
+ * Convert a credential name to host-side env var key: VAULT_<NAME>
+ *
+ * Host-side env vars use the VAULT_ prefix for namespacing.
+ * Example: `api_key` → `VAULT_API_KEY`
+ */
+export function credentialToStoreKey(name: string): string {
+  return `VAULT_${name.toUpperCase()}`;
+}
+
+/**
+ * Convert a credential name to container runtime env var key: <NAME>
+ *
+ * Container env vars use plain names (no prefix) for ergonomic access in scripts.
+ * Example: `api_key` → `API_KEY`
+ */
+export function credentialToRuntimeKey(name: string): string {
+  return name.toUpperCase();
+}
+
+/**
  * Create an env-var based credential store.
  *
  * Maps credential names to `VAULT_<NAME>` environment variables.
@@ -59,17 +79,17 @@ const ENV_VAR_REFERENCE = /\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9
 export function createEnvCredentialStore(): CredentialStore {
   return {
     get(name: string): string | null {
-      const envKey = `VAULT_${name.toUpperCase()}`;
+      const envKey = credentialToStoreKey(name);
       return process.env[envKey] ?? null;
     },
 
     set(name: string, value: string): void {
-      const envKey = `VAULT_${name.toUpperCase()}`;
+      const envKey = credentialToStoreKey(name);
       process.env[envKey] = value;
     },
 
     delete(name: string): boolean {
-      const envKey = `VAULT_${name.toUpperCase()}`;
+      const envKey = credentialToStoreKey(name);
       const existed = envKey in process.env;
       // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete process.env[envKey];

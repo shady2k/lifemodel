@@ -82,6 +82,10 @@ export interface SkillPolicy {
   /** Credential names this skill requires */
   requiredCredentials?: string[] | undefined;
 
+  /** Credential values obtained by this skill at runtime (e.g., API keys from signup).
+   *  Stored in policy.json for persistence across restarts. Redacted in display. */
+  credentialValues?: Record<string, string> | undefined;
+
   /** Pre-installed dependency packages (npm/pip) */
   dependencies?:
     | {
@@ -112,6 +116,14 @@ export interface SkillPolicy {
 
   /** When this policy was approved */
   approvedAt?: string | undefined;
+
+  /** Extraction metadata (set when skill is extracted from Motor Cortex) */
+  extractedFrom?: {
+    runId: string;
+    timestamp: string;
+    changedFiles: string[];
+    deletedFiles: string[];
+  };
 }
 
 /**
@@ -185,4 +197,19 @@ export interface LoadedSkill {
 
   /** Absolute path to the SKILL.md file */
   skillPath: string;
+}
+
+/**
+ * Sanitize a policy for display to the model/user.
+ *
+ * Redacts credential values to prevent key leakage in logs and LLM responses.
+ * Returns a shallow copy with credentialValues values replaced by "[set]".
+ */
+export function sanitizePolicyForDisplay(policy: SkillPolicy): SkillPolicy {
+  if (!policy.credentialValues) return policy;
+  const { credentialValues, ...rest } = policy;
+  return {
+    ...rest,
+    credentialValues: Object.fromEntries(Object.keys(credentialValues).map((k) => [k, '[set]'])),
+  };
 }

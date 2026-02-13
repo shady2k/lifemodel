@@ -31,8 +31,8 @@ import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import type { ContainerHandle } from '../container/types.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
-import { resolveCredentials } from '../vault/credential-store.js';
-import { readdir, cp, mkdir } from 'node:fs/promises';
+import { resolveCredentials, credentialToRuntimeKey } from '../vault/credential-store.js';
+import { readdir, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTaskLogger, redactCredentials } from './task-logger.js';
 import { validateToolArgs } from '../../utils/tool-validation.js';
@@ -189,6 +189,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Without it in the tool schema, the system prompt's "call ask_user" instruction is impossible.
   toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.ask_user);
 
+  // Inject save_credential when a credential store is available — lets agents
+  // persist credentials obtained during execution (e.g. signup API keys).
+  if (params.credentialStore) {
+    toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.save_credential);
+  }
+
   // Add request_approval tool if shell is granted (network access = needs approval gate)
   if (run.tools.includes('bash')) {
     toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.request_approval);
@@ -203,14 +209,43 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Use attempt's messages (already built by caller)
   const messages = attempt.messages;
 
-  // Deliver all known credentials to the container upfront.
+  // Log system prompt for debugging
+  const systemMsg = messages.find((m) => m.role === 'system');
+  if (systemMsg?.content) {
+    await taskLog?.log(`\nSYSTEM PROMPT:\n${systemMsg.content}\n`);
+  }
+
+  // Deliver credentials to the container upfront.
   // Scripts use process.env.NAME, so credentials must be in the shell env
   // from the start — not lazily when placeholders are detected.
+  //
+  // If skill has requiredCredentials, filter delivery to only those names.
+  // Priority: skill.policy.credentialValues (skill-stored) → credentialStore (user env vars)
+  // Container env vars use plain NAME (no VAULT_ prefix) for ergonomic script access.
   if (params.containerHandle && params.credentialStore) {
-    for (const name of params.credentialStore.list()) {
-      const value = params.credentialStore.get(name);
-      if (value) {
-        await params.containerHandle.deliverCredential(name, value);
+    const skillRequiredCreds = params.skill?.policy?.requiredCredentials;
+
+    if (skillRequiredCreds && skillRequiredCreds.length > 0) {
+      // Filtered delivery: only required credentials
+      for (const name of skillRequiredCreds) {
+        // Check skill-stored credentials first, then user env vars
+        const skillValue = params.skill?.policy?.credentialValues?.[name];
+        const value = skillValue ?? params.credentialStore.get(name);
+        if (value) {
+          await params.containerHandle.deliverCredential(credentialToRuntimeKey(name), value);
+          // Add to redaction array for output masking
+          if (value.length >= 8) {
+            credentialValues.push(value);
+          }
+        }
+      }
+    } else {
+      // Backward compat: deliver all credentials from CredentialStore
+      for (const name of params.credentialStore.list()) {
+        const value = params.credentialStore.get(name);
+        if (value) {
+          await params.containerHandle.deliverCredential(credentialToRuntimeKey(name), value);
+        }
       }
     }
   }
@@ -271,7 +306,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       throw new Error('LLM response is undefined after retries');
     }
     const contentPreview = llmResponse.content
-      ? redactCredentials(llmResponse.content.slice(0, 200)).replace(/\n/g, ' ')
+      ? redactCredentials(llmResponse.content.slice(0, 2000)).replace(/\n/g, ' ')
       : '(none)';
     childLogger.debug(
       {
@@ -381,7 +416,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
             workspace,
             params.skillsDir,
             run.id,
-            childLogger
+            childLogger,
+            run.pendingCredentials
           );
           if (extractionResult.created.length > 0 || extractionResult.updated.length > 0) {
             installedSkills = extractionResult;
@@ -502,7 +538,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       }
 
       childLogger.debug({ tool: toolName, args: toolArgs }, 'Executing tool');
-      const argsSummary = redactCredentials(JSON.stringify(toolArgs)).slice(0, 200);
+      const argsSummary = redactCredentials(JSON.stringify(toolArgs)).slice(0, 2000);
       await taskLog?.log(`  TOOL ${toolName}(${argsSummary})`);
 
       // Validate tool arguments against schema
@@ -590,8 +626,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         toolArgs = validation.data; // Use coerced args
       }
 
-      // Validate tool is in granted tools (skip synthetic tools: ask_user, request_approval)
-      const syntheticTools = ['ask_user', 'request_approval'];
+      // Validate tool is in granted tools (skip synthetic tools: ask_user, request_approval, save_credential)
+      const syntheticTools = ['ask_user', 'request_approval', 'save_credential'];
       if (!syntheticTools.includes(toolName) && !run.tools.includes(toolName as MotorTool)) {
         const toolMessage: Message = {
           role: 'tool',
@@ -703,6 +739,237 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
         awaitingInput = true;
         break; // Stop processing tools
+      }
+
+      // Handle save_credential — persist a credential obtained during the run (e.g. signup API key)
+      if (toolName === 'save_credential') {
+        const credName = typeof toolArgs['name'] === 'string' ? toolArgs['name'] : '';
+        const credValue = typeof toolArgs['value'] === 'string' ? toolArgs['value'] : '';
+        const startTime = Date.now();
+
+        if (!credName || !credValue) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output: 'Missing required fields: name and value.',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: 'save_credential',
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: 'Missing required fields: name and value.',
+              errorCode: 'invalid_args',
+              retryable: true,
+              provenance: 'internal',
+              durationMs: Date.now() - startTime,
+            },
+            durationMs: Date.now() - startTime,
+          });
+          continue;
+        }
+        if (!/^[a-zA-Z0-9_]+$/.test(credName)) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output: 'Invalid name format. Use alphanumeric characters and underscores only.',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: 'save_credential',
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: 'Invalid name format. Use alphanumeric characters and underscores only.',
+              errorCode: 'invalid_args',
+              retryable: true,
+              provenance: 'internal',
+              durationMs: Date.now() - startTime,
+            },
+            durationMs: Date.now() - startTime,
+          });
+          continue;
+        }
+
+        // Scope enforcement: skill runs must declare requiredCredentials
+        const requiredCreds = params.skill?.policy?.requiredCredentials;
+        if (params.skill && (!requiredCreds || requiredCreds.length === 0)) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output:
+                'Skill must declare requiredCredentials in policy.json to save credentials. Add the credential name to requiredCredentials first.',
+              error: 'permission_denied',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: 'save_credential',
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: 'Skill must declare requiredCredentials in policy.json to save credentials.',
+              errorCode: 'permission_denied',
+              retryable: false,
+              provenance: 'internal',
+              durationMs: Date.now() - startTime,
+            },
+            durationMs: Date.now() - startTime,
+          });
+          continue;
+        }
+
+        // Scope enforcement: only allow names in requiredCredentials list
+        if (params.skill && requiredCreds && !requiredCreds.includes(credName)) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output: `Credential "${credName}" not in skill's requiredCredentials. Allowed: ${requiredCreds.join(', ')}`,
+              error: 'permission_denied',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: 'save_credential',
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: `Credential "${credName}" not in skill's requiredCredentials. Allowed: ${requiredCreds.join(', ')}`,
+              errorCode: 'permission_denied',
+              retryable: false,
+              provenance: 'internal',
+              durationMs: Date.now() - startTime,
+            },
+            durationMs: Date.now() - startTime,
+          });
+          continue;
+        }
+
+        // Persist to policy.json for existing skills, or pendingCredentials for new skills
+        let persistError: string | null = null;
+        const runtimeKey = credentialToRuntimeKey(credName);
+
+        if (params.skill?.path) {
+          // Existing skill: persist to policy.json
+          const policyPath = join(params.skill.path, 'policy.json');
+          try {
+            let existingPolicy: Record<string, unknown> = {};
+            try {
+              const raw = await readFile(policyPath, 'utf-8');
+              existingPolicy = JSON.parse(raw) as Record<string, unknown>;
+            } catch {
+              // No existing policy — will create one
+            }
+
+            const credentialValues: Record<string, string> =
+              (existingPolicy['credentialValues'] as Record<string, string> | undefined) ?? {};
+            credentialValues[credName] = credValue;
+
+            const updatedPolicy = { ...existingPolicy, credentialValues };
+            const tmpPath = join(params.skill.path, `.policy.json.tmp-${run.id}`);
+            await writeFile(tmpPath, JSON.stringify(updatedPolicy, null, 2), {
+              mode: 0o600, // Secure: only owner can read/write
+            });
+            // Atomic rename
+            const { rename } = await import('node:fs/promises');
+            await rename(tmpPath, policyPath);
+
+            childLogger.info(
+              { name: credName, skillPath: params.skill.path },
+              'Credential persisted to skill policy.json'
+            );
+          } catch (err) {
+            persistError = `Failed to persist credential: ${err instanceof Error ? err.message : String(err)}`;
+            childLogger.warn(
+              { name: credName, error: persistError },
+              'Failed to persist credential to policy.json'
+            );
+          }
+        } else {
+          // New skill (no skill dir yet): store in pendingCredentials on run
+          run.pendingCredentials = run.pendingCredentials ?? {};
+          run.pendingCredentials[credName] = credValue;
+          childLogger.info(
+            { name: credName },
+            'Credential stored in pendingCredentials for new skill'
+          );
+        }
+
+        if (persistError) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({
+              ok: false,
+              output: persistError,
+              error: 'execution_error',
+            }),
+            tool_call_id: toolCall.id,
+          });
+          step.toolCalls.push({
+            tool: 'save_credential',
+            args: toolArgs,
+            result: {
+              ok: false,
+              output: persistError,
+              errorCode: 'execution_error',
+              retryable: true,
+              provenance: 'internal',
+              durationMs: Date.now() - startTime,
+            },
+            durationMs: Date.now() - startTime,
+          });
+          continue;
+        }
+
+        // Best-effort delivery to container (fire-and-forget)
+        if (params.containerHandle) {
+          try {
+            await params.containerHandle.deliverCredential(runtimeKey, credValue);
+          } catch {
+            // Ignore delivery errors — credential is persisted for future runs
+          }
+        }
+
+        // Add to redaction array for output masking
+        if (credValue.length >= 8) {
+          credentialValues.push(credValue);
+        }
+
+        // Also save to in-memory credentialStore for this run
+        if (params.credentialStore) {
+          params.credentialStore.set(credName, credValue);
+        }
+
+        const successMsg = `Credential "${credName}" saved. Available as $${runtimeKey} in this and future runs.`;
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify({
+            ok: true,
+            output: successMsg,
+          }),
+          tool_call_id: toolCall.id,
+        });
+        step.toolCalls.push({
+          tool: 'save_credential',
+          args: toolArgs,
+          result: {
+            ok: true,
+            output: successMsg,
+            retryable: false,
+            provenance: 'internal',
+            durationMs: Date.now() - startTime,
+          },
+          durationMs: Date.now() - startTime,
+        });
+        await taskLog?.log(`    → Credential "${credName}" saved`);
+        continue;
       }
 
       // Resolve credential placeholders in tool args (AFTER state persistence, BEFORE execution)
@@ -887,10 +1154,56 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       };
       messages.push(toolMessage);
 
-      const resultPreview = redactCredentials(toolResult.output.slice(0, 300)).replace(/\n/g, ' ');
+      const resultPreview = redactCredentials(toolResult.output.slice(0, 2000)).replace(/\n/g, ' ');
       await taskLog?.log(
         `    → ${toolResult.ok ? 'OK' : 'FAIL'} (${String(toolResult.durationMs)}ms): ${resultPreview}`
       );
+
+      // Auto-pause on domain blocks — don't rely on weak models to call ask_user.
+      // Extract blocked domain from the error and auto-trigger ask_user.
+      if (
+        !toolResult.ok &&
+        toolResult.errorCode === 'permission_denied' &&
+        toolResult.output.startsWith('BLOCKED: Domain ')
+      ) {
+        const domainMatch = /^BLOCKED: Domain (\S+)/.exec(toolResult.output);
+        const blockedDomain = domainMatch?.[1] ?? 'unknown';
+        const question = `The task needs access to domain "${blockedDomain}" which is not in the allowed list. Grant access?`;
+
+        childLogger.info({ blockedDomain }, 'Auto-pausing for domain access request');
+        await taskLog?.log(`    → AUTO ask_user: ${question}`);
+
+        attempt.status = 'awaiting_input';
+        attempt.pendingQuestion = question;
+        attempt.pendingToolCallId = toolCall.id;
+        attempt.stepCursor = i;
+        attempt.messages = messages;
+        attempt.trace.steps.push(step);
+        attempt.trace.totalIterations = i;
+
+        run.status = 'awaiting_input';
+        await stateManager.updateRun(run);
+
+        pushSignal(
+          createSignal(
+            'motor_result',
+            'motor.cortex',
+            { value: 1, confidence: 1 },
+            {
+              data: {
+                kind: 'motor_result',
+                runId: run.id,
+                status: 'awaiting_input',
+                attemptIndex: attempt.index,
+                question,
+              },
+            }
+          )
+        );
+
+        awaitingInput = true;
+        break;
+      }
 
       childLogger.debug(
         { tool: toolName, ok: toolResult.ok, durationMs: toolResult.durationMs },
@@ -1075,6 +1388,8 @@ export function buildMotorSystemPrompt(
     list: '- list: List files and directories (optional recursive mode)',
     glob: '- glob: Find files by glob pattern (e.g., "**/*.ts")',
     ask_user: '- ask_user: Ask the user a question (pauses execution)',
+    save_credential:
+      '- save_credential: Save a credential (e.g. API key from signup) for future runs',
     bash: '- bash: Run commands (node, npm, npx, python, pip, curl, jq, grep, git, etc.). Full async Node.js via "node script.js". Supports pipes.',
     grep: '- grep: Search patterns across files (regex, max 100 matches)',
     patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
@@ -1115,6 +1430,7 @@ Guidelines:
 - Use bash for runtime execution (node scripts, npm install, python, pip) and text processing with pipes
 - Be concise and direct in your responses
 - Report what you did and the result
+- If something is blocked, denied, or fails repeatedly (2+ times), call ask_user to report the problem and ask for guidance. Do NOT silently work around blockers by guessing or fabricating content.
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
 - Credentials are environment variables. Use process.env.NAME in Node scripts, os.environ["NAME"] in Python, $NAME in bash commands and fetch headers. The system resolves $NAME in all tool arguments automatically.
 ${
@@ -1122,10 +1438,10 @@ ${
     ? `
 Allowed network domains:
 ${run.domains.map((d) => `- ${d}`).join('\n')}
-Requests to any other domain will fail. On first failure, immediately call ask_user to request the domain.
-Do NOT retry failed domains. Do NOT fabricate content.
+Requests to any other domain will be BLOCKED.
+CRITICAL: When a domain is blocked, you MUST immediately call ask_user to request access. Do NOT try alternative URLs, do NOT try different domains, do NOT fabricate or guess content. Stop and ask_user FIRST.
 Do NOT run npm install or pip install — registries are not reachable. Pre-installed packages (if any) are already available via require() or import.
-Use curl, fetch, or built-in libraries (urllib, node https) for API calls.`
+For API calls, prefer the fetch tool. In bash/node scripts, use Node's built-in global fetch() (no import needed) or curl.`
     : `
 Network access is disabled. All tasks must be completed using local tools only.
 Do NOT run npm install or pip install — there is no network access. Pre-installed packages (if any) are already available via require() or import.`
@@ -1141,7 +1457,6 @@ You create and maintain Agent Skills — modular, filesystem-based capabilities.
 
 Skill directory structure:
   SKILL.md           — required: frontmatter metadata + step-by-step instructions
-  policy.json        — required: security policy (tools, domains, credentials)
   references/        — optional: API docs, schemas, examples
   scripts/           — optional: helper scripts the instructions reference
 
@@ -1168,28 +1483,16 @@ The frontmatter (name + description) is always loaded at startup so the agent kn
 The body is only loaded when the skill is triggered, so keep it focused and actionable.
 Reference files (references/, scripts/) are loaded on demand — link to them from the instructions.
 
-policy.json format:
-{
-  "schemaVersion": 1,
-  "trust": "approved",
-  "allowedTools": ["bash", "read", "write", "fetch"],
-  "allowedDomains": ["api.example.com"],
-  "requiredCredentials": ["api_key_name"],
-  "provenance": {
-    "source": "https://where-you-found-the-docs",
-    "fetchedAt": "ISO-8601 timestamp"
-  }
-}
+If an official SDK (npm or pip package) exists for the API, ALWAYS prefer it over raw HTTP calls.
+Mention the SDK in SKILL.md with installation instructions: "npm install package-name@x.y.z" or "pip install package-name==x.y.z".
+SKILL.md examples should use the SDK, not raw curl/fetch. Find the latest package version from the API documentation.
 
-Set trust to "approved" when the user explicitly asked you to create or learn this skill.
-Set trust to "needs_reapproval" if you are creating a skill from untrusted or unverified content.
-Always record provenance.source with the URL or reference where you found the information.
+Trust is always "needs_review" for new skills — the user reviews and approves before first use.
 
-Save files at the workspace root (e.g. write({path: "SKILL.md", content: "..."}) and write({path: "policy.json", content: "..."})).
+Save files at the workspace root (e.g. write({path: "SKILL.md", content: "..."})).
 Reference files go in subdirectories: write({path: "references/api-docs.md", content: "..."}).
 These files will be automatically extracted and installed after your run completes.
-Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.
-Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.`
+Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.`
       : ''
   }${
     skill
@@ -1198,8 +1501,13 @@ Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_us
 A skill is available for this task. Read its files before starting work.
 Skill: ${skill.frontmatter.name} — ${skill.frontmatter.description}
 Start by reading SKILL.md: read({path: "SKILL.md"}). Check for reference files too: list({path: "."}).
+${
+  skill.policy?.dependencies
+    ? `IMPORTANT: SKILL.md contains tested, working code examples. Use them EXACTLY as written — copy constructors, method names, and argument shapes from the examples. Do NOT guess or invent API usage. If something fails, re-read SKILL.md and compare your code against the examples before trying alternatives.
+Pre-installed packages are available — use require() or import directly.`
+    : `No SDK packages are pre-installed for this skill. SKILL.md examples may use SDK calls — do NOT copy them directly. Instead, use the fetch tool or Node's built-in global fetch() for raw HTTP API calls. Check the API documentation or reference files for the correct HTTP endpoints, methods, and request formats. Do NOT guess URL paths from SDK method names.`
+}
 You can modify skill files directly in the workspace using write or patch. Changes are automatically extracted and installed after your run completes.
-Pre-installed packages are available — use require() or import directly.
 Do NOT run npm install or pip install — package registries are not reachable at runtime.
 ${
   skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0

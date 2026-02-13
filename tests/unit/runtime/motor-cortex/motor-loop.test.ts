@@ -40,11 +40,9 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).toContain('You create and maintain Agent Skills');
     expect(prompt).toContain('name: skill-name');
     expect(prompt).toContain('description: What this skill does');
-    expect(prompt).toContain('policy.json');
+    // policy.json is no longer in the prompt (excluded from container)
     expect(prompt).toContain('Save files at the workspace root');
-    expect(prompt).toContain(
-      'Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.'
-    );
+    expect(prompt).toContain('Trust is always "needs_review"');
   });
 
   it('does NOT include skill creation instructions when write is not granted', () => {
@@ -52,7 +50,7 @@ describe('buildMotorSystemPrompt', () => {
     const prompt = buildMotorSystemPrompt(run);
 
     expect(prompt).not.toContain('You create and maintain Agent Skills');
-    expect(prompt).not.toContain('policy.json');
+    expect(prompt).not.toContain('SKILL.md format');
   });
 
   it('includes skill reference with workspace root paths when skill is provided', () => {
@@ -96,13 +94,13 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).toContain('Maximum iterations:');
   });
 
-  it('does NOT include search tool in valid tools list', () => {
-    const run = createMockRun(['write', 'bash', 'search']);
+  it('does NOT include search tool in tool descriptions', () => {
+    const run = createMockRun(['write', 'bash']);
     const prompt = buildMotorSystemPrompt(run);
 
-    // search should not appear in the prompt's valid tools list
-    expect(prompt).toContain('Valid tools for allowedTools: read, write, list, glob, bash, grep, patch, ask_user, fetch.');
-    // the word "search" may appear in the context of web search but not as a tool
+    // search tool is not a valid motor tool
     expect(prompt).not.toContain('- search:');
+    // bash should be available
+    expect(prompt).toContain('- bash:');
   });
 });

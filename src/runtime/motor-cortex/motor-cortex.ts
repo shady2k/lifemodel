@@ -18,7 +18,7 @@ import type { MotorRun, MotorTool, RunStatus, MotorAttempt } from './motor-proto
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import type { MotorFetchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
-import { runMotorLoop, buildInitialMessages } from './motor-loop.js';
+import { runMotorLoop, buildInitialMessages, buildMotorSystemPrompt } from './motor-loop.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
@@ -29,7 +29,7 @@ import type { PreparedDeps, SkillDependencies } from '../dependencies/dependency
 import { generateBaseline } from './skill-extraction.js';
 import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
-import { loadSkill } from '../skills/skill-loader.js';
+import { loadSkill, savePolicy } from '../skills/skill-loader.js';
 import { mergeDomains } from '../container/network-policy.js';
 
 /**
@@ -389,6 +389,30 @@ export class MotorCortex {
       const existingDomains = run.domains ?? [];
       const allDomains = [...existingDomains, ...domains];
       run.domains = Array.from(new Set(allDomains));
+
+      // Persist newly granted domains to skill policy (same as respondToRun)
+      if (run.skill && this.skillsDir && skill?.policy) {
+        try {
+          const policyDomains = new Set(skill.policy.allowedDomains ?? []);
+          const newForPolicy = domains.filter((d) => !policyDomains.has(d));
+          if (newForPolicy.length > 0) {
+            const updatedPolicy = {
+              ...skill.policy,
+              allowedDomains: [...Array.from(policyDomains), ...newForPolicy],
+            };
+            await savePolicy(skill.path, updatedPolicy);
+            this.logger.info(
+              { runId, skill: run.skill, addedDomains: newForPolicy },
+              'Persisted new domains to skill policy on retry'
+            );
+          }
+        } catch (err) {
+          this.logger.warn(
+            { runId, skill: run.skill, error: err },
+            'Failed to persist domains to skill policy on retry (non-fatal)'
+          );
+        }
+      }
     }
 
     // Create new attempt with fresh messages but recovery context
@@ -454,7 +478,13 @@ export class MotorCortex {
         if (run.skill && this.skillsDir && !existsSync(baselinePath)) {
           const skillSourceDir = join(this.skillsDir, run.skill);
           try {
-            await cp(skillSourceDir, workspace, { recursive: true });
+            // Copy skill files to workspace, EXCLUDING policy.json
+            // (policy.json is host-side only — Motor sub-agent shouldn't know about it)
+            await cp(skillSourceDir, workspace, {
+              recursive: true,
+              filter: (src: string) =>
+                !src.endsWith('/policy.json') && !src.endsWith('\\policy.json'),
+            });
             const baseline = await generateBaseline(workspace);
             const { writeFile } = await import('node:fs/promises');
             await writeFile(baselinePath, JSON.stringify(baseline, null, 2));
@@ -474,12 +504,13 @@ export class MotorCortex {
       }
 
       // Install skill dependencies (cache-first, prep container on miss)
+      // Read from HOST skill directory (not workspace) since policy.json is excluded from container
       let preparedDeps: PreparedDeps | null = null;
       if (run.skill && this.skillsDir) {
-        const policyPath = join(workspace, 'policy.json');
-        if (existsSync(policyPath)) {
+        const hostPolicyPath = join(this.skillsDir, run.skill, 'policy.json');
+        if (existsSync(hostPolicyPath)) {
           try {
-            const policyRaw = JSON.parse(await readFileAsync(policyPath, 'utf8')) as Record<
+            const policyRaw = JSON.parse(await readFileAsync(hostPolicyPath, 'utf8')) as Record<
               string,
               unknown
             >;
@@ -871,6 +902,68 @@ export class MotorCortex {
         { runId, newDomains: effectiveDomains, mergedDomains: run.domains },
         'Domains expanded on respond'
       );
+
+      // Rebuild system prompt so the model sees the updated domains.
+      // Without this, the system prompt still lists the original domains,
+      // misleading the model even though tools accept the new ones.
+      const systemIdx = attempt.messages.findIndex((m) => m.role === 'system');
+      if (systemIdx >= 0) {
+        let skill: LoadedSkill | undefined;
+        if (run.skill && this.skillsDir) {
+          const skillResult = await loadSkill(run.skill, this.skillsDir);
+          if (!('error' in skillResult)) skill = skillResult;
+        }
+        attempt.messages[systemIdx] = {
+          role: 'system',
+          content: buildMotorSystemPrompt(run, skill, attempt.recoveryContext),
+        };
+      }
+
+      // Destroy the existing container so runLoopInBackground creates a fresh one
+      // with updated --add-host and iptables rules for the new domains.
+      // The container's network policy is frozen at creation time (see network-policy.md).
+      const existingContainer = this.activeContainers.get(runId);
+      if (existingContainer && this.containerManager) {
+        this.activeContainers.delete(runId);
+        try {
+          await this.containerManager.destroy(runId);
+          this.logger.info({ runId }, 'Destroyed container for domain expansion — will recreate');
+        } catch (destroyErr) {
+          this.logger.warn(
+            { runId, error: destroyErr },
+            'Failed to destroy container for domain expansion'
+          );
+        }
+      }
+
+      // Persist newly granted domains back to the skill's policy.json so future
+      // runs don't hit the same wall. policy.json is excluded from content hash,
+      // so this won't invalidate trust (see skill-lifecycle.md Open Question #8).
+      if (run.skill && this.skillsDir) {
+        try {
+          const skillResult = await loadSkill(run.skill, this.skillsDir);
+          if (!('error' in skillResult) && skillResult.policy) {
+            const policyDomains = new Set(skillResult.policy.allowedDomains ?? []);
+            const newForPolicy = effectiveDomains.filter((d) => !policyDomains.has(d));
+            if (newForPolicy.length > 0) {
+              const updatedPolicy = {
+                ...skillResult.policy,
+                allowedDomains: [...Array.from(policyDomains), ...newForPolicy],
+              };
+              await savePolicy(skillResult.path, updatedPolicy);
+              this.logger.info(
+                { runId, skill: run.skill, addedDomains: newForPolicy },
+                'Persisted new domains to skill policy'
+              );
+            }
+          }
+        } catch (err) {
+          this.logger.warn(
+            { runId, skill: run.skill, error: err },
+            'Failed to persist domains to skill policy (non-fatal)'
+          );
+        }
+      }
     }
 
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)

@@ -264,7 +264,7 @@ describe('core.skill tool', () => {
 
     it('errors on invalid action', async () => {
       const result = (await tool.execute({
-        action: 'delete',
+        action: 'invalid_action',
         name: 'test-skill',
       })) as SkillResult;
 
@@ -290,7 +290,7 @@ describe('core.skill tool', () => {
     it('has action parameter with enum', () => {
       const actionParam = tool.parameters.find((p) => p.name === 'action');
       expect(actionParam).toBeDefined();
-      expect(actionParam?.enum).toEqual(['read', 'approve', 'reject']);
+      expect(actionParam?.enum).toEqual(['read', 'approve', 'reject', 'delete']);
     });
   });
 });

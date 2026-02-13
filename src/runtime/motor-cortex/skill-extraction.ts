@@ -61,8 +61,9 @@ export function generateBaseline(dir: string): Promise<MotorBaseline> {
 
 /**
  * Skill file allowlist for baseline generation and extraction.
+ * policy.json is excluded — it's host-side only, managed by cognition layer.
  */
-const SKILL_FILE_ALLOWLIST = ['SKILL.md', 'policy.json', 'references/**', 'scripts/**'];
+const SKILL_FILE_ALLOWLIST = ['SKILL.md', 'references/**', 'scripts/**'];
 
 /**
  * Denylist of paths to never include in skill baseline or extraction.
@@ -237,7 +238,8 @@ async function extractSingleSkill(
   skillsDir: string,
   skillName: string,
   runId: string,
-  logger: Logger
+  logger: Logger,
+  pendingCredentials?: Record<string, string>
 ): Promise<{ extracted: boolean; isUpdate: boolean }> {
   const skillMdPath = join(workspace, 'SKILL.md');
 
@@ -332,7 +334,40 @@ async function extractSingleSkill(
       throw new Error(`Total size exceeds limit (${String(MAX_TOTAL_SIZE)} bytes)`);
     }
 
-    // Step 7: Atomic install
+    // Step 7: Read existing policy BEFORE atomic rename (to preserve credentialValues)
+    // This is critical - after rename, targetDir contains new files, not old ones
+    let existingCredentialValues: Record<string, string> | undefined;
+    let existingPolicyForMerge: Record<string, unknown> | null = null;
+    if (isUpdate) {
+      try {
+        const existingPolicyPath = join(targetDir, 'policy.json');
+        const existing = await readFile(existingPolicyPath, 'utf-8');
+        const parsed = JSON.parse(existing) as Record<string, unknown>;
+        if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Preserve credentialValues
+          if (parsed['credentialValues'] && typeof parsed['credentialValues'] === 'object') {
+            existingCredentialValues = parsed['credentialValues'] as Record<string, string>;
+          }
+          // Preserve other fields for fallback
+          const { provenance, credentialValues: _credentialValues, ...restOfParsed } = parsed;
+          const hasValidProvenance =
+            provenance &&
+            typeof provenance === 'object' &&
+            'source' in provenance &&
+            typeof provenance.source === 'string' &&
+            'fetchedAt' in provenance &&
+            typeof provenance.fetchedAt === 'string';
+          existingPolicyForMerge = {
+            ...restOfParsed,
+            provenance: hasValidProvenance ? (provenance as SkillPolicy['provenance']) : undefined,
+          };
+        }
+      } catch {
+        // No valid existing policy
+      }
+    }
+
+    // Step 8: Atomic install
     if (isUpdate) {
       await rename(targetDir, backupDir);
     }
@@ -343,7 +378,9 @@ async function extractSingleSkill(
       await rm(backupDir, { recursive: true, force: true });
     }
 
-    // Step 8: Merge and update policy
+    // Step 9: Merge and update policy
+    // Note: policy.json is NOT in the workspace (excluded from container)
+    // So motorPolicy will always be null - we build from scratch using existing + pending
     const policyPath = join(targetDir, 'policy.json');
     let motorPolicy: Record<string, unknown> | null = null;
 
@@ -354,32 +391,7 @@ async function extractSingleSkill(
         motorPolicy = null;
       }
     } catch {
-      // No valid policy from Motor
-    }
-
-    // Read existing policy for merge (update only)
-    let existingPolicy: Record<string, unknown> | null = null;
-    if (isUpdate) {
-      try {
-        const existing = await readFile(join(targetDir, 'policy.json'), 'utf-8');
-        const parsed = JSON.parse(existing) as Record<string, unknown>;
-        if (typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const { provenance, ...restOfParsed } = parsed;
-          const hasValidProvenance =
-            provenance &&
-            typeof provenance === 'object' &&
-            'source' in provenance &&
-            typeof provenance.source === 'string' &&
-            'fetchedAt' in provenance &&
-            typeof provenance.fetchedAt === 'string';
-          existingPolicy = {
-            ...restOfParsed,
-            provenance: hasValidProvenance ? (provenance as SkillPolicy['provenance']) : undefined,
-          };
-        }
-      } catch {
-        // No valid existing policy
-      }
+      // No valid policy from workspace (expected - policy.json excluded)
     }
 
     // Compute content hash
@@ -399,8 +411,8 @@ async function extractSingleSkill(
         fetchedAt: motorProvenance['fetchedAt'] as string,
         contentHash,
       };
-    } else if (existingPolicy) {
-      const fallbackProvenance = existingPolicy['provenance'] as
+    } else if (existingPolicyForMerge) {
+      const fallbackProvenance = existingPolicyForMerge['provenance'] as
         | Record<string, unknown>
         | undefined;
       if (
@@ -422,12 +434,20 @@ async function extractSingleSkill(
     const motorRequiredCredentials = motorPolicy?.['requiredCredentials'] as string[] | undefined;
     const motorInputs = motorPolicy?.['inputs'] as SkillInput[] | undefined;
 
-    const fallbackTools = existingPolicy?.['allowedTools'] as string[] | undefined;
-    const fallbackDomains = existingPolicy?.['allowedDomains'] as string[] | undefined;
-    const fallbackCredentials = existingPolicy?.['requiredCredentials'] as string[] | undefined;
-    const fallbackInputs = existingPolicy?.['inputs'] as SkillInput[] | undefined;
+    const fallbackTools = existingPolicyForMerge?.['allowedTools'] as string[] | undefined;
+    const fallbackDomains = existingPolicyForMerge?.['allowedDomains'] as string[] | undefined;
+    const fallbackCredentials = existingPolicyForMerge?.['requiredCredentials'] as
+      | string[]
+      | undefined;
+    const fallbackInputs = existingPolicyForMerge?.['inputs'] as SkillInput[] | undefined;
 
-    const newPolicy = {
+    // Merge credentialValues: existing + pending (pending takes precedence)
+    const mergedCredentialValues: Record<string, string> = {
+      ...(existingCredentialValues ?? {}),
+      ...(pendingCredentials ?? {}),
+    };
+
+    const newPolicy: SkillPolicy = {
       schemaVersion: 1,
       trust: 'pending_review' as const,
       allowedTools: (motorAllowedTools ?? fallbackTools ?? []) as MotorTool[],
@@ -435,6 +455,9 @@ async function extractSingleSkill(
       requiredCredentials: motorRequiredCredentials ?? fallbackCredentials,
       inputs: motorInputs ?? fallbackInputs,
       ...(effectiveProvenance && { provenance: effectiveProvenance }),
+      ...(Object.keys(mergedCredentialValues).length > 0 && {
+        credentialValues: mergedCredentialValues,
+      }),
       extractedFrom: {
         runId,
         timestamp: new Date().toISOString(),
@@ -480,7 +503,8 @@ export async function extractSkillsFromWorkspace(
   workspace: string,
   skillsDir: string,
   runId: string,
-  logger: Logger
+  logger: Logger,
+  pendingCredentials?: Record<string, string>
 ): Promise<{ created: string[]; updated: string[] }> {
   const created: string[] = [];
   const updated: string[] = [];
@@ -532,7 +556,8 @@ export async function extractSkillsFromWorkspace(
       skillsDir,
       skillName,
       runId,
-      logger
+      logger,
+      pendingCredentials
     );
 
     if (result.extracted) {

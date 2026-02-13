@@ -98,8 +98,9 @@ describe('skill-extraction', () => {
   });
 
   describe('new skill creation (no baseline)', () => {
-    it('extracts new skill with SKILL.md at workspace root', async () => {
+    it('extracts new skill with SKILL.md at workspace root (workspace policy.json ignored)', async () => {
       await writeSkillMd('weather', 'Fetch weather data from wttr.in');
+      // Note: policy.json in workspace is now ignored (excluded from allowlist)
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
@@ -120,8 +121,9 @@ describe('skill-extraction', () => {
 
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
-      expect(policy.allowedDomains).toEqual(['wttr.in']);
-      expect(policy.provenance.source).toBe('https://wttr.in');
+      // Workspace policy.json is ignored, so these fields are not set
+      expect(policy.allowedDomains).toBeUndefined();
+      expect(policy.provenance).toBeUndefined();
       expect(policy.extractedFrom.runId).toBe(runId);
     });
 
@@ -270,10 +272,11 @@ describe('skill-extraction', () => {
   });
 
   describe('content hash', () => {
-    it('computes hash over installed directory', async () => {
+    it('computes hash over installed directory (workspace policy.json ignored)', async () => {
       await writeSkillMd('hashed', 'Hash test');
       await mkdir(join(workspace, 'scripts'), { recursive: true });
       await writeFile(join(workspace, 'scripts', 'run.sh'), 'echo test', 'utf-8');
+      // Note: workspace policy.json is ignored, so no provenance/contentHash
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
@@ -285,10 +288,12 @@ describe('skill-extraction', () => {
 
       const installedDir = join(skillsDir, 'hashed');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      expect(policy.provenance.contentHash).toMatch(/^sha256:/);
+      // No provenance since workspace policy.json is ignored
+      expect(policy.provenance).toBeUndefined();
 
+      // Verify directory hash can still be computed
       const directHash = await computeDirectoryHash(installedDir);
-      expect(policy.provenance.contentHash).toBe(directHash);
+      expect(directHash).toMatch(/^sha256:/);
     });
   });
 
@@ -306,8 +311,9 @@ describe('skill-extraction', () => {
   });
 
   describe('Motor provenance', () => {
-    it('preserves valid Motor provenance', async () => {
+    it('workspace policy.json is ignored (no provenance preserved)', async () => {
       await writeSkillMd('provenance', 'Provenance test');
+      // Note: workspace policy.json is now ignored (excluded from allowlist)
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
@@ -322,9 +328,9 @@ describe('skill-extraction', () => {
 
       const installedDir = join(skillsDir, 'provenance');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      expect(policy.provenance.source).toBe('https://example.com/docs');
-      expect(policy.provenance.fetchedAt).toBe('2024-01-01T00:00:00Z');
-      expect(policy.provenance.contentHash).toBeDefined();
+      // No provenance since workspace policy.json is ignored
+      expect(policy.provenance).toBeUndefined();
+      expect(policy.allowedTools).toEqual([]);
     });
   });
 
@@ -356,6 +362,110 @@ describe('skill-extraction', () => {
     });
   });
 
+  describe('credential persistence through extraction', () => {
+    it('preserves existing credentialValues when updating a skill', async () => {
+      // Pre-install skill with credentials in policy
+      const installedDir = join(skillsDir, 'with-creds');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: with-creds\ndescription: Has credentials\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedTools: ['bash'],
+          requiredCredentials: ['api_key'],
+          credentialValues: { api_key: 'sk-live-secret-12345' },
+        }),
+        'utf-8'
+      );
+
+      // Write updated SKILL.md (triggers extraction)
+      await writeSkillMd('with-creds', 'Has credentials', '# Updated instructions');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['with-creds']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.trust).toBe('pending_review'); // Trust always reset
+      expect(policy.credentialValues).toEqual({ api_key: 'sk-live-secret-12345' }); // Preserved!
+    });
+
+    it('merges pendingCredentials into new skill policy', async () => {
+      await writeSkillMd('new-skill', 'Brand new skill');
+
+      const pendingCredentials = { signup_key: 'pk-test-abc123' };
+      const result = await extractSkillsFromWorkspace(
+        workspace,
+        skillsDir,
+        runId,
+        mockLogger,
+        pendingCredentials
+      );
+      expect(result.created).toEqual(['new-skill']);
+
+      const installedDir = join(skillsDir, 'new-skill');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.credentialValues).toEqual({ signup_key: 'pk-test-abc123' });
+    });
+
+    it('merges pendingCredentials with existing credentialValues (pending wins)', async () => {
+      // Pre-install skill with existing credential
+      const installedDir = join(skillsDir, 'merge-test');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: merge-test\ndescription: Merge test\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedTools: [],
+          credentialValues: { old_key: 'old-value', shared_key: 'old-shared' },
+        }),
+        'utf-8'
+      );
+
+      // Update skill with new pending credentials
+      await writeSkillMd('merge-test', 'Merge test', '# Updated');
+
+      const pendingCredentials = { shared_key: 'new-shared', new_key: 'new-value' };
+      const result = await extractSkillsFromWorkspace(
+        workspace,
+        skillsDir,
+        runId,
+        mockLogger,
+        pendingCredentials
+      );
+      expect(result.updated).toEqual(['merge-test']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.credentialValues).toEqual({
+        old_key: 'old-value', // Preserved from existing
+        shared_key: 'new-shared', // Pending wins over existing
+        new_key: 'new-value', // New from pending
+      });
+    });
+
+    it('omits credentialValues when none exist and no pending', async () => {
+      await writeSkillMd('no-creds', 'No credentials');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['no-creds']);
+
+      const installedDir = join(skillsDir, 'no-creds');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.credentialValues).toBeUndefined();
+    });
+  });
+
   describe('existing skill update', () => {
     it('marks existing skill as updated', async () => {
       // Pre-install old version
@@ -379,7 +489,7 @@ describe('skill-extraction', () => {
       expect(updatedContent).toContain('Updated version');
     });
 
-    it('Motor-written policy takes precedence over existing policy on update', async () => {
+    it('preserves existing policy values on update (policy.json excluded from workspace)', async () => {
       // Pre-install with old policy
       const installedDir = join(skillsDir, 'motor-wins');
       await mkdir(installedDir, { recursive: true });
@@ -396,6 +506,7 @@ describe('skill-extraction', () => {
 
       // Write updated version at workspace root
       await writeSkillMd('motor-wins', 'Updated version', '# Updated');
+      // Note: policy.json in workspace is now ignored (not in allowlist)
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
@@ -408,8 +519,9 @@ describe('skill-extraction', () => {
 
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
-      expect(policy.allowedTools).toEqual(['fetch']);
-      expect(policy.allowedDomains).toEqual(['new.example.com']);
+      // Existing policy values are preserved since workspace policy.json is excluded
+      expect(policy.allowedTools).toEqual(['bash']);
+      expect(policy.allowedDomains).toEqual(['old.example.com']);
     });
   });
 });

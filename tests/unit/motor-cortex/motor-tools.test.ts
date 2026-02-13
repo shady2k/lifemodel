@@ -554,9 +554,9 @@ describe('fetch tool', () => {
     expect(result.output).toContain('Fetch not configured');
   });
 
-  it('truncates response to 10KB', async () => {
+  it('truncates response to 30KB', async () => {
     ctx.allowedDomains = ['example.com'];
-    const longContent = 'x'.repeat(15 * 1024); // 15KB
+    const longContent = 'x'.repeat(50 * 1024); // 50KB
     ctx.fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -566,7 +566,7 @@ describe('fetch tool', () => {
 
     const result = await executeTool('fetch', { url: 'https://example.com/data' }, ctx);
     expect(result.ok).toBe(true);
-    expect(result.output.length).toBeLessThanOrEqual(10 * 1024 + 100); // +100 for truncation message
+    expect(result.output.length).toBeLessThanOrEqual(30 * 1024 + 100); // +100 for truncation message
     expect(result.output).toContain('response truncated');
   });
 

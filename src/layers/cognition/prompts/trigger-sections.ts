@@ -316,6 +316,7 @@ Do NOT create a new core.act run for the same task. Use retry to continue the ex
       return `<trigger type="motor_awaiting_input">
 <context>Task run ${runId} needs user input: "${question}"</context>
 <task>
+IMPORTANT: The user has NOT seen this question yet. Any prior "yes"/"no"/"Да" in the conversation history above is for a DIFFERENT question — do NOT reuse it.
 You MUST ask the user this question and WAIT for their answer. Do NOT auto-approve or answer on behalf of the user.
 1. Send the question to the user in your response (rephrase naturally).
 2. STOP — do not call core.task.respond yet. Wait for the user to reply in a follow-up message.

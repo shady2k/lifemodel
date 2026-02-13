@@ -5,6 +5,7 @@
  * - read: inspect skill content (frontmatter, body, policy, trust)
  * - approve: approve a pending/needs_reapproval skill for Motor Cortex execution
  * - reject: reset trust to needs_reapproval
+ * - delete: permanently remove a skill directory
  *
  * Replaces the old core.approveSkill tool, following the same merge pattern
  * used for core.task (formerly core.tasks).
@@ -12,12 +13,14 @@
 
 import type { Tool, ToolParameter } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
+import { rm } from 'node:fs/promises';
 import {
   loadSkill,
   savePolicy,
   computeDirectoryHash,
 } from '../../../../runtime/skills/skill-loader.js';
 import type { SkillPolicy } from '../../../../runtime/skills/skill-types.js';
+import { sanitizePolicyForDisplay } from '../../../../runtime/skills/skill-types.js';
 
 /**
  * Result from core.skill tool execution.
@@ -56,8 +59,8 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       type: 'string',
       required: true,
       description:
-        'Action to perform: read (inspect skill content), approve (approve for execution), reject (reset trust to needs_reapproval)',
-      enum: ['read', 'approve', 'reject'],
+        'Action to perform: read (inspect skill content), approve (approve for execution), reject (reset trust to needs_reapproval), delete (permanently remove skill)',
+      enum: ['read', 'approve', 'reject', 'delete'],
     },
     {
       name: 'name',
@@ -71,7 +74,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content or approve/reject a skill for execution. Use action=read to inspect a skill's instructions and policy. Use action=approve or reject to change trust state.",
+      "Read skill content, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
@@ -80,10 +83,10 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       const action = args['action'] as string | undefined;
       const skillName = args['name'] as string | undefined;
 
-      if (!action || !['read', 'approve', 'reject'].includes(action)) {
+      if (!action || !['read', 'approve', 'reject', 'delete'].includes(action)) {
         return {
           success: false,
-          error: 'Missing or invalid parameter: action (must be read, approve, or reject)',
+          error: 'Missing or invalid parameter: action (must be read, approve, reject, or delete)',
         };
       }
       if (!skillName || typeof skillName !== 'string') {
@@ -104,8 +107,21 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
           frontmatter: loaded.frontmatter as unknown as Record<string, unknown>,
           trust: loaded.policy?.trust ?? 'no_policy',
           body: loaded.body,
-          policy: loaded.policy,
+          policy: loaded.policy ? sanitizePolicyForDisplay(loaded.policy) : undefined,
         };
+      }
+
+      // --- delete ---
+      if (action === 'delete') {
+        try {
+          await rm(loaded.path, { recursive: true, force: true });
+          return { success: true, skill: skillName };
+        } catch (err) {
+          return {
+            success: false,
+            error: `Failed to delete skill "${skillName}": ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
       }
 
       // --- approve / reject ---

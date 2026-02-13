@@ -208,6 +208,31 @@ export const SYNTHETIC_TOOL_DEFINITIONS = {
       },
     },
   },
+  save_credential: {
+    type: 'function',
+    function: {
+      name: 'save_credential',
+      description:
+        'Save a credential (e.g. API key obtained during signup) for future use. ' +
+        'The credential is stored securely and available as an env var in future runs. ' +
+        'Use this after signing up for a service that returns an API key.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description:
+              'Credential name (alphanumeric + underscores). Will be available as $NAME env var.',
+          },
+          value: {
+            type: 'string',
+            description: 'Credential value (e.g. API key). Never logged or returned.',
+          },
+        },
+        required: ['name', 'value'],
+      },
+    },
+  },
 } satisfies Record<string, OpenAIChatTool>;
 
 /**
@@ -1127,8 +1152,8 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
         ...(body && { body }),
       });
 
-      // Truncate response to 10KB
-      const maxLength = 10 * 1024;
+      // Truncate response to 30KB (enough for API docs with OpenAPI specs + SDK examples)
+      const maxLength = 30 * 1024;
       const truncated =
         result.content.length > maxLength
           ? result.content.slice(0, maxLength) +

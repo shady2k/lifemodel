@@ -564,9 +564,27 @@ Scoped file operations within a temporary workspace:
 
 A general-purpose secret storage for passwords, API keys, and tokens used by Motor Cortex tasks.
 
+### Two Credential Sources
+
+1. **User credentials** → `.env` file as `VAULT_*` env vars (e.g. `VAULT_API_KEY`). Managed by user via `core.credential` tool. `credentialToStoreKey()` maps names to env vars.
+
+2. **Skill-acquired credentials** → stored in the skill's `policy.json` under `credentialValues` field. Motor's `save_credential` tool persists here. Survives restarts. Redacted via `sanitizePolicyForDisplay()` in all read paths (core.skill, logs).
+
+**Delivery priority at container start:** For each name in `requiredCredentials`:
+1. Check `skill.policy.credentialValues[name]` first (skill-stored)
+2. Fall back to `credentialStore.get(name)` (user env vars)
+3. Deliver to container as `credentialToRuntimeKey(name)` (plain `NAME`, no `VAULT_` prefix)
+
+**Scope enforcement for `save_credential`:**
+- Skill runs must declare `requiredCredentials` — empty/absent = denied
+- Credential name must be in the `requiredCredentials` list
+- Non-skill runs are unconstrained (direct motor runs have no policy)
+
+**First-time skill creation:** When the skill directory doesn't exist yet (new skill), `save_credential` stores in a run-scoped `pendingCredentials` map. Extraction merges these into the new policy.json when installing the skill.
+
 ### Phase 1: Environment Variables
 
-No vault infrastructure. Tasks that need credentials read from `process.env` — same pattern as all other secrets in the system (`OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`). Suitable for Phase 1 since code+shell tasks rarely need web credentials.
+Tasks that need credentials read from `process.env` via `VAULT_<NAME>` env vars — same pattern as all other secrets in the system (`OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`).
 
 ### Phase 2: Encrypted Credential Store
 
@@ -645,6 +663,9 @@ Only `name` and `description` are required per the standard. Additional fields (
   "allowedTools": ["shell", "code"],
   "allowedDomains": ["api.agentmail.to"],
   "requiredCredentials": ["agentmail_api_key"],
+  "credentialValues": {
+    "agentmail_api_key": "sk-live-..."
+  },
   "provenance": {
     "source": "https://skills.sh/agentmail-to/agentmail-skills/agentmail",
     "fetchedAt": "2026-02-10T12:00:00Z",
@@ -654,6 +675,8 @@ Only `name` and `description` are required per the standard. Additional fields (
   "approvedAt": "2026-02-10T12:05:00Z"
 }
 ```
+
+**Note:** `credentialValues` contains skill-acquired secrets (e.g. API keys obtained during signup). These are redacted to `"[set]"` by `sanitizePolicyForDisplay()` in all read paths. `policy.json` is written with mode `0o600` (owner read/write only) for security.
 
 **Key properties:**
 - **Optional** — skills work without a policy (onboarding generates it on first use)
@@ -687,6 +710,7 @@ Avoids directory scanning for fast skill discovery. Updated atomically on skill 
 | `allowedTools` | Motor tools this skill may use (`code`, `shell`, `filesystem`, etc.) |
 | `allowedDomains` | Network domains for iptables enforcement |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
+| `credentialValues` | Skill-acquired credentials (e.g. API keys from signup). Persisted for restart survival. Redacted via `sanitizePolicyForDisplay()` in all read paths |
 | `dependencies` | npm/pip packages pre-installed before container starts (Phase 4) |
 | `inputs` | Typed parameters — validated before starting the LLM loop |
 | `provenance` | Source URL, fetch time, content hash for integrity verification |

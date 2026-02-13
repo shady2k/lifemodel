@@ -7,6 +7,8 @@ import {
   createEnvCredentialStore,
   resolveCredentials,
   hasCredentialPlaceholders,
+  credentialToStoreKey,
+  credentialToRuntimeKey,
 } from '../../../src/runtime/vault/credential-store.js';
 
 describe('createEnvCredentialStore', () => {
@@ -139,6 +141,36 @@ describe('resolveCredentials', () => {
       store
     );
     expect(resolved).toBe('sk-secret-123 and sk-secret-123');
+  });
+});
+
+describe('credentialToStoreKey', () => {
+  it('maps credential name to VAULT_ env var', () => {
+    expect(credentialToStoreKey('api_key')).toBe('VAULT_API_KEY');
+  });
+
+  it('uppercases the name', () => {
+    expect(credentialToStoreKey('mySecret')).toBe('VAULT_MYSECRET');
+  });
+
+  it('handles already-uppercase names', () => {
+    expect(credentialToStoreKey('TOKEN')).toBe('VAULT_TOKEN');
+  });
+});
+
+describe('credentialToRuntimeKey', () => {
+  it('maps credential name to plain uppercase env var', () => {
+    expect(credentialToRuntimeKey('api_key')).toBe('API_KEY');
+  });
+
+  it('uppercases mixed-case names', () => {
+    expect(credentialToRuntimeKey('mySecret')).toBe('MYSECRET');
+  });
+
+  it('no VAULT_ prefix (container uses plain names)', () => {
+    const key = credentialToRuntimeKey('token');
+    expect(key).toBe('TOKEN');
+    expect(key).not.toContain('VAULT');
   });
 });
 

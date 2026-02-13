@@ -342,4 +342,8 @@ export interface MotorRun {
 
   /** Allowed network domains for this run (merged from skill + explicit) */
   domains?: string[];
+
+  /** Credentials saved by save_credential before skill directory exists.
+   *  Merged into policy.json during extraction. */
+  pendingCredentials?: Record<string, string>;
 }

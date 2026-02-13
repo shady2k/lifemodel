@@ -78,14 +78,16 @@ User: "I came across AgentMail, learn how to work with it"
    - Analyze API structure, endpoints, auth requirements
    - Write to workspace root:
        SKILL.md                         (instructions)
-       policy.json                      (tools: bash+read+write+fetch, domains: api.agentmail.to)
        references/api-docs.md           (full API reference)
        scripts/                         (helper scripts if needed)
+   - Note: Motor does NOT create policy.json — it's host-side only,
+     generated during extraction with trust: "pending_review"
    - Complete with summary of what was created
 
 3. POST-RUN EXTRACTION (automatic, baseline-diff)
    - Read .motor-baseline.json from workspace (generated at init)
-   - Scan workspace for current skill files (SKILL.md, policy.json, references/**, scripts/**)
+   - Scan workspace for current skill files (SKILL.md, references/**, scripts/**)
+     (policy.json is excluded — it's host-side only)
    - Three-way diff against baseline:
      a. CHANGED: file in baseline with different hash → extract
      b. ADDED: file in current but not in baseline → extract
@@ -95,9 +97,11 @@ User: "I came across AgentMail, learn how to work with it"
      a. Validate SKILL.md: parse frontmatter, check name+description exist
      b. Validate policy.json if present: check schema
      c. Sanitize skill name: lowercase, no path traversal
-     d. FORCE trust to "pending_review" (ignore what Motor wrote)
-     e. Atomic copy to data/skills/<name>/
-     f. Compute and store content hash in policy.json
+     d. Generate policy.json with trust: "pending_review" (Motor never creates it)
+     e. Preserve existing credentialValues from prior policy (if updating)
+     f. Merge any pendingCredentials saved during the run (from save_credential)
+     g. Atomic copy to data/skills/<name>/
+     h. Compute and store content hash in policy.json
    - Include created/updated skill names in result
 
 4. COGNITION receives motor_result signal
@@ -196,7 +200,6 @@ User: "Send an email via AgentMail"
         (still on api.agentmail.to — same approved domain)
      d. Writes CORRECTED skill in-place at workspace root:
         SKILL.md (updated instructions)
-        policy.json (same domains)
      e. Retries task with corrected approach → succeeds
 
 2. POST-RUN EXTRACTION (baseline-diff)
@@ -361,7 +364,8 @@ extractSkillsFromWorkspace(workspace, skillsDir, runId):
      - If missing → treat as fresh workspace (all files are new)
 
   2. Scan workspace for skill files matching allowlist:
-     SKILL.md, policy.json, references/**, scripts/**
+     SKILL.md, references/**, scripts/**
+     (policy.json excluded — host-side only, managed by cognition layer)
      Hard denylist: node_modules/**, .cache/**, .local/**, *.log, .git/**
 
   3. Check SKILL.md exists — skip if missing
@@ -380,11 +384,14 @@ extractSkillsFromWorkspace(workspace, skillsDir, runId):
   6. Copy ALL current skill files to temp dir, then atomic install:
      a. Recursive symlink check on workspace
      b. Size limits: 1MB per file, 10MB total
-     c. Atomic rename: temp → target (with backup/rollback)
-     d. Force policy.json changes:
+     c. Read existing policy.json BEFORE atomic rename (to preserve credentialValues)
+     d. Atomic rename: temp → target (with backup/rollback)
+     e. Build policy.json:
         - Set trust: "pending_review"
         - Compute contentHash over all skill files
-        - Preserve provenance if Motor wrote it
+        - Preserve provenance if Motor wrote it or from existing policy
+        - Preserve credentialValues from existing policy
+        - Merge pendingCredentials from run (from save_credential calls)
         - Add extractedFrom: { runId, timestamp, changedFiles, deletedFiles }
 
   7. Return { created: string[], updated: string[] }
@@ -420,9 +427,11 @@ Motor prompt teaches the sub-agent the Agent Skills standard:
 ```
 Skill files go at the workspace root:
   SKILL.md           — required: frontmatter (name, description) + instructions
-  policy.json        — required: security policy (tools, domains, credentials)
   references/        — optional: API docs, schemas, examples
   scripts/           — optional: helper scripts
+
+Note: policy.json is NOT created by Motor — it's managed by the host/cognition layer.
+Trust is always "needs_review" for new skills — the user reviews and approves before first use.
 
 SKILL.md uses YAML frontmatter for metadata, then markdown for instructions.
 The description should explain both what the skill does and when to trigger it.
@@ -471,7 +480,9 @@ Skills remain at `pending_review` until explicitly approved. Cognition handles t
 
 4. **Auto-approval for self-fixes**: When Motor fixes a skill during execution (Scenario 4), should Cognition auto-approve if the fix is minor (same tools, same domains, just endpoint change)? Or always require user approval? (Proposed: always require — safer. The iptables enforcement is the real-time safety net; trust approval is for persistent policy.)
 
-5. **Credential handling during creation**: When Motor creates a skill that needs credentials (API key), how does the user provide them? (Existing: `core.credential` tool — Cognition asks user, stores via CredentialStore.)
+5. **Credential handling during creation**: ✅ **Resolved.** Two credential sources:
+   - **User credentials**: Stored in `.env` as `VAULT_*` env vars, managed via `core.credential` tool
+   - **Skill-acquired credentials**: Stored in the skill's `policy.json` under `credentialValues` field. Motor's `save_credential` tool persists to policy.json for existing skills, or to `pendingCredentials` (merged at extraction) for new skills. Credentials are scoped to `requiredCredentials` — Motor can only save names declared in the skill policy. At container delivery time, `credentialValues` takes priority over `CredentialStore` (user env vars). `sanitizePolicyForDisplay()` redacts values in all read paths.
 
 6. **Skill deletion**: No deletion flow defined yet. (Proposed: add `core.removeSkill` tool or handle via Cognition direct write. Out of scope for initial implementation.)
 
