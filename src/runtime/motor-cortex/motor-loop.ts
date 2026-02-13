@@ -203,6 +203,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Use attempt's messages (already built by caller)
   const messages = attempt.messages;
 
+  // Deliver all known credentials to the container upfront.
+  // Scripts use process.env.NAME, so credentials must be in the shell env
+  // from the start — not lazily when placeholders are detected.
+  if (params.containerHandle && params.credentialStore) {
+    for (const name of params.credentialStore.list()) {
+      const value = params.credentialStore.get(name);
+      if (value) {
+        await params.containerHandle.deliverCredential(name, value);
+      }
+    }
+  }
+
   // Enter iteration loop
   let consecutiveFailures: {
     tool: string;
@@ -691,28 +703,6 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
         awaitingInput = true;
         break; // Stop processing tools
-      }
-
-      // Deliver credentials to container's in-memory store.
-      // This is needed because filesystem write content is resolved INSIDE the container
-      // (tool-server has its own credential resolver for file content).
-      // Host-side resolution below handles all other tool args.
-      if (params.containerHandle && params.credentialStore) {
-        for (const value of Object.values(toolArgs)) {
-          if (typeof value === 'string') {
-            const placeholderRegex = /<credential:([a-zA-Z0-9_]+)>/g;
-            let match;
-            while ((match = placeholderRegex.exec(value)) !== null) {
-              const credName = match[1];
-              if (credName) {
-                const credValue = params.credentialStore.get(credName);
-                if (credValue) {
-                  await params.containerHandle.deliverCredential(credName, credValue);
-                }
-              }
-            }
-          }
-        }
       }
 
       // Resolve credential placeholders in tool args (AFTER state persistence, BEFORE execution)
