@@ -75,6 +75,7 @@ const SKILL_FILE_DENYLIST = [
   '*.log',
   '.git/**',
   '.motor-baseline.json', // Baseline file itself
+  '.motor-output/**', // Truncation spillover files
 ];
 
 /**

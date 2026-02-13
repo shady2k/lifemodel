@@ -22,7 +22,7 @@ import { runMotorLoop, buildInitialMessages, buildMotorSystemPrompt } from './mo
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
-import { cp, readFile as readFileAsync } from 'node:fs/promises';
+import { cp, rm, readFile as readFileAsync } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
 import type { PreparedDeps, SkillDependencies } from '../dependencies/dependency-manager.js';
@@ -31,6 +31,7 @@ import type { LoadedSkill } from '../skills/skill-types.js';
 import type { CredentialStore } from '../vault/credential-store.js';
 import { loadSkill, savePolicy } from '../skills/skill-loader.js';
 import { mergeDomains } from '../container/network-policy.js';
+import { TRUNCATION_DIR } from './tool-truncation.js';
 
 /**
  * Default max iterations per attempt.
@@ -763,6 +764,19 @@ export class MotorCortex {
           this.logger.warn({ runId: run.id, error: destroyError }, 'Failed to destroy container');
         }
       }
+
+      // Clean up truncation spillover files on terminal states only
+      const terminal = run.status === 'completed' || run.status === 'failed';
+      if (terminal && run.workspacePath) {
+        rm(join(run.workspacePath, TRUNCATION_DIR), { recursive: true, force: true }).catch(
+          (err: unknown) => {
+            this.logger.debug(
+              { runId: run.id, error: err instanceof Error ? err.message : String(err) },
+              'Failed to clean up truncation spillover'
+            );
+          }
+        );
+      }
     }
   }
 
@@ -980,11 +994,20 @@ export class MotorCortex {
         effectiveDomains && effectiveDomains.length > 0
           ? ` Network access granted for: ${effectiveDomains.join(', ')}.`
           : '';
-      attempt.messages.push({
-        role: 'tool',
+      // Replace the BLOCKED result in-place (auto-pause already pushed one for this tool_call_id)
+      const idx = attempt.messages.findIndex(
+        (m) => m.role === 'tool' && m.tool_call_id === attempt.pendingToolCallId
+      );
+      const resultMsg = {
+        role: 'tool' as const,
         content: JSON.stringify({ ok: true, output: `User answered: ${answer}${domainNote}` }),
         tool_call_id: attempt.pendingToolCallId,
-      });
+      };
+      if (idx !== -1) {
+        attempt.messages[idx] = resultMsg;
+      } else {
+        attempt.messages.push(resultMsg);
+      }
     }
 
     // Update status

@@ -479,7 +479,14 @@ export class CoreLoop {
       } else {
         allSignals = incomingSignals;
         withTraceContext(tickCtx, () => {
-          this.logger.warn({ stressLevel }, 'AUTONOMIC layer disabled due to stress');
+          this.logger.warn(
+            {
+              stressLevel,
+              eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
+              cpuPercent: health.cpuPercent.toFixed(1),
+            },
+            'AUTONOMIC layer disabled due to stress'
+          );
         });
       }
 
@@ -519,7 +526,14 @@ export class CoreLoop {
         allIntents.push(...aggregationResult.intents);
       } else {
         withTraceContext(tickCtx, () => {
-          this.logger.warn({ stressLevel }, 'AGGREGATION layer disabled due to stress');
+          this.logger.warn(
+            {
+              stressLevel,
+              eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
+              cpuPercent: health.cpuPercent.toFixed(1),
+            },
+            'AGGREGATION layer disabled due to stress'
+          );
         });
       }
 
@@ -575,7 +589,12 @@ export class CoreLoop {
       if (aggregationResult?.wakeCognition && !activeLayers.cognition) {
         withTraceContext(tickCtx, () => {
           this.logger.warn(
-            { stressLevel, wakeReason: aggregationResult.wakeReason },
+            {
+              stressLevel,
+              wakeReason: aggregationResult.wakeReason,
+              eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
+              cpuPercent: health.cpuPercent.toFixed(1),
+            },
             'COGNITION layer disabled due to stress - wake blocked'
           );
         });

@@ -205,11 +205,13 @@ export class VercelAIProvider extends BaseLLMProvider {
    * parsing internally on this endpoint. addCacheControl is skipped separately
    * to avoid multipart system messages that @ai-sdk/openai rejects.
    */
-  private getModel(modelId: string): LanguageModel {
+  private getModel(modelId: string, request?: CompletionRequest): LanguageModel {
     if (isOpenRouterConfig(this.config)) {
       return createOpenRouter({
         apiKey: this.config.apiKey,
-      })(modelId);
+      })(modelId, {
+        ...(request?.parallelToolCalls === false && { parallelToolCalls: false }),
+      });
     } else {
       return createOpenAI({
         baseURL: this.config.baseUrl,
@@ -661,8 +663,8 @@ export class VercelAIProvider extends BaseLLMProvider {
     // Build provider options (OpenRouter-specific body fields)
     const providerOptions = this.buildProviderOptions(modelId, overrides, request);
 
-    // Get the model
-    const model = this.getModel(modelId);
+    // Get the model (pass request so parallelToolCalls reaches the model constructor)
+    const model = this.getModel(modelId, request);
 
     // Debug logging
     this.providerLogger?.debug(

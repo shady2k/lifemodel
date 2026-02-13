@@ -36,6 +36,7 @@ import { readdir, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTaskLogger, redactCredentials } from './task-logger.js';
 import { validateToolArgs } from '../../utils/tool-validation.js';
+import { truncateToolOutput, TRUNCATION_DIR } from './tool-truncation.js';
 
 /**
  * Parameters for running the motor loop.
@@ -116,6 +117,32 @@ const FAILURE_HINT_MAX_TOKENS = 256;
  *
  * @param params - Loop parameters
  */
+/**
+ * Ensures every tool_call in assistant messages has exactly one matching tool result.
+ * Strips orphaned tool_calls (those without a corresponding tool message) to prevent
+ * LLM API rejections like "Tool results are missing."
+ */
+function sanitizeToolCallResultPairs(messages: Message[]): void {
+  const toolResultIds = new Set(
+    messages
+      .filter((m): m is Message & { tool_call_id: string } => m.role === 'tool' && !!m.tool_call_id)
+      .map((m) => m.tool_call_id)
+  );
+
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      const matched = msg.tool_calls.filter((tc) => toolResultIds.has(tc.id));
+      if (matched.length < msg.tool_calls.length) {
+        if (matched.length > 0) {
+          msg.tool_calls = matched;
+        } else {
+          delete msg.tool_calls;
+        }
+      }
+    }
+  }
+}
+
 export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   const { run, attempt, llm, stateManager, pushSignal, logger } = params;
   const childLogger = logger.child({ runId: run.id, attemptId: attempt.id });
@@ -272,6 +299,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     childLogger.debug({ iteration: i, messageCount: messages.length }, 'Loop iteration');
     await taskLog?.log(`\nITERATION ${String(i)}`);
 
+    // Safety net: ensure every tool_call has a matching tool result before calling LLM
+    sanitizeToolCallResultPairs(messages);
+
     // Call LLM (with retry on transient provider errors)
     let llmResponse: Awaited<ReturnType<typeof llm.complete>> | undefined;
     const LLM_MAX_RETRIES = 2;
@@ -283,6 +313,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           toolChoice: 'auto',
           maxTokens: 4096,
           role: 'motor',
+          parallelToolCalls: false,
         });
         break; // Success
       } catch (llmError) {
@@ -305,6 +336,17 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     if (!llmResponse) {
       throw new Error('LLM response is undefined after retries');
     }
+    // Server-side enforcement: even if the provider ignores parallelToolCalls,
+    // only execute one tool call per iteration to prevent orphaned tool_calls on pause.
+    if (llmResponse.toolCalls && llmResponse.toolCalls.length > 1) {
+      childLogger.info(
+        { returned: llmResponse.toolCalls.length },
+        'Truncating parallel tool calls to 1 (server-side enforcement)'
+      );
+      const first = llmResponse.toolCalls[0];
+      if (first) llmResponse.toolCalls = [first];
+    }
+
     const contentPreview = llmResponse.content
       ? redactCredentials(llmResponse.content.slice(0, 2000)).replace(/\n/g, ' ')
       : '(none)';
@@ -399,7 +441,13 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           const workspaceFiles = await readdir(workspace);
           if (workspaceFiles.length > 0) {
             await mkdir(artifactsDir, { recursive: true });
-            await cp(workspace, artifactsDir, { recursive: true });
+            // Filter out .motor-output/ from artifact copy (truncation spillover files)
+            const truncDirAbsolute = join(workspace, TRUNCATION_DIR) + '/';
+            await cp(workspace, artifactsDir, {
+              recursive: true,
+              filter: (src) =>
+                src !== truncDirAbsolute.slice(0, -1) && !src.startsWith(truncDirAbsolute),
+            });
             artifacts = workspaceFiles;
             childLogger.debug({ artifacts, artifactsDir }, 'Artifacts persisted');
           }
@@ -1045,6 +1093,13 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         toolResult.output += `\nAllowed domains: ${run.domains.join(', ')}. You MUST call ask_user to request access — do not work around this.`;
       }
 
+      // Apply universal truncation to prevent massive tool outputs from bloating context.
+      // This runs AFTER domain error enrichment (so hints are preserved) but BEFORE
+      // step trace and message storage (so both use truncated content).
+      const redactedOutput = redactValues(toolResult.output);
+      const truncation = await truncateToolOutput(redactedOutput, toolName, toolCall.id, workspace);
+      toolResult.output = truncation.content; // Mutate before trace and message storage
+
       // Record in step trace
       step.toolCalls.push({
         tool: toolName,
@@ -1421,8 +1476,10 @@ Guidelines:
 - Be concise and direct in your responses
 - Report what you did and the result
 - If something is blocked, denied, or fails repeatedly (2+ times), call ask_user to report the problem and ask for guidance. Do NOT silently work around blockers by guessing or fabricating content.
+- When downloading files from a repository, always fetch the actual source content. Do NOT reconstruct or rewrite file contents from HTML page previews or summaries — download the raw file instead.
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
 - Credentials are environment variables. Use process.env.NAME in Node scripts, os.environ["NAME"] in Python, $NAME in bash commands and fetch headers. The system resolves $NAME in all tool arguments automatically.
+- Large tool outputs are automatically truncated. When you see "Output truncated. Full output saved to: ..." use read({"path": "<filepath>", "offset": 1, "limit": 100}) or grep({"pattern": "...", "path": "<filepath>"}) to access the full content.
 ${
   run.domains && run.domains.length > 0
     ? `
