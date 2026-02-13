@@ -103,6 +103,43 @@ describe('resolveCredentials', () => {
     expect(resolved).toBe('no credentials here');
     expect(missing).toEqual([]);
   });
+
+  it('resolves $NAME env var references for known credentials', () => {
+    const { resolved, missing } = resolveCredentials(
+      'curl -H "Authorization: Bearer $API_KEY" https://api.example.com',
+      store
+    );
+    expect(resolved).toContain('sk-secret-123');
+    expect(resolved).not.toContain('$API_KEY');
+    expect(missing).toEqual([]);
+  });
+
+  it('resolves ${NAME} env var references for known credentials', () => {
+    const { resolved, missing } = resolveCredentials(
+      'curl -H "Authorization: Bearer ${API_KEY}" https://api.example.com',
+      store
+    );
+    expect(resolved).toContain('sk-secret-123');
+    expect(resolved).not.toContain('${API_KEY}');
+    expect(missing).toEqual([]);
+  });
+
+  it('leaves $NAME for unknown (non-credential) env vars', () => {
+    const { resolved, missing } = resolveCredentials(
+      'echo $HOME and $PATH',
+      store
+    );
+    expect(resolved).toBe('echo $HOME and $PATH');
+    expect(missing).toEqual([]);
+  });
+
+  it('resolves mixed placeholder and env var styles', () => {
+    const { resolved } = resolveCredentials(
+      '<credential:api_key> and $API_KEY',
+      store
+    );
+    expect(resolved).toBe('sk-secret-123 and sk-secret-123');
+  });
 });
 
 describe('hasCredentialPlaceholders', () => {

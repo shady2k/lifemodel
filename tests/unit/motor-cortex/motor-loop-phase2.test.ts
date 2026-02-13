@@ -66,10 +66,10 @@ describe('buildMotorSystemPrompt', () => {
     expect(prompt).toContain('patch:');
   });
 
-  it('includes credential placeholder guidance', () => {
+  it('includes credential guidance', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run);
-    expect(prompt).toContain('<credential:NAME>');
+    expect(prompt).toContain('Credentials are environment variables');
   });
 
   it('includes recovery context when provided', () => {
@@ -125,7 +125,7 @@ describe('skill injection into system prompt', () => {
     const run = makeRun();
     const prompt = buildMotorSystemPrompt(run, skill);
 
-    expect(prompt).toContain('<credential:weather_api_key>');
+    expect(prompt).toContain('process.env.weather_api_key');
   });
 
   it('does not inject skill tags when no skill provided', () => {

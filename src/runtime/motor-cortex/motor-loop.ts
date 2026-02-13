@@ -1126,7 +1126,7 @@ Guidelines:
 - Be concise and direct in your responses
 - Report what you did and the result
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
-- Credentials: use <credential:NAME> placeholders in direct tool arguments (bash commands, fetch headers). The system resolves them before execution. In script FILES (.js, .py), use process.env.NAME (Node) or os.environ["NAME"] (Python) instead — placeholders are NOT resolved inside file content. Credentials are available as environment variables at runtime.
+- Credentials are environment variables. Use process.env.NAME in Node scripts, os.environ["NAME"] in Python, $NAME in bash commands and fetch headers. The system resolves $NAME in all tool arguments automatically.
 ${
   run.domains && run.domains.length > 0
     ? `
@@ -1213,7 +1213,7 @@ Pre-installed packages are available — use require() or import directly.
 Do NOT run npm install or pip install — package registries are not reachable at runtime.
 ${
   skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0
-    ? `\nAvailable credentials for this skill:\n${skill.policy.requiredCredentials.map((c) => `- <credential:${c}> — in tool args (bash, fetch). In script files use process.env.${c} (Node) or os.environ["${c}"] (Python).`).join('\n')}\nExamples:\n  fetch tool: {headers: {"Authorization": "Bearer <credential:${String(skill.policy.requiredCredentials[0])}>"}}\n  bash inline: curl -H "Authorization: Bearer <credential:${String(skill.policy.requiredCredentials[0])}>"\n  script file: const apiKey = process.env.${String(skill.policy.requiredCredentials[0])};`
+    ? `\nAvailable credentials (as env vars):\n${skill.policy.requiredCredentials.map((c) => `- ${c}`).join('\n')}\nUsage:\n  Node script: const apiKey = process.env.${String(skill.policy.requiredCredentials[0])};\n  Python:      api_key = os.environ["${String(skill.policy.requiredCredentials[0])}"]\n  bash:        curl -H "Authorization: Bearer $${String(skill.policy.requiredCredentials[0])}"\n  fetch tool:  {"Authorization": "Bearer $${String(skill.policy.requiredCredentials[0])}"}`
     : ''
 }
 

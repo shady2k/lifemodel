@@ -45,6 +45,12 @@ export interface CredentialResolution {
 const CREDENTIAL_PLACEHOLDER = /<credential:([a-zA-Z0-9_]+)>/g;
 
 /**
+ * Regex to match shell-style env var references: $NAME or ${NAME}
+ * Only resolves names that exist in the credential store (not arbitrary env vars).
+ */
+const ENV_VAR_REFERENCE = /\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)/g;
+
+/**
  * Create an env-var based credential store.
  *
  * Maps credential names to `VAULT_<NAME>` environment variables.
@@ -90,8 +96,10 @@ export function createEnvCredentialStore(): CredentialStore {
  */
 export function resolveCredentials(text: string, store: CredentialStore): CredentialResolution {
   const missing: string[] = [];
+  const knownNames = new Set(store.list().map((n) => n.toUpperCase()));
 
-  const resolved = text.replace(CREDENTIAL_PLACEHOLDER, (_match, name: string) => {
+  // First pass: resolve <credential:NAME> placeholders
+  let resolved = text.replace(CREDENTIAL_PLACEHOLDER, (_match, name: string) => {
     const value = store.get(name);
     if (value === null) {
       missing.push(name);
@@ -99,6 +107,21 @@ export function resolveCredentials(text: string, store: CredentialStore): Creden
     }
     return value;
   });
+
+  // Second pass: resolve $NAME and ${NAME} references (only for known credentials)
+  resolved = resolved.replace(
+    ENV_VAR_REFERENCE,
+    (match, braced: string | undefined, bare: string | undefined) => {
+      const name = braced ?? bare;
+      if (!name || !knownNames.has(name.toUpperCase())) return match; // Not a credential — leave as-is
+      const value = store.get(name);
+      if (value === null) {
+        missing.push(name);
+        return match;
+      }
+      return value;
+    }
+  );
 
   return { resolved, missing };
 }

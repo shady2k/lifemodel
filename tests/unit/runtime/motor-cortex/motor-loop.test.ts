@@ -86,7 +86,7 @@ describe('buildMotorSystemPrompt', () => {
 
     expect(prompt).toContain('Guidelines:');
     expect(prompt).toContain('Break down complex tasks into steps');
-    expect(prompt).toContain('<credential:NAME>');
+    expect(prompt).toContain('Credentials are environment variables');
   });
 
   it('includes maximum iterations', () => {
