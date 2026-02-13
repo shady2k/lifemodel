@@ -347,9 +347,13 @@ async function executeBash(
       };
     }
 
+    // Combine stdout + stderr so the LLM sees the full picture.
+    // Many tools (npm, node scripts) write errors to stderr even on exit 0.
+    const combined = [output, stderr].filter(Boolean).join('\n') || '(no output)';
+
     return {
       ok: true,
-      output: output || stderr || '(no output)',
+      output: combined,
       retryable: false,
       provenance: validation.hasNetwork ? 'web' : 'internal',
       durationMs: Date.now() - startTime,
