@@ -462,6 +462,13 @@ export class MotorCortex {
       attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
+      // Load skill for credential delivery and save_credential persistence
+      let loadedSkill: LoadedSkill | undefined;
+      if (run.skill && this.skillsDir) {
+        const skillResult = await loadSkill(run.skill, this.skillsDir);
+        if (!('error' in skillResult)) loadedSkill = skillResult;
+      }
+
       // Reuse existing workspace on resume (preserves files from prior iterations).
       let workspace: string;
       if (run.workspacePath && existsSync(run.workspacePath)) {
@@ -602,6 +609,7 @@ export class MotorCortex {
         logger: this.logger,
         workspace,
         abortSignal: abortController.signal,
+        ...(loadedSkill && { skill: loadedSkill }),
         ...(this.skillsDir && { skillsDir: this.skillsDir }),
         ...(this.credentialStore && { credentialStore: this.credentialStore }),
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),

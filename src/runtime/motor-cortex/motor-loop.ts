@@ -796,37 +796,16 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           continue;
         }
 
-        // Scope enforcement: skill runs must declare requiredCredentials
+        // Scope enforcement: if requiredCredentials is declared and non-empty,
+        // only allow names in that list. If absent/empty, allow any name
+        // (the credential name will be auto-added to requiredCredentials on persist).
         const requiredCreds = params.skill?.policy?.requiredCredentials;
-        if (params.skill && (!requiredCreds || requiredCreds.length === 0)) {
-          messages.push({
-            role: 'tool',
-            content: JSON.stringify({
-              ok: false,
-              output:
-                'Skill must declare requiredCredentials in policy.json to save credentials. Add the credential name to requiredCredentials first.',
-              error: 'permission_denied',
-            }),
-            tool_call_id: toolCall.id,
-          });
-          step.toolCalls.push({
-            tool: 'save_credential',
-            args: toolArgs,
-            result: {
-              ok: false,
-              output: 'Skill must declare requiredCredentials in policy.json to save credentials.',
-              errorCode: 'permission_denied',
-              retryable: false,
-              provenance: 'internal',
-              durationMs: Date.now() - startTime,
-            },
-            durationMs: Date.now() - startTime,
-          });
-          continue;
-        }
-
-        // Scope enforcement: only allow names in requiredCredentials list
-        if (params.skill && requiredCreds && !requiredCreds.includes(credName)) {
+        if (
+          params.skill &&
+          requiredCreds &&
+          requiredCreds.length > 0 &&
+          !requiredCreds.includes(credName)
+        ) {
           messages.push({
             role: 'tool',
             content: JSON.stringify({
@@ -872,7 +851,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
               (existingPolicy['credentialValues'] as Record<string, string> | undefined) ?? {};
             credentialValues[credName] = credValue;
 
-            const updatedPolicy = { ...existingPolicy, credentialValues };
+            // Auto-register credential name in requiredCredentials if not already present
+            const existingRequired =
+              (existingPolicy['requiredCredentials'] as string[] | undefined) ?? [];
+            const updatedRequired = existingRequired.includes(credName)
+              ? existingRequired
+              : [...existingRequired, credName];
+
+            const updatedPolicy = {
+              ...existingPolicy,
+              credentialValues,
+              requiredCredentials: updatedRequired,
+            };
             const tmpPath = join(params.skill.path, `.policy.json.tmp-${run.id}`);
             await writeFile(tmpPath, JSON.stringify(updatedPolicy, null, 2), {
               mode: 0o600, // Secure: only owner can read/write
