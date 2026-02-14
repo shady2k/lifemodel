@@ -170,11 +170,10 @@ const SCHEMA_LIST = {
 
 /**
  * OpenAI-compatible JSON Schema for the reminder tool.
- * Uses proper nested properties so OpenAI strict mode enforces structure.
- *
- * Key requirements for OpenAI strict mode:
- * - All fields in `required` array (optional fields use type: ["type", "null"])
- * - `additionalProperties: false` on all object types
+ * Canonical (non-strict) form: only truly required fields in `required`.
+ * Optional fields use plain types without nullable union.
+ * Strict mode transformation is applied dynamically in vercel-ai-provider.ts
+ * for models that support it (OpenAI, Claude).
  */
 const REMINDER_RAW_SCHEMA = {
   type: 'object',
@@ -185,11 +184,11 @@ const REMINDER_RAW_SCHEMA = {
       description: 'Action to perform',
     },
     content: {
-      type: ['string', 'null'],
+      type: 'string',
       description: 'What to remind about (required for create)',
     },
     anchor: {
-      type: ['object', 'null'],
+      type: 'object',
       description: 'Semantic date anchor (required for create). Extract time from user message.',
       properties: {
         type: {
@@ -206,7 +205,7 @@ const REMINDER_RAW_SCHEMA = {
           description: 'Original time expression from user (e.g., "завтра", "in 2 hours")',
         },
         relative: {
-          type: ['object', 'null'],
+          type: 'object',
           description: 'For type="relative" (e.g., "in 30 minutes")',
           properties: {
             unit: {
@@ -222,11 +221,11 @@ const REMINDER_RAW_SCHEMA = {
           additionalProperties: false,
         },
         absolute: {
-          type: ['object', 'null'],
+          type: 'object',
           description: 'For type="absolute" (e.g., "tomorrow", "next Monday at 3pm")',
           properties: {
             special: {
-              type: ['string', 'null'],
+              type: 'string',
               enum: [
                 'tomorrow',
                 'next_week',
@@ -234,25 +233,23 @@ const REMINDER_RAW_SCHEMA = {
                 'this_evening',
                 'tonight',
                 'this_afternoon',
-                null,
               ],
               description: 'Named time shortcut',
             },
-            year: { type: ['number', 'null'] },
-            month: { type: ['number', 'null'], description: '1-12' },
-            day: { type: ['number', 'null'], description: '1-31' },
-            hour: { type: ['number', 'null'], description: '0-23' },
-            minute: { type: ['number', 'null'], description: '0-59' },
+            year: { type: 'number' },
+            month: { type: 'number', description: '1-12' },
+            day: { type: 'number', description: '1-31' },
+            hour: { type: 'number', description: '0-23' },
+            minute: { type: 'number', description: '0-59' },
             dayOfWeek: {
-              type: ['number', 'null'],
+              type: 'number',
               description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
             },
           },
-          required: ['special', 'year', 'month', 'day', 'hour', 'minute', 'dayOfWeek'],
           additionalProperties: false,
         },
         recurring: {
-          type: ['object', 'null'],
+          type: 'object',
           description: 'For type="recurring" (e.g., "every day at 9am")',
           properties: {
             frequency: {
@@ -263,49 +260,40 @@ const REMINDER_RAW_SCHEMA = {
               type: 'number',
               description: 'Every N periods (default: 1)',
             },
-            hour: { type: ['number', 'null'], description: '0-23' },
-            minute: { type: ['number', 'null'], description: '0-59' },
+            hour: { type: 'number', description: '0-23' },
+            minute: { type: 'number', description: '0-59' },
             daysOfWeek: {
-              type: ['array', 'null'],
+              type: 'array',
               items: { type: 'number' },
               description: 'For weekly: days of week (0=Sun, 6=Sat)',
             },
             dayOfMonth: {
-              type: ['number', 'null'],
+              type: 'number',
               description: 'For monthly: fixed day (1-31)',
             },
             anchorDay: {
-              type: ['number', 'null'],
+              type: 'number',
               description: 'For monthly with constraint: anchor day (1-31)',
             },
             constraint: {
-              type: ['string', 'null'],
-              enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday', null],
+              type: 'string',
+              enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
               description: 'Constraint to apply after anchorDay',
             },
           },
-          required: [
-            'frequency',
-            'interval',
-            'hour',
-            'minute',
-            'daysOfWeek',
-            'dayOfMonth',
-            'anchorDay',
-            'constraint',
-          ],
+          required: ['frequency'],
           additionalProperties: false,
         },
       },
-      required: ['type', 'confidence', 'originalPhrase', 'relative', 'absolute', 'recurring'],
+      required: ['type', 'confidence', 'originalPhrase'],
       additionalProperties: false,
     },
     advanceNotice: {
-      type: ['object', 'null'],
+      type: 'object',
       description: 'Optional advance notice (e.g., "remind me 30 minutes before")',
       properties: {
         before: {
-          type: ['object', 'null'],
+          type: 'object',
           properties: {
             unit: {
               type: 'string',
@@ -323,20 +311,20 @@ const REMINDER_RAW_SCHEMA = {
       additionalProperties: false,
     },
     reminderId: {
-      type: ['string', 'null'],
+      type: 'string',
       description: 'Reminder ID (required for cancel)',
     },
     tags: {
-      type: ['array', 'null'],
+      type: 'array',
       items: { type: 'string' },
       description: 'Optional tags for organizing',
     },
     limit: {
-      type: ['number', 'null'],
+      type: 'number',
       description: 'Max reminders to return (list only, default: 10)',
     },
   },
-  required: ['action', 'content', 'anchor', 'advanceNotice', 'reminderId', 'tags', 'limit'],
+  required: ['action'],
   additionalProperties: false,
 };
 

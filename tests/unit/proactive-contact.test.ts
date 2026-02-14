@@ -98,7 +98,7 @@ describe('Proactive Contact', () => {
 
       // Should have proactive contact section
       expect(fullPrompt).toContain('<trigger type="proactive_contact">');
-      expect(fullPrompt).toContain('This is not a response to anything');
+      expect(fullPrompt).toContain('not replying to the conversation');
       expect(fullPrompt).toContain('You are initiating contact');
     });
 
@@ -149,10 +149,10 @@ describe('Proactive Contact', () => {
         .filter((m) => m.role === 'system' || m.role === 'user')
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
-      // Prompt gives agent decision guidance with tool budget
-      expect(fullPrompt).toContain('You MUST choose ONE action');
-      expect(fullPrompt).toContain('Tool budget');
-      expect(fullPrompt).toContain('Send a message');
+      // Prompt gives agent decision guidance with tool limit
+      expect(fullPrompt).toContain('Choose ONE action');
+      expect(fullPrompt).toContain('Max 3 tool calls');
+      expect(fullPrompt).toContain('Send a NEW message');
       expect(fullPrompt).toContain('Skip messaging');
     });
 

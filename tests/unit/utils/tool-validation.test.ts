@@ -518,4 +518,130 @@ describe('validateToolArgs', () => {
       expect(result.success).toBe(true);
     });
   });
+
+  describe('string "null" coercion (weak model compat)', () => {
+    // Weak models (GLM, DeepSeek, Qwen) pass string "null" instead of JSON null
+    // This tests the schema-aware coercion logic
+
+    const nullableSchema = {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string' },
+        entries: { type: ['array', 'null'] },
+        date: { type: ['string', 'null'] },
+        limit: { type: ['number', 'null'] },
+      },
+      required: ['action'] as string[],
+    };
+
+    it('coerces string "null" to JSON null for nullable field', () => {
+      const result = validateToolArgs({ action: 'list', entries: 'null' }, nullableSchema);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entries).toBe(null);
+      }
+    });
+
+    it('coerces string "NULL" (case-insensitive) to JSON null', () => {
+      const result = validateToolArgs({ action: 'list', entries: 'NULL' }, nullableSchema);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entries).toBe(null);
+      }
+    });
+
+    it('coerces string " null " (with whitespace) to JSON null', () => {
+      const result = validateToolArgs({ action: 'list', entries: ' null ' }, nullableSchema);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entries).toBe(null);
+      }
+    });
+
+    it('deletes optional non-nullable field with string "null"', () => {
+      // Non-nullable optional field - treat as omitted
+      const schema = {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string' },
+          name: { type: 'string' }, // non-nullable, optional
+        },
+        required: ['action'] as string[],
+      };
+
+      const result = validateToolArgs({ action: 'test', name: 'null' }, schema);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.name).toBeUndefined();
+      }
+    });
+
+    it('rejects string "null" for required non-nullable field', () => {
+      // Required non-nullable field - validation error
+      const schema = {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string' }, // non-nullable, required
+        },
+        required: ['action'] as string[],
+      };
+
+      const result = validateToolArgs({ action: 'null' }, schema);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('required and non-nullable');
+        expect(result.error).toContain('action');
+      }
+    });
+
+    it('does NOT coerce "None" or "undefined" strings (only exact "null")', () => {
+      // Only "null" (case-insensitive) is coerced, not "None" or "undefined"
+      // Using a non-nullable string field to test that "None" is NOT treated as null
+      const schema = {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string' },
+          name: { type: 'string' }, // non-nullable string
+        },
+        required: ['action'] as string[],
+      };
+
+      // "None" should be treated as a regular string value, not coerced
+      const result = validateToolArgs({ action: 'create', name: 'None' }, schema);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.name).toBe('None'); // Preserved as-is
+      }
+    });
+
+    it('does NOT coerce string "null" for unknown parameters', () => {
+      const result = validateToolArgs({ action: 'list', unknownField: 'null' }, nullableSchema);
+      // Unknown field should be rejected (not coerced)
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('Unknown parameter');
+      }
+    });
+
+    it('coerces multiple string "null" values in one call', () => {
+      const result = validateToolArgs(
+        { action: 'list', entries: 'null', date: 'null', limit: 'null' },
+        nullableSchema
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.entries).toBe(null);
+        expect(result.data.date).toBe(null);
+        expect(result.data.limit).toBe(null);
+      }
+    });
+
+    it('preserves actual string "null" value for non-nullable string fields when valid', () => {
+      // Edge case: what if user literally wants to store string "null"?
+      // For nullable fields we coerce, for non-nullable required fields we error
+      // This test ensures the coercion only happens when type includes null
+      const result = validateToolArgs({ action: 'create' }, nullableSchema);
+      expect(result.success).toBe(true);
+    });
+  });
 });

@@ -15,6 +15,7 @@ import type {
   ToolCall,
 } from '../../llm/provider.js';
 import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
+import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
 import {
   isGeminiModel,
@@ -488,9 +489,13 @@ export class VercelAIProvider extends BaseLLMProvider {
    * so models receive tools with empty parameters. This method produces the raw OpenAI
    * tool format that gets injected via providerOptions.openrouter (which is spread
    * over the SDK's getArgs output, overriding the broken tools).
+   *
+   * @param tools - Tools to convert
+   * @param strict - If true, apply OpenAI strict mode transformation to schemas
    */
   private convertToolsRaw(
-    tools: CompletionRequest['tools']
+    tools: CompletionRequest['tools'],
+    strict: boolean
   ): Record<string, unknown>[] | undefined {
     if (!tools || tools.length === 0) return undefined;
 
@@ -498,14 +503,26 @@ export class VercelAIProvider extends BaseLLMProvider {
       const fn = t.function;
       if ('parameters' in fn) {
         // Full tool — include the actual parameter schema
-        return {
+        // Apply strict mode transformation if requested
+        const parameters = strict
+          ? toStrictSchema(fn.parameters as Record<string, unknown>)
+          : fn.parameters;
+
+        const result: Record<string, unknown> = {
           type: 'function',
           function: {
             name: fn.name,
             description: fn.description,
-            parameters: fn.parameters,
+            parameters,
           },
         };
+
+        // Add strict flag only when in strict mode
+        if (strict) {
+          result['strict'] = true;
+        }
+
+        return result;
       }
       // Minimal tool (lazy schema) — name + description only
       return { type: 'function', function: { name: fn.name, description: fn.description } };
@@ -620,8 +637,13 @@ export class VercelAIProvider extends BaseLLMProvider {
     // raw OpenAI-format tools via providerOptions, we override the broken
     // SDK conversion. The provider spreads openrouterOptions over getArgs output,
     // so our tools replace the SDK's broken ones.
+    //
+    // Apply strict mode transformation only for models that support it (OpenAI, Claude).
+    // Weak models (GLM, DeepSeek, Qwen, etc.) receive canonical non-strict schemas
+    // to avoid confusion with nullable type unions.
     if (isOpenRouterConfig(this.config) && request.tools && request.tools.length > 0) {
-      const rawTools = this.convertToolsRaw(request.tools);
+      const useStrict = overrides.supportsStrictToolSchema ?? false;
+      const rawTools = this.convertToolsRaw(request.tools, useStrict);
       if (rawTools && rawTools.length > 0) {
         providerOptions[providerKey] ??= {};
         providerOptions[providerKey]['tools'] = rawTools;

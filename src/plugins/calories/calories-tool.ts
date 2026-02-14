@@ -876,11 +876,10 @@ export function createCaloriesTool(
 
   /**
    * OpenAI-compatible JSON Schema for the calories tool.
-   * Uses proper nested properties so OpenAI strict mode enforces structure.
-   *
-   * Key requirements for OpenAI strict mode:
-   * - All fields in `required` array (optional fields use type: ["type", "null"])
-   * - `additionalProperties: false` on all object types
+   * Canonical (non-strict) form: only truly required fields in `required`.
+   * Optional fields use plain types without nullable union.
+   * Strict mode transformation is applied dynamically in vercel-ai-provider.ts
+   * for models that support it (OpenAI, Claude).
    */
   const CALORIES_RAW_SCHEMA = {
     type: 'object',
@@ -891,7 +890,7 @@ export function createCaloriesTool(
         description: 'Action to perform',
       },
       entries: {
-        type: ['array', 'null'],
+        type: 'array',
         description: 'Array of food entries for log action',
         items: {
           type: 'object',
@@ -901,7 +900,7 @@ export function createCaloriesTool(
               description: 'Food name (no quantity, e.g., "Американо" not "Американо 200мл")',
             },
             portion: {
-              type: ['object', 'null'],
+              type: 'object',
               description: 'Portion specification: { quantity, unit }',
               properties: {
                 quantity: { type: 'number', description: 'Amount (e.g., 200)' },
@@ -927,82 +926,64 @@ export function createCaloriesTool(
               additionalProperties: false,
             },
             calories_estimate: {
-              type: ['number', 'null'],
+              type: 'number',
               description: 'Calorie estimate if known (positive number)',
             },
             calories_per_100g: {
-              type: ['number', 'null'],
+              type: 'number',
               description:
                 'Caloric density (kcal per 100g). Use with weight portion (g/kg) — tool computes calories automatically.',
             },
             meal_type: {
-              type: ['string', 'null'],
-              enum: ['breakfast', 'lunch', 'dinner', 'snack', null],
+              type: 'string',
+              enum: ['breakfast', 'lunch', 'dinner', 'snack'],
               description: 'Meal type',
             },
             timestamp: {
-              type: ['string', 'null'],
+              type: 'string',
               description: 'ISO timestamp override (optional)',
             },
             chooseItemId: {
-              type: ['string', 'null'],
+              type: 'string',
               description: 'Explicit item ID to resolve ambiguity',
             },
           },
-          required: [
-            'name',
-            'portion',
-            'calories_estimate',
-            'calories_per_100g',
-            'meal_type',
-            'timestamp',
-            'chooseItemId',
-          ],
+          required: ['name'],
           additionalProperties: false,
         },
       },
       date: {
-        type: ['string', 'null'],
+        type: 'string',
         description:
           'Date: "today", "yesterday", "tomorrow", or YYYY-MM-DD (default: today based on sleep patterns)',
       },
       meal_type: {
-        type: ['string', 'null'],
-        enum: ['breakfast', 'lunch', 'dinner', 'snack', null],
+        type: 'string',
+        enum: ['breakfast', 'lunch', 'dinner', 'snack'],
         description: 'Filter by meal type for list action',
       },
       limit: {
-        type: ['number', 'null'],
+        type: 'number',
         description: 'Max entries for list (default: 20)',
       },
       daily_target: {
-        type: ['number', 'null'],
+        type: 'number',
         description: 'Calorie goal for goal action',
       },
       calculate_from_stats: {
-        type: ['boolean', 'null'],
+        type: 'boolean',
         description: 'Calculate TDEE from user data for goal action',
       },
       weight: {
-        type: ['number', 'null'],
+        type: 'number',
         description: 'Weight in kg for log_weight action',
       },
       entry_id: {
-        type: ['string', 'null'],
+        type: 'string',
         description: 'Entry ID for delete action',
       },
     },
-    required: [
-      'action',
-      'entries',
-      'date',
-      'meal_type',
-      'limit',
-      'daily_target',
-      'calculate_from_stats',
-      'weight',
-      'entry_id',
-    ],
+    required: ['action'],
     additionalProperties: false,
   };
 

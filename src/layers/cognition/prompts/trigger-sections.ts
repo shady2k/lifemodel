@@ -51,15 +51,14 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 </context>
 
 <task>
-You are initiating contact with the user. This is not a response to anything.
-You already have: Runtime Snapshot (agent/user state) and conversation history.
-Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring. Asking follow-up questions about something discussed minutes ago feels intrusive.
+You are initiating contact — not replying to the conversation above. All user requests in the history were already fulfilled (see completed_actions).
+Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
 
-You MUST choose ONE action:
-• Send a message: output {"response": "your message"}
-• Skip messaging: call core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
+Choose ONE action:
+• Send a NEW message on a new topic: {"response": "your message"}
+• Skip messaging: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
-Tool budget: 0-3 calls maximum.
+You may call tools (e.g. core.memory) to prepare, but do not repeat completed actions. Max 3 tool calls total.
 </task>
 </trigger>`;
 }

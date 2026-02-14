@@ -336,7 +336,7 @@ Already done. Do not repeat unless asked.
 
   return `<completed_actions>
 ${formatted.join('\n')}
-These actions were already executed. Do NOT call these tools again for the same data.
+These actions were already executed in the conversation above. Do NOT repeat them.
 </completed_actions>`;
 }
 

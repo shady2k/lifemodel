@@ -88,7 +88,7 @@ export function buildInitialMessages(
     messages.push({
       role: 'user',
       content:
-        '[End of conversation history. A new system event follows. Do not continue the conversation above.]',
+        '[End of conversation history. All messages above were already handled and responded to. A new, unrelated system event follows.]',
     });
   }
 

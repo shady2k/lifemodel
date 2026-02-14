@@ -263,6 +263,39 @@ export function validateToolArgs(
       continue;
     }
 
+    // Check 5.5: String "null" coercion for weak models
+    // Weak models (GLM, DeepSeek, Qwen) pass string "null" instead of JSON null or omitting
+    if (typeof value === 'string' && value.trim().toLowerCase() === 'null') {
+      const propSchema = properties[key];
+      if (isPlainObject(propSchema)) {
+        // Check if field is nullable (type array includes "null")
+        const isNullable = Array.isArray(propSchema['type']) && propSchema['type'].includes('null');
+
+        if (isNullable) {
+          // Coerce string "null" to JSON null
+          args[key] = null;
+          continue; // Skip further validation - null is valid for nullable field
+        } else {
+          // Field is not nullable - check if it's required
+          const isRequired = Array.isArray(schema['required'])
+            ? (schema['required'] as string[]).includes(key)
+            : false;
+
+          if (!isRequired) {
+            // Optional non-nullable field - treat as omitted
+            Reflect.deleteProperty(args, key);
+            continue;
+          } else {
+            // Required non-nullable field with string "null" - validation error
+            errors.push(
+              `${key}: received string "null" but field is required and non-nullable. Provide an actual value.`
+            );
+            continue;
+          }
+        }
+      }
+    }
+
     // Get expected types from schema
     const propSchema = properties[key];
     if (!isPlainObject(propSchema)) continue;
