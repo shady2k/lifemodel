@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { MinimalOpenAIChatTool } from '../../src/llm/tool-schema.js';
+import type { MinimalOpenAIChatTool, OpenAIChatTool } from '../../src/llm/tool-schema.js';
 import type { CompletionRequest, Message } from '../../src/llm/provider.js';
 import { VercelAIProvider } from '../../src/plugins/providers/vercel-ai-provider.js';
 import { generateText } from 'ai';
@@ -143,6 +143,117 @@ describe('VercelAIProvider', () => {
     // Local provider should use .chat() (officially recommended for LM Studio)
     expect(mockChatModel).toHaveBeenCalledWith('test');
     expect(mockResponsesModel).not.toHaveBeenCalled();
+  });
+
+  describe('wire-level tool schema verification', () => {
+    // These tests verify that tool schemas arrive intact in the actual generateText call,
+    // catching regressions like the AI SDK v6 schema stripping bug where properties
+    // were emptied before reaching the provider.
+
+    const toolsWithSchema: (OpenAIChatTool | MinimalOpenAIChatTool)[] = [
+      {
+        type: 'function',
+        function: {
+          name: 'fetch',
+          description: 'Fetch a URL',
+          parameters: {
+            type: 'object' as const,
+            properties: {
+              url: { type: 'string', description: 'URL to fetch' },
+              method: { type: 'string', enum: ['GET', 'POST'], description: 'HTTP method' },
+            },
+            required: ['url'],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: { name: 'core.tools', description: 'Describe tools' },
+      },
+    ];
+
+    const successResponse = {
+      text: 'ok',
+      toolCalls: undefined,
+      finishReason: 'stop',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      response: { id: 'resp_1' },
+    };
+
+    it('OpenRouter: raw tools in providerOptions preserve full parameter schemas', async () => {
+      const provider = new VercelAIProvider({ apiKey: 'test' });
+      (generateText as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(
+        successResponse
+      );
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: toolsWithSchema,
+      });
+
+      const call = (generateText as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0] as Record<string, unknown>;
+
+      // Verify providerOptions.openrouter.tools has raw schemas (the SDK bug workaround)
+      const providerOptions = call['providerOptions'] as Record<string, Record<string, unknown>> | undefined;
+      expect(providerOptions?.['openrouter']).toBeTruthy();
+
+      const rawTools = providerOptions!['openrouter']!['tools'] as { type: string; function: { name: string; parameters?: Record<string, unknown> } }[];
+      expect(rawTools).toHaveLength(2);
+
+      // Full tool: parameters.properties must be populated (not stripped)
+      const fetchTool = rawTools.find((t) => t.function.name === 'fetch');
+      expect(fetchTool).toBeTruthy();
+      expect(fetchTool!.function.parameters).toBeTruthy();
+      const props = fetchTool!.function.parameters!['properties'] as Record<string, unknown>;
+      expect(props).toBeTruthy();
+      expect(Object.keys(props)).toContain('url');
+      expect(Object.keys(props)).toContain('method');
+
+      // Minimal tool: no parameters (just name + description)
+      const minimalTool = rawTools.find((t) => t.function.name === 'core.tools');
+      expect(minimalTool).toBeTruthy();
+      expect(minimalTool!.function.parameters).toBeUndefined();
+    });
+
+    it('Local: tools passed to generateText have schemas intact', async () => {
+      const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+      (generateText as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(
+        successResponse
+      );
+
+      await provider.complete({
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: toolsWithSchema,
+      });
+
+      const call = (generateText as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0] as Record<string, unknown>;
+
+      // Local providers don't use providerOptions.openrouter — tools go through SDK directly
+      const tools = call['tools'] as Record<string, { parameters: unknown; description: string }>;
+      expect(tools).toBeTruthy();
+
+      // Full tool: jsonSchema mock returns the schema as-is
+      expect(tools['fetch']).toBeTruthy();
+      expect(tools['fetch']!.parameters).toMatchObject({
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          method: { type: 'string' },
+        },
+      });
+
+      // Minimal tool: permissive schema
+      expect(tools['core.tools']).toBeTruthy();
+      expect(tools['core.tools']!.parameters).toMatchObject({
+        type: 'object',
+        additionalProperties: true,
+      });
+
+      // Local should NOT have openrouter providerOptions with tools
+      const providerOptions = call['providerOptions'] as Record<string, Record<string, unknown>> | undefined;
+      expect(providerOptions?.['openrouter']?.['tools']).toBeUndefined();
+    });
   });
 
   it('strips Harmony tokens from local provider responses', () => {
