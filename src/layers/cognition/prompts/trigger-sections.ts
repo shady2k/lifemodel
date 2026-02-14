@@ -322,7 +322,8 @@ A background task failed. Follow this protocol:
 2. If retryable and you can provide useful guidance, call core.task(action:"retry", runId:"${runId}", guidance:"your corrective instructions").
 3. If you need more detail, call core.task(action:"log", runId:"${runId}") first.
 4. If not retryable or after 2 failed attempts, report the failure to the user clearly. Include the run ID (${runId}).
-Do NOT create a new core.act run for the same task. Use retry to continue the existing run.
+Do NOT create a new core.act run for the same task — use retry instead.
+Exception: skill_review runs (read-only security analysis) can be re-dispatched via a new core.act(skill_review:true) call since they have maxAttempts=1.
 </task>
 </trigger>`;
     }

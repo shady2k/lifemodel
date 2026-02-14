@@ -379,7 +379,7 @@ describe('core.act tool', () => {
           tools: ['read', 'list', 'glob', 'grep'], // read-only tools only
           domains: [], // empty domains
           maxAttempts: 1,
-          maxIterations: 10,
+          maxIterations: 30,
           config: {
             syntheticTools: [],
             installDependencies: false,

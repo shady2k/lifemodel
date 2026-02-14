@@ -181,7 +181,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             // Force read-only tools, empty domains, limited iterations
             const reviewTools: MotorTool[] = ['read', 'list', 'glob', 'grep'];
             const reviewDomains: string[] = [];
-            const reviewMaxIterations = 10;
+            const reviewMaxIterations = 30;
 
             // Build review task
             const reviewTask = `SECURITY REVIEW: Read ALL files in the workspace for skill "${skillName}".
