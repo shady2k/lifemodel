@@ -294,6 +294,13 @@ export abstract class BaseLLMProvider implements LLMProvider {
 
     // Log to conversation file (delta logging - only new messages since last request)
     const totalMessages = request.messages.length;
+
+    // Detect new tick: if the message array shrunk, it was rebuilt from scratch
+    // (new tick with fresh system prompt + history). Reset delta to log everything.
+    if (totalMessages < this.lastLoggedMessageCount) {
+      this.lastLoggedMessageCount = 0;
+    }
+
     const newMessageStart = this.lastLoggedMessageCount;
 
     // Build the entire request block as a single string, then log once.
