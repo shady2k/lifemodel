@@ -23,6 +23,16 @@ export type RunStatus =
   | 'failed';
 
 /**
+ * Synthetic tools that can be injected into a Motor Cortex run.
+ *
+ * These are host-side tools that don't run in the container:
+ * - ask_user: Pause execution and ask user a question
+ * - save_credential: Persist a credential for future runs
+ * - request_approval: Request user approval for an action (requires bash tool)
+ */
+export type SyntheticTool = 'ask_user' | 'save_credential' | 'request_approval';
+
+/**
  * Tools available to the Motor Cortex sub-agent.
  */
 export type MotorTool = 'read' | 'write' | 'list' | 'glob' | 'bash' | 'grep' | 'patch' | 'fetch';
@@ -362,6 +372,16 @@ export interface MotorRun {
 
   /** Allowed network domains for this run (merged from skill + explicit) */
   domains?: string[];
+
+  /** Run configuration (persisted for retry/resume) */
+  config: {
+    /** Which synthetic tools to inject (allow-list) */
+    syntheticTools: SyntheticTool[];
+    /** Whether to install skill dependencies before running */
+    installDependencies: boolean;
+    /** Whether to merge skill policy domains into allowed domains */
+    mergePolicyDomains: boolean;
+  };
 
   /** Credentials saved by save_credential before skill directory exists.
    *  Merged into policy.json during extraction. */

@@ -45,6 +45,11 @@ function makeRun(overrides?: Partial<MotorRun>): MotorRun {
     maxAttempts: 3,
     startedAt: new Date().toISOString(),
     energyConsumed: 0,
+    config: {
+      syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+      installDependencies: true,
+      mergePolicyDomains: true,
+    },
     ...overrides,
   };
 }

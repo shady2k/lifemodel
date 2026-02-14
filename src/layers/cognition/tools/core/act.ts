@@ -12,7 +12,7 @@
 import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
-import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
+import type { MotorTool, SyntheticTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
 import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
 import { isValidDomain } from '../../../../runtime/container/network-policy.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
@@ -80,6 +80,13 @@ export function createActTool(motorCortex: MotorCortex): Tool {
         'Network domains to allow access to (e.g., ["api.example.com"]). Merged with skill policy domains if provided.',
       required: false,
     },
+    {
+      name: 'skill_review',
+      type: 'boolean' as const,
+      description:
+        'Skill security review mode: read-only tools, no network, no synthetic tools. Only callable from motor_result trigger. Requires skill param and mode:agentic.',
+      required: false,
+    },
   ];
 
   return {
@@ -90,14 +97,24 @@ export function createActTool(motorCortex: MotorCortex): Tool {
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
-    execute: async (args, _context) => {
+    execute: async (args, context) => {
       const mode = args['mode'] as string;
       const task = args['task'] as string;
+      const skillReview = args['skill_review'] as boolean | undefined;
+      const triggerType = context?.triggerType;
 
       if (!mode || !task) {
         return {
           success: false,
           error: 'Missing required parameters: mode, task',
+        };
+      }
+
+      // skill_review requires agentic mode
+      if (skillReview === true && mode !== 'agentic') {
+        return {
+          success: false,
+          error: 'skill_review requires mode:"agentic"',
         };
       }
 
@@ -126,8 +143,85 @@ export function createActTool(motorCortex: MotorCortex): Tool {
         try {
           const skillName = args['skill'] as string | undefined;
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
-          const maxIterations = (args['maxIterations'] as number | undefined) ?? 30;
           const explicitDomains = (args['domains'] as string[] | undefined) ?? [];
+
+          // Handle skill_review mode
+          if (skillReview === true) {
+            // Trigger gate: reject unless motor_result trigger
+            if (triggerType !== 'motor_result') {
+              return {
+                success: false,
+                error:
+                  'skill_review mode can only be called from motor_result trigger. ' +
+                  'This ensures security review happens only after Motor creates/updates a skill.',
+              };
+            }
+
+            // Require skill param
+            if (!skillName) {
+              return {
+                success: false,
+                error:
+                  'skill_review mode requires the skill parameter to specify which skill to review.',
+              };
+            }
+
+            // Load skill (skip trust gating for review)
+            const skillResult = await loadSkill(skillName);
+            if ('error' in skillResult) {
+              return {
+                success: false,
+                error: skillResult.error,
+              };
+            }
+            const loadedSkill = skillResult;
+
+            // Skip input validation for review mode
+
+            // Force read-only tools, empty domains, limited iterations
+            const reviewTools: MotorTool[] = ['read', 'list', 'glob', 'grep'];
+            const reviewDomains: string[] = [];
+            const reviewMaxIterations = 10;
+
+            // Build review task
+            const reviewTask = `SECURITY REVIEW: Read ALL files in the workspace for skill "${skillName}".
+For each file, report:
+1. File path and purpose
+2. Any credentials referenced (env vars like process.env.NAME, $NAME, etc.)
+3. Any domains referenced (URLs, hostnames)
+4. Any security concerns or suspicious patterns
+
+Files to read: SKILL.md, and any files in scripts/ or references/ directories.
+Start by listing the directory structure, then read each file.`;
+
+            const { runId } = await motorCortex.startRun({
+              task: reviewTask,
+              tools: reviewTools,
+              maxIterations: reviewMaxIterations,
+              maxAttempts: 1,
+              skill: loadedSkill,
+              domains: reviewDomains,
+              config: {
+                syntheticTools: [],
+                installDependencies: false,
+                mergePolicyDomains: false,
+              },
+            });
+
+            return {
+              success: true,
+              data: {
+                mode: 'agentic',
+                runId,
+                status: 'started',
+                skill: skillName,
+                message: `Security review started for skill "${skillName}" (run: ${runId}). Results will arrive via motor_result signal.`,
+              },
+            };
+          }
+
+          // Normal execution (not skill_review)
+          const maxIterations = (args['maxIterations'] as number | undefined) ?? 30;
 
           // Load skill if specified
           let loadedSkill: LoadedSkill | undefined = undefined;
@@ -226,6 +320,15 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             maxIterations,
             ...(loadedSkill && { skill: loadedSkill }),
             ...(domains.length > 0 && { domains }),
+            config: {
+              syntheticTools: [
+                'ask_user',
+                'save_credential',
+                'request_approval',
+              ] as SyntheticTool[],
+              installDependencies: true,
+              mergePolicyDomains: true,
+            },
           });
 
           // Note: Auto-discovery mode - no index.json to update

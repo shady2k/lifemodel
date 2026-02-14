@@ -488,9 +488,14 @@ After extraction, Cognition must review each new/updated skill before presenting
 
 ### Two-Layer Review Approach
 
-1. **Regex extraction (host-side, deterministic):** Extract env var names and URL domains from the SKILL.md body. These are observed references — hard facts even the fast model can work with. No prompt injection risk.
+1. **Regex extraction (host-side, deterministic):** Extract env var names and URL domains from all skill files. These are observed references — hard facts even the fast model can work with. No prompt injection risk. Accessed via `core.skill(action:"review")`.
 
-2. **LLM analysis (Cognition-side, advisory):** Cognition calls `core.skill(action:"read")` to see the full instructions and analyzes what setup steps the user needs. Presented as "inferred from instructions (may be incomplete)" — separate from the deterministic review facts.
+2. **Motor review task (sandboxed, advisory):** Cognition dispatches a Motor run with `skill_review: true` to read ALL skill files (SKILL.md, scripts/, references/) and report file-by-file analysis. This run has:
+   - Read-only tools: `read`, `list`, `glob`, `grep`
+   - No network access (empty domains)
+   - No synthetic tools (no `ask_user`, `save_credential`, `request_approval`)
+   - Limited iterations (max 10)
+   - Single attempt (no auto-retry)
 
 3. **Motor runtime as safety net:** If both layers miss something, Motor fails at runtime and reports back via `ask_user`.
 
@@ -509,10 +514,18 @@ After extraction, Cognition must review each new/updated skill before presenting
    - Whether bash was used (note: network activity beyond fetch is not instrumented in run evidence,
      but all network access is still enforced by the container firewall)
    - Provenance (source URL, fetch timestamp)
-4. Cognition calls core.skill(action:"read") to see full instructions
-5. Cognition analyzes body for setup requirements (API key registration, env var config)
-6. Cognition presents review facts + inferred setup to the user
-7. User approves → Cognition calls core.skill(action:"approve")
+4. Cognition tells user: "Analyzing skill files for security review..."
+5. Cognition dispatches Motor review: core.act(mode:"agentic", skill:"skill-name", skill_review:true, task:"Read all files...")
+6. Motor review reads SKILL.md, scripts/, references/ and reports:
+   - Each file's purpose and contents
+   - Credentials referenced in each file
+   - Domains referenced in each file
+   - Any security concerns or suspicious patterns
+7. When motor_result arrives (second signal), Cognition combines:
+   - Deterministic facts from step 3 (authoritative)
+   - Motor analysis from step 6 (advisory, may be incomplete)
+8. Cognition presents everything at once to user
+9. User approves → Cognition calls core.skill(action:"approve")
 ```
 
 ### Content Reference Extraction
@@ -566,6 +579,71 @@ Domains needed during skill **creation** (docs sites, skills.sh, github.com) are
 - New skills have no `allowedDomains` — the user sets them during approval
 - Updated skills preserve existing `allowedDomains` (previously user-approved)
 - On first usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow)
+
+## Motor Run Configuration
+
+Each Motor run has a `config` object that controls its behavior:
+
+```typescript
+interface MotorRunConfig {
+  /** Which synthetic tools to inject (allow-list) */
+  syntheticTools: SyntheticTool[];
+  /** Whether to install skill dependencies before running */
+  installDependencies: boolean;
+  /** Whether to merge skill policy domains into allowed domains */
+  mergePolicyDomains: boolean;
+}
+```
+
+### Synthetic Tools
+
+Synthetic tools are host-side tools that don't run in the container:
+- `ask_user`: Pause execution and ask user a question
+- `save_credential`: Persist a credential for future runs
+- `request_approval`: Request user approval for an action (requires bash tool)
+
+### Normal Execution Config
+
+For skill creation and execution runs:
+```json
+{
+  "syntheticTools": ["ask_user", "save_credential", "request_approval"],
+  "installDependencies": true,
+  "mergePolicyDomains": true
+}
+```
+
+### Skill Review Config
+
+For security review runs (triggered by `skill_review: true`):
+```json
+{
+  "syntheticTools": [],
+  "installDependencies": false,
+  "mergePolicyDomains": false
+}
+```
+
+## skill_review Parameter
+
+The `core.act` tool accepts a `skill_review` boolean parameter for security review mode:
+
+```typescript
+core.act({
+  mode: "agentic",
+  skill: "skill-name",
+  skill_review: true,
+  task: "Read all files and report findings"
+})
+```
+
+**Constraints:**
+- Only callable from `motor_result` trigger (enforced at runtime)
+- Requires `skill` parameter
+- Forces read-only tools: `read`, `list`, `glob`, `grep`
+- Forces empty domains (no network access)
+- Forces `maxIterations: 10`, `maxAttempts: 1`
+- Bypasses trust gating (can review `pending_review` and `needs_reapproval` skills)
 
 ## Open Questions
 

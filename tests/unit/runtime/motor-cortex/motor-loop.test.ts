@@ -19,6 +19,11 @@ describe('buildMotorSystemPrompt', () => {
       attempts: [],
       currentAttemptIndex: 0,
       maxAttempts: 3,
+      config: {
+        syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+        installDependencies: true,
+        mergePolicyDomains: true,
+      },
       startedAt: new Date().toISOString(),
       energyConsumed: 0,
     } satisfies MotorRun;

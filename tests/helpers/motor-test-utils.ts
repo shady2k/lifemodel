@@ -94,6 +94,11 @@ export function createTestMotorRun(overrides?: Partial<MotorRun>): MotorRun {
     maxAttempts: 3,
     startedAt: new Date().toISOString(),
     energyConsumed: 0,
+    config: {
+      syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+      installDependencies: true,
+      mergePolicyDomains: true,
+    },
     ...overrides,
   };
 }
@@ -296,6 +301,7 @@ export async function createTestLoopParams(
     credentialStore,
     artifactsBaseDir: options.artifactsBaseDir ?? workspace,
     workspace,
+    syntheticTools: run.config.syntheticTools,
   };
 
   const cleanup = async () => {

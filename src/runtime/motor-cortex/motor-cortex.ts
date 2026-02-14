@@ -14,7 +14,13 @@ import type { Storage } from '../../storage/storage.js';
 import type { Signal } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
 import type { EnergyModel } from '../../core/energy.js';
-import type { MotorRun, MotorTool, RunStatus, MotorAttempt } from './motor-protocol.js';
+import type {
+  MotorRun,
+  MotorTool,
+  RunStatus,
+  MotorAttempt,
+  SyntheticTool,
+} from './motor-protocol.js';
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import type { MotorFetchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
@@ -249,6 +255,14 @@ export class MotorCortex {
     timeout?: number;
     skill?: LoadedSkill;
     domains?: string[];
+    /** Run configuration (defaults to full execution mode) */
+    config?: {
+      syntheticTools?: SyntheticTool[];
+      installDependencies?: boolean;
+      mergePolicyDomains?: boolean;
+    };
+    /** Maximum attempts before giving up (default: DEFAULT_MAX_ATTEMPTS) */
+    maxAttempts?: number;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -277,11 +291,28 @@ export class MotorCortex {
     const runId = crypto.randomUUID();
     const now = new Date().toISOString();
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const maxAttempts = params.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
 
-    // Merge skill policy domains with explicit domains
-    const skillDomains = params.skill?.policy?.allowedDomains;
-    const explicitDomains = params.domains;
-    const mergedDomains = mergeDomains(skillDomains, explicitDomains);
+    // Build run config with defaults for full execution mode
+    const runConfig: MotorRun['config'] = {
+      syntheticTools: params.config?.syntheticTools ?? [
+        'ask_user',
+        'save_credential',
+        'request_approval',
+      ],
+      installDependencies: params.config?.installDependencies ?? true,
+      mergePolicyDomains: params.config?.mergePolicyDomains ?? true,
+    };
+
+    // Merge skill policy domains with explicit domains (only when mergePolicyDomains is true)
+    let mergedDomains: string[] = [];
+    if (runConfig.mergePolicyDomains) {
+      const skillDomains = params.skill?.policy?.allowedDomains;
+      const explicitDomains = params.domains;
+      mergedDomains = mergeDomains(skillDomains, explicitDomains);
+    } else {
+      mergedDomains = params.domains ?? [];
+    }
 
     // Pre-seed GitHub domains when task references skills.sh.
     // Skills hosted on skills.sh resolve to GitHub raw content and the GitHub API,
@@ -301,7 +332,8 @@ export class MotorCortex {
       tools: params.tools,
       attempts: [], // Will be populated below
       currentAttemptIndex: 0,
-      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      maxAttempts,
+      config: runConfig,
       startedAt: now,
       energyConsumed: energyBefore - this.energyModel.getEnergy(),
       ...(mergedDomains.length > 0 && { domains: mergedDomains }),
@@ -524,8 +556,9 @@ export class MotorCortex {
 
       // Install skill dependencies (cache-first, prep container on miss)
       // Read from HOST skill directory (not workspace) since policy.json is excluded from container
+      // Only install when config.installDependencies is true (default for normal execution)
       let preparedDeps: PreparedDeps | null = null;
-      if (run.skill && this.skillsDir) {
+      if (run.config.installDependencies && run.skill && this.skillsDir) {
         const hostPolicyPath = join(this.skillsDir, run.skill, 'policy.json');
         if (existsSync(hostPolicyPath)) {
           try {
@@ -621,6 +654,7 @@ export class MotorCortex {
         logger: this.logger,
         workspace,
         abortSignal: abortController.signal,
+        syntheticTools: run.config.syntheticTools,
         ...(loadedSkill && { skill: loadedSkill }),
         ...(this.skillsDir && { skillsDir: this.skillsDir }),
         ...(this.credentialStore && { credentialStore: this.credentialStore }),

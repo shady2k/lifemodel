@@ -308,4 +308,172 @@ describe('core.act tool', () => {
       expect(paramNames).not.toContain('tools');
     });
   });
+
+  describe('skill_review mode', () => {
+    const motorResultContext = { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' };
+
+    it('rejects from non-motor_result trigger', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'pending_review', schemaVersion: 1 },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      const result = (await tool.execute(
+        {
+          mode: 'agentic',
+          skill: 'test-skill',
+          skill_review: true,
+          task: 'review task',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as Record<string, unknown>;
+
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('skill_review mode can only be called from motor_result trigger');
+    });
+
+    it('rejects without skill param', async () => {
+      const result = (await tool.execute(
+        {
+          mode: 'agentic',
+          skill_review: true,
+          task: 'review task',
+        },
+        motorResultContext
+      )) as Record<string, unknown>;
+
+      expect(result['success']).toBe(false);
+      expect(result['error']).toContain('skill_review mode requires the skill parameter');
+    });
+
+    it('dispatches with read-only tools, empty domains, maxAttempts=1', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'pending_review', schemaVersion: 1 },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'review-run-123',
+      });
+
+      const result = (await tool.execute(
+        {
+          mode: 'agentic',
+          skill: 'test-skill',
+          skill_review: true,
+          task: 'review task',
+        },
+        motorResultContext
+      )) as Record<string, unknown>;
+
+      expect(result['success']).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: ['read', 'list', 'glob', 'grep'], // read-only tools only
+          domains: [], // empty domains
+          maxAttempts: 1,
+          maxIterations: 10,
+          config: {
+            syntheticTools: [],
+            installDependencies: false,
+            mergePolicyDomains: false,
+          },
+        })
+      );
+    });
+
+    it('bypasses trust gating for pending_review skill', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'pending_review', schemaVersion: 1 },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'review-run-456',
+      });
+
+      const result = (await tool.execute(
+        {
+          mode: 'agentic',
+          skill: 'pending-skill',
+          skill_review: true,
+          task: 'review task',
+        },
+        motorResultContext
+      )) as Record<string, unknown>;
+
+      // Should succeed despite pending_review trust (review mode bypasses gating)
+      expect(result['success']).toBe(true);
+    });
+
+    it('bypasses trust gating for needs_reapproval skill', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'needs_reapproval', schemaVersion: 1 },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'review-run-789',
+      });
+
+      const result = (await tool.execute(
+        {
+          mode: 'agentic',
+          skill: 'needs-reapproval-skill',
+          skill_review: true,
+          task: 'review task',
+        },
+        motorResultContext
+      )) as Record<string, unknown>;
+
+      // Should succeed despite needs_reapproval trust (review mode bypasses gating)
+      expect(result['success']).toBe(true);
+    });
+  });
+
+  describe('normal execution config', () => {
+    it('passes full config with all synthetic tools for approved skill', async () => {
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        frontmatter: { name: 'test', description: 'Test' },
+        policy: { trust: 'approved', schemaVersion: 1, allowedDomains: ['api.example.com'] },
+        body: 'instructions',
+        path: '/path',
+        skillPath: '/path/SKILL.md',
+      });
+
+      (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+        runId: 'run-config-test',
+      });
+
+      await tool.execute({
+        mode: 'agentic',
+        skill: 'approved-skill',
+        task: 'test task',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
+      expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: {
+            syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+            installDependencies: true,
+            mergePolicyDomains: true,
+          },
+        })
+      );
+    });
+  });
 });

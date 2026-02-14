@@ -20,6 +20,7 @@ import type {
   FailureSummary,
   FailureCategory,
   RunEvidence,
+  SyntheticTool,
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
 import {
@@ -60,6 +61,9 @@ export interface MotorLoopParams {
 
   /** Logger */
   logger: Logger;
+
+  /** Which synthetic tools to inject (required, controlled by caller) */
+  syntheticTools: SyntheticTool[];
 
   /** Skills directory for filesystem access (optional) */
   skillsDir?: string;
@@ -213,19 +217,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Get tool definitions
   const toolDefinitions = getToolDefinitions(run.tools);
 
-  // Always inject ask_user — the model needs it to request missing domains, credentials, etc.
-  // Without it in the tool schema, the system prompt's "call ask_user" instruction is impossible.
-  toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.ask_user);
-
-  // Inject save_credential when a credential store is available — lets agents
-  // persist credentials obtained during execution (e.g. signup API keys).
-  if (params.credentialStore) {
-    toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.save_credential);
-  }
-
-  // Add request_approval tool if shell is granted (network access = needs approval gate)
-  if (run.tools.includes('bash')) {
-    toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS.request_approval);
+  // Inject synthetic tools explicitly from params.syntheticTools
+  // No fallback logic — caller always specifies what's allowed.
+  for (const st of params.syntheticTools) {
+    // Enforce: request_approval requires bash in tools
+    if (st === 'request_approval' && !run.tools.includes('bash')) continue;
+    toolDefinitions.push(SYNTHETIC_TOOL_DEFINITIONS[st]);
   }
 
   // Build schema map for validation
@@ -705,9 +702,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         toolArgs = validation.data; // Use coerced args
       }
 
-      // Validate tool is in granted tools (skip synthetic tools: ask_user, request_approval, save_credential)
-      const syntheticTools = ['ask_user', 'request_approval', 'save_credential'];
-      if (!syntheticTools.includes(toolName) && !run.tools.includes(toolName as MotorTool)) {
+      // Validate tool is in granted tools or configured synthetic tools
+      const allowedSyntheticTools = new Set<string>(params.syntheticTools);
+      if (!allowedSyntheticTools.has(toolName) && !run.tools.includes(toolName as MotorTool)) {
         const toolMessage: Message = {
           role: 'tool',
           content: JSON.stringify({
@@ -1568,8 +1565,8 @@ export function buildMotorSystemPrompt(
     fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
   };
 
-  // Always include ask_user in the description (it's always available as a synthetic tool)
-  const allTools: string[] = [...run.tools, 'ask_user'];
+  // Include only configured synthetic tools in the description
+  const allTools: string[] = [...run.tools, ...run.config.syntheticTools];
   const toolsDesc = allTools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
 
   // Recovery context injection for retry attempts

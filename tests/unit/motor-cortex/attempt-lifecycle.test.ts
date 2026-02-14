@@ -210,6 +210,11 @@ describe('recovery context in system prompt', () => {
       maxAttempts: 3,
       startedAt: new Date().toISOString(),
       energyConsumed: 0.1,
+      config: {
+        syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+        installDependencies: true,
+        mergePolicyDomains: true,
+      },
     };
   }
 
