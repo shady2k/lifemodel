@@ -272,6 +272,9 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
 4. Do NOT present partial info — wait for the review motor_result on a later turn.
 5. When the review motor_result arrives, present the Motor analysis summary to the user along with the deterministic facts.
    - If bash was used during creation, note: "Network activity beyond the fetch tool is not instrumented in run evidence, but all network access is still enforced by the container firewall"
+   - For each referenced credential, tell the user to set the env var with VAULT_ prefix: export VAULT_<CREDENTIAL_NAME>="value"
+     Example: if the skill references AGENTMAIL_API_KEY, the user must set VAULT_AGENTMAIL_API_KEY.
+   - For policy domains, note which domains should be added to the skill policy for runtime network access.
 6. Ask the user to approve. Do NOT call core.skill(action:"approve") on this turn — it requires a user_message trigger. Wait for the user to reply.`;
       }
 
