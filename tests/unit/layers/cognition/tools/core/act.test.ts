@@ -180,7 +180,7 @@ describe('core.act tool', () => {
       );
     });
 
-    it('merges explicit domains with policy domains', async () => {
+    it('uses only policy domains, ignores explicit domains for skill runs', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
@@ -197,18 +197,22 @@ describe('core.act tool', () => {
         runId: 'run-123',
       });
 
-      await tool.execute({
+      const result = (await tool.execute({
         mode: 'agentic',
         task: 'test task',
         skill: 'test-skill',
         domains: ['another.com'],
-      });
+      })) as Record<string, unknown>;
 
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          domains: expect.arrayContaining(['api.example.com', 'another.com']) as string[],
+          domains: ['api.example.com'], // Only policy domains
         })
+      );
+      // Explicit domains ignored with warning
+      expect((result['data'] as Record<string, unknown>)?.['warnings']).toEqual(
+        expect.arrayContaining([expect.stringContaining('Explicit domains ignored')])
       );
     });
 

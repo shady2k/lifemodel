@@ -296,9 +296,17 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
               };
             }
 
-            // Merge domains: policy + explicit
-            if (policy.allowedDomains) {
-              domains = [...new Set([...policy.allowedDomains, ...explicitDomains])];
+            // Domains: policy is authoritative for approved skills.
+            // Cognition cannot grant arbitrary network access by passing explicit domains.
+            if (policy.allowedDomains && policy.allowedDomains.length > 0) {
+              domains = policy.allowedDomains;
+            } else {
+              domains = [];
+            }
+            if (explicitDomains.length > 0) {
+              warnings.push(
+                `Explicit domains ignored for skill "${skillName}" — use policy.allowedDomains instead.`
+              );
             }
 
             // Note: credentials are handled by Motor Cortex via CredentialStore
