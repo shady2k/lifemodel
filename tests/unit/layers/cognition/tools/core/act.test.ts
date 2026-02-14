@@ -312,7 +312,7 @@ describe('core.act tool', () => {
   describe('skill_review mode', () => {
     const motorResultContext = { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' };
 
-    it('rejects from non-motor_result trigger', async () => {
+    it('rejects from non-allowed trigger (e.g. thought)', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: { trust: 'pending_review', schemaVersion: 1 },
@@ -328,11 +328,11 @@ describe('core.act tool', () => {
           skill_review: true,
           task: 'review task',
         },
-        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+        { triggerType: 'thought', recipientId: 'test', correlationId: 'test' }
       )) as Record<string, unknown>;
 
       expect(result['success']).toBe(false);
-      expect(result['error']).toContain('skill_review mode can only be called from motor_result trigger');
+      expect(result['error']).toContain('skill_review mode can only be called from motor_result or user_message');
     });
 
     it('rejects without skill param', async () => {

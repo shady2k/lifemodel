@@ -147,13 +147,12 @@ export function createActTool(motorCortex: MotorCortex): Tool {
 
           // Handle skill_review mode
           if (skillReview === true) {
-            // Trigger gate: reject unless motor_result trigger
-            if (triggerType !== 'motor_result') {
+            // Trigger gate: allow from motor_result (after creation) or user_message (user-requested review)
+            if (triggerType !== 'motor_result' && triggerType !== 'user_message') {
               return {
                 success: false,
                 error:
-                  'skill_review mode can only be called from motor_result trigger. ' +
-                  'This ensures security review happens only after Motor creates/updates a skill.',
+                  'skill_review mode can only be called from motor_result or user_message trigger.',
               };
             }
 
