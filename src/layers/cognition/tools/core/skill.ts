@@ -25,6 +25,7 @@ import {
 import type { SkillPolicy } from '../../../../runtime/skills/skill-types.js';
 import { sanitizePolicyForDisplay } from '../../../../runtime/skills/skill-types.js';
 import { reviewSkill } from '../../../../runtime/skills/skill-review.js';
+import type { SkillReview } from '../../../../runtime/skills/skill-review.js';
 
 /**
  * Result from core.skill tool execution.
@@ -39,24 +40,7 @@ export interface SkillResult {
   policy?: SkillPolicy | undefined;
   trust?: string | undefined;
   // review action fields
-  review?:
-    | {
-        name: string;
-        description: string;
-        trust: string;
-        policyDomains: string[];
-        policyCredentials: string[];
-        evidence: {
-          fetchedDomains: string[];
-          savedCredentials: string[];
-          toolsUsed: string[];
-          bashUsed: boolean;
-        } | null;
-        files: { path: string; sizeBytes: number; hash: string }[];
-        provenance: SkillPolicy['provenance'];
-        extractedFrom: SkillPolicy['extractedFrom'];
-      }
-    | undefined;
+  review?: SkillReview | undefined;
   // approve/reject action fields
   allowedDomains?: string[] | undefined;
 }
@@ -166,7 +150,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       if (!loaded.policy) {
         return {
           success: false,
-          error: `Skill "${skillName}" has no policy.json — cannot change trust`,
+          error: `Skill "${skillName}" has no policy — cannot change trust`,
         };
       }
 

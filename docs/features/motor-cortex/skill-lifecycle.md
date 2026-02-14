@@ -486,21 +486,58 @@ Skills remain at `pending_review` until explicitly approved. Cognition handles t
 
 After extraction, Cognition must review each new/updated skill before presenting it for approval. This is a **second security layer** — the Docker sandbox is the primary boundary, the review provides **visibility for informed user consent**.
 
+### Two-Layer Review Approach
+
+1. **Regex extraction (host-side, deterministic):** Extract env var names and URL domains from the SKILL.md body. These are observed references — hard facts even the fast model can work with. No prompt injection risk.
+
+2. **LLM analysis (Cognition-side, advisory):** Cognition calls `core.skill(action:"read")` to see the full instructions and analyzes what setup steps the user needs. Presented as "inferred from instructions (may be incomplete)" — separate from the deterministic review facts.
+
+3. **Motor runtime as safety net:** If both layers miss something, Motor fails at runtime and reports back via `ask_user`.
+
 ### Review Flow
 
 ```
 1. COGNITION receives motor_result with installed skills
 2. For each skill, calls core.skill(action:"review", name:"<skill-name>")
-3. Review returns deterministic facts (no heuristics, no content scanning):
+3. Review returns deterministic facts:
    - Description and trust level
    - Policy domains (runtime permissions) vs evidence domains (what was contacted during creation)
    - Policy credentials vs evidence credentials (what was saved during creation)
+   - Referenced credentials (env vars observed in all skill files)
+   - Referenced domains (URLs observed in all skill files)
    - File inventory (path, size, truncated SHA-256 hash)
-   - Whether bash was used (warning: network activity beyond fetch is unobservable)
+   - Whether bash was used (note: network activity beyond fetch is not instrumented in run evidence,
+     but all network access is still enforced by the container firewall)
    - Provenance (source URL, fetch timestamp)
-4. Cognition presents these facts to the user
-5. User approves → Cognition calls core.skill(action:"approve")
+4. Cognition calls core.skill(action:"read") to see full instructions
+5. Cognition analyzes body for setup requirements (API key registration, env var config)
+6. Cognition presents review facts + inferred setup to the user
+7. User approves → Cognition calls core.skill(action:"approve")
 ```
+
+### Content Reference Extraction
+
+The `reviewSkill()` function extracts observed references from all allowlisted skill files (SKILL.md, `scripts/**`, `references/**`). The file inventory scan already reads these files for hashing — extraction piggybacks on the same I/O with zero additional disk reads.
+
+**Credential patterns detected:**
+- `process.env.VAR_NAME` (JS/TS dot notation)
+- `process.env["VAR_NAME"]` / `process.env['VAR_NAME']` (JS/TS bracket notation)
+- `os.environ["VAR_NAME"]` / `os.environ.get("VAR_NAME")` / `os.environ['VAR_NAME']` (Python)
+- `${VAR_NAME}` and `$VAR_NAME` inside fenced shell blocks (````bash`/`sh`/`zsh`/`shell`)
+- `VAULT_VAR_NAME` anywhere (our convention)
+
+**Domain patterns detected:**
+- HTTPS/HTTP URLs parsed via `new URL()` for robust hostname extraction
+
+**Exclusions:**
+- Shell specials (`$1`-`$9`, `$?`, `$!`, etc.)
+- Well-known non-credential vars (`NODE_ENV`, `HOME`, `PATH`, etc.)
+- Placeholder domains (`localhost`, `example.com`, `your-server.com`, etc.)
+
+### v1 Limitations
+
+- **HTTPS/HTTP URLs only:** Bare hostnames and `ws://`/`wss://` schemes are not detected
+- **Binary files skipped:** Files containing null bytes are excluded from text extraction
 
 ### Consent Gating
 

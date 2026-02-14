@@ -8,7 +8,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { reviewSkill } from '../../../../src/runtime/skills/skill-review.js';
+import {
+  reviewSkill,
+  extractCredentialReferences,
+  extractDomainReferences,
+} from '../../../../src/runtime/skills/skill-review.js';
 import { loadSkill } from '../../../../src/runtime/skills/skill-loader.js';
 import type { LoadedSkill } from '../../../../src/runtime/skills/skill-types.js';
 
@@ -218,6 +222,247 @@ describe('skill-review', () => {
       const review = await reviewSkill(loaded);
 
       expect(review.provenance).toEqual(provenance);
+    });
+  });
+
+  describe('content reference extraction', () => {
+    describe('extractCredentialReferences', () => {
+      it('extracts process.env.VAR_NAME', () => {
+        const text = 'const key = process.env.AGENTMAIL_API_KEY;';
+        expect(extractCredentialReferences(text)).toEqual(['AGENTMAIL_API_KEY']);
+      });
+
+      it('extracts os.environ["VAR_NAME"]', () => {
+        const text = 'key = os.environ["SECRET_TOKEN"]';
+        expect(extractCredentialReferences(text)).toEqual(['SECRET_TOKEN']);
+      });
+
+      it('extracts os.environ.get("VAR_NAME")', () => {
+        const text = 'key = os.environ.get("CLIENT_ID")';
+        expect(extractCredentialReferences(text)).toEqual(['CLIENT_ID']);
+      });
+
+      it('extracts os.environ["VAR_NAME"] with single quotes', () => {
+        const text = "key = os.environ['SINGLE_QUOTED']";
+        expect(extractCredentialReferences(text)).toEqual(['SINGLE_QUOTED']);
+      });
+
+      it('extracts VAULT_* convention variables', () => {
+        const text = 'Use VAULT_SLACK_TOKEN for authentication';
+        expect(extractCredentialReferences(text)).toEqual(['VAULT_SLACK_TOKEN']);
+      });
+
+      it('extracts ${VAR_NAME} inside bash blocks', () => {
+        const text = '```bash\ncurl -H "Authorization: ${API_KEY}" https://api.example.com\n```';
+        expect(extractCredentialReferences(text)).toEqual(['API_KEY']);
+      });
+
+      it('filters out process.env.NODE_ENV', () => {
+        const text = 'if (process.env.NODE_ENV === "production")';
+        expect(extractCredentialReferences(text)).toEqual([]);
+      });
+
+      it('deduplicates and sorts results', () => {
+        const text = `
+          process.env.API_KEY
+          process.env.API_KEY
+          process.env.ZEBRA_KEY
+          process.env.ALPHA_KEY
+        `;
+        expect(extractCredentialReferences(text)).toEqual(['ALPHA_KEY', 'API_KEY', 'ZEBRA_KEY']);
+      });
+
+      it('returns empty array for no credential refs', () => {
+        const text = 'This is just plain text with no credentials';
+        expect(extractCredentialReferences(text)).toEqual([]);
+      });
+
+      it('filters out shell specials ($1, $?, $$)', () => {
+        const text = '```bash\necho $1\nexit $?\npid=$$\nMY_VAR="value"\necho $MY_VAR\n```';
+        expect(extractCredentialReferences(text)).toEqual(['MY_VAR']);
+      });
+
+      it('preserves mixed case', () => {
+        const text = 'process.env.MyKey';
+        expect(extractCredentialReferences(text)).toEqual(['MyKey']);
+      });
+
+      it('extracts process.env["VAR_NAME"] bracket notation', () => {
+        const text = 'const key = process.env["API_SECRET"];';
+        expect(extractCredentialReferences(text)).toEqual(['API_SECRET']);
+      });
+
+      it("extracts process.env['VAR_NAME'] single-quote bracket notation", () => {
+        const text = "const key = process.env['WEBHOOK_TOKEN'];";
+        expect(extractCredentialReferences(text)).toEqual(['WEBHOOK_TOKEN']);
+      });
+
+      it('extracts bare $VAR in bash blocks', () => {
+        const text = '```bash\ncurl -H "Auth: $AUTH_TOKEN" https://api.test.com\n```';
+        expect(extractCredentialReferences(text)).toEqual(['AUTH_TOKEN']);
+      });
+
+      it('extracts from ```shell blocks', () => {
+        const text = '```shell\nexport ${MY_SECRET}=value\n```';
+        expect(extractCredentialReferences(text)).toEqual(['MY_SECRET']);
+      });
+
+      it('extracts from multiple bash blocks', () => {
+        const text = '```bash\necho $FIRST_KEY\n```\nSome text\n```sh\necho $SECOND_KEY\n```';
+        expect(extractCredentialReferences(text)).toEqual(['FIRST_KEY', 'SECOND_KEY']);
+      });
+
+      it('does not extract ${VAR} from non-shell code blocks', () => {
+        const text = '```python\nprint("${NOT_A_SHELL_VAR}")\n```';
+        expect(extractCredentialReferences(text)).toEqual([]);
+      });
+
+      it('extracts os.environ.get with default argument', () => {
+        const text = 'os.environ.get("API_KEY", "fallback")';
+        expect(extractCredentialReferences(text)).toEqual(['API_KEY']);
+      });
+    });
+
+    describe('extractDomainReferences', () => {
+      it('extracts https://api.agentmail.to', () => {
+        const text = 'Fetch from https://api.agentmail.to';
+        expect(extractDomainReferences(text)).toEqual(['api.agentmail.to']);
+      });
+
+      it('strips path from URL', () => {
+        const text = 'POST to https://api.agentmail.to/v1/send';
+        expect(extractDomainReferences(text)).toEqual(['api.agentmail.to']);
+      });
+
+      it('filters out example.com', () => {
+        const text = 'See https://example.com for docs';
+        expect(extractDomainReferences(text)).toEqual([]);
+      });
+
+      it('filters out your-server.com', () => {
+        const text = 'Replace https://your-server.com with your domain';
+        expect(extractDomainReferences(text)).toEqual([]);
+      });
+
+      it('handles trailing punctuation', () => {
+        const text = 'API is at (https://api.x.com).';
+        expect(extractDomainReferences(text)).toEqual(['api.x.com']);
+      });
+
+      it('deduplicates and sorts results', () => {
+        const text = `
+          https://zebra.com
+          https://alpha.com
+          https://alpha.com
+        `;
+        expect(extractDomainReferences(text)).toEqual(['alpha.com', 'zebra.com']);
+      });
+
+      it('filters out localhost', () => {
+        const text = 'Test locally at https://localhost:3000';
+        expect(extractDomainReferences(text)).toEqual([]);
+      });
+
+      it('returns empty array for no URL refs', () => {
+        const text = 'No URLs here';
+        expect(extractDomainReferences(text)).toEqual([]);
+      });
+
+      it('normalizes to lowercase', () => {
+        const text = 'https://API.Example.COM/test';
+        // Note: example.com is filtered, so let's use a real-looking domain
+        const text2 = 'https://API.RealService.COM/test';
+        expect(extractDomainReferences(text2)).toEqual(['api.realservice.com']);
+      });
+
+      it('extracts HTTP URLs (not just HTTPS)', () => {
+        const text = 'Endpoint at http://api.internal.corp/v1';
+        expect(extractDomainReferences(text)).toEqual(['api.internal.corp']);
+      });
+
+      it('extracts URL with port number', () => {
+        const text = 'Server at https://api.myapp.com:8443/path';
+        expect(extractDomainReferences(text)).toEqual(['api.myapp.com']);
+      });
+    });
+
+    describe('integration: full skill review', () => {
+      it('populates referencedCredentials and referencedDomains from skill body', async () => {
+        const loaded = await createSkill({
+          name: 'agentmail-test',
+          description: 'AgentMail API skill',
+          policy: {
+            schemaVersion: 1,
+            trust: 'pending_review',
+            runEvidence: {
+              fetchedDomains: ['agentmail.dev'],
+              savedCredentials: [],
+              toolsUsed: ['fetch'],
+              bashUsed: false,
+            },
+          },
+        });
+
+        // Modify the skill body to include references
+        const skillPath = join(skillDir, 'agentmail-test', 'SKILL.md');
+        await writeFile(
+          skillPath,
+          `---
+name: agentmail-test
+description: AgentMail API skill
+---
+# AgentMail
+
+Send emails using the AgentMail API.
+
+\`\`\`bash
+curl -H "Authorization: Bearer \${AGENTMAIL_API_KEY}" https://api.agentmail.to/v1/send
+\`\`\`
+
+Also see https://console.agentmail.to for dashboard access.
+`,
+          'utf-8'
+        );
+
+        // Reload the skill
+        const reloaded = await loadSkill('agentmail-test', skillDir);
+        if ('error' in reloaded) {
+          throw new Error(`Failed to reload skill: ${reloaded.error}`);
+        }
+
+        const review = await reviewSkill(reloaded);
+
+        expect(review.referencedCredentials).toContain('AGENTMAIL_API_KEY');
+        expect(review.referencedDomains).toEqual(
+          expect.arrayContaining(['api.agentmail.to', 'console.agentmail.to'])
+        );
+      });
+
+      it('extracts references from scripts/ and references/ files', async () => {
+        const loaded = await createSkill({
+          name: 'multi-file-skill',
+          description: 'Skill with references in multiple files',
+          policy: { schemaVersion: 1, trust: 'pending_review' },
+          files: [
+            {
+              path: 'scripts/setup.sh',
+              content: '#!/bin/bash\ncurl -H "Authorization: $SETUP_TOKEN" https://setup.api.io/init\n',
+            },
+            {
+              path: 'references/config.md',
+              content: '# Config\nSet `process.env.REF_API_KEY` to your key.\nEndpoint: https://ref.service.com/v2\n',
+            },
+          ],
+        });
+
+        const review = await reviewSkill(loaded);
+
+        // Credentials from scripts/ and references/ should be found
+        expect(review.referencedCredentials).toContain('REF_API_KEY');
+        // Domains from scripts/ and references/ should be found
+        expect(review.referencedDomains).toContain('setup.api.io');
+        expect(review.referencedDomains).toContain('ref.service.com');
+      });
     });
   });
 });

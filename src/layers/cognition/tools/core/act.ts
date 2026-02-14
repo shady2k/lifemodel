@@ -14,6 +14,7 @@ import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
 import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
 import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
+import { isValidDomain } from '../../../../runtime/container/network-policy.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
 
 /**
@@ -63,7 +64,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
       name: 'skill',
       type: 'string' as const,
       description:
-        'Skill name to load (from data/skills/<name>/SKILL.md). Skill must have approved policy. Domains from policy are used automatically.',
+        'Skill name to load. Must have approved policy. Domains from policy are used automatically.',
       required: false,
     },
     {
@@ -196,6 +197,18 @@ export function createActTool(motorCortex: MotorCortex): Tool {
                 error: `Skill input validation failed: ${inputErrors.join('; ')}`,
               };
             }
+          }
+
+          // Validate domains before starting — catch wildcards, IPs, etc.
+          const invalidDomains = domains.filter((d) => !isValidDomain(d));
+          if (invalidDomains.length > 0) {
+            return {
+              success: false,
+              error:
+                `Invalid domain names: ${invalidDomains.join(', ')}. ` +
+                `Wildcards (*.example.com) are not supported — enumerate specific subdomains ` +
+                `(e.g., "github.com", "api.github.com", "raw.githubusercontent.com").`,
+            };
           }
 
           // Build task with inputs if provided

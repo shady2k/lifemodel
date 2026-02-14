@@ -221,7 +221,7 @@ describe('core.skill tool', () => {
       )) as SkillResult;
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('no policy.json');
+      expect(result.error).toContain('has no policy');
     });
   });
 
@@ -258,7 +258,7 @@ describe('core.skill tool', () => {
       )) as SkillResult;
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('no policy.json');
+      expect(result.error).toContain('has no policy');
     });
   });
 
