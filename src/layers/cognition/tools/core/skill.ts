@@ -121,6 +121,12 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       // --- review (always allowed) ---
       if (action === 'review') {
         const review = await reviewSkill(loaded);
+
+        // Transition pending_review → needs_reapproval so approve is unblocked after review
+        if (loaded.policy?.trust === 'pending_review') {
+          await savePolicy(loaded.path, { ...loaded.policy, trust: 'needs_reapproval' });
+        }
+
         return { success: true, skill: skillName, review };
       }
 
