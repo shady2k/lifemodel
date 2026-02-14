@@ -182,16 +182,35 @@ export function createActTool(motorCortex: MotorCortex): Tool {
             const reviewDomains: string[] = [];
             const reviewMaxIterations = 30;
 
-            // Build review task
-            const reviewTask = `SECURITY REVIEW: Read ALL files in the workspace for skill "${skillName}".
-For each file, report:
-1. File path and purpose
-2. Any credentials referenced (env vars like process.env.NAME, $NAME, etc.)
-3. Any domains referenced (URLs, hostnames)
-4. Any security concerns or suspicious patterns
+            // Build review task — output should be user-ready for approve/reject decision
+            const reviewTask = `SECURITY REVIEW for skill "${skillName}".
+Read ALL files in the workspace (SKILL.md, scripts/, references/) and produce a structured report for the user.
 
-Files to read: SKILL.md, and any files in scripts/ or references/ directories.
-Start by listing the directory structure, then read each file.`;
+Steps:
+1. List the workspace to find all files
+2. Read each file completely
+3. Use grep to find credentials (process.env, os.environ, $VAR) and domains (URLs, hostnames)
+
+Output format — produce EXACTLY this structure:
+
+**What this skill does:** 1-2 sentences describing concrete capabilities.
+
+**Files:**
+- filename (size) — purpose
+
+**Credentials needed:**
+- ENV_VAR_NAME — what it's for, where to get it (e.g. "register at console.example.com")
+
+**Domains used:**
+- domain.com — what the skill uses it for
+
+**Security assessment:**
+- Note any concerns or confirm no suspicious patterns found
+
+**Setup steps for user:**
+1. Numbered steps the user must complete (get API key, set env var, add domain to policy, etc.)
+
+Be specific and actionable. Do NOT give generic advice. Every credential, domain, and setup step must come from actual file content you read.`;
 
             const { runId } = await motorCortex.startRun({
               task: reviewTask,

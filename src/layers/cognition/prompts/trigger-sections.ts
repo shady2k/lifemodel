@@ -256,7 +256,7 @@ export function buildMotorResultSection(data: MotorResultData): string {
       }
 
       // Build task
-      let task = `Report the result to the user concisely. Include the run ID (${runId}) so the user can reference it.`;
+      let task = `Report the result to the user. Include the run ID (${runId}) so the user can reference it.`;
       if (
         installedSkills &&
         (installedSkills.created.length > 0 || installedSkills.updated.length > 0)
@@ -269,16 +269,9 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
 3. For each skill, dispatch a Motor review task:
    core.act(mode:"agentic", skill:"skill-name", skill_review:true, task:"Read all files and report findings")
    Motor review gets read-only tools, no network, no synthetic tools. It reads SKILL.md, scripts/, references/.
-4. When the second motor_result arrives, combine:
-   - Deterministic facts from step 1 (authoritative)
-   - Motor analysis from step 3 (advisory, may be incomplete)
-5. Present EVERYTHING at once:
-   - Description and trust level
-   - Credentials: policy (declared) vs referenced in skill files
-   - Domains: policy (runtime) vs evidence (creation) vs referenced in skill files
-   - File inventory with purposes
-   - Setup steps the user needs (API key registration, env var configuration)
-   - If bash was used, note: "Network activity beyond the fetch tool is not instrumented in run evidence, but all network access is still enforced by the container firewall"
+4. Do NOT present partial info — wait for the review motor_result on a later turn.
+5. When the review motor_result arrives, present the Motor analysis summary to the user along with the deterministic facts.
+   - If bash was used during creation, note: "Network activity beyond the fetch tool is not instrumented in run evidence, but all network access is still enforced by the container firewall"
 6. Ask the user to approve. Do NOT call core.skill(action:"approve") on this turn — it requires a user_message trigger. Wait for the user to reply.`;
       }
 
