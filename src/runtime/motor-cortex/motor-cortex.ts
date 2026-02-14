@@ -36,12 +36,12 @@ import { TRUNCATION_DIR } from './tool-truncation.js';
 /**
  * Default max iterations per attempt.
  */
-const DEFAULT_MAX_ITERATIONS = 20;
+const DEFAULT_MAX_ITERATIONS = 30;
 
 /**
  * Default max iterations for retry attempts (slightly reduced budget).
  */
-const RETRY_MAX_ITERATIONS = 15;
+const RETRY_MAX_ITERATIONS = 20;
 
 /**
  * Dependencies for Motor Cortex service.
@@ -282,6 +282,17 @@ export class MotorCortex {
     const skillDomains = params.skill?.policy?.allowedDomains;
     const explicitDomains = params.domains;
     const mergedDomains = mergeDomains(skillDomains, explicitDomains);
+
+    // Pre-seed GitHub domains when task references skills.sh.
+    // Skills hosted on skills.sh resolve to GitHub raw content and the GitHub API,
+    // so pre-seeding avoids two domain-escalation round-trips that pause execution.
+    if (params.task.includes('skills.sh')) {
+      for (const ghDomain of ['raw.githubusercontent.com', 'api.github.com', 'github.com']) {
+        if (!mergedDomains.includes(ghDomain)) {
+          mergedDomains.push(ghDomain);
+        }
+      }
+    }
 
     const run: MotorRun = {
       id: runId,
@@ -920,9 +931,21 @@ export class MotorCortex {
     if (effectiveDomains && effectiveDomains.length > 0) {
       const existingDomains = run.domains ?? [];
       run.domains = Array.from(new Set([...existingDomains, ...effectiveDomains]));
+
+      // Reset iteration budget: domain approval shouldn't cost iterations.
+      // The model paused at stepCursor — give it a full budget from there.
+      const oldMax = attempt.maxIterations;
+      attempt.maxIterations = attempt.stepCursor + DEFAULT_MAX_ITERATIONS;
       this.logger.info(
-        { runId, newDomains: effectiveDomains, mergedDomains: run.domains },
-        'Domains expanded on respond'
+        {
+          runId,
+          newDomains: effectiveDomains,
+          mergedDomains: run.domains,
+          stepCursor: attempt.stepCursor,
+          oldMaxIterations: oldMax,
+          newMaxIterations: attempt.maxIterations,
+        },
+        'Domains expanded on respond — iteration budget reset'
       );
 
       // Rebuild system prompt so the model sees the updated domains.
@@ -937,7 +960,12 @@ export class MotorCortex {
         }
         attempt.messages[systemIdx] = {
           role: 'system',
-          content: buildMotorSystemPrompt(run, skill, attempt.recoveryContext),
+          content: buildMotorSystemPrompt(
+            run,
+            skill,
+            attempt.recoveryContext,
+            attempt.maxIterations
+          ),
         };
       }
 

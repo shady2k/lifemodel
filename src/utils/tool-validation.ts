@@ -309,6 +309,15 @@ export function validateToolArgs(
       args[key] = coerced;
     }
 
+    // Auto-coerce: string → boolean (weak models pass "true"/"false" as strings)
+    if (expectedTypes.includes('boolean') && actualType === 'string') {
+      const lower = (value as string).toLowerCase();
+      if (lower === 'true' || lower === 'false') {
+        coerced = lower === 'true';
+        args[key] = coerced;
+      }
+    }
+
     // Auto-coerce: string → number
     if (expectedTypes.includes('number') && actualType === 'string') {
       const num = Number(value);

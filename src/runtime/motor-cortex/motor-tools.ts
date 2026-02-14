@@ -244,7 +244,8 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     function: {
       name: 'read',
       description:
-        'Read a file. Returns content with line numbers (max 2000 lines). Use offset/limit for large files.',
+        'Read a file from the workspace. Returns content with line numbers (1-based). ' +
+        'Max 2000 lines per call — use offset and limit to paginate large files.',
       parameters: {
         type: 'object',
         properties: {
@@ -271,8 +272,8 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     function: {
       name: 'write',
       description:
-        'Write content to a file. Creates parent directories automatically. ' +
-        'Writes to workspace only — use relative paths (e.g. "output.txt", "skills/name/SKILL.md").',
+        'Write content to a file (auto-creates parent directories). Use relative paths only. ' +
+        'For large content from a truncated tool output, prefer bash cp from the saved .motor-output/ file instead of passing the content directly.',
       parameters: {
         type: 'object',
         properties: {
@@ -302,14 +303,14 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
         properties: {
           path: {
             type: 'string',
-            description: 'Directory path (relative to workspace, default ".").',
+            description: 'Directory path relative to workspace (e.g. ".", "src", "references").',
           },
           recursive: {
             type: 'boolean',
             description: 'List files recursively (default false).',
           },
         },
-        required: [],
+        required: ['path'],
       },
     },
   },
@@ -342,16 +343,18 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     function: {
       name: 'bash',
       description:
-        'Run commands (node, npm, npx, python, pip, curl, jq, grep, cat, head, tail, ls, git, etc.). ' +
-        'Full async Node.js via "node script.js". Supports pipes (e.g., "curl url | jq .data"). ' +
-        'Use for HTTP requests, package management, running scripts, and file processing.',
+        'Run shell commands (node, npm, npx, python, pip, curl, jq, grep, git, cp, mv, mkdir, etc.). ' +
+        'Supports pipes (cmd | cmd), loops (for f in ...; do ...; done), and conditionals (if/then/fi). ' +
+        'Full async Node.js via "node script.js". ' +
+        'If output exceeds limits, it is truncated and the full output is saved to .motor-output/ — use read with offset/limit to view specific sections.',
       parameters: {
         type: 'object',
         properties: {
           command: {
             type: 'string',
             description:
-              'Shell command to run. Supports node, npm, npx, python, pip, curl, jq, grep, cat, ls, git, etc.',
+              'Shell command to run. Supports pipes (|), loops (for/while/do/done), conditionals (if/then/fi). ' +
+              'Use cp to copy files between paths. Use curl -o <path> <url> to download directly to a file.',
           },
           timeout: {
             type: 'number',
@@ -372,8 +375,9 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
     function: {
       name: 'grep',
       description:
-        'Search for patterns across workspace files. ' +
-        'Returns matching lines in "file:line: content" format (max 100 matches, 200 chars per line).',
+        'Search for regex patterns across workspace files. ' +
+        'Returns matching lines in "file:line: content" format (max 100 matches, 200 chars per line). ' +
+        'Also works on .motor-output/ files to search truncated content.',
       parameters: {
         type: 'object',
         properties: {
@@ -430,7 +434,8 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
       name: 'fetch',
       description:
         'Fetch a URL (GET/POST/PUT/DELETE). Returns content (HTML→Markdown for web pages, raw for JSON/text). ' +
-        'Domain-restricted. Prefer over shell curl for HTTP requests.',
+        'Domain-restricted — prefer over bash+curl. ' +
+        'Large responses are automatically truncated and saved to .motor-output/.',
       parameters: {
         type: 'object',
         properties: {
@@ -444,12 +449,13 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
             enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
           },
           headers: {
-            type: 'object',
-            description: 'HTTP headers as key-value pairs.',
+            type: 'string',
+            description:
+              'HTTP headers as a JSON string of key-value pairs (e.g. {"Authorization":"Bearer ..."})',
           },
           body: {
-            type: ['string', 'object'],
-            description: 'Request body (for POST/PUT/PATCH). Pass a JSON object or a JSON string.',
+            type: 'string',
+            description: 'Request body (for POST/PUT/PATCH). Pass a JSON string.',
           },
         },
         required: ['url'],
@@ -593,14 +599,22 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       // Apply offset (1-based) and limit
       const sliced = allLines.slice(offset - 1, offset - 1 + limit);
 
-      // Format with line numbers
-      const lineNumWidth = String(offset - 1 + sliced.length).length;
-      let output = sliced
-        .map((line, i) => {
-          const lineNum = String(offset + i).padStart(lineNumWidth, ' ');
-          return `${lineNum}| ${line}`;
-        })
-        .join('\n');
+      // Format output — skip line numbers for .motor-output/ files to prevent
+      // prefix stacking on re-reads (each read adds ~5-6 bytes/line of prefixes,
+      // pushing the result over 4KB and causing cascading re-truncation).
+      const isMotorOutput = path.startsWith('.motor-output/') || path.startsWith('.motor-output\\');
+      let output: string;
+      if (isMotorOutput) {
+        output = sliced.join('\n');
+      } else {
+        const lineNumWidth = String(offset - 1 + sliced.length).length;
+        output = sliced
+          .map((line, i) => {
+            const lineNum = String(offset + i).padStart(lineNumWidth, ' ');
+            return `${lineNum}| ${line}`;
+          })
+          .join('\n');
+      }
 
       // Apply 50KB character cap
       if (output.length > MAX_READ_CHARS) {

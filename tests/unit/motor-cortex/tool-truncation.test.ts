@@ -26,7 +26,7 @@ describe('truncateToolOutput', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
-  describe('under-limit passthrough', () => {
+  describe('under-limit passthrough (non-fetch tools)', () => {
     it('returns original content when under both limits', async () => {
       const output = 'Hello, world!';
       const result = await truncateToolOutput(output, 'read', 'call_123', workspace);
@@ -37,19 +37,21 @@ describe('truncateToolOutput', () => {
       expect(result.savedPath).toBeUndefined();
     });
 
-    it('returns original content at exactly max bytes', async () => {
-      // Create output exactly at byte limit
+    it('returns original content at exactly max bytes (non-fetch)', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES);
-      const result = await truncateToolOutput(output, 'fetch', 'call_abc', workspace);
+      const result = await truncateToolOutput(output, 'bash', 'call_abc', workspace);
 
       expect(result.truncated).toBe(false);
       expect(result.content).toBe(output);
     });
 
-    it('returns original content at exactly max lines', async () => {
-      // Create output with exactly max lines
-      const lines = Array(TRUNCATION_MAX_LINES).fill('line');
+    it('returns original content at exactly max lines when under byte limit', async () => {
+      // Use single-char lines so total bytes stay under TRUNCATION_MAX_BYTES
+      // TRUNCATION_MAX_LINES lines of "x\n" = 2 bytes each = 4000 bytes ≤ 4096
+      const lines = Array(TRUNCATION_MAX_LINES).fill('x');
       const output = lines.join('\n');
+      // Sanity: must be under byte limit for this test to be meaningful
+      expect(Buffer.byteLength(output, 'utf-8')).toBeLessThanOrEqual(TRUNCATION_MAX_BYTES);
       const result = await truncateToolOutput(output, 'bash', 'call_xyz', workspace);
 
       expect(result.truncated).toBe(false);
@@ -65,9 +67,18 @@ describe('truncateToolOutput', () => {
     });
   });
 
-  describe('byte limit trigger', () => {
-    it('truncates when byte limit exceeded', async () => {
-      // Create output that exceeds byte limit but not line limit
+  describe('fetch always saves (even small results)', () => {
+    it('saves small fetch result to .motor-output/', async () => {
+      const output = 'Small fetch result';
+      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace);
+
+      expect(result.truncated).toBe(true);
+      expect(result.savedPath).toBe(`${TRUNCATION_DIR}/fetch-call_123.txt`);
+      expect(result.content).toContain('Output saved');
+      expect(result.content).toContain('.motor-output/fetch-call_123.txt');
+    });
+
+    it('saves large fetch result to .motor-output/', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 1000);
       const result = await truncateToolOutput(output, 'fetch', 'call_abc', workspace);
 
@@ -76,37 +87,58 @@ describe('truncateToolOutput', () => {
       expect(result.savedPath).toBe(`${TRUNCATION_DIR}/fetch-call_abc.txt`);
     });
 
-    it('includes hint message with file path', async () => {
-      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
-      const result = await truncateToolOutput(output, 'fetch', 'call_xyz', workspace);
+    it('returns fetch error inline when toolOk is false', async () => {
+      const output = 'BLOCKED: Domain api.example.com is not in allowed list.';
+      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace, {
+        toolOk: false,
+      });
 
-      expect(result.content).toContain('Output truncated');
-      expect(result.content).toContain('.motor-output/fetch-call_xyz.txt');
-      expect(result.content).toContain('use read with offset/limit or grep');
+      expect(result.truncated).toBe(false);
+      expect(result.content).toBe(output);
     });
 
-    it('reports bytes truncated when byte limit hit', async () => {
-      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
-      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace);
-
-      expect(result.content).toContain('bytes truncated');
-      expect(result.content).not.toContain('lines truncated');
-    });
-
-    it('saves full content to file', async () => {
+    it('preserves full content in saved file', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
       const result = await truncateToolOutput(output, 'fetch', 'call_test', workspace);
 
-      // Read the saved file
       const savedPath = join(workspace, result.savedPath!);
       const savedContent = await readFile(savedPath, 'utf-8');
       expect(savedContent).toBe(output);
     });
   });
 
-  describe('line limit trigger', () => {
+  describe('byte limit trigger (non-fetch tools)', () => {
+    it('truncates when byte limit exceeded', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 1000);
+      const result = await truncateToolOutput(output, 'bash', 'call_abc', workspace);
+
+      expect(result.truncated).toBe(true);
+      expect(result.originalBytes).toBe(TRUNCATION_MAX_BYTES + 1000);
+      expect(result.savedPath).toBe(`${TRUNCATION_DIR}/bash-call_abc.txt`);
+    });
+
+    it('returns pointer with no content preview', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
+      const result = await truncateToolOutput(output, 'bash', 'call_xyz', workspace);
+
+      expect(result.content).toContain('Output saved');
+      expect(result.content).toContain('.motor-output/bash-call_xyz.txt');
+      expect(result.content).toContain('cp');
+      expect(result.content).toContain('read');
+    });
+
+    it('saves full content to file', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
+      const result = await truncateToolOutput(output, 'bash', 'call_test', workspace);
+
+      const savedPath = join(workspace, result.savedPath!);
+      const savedContent = await readFile(savedPath, 'utf-8');
+      expect(savedContent).toBe(output);
+    });
+  });
+
+  describe('line limit trigger (non-fetch tools)', () => {
     it('truncates when line limit exceeded', async () => {
-      // Create output that exceeds line limit but not byte limit (short lines)
       const lines = Array(TRUNCATION_MAX_LINES + 100).fill('line');
       const output = lines.join('\n');
       const result = await truncateToolOutput(output, 'bash', 'call_def', workspace);
@@ -115,36 +147,51 @@ describe('truncateToolOutput', () => {
       expect(result.savedPath).toBe(`${TRUNCATION_DIR}/bash-call_def.txt`);
     });
 
-    it('reports lines truncated when line limit hit', async () => {
+    it('returns pointer with no content preview (no inline head lines)', async () => {
       const lines = Array(TRUNCATION_MAX_LINES + 100).fill('line');
-      const output = lines.join('\n');
-      const result = await truncateToolOutput(output, 'bash', 'call_123', workspace);
-
-      expect(result.content).toContain('lines truncated');
-      expect(result.content).not.toContain('bytes truncated');
-    });
-
-    it('preserves preview lines from head', async () => {
-      const lines = Array(TRUNCATION_MAX_LINES + 50).fill('line');
-      // Make first few lines unique to verify they're preserved
       lines[0] = 'FIRST_LINE';
       lines[1] = 'SECOND_LINE';
       const output = lines.join('\n');
 
       const result = await truncateToolOutput(output, 'bash', 'call_xyz', workspace);
 
-      expect(result.content).toContain('FIRST_LINE');
-      expect(result.content).toContain('SECOND_LINE');
+      // No preview — just pointer metadata
+      expect(result.content).toContain('Output saved');
+      expect(result.content).not.toContain('FIRST_LINE');
+      expect(result.content).not.toContain('SECOND_LINE');
+    });
+  });
+
+  describe('fetch error inline (toolOk: false)', () => {
+    it('does not save BLOCKED: Domain messages', async () => {
+      const output = 'BLOCKED: Domain api.example.com is not in allowed list.';
+      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace, {
+        toolOk: false,
+      });
+
+      expect(result.truncated).toBe(false);
+      expect(result.content).toBe(output);
+    });
+
+    it('preserves domain error messages exactly', async () => {
+      const output =
+        'BLOCKED: Domain raw.githubusercontent.com is not in allowed list. Allowed domains: github.com.';
+      const result = await truncateToolOutput(output, 'fetch', 'call_xyz', workspace, {
+        toolOk: false,
+      });
+
+      expect(result.truncated).toBe(false);
+      expect(result.content).toContain('BLOCKED: Domain');
+      expect(result.content).toContain('raw.githubusercontent.com');
     });
   });
 
   describe('file naming', () => {
     it('uses tool name and last 8 chars of call ID in filename', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 100);
-      const result = await truncateToolOutput(output, 'fetch', 'call_abcdefgh12345678', workspace);
+      const result = await truncateToolOutput(output, 'bash', 'call_abcdefgh12345678', workspace);
 
-      // 'call_abcdefgh12345678' (21 chars).slice(-8) = '12345678'
-      expect(result.savedPath).toBe(`${TRUNCATION_DIR}/fetch-12345678.txt`);
+      expect(result.savedPath).toBe(`${TRUNCATION_DIR}/bash-12345678.txt`);
     });
 
     it('handles short call IDs', async () => {
@@ -155,28 +202,8 @@ describe('truncateToolOutput', () => {
     });
   });
 
-  describe('domain block messages (short, never truncated)', () => {
-    it('does not truncate BLOCKED: Domain messages', async () => {
-      const output = 'BLOCKED: Domain api.example.com is not in allowed list.';
-      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace);
-
-      expect(result.truncated).toBe(false);
-      expect(result.content).toBe(output);
-    });
-
-    it('preserves domain error messages exactly', async () => {
-      const output =
-        'BLOCKED: Domain raw.githubusercontent.com is not in allowed list. Allowed domains: github.com.';
-      const result = await truncateToolOutput(output, 'fetch', 'call_xyz', workspace);
-
-      expect(result.truncated).toBe(false);
-      expect(result.content).toContain('BLOCKED: Domain');
-      expect(result.content).toContain('raw.githubusercontent.com');
-    });
-  });
-
   describe('edge cases', () => {
-    it('handles empty string', async () => {
+    it('handles empty string (non-fetch)', async () => {
       const result = await truncateToolOutput('', 'read', 'call_123', workspace);
 
       expect(result.truncated).toBe(false);
@@ -185,17 +212,15 @@ describe('truncateToolOutput', () => {
 
     it('handles single very long line', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 5000);
-      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace);
+      const result = await truncateToolOutput(output, 'bash', 'call_123', workspace);
 
       expect(result.truncated).toBe(true);
-      // Single line, so preview should be empty (no newline to break on)
-      // The algorithm stops when adding the next line would exceed bytes
     });
 
     it('handles unicode content correctly', async () => {
-      // Unicode characters can be multi-byte
-      const output = '🎉'.repeat(TRUNCATION_MAX_BYTES); // Each emoji is 4 bytes
-      const result = await truncateToolOutput(output, 'fetch', 'call_123', workspace);
+      // Unicode characters can be multi-byte — 4 bytes each
+      const output = '🎉'.repeat(TRUNCATION_MAX_BYTES);
+      const result = await truncateToolOutput(output, 'bash', 'call_123', workspace);
 
       expect(result.truncated).toBe(true);
       expect(result.originalBytes!).toBeGreaterThan(TRUNCATION_MAX_BYTES);
@@ -203,7 +228,7 @@ describe('truncateToolOutput', () => {
 
     it('creates .motor-output directory if needed', async () => {
       const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 100);
-      await truncateToolOutput(output, 'fetch', 'call_123', workspace);
+      await truncateToolOutput(output, 'bash', 'call_123', workspace);
 
       const spilloverDir = join(workspace, TRUNCATION_DIR);
       expect(existsSync(spilloverDir)).toBe(true);

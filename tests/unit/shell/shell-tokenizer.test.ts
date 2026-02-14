@@ -127,8 +127,16 @@ describe('hasDangerousMetachars', () => {
     expect(hasDangerousMetachars('echo hello')).toBe(false);
   });
 
-  it('detects semicolons', () => {
-    expect(hasDangerousMetachars('echo ok; rm -rf /')).toBe(true);
+  it('allows semicolons (safe in sandboxed container with command allowlist)', () => {
+    expect(hasDangerousMetachars('echo ok; rm -rf /')).toBe(false);
+  });
+
+  it('allows for loops with semicolons', () => {
+    expect(hasDangerousMetachars('for f in a b; do echo $f; done')).toBe(false);
+  });
+
+  it('allows while loops with semicolons', () => {
+    expect(hasDangerousMetachars('while true; do echo hi; done')).toBe(false);
   });
 
   it('detects $() expansion', () => {

@@ -58,6 +58,7 @@
     "fast-xml-parser": "^5.3.4",
     "fastify": "^5.7.2",
     "grammy": "^1.39.3",
+    "gray-matter": "^4.0.3",
     "iconv-lite": "^0.7.2",
     "luxon": "^3.7.2",
     "node-html-parser": "^7.0.2",

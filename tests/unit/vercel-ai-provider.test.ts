@@ -4,7 +4,10 @@ import type { CompletionRequest, Message } from '../../src/llm/provider.js';
 import { VercelAIProvider } from '../../src/plugins/providers/vercel-ai-provider.js';
 import { generateText } from 'ai';
 
-vi.mock('ai', () => ({ generateText: vi.fn() }));
+vi.mock('ai', () => ({
+  generateText: vi.fn(),
+  jsonSchema: (schema: unknown) => schema,
+}));
 vi.mock('@openrouter/ai-sdk-provider', () => ({ createOpenRouter: () => () => ({}) }));
 
 // Mock createOpenAI to track whether .chat() or .responses() is called
@@ -35,12 +38,11 @@ describe('VercelAIProvider', () => {
 
     const converted = (provider as unknown as { convertTools: (t: unknown) => unknown }).convertTools(
       tools
-    ) as Record<string, { description: string; inputSchema: () => Promise<unknown> }>;
+    ) as Record<string, { description: string; parameters: unknown }>;
 
     expect(converted['core.tools']).toBeTruthy();
     expect(converted['core.tools']?.description).toBe('Describe tools');
-    const schema = await converted['core.tools']?.inputSchema();
-    expect(schema).toMatchObject({ type: 'object', additionalProperties: true });
+    expect(converted['core.tools']?.parameters).toMatchObject({ type: 'object', additionalProperties: true });
   });
 
   it('does not crash when generateText returns undefined toolCalls', async () => {

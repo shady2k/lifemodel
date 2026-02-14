@@ -26,6 +26,7 @@
  * ```
  */
 
+import matter from 'gray-matter';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, mkdir, stat, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -115,113 +116,26 @@ export async function computeDirectoryHash(dirPath: string): Promise<string> {
 /**
  * Parse a SKILL.md file content into frontmatter + body.
  *
- * Uses inline regex-based YAML parser (lenient — skips nested blocks).
- * This allows the Agent Skills standard format while handling extensions gracefully.
+ * Uses gray-matter for YAML frontmatter parsing — handles all YAML features
+ * including block sequences, nested objects, and multi-line strings.
  */
 export function parseSkillFile(
   content: string
 ): { frontmatter: Record<string, unknown>; body: string } | { error: string } {
-  // Split on --- delimiters
-  const trimmed = content.trimStart();
-  if (!trimmed.startsWith('---')) {
-    return { error: 'SKILL.md must start with --- (YAML frontmatter delimiter)' };
-  }
-
-  const secondDelimiter = trimmed.indexOf('---', 3);
-  if (secondDelimiter === -1) {
-    return { error: 'Missing closing --- delimiter for YAML frontmatter' };
-  }
-
-  const yamlBlock = trimmed.slice(3, secondDelimiter).trim();
-  const body = trimmed.slice(secondDelimiter + 3).trim();
-
-  // Parse YAML (lenient — skip nested blocks)
-  const frontmatter: Record<string, unknown> = {};
-  const lines = yamlBlock.split('\n');
-  let skipNested = false;
-
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    if (!trimmedLine || trimmedLine.startsWith('#')) {
-      // Skip blank lines and comments
-      continue;
+  try {
+    const result = matter(content);
+    if (typeof result.data !== 'object' || Array.isArray(result.data)) {
+      return { error: 'SKILL.md frontmatter must be a YAML mapping (key-value pairs)' };
     }
-
-    // Check for nested block (skip it leniently)
-    if (skipNested) {
-      if (line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
-        // Back to root level
-        skipNested = false;
-      } else {
-        // Still in nested block — skip this line
-        continue;
-      }
-    }
-
-    const colonIdx = trimmedLine.indexOf(':');
-    if (colonIdx === -1) {
-      // No colon — invalid YAML line, skip it leniently
-      continue;
-    }
-
-    const key = trimmedLine.slice(0, colonIdx).trim();
-    const rawValue = trimmedLine.slice(colonIdx + 1).trim();
-
-    // Check if this key starts a nested block (value empty + next line indented)
-    if (!rawValue) {
-      const lineIdx = lines.indexOf(line);
-      const nextIdx = lineIdx + 1;
-      if (nextIdx < lines.length) {
-        const nextLine = lines[nextIdx];
-        if (nextLine !== undefined && (nextLine.startsWith('  ') || nextLine.startsWith('\t'))) {
-          // This is a nested block header (like metadata:) — skip it
-          skipNested = true;
-          continue;
-        }
-      }
-    }
-
-    frontmatter[key] = parseYamlValue(rawValue);
+    return {
+      frontmatter: result.data as Record<string, unknown>,
+      body: result.content.trim(),
+    };
+  } catch (err) {
+    return {
+      error: `Failed to parse SKILL.md frontmatter: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
-
-  return { frontmatter, body };
-}
-
-/**
- * Parse a single YAML value (strict subset).
- *
- * Supports:
- * - Strings: unquoted or "quoted"
- * - Numbers: integer or float
- * - Booleans: true/false
- * - Inline arrays: [a, b, c]
- */
-function parseYamlValue(raw: string): unknown {
-  // Empty value
-  if (!raw) return '';
-
-  // Inline array: [a, b, c]
-  if (raw.startsWith('[') && raw.endsWith(']')) {
-    const inner = raw.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner.split(',').map((item) => parseYamlValue(item.trim()));
-  }
-
-  // Quoted string
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-    return raw.slice(1, -1);
-  }
-
-  // Boolean
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-
-  // Number
-  const num = Number(raw);
-  if (!isNaN(num) && raw !== '') return num;
-
-  // Unquoted string
-  return raw;
 }
 
 /**

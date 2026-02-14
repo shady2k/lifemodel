@@ -296,8 +296,23 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       return;
     }
 
-    childLogger.debug({ iteration: i, messageCount: messages.length }, 'Loop iteration');
-    await taskLog?.log(`\nITERATION ${String(i)}`);
+    // Estimate cumulative message size for debugging context bloat
+    const totalMsgBytes = messages.reduce(
+      (sum, m) =>
+        sum +
+        Buffer.byteLength(
+          typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          'utf-8'
+        ),
+      0
+    );
+    childLogger.debug(
+      { iteration: i, messageCount: messages.length, totalMsgBytes },
+      'Loop iteration'
+    );
+    await taskLog?.log(
+      `\nITERATION ${String(i)} (${String(messages.length)} messages, ~${String(Math.round(totalMsgBytes / 1024))}KB in context)`
+    );
 
     // Safety net: ensure every tool_call has a matching tool result before calling LLM
     sanitizeToolCallResultPairs(messages);
@@ -311,7 +326,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           messages,
           tools: toolDefinitions,
           toolChoice: 'auto',
-          maxTokens: 4096,
+          maxTokens: 16384,
           role: 'motor',
           parallelToolCalls: false,
         });
@@ -350,19 +365,29 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     const contentPreview = llmResponse.content
       ? redactCredentials(llmResponse.content.slice(0, 2000)).replace(/\n/g, ' ')
       : '(none)';
+    const usage = llmResponse.usage;
     childLogger.debug(
       {
         iteration: i,
         model: llmResponse.model,
+        generationId: llmResponse.generationId,
         toolCallCount: llmResponse.toolCalls?.length ?? 0,
         finishReason: llmResponse.finishReason,
         contentLength: llmResponse.content?.length ?? 0,
         contentPreview,
+        promptTokens: usage?.promptTokens,
+        completionTokens: usage?.completionTokens,
+        cachedTokens: usage?.cacheReadTokens,
       },
       'LLM response received'
     );
+    // Build token summary for task log: "tokens=1234/56 cached=1100" (prompt/completion cached=N)
+    const tokenSummary = usage
+      ? ` tokens=${String(usage.promptTokens)}/${String(usage.completionTokens)}${usage.cacheReadTokens ? ` cached=${String(usage.cacheReadTokens)}` : ''}`
+      : '';
+    const genId = llmResponse.generationId ? ` gen:${llmResponse.generationId}` : '';
     await taskLog?.log(
-      `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls, finish=${llmResponse.finishReason ?? 'unknown'}, content=${String(llmResponse.content?.length ?? 0)} chars`
+      `  LLM [${llmResponse.model}] → ${String(llmResponse.toolCalls?.length ?? 0)} tool calls, finish=${llmResponse.finishReason ?? 'unknown'}, content=${String(llmResponse.content?.length ?? 0)} chars${tokenSummary}${genId}`
     );
     if (llmResponse.content) {
       await taskLog?.log(`  Content: ${contentPreview}`);
@@ -1097,8 +1122,50 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       // This runs AFTER domain error enrichment (so hints are preserved) but BEFORE
       // step trace and message storage (so both use truncated content).
       const redactedOutput = redactValues(toolResult.output);
-      const truncation = await truncateToolOutput(redactedOutput, toolName, toolCall.id, workspace);
-      toolResult.output = truncation.content; // Mutate before trace and message storage
+      const outputBytes = Buffer.byteLength(redactedOutput, 'utf-8');
+
+      // Skip re-truncation when reading .motor-output/ files — content was already
+      // truncated when saved, and read's offset/limit already constrains output size.
+      // Re-truncating causes cascading read-stacking (read → save → read → save → ...).
+      const readingMotorOutput =
+        toolName === 'read' &&
+        typeof toolArgs['path'] === 'string' &&
+        toolArgs['path'].startsWith('.motor-output/');
+
+      if (readingMotorOutput) {
+        toolResult.output = redactedOutput;
+        childLogger.debug(
+          { tool: toolName, outputBytes },
+          'Skipped re-truncation for .motor-output/ read'
+        );
+      } else {
+        const truncation = await truncateToolOutput(
+          redactedOutput,
+          toolName,
+          toolCall.id,
+          workspace,
+          { toolOk: toolResult.ok }
+        );
+        toolResult.output = truncation.content; // Mutate before trace and message storage
+
+        if (truncation.truncated) {
+          childLogger.info(
+            {
+              tool: toolName,
+              callId: toolCall.id,
+              originalBytes: truncation.originalBytes,
+              truncatedBytes: Buffer.byteLength(truncation.content, 'utf-8'),
+              savedPath: truncation.savedPath,
+            },
+            'Tool output truncated'
+          );
+          await taskLog?.log(
+            `    [truncated: ${String(truncation.originalBytes)} → ${String(Buffer.byteLength(truncation.content, 'utf-8'))} bytes, saved to ${String(truncation.savedPath)}]`
+          );
+        } else {
+          childLogger.debug({ tool: toolName, outputBytes }, 'Tool output within limits');
+        }
+      }
 
       // Record in step trace
       step.toolCalls.push({
@@ -1435,7 +1502,7 @@ export function buildMotorSystemPrompt(
     ask_user: '- ask_user: Ask the user a question (pauses execution)',
     save_credential:
       '- save_credential: Save a credential (e.g. API key from signup) for future runs',
-    bash: '- bash: Run commands (node, npm, npx, python, pip, curl, jq, grep, git, etc.). Full async Node.js via "node script.js". Supports pipes.',
+    bash: '- bash: Run commands (node, npm, npx, python, pip, curl, jq, grep, git, etc.). Supports pipes, loops (for/while), and conditionals. Full async Node.js via "node script.js".',
     grep: '- grep: Search patterns across files (regex, max 100 matches)',
     patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
     fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
@@ -1476,10 +1543,10 @@ Guidelines:
 - Be concise and direct in your responses
 - Report what you did and the result
 - If something is blocked, denied, or fails repeatedly (2+ times), call ask_user to report the problem and ask for guidance. Do NOT silently work around blockers by guessing or fabricating content.
-- When downloading files from a repository, always fetch the actual source content. Do NOT reconstruct or rewrite file contents from HTML page previews or summaries — download the raw file instead.
+- When downloading files from a repository, always fetch the actual source content. Do NOT reconstruct or rewrite file contents from previews, summaries, or truncated output — download the raw file or copy from the saved .motor-output/ file instead.
 - File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
 - Credentials are environment variables. Use process.env.NAME in Node scripts, os.environ["NAME"] in Python, $NAME in bash commands and fetch headers. The system resolves $NAME in all tool arguments automatically.
-- Large tool outputs are automatically truncated. When you see "Output truncated. Full output saved to: ..." use read({"path": "<filepath>", "offset": 1, "limit": 100}) or grep({"pattern": "...", "path": "<filepath>"}) to access the full content.
+- Large tool outputs are automatically truncated and saved to .motor-output/. When you see "Output truncated", use read to view sections or bash cp to copy the file (e.g. bash({"command":"cp .motor-output/fetch-abc123.txt references/doc.md"})). NEVER write file contents from memory — always read or copy from the saved file.
 ${
   run.domains && run.domains.length > 0
     ? `
@@ -1586,6 +1653,10 @@ export function buildInitialMessages(
     {
       role: 'system',
       content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
+    },
+    {
+      role: 'user',
+      content: 'Begin the task.',
     },
   ];
 }

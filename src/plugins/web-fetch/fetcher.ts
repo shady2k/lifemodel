@@ -481,8 +481,13 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
       let markdown: string;
       let plainText: string | undefined;
 
-      if (baseContentType === 'text/plain') {
-        markdown = text;
+      const isPlainText = baseContentType === 'text/plain';
+      if (isPlainText) {
+        // Plain text: preserve indentation (sanitizeMarkdown trims every line)
+        markdown = text
+          .replace(/\r\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
         plainText = text;
       } else if (baseContentType === 'application/json') {
         // Format JSON nicely
@@ -499,8 +504,15 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
         markdown = turndown.turndown(text);
       }
 
-      // Sanitize and truncate markdown
-      markdown = sanitizeMarkdown(markdown, maxMarkdownBytes);
+      // Sanitize and truncate markdown (skip for plain text — it strips indentation)
+      if (!isPlainText) {
+        markdown = sanitizeMarkdown(markdown, maxMarkdownBytes);
+      } else if (Buffer.byteLength(markdown, 'utf-8') > maxMarkdownBytes) {
+        // Still enforce byte limit for plain text
+        const encoded = Buffer.from(markdown, 'utf-8');
+        markdown =
+          encoded.subarray(0, maxMarkdownBytes - 20).toString('utf-8') + '\n\n[Content truncated]';
+      }
 
       const latencyMs = Date.now() - startTime;
       logger.info(

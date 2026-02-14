@@ -54,7 +54,7 @@ Body`;
     }
   });
 
-  it('skips nested metadata blocks (lenient parsing)', () => {
+  it('parses nested metadata blocks', () => {
     const content = `---
 name: with-metadata
 description: Skill with nested metadata
@@ -66,22 +66,24 @@ Body`;
     const result = parseSkillFile(content);
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      // Should skip nested metadata block
       expect(result.frontmatter['name']).toBe('with-metadata');
-      // metadata should not be in frontmatter
-      expect(result.frontmatter['metadata']).toBeUndefined();
+      // gray-matter fully parses nested objects
+      const metadata = result.frontmatter['metadata'] as Record<string, unknown>;
+      expect(metadata['author']).toBe('Test Author');
+      expect(metadata['version']).toBe('1.0.0');
     }
   });
 
-  it('returns error for missing opening delimiter', () => {
+  it('returns empty frontmatter for missing opening delimiter', () => {
     const content = `name: test
 description: test
 ---
 Body`;
     const result = parseSkillFile(content);
-    expect('error' in result).toBe(true);
-    if ('error' in result) {
-      expect(result.error).toContain('---');
+    // gray-matter returns empty data when no frontmatter delimiters found
+    expect('error' in result).toBe(false);
+    if (!('error' in result)) {
+      expect(Object.keys(result.frontmatter)).toHaveLength(0);
     }
   });
 
@@ -92,6 +94,38 @@ description: test
 Body`;
     const result = parseSkillFile(content);
     expect('error' in result).toBe(true);
+  });
+
+  it('parses skills.sh inputs block sequence format', () => {
+    const content = `---
+name: send-email
+description: Send emails via Resend API
+inputs:
+    - name: RESEND_API_KEY
+      description: Resend API key for sending emails
+      required: true
+    - name: RESEND_WEBHOOK_SECRET
+      description: Webhook signing secret
+      required: false
+---
+# Send Email`;
+    const result = parseSkillFile(content);
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+
+    expect(result.frontmatter['name']).toBe('send-email');
+    expect(Array.isArray(result.frontmatter['inputs'])).toBe(true);
+    const inputs = result.frontmatter['inputs'] as Array<Record<string, unknown>>;
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]!['name']).toBe('RESEND_API_KEY');
+    expect(inputs[0]!['description']).toBe('Resend API key for sending emails');
+    expect(inputs[0]!['required']).toBe(true);
+    expect(inputs[1]!['name']).toBe('RESEND_WEBHOOK_SECRET');
+    expect(inputs[1]!['required']).toBe(false);
+
+    // Validate that frontmatter passes validation
+    const errors = validateSkillFrontmatter(result.frontmatter);
+    expect(errors).toEqual([]);
   });
 });
 

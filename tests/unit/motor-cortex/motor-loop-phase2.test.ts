@@ -151,17 +151,20 @@ describe('buildInitialMessages', () => {
     };
 
     const messages = buildInitialMessages(run, skill);
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.role).toBe('system');
     expect(messages[0]?.content).toContain('Skill: test');
     expect(messages[0]?.content).toContain('read({path: "SKILL.md"})');
+    expect(messages[1]?.role).toBe('user');
 
   });
 
   it('creates system message without skill', () => {
     const run = makeRun();
     const messages = buildInitialMessages(run);
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(2);
     expect(messages[0]?.content).not.toContain('<skill');
+    expect(messages[1]?.role).toBe('user');
   });
 
   it('creates system message with recovery context', () => {
@@ -173,9 +176,10 @@ describe('buildInitialMessages', () => {
     };
 
     const messages = buildInitialMessages(run, undefined, recoveryContext);
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(2);
     expect(messages[0]?.content).toContain('<recovery_context');
     expect(messages[0]?.content).toContain('Use port 8080 instead of 443');
+    expect(messages[1]?.role).toBe('user');
   });
 });
 

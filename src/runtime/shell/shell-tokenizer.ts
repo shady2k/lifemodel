@@ -17,25 +17,29 @@ export interface TokenizeResult {
  * Injection-capable metacharacters.
  *
  * Only truly dangerous patterns are blocked:
- * - `;`  — command chaining (bypasses pipeline allowlist)
  * - `` ` `` — command substitution
  * - `$(` — command substitution
  *
  * Safe (allowed in sandboxed container with command allowlist):
+ * - `;` — command chaining: each command still validated against allowlist independently
  * - `>`, `<` — redirections
  * - `&` — background/stderr redirect `2>&1`
  * - `\` — escape sequences
- * - `(`, `)` — grouping (harmless without `;` or `$()`)
+ * - `(`, `)` — grouping (harmless without `$()`)
  * - `!` — history expansion (non-interactive shell, no effect)
  * - `$` alone — variable reference is safe
+ *
+ * Semicolon is safe because the Docker sandbox enforces per-command allowlisting.
+ * Even with `; rm -rf /`, the `rm` command would be blocked by the allowlist.
+ * This unblocks legitimate shell constructs like `for f in a b; do echo $f; done`.
  */
-const DANGEROUS_RE = /[;`]|\$\(/;
+const DANGEROUS_RE = /[`]|\$\(/;
 
 /**
  * Check if a command string contains injection-capable metacharacters.
  *
  * Uses a simple regex — quote context doesn't matter because the blocked
- * patterns (`;`, backtick, `$(`) are dangerous even inside double quotes.
+ * patterns (backtick, `$(`) are dangerous even inside double quotes.
  * Single-quoted regions are safe but the patterns are rare enough in
  * legitimate single-quoted content that false positives are acceptable.
  */

@@ -56,7 +56,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
     {
       name: 'maxIterations',
       type: 'number' as const,
-      description: 'Max iterations for agentic mode (default: 20)',
+      description: 'Max iterations for agentic mode (default: 30)',
       required: false,
     },
     {
@@ -125,7 +125,7 @@ export function createActTool(motorCortex: MotorCortex): Tool {
         try {
           const skillName = args['skill'] as string | undefined;
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
-          const maxIterations = (args['maxIterations'] as number | undefined) ?? 20;
+          const maxIterations = (args['maxIterations'] as number | undefined) ?? 30;
           const explicitDomains = (args['domains'] as string[] | undefined) ?? [];
 
           // Load skill if specified

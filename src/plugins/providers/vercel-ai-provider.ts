@@ -26,7 +26,7 @@ import {
 // Vercel AI SDK imports
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateText } from 'ai';
+import { generateText, jsonSchema } from 'ai';
 import type { LanguageModel } from 'ai';
 
 /**
@@ -458,27 +458,58 @@ export class VercelAIProvider extends BaseLLMProvider {
       const fn = t.function;
       // Check if this is OpenAIChatTool (has parameters) or MinimalOpenAIChatTool
       if ('parameters' in fn) {
-        const schema = fn.parameters;
-        // Build AI SDK tool structure with `inputSchema` as a function
-        // AI SDK v6 requires inputSchema to be a function that returns PromiseLike<JSONSchema7>
+        // Use jsonSchema() so the AI SDK recognizes this as a valid tool schema.
+        // NOTE: AI SDK v6 + @openrouter/ai-sdk-provider@2.x have a bug where
+        // jsonSchema() properties are stripped before reaching the provider.
+        // The API receives { properties: {}, additionalProperties: false }.
+        // We work around this by injecting raw tools via providerOptions (see
+        // buildProviderOptions). The SDK tools are still needed for tool call
+        // parsing and repair callbacks.
         aiTools[fn.name] = {
           description: fn.description,
-          inputSchema: () => Promise.resolve(schema as JsonObject),
+          parameters: jsonSchema(fn.parameters as Record<string, unknown>),
         };
         continue;
       }
       // Minimal format - register with a permissive schema so the tool is visible
       aiTools[fn.name] = {
         description: fn.description,
-        inputSchema: () =>
-          Promise.resolve({
-            type: 'object',
-            additionalProperties: true,
-          } as JsonObject),
+        parameters: jsonSchema({ type: 'object' as const, additionalProperties: true }),
       };
     }
 
     return aiTools;
+  }
+
+  /**
+   * Convert tools to raw OpenAI format for direct injection via providerOptions.
+   *
+   * The AI SDK v6 strips jsonSchema() properties before the provider serializes them,
+   * so models receive tools with empty parameters. This method produces the raw OpenAI
+   * tool format that gets injected via providerOptions.openrouter (which is spread
+   * over the SDK's getArgs output, overriding the broken tools).
+   */
+  private convertToolsRaw(
+    tools: CompletionRequest['tools']
+  ): Record<string, unknown>[] | undefined {
+    if (!tools || tools.length === 0) return undefined;
+
+    return tools.map((t) => {
+      const fn = t.function;
+      if ('parameters' in fn) {
+        // Full tool — include the actual parameter schema
+        return {
+          type: 'function',
+          function: {
+            name: fn.name,
+            description: fn.description,
+            parameters: fn.parameters,
+          },
+        };
+      }
+      // Minimal tool (lazy schema) — name + description only
+      return { type: 'function', function: { name: fn.name, description: fn.description } };
+    });
   }
 
   /**
@@ -581,6 +612,20 @@ export class VercelAIProvider extends BaseLLMProvider {
     if (request.parallelToolCalls === false) {
       providerOptions[providerKey] ??= {};
       providerOptions[providerKey]['parallel_tool_calls'] = false;
+    }
+
+    // Inject raw tool definitions to work around AI SDK v6 schema stripping.
+    // The SDK's jsonSchema() wrapper loses all properties by the time it reaches
+    // the provider — models receive tools with empty parameters. By injecting
+    // raw OpenAI-format tools via providerOptions, we override the broken
+    // SDK conversion. The provider spreads openrouterOptions over getArgs output,
+    // so our tools replace the SDK's broken ones.
+    if (isOpenRouterConfig(this.config) && request.tools && request.tools.length > 0) {
+      const rawTools = this.convertToolsRaw(request.tools);
+      if (rawTools && rawTools.length > 0) {
+        providerOptions[providerKey] ??= {};
+        providerOptions[providerKey]['tools'] = rawTools;
+      }
     }
 
     return Object.keys(providerOptions).length > 0 ? providerOptions : undefined;
