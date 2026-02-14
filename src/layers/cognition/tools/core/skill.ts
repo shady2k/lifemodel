@@ -3,12 +3,15 @@
  *
  * Unified tool for skill operations:
  * - read: inspect skill content (frontmatter, body, policy, trust)
+ * - review: get deterministic security review (evidence, files, provenance)
  * - approve: approve a pending/needs_reapproval skill for Motor Cortex execution
  * - reject: reset trust to needs_reapproval
  * - delete: permanently remove a skill directory
  *
  * Replaces the old core.approveSkill tool, following the same merge pattern
  * used for core.task (formerly core.tasks).
+ *
+ * Consent gating: approve, reject, and delete require user_message trigger.
  */
 
 import type { Tool, ToolParameter } from '../types.js';
@@ -21,6 +24,7 @@ import {
 } from '../../../../runtime/skills/skill-loader.js';
 import type { SkillPolicy } from '../../../../runtime/skills/skill-types.js';
 import { sanitizePolicyForDisplay } from '../../../../runtime/skills/skill-types.js';
+import { reviewSkill } from '../../../../runtime/skills/skill-review.js';
 
 /**
  * Result from core.skill tool execution.
@@ -34,6 +38,25 @@ export interface SkillResult {
   body?: string | undefined;
   policy?: SkillPolicy | undefined;
   trust?: string | undefined;
+  // review action fields
+  review?:
+    | {
+        name: string;
+        description: string;
+        trust: string;
+        policyDomains: string[];
+        policyCredentials: string[];
+        evidence: {
+          fetchedDomains: string[];
+          savedCredentials: string[];
+          toolsUsed: string[];
+          bashUsed: boolean;
+        } | null;
+        files: { path: string; sizeBytes: number; hash: string }[];
+        provenance: SkillPolicy['provenance'];
+        extractedFrom: SkillPolicy['extractedFrom'];
+      }
+    | undefined;
   // approve/reject action fields
   allowedDomains?: string[] | undefined;
 }
@@ -58,8 +81,8 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       type: 'string',
       required: true,
       description:
-        'Action to perform: read (inspect skill content), approve (approve for execution), reject (reset trust to needs_reapproval), delete (permanently remove skill)',
-      enum: ['read', 'approve', 'reject', 'delete'],
+        'Action to perform: read (inspect skill content), review (security review with evidence), approve (approve for execution), reject (reset trust to needs_reapproval), delete (permanently remove skill)',
+      enum: ['read', 'review', 'approve', 'reject', 'delete'],
     },
     {
       name: 'name',
@@ -73,19 +96,20 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill.",
+      "Read skill content, review for approval, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review with evidence. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
-    execute: async (args): Promise<SkillResult> => {
+    execute: async (args, context): Promise<SkillResult> => {
       const action = args['action'] as string | undefined;
       const skillName = args['name'] as string | undefined;
 
-      if (!action || !['read', 'approve', 'reject', 'delete'].includes(action)) {
+      if (!action || !['read', 'review', 'approve', 'reject', 'delete'].includes(action)) {
         return {
           success: false,
-          error: 'Missing or invalid parameter: action (must be read, approve, reject, or delete)',
+          error:
+            'Missing or invalid parameter: action (must be read, review, approve, reject, or delete)',
         };
       }
       if (!skillName || typeof skillName !== 'string') {
@@ -98,7 +122,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         return { success: false, error: loaded.error };
       }
 
-      // --- read ---
+      // --- read (always allowed) ---
       if (action === 'read') {
         return {
           success: true,
@@ -107,6 +131,21 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
           trust: loaded.policy?.trust ?? 'no_policy',
           body: loaded.body,
           policy: loaded.policy ? sanitizePolicyForDisplay(loaded.policy) : undefined,
+        };
+      }
+
+      // --- review (always allowed) ---
+      if (action === 'review') {
+        const review = await reviewSkill(loaded);
+        return { success: true, skill: skillName, review };
+      }
+
+      // --- CONSENT GATE: approve, reject, delete require user_message trigger ---
+      if (context?.triggerType !== 'user_message') {
+        return {
+          success: false,
+          error:
+            'Skill mutations require user interaction. Present the review (action="review") and wait for user response before calling approve/reject/delete.',
         };
       }
 

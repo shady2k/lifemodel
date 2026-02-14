@@ -470,7 +470,14 @@ export async function loadSkill(
   baseDir?: string
 ): Promise<LoadedSkill | { error: string }> {
   const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
-  const skillPath = join(dir, skillName, 'SKILL.md');
+
+  // Path traversal guard: resolved path must stay within skills dir
+  const skillDir = resolve(dir, skillName);
+  if (!skillDir.startsWith(dir + '/') && skillDir !== dir) {
+    return { error: `Invalid skill name: "${skillName}"` };
+  }
+
+  const skillPath = join(skillDir, 'SKILL.md');
 
   try {
     const content = await readFile(skillPath, 'utf-8');
@@ -486,7 +493,6 @@ export async function loadSkill(
     }
 
     const frontmatter = toSkillFrontmatter(parsed.frontmatter);
-    const skillDir = join(dir, skillName);
     let policy = await loadPolicy(skillDir);
 
     // Content hash verification

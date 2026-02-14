@@ -106,17 +106,21 @@ User: "I came across AgentMail, learn how to work with it"
 
 4. COGNITION receives motor_result signal
    - Result includes created skill names
-   - Loads skill metadata: name, description, requestedTools, requestedDomains
-   - Presents to user for approval:
+   - Calls core.skill(action:"review", name:"agentmail")
+   - Review returns: description, trust, file inventory, run evidence
+     (domains contacted, credentials saved, tools used, bash usage)
+   - Presents review to user for approval:
      "I learned AgentMail — it's an API for giving AI agents email inboxes.
-      To use it, I'll need:
-      - Tools: shell, code
-      - Network access to: api.agentmail.to
-      - Credentials: agentmail_api_key
+      During creation, I accessed: agentmail.dev, docs.agentmail.dev
+      Credentials saved: agentmail_api_key
+      Files: SKILL.md (2.1KB), references/api-docs.md (8.4KB)
       Want me to activate this skill?"
+   - NOTE: core.skill(action:"approve") is consent-gated — Cognition cannot
+     call it on this motor_result turn. It must wait for the user's response.
 
 5. USER approves
-   - Cognition updates policy with trust: "approved", approvedBy: "user"
+   - Cognition calls core.skill(action:"approve", name:"agentmail")
+     (now on a user_message trigger — consent gate passes)
    - Skill is now executable via core.act(skill: "agentmail")
 ```
 
@@ -344,10 +348,17 @@ User: "Check out https://skills.sh/agentmail — add that skill"
 
 3. EXTRACTION installs with trust: "pending_review"
    - provenance.source preserved for audit trail
+   - runEvidence captures domains fetched (skills.sh), tools used, bash usage
 
-4. COGNITION presents for approval
-   - Includes provenance: "This skill was fetched from skills.sh"
-   - User approves → trust: "approved"
+4. COGNITION receives motor_result
+   - Calls core.skill(action:"review", name:"agentmail") for security review
+   - Presents review with provenance: "This skill was fetched from skills.sh"
+   - Includes evidence: domains contacted, credentials saved, file inventory
+   - Waits for user response (consent-gated — cannot approve on this turn)
+
+5. USER approves
+   - Cognition calls core.skill(action:"approve") on user_message trigger
+   - Trust set to "approved"
 ```
 
 ## Post-Run Extraction — Detailed Spec
@@ -465,10 +476,59 @@ Write roots: [workspace]  — Motor reads and writes in the same place
 When a Motor run creates or updates skills, the result signal includes the skill names and whether they're new or updated. Cognition's trigger section instructs it to:
 
 1. Report the task result to the user
-2. For each new/updated skill, present what it does and what permissions it needs
-3. Ask the user to approve each skill before it can be used
+2. For each new/updated skill, call `core.skill(action:"review")` to get a deterministic security review
+3. Present the review findings to the user (see below)
+4. Wait for the user to respond before calling `core.skill(action:"approve")`
 
 Skills remain at `pending_review` until explicitly approved. Cognition handles the approval conversation.
+
+## Post-Extraction Security Review
+
+After extraction, Cognition must review each new/updated skill before presenting it for approval. This is a **second security layer** — the Docker sandbox is the primary boundary, the review provides **visibility for informed user consent**.
+
+### Review Flow
+
+```
+1. COGNITION receives motor_result with installed skills
+2. For each skill, calls core.skill(action:"review", name:"<skill-name>")
+3. Review returns deterministic facts (no heuristics, no content scanning):
+   - Description and trust level
+   - Policy domains (runtime permissions) vs evidence domains (what was contacted during creation)
+   - Policy credentials vs evidence credentials (what was saved during creation)
+   - File inventory (path, size, truncated SHA-256 hash)
+   - Whether bash was used (warning: network activity beyond fetch is unobservable)
+   - Provenance (source URL, fetch timestamp)
+4. Cognition presents these facts to the user
+5. User approves → Cognition calls core.skill(action:"approve")
+```
+
+### Consent Gating
+
+Mutation actions (`approve`, `reject`, `delete` on `core.skill`; `respond`, `approve` on `core.task`) are **consent-gated** — they can only be called on `user_message` triggers. This prevents Cognition from auto-approving skills or auto-responding to Motor questions on non-user triggers (e.g., `motor_result`).
+
+Two layers of defense:
+1. **Tool filtering:** `core.task` is removed from the LLM toolset when the trigger is `awaiting_input` or `awaiting_approval`
+2. **Runtime consent gate:** Each mutating action checks `triggerType === 'user_message'` and returns an error if not
+
+### Run Evidence
+
+During execution, Motor aggregates **observed evidence** from all attempt traces:
+- `fetchedDomains`: hostnames extracted from `fetch` tool call URLs
+- `savedCredentials`: names from `save_credential` calls
+- `toolsUsed`: unique set of all tools used
+- `bashUsed`: whether bash was invoked (implies network activity may be unobservable)
+
+Evidence is persisted in `policy.json` under `runEvidence` and replaced on each extraction (full run history is preserved in `data/motor-runs/` for audit).
+
+### Domain Separation
+
+Domains needed during skill **creation** (docs sites, skills.sh, github.com) are different from domains needed during skill **usage** (api.agentmail.to). These are handled separately:
+
+- `policy.allowedDomains` = runtime execution permissions only. **NOT auto-populated from creation domains.**
+- `policy.runEvidence.fetchedDomains` = historical evidence of what was accessed during creation
+- New skills have no `allowedDomains` — the user sets them during approval
+- Updated skills preserve existing `allowedDomains` (previously user-approved)
+- On first usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow)
 
 ## Open Questions
 

@@ -31,6 +31,7 @@ import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Logger } from '../../types/logger.js';
 import type { SkillInput, SkillPolicy } from '../skills/skill-types.js';
+import type { RunEvidence } from './motor-protocol.js';
 import {
   computeDirectoryHash,
   parseSkillFile,
@@ -241,7 +242,8 @@ async function extractSingleSkill(
   skillName: string,
   runId: string,
   logger: Logger,
-  pendingCredentials?: Record<string, string>
+  pendingCredentials?: Record<string, string>,
+  runEvidence?: RunEvidence
 ): Promise<{ extracted: boolean; isUpdate: boolean }> {
   const skillMdPath = join(workspace, 'SKILL.md');
 
@@ -447,6 +449,7 @@ async function extractSingleSkill(
         changedFiles,
         deletedFiles,
       },
+      ...(runEvidence && { runEvidence }),
     };
 
     await savePolicy(targetDir, newPolicy);
@@ -487,7 +490,8 @@ export async function extractSkillsFromWorkspace(
   skillsDir: string,
   runId: string,
   logger: Logger,
-  pendingCredentials?: Record<string, string>
+  pendingCredentials?: Record<string, string>,
+  runEvidence?: RunEvidence
 ): Promise<{ created: string[]; updated: string[] }> {
   const created: string[] = [];
   const updated: string[] = [];
@@ -540,7 +544,8 @@ export async function extractSkillsFromWorkspace(
       skillName,
       runId,
       logger,
-      pendingCredentials
+      pendingCredentials,
+      runEvidence
     );
 
     if (result.extracted) {

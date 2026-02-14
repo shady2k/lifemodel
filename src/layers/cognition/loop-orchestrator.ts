@@ -71,6 +71,7 @@ export function buildRequest(
  * - Can't escalate from smart model (already using it)
  * - Can't emit thoughts when processing a thought (prevents infinite loops)
  * - Can't do housekeeping (thought/agent) during proactive contact (prevents prep loops)
+ * - Can't use core.task on awaiting_input/awaiting_approval motor_result (consent gate)
  */
 export function filterToolsForContext(
   tools: (OpenAIChatTool | MinimalOpenAIChatTool)[],
@@ -80,6 +81,14 @@ export function filterToolsForContext(
   const isThoughtTrigger = context.triggerSignal.type === 'thought';
   const isProactive =
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);
+
+  // Check for motor_result with awaiting_input or awaiting_approval status
+  const isMotorResultAwaiting =
+    context.triggerSignal.type === 'motor_result' &&
+    (context.triggerSignal.data as { status?: string } | undefined)?.status === 'awaiting_input';
+  const isMotorResultAwaitingApproval =
+    context.triggerSignal.type === 'motor_result' &&
+    (context.triggerSignal.data as { status?: string } | undefined)?.status === 'awaiting_approval';
 
   return tools.filter((t) => {
     if (typeof t !== 'object') return true;
@@ -111,6 +120,12 @@ export function filterToolsForContext(
     if (isProactive) {
       if (name === 'core.thought' || name === 'core_thought') return false;
       if (name === 'core.agent' || name === 'core_agent') return false;
+    }
+
+    // Motor result awaiting input/approval: remove core.task to prevent auto-response
+    // The model should relay the question/approval to the user and wait for their reply
+    if (isMotorResultAwaiting || isMotorResultAwaitingApproval) {
+      if (name === 'core.task' || name === 'core_task') return false;
     }
 
     return true;

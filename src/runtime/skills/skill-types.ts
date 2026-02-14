@@ -122,6 +122,20 @@ export interface SkillPolicy {
     changedFiles: string[];
     deletedFiles: string[];
   };
+
+  /** Observed evidence from the creation/update run (for security review) */
+  runEvidence?:
+    | {
+        /** Domains actually contacted via fetch tool */
+        fetchedDomains: string[];
+        /** Credentials saved via save_credential during the run */
+        savedCredentials: string[];
+        /** Motor tools used during the run */
+        toolsUsed: string[];
+        /** Whether bash was used — network activity may not be fully captured */
+        bashUsed: boolean;
+      }
+    | undefined;
 }
 
 /**

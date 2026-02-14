@@ -657,4 +657,100 @@ inputs:
       expect(policy.inputs?.[0]?.type).toBe('string'); // defaulted from invalid type
     });
   });
+
+  describe('runEvidence persistence', () => {
+    it('persists runEvidence in policy.json when provided', async () => {
+      await writeSkillMd('evidence-test', 'Skill with evidence');
+
+      const evidence = {
+        fetchedDomains: ['api.example.com', 'cdn.example.com'],
+        savedCredentials: ['api_key'],
+        toolsUsed: ['fetch', 'write'],
+        bashUsed: false,
+      };
+
+      const result = await extractSkillsFromWorkspace(
+        workspace,
+        skillsDir,
+        runId,
+        mockLogger,
+        undefined,
+        evidence
+      );
+      expect(result.created).toEqual(['evidence-test']);
+
+      const installedDir = join(skillsDir, 'evidence-test');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.runEvidence).toEqual(evidence);
+    });
+
+    it('omits runEvidence when not provided', async () => {
+      await writeSkillMd('no-evidence', 'Skill without evidence');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['no-evidence']);
+
+      const installedDir = join(skillsDir, 'no-evidence');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.runEvidence).toBeUndefined();
+    });
+
+    it('new skill has no allowedDomains (set during approval)', async () => {
+      await writeSkillMd('new-skill-domains', 'Brand new skill');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['new-skill-domains']);
+
+      const installedDir = join(skillsDir, 'new-skill-domains');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // New skills should NOT have allowedDomains - that's set during user approval
+      expect(policy.allowedDomains).toBeUndefined();
+    });
+
+    it('updated skill preserves existing allowedDomains', async () => {
+      // Pre-install with allowedDomains
+      const installedDir = join(skillsDir, 'preserve-domains');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: preserve-domains\ndescription: Old\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          allowedDomains: ['api.old.com', 'cdn.old.com'],
+        }),
+        'utf-8'
+      );
+
+      // Update skill with evidence from different domains
+      await writeSkillMd('preserve-domains', 'Updated', '# Updated');
+
+      const evidence = {
+        fetchedDomains: ['api.new.com'], // Different from allowedDomains
+        savedCredentials: [],
+        toolsUsed: ['fetch'],
+        bashUsed: false,
+      };
+
+      const result = await extractSkillsFromWorkspace(
+        workspace,
+        skillsDir,
+        runId,
+        mockLogger,
+        undefined,
+        evidence
+      );
+      expect(result.updated).toEqual(['preserve-domains']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // allowedDomains preserved from existing policy, NOT from run.domains
+      expect(policy.allowedDomains).toEqual(['api.old.com', 'cdn.old.com']);
+      // Evidence shows what was actually contacted during creation
+      expect(policy.runEvidence?.fetchedDomains).toEqual(['api.new.com']);
+    });
+  });
 });

@@ -3,6 +3,8 @@
  *
  * Unified tool for Motor Cortex run management.
  * Replaces the former core.tasks (list) and core.task (control) split.
+ *
+ * Consent gating: respond and approve actions require user_message trigger.
  */
 
 import type { Tool } from '../types.js';
@@ -93,7 +95,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
-    execute: async (args, _context) => {
+    execute: async (args, context) => {
       const action = args['action'] as string;
 
       if (!action) {
@@ -217,6 +219,15 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
         }
 
         case 'respond': {
+          // CONSENT GATE: respond requires user_message trigger
+          if (context?.triggerType !== 'user_message') {
+            return {
+              success: false,
+              error:
+                'This action requires user input. Relay the question to the user first, then wait for their response.',
+            };
+          }
+
           const runId = args['runId'] as string;
           const answer = args['answer'] as string;
           const domains = args['domains'] as string[] | undefined;
@@ -248,6 +259,15 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
         }
 
         case 'approve': {
+          // CONSENT GATE: approve requires user_message trigger
+          if (context?.triggerType !== 'user_message') {
+            return {
+              success: false,
+              error:
+                'This action requires user input. Present the approval request to the user first, then wait for their decision.',
+            };
+          }
+
           const runId = args['runId'] as string;
           const approved = args['approved'] as boolean | undefined;
           if (!runId) {

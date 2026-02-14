@@ -126,10 +126,13 @@ describe('core.skill tool', () => {
     it('approves a pending_review skill', async () => {
       await setupSkill('test-skill', makePolicy('pending_review'));
 
-      const result = (await tool.execute({
-        action: 'approve',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(true);
       expect(result.skill).toBe('test-skill');
@@ -146,10 +149,13 @@ describe('core.skill tool', () => {
     it('approves a needs_reapproval skill', async () => {
       await setupSkill('test-skill', makePolicy('needs_reapproval'));
 
-      const result = (await tool.execute({
-        action: 'approve',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(true);
       expect(result.trust).toBe('approved');
@@ -170,10 +176,13 @@ describe('core.skill tool', () => {
       await setupSkill('test-skill', policy);
 
       // Approve
-      const result = (await tool.execute({
-        action: 'approve',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
       expect(result.success).toBe(true);
       expect(result.trust).toBe('approved');
 
@@ -188,10 +197,13 @@ describe('core.skill tool', () => {
     it('errors if skill is already approved', async () => {
       await setupSkill('test-skill', makePolicy('approved'));
 
-      const result = (await tool.execute({
-        action: 'approve',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('already approved');
@@ -200,10 +212,13 @@ describe('core.skill tool', () => {
     it('errors if skill has no policy', async () => {
       await setupSkill('test-skill'); // No policy
 
-      const result = (await tool.execute({
-        action: 'approve',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('no policy.json');
@@ -214,10 +229,13 @@ describe('core.skill tool', () => {
     it('rejects a pending_review skill back to needs_reapproval', async () => {
       await setupSkill('test-skill', makePolicy('pending_review'));
 
-      const result = (await tool.execute({
-        action: 'reject',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'reject',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(true);
       expect(result.trust).toBe('needs_reapproval');
@@ -231,10 +249,13 @@ describe('core.skill tool', () => {
     it('errors if skill has no policy', async () => {
       await setupSkill('test-skill'); // No policy
 
-      const result = (await tool.execute({
-        action: 'reject',
-        name: 'test-skill',
-      })) as SkillResult;
+      const result = (await tool.execute(
+        {
+          action: 'reject',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('no policy.json');
@@ -288,7 +309,7 @@ describe('core.skill tool', () => {
     it('has action parameter with enum', () => {
       const actionParam = tool.parameters.find((p) => p.name === 'action');
       expect(actionParam).toBeDefined();
-      expect(actionParam?.enum).toEqual(['read', 'approve', 'reject', 'delete']);
+      expect(actionParam?.enum).toEqual(['read', 'review', 'approve', 'reject', 'delete']);
     });
   });
 });

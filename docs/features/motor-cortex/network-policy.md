@@ -117,6 +117,16 @@ policy.json domains    core.act({ domains })    core.task({ action:'retry', doma
 
 On retry, new domains are unioned with existing `run.domains` — the set only grows, never shrinks within a run.
 
+### Domain Persistence at Extraction
+
+Creation domains and usage domains are **separate concerns**:
+
+- **Creation domains** (`run.domains`): Domains needed to build the skill (docs sites, skills.sh, etc.). These are NOT persisted to `policy.allowedDomains` — they would over-grant runtime permissions.
+- **Usage domains** (`policy.allowedDomains`): Runtime execution permissions. Set by the user during approval, preserved on skill updates.
+- **Evidence** (`policy.runEvidence.fetchedDomains`): Historical record of domains actually contacted during creation. Extracted from `fetch` tool call URLs across all attempts. Presented during security review for informed user consent.
+
+For new skills, `allowedDomains` starts as `undefined` — the user specifies runtime domains during approval. For updated skills, existing `allowedDomains` are preserved (previously user-approved). On first real usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow).
+
 ## Files
 
 | File | Purpose |

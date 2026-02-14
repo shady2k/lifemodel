@@ -105,5 +105,6 @@ export function buildToolContext(context: LoopContext): ToolContext {
     recipientId: context.recipientId ?? '',
     userId: context.userId,
     correlationId: context.tickId,
+    triggerType: context.triggerSignal.type,
   };
 }

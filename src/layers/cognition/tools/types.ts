@@ -81,6 +81,13 @@ export interface ToolContext {
 
   /** Correlation ID for tracing */
   correlationId: string;
+
+  /**
+   * Trigger type that started this cognition loop.
+   * Required for consent-gated mutations (approve, respond, etc.)
+   * Tools check this to ensure user consent actions only happen on user_message triggers.
+   */
+  triggerType: string;
 }
 
 /**

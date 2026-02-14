@@ -19,6 +19,7 @@ import type {
   TaskResult,
   FailureSummary,
   FailureCategory,
+  RunEvidence,
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
 import {
@@ -485,12 +486,17 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       let installedSkills: { created: string[]; updated: string[] } | undefined;
       if (params.skillsDir) {
         try {
+          // Aggregate evidence from all attempts for security review
+          const evidence = aggregateRunEvidence(run);
+          childLogger.info({ evidence }, 'Aggregated run evidence for skill review');
+
           const extractionResult = await extractSkillsFromWorkspace(
             workspace,
             params.skillsDir,
             run.id,
             childLogger,
-            run.pendingCredentials
+            run.pendingCredentials,
+            evidence
           );
           if (extractionResult.created.length > 0 || extractionResult.updated.length > 0) {
             installedSkills = extractionResult;
@@ -1482,6 +1488,60 @@ export async function getFailureHint(
  */
 function hasTool(tool: string, tools: string[]): boolean {
   return tools.includes(tool);
+}
+
+/**
+ * Aggregate evidence from all attempts' tool call traces.
+ *
+ * Collects deterministic observations from the actual run:
+ * - Domains contacted via fetch (from tool args, not heuristics)
+ * - Credentials saved via save_credential
+ * - Tools used (including bash for network activity warning)
+ *
+ * @param run - The completed motor run
+ * @returns Aggregated evidence for security review
+ */
+export function aggregateRunEvidence(run: MotorRun): RunEvidence {
+  const fetchedDomains = new Set<string>();
+  const savedCredentials = new Set<string>();
+  const toolsUsed = new Set<string>();
+  let bashUsed = false;
+
+  // Iterate over ALL attempts (retries may have contacted different domains)
+  for (const attempt of run.attempts) {
+    for (const step of attempt.trace.steps) {
+      for (const toolCall of step.toolCalls) {
+        toolsUsed.add(toolCall.tool);
+
+        // Track bash usage for network activity warning
+        if (toolCall.tool === 'bash') {
+          bashUsed = true;
+        }
+
+        // Extract domains from fetch tool calls
+        if (toolCall.tool === 'fetch' && toolCall.args['url']) {
+          try {
+            const url = new URL(toolCall.args['url'] as string);
+            fetchedDomains.add(url.hostname.toLowerCase());
+          } catch {
+            // Invalid URL, skip
+          }
+        }
+
+        // Track saved credentials
+        if (toolCall.tool === 'save_credential' && toolCall.args['name']) {
+          savedCredentials.add(toolCall.args['name'] as string);
+        }
+      }
+    }
+  }
+
+  return {
+    fetchedDomains: [...fetchedDomains].sort(),
+    savedCredentials: [...savedCredentials].sort(),
+    toolsUsed: [...toolsUsed].sort(),
+    bashUsed,
+  };
 }
 
 /**
