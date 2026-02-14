@@ -110,7 +110,7 @@ describe('core.act tool', () => {
       })) as Record<string, unknown>;
 
       expect(result['success']).toBe(false);
-      expect(result['error']).toContain('pending approval (new skill)');
+      expect(result['error']).toContain('pending approval (new skill, not yet reviewed)');
       expect(result['error']).toContain('core.skill(action:"approve"');
       expect(result['error']).toContain('Do not retry core.act');
     });

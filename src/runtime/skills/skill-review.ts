@@ -361,14 +361,17 @@ export async function reviewSkill(loaded: LoadedSkill): Promise<SkillReview> {
     trust = 'no_policy - skill has no security policy';
   } else {
     switch (policy.trust) {
-      case 'approved':
-        trust = 'approved - user has approved these permissions';
-        break;
       case 'pending_review':
-        trust = 'pending_review - extracted from Motor Cortex, needs approval';
+        trust = 'pending_review - freshly created by Motor Cortex, never reviewed';
+        break;
+      case 'reviewed':
+        trust = 'reviewed - security review done, waiting for user approval';
         break;
       case 'needs_reapproval':
         trust = 'needs_reapproval - content changed since last approval';
+        break;
+      case 'approved':
+        trust = 'approved - user has approved these permissions';
         break;
       default:
         trust = `unknown (${(policy as { trust: string }).trust})`;

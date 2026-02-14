@@ -55,11 +55,12 @@ export interface SkillFrontmatter {
 /**
  * Trust state for a skill's security policy.
  *
- * - needs_reapproval: Content hash changed since approval (has policy) or no policy exists
- * - pending_review: User has not yet approved this skill (extracted from Motor Cortex)
+ * - pending_review: Freshly created by Motor Cortex, never reviewed
+ * - reviewed: Security review done, waiting for user approval
+ * - needs_reapproval: Content changed since last approval
  * - approved: User has approved these permissions
  */
-export type SkillTrust = 'needs_reapproval' | 'pending_review' | 'approved';
+export type SkillTrust = 'pending_review' | 'reviewed' | 'needs_reapproval' | 'approved';
 
 /**
  * Security policy sidecar (policy.json).

@@ -80,7 +80,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content, review for approval, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review with evidence. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill. IMPORTANT: Skills with trust pending_review cannot be approved directly — you must first run action=review for deterministic facts, then dispatch core.act(skill_review:true) for file analysis, present both to the user, and only approve after their explicit confirmation.",
+      "Read skill content, review for approval, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review with evidence (transitions trust to 'reviewed'). Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill. Trust lifecycle: pending_review → reviewed (after review) → approved (after user approval). Content changes → needs_reapproval → reviewed → approved. If user asks to approve a pending_review skill without review, ask them to confirm first — they may skip the review if they wish.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
@@ -122,9 +122,12 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       if (action === 'review') {
         const review = await reviewSkill(loaded);
 
-        // Transition pending_review → needs_reapproval so approve is unblocked after review
-        if (loaded.policy?.trust === 'pending_review') {
-          await savePolicy(loaded.path, { ...loaded.policy, trust: 'needs_reapproval' });
+        // Transition pending_review/needs_reapproval → reviewed after security review
+        if (
+          loaded.policy?.trust === 'pending_review' ||
+          loaded.policy?.trust === 'needs_reapproval'
+        ) {
+          await savePolicy(loaded.path, { ...loaded.policy, trust: 'reviewed' });
         }
 
         return { success: true, skill: skillName, review };
@@ -164,14 +167,6 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         return {
           success: false,
           error: `Skill "${skillName}" is already approved`,
-        };
-      }
-
-      // Gate: pending_review skills must be reviewed before approval
-      if (action === 'approve' && loaded.policy.trust === 'pending_review') {
-        return {
-          success: false,
-          error: `Skill "${skillName}" has trust "pending_review" and must be reviewed before approval. Run core.skill(action:"review", name:"${skillName}") for deterministic facts, then core.act(mode:"agentic", skill:"${skillName}", skill_review:true, task:"Read all files and report findings") for file analysis. Present both to the user, then call approve after their confirmation.`,
         };
       }
 

@@ -353,8 +353,9 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
 
     // Validate trust (accept legacy 'unknown' for migration)
     if (
-      raw['trust'] !== 'needs_reapproval' &&
       raw['trust'] !== 'pending_review' &&
+      raw['trust'] !== 'reviewed' &&
+      raw['trust'] !== 'needs_reapproval' &&
       raw['trust'] !== 'approved' &&
       raw['trust'] !== 'unknown' // Accept legacy value for migration
     ) {

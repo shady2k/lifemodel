@@ -269,10 +269,12 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
 
             // Trust gating — block unapproved skills
             if (policy && policy.trust !== 'approved') {
-              const trustLabel =
-                policy.trust === 'pending_review'
-                  ? 'pending approval (new skill)'
-                  : 'needs re-approval (content changed)';
+              const trustLabels: Record<string, string> = {
+                pending_review: 'pending approval (new skill, not yet reviewed)',
+                reviewed: 'reviewed but not yet approved',
+                needs_reapproval: 'needs re-approval (content changed)',
+              };
+              const trustLabel = trustLabels[policy.trust] ?? policy.trust;
               return {
                 success: false,
                 error:
