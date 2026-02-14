@@ -35,7 +35,6 @@ export interface SkillResult {
   policy?: SkillPolicy | undefined;
   trust?: string | undefined;
   // approve/reject action fields
-  allowedTools?: string[] | undefined;
   allowedDomains?: string[] | undefined;
 }
 
@@ -165,7 +164,6 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         success: true,
         skill: skillName,
         trust: updatedPolicy.trust,
-        allowedTools: updatedPolicy.allowedTools,
         allowedDomains: updatedPolicy.allowedDomains,
       };
     },

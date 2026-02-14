@@ -28,7 +28,6 @@ function makePolicy(trust: 'needs_reapproval' | 'pending_review' | 'approved'): 
   return {
     schemaVersion: 1,
     trust,
-    allowedTools: ['shell', 'code'],
     allowedDomains: ['api.example.com'],
   };
 }
@@ -81,7 +80,7 @@ describe('core.skill tool', () => {
       expect(result.body).toContain('Do something useful.');
       expect(result.trust).toBe('pending_review');
       expect(result.policy).toBeDefined();
-      expect(result.policy?.allowedTools).toEqual(['shell', 'code']);
+      expect(result.policy?.allowedDomains).toEqual(['api.example.com']);
     });
 
     it('works without policy.json', async () => {
@@ -135,7 +134,6 @@ describe('core.skill tool', () => {
       expect(result.success).toBe(true);
       expect(result.skill).toBe('test-skill');
       expect(result.trust).toBe('approved');
-      expect(result.allowedTools).toEqual(['shell', 'code']);
       expect(result.allowedDomains).toEqual(['api.example.com']);
 
       // Verify persisted

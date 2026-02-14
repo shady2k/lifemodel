@@ -64,7 +64,6 @@ Use **persistent skill dependency packs** with a two-tier cache and short-lived 
 {
   "schemaVersion": 2,
   "trust": "approved",
-  "allowedTools": ["bash", "read", "write", "fetch"],
   "allowedDomains": ["api.stripe.com"],
   "requiredCredentials": ["stripe_key"],
   "dependencies": {

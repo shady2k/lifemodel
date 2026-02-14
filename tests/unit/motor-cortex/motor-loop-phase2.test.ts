@@ -104,7 +104,6 @@ describe('skill injection into system prompt', () => {
     policy: {
       schemaVersion: 1,
       trust: 'approved',
-      allowedTools: ['shell', 'code'],
       requiredCredentials: ['weather_api_key'],
     },
     body: '# Weather Report\n\nUse curl -H "Authorization: Bearer <credential:weather_api_key>" to call the API.',

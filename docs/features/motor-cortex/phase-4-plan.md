@@ -47,7 +47,6 @@ Dependencies are declared in `policy.json` alongside existing fields:
 {
   "schemaVersion": 1,
   "trust": "approved",
-  "allowedTools": ["bash"],
   "dependencies": {
     "npm": {
       "packages": [
@@ -126,4 +125,4 @@ Cache key includes:
 - **Integrity hashes** — npm `integrity` field (SRI), pip `--require-hashes`. Accept but don't enforce in Phase 1.
 - **Pack size limits** — Cap total dependency size per ecosystem.
 - **Cache pruning** — Remove packs for deleted skills or when image changes.
-- **`allowedTools` removal** — Phase 5 goal: infer tools from skill content instead of declaring them.
+- **`allowedTools` removed** — Container isolation is the security boundary; all sandboxed tools are always granted.

@@ -10,7 +10,6 @@ describe('sanitizePolicyForDisplay', () => {
   const basePolicy: SkillPolicy = {
     schemaVersion: 1,
     trust: 'approved',
-    allowedTools: ['bash', 'fetch'],
     allowedDomains: ['api.example.com'],
     requiredCredentials: ['api_key', 'secret_token'],
   };
@@ -49,7 +48,6 @@ describe('sanitizePolicyForDisplay', () => {
 
     expect(result.schemaVersion).toBe(1);
     expect(result.trust).toBe('approved');
-    expect(result.allowedTools).toEqual(['bash', 'fetch']);
     expect(result.allowedDomains).toEqual(['api.example.com']);
     expect(result.requiredCredentials).toEqual(['api_key', 'secret_token']);
     expect(result.approvedBy).toBe('user');

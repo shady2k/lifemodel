@@ -76,7 +76,7 @@ describe('core.act tool', () => {
     it('blocks needs_reapproval skill', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedTools: ['code'] },
+        policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedDomains: ['api.example.com'] },
         body: 'instructions',
         path: '/path',
         skillPath: '/path/SKILL.md',
@@ -97,7 +97,7 @@ describe('core.act tool', () => {
     it('blocks pending_review skill', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'pending_review', schemaVersion: 1, allowedTools: ['bash'] },
+        policy: { trust: 'pending_review', schemaVersion: 1, allowedDomains: ['api.example.com'] },
         body: 'instructions',
         path: '/path',
         skillPath: '/path/SKILL.md',
@@ -121,7 +121,7 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['bash'],
+          allowedDomains: ['api.example.com'],
         },
         body: 'instructions',
         path: '/path',
@@ -147,13 +147,12 @@ describe('core.act tool', () => {
       );
     });
 
-    it('uses all tools regardless of policy.allowedTools', async () => {
+    it('grants all tools to approved skill runs', async () => {
       (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
         frontmatter: { name: 'test', description: 'Test' },
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['bash'], // Policy only declares bash
           allowedDomains: ['api.example.com'],
         },
         body: 'instructions',
@@ -175,7 +174,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          tools: ALL_MOTOR_TOOLS, // All tools, not just policy's ['bash']
+          tools: ALL_MOTOR_TOOLS, // All tools always granted
           domains: ['api.example.com'],
         })
       );
@@ -187,7 +186,6 @@ describe('core.act tool', () => {
         policy: {
           trust: 'approved',
           schemaVersion: 1,
-          allowedTools: ['bash'],
           allowedDomains: ['api.example.com'],
         },
         body: 'instructions',

@@ -12,7 +12,7 @@
  * ## Policy Sidecar
  *
  * policy.json is an auto-generated, user-approved security policy:
- * - allowedTools, allowedDomains, requiredCredentials
+ * - allowedDomains, requiredCredentials, inputs
  * - trust state: 'needs_reapproval' | 'pending_review' | 'approved'
  * - contentHash binding to detect SKILL.md modifications
  *
@@ -22,8 +22,6 @@
  * SKILL.md is portable and immutable by our system.
  * policy.json is managed locally and controls runtime permissions.
  */
-
-import type { MotorTool } from '../motor-cortex/motor-protocol.js';
 
 /**
  * Agent Skills standard frontmatter (portable).
@@ -49,6 +47,9 @@ export interface SkillFrontmatter {
 
   /** Optional: tools hint (non-standard, may be used by skill publishers) */
   'allowed-tools'?: string | undefined;
+
+  /** Input parameters the skill accepts (from frontmatter) */
+  inputs?: SkillInput[] | undefined;
 }
 
 /**
@@ -72,9 +73,6 @@ export interface SkillPolicy {
 
   /** Trust state — 'approved' means user confirmed these permissions */
   trust: SkillTrust;
-
-  /** Motor tools this skill is allowed to use */
-  allowedTools: MotorTool[];
 
   /** Network domains this skill may access (enforced via iptables) */
   allowedDomains?: string[] | undefined;

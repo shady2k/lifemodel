@@ -20,8 +20,8 @@
  * {
  *   "schemaVersion": 1,
  *   "trust": "approved",
- *   "allowedTools": ["bash"],
- *   "allowedDomains": ["api.weather.com"]
+ *   "allowedDomains": ["api.weather.com"],
+ *   "requiredCredentials": ["api_key"]
  * }
  * ```
  */
@@ -37,6 +37,7 @@ import type {
   SkillIndexEntry,
   DiscoveredSkill,
   LoadedSkill,
+  SkillInput,
 } from './skill-types.js';
 
 /**
@@ -192,7 +193,66 @@ function toSkillFrontmatter(raw: Record<string, unknown>): SkillFrontmatter {
     license: raw['license'] as string | undefined,
     compatibility: raw['compatibility'] as string | undefined,
     'allowed-tools': raw['allowed-tools'] as string | undefined,
+    inputs: Array.isArray(raw['inputs']) ? parseSkillInputs(raw['inputs']) : undefined,
   };
+}
+
+/**
+ * Parse and validate skill inputs from frontmatter.
+ *
+ * Validates each entry and applies defaults:
+ * - `name` must be non-empty string (skip if not)
+ * - `type` must be 'string' | 'number' | 'boolean' (default: 'string')
+ * - `description` must be string (default: empty string)
+ * - `required` must be boolean (default: true)
+ * - `default` is optional, passed through if present
+ * - Skip entries with duplicate `name`s
+ *
+ * @param raw - Raw inputs array from frontmatter
+ * @returns Validated SkillInput array
+ */
+export function parseSkillInputs(raw: unknown[]): SkillInput[] {
+  const result: SkillInput[] = [];
+  const seenNames = new Set<string>();
+
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+
+    const e = entry as Record<string, unknown>;
+
+    // name is required and must be non-empty string
+    if (typeof e['name'] !== 'string' || e['name'].trim() === '') continue;
+    const name = e['name'];
+
+    // Skip duplicate names
+    if (seenNames.has(name)) continue;
+    seenNames.add(name);
+
+    // type validation with default
+    let type: 'string' | 'number' | 'boolean' = 'string';
+    if (e['type'] === 'string' || e['type'] === 'number' || e['type'] === 'boolean') {
+      type = e['type'];
+    }
+
+    // description with default
+    const description = typeof e['description'] === 'string' ? e['description'] : '';
+
+    // required with default
+    const required = typeof e['required'] === 'boolean' ? e['required'] : true;
+
+    // default is optional, pass through if present
+    const hasDefault = 'default' in e;
+    const defaultVal = hasDefault ? e['default'] : undefined;
+
+    const input: SkillInput = { name, type, description, required };
+    if (hasDefault) {
+      input.default = defaultVal as string | number | boolean;
+    }
+
+    result.push(input);
+  }
+
+  return result;
 }
 
 /**
@@ -306,21 +366,7 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
       raw['trust'] = 'needs_reapproval';
     }
 
-    // Validate allowedTools
-    if (!Array.isArray(raw['allowedTools'])) {
-      return null;
-    }
-
-    // Migrate legacy tool names: filesystem → read, write, list (with dedup)
-    const policy = raw as unknown as SkillPolicy;
-    if (Array.isArray(policy.allowedTools) && policy.allowedTools.includes('filesystem' as never)) {
-      const expanded = policy.allowedTools.flatMap((t: string) =>
-        t === 'filesystem' ? ['read', 'write', 'list'] : [t]
-      );
-      policy.allowedTools = [...new Set(expanded)] as SkillPolicy['allowedTools'];
-    }
-
-    return policy;
+    return raw as unknown as SkillPolicy;
   } catch {
     return null;
   }

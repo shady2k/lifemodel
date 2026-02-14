@@ -101,7 +101,7 @@ core.setInterest for ongoing interests (not one-time questions). Use 1-3 word ke
 <skill_rules>
 Skills are modular, filesystem-based capabilities executed by Motor Cortex. Each skill is a directory containing:
 - SKILL.md — YAML frontmatter (name, description) + step-by-step instructions, examples, edge cases
-- policy.json — security policy: allowed tools, network domains, required credentials, provenance
+- policy.json — security policy: network domains, required credentials, provenance
 - references/ — optional API docs, schemas, examples (loaded on demand by Motor)
 - scripts/ — optional helper scripts referenced in the instructions
 The frontmatter description tells you WHEN to use the skill. The body tells Motor HOW to execute it.

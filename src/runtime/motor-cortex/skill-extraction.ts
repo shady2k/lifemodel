@@ -30,11 +30,11 @@ import { readdir, readFile, stat, lstat, cp, rename, rm, mkdir } from 'node:fs/p
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Logger } from '../../types/logger.js';
-import type { MotorTool } from './motor-protocol.js';
 import type { SkillInput, SkillPolicy } from '../skills/skill-types.js';
 import {
   computeDirectoryHash,
   parseSkillFile,
+  parseSkillInputs,
   validateSkillFrontmatter,
   savePolicy,
 } from '../skills/skill-loader.js';
@@ -380,68 +380,50 @@ async function extractSingleSkill(
       await rm(backupDir, { recursive: true, force: true });
     }
 
-    // Step 9: Merge and update policy
+    // Step 9: Build new policy
     // Note: policy.json is NOT in the workspace (excluded from container)
-    // So motorPolicy will always be null - we build from scratch using existing + pending
-    const policyPath = join(targetDir, 'policy.json');
-    let motorPolicy: Record<string, unknown> | null = null;
-
-    try {
-      const policyContent = await readFile(policyPath, 'utf-8');
-      motorPolicy = JSON.parse(policyContent) as Record<string, unknown>;
-      if (typeof motorPolicy !== 'object') {
-        motorPolicy = null;
-      }
-    } catch {
-      // No valid policy from workspace (expected - policy.json excluded)
-    }
+    // We build from existing policy (for updates) + frontmatter inputs
 
     // Compute content hash
     const contentHash = await computeDirectoryHash(targetDir);
 
-    // Build effective provenance: Motor > existing > none
-    const motorProvenance = motorPolicy?.['provenance'] as Record<string, unknown> | undefined;
-    const hasValidProvenance =
-      motorProvenance &&
-      typeof motorProvenance['source'] === 'string' &&
-      typeof motorProvenance['fetchedAt'] === 'string';
-
+    // Build provenance from existing policy only (workspace has no policy.json)
     let effectiveProvenance: SkillPolicy['provenance'] = undefined;
-    if (hasValidProvenance) {
-      effectiveProvenance = {
-        source: motorProvenance['source'] as string,
-        fetchedAt: motorProvenance['fetchedAt'] as string,
-        contentHash,
-      };
-    } else if (existingPolicyForMerge) {
-      const fallbackProvenance = existingPolicyForMerge['provenance'] as
+    if (existingPolicyForMerge) {
+      const existingProvenance = existingPolicyForMerge['provenance'] as
         | Record<string, unknown>
         | undefined;
       if (
-        fallbackProvenance &&
-        typeof fallbackProvenance['source'] === 'string' &&
-        typeof fallbackProvenance['fetchedAt'] === 'string'
+        existingProvenance &&
+        typeof existingProvenance['source'] === 'string' &&
+        typeof existingProvenance['fetchedAt'] === 'string'
       ) {
         effectiveProvenance = {
-          source: fallbackProvenance['source'],
-          fetchedAt: fallbackProvenance['fetchedAt'],
+          source: existingProvenance['source'],
+          fetchedAt: existingProvenance['fetchedAt'],
           contentHash,
         };
       }
     }
 
-    // Build new policy
-    const motorAllowedTools = motorPolicy?.['allowedTools'] as string[] | undefined;
-    const motorAllowedDomains = motorPolicy?.['allowedDomains'] as string[] | undefined;
-    const motorRequiredCredentials = motorPolicy?.['requiredCredentials'] as string[] | undefined;
-    const motorInputs = motorPolicy?.['inputs'] as SkillInput[] | undefined;
+    // Get frontmatter inputs
+    const frontmatterInputs = parsed.frontmatter['inputs'] as Record<string, unknown>[] | undefined;
 
-    const fallbackTools = existingPolicyForMerge?.['allowedTools'] as string[] | undefined;
+    // Build new policy - use frontmatter inputs as primary source, fallback to existing
     const fallbackDomains = existingPolicyForMerge?.['allowedDomains'] as string[] | undefined;
     const fallbackCredentials = existingPolicyForMerge?.['requiredCredentials'] as
       | string[]
       | undefined;
     const fallbackInputs = existingPolicyForMerge?.['inputs'] as SkillInput[] | undefined;
+
+    // Parse frontmatter inputs if present (reuse parseSkillInputs for validation + dedup)
+    let inputs: SkillPolicy['inputs'] = undefined;
+    if (Array.isArray(frontmatterInputs) && frontmatterInputs.length > 0) {
+      const parsed = parseSkillInputs(frontmatterInputs);
+      inputs = parsed.length > 0 ? parsed : undefined;
+    } else if (fallbackInputs) {
+      inputs = fallbackInputs;
+    }
 
     // Merge credentialValues: existing + pending (pending takes precedence)
     const mergedCredentialValues: Record<string, string> = {
@@ -452,10 +434,9 @@ async function extractSingleSkill(
     const newPolicy: SkillPolicy = {
       schemaVersion: 1,
       trust: 'pending_review' as const,
-      allowedTools: (motorAllowedTools ?? fallbackTools ?? []) as MotorTool[],
-      allowedDomains: motorAllowedDomains ?? fallbackDomains,
-      requiredCredentials: motorRequiredCredentials ?? fallbackCredentials,
-      inputs: motorInputs ?? fallbackInputs,
+      allowedDomains: fallbackDomains,
+      requiredCredentials: fallbackCredentials,
+      inputs,
       ...(effectiveProvenance && { provenance: effectiveProvenance }),
       ...(Object.keys(mergedCredentialValues).length > 0 && {
         credentialValues: mergedCredentialValues,

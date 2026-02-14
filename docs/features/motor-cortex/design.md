@@ -660,7 +660,6 @@ Only `name` and `description` are required per the standard. Additional fields (
 {
   "schemaVersion": 1,
   "trust": "approved",
-  "allowedTools": ["shell", "code"],
   "allowedDomains": ["api.agentmail.to"],
   "requiredCredentials": ["agentmail_api_key"],
   "credentialValues": {
@@ -707,7 +706,6 @@ Avoids directory scanning for fast skill discovery. Updated atomically on skill 
 | Field | Purpose |
 |-------|---------|
 | `trust` | `'needs_reapproval'` or `'approved'` — controls whether policy defaults are used |
-| `allowedTools` | Motor tools this skill may use (`code`, `shell`, `filesystem`, etc.) |
 | `allowedDomains` | Network domains for iptables enforcement |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
 | `credentialValues` | Skill-acquired credentials (e.g. API keys from signup). Persisted for restart survival. Redacted via `sanitizePolicyForDisplay()` in all read paths |

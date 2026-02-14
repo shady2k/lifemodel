@@ -13,8 +13,8 @@ import {
   savePolicy,
   loadSkill,
   computeDirectoryHash,
+  parseSkillInputs,
 } from '../../../../src/runtime/skills/skill-loader.js';
-import type { MotorTool } from '../../../../src/runtime/motor-cortex/motor-protocol.js';
 import { mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -225,7 +225,6 @@ describe('policy.json operations', () => {
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code', 'shell'] as MotorTool[],
       allowedDomains: ['api.example.com'],
       requiredCredentials: ['api_key'],
       approvedBy: 'user' as const,
@@ -237,7 +236,7 @@ describe('policy.json operations', () => {
 
     expect(loaded).not.toBeNull();
     expect(loaded?.trust).toBe('approved');
-    expect(loaded?.allowedTools).toEqual(['code', 'shell']);
+    expect(loaded?.allowedDomains).toEqual(['api.example.com']);
   });
 
   it('returns null for missing policy', async () => {
@@ -293,7 +292,7 @@ Body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'] as MotorTool[],
+      allowedDomains: ['api.example.com'],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {
@@ -327,7 +326,7 @@ Original body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'] as MotorTool[],
+      allowedDomains: ['api.example.com'],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {
@@ -369,7 +368,7 @@ Body`;
     const policy = {
       schemaVersion: 1,
       trust: 'approved' as const,
-      allowedTools: ['code'] as MotorTool[],
+      allowedDomains: ['api.example.com'],
       approvedBy: 'user' as const,
       approvedAt: new Date().toISOString(),
       provenance: {
@@ -532,5 +531,104 @@ describe('computeDirectoryHash', () => {
     const hash2 = await computeDirectoryHash(skillDir);
 
     expect(hash1).toBe(hash2);
+  });
+});
+
+describe('parseSkillInputs', () => {
+  it('parses valid inputs array', () => {
+    const raw = [
+      { name: 'API_KEY', description: 'API key', required: true },
+      { name: 'TIMEOUT', type: 'number', description: 'Timeout in ms', required: false, default: 5000 },
+    ];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      name: 'API_KEY',
+      type: 'string',
+      description: 'API key',
+      required: true,
+    });
+    expect(result[1]).toEqual({
+      name: 'TIMEOUT',
+      type: 'number',
+      description: 'Timeout in ms',
+      required: false,
+      default: 5000,
+    });
+  });
+
+  it('applies defaults for missing fields', () => {
+    const raw = [{ name: 'MINIMAL' }];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      name: 'MINIMAL',
+      type: 'string',
+      description: '',
+      required: true,
+    });
+  });
+
+  it('skips entries with missing name', () => {
+    const raw = [
+      { description: 'No name' },
+      { name: '', description: 'Empty name' },
+      { name: 'VALID', description: 'Valid entry' },
+    ];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe('VALID');
+  });
+
+  it('skips entries with non-object types', () => {
+    const raw = [
+      'string entry',
+      null,
+      123,
+      { name: 'VALID', type: 'string' },
+    ];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.name).toBe('VALID');
+  });
+
+  it('skips duplicate names (first wins)', () => {
+    const raw = [
+      { name: 'DUP', description: 'First', type: 'string' },
+      { name: 'DUP', description: 'Second', type: 'number' },
+      { name: 'UNIQUE', description: 'Unique' },
+    ];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.description).toBe('First');
+    expect(result[0]?.type).toBe('string');
+    expect(result[1]?.name).toBe('UNIQUE');
+  });
+
+  it('validates type field and defaults invalid types to string', () => {
+    const raw = [
+      { name: 'A', type: 'string' },
+      { name: 'B', type: 'number' },
+      { name: 'C', type: 'boolean' },
+      { name: 'D', type: 'invalid' },
+      { name: 'E', type: 123 },
+    ];
+    const result = parseSkillInputs(raw);
+
+    expect(result).toHaveLength(5);
+    expect(result[0]?.type).toBe('string');
+    expect(result[1]?.type).toBe('number');
+    expect(result[2]?.type).toBe('boolean');
+    expect(result[3]?.type).toBe('string'); // invalid -> default
+    expect(result[4]?.type).toBe('string'); // non-string -> default
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseSkillInputs([])).toEqual([]);
   });
 });

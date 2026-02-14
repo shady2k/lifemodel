@@ -104,7 +104,6 @@ describe('skill-extraction', () => {
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
-        allowedTools: ['bash'],
         allowedDomains: ['wttr.in'],
         provenance: { source: 'https://wttr.in', fetchedAt: new Date().toISOString() },
       });
@@ -138,7 +137,6 @@ describe('skill-extraction', () => {
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
       expect(policy.schemaVersion).toBe(1);
-      expect(policy.allowedTools).toEqual([]);
       expect(policy.extractedFrom.runId).toBe(runId);
     });
   });
@@ -259,7 +257,7 @@ describe('skill-extraction', () => {
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
-        allowedTools: ['bash'],
+        allowedDomains: ['api.example.com'],
       });
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
@@ -280,7 +278,6 @@ describe('skill-extraction', () => {
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
-        allowedTools: [],
         provenance: { source: 'test', fetchedAt: '2024-01-01T00:00:00Z' },
       });
 
@@ -317,7 +314,7 @@ describe('skill-extraction', () => {
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
-        allowedTools: ['bash'],
+        allowedDomains: ['api.example.com'],
         provenance: {
           source: 'https://example.com/docs',
           fetchedAt: '2024-01-01T00:00:00Z',
@@ -330,7 +327,7 @@ describe('skill-extraction', () => {
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       // No provenance since workspace policy.json is ignored
       expect(policy.provenance).toBeUndefined();
-      expect(policy.allowedTools).toEqual([]);
+      expect(policy.allowedDomains).toBeUndefined();
     });
   });
 
@@ -350,7 +347,7 @@ describe('skill-extraction', () => {
 
     it('generates minimal policy when Motor policy has wrong schema version', async () => {
       await writeSkillMd('wrong-schema', 'Wrong schema');
-      await writePolicy({ schemaVersion: 'wrong', trust: 'approved', allowedTools: [] });
+      await writePolicy({ schemaVersion: 'wrong', trust: 'approved' });
 
       const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
       expect(result.created).toEqual(['wrong-schema']);
@@ -377,7 +374,6 @@ describe('skill-extraction', () => {
         JSON.stringify({
           schemaVersion: 1,
           trust: 'approved',
-          allowedTools: ['bash'],
           requiredCredentials: ['api_key'],
           credentialValues: { api_key: 'sk-live-secret-12345' },
         }),
@@ -427,7 +423,6 @@ describe('skill-extraction', () => {
         JSON.stringify({
           schemaVersion: 1,
           trust: 'approved',
-          allowedTools: [],
           credentialValues: { old_key: 'old-value', shared_key: 'old-shared' },
         }),
         'utf-8'
@@ -500,7 +495,7 @@ describe('skill-extraction', () => {
       );
       await writeFile(
         join(installedDir, 'policy.json'),
-        JSON.stringify({ schemaVersion: 1, trust: 'approved', allowedTools: ['bash'], allowedDomains: ['old.example.com'] }),
+        JSON.stringify({ schemaVersion: 1, trust: 'approved', allowedDomains: ['old.example.com'] }),
         'utf-8'
       );
 
@@ -510,7 +505,6 @@ describe('skill-extraction', () => {
       await writePolicy({
         schemaVersion: 1,
         trust: 'approved',
-        allowedTools: ['fetch'],
         allowedDomains: ['new.example.com'],
       });
 
@@ -520,8 +514,147 @@ describe('skill-extraction', () => {
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.trust).toBe('pending_review');
       // Existing policy values are preserved since workspace policy.json is excluded
-      expect(policy.allowedTools).toEqual(['bash']);
       expect(policy.allowedDomains).toEqual(['old.example.com']);
+    });
+  });
+
+  describe('frontmatter inputs pipeline', () => {
+    it('extracts inputs from SKILL.md frontmatter to policy.json', async () => {
+      const skillContent = `---
+name: send-email
+description: Send emails via Resend API
+inputs:
+  - name: RESEND_API_KEY
+    description: Resend API key for sending emails
+    required: true
+  - name: TIMEOUT_MS
+    type: number
+    description: Timeout in milliseconds
+    required: false
+    default: 5000
+---
+# Send Email
+Instructions here`;
+      await writeFile(join(workspace, 'SKILL.md'), skillContent, 'utf-8');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['send-email']);
+
+      const installedDir = join(skillsDir, 'send-email');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.inputs).toBeDefined();
+      expect(policy.inputs).toHaveLength(2);
+      expect(policy.inputs?.[0]).toEqual({
+        name: 'RESEND_API_KEY',
+        type: 'string',
+        description: 'Resend API key for sending emails',
+        required: true,
+      });
+      expect(policy.inputs?.[1]).toEqual({
+        name: 'TIMEOUT_MS',
+        type: 'number',
+        description: 'Timeout in milliseconds',
+        required: false,
+        default: 5000,
+      });
+    });
+
+    it('uses frontmatter inputs over existing policy inputs on update', async () => {
+      // Pre-install with old inputs
+      const installedDir = join(skillsDir, 'input-update');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: input-update\ndescription: Old\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          inputs: [{ name: 'OLD_INPUT', type: 'string', description: 'Old', required: true }],
+        }),
+        'utf-8'
+      );
+
+      // Update with new inputs in frontmatter
+      const skillContent = `---
+name: input-update
+description: Updated
+inputs:
+  - name: NEW_INPUT
+    type: boolean
+    description: New input
+    required: false
+---
+# Updated`;
+      await writeFile(join(workspace, 'SKILL.md'), skillContent, 'utf-8');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['input-update']);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // Frontmatter inputs take precedence
+      expect(policy.inputs).toHaveLength(1);
+      expect(policy.inputs?.[0]?.name).toBe('NEW_INPUT');
+      expect(policy.inputs?.[0]?.type).toBe('boolean');
+    });
+
+    it('falls back to existing inputs when frontmatter has no inputs', async () => {
+      // Pre-install with inputs
+      const installedDir = join(skillsDir, 'input-fallback');
+      await mkdir(installedDir, { recursive: true });
+      await writeFile(
+        join(installedDir, 'SKILL.md'),
+        '---\nname: input-fallback\ndescription: Old\n---\n# Old',
+        'utf-8'
+      );
+      await writeFile(
+        join(installedDir, 'policy.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          trust: 'approved',
+          inputs: [{ name: 'EXISTING', type: 'string', description: 'Existing input', required: true }],
+        }),
+        'utf-8'
+      );
+
+      // Update without inputs in frontmatter
+      await writeSkillMd('input-fallback', 'Updated', '# Updated');
+
+      await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // Existing inputs preserved
+      expect(policy.inputs).toHaveLength(1);
+      expect(policy.inputs?.[0]?.name).toBe('EXISTING');
+    });
+
+    it('handles malformed inputs gracefully', async () => {
+      const skillContent = `---
+name: bad-inputs
+description: Has malformed inputs
+inputs:
+  - description: Missing name
+  - name: ""
+    description: Empty name
+  - name: VALID
+    type: invalid_type
+    description: Valid entry with bad type
+---
+# Skill`;
+      await writeFile(join(workspace, 'SKILL.md'), skillContent, 'utf-8');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['bad-inputs']);
+
+      const installedDir = join(skillsDir, 'bad-inputs');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      // Only VALID entry should be included, with defaulted type
+      expect(policy.inputs).toHaveLength(1);
+      expect(policy.inputs?.[0]?.name).toBe('VALID');
+      expect(policy.inputs?.[0]?.type).toBe('string'); // defaulted from invalid type
     });
   });
 });
