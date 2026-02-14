@@ -80,7 +80,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content, review for approval, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review with evidence. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill.",
+      "Read skill content, review for approval, approve/reject/delete a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review with evidence. Use action=approve or reject to change trust state. Use action=delete to permanently remove a skill. IMPORTANT: Skills with trust pending_review cannot be approved directly — you must first run action=review for deterministic facts, then dispatch core.act(skill_review:true) for file analysis, present both to the user, and only approve after their explicit confirmation.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
@@ -158,6 +158,14 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         return {
           success: false,
           error: `Skill "${skillName}" is already approved`,
+        };
+      }
+
+      // Gate: pending_review skills must be reviewed before approval
+      if (action === 'approve' && loaded.policy.trust === 'pending_review') {
+        return {
+          success: false,
+          error: `Skill "${skillName}" has trust "pending_review" and must be reviewed before approval. Run core.skill(action:"review", name:"${skillName}") for deterministic facts, then core.act(mode:"agentic", skill:"${skillName}", skill_review:true, task:"Read all files and report findings") for file analysis. Present both to the user, then call approve after their confirmation.`,
         };
       }
 

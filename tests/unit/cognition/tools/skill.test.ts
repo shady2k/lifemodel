@@ -102,8 +102,8 @@ describe('core.skill tool', () => {
       });
     });
 
-    it('succeeds when triggerType is user_message', async () => {
-      await createSkill('test-approve-user');
+    it('succeeds when triggerType is user_message and trust is needs_reapproval', async () => {
+      await createSkill('test-approve-user', 'needs_reapproval');
 
       const result = await tool.execute(
         { action: 'approve', name: 'test-approve-user' },
@@ -111,6 +111,20 @@ describe('core.skill tool', () => {
       );
 
       expect(result).toMatchObject({ success: true, trust: 'approved' });
+    });
+
+    it('rejects approve for pending_review skill (must review first)', async () => {
+      await createSkill('test-approve-pending', 'pending_review');
+
+      const result = await tool.execute(
+        { action: 'approve', name: 'test-approve-pending' },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        error: expect.stringContaining('pending_review'),
+      });
     });
   });
 

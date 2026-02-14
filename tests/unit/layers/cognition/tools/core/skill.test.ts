@@ -123,7 +123,7 @@ describe('core.skill tool', () => {
   });
 
   describe('approve', () => {
-    it('approves a pending_review skill', async () => {
+    it('rejects approve for pending_review skill (must review first)', async () => {
       await setupSkill('test-skill', makePolicy('pending_review'));
 
       const result = (await tool.execute(
@@ -134,16 +134,9 @@ describe('core.skill tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       )) as SkillResult;
 
-      expect(result.success).toBe(true);
-      expect(result.skill).toBe('test-skill');
-      expect(result.trust).toBe('approved');
-      expect(result.allowedDomains).toEqual(['api.example.com']);
-
-      // Verify persisted
-      const saved = await readPolicy('test-skill');
-      expect(saved.trust).toBe('approved');
-      expect(saved.approvedBy).toBe('user');
-      expect(saved.approvedAt).toBeDefined();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('pending_review');
+      expect(result.error).toContain('must be reviewed');
     });
 
     it('approves a needs_reapproval skill', async () => {
