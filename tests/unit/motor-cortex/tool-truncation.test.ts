@@ -47,7 +47,7 @@ describe('truncateToolOutput', () => {
 
     it('returns original content at exactly max lines when under byte limit', async () => {
       // Use single-char lines so total bytes stay under TRUNCATION_MAX_BYTES
-      // TRUNCATION_MAX_LINES lines of "x\n" = 2 bytes each = 4000 bytes ≤ 4096
+      // TRUNCATION_MAX_LINES lines of "x\n" = 2 bytes each = 4000 bytes, well under 50KB
       const lines = Array(TRUNCATION_MAX_LINES).fill('x');
       const output = lines.join('\n');
       // Sanity: must be under byte limit for this test to be meaningful

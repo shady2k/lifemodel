@@ -28,8 +28,8 @@ const ALWAYS_SAVE_TOOLS = new Set(['fetch']);
 /** Maximum lines before save-to-file triggers */
 export const TRUNCATION_MAX_LINES = 2000;
 
-/** Maximum bytes for inline output in context (~1K tokens per tool result) */
-export const TRUNCATION_MAX_BYTES = 4 * 1024; // 4KB
+/** Maximum bytes for inline output in context (~12K tokens per tool result) */
+export const TRUNCATION_MAX_BYTES = 50 * 1024; // 50KB
 
 /** Directory name for spillover files (relative to workspace) */
 export const TRUNCATION_DIR = '.motor-output';
