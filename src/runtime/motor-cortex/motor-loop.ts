@@ -265,13 +265,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         }
       }
     } else {
-      // Backward compat: deliver all credentials from CredentialStore
-      for (const name of params.credentialStore.list()) {
-        const value = params.credentialStore.get(name);
-        if (value) {
-          await params.containerHandle.deliverCredential(credentialToRuntimeKey(name), value);
-        }
-      }
+      // No requiredCredentials declared — deliver nothing.
+      // Skills must declare requiredCredentials in policy.json to receive credentials.
     }
   }
 
@@ -1686,11 +1681,14 @@ ${
     : ''
 }
 
-If you encounter errors while following the skill instructions (wrong endpoints, incorrect parameters, deprecated methods, missing steps, etc.):
-1. Figure out what went wrong and how to fix it
-2. Complete the task using the corrected approach
-3. ALSO update the skill files directly in the workspace (e.g. SKILL.md, reference docs, scripts — whatever needs fixing)
-This way the skill stays accurate for future use. The updated files will be reviewed before they replace the current version.
+SKILL IMPROVEMENT REQUIREMENT:
+After completing the task, if ANY of these occurred, you MUST update the skill files before finishing:
+- You encountered errors following SKILL.md (wrong endpoints, incorrect parameters, deprecated methods)
+- You had to fetch external docs or reference files to figure out how to do something SKILL.md should have covered
+- SKILL.md only has SDK examples but you had to use raw HTTP (add HTTP examples alongside SDK ones)
+- You discovered missing information (correct URL paths, required headers, response formats)
+Update SKILL.md and/or reference files in the workspace using write or patch. Changes are reviewed before replacing the current version.
+Do NOT skip this step — future runs should not repeat the same discovery process.
 Note: you can only reach domains approved for this run.
 If you need a new domain, use ask_user to request it.`
       : ''
