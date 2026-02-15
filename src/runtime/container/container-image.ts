@@ -56,7 +56,7 @@ RUN mkdir -p /opt/motor && chown node:node /opt/motor
 # Copy all runtime files (tool-server + sandbox-worker)
 COPY . /opt/motor/
 
-# Create workspace dir (will be bind-mounted)
+# Create workspace dir (Docker volume mounted at runtime)
 RUN mkdir -p /workspace && chown node:node /workspace
 
 # Redirect npm/pip to writable workspace (root fs is read-only)

@@ -28,12 +28,75 @@ import { runMotorLoop } from './motor-loop.js';
 import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
-import { existsSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
 import type { PreparedDeps } from '../dependencies/dependency-manager.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
+
+/**
+ * Max file count in workspace output.
+ */
+const MAX_OUTPUT_FILES = 500;
+
+/**
+ * Max total size of workspace output (50MB).
+ */
+const MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
+
+/**
+ * Validate workspace output directory.
+ * Rejects symlinks, special files, and enforces size/count limits.
+ */
+function validateWorkspaceOutput(dir: string, logger: Logger): { ok: boolean; reason?: string } {
+  let fileCount = 0;
+  let totalSize = 0;
+
+  try {
+    const walk = (currentDir: string): string | null => {
+      const entries = readdirSync(currentDir);
+      for (const entry of entries) {
+        const fullPath = join(currentDir, entry);
+        const stat = lstatSync(fullPath);
+
+        if (stat.isSymbolicLink()) {
+          logger.warn({ path: fullPath }, 'Rejecting symlink in workspace output');
+          return `Symlink not allowed: ${entry}`;
+        }
+        if (!stat.isFile() && !stat.isDirectory()) {
+          logger.warn(
+            { path: fullPath, mode: stat.mode },
+            'Rejecting special file in workspace output'
+          );
+          return `Special file not allowed: ${entry}`;
+        }
+        if (stat.isFile()) {
+          fileCount++;
+          totalSize += stat.size;
+          if (fileCount > MAX_OUTPUT_FILES) {
+            return `Too many files (>${String(MAX_OUTPUT_FILES)})`;
+          }
+          if (totalSize > MAX_OUTPUT_SIZE) {
+            return `Total size exceeds ${String(MAX_OUTPUT_SIZE / 1024 / 1024)}MB`;
+          }
+        }
+        if (stat.isDirectory()) {
+          const reason = walk(fullPath);
+          if (reason) return reason;
+        }
+      }
+      return null;
+    };
+
+    const reason = walk(dir);
+    return reason ? { ok: false, reason } : { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: message };
+  }
+}
 
 /**
  * Default max iterations per attempt.
@@ -512,9 +575,13 @@ export class MotorCortex {
           'Reusing existing container for resumed run'
         );
       } else if (this.containerManager && (await this.isDockerAvailable())) {
+        // Generate volume name for workspace isolation
+        const volumeName = `motor-ws-${run.id}`;
+
         // Build container config with optional dependency mounts
         const containerConfig: ContainerConfig = {
           workspacePath: workspace,
+          volumeName,
           ...(run.domains && run.domains.length > 0 && { allowedDomains: run.domains }),
           ...(preparedDeps && {
             extraMounts: [
@@ -582,13 +649,44 @@ export class MotorCortex {
         ...(preparedDeps && { preparedDeps }),
       });
 
+      // After motor loop, copy workspace out of container for extraction and artifacts
+      let outputDir: string | undefined;
+      // Track the raw path for cleanup (outputDir may be cleared on validation failure)
+      let outputDirForCleanup: string | undefined;
+      if (containerHandle && (run.status as string) === 'completed' && run.result?.ok) {
+        try {
+          // Create temp dir for workspace output
+          outputDir = join(tmpdir(), `motor-output-${run.id}`);
+          outputDirForCleanup = outputDir;
+          await mkdir(outputDir, { recursive: true });
+
+          // Copy workspace out of container
+          await containerHandle.copyWorkspaceOut(outputDir);
+          this.logger.info({ runId: run.id, outputDir }, 'Workspace copied out of container');
+
+          // Validate output (reject symlinks, special files, enforce limits)
+          const validation = validateWorkspaceOutput(outputDir, this.logger);
+          if (!validation.ok) {
+            this.logger.warn(
+              { runId: run.id, reason: validation.reason },
+              'Workspace output validation failed'
+            );
+            // Don't fail the run - just log and skip extraction
+            outputDir = undefined;
+          }
+        } catch (error) {
+          this.logger.warn({ runId: run.id, error }, 'Failed to copy workspace out of container');
+          outputDir = undefined;
+        }
+      }
+
       // Post-loop skill extraction (middleware logic)
       // Motor Cortex is now a pure runtime — extraction happens after loop completes
-      // Cast needed: runMotorLoop mutates run.status by reference, TS narrows it to 'running'
-      if (this.skillsDir && (run.status as string) === 'completed' && run.result?.ok) {
+      // Uses output from copyWorkspaceOut, not the staging workspace
+      if (this.skillsDir && outputDir && (run.status as string) === 'completed' && run.result?.ok) {
         try {
           const extractionResult = await extractSkillsFromWorkspace(
-            workspace,
+            outputDir,
             this.skillsDir,
             run.id,
             this.logger,
@@ -609,6 +707,41 @@ export class MotorCortex {
             'Skill extraction failed after run completion'
           );
         }
+      }
+
+      // Persist artifacts from output dir (moved from motor-loop.ts)
+      if (
+        outputDir &&
+        this.artifactsBaseDir &&
+        (run.status as string) === 'completed' &&
+        run.result?.ok
+      ) {
+        try {
+          const artifactsDir = join(this.artifactsBaseDir, run.id, 'artifacts');
+          const { readdir, cp: cpFiles, mkdir: mkdirFiles } = await import('node:fs/promises');
+          const outputFiles = await readdir(outputDir);
+          if (outputFiles.length > 0) {
+            await mkdirFiles(artifactsDir, { recursive: true });
+            // Filter out .motor-output/ from artifact copy (truncation spillover files)
+            const truncDirAbsolute = join(outputDir, TRUNCATION_DIR) + '/';
+            await cpFiles(outputDir, artifactsDir, {
+              recursive: true,
+              filter: (src: string) =>
+                src !== truncDirAbsolute.slice(0, -1) && !src.startsWith(truncDirAbsolute),
+            });
+            run.result.artifacts = outputFiles;
+            this.logger.debug({ artifacts: outputFiles, artifactsDir }, 'Artifacts persisted');
+          }
+        } catch (error) {
+          this.logger.warn({ runId: run.id, error }, 'Failed to persist artifacts');
+        }
+      }
+
+      // Clean up output dir (always, even if validation failed)
+      if (outputDirForCleanup) {
+        rm(outputDirForCleanup, { recursive: true, force: true }).catch((_: unknown) => {
+          /* cleanup */
+        });
       }
 
       // Emit completion signal AFTER extraction (so installedSkills is included)

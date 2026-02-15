@@ -60,14 +60,17 @@ class DockerContainerHandle implements ContainerHandle {
   >();
   private destroyed = false;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly volumeName: string;
 
   constructor(
     containerId: string,
+    volumeName: string,
     proc: ReturnType<typeof spawn>,
     logger: Logger,
     maxLifetimeMs: number
   ) {
     this.containerId = containerId;
+    this.volumeName = volumeName;
     this.process = proc;
     this.logger = logger.child({ containerId: containerId.slice(0, 12) });
 
@@ -183,6 +186,23 @@ class DockerContainerHandle implements ContainerHandle {
     return Promise.resolve();
   }
 
+  async copyWorkspaceOut(hostDir: string): Promise<void> {
+    // Copy workspace files from container to host directory.
+    // Works on stopped containers (docker cp doesn't require running state).
+    this.logger.debug({ hostDir }, 'Copying workspace out of container');
+
+    try {
+      await execFileAsync('docker', ['cp', `${this.containerId}:/workspace/.`, hostDir], {
+        timeout: 60_000,
+      });
+      this.logger.info({ hostDir }, 'Workspace copied out');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn({ hostDir, error: message }, 'Failed to copy workspace out');
+      throw new Error(`Failed to copy workspace out: ${message}`);
+    }
+  }
+
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -210,6 +230,18 @@ class DockerContainerHandle implements ContainerHandle {
       });
     } catch {
       // Container may already be gone
+    }
+
+    // Remove workspace volume (independent of container removal)
+    if (this.volumeName) {
+      try {
+        await execFileAsync('docker', ['volume', 'rm', this.volumeName], {
+          timeout: 10_000,
+        });
+        this.logger.debug({ volumeName: this.volumeName }, 'Workspace volume removed');
+      } catch {
+        // Volume may already be gone or still in use
+      }
     }
 
     // Kill process if still alive
@@ -293,12 +325,28 @@ function buildCreateArgs(
     args.push('--network', 'none');
   }
 
-  // Workspace bind mount (writable, no exec)
-  args.push('-v', `${config.workspacePath}:/workspace:rw`);
+  // Workspace: named volume mount (no host filesystem access)
+  // Docker pre-populates from image's /workspace (owned by node:node)
+  // Validate volume name format: only alphanumeric, hyphens, underscores allowed
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(config.volumeName)) {
+    throw new Error(`Invalid volume name: ${config.volumeName}`);
+  }
+  args.push('--mount', `type=volume,src=${config.volumeName},dst=/workspace`);
 
-  // Extra bind mounts (e.g. pre-installed dependency packs)
+  // Run as node user (UID/GID 1000) for deterministic ownership
+  args.push('--user', '1000:1000');
+
+  // Extra named volume mounts (e.g. pre-installed dependency packs)
+  // Defense-in-depth: validate hostPath is a Docker volume name (not a host path).
+  // Docker volume names: alphanumeric, hyphens, underscores, dots. No slashes, dots-only, or tildes.
+  // Any path-like value (absolute, relative, ~) would create a host bind mount.
   if (config.extraMounts) {
     for (const mount of config.extraMounts) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(mount.hostPath)) {
+        throw new Error(
+          `extraMounts.hostPath must be a Docker volume name, not a path: ${mount.hostPath}`
+        );
+      }
       args.push('-v', `${mount.hostPath}:${mount.containerPath}:${mount.mode}`);
     }
   }
@@ -391,6 +439,16 @@ export function createContainerManager(logger: Logger): ContainerManager {
       const random = randomBytes(4).toString('hex');
       const containerName = `motor-${runId.slice(0, 8)}-${random}`;
 
+      // Create named volume for workspace isolation
+      const volumeName = config.volumeName;
+      log.debug({ volumeName }, 'Creating workspace volume');
+      try {
+        await execFileAsync('docker', ['volume', 'create', volumeName], { timeout: 10_000 });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to create workspace volume: ${message}`);
+      }
+
       // Create container (uses resolvedPolicy.resolvedHosts for --add-host entries)
       const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
       const createArgs = buildCreateArgs(containerName, config, resolvedHosts);
@@ -398,6 +456,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
         {
           containerName,
           runId,
+          volumeName,
           hasDomains,
           extraMounts: config.extraMounts,
           extraEnv: config.extraEnv,
@@ -405,11 +464,97 @@ export function createContainerManager(logger: Logger): ContainerManager {
         'Creating container'
       );
 
-      const { stdout: containerId } = await execFileAsync('docker', createArgs, {
-        timeout: 30_000,
-      });
+      let trimmedId: string;
+      try {
+        const { stdout: containerId } = await execFileAsync('docker', createArgs, {
+          timeout: 30_000,
+        });
+        trimmedId = containerId.trim();
+      } catch (error) {
+        // Clean up volume on docker create failure
+        try {
+          await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 10_000 });
+        } catch {
+          // Best-effort cleanup
+        }
+        throw error;
+      }
 
-      const trimmedId = containerId.trim();
+      // Copy workspace files into container via tar pipe
+      // This must happen AFTER container creation but BEFORE starting
+      log.debug(
+        { containerId: trimmedId.slice(0, 12), workspacePath: config.workspacePath },
+        'Copying workspace into container'
+      );
+      try {
+        // Use tar with ownership flags to ensure files are owned by node (1000:1000)
+        // COPYFILE_DISABLE=1 prevents macOS ._ metadata artifacts
+        await new Promise<void>((resolve, reject) => {
+          const tar = spawn(
+            'tar',
+            ['-C', config.workspacePath, '-cf', '-', '--owner=1000', '--group=1000', '.'],
+            {
+              env: { ...process.env, COPYFILE_DISABLE: '1' },
+            }
+          );
+
+          const dockerCp = spawn('docker', ['cp', '-a', '-', `${trimmedId}:/workspace/`]);
+
+          tar.stdout.pipe(dockerCp.stdin);
+
+          let tarExitCode: number | null = null;
+          let dockerCpExitCode: number | null = null;
+          let dockerCpStderr = '';
+          dockerCp.stderr.on('data', (data: Buffer) => {
+            dockerCpStderr += data.toString();
+          });
+
+          // Wait for BOTH processes to close before resolving/rejecting.
+          // tar closes first (producer), then dockerCp closes (consumer),
+          // but event delivery order isn't guaranteed.
+          const checkDone = () => {
+            if (tarExitCode === null || dockerCpExitCode === null) return; // Still waiting
+            if (tarExitCode !== 0) {
+              reject(
+                new Error(`tar failed (exit ${String(tarExitCode)}): workspace may be incomplete`)
+              );
+            } else if (dockerCpExitCode !== 0) {
+              reject(
+                new Error(`docker cp failed (exit ${String(dockerCpExitCode)}): ${dockerCpStderr}`)
+              );
+            } else {
+              resolve();
+            }
+          };
+
+          tar.on('close', (code) => {
+            tarExitCode = code;
+            checkDone();
+          });
+          dockerCp.on('close', (code) => {
+            dockerCpExitCode = code;
+            checkDone();
+          });
+
+          tar.on('error', reject);
+          dockerCp.on('error', reject);
+        });
+        log.debug({ containerId: trimmedId.slice(0, 12) }, 'Workspace copied into container');
+      } catch (error) {
+        // Cleanup on failure
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(
+          { containerId: trimmedId.slice(0, 12), error: message },
+          'Failed to copy workspace into container'
+        );
+        try {
+          await execFileAsync('docker', ['rm', '-f', trimmedId], { timeout: 10_000 });
+          await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 10_000 });
+        } catch {
+          // Best-effort cleanup
+        }
+        throw new Error(`Failed to copy workspace into container: ${message}`);
+      }
 
       if (hasDomains && resolvedPolicy) {
         // Pause/unpause flow for network policy application.
@@ -445,6 +590,11 @@ export function createContainerManager(logger: Logger): ContainerManager {
           } catch {
             // Best-effort cleanup
           }
+          try {
+            await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 10_000 });
+          } catch {
+            // Best-effort cleanup
+          }
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(`Failed to set up network policy: ${message}`);
         }
@@ -456,7 +606,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
         });
 
         const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
-        const handle = new DockerContainerHandle(trimmedId, proc, log, maxLifetimeMs);
+        const handle = new DockerContainerHandle(trimmedId, volumeName, proc, log, maxLifetimeMs);
 
         activeContainers.set(runId, handle);
         log.info(
@@ -476,7 +626,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
         });
 
         const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
-        const handle = new DockerContainerHandle(trimmedId, proc, log, maxLifetimeMs);
+        const handle = new DockerContainerHandle(trimmedId, volumeName, proc, log, maxLifetimeMs);
 
         activeContainers.set(runId, handle);
         log.info(
@@ -498,6 +648,8 @@ export function createContainerManager(logger: Logger): ContainerManager {
     },
 
     async prune(maxAgeMs: number): Promise<number> {
+      let pruned = 0;
+
       try {
         // List Motor Cortex containers
         const { stdout } = await execFileAsync(
@@ -513,47 +665,88 @@ export function createContainerManager(logger: Logger): ContainerManager {
           { timeout: 10_000 }
         );
 
-        if (!stdout.trim()) return 0;
+        if (stdout.trim()) {
+          const lines = stdout.trim().split('\n');
 
-        const lines = stdout.trim().split('\n');
-        let pruned = 0;
+          for (const line of lines) {
+            const [id] = line.split('\t');
+            if (!id) continue;
 
-        for (const line of lines) {
-          const [id] = line.split('\t');
-          if (!id) continue;
-
-          // Parse creation time from Docker's format
-          // Docker format: "2024-01-01 12:00:00 +0000 UTC"
-          const parts = line.split('\t');
-          const createdStr = parts[1]?.trim();
-          if (createdStr) {
-            const created = new Date(createdStr);
-            const ageMs = Date.now() - created.getTime();
-            if (ageMs > maxAgeMs) {
+            // Parse creation time from Docker's format
+            // Docker format: "2024-01-01 12:00:00 +0000 UTC"
+            const parts = line.split('\t');
+            const createdStr = parts[1]?.trim();
+            if (createdStr) {
+              const created = new Date(createdStr);
+              const ageMs = Date.now() - created.getTime();
+              if (ageMs > maxAgeMs) {
+                try {
+                  await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
+                  pruned++;
+                  log.info({ containerId: id }, 'Pruned stale container');
+                } catch {
+                  log.warn({ containerId: id }, 'Failed to prune container');
+                }
+              }
+            } else {
+              // Can't determine age — prune conservatively
               try {
                 await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
                 pruned++;
-                log.info({ containerId: id }, 'Pruned stale container');
               } catch {
-                log.warn({ containerId: id }, 'Failed to prune container');
+                // Ignore
               }
-            }
-          } else {
-            // Can't determine age — prune conservatively
-            try {
-              await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
-              pruned++;
-            } catch {
-              // Ignore
             }
           }
         }
-
-        return pruned;
       } catch (error) {
         log.warn({ error }, 'Failed to prune containers');
-        return 0;
       }
+
+      // Also prune orphaned workspace volumes (motor-ws-* prefix)
+      try {
+        const { stdout: volumeList } = await execFileAsync(
+          'docker',
+          ['volume', 'ls', '--format', '{{.Name}}'],
+          { timeout: 10_000 }
+        );
+
+        if (volumeList.trim()) {
+          const volumes = volumeList.trim().split('\n');
+          const motorVolumes = volumes.filter((v) => v.startsWith('motor-ws-'));
+
+          for (const vol of motorVolumes) {
+            // Check if volume is not in use by any container
+            try {
+              // If we get here, the volume exists. Check if it's dangling (no containers using it).
+              // A dangling volume has no "UsageData" or RefCount of 0.
+              const { stdout: usageOut } = await execFileAsync(
+                'docker',
+                [
+                  'volume',
+                  'inspect',
+                  '--format',
+                  '{{if .UsageData}}{{.UsageData.RefCount}}{{else}}0{{end}}',
+                  vol,
+                ],
+                { timeout: 5_000 }
+              );
+              const refCount = parseInt(usageOut.trim(), 10);
+              if (refCount === 0 || isNaN(refCount)) {
+                await execFileAsync('docker', ['volume', 'rm', vol], { timeout: 10_000 });
+                pruned++;
+                log.info({ volumeName: vol }, 'Pruned orphaned workspace volume');
+              }
+            } catch {
+              // Volume may already be gone or in use — skip
+            }
+          }
+        }
+      } catch (error) {
+        log.warn({ error }, 'Failed to prune orphaned volumes');
+      }
+
+      return pruned;
     },
 
     async destroyAll(): Promise<void> {

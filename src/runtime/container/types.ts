@@ -144,8 +144,11 @@ export class FrameDecoder {
  * Configuration for creating a Docker container.
  */
 export interface ContainerConfig {
-  /** Workspace directory on the host (bind-mounted as /workspace) */
+  /** Staging directory on host to copy workspace files FROM (via docker cp) */
   workspacePath: string;
+
+  /** Named Docker volume for /workspace isolation (e.g., motor-ws-<runId>) */
+  volumeName: string;
 
   /** Memory limit (default: '512m') */
   memoryLimit?: string;
@@ -188,7 +191,13 @@ export interface ContainerHandle {
   /** Deliver a credential to the container's in-memory store */
   deliverCredential(name: string, value: string): Promise<void>;
 
-  /** Destroy the container (force-remove) */
+  /**
+   * Copy workspace files out of the container to a host directory.
+   * Called after the run completes (container may be stopped).
+   */
+  copyWorkspaceOut(hostDir: string): Promise<void>;
+
+  /** Destroy the container and its workspace volume (force-remove) */
   destroy(): Promise<void>;
 }
 

@@ -30,11 +30,10 @@ import {
 } from './motor-tools.js';
 import type { ContainerHandle } from '../container/types.js';
 import { credentialToRuntimeKey } from '../vault/credential-store.js';
-import { readdir, mkdir, cp } from 'node:fs/promises';
-import { join } from 'node:path';
 import { createTaskLogger, redactCredentials } from './task-logger.js';
 import { validateToolArgs } from '../../utils/tool-validation.js';
-import { truncateToolOutput, TRUNCATION_DIR } from './tool-truncation.js';
+import { truncateToolOutput } from './tool-truncation.js';
+import { join } from 'node:path';
 import type { PreparedDeps } from '../dependencies/dependency-manager.js';
 
 /**
@@ -437,35 +436,14 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         'No tool calls - task complete'
       );
 
-      // Persist workspace files as artifacts
-      let artifacts: string[] | undefined;
-      if (params.artifactsBaseDir) {
-        try {
-          const artifactsDir = join(params.artifactsBaseDir, run.id, 'artifacts');
-          const workspaceFiles = await readdir(workspace);
-          if (workspaceFiles.length > 0) {
-            await mkdir(artifactsDir, { recursive: true });
-            // Filter out .motor-output/ from artifact copy (truncation spillover files)
-            const truncDirAbsolute = join(workspace, TRUNCATION_DIR) + '/';
-            await cp(workspace, artifactsDir, {
-              recursive: true,
-              filter: (src: string) =>
-                src !== truncDirAbsolute.slice(0, -1) && !src.startsWith(truncDirAbsolute),
-            });
-            artifacts = workspaceFiles;
-            childLogger.debug({ artifacts, artifactsDir }, 'Artifacts persisted');
-          }
-        } catch (error) {
-          childLogger.warn({ error }, 'Failed to persist artifacts');
-        }
-      }
+      // Note: Artifact persistence moved to motor-cortex.ts (after copyWorkspaceOut)
+      // This allows artifacts to be copied from the container's workspace
 
       const result: TaskResult = {
         ok: true,
         summary: redactValues(llmResponse.content ?? 'Task completed without summary'),
         runId: run.id,
-        ...(artifacts && { artifacts }),
-        // installedSkills populated by middleware (motor-cortex.ts) after loop completes
+        // artifacts and installedSkills populated by motor-cortex.ts after loop completes
         stats: {
           iterations: i + 1,
           durationMs: Date.now() - new Date(attempt.startedAt).getTime(),
@@ -1068,6 +1046,33 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           await taskLog?.log(
             `    [truncated: ${String(truncation.originalBytes)} → ${String(Buffer.byteLength(truncation.content, 'utf-8'))} bytes, saved to ${String(truncation.savedPath)}]`
           );
+
+          // Write spillover file into container via IPC so read/bash tools can access it.
+          // truncateToolOutput saves to the HOST staging dir, but tools execute INSIDE
+          // the container (named volume). Use the container's own write tool via IPC.
+          if (params.containerHandle && truncation.savedPath) {
+            const hostFilePath = join(workspace, truncation.savedPath);
+            try {
+              const { readFile: readSpillover } = await import('node:fs/promises');
+              const spilloverContent = await readSpillover(hostFilePath, 'utf-8');
+              await params.containerHandle.execute({
+                type: 'execute',
+                id: crypto.randomUUID(),
+                tool: 'write',
+                args: { path: truncation.savedPath, content: spilloverContent },
+                timeoutMs: 15_000,
+              });
+            } catch (err) {
+              // Non-fatal: model can still see the truncated pointer
+              childLogger.debug(
+                {
+                  savedPath: truncation.savedPath,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+                'Failed to write spillover file into container (non-fatal)'
+              );
+            }
+          }
         } else {
           childLogger.debug({ tool: toolName, outputBytes }, 'Tool output within limits');
         }
