@@ -132,6 +132,7 @@ Allowed network domains:
 ${domains.map((d) => `- ${d}`).join('\n')}
 Requests to any other domain will be BLOCKED.
 CRITICAL: When a domain is blocked, you MUST immediately call ask_user to request access. Do NOT try alternative URLs, do NOT try different domains, do NOT fabricate or guess content. Stop and ask_user FIRST.
+Signs of a blocked domain: "fetch failed", "Could not resolve host", "EAI_AGAIN", "ENOTFOUND", empty curl output, or any DNS error. If you see ANY of these, the domain is likely not in the allowed list — call ask_user immediately instead of retrying.
 Do NOT run npm install or pip install — registries are not reachable. Pre-installed packages (if any) are already available via require() or import.
 For API calls, prefer the fetch tool. In bash/node scripts, use Node's built-in global fetch() (no import needed) or curl.`
     : `

@@ -3,7 +3,7 @@
  *
  * Unified tool for skill operations:
  * - read: inspect skill content (frontmatter, body, policy, status)
- * - review: get deterministic security review (files, provenance)
+ * - review: deterministic security review + Motor deep review dispatch
  * - approve: approve a pending/needs_reapproval skill for Motor Cortex execution
  * - reject: reset status to needs_reapproval
  * - delete: permanently remove a skill directory
@@ -27,6 +27,11 @@ import type { SkillPolicy, MotorToolName } from '../../../../runtime/skills/skil
 import { sanitizePolicyForDisplay } from '../../../../runtime/skills/skill-types.js';
 import { reviewSkill } from '../../../../runtime/skills/skill-review.js';
 import type { SkillReview } from '../../../../runtime/skills/skill-review.js';
+import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
+import type { MotorTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
+import { buildMotorSystemPrompt } from '../../../../runtime/motor-cortex/motor-prompt.js';
+import { prepareSkillWorkspace } from '../../../../runtime/skills/skill-workspace.js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Result from core.skill tool execution.
@@ -42,12 +47,15 @@ export interface SkillResult {
   status?: string | undefined;
   // review action fields
   review?: SkillReview | undefined;
+  motorReviewDispatched?: boolean | undefined;
+  runId?: string | undefined;
   // approve/reject action fields
   domains?: string[] | undefined;
   // update action fields
   credentials?: string[] | undefined;
   tools?: unknown[] | undefined;
   dependencies?: unknown;
+  warnings?: string[] | undefined;
 }
 
 /**
@@ -56,13 +64,27 @@ export interface SkillResult {
 export interface SkillToolDeps {
   /** Base directory for skills (e.g., data/skills) */
   skillsDir: string;
+
+  /** Motor Cortex service (for dispatching deep review runs) */
+  motorCortex?: MotorCortex;
+
+  /** Base directory for motor workspaces (for review workspace prep) */
+  workspacesDir?: string;
+
+  /** Logger for diagnostics */
+  logger?: {
+    debug: (...args: unknown[]) => void;
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+  };
 }
 
 /**
  * Create core.skill tool.
  */
 export function createSkillTool(deps: SkillToolDeps): Tool {
-  const { skillsDir } = deps;
+  const { skillsDir, motorCortex, workspacesDir, logger: skillLogger } = deps;
 
   const parameters: ToolParameter[] = [
     {
@@ -135,7 +157,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content, review for approval, approve/reject/delete/update a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review (transitions: pending_review/needs_reapproval → reviewing, reviewing → reviewed). Use action=approve or reject to change status. Use action=delete to permanently remove a skill. Use action=update to modify policy fields: domains, credentials, tools, dependencies. Status lifecycle: pending_review → reviewing (after first review) → reviewed (after Motor deep review) → approved (after user approval). Content changes → needs_reapproval → reviewing → reviewed → approved.",
+      "Read skill content, review for approval, approve/reject/delete/update a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for full security review: runs deterministic extraction AND dispatches a Motor deep review automatically (pending_review/needs_reapproval → reviewing). Call again after Motor completes to transition reviewing → reviewed. Use action=approve or reject to change status. Use action=delete to permanently remove a skill. Use action=update to modify policy fields: domains, credentials, tools, dependencies. Status lifecycle: pending_review → reviewing (review dispatched) → reviewed (Motor review done) → approved (user approval). Content changes → needs_reapproval → same cycle.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
@@ -180,22 +202,118 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       if (action === 'review') {
         const review = await reviewSkill(loaded);
 
-        // Idempotent status transitions:
-        // Phase 1: pending_review/needs_reapproval → reviewing (deterministic extraction done, Motor deep review pending)
-        // Phase 2: reviewing → reviewed (Motor deep review complete, re-run deterministic extraction for fresh data)
-        // Already reviewed → no-op
-        if (loaded.policy) {
-          if (
-            loaded.policy.status === 'pending_review' ||
-            loaded.policy.status === 'needs_reapproval'
-          ) {
-            await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewing' });
-          } else if (loaded.policy.status === 'reviewing') {
-            await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewed' });
-          }
-          // reviewed/approved → no-op
+        if (!loaded.policy) {
+          return { success: true, skill: skillName, review };
         }
 
+        const status = loaded.policy.status;
+
+        // Phase 1: dispatch Motor deep review for skills needing first review,
+        // or when user explicitly re-reviews (reviewed status + user_message trigger only)
+        const needsFirstReview = status === 'pending_review' || status === 'needs_reapproval';
+        const userReReview = status === 'reviewed' && context?.triggerType === 'user_message';
+        if (needsFirstReview || userReReview) {
+          // Dispatch Motor deep review if Motor Cortex is available
+          if (motorCortex && workspacesDir) {
+            try {
+              const reviewTools: MotorTool[] = ['read', 'list', 'glob', 'grep'];
+              const reviewTask = `SECURITY REVIEW for skill "${skillName}".
+Read ALL files in the workspace (SKILL.md, scripts/, references/) and produce a structured report for the user.
+
+Steps:
+1. List the workspace to find all files
+2. Read each file completely
+3. Use grep to find credentials (process.env, os.environ, $VAR) and domains (URLs, hostnames)
+4. Use grep to find package references: require(), import statements, package.json dependencies, pip install references
+
+Output format — produce EXACTLY this structure:
+
+**What this skill does:** 1-2 sentences describing concrete capabilities.
+
+**Files:**
+- filename (size) — purpose
+
+**Credentials needed:**
+- ENV_VAR_NAME — what it's for, where to get it (e.g. "register at console.example.com")
+
+**Domains used:**
+- domain.com — what the skill uses it for
+
+**Packages referenced:**
+- ecosystem: package-name@version — what it's used for (e.g. "npm: agentmail@1.0.0 — SDK client")
+
+**Security assessment:**
+- Note any concerns or confirm no suspicious patterns found
+
+**Setup steps for user:**
+1. Numbered steps the user must complete (get API key, set env var, add domain to policy, etc.)
+
+Be specific and actionable. Do NOT give generic advice. Every credential, domain, package, and setup step must come from actual file content you read.`;
+
+              // Prepare workspace with skill files
+              const prepared = await prepareSkillWorkspace(
+                loaded.path,
+                workspacesDir,
+                randomUUID(),
+                skillLogger as Parameters<typeof prepareSkillWorkspace>[3]
+              );
+
+              // Build system prompt for review mode
+              const reviewSystemPrompt = buildMotorSystemPrompt({
+                task: reviewTask,
+                tools: reviewTools,
+                syntheticTools: [],
+                domains: [],
+                maxIterations: 30,
+              });
+
+              // Dispatch Motor run — status transition happens AFTER successful startRun
+              const { runId } = await motorCortex.startRun({
+                task: reviewTask,
+                tools: reviewTools,
+                maxIterations: 30,
+                maxAttempts: 1,
+                domains: [],
+                syntheticTools: [],
+                systemPrompt: reviewSystemPrompt,
+                workspacePath: prepared.workspacePath,
+                skillName,
+                skillReview: true,
+              });
+
+              // Only transition status after successful dispatch (atomic — no stuck reviewing state)
+              await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewing' });
+
+              return {
+                success: true,
+                skill: skillName,
+                review,
+                motorReviewDispatched: true,
+                runId,
+              };
+            } catch (err) {
+              // Motor dispatch failed — don't transition status
+              return {
+                success: false,
+                error: `Deterministic review succeeded but Motor deep review failed to start: ${err instanceof Error ? err.message : String(err)}. Skill status unchanged (${status}).`,
+                skill: skillName,
+                review,
+              };
+            }
+          }
+
+          // No Motor available — just do deterministic review and transition
+          await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewing' });
+          return { success: true, skill: skillName, review, motorReviewDispatched: false };
+        }
+
+        // Phase 2: reviewing → reviewed (Motor deep review complete)
+        if (status === 'reviewing') {
+          await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewed' });
+          return { success: true, skill: skillName, review };
+        }
+
+        // approved → no-op, return fresh deterministic review data
         return { success: true, skill: skillName, review };
       }
 
@@ -318,53 +436,58 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         // Import validators
         const { isValidDomain } = await import('../../../../runtime/container/network-policy.js');
 
-        // Validate domains (if specified)
-        if (addDomains ?? removeDomains) {
-          const domains = [...(addDomains ?? []), ...(removeDomains ?? [])];
-          for (const domain of domains) {
-            if (!isValidDomain(domain)) {
-              return {
-                success: false,
-                error: `Invalid domain: ${domain}. Wildcards (*.example.com) are not supported — enumerate specific subdomains (e.g., "github.com", "api.github.com", "raw.githubusercontent.com").`,
-              };
-            }
-          }
-        }
-
-        // Validate dependencies (if specified)
-        if (addDependencies ?? removeDependencies) {
-          const toValidate = [...(addDependencies ?? []), ...(removeDependencies ?? [])];
-          for (const dep of toValidate) {
-            const { ecosystem, packages } = dep;
-            if (ecosystem.length === 0 || packages.length === 0) {
-              return {
-                success: false,
-                error: `Invalid dependency: ${JSON.stringify(dep)}. Must specify ecosystem ("npm" or "pip") and packages array.`,
-              };
-            }
-            for (const pkg of packages) {
-              if (!pkg.name || !pkg.version) {
-                return {
-                  success: false,
-                  error: `Invalid dependency package: ${JSON.stringify(pkg)}. Must specify name and version.`,
-                };
-              }
-            }
-          }
-        }
-
-        // Apply updates to policy
+        // Apply updates to policy, collecting warnings for invalid fields.
+        // Valid fields are applied even if other fields fail validation —
+        // this prevents data loss when the model sends a single update call
+        // with a mix of valid and invalid fields.
         const updatedPolicy: SkillPolicy = { ...loaded.policy };
+        const warnings: string[] = [];
 
-        if (addDomains && addDomains.length > 0) {
-          updatedPolicy.domains = [...(updatedPolicy.domains ?? []), ...addDomains];
-        }
-        if (removeDomains && removeDomains.length > 0) {
-          updatedPolicy.domains = (updatedPolicy.domains ?? []).filter(
-            (d) => !removeDomains.includes(d)
-          );
+        // Domains — validate format and DNS then apply
+        if (addDomains ?? removeDomains) {
+          const invalidDomains: string[] = [];
+          const unresolvableDomains: string[] = [];
+          const formatValid = (addDomains ?? []).filter((d) => {
+            if (!isValidDomain(d)) {
+              invalidDomains.push(d);
+              return false;
+            }
+            return true;
+          });
+          // DNS-validate: reject domains that don't resolve (likely hallucinated by LLM)
+          const dns = await import('node:dns/promises');
+          const validAddDomains: string[] = [];
+          for (const d of formatValid) {
+            try {
+              await dns.resolve4(d);
+              validAddDomains.push(d);
+            } catch {
+              unresolvableDomains.push(d);
+            }
+          }
+          if (invalidDomains.length > 0) {
+            warnings.push(
+              `Invalid domains skipped: ${invalidDomains.join(', ')}. Wildcards (*.example.com) are not supported — enumerate specific subdomains.`
+            );
+          }
+          if (unresolvableDomains.length > 0) {
+            warnings.push(
+              `Unresolvable domains skipped (DNS lookup failed): ${unresolvableDomains.join(', ')}. Check for typos.`
+            );
+          }
+          if (validAddDomains.length > 0) {
+            updatedPolicy.domains = [
+              ...new Set([...(updatedPolicy.domains ?? []), ...validAddDomains]),
+            ];
+          }
+          if (removeDomains && removeDomains.length > 0) {
+            updatedPolicy.domains = (updatedPolicy.domains ?? []).filter(
+              (d) => !removeDomains.includes(d)
+            );
+          }
         }
 
+        // Credentials — no validation needed, apply directly
         if (addCredentials && addCredentials.length > 0) {
           updatedPolicy.requiredCredentials = [
             ...new Set([...(updatedPolicy.requiredCredentials ?? []), ...addCredentials]),
@@ -376,38 +499,64 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
           );
         }
 
-        if (addDependencies && addDependencies.length > 0) {
-          updatedPolicy.dependencies ??= {};
-          const deps = updatedPolicy.dependencies;
-          // Merge: for each ecosystem, union-add packages (deduped by name)
-          for (const dep of addDependencies) {
-            const eco = dep.ecosystem as 'npm' | 'pip';
-            deps[eco] ??= { packages: [] };
-            const pkgList = deps[eco].packages;
-            for (const pkg of dep.packages) {
-              const idx = pkgList.findIndex((p: { name: string }) => p.name === pkg.name);
-              if (idx >= 0) {
-                pkgList[idx] = pkg; // Update version
+        // Dependencies — validate then apply
+        if (addDependencies ?? removeDependencies) {
+          const validAddDeps: typeof addDependencies = [];
+          for (const dep of addDependencies ?? []) {
+            const { ecosystem, packages } = dep;
+            if (ecosystem.length === 0 || packages.length === 0) {
+              warnings.push(
+                `Invalid dependency skipped: ${JSON.stringify(dep)}. Must specify ecosystem ("npm" or "pip") and packages array.`
+              );
+              continue;
+            }
+            const validPkgs = [];
+            for (const pkg of packages) {
+              if (!pkg.name || !pkg.version) {
+                warnings.push(
+                  `Invalid dependency package skipped: ${JSON.stringify(pkg)}. Must specify name and version.`
+                );
               } else {
-                pkgList.push(pkg);
+                validPkgs.push(pkg);
+              }
+            }
+            if (validPkgs.length > 0) {
+              validAddDeps.push({ ecosystem, packages: validPkgs });
+            }
+          }
+          if (validAddDeps.length > 0) {
+            updatedPolicy.dependencies ??= {};
+            const deps = updatedPolicy.dependencies;
+            for (const dep of validAddDeps) {
+              const eco = dep.ecosystem as 'npm' | 'pip';
+              deps[eco] ??= { packages: [] };
+              const pkgList = deps[eco].packages;
+              for (const pkg of dep.packages) {
+                const idx = pkgList.findIndex((p: { name: string }) => p.name === pkg.name);
+                if (idx >= 0) {
+                  pkgList[idx] = pkg; // Update version
+                } else {
+                  pkgList.push(pkg);
+                }
+              }
+            }
+          }
+          if (removeDependencies && removeDependencies.length > 0 && updatedPolicy.dependencies) {
+            const deps = updatedPolicy.dependencies;
+            for (const dep of removeDependencies) {
+              const eco = dep.ecosystem as 'npm' | 'pip';
+              const ecoEntry = deps[eco];
+              if (ecoEntry) {
+                const names = new Set(dep.packages.map((p: { name: string }) => p.name));
+                ecoEntry.packages = ecoEntry.packages.filter(
+                  (p: { name: string }) => !names.has(p.name)
+                );
               }
             }
           }
         }
-        if (removeDependencies && removeDependencies.length > 0 && updatedPolicy.dependencies) {
-          const deps = updatedPolicy.dependencies;
-          for (const dep of removeDependencies) {
-            const eco = dep.ecosystem as 'npm' | 'pip';
-            const ecoEntry = deps[eco];
-            if (ecoEntry) {
-              const names = new Set(dep.packages.map((p: { name: string }) => p.name));
-              ecoEntry.packages = ecoEntry.packages.filter(
-                (p: { name: string }) => !names.has(p.name)
-              );
-            }
-          }
-        }
 
+        // Tools — no validation needed, apply directly
         if (addTools && addTools.length > 0) {
           const allTools = [...(updatedPolicy.tools ?? []), ...addTools] as (
             | MotorToolName
@@ -425,7 +574,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
 
         // No index.json update needed — auto-discovery reads from disk directly
 
-        return {
+        const result: SkillResult = {
           success: true,
           skill: skillName,
           status: updatedPolicy.status,
@@ -434,6 +583,10 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
           tools: updatedPolicy.tools,
           dependencies: updatedPolicy.dependencies,
         };
+        if (warnings.length > 0) {
+          result.warnings = warnings;
+        }
+        return result;
       }
 
       return { success: false, error: `Unknown action: ${action}` };

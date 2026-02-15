@@ -1107,7 +1107,10 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       const hostname = parsed.hostname.toLowerCase();
       const allowed = ctx.allowedDomains ?? [];
 
-      if (!allowed.includes(hostname) && !allowed.some((d) => hostname.endsWith(`.${d}`))) {
+      // Exact match only — must be consistent with container network policy (--add-host).
+      // Subdomain matching (e.g. api.example.com matching example.com) would let the fetch tool
+      // reach domains that the container's DNS/iptables blocks, creating confusing mixed signals.
+      if (!allowed.includes(hostname)) {
         return {
           ok: false,
           output: `BLOCKED: Domain ${hostname} is not in the allowed list. You MUST call ask_user now to request access to this domain. Do not try alternative URLs or workarounds. Allowed domains: ${allowed.join(', ')}.`,

@@ -517,12 +517,13 @@ describe('fetch tool', () => {
     expect(mockFetchFn).toHaveBeenCalledWith('https://api.example.com/data', expect.anything());
   });
 
-  it('checks domain against allowedDomains - allows subdomain match', async () => {
+  it('checks domain against allowedDomains - blocks subdomain (exact match only)', async () => {
     ctx.allowedDomains = ['example.com'];
     ctx.fetchFn = mockFetchFn;
 
     const result = await executeTool('fetch', { url: 'https://api.example.com/data' }, ctx);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
   });
 
   it('blocks domain not in allowedDomains list', async () => {

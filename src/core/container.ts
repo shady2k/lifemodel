@@ -818,7 +818,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     );
     layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex, artifactsBaseDir));
     layers.cognition.getToolRegistry().registerTool(createCredentialTool({ credentialStore }));
-    layers.cognition.getToolRegistry().registerTool(createSkillTool({ skillsDir }));
+    layers.cognition
+      .getToolRegistry()
+      .registerTool(createSkillTool({ skillsDir, motorCortex, workspacesDir, logger }));
     logger.info('Motor Cortex tools registered');
   }
 

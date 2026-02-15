@@ -110,6 +110,13 @@ After completing the task, if ANY of these occurred, you MUST update the skill f
 - You discovered missing information (correct URL paths, required headers, response formats)
 Update SKILL.md and/or reference files in the workspace using write or patch. Changes are reviewed before replacing the current version.
 Do NOT skip this step — future runs should not repeat the same discovery process.
+
+WORKSPACE CLEANUP:
+Before finishing, delete any temporary files you created (test scripts, debug files, scratch files) that are NOT part of the skill.
+All files left in the workspace are permanently saved as part of the skill.
+Keep: SKILL.md, references/, scripts/ (reusable helpers referenced by SKILL.md).
+Delete: one-off test scripts, debug output, temp files.
+
 Note: you can only reach domains approved for this run.
 If you need a new domain, use ask_user to request it.`);
   }
@@ -223,14 +230,7 @@ export function createActTool(deps: ActToolDeps): Tool {
       name: 'domains',
       type: 'array' as const,
       description:
-        'Network domains to allow access to (e.g., ["api.example.com"]). Merged with skill policy domains if provided.',
-      required: false,
-    },
-    {
-      name: 'skill_review',
-      type: 'boolean' as const,
-      description:
-        'Skill security review mode: read-only tools, no network, no synthetic tools. Only callable from motor_result trigger. Requires skill param and mode:agentic.',
+        'Network domains to allow access to (e.g., ["api.example.com"]). For non-skill runs only; ignored for skill runs (use core.skill action:"update" to set policy domains).',
       required: false,
     },
   ];
@@ -243,24 +243,14 @@ export function createActTool(deps: ActToolDeps): Tool {
     hasSideEffects: true,
     parameters,
     validate: (args) => validateAgainstParameters(args as Record<string, unknown>, parameters),
-    execute: async (args, context) => {
+    execute: async (args, _context) => {
       const mode = args['mode'] as string;
       const task = args['task'] as string;
-      const skillReview = args['skill_review'] as boolean | undefined;
-      const triggerType = context?.triggerType;
 
       if (!mode || !task) {
         return {
           success: false,
           error: 'Missing required parameters: mode, task',
-        };
-      }
-
-      // skill_review requires agentic mode
-      if (skillReview === true && mode !== 'agentic') {
-        return {
-          success: false,
-          error: 'skill_review requires mode:"agentic"',
         };
       }
 
@@ -291,127 +281,6 @@ export function createActTool(deps: ActToolDeps): Tool {
           const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
           const explicitDomains = (args['domains'] as string[] | undefined) ?? [];
 
-          // Handle skill_review mode
-          if (skillReview === true) {
-            // Trigger gate: allow from motor_result (after creation) or user_message (user-requested review)
-            if (triggerType !== 'motor_result' && triggerType !== 'user_message') {
-              return {
-                success: false,
-                error:
-                  'skill_review mode can only be called from motor_result or user_message trigger.',
-              };
-            }
-
-            // Require skill param
-            if (!skillName) {
-              return {
-                success: false,
-                error:
-                  'skill_review mode requires the skill parameter to specify which skill to review.',
-              };
-            }
-
-            // Load skill (skip status gating for review)
-            const skillResult = await loadSkill(skillName, skillsDir);
-            if ('error' in skillResult) {
-              return {
-                success: false,
-                error: skillResult.error,
-              };
-            }
-            // Skip input validation for review mode
-
-            // Force read-only tools, empty domains, limited iterations
-            const reviewTools: MotorTool[] = ['read', 'list', 'glob', 'grep'];
-            const reviewDomains: string[] = [];
-            const reviewMaxIterations = 30;
-
-            // Build review task — output should be user-ready for approve/reject decision
-            const reviewTask = `SECURITY REVIEW for skill "${skillName}".
-Read ALL files in the workspace (SKILL.md, scripts/, references/) and produce a structured report for the user.
-
-Steps:
-1. List the workspace to find all files
-2. Read each file completely
-3. Use grep to find credentials (process.env, os.environ, $VAR) and domains (URLs, hostnames)
-4. Use grep to find package references: require(), import statements, package.json dependencies, pip install references
-
-Output format — produce EXACTLY this structure:
-
-**What this skill does:** 1-2 sentences describing concrete capabilities.
-
-**Files:**
-- filename (size) — purpose
-
-**Credentials needed:**
-- ENV_VAR_NAME — what it's for, where to get it (e.g. "register at console.example.com")
-
-**Domains used:**
-- domain.com — what the skill uses it for
-
-**Packages referenced:**
-- ecosystem: package-name@version — what it's used for (e.g. "npm: agentmail@1.0.0 — SDK client")
-
-**Security assessment:**
-- Note any concerns or confirm no suspicious patterns found
-
-**Setup steps for user:**
-1. Numbered steps the user must complete (get API key, set env var, add domain to policy, etc.)
-
-Be specific and actionable. Do NOT give generic advice. Every credential, domain, package, and setup step must come from actual file content you read.`;
-
-            // Prepare workspace with skill files (so review can read them)
-            let reviewWorkspacePath: string | undefined;
-            try {
-              const prepared = await prepareSkillWorkspace(
-                skillResult.path,
-                workspacesDir,
-                crypto.randomUUID(),
-                actLogger as Parameters<typeof prepareSkillWorkspace>[3]
-              );
-              reviewWorkspacePath = prepared.workspacePath;
-            } catch (err) {
-              return {
-                success: false,
-                error: `Failed to prepare skill workspace for review: ${err instanceof Error ? err.message : String(err)}`,
-              };
-            }
-
-            // Build system prompt for review mode
-            const reviewSystemPrompt = buildMotorSystemPrompt({
-              task: reviewTask,
-              tools: reviewTools,
-              syntheticTools: [],
-              domains: reviewDomains,
-              maxIterations: reviewMaxIterations,
-            });
-
-            const { runId } = await motorCortex.startRun({
-              task: reviewTask,
-              tools: reviewTools,
-              maxIterations: reviewMaxIterations,
-              maxAttempts: 1,
-              domains: reviewDomains,
-              syntheticTools: [], // No synthetic tools for review
-              systemPrompt: reviewSystemPrompt,
-              workspacePath: reviewWorkspacePath,
-              skillName,
-              skillReview: true,
-            });
-
-            return {
-              success: true,
-              data: {
-                mode: 'agentic',
-                runId,
-                status: 'started',
-                skill: skillName,
-                message: `Security review started for skill "${skillName}" (run: ${runId}). Results will arrive via motor_result signal.`,
-              },
-            };
-          }
-
-          // Normal execution (not skill_review)
           const maxIterations = (args['maxIterations'] as number | undefined) ?? 30;
 
           // Load skill if specified
@@ -511,6 +380,25 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
                     credentials[name] = storeValue;
                   }
                 }
+              }
+            }
+
+            // Fail-fast if required credentials are missing
+            if (credentialNames && credentialNames.length > 0) {
+              const missingCreds = credentialNames.filter((name) => !credentials?.[name]);
+              if (missingCreds.length > 0) {
+                return {
+                  success: false,
+                  error:
+                    `Missing required credentials for skill "${skillName}": ` +
+                    missingCreds
+                      .map((n) => {
+                        const upper = n.toUpperCase();
+                        return upper.startsWith('VAULT_') ? upper : `VAULT_${upper}`;
+                      })
+                      .join(', ') +
+                    '. Set them as environment variables and restart.',
+                };
               }
             }
 

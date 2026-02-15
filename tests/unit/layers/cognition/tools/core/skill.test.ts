@@ -268,7 +268,7 @@ describe('core.skill tool', () => {
       expect(saved.status).toBe('reviewed');
     });
 
-    it('no-op for already reviewed skill', async () => {
+    it('no-op for reviewed skill without user_message trigger', async () => {
       await setupSkill('test-skill', createTestPolicy({ status: 'reviewed' }));
 
       const result = (await tool.execute({
@@ -280,6 +280,21 @@ describe('core.skill tool', () => {
 
       const saved = await readPolicy('test-skill');
       expect(saved.status).toBe('reviewed');
+    });
+
+    it('re-dispatches review for reviewed skill on user_message trigger (no Motor → reviewing)', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewed' }));
+
+      const result = (await tool.execute(
+        { action: 'review', name: 'test-skill' },
+        { triggerType: 'user_message' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(true);
+      expect(result.motorReviewDispatched).toBe(false); // No Motor available in test
+
+      const saved = await readPolicy('test-skill');
+      expect(saved.status).toBe('reviewing');
     });
 
     it('no-op for approved skill', async () => {

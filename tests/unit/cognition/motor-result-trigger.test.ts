@@ -53,7 +53,7 @@ describe('buildMotorResultSection', () => {
       // Should include deterministic review action
       expect(section).toContain('core.skill(action:"review"');
       // Should include Motor review dispatch (not read action)
-      expect(section).toContain('skill_review:true');
+      expect(section).toContain('core.skill(action:"review"');
       // Should instruct to say "analyzing"
       expect(section).toContain('Analyzing skill files');
     });
@@ -125,7 +125,7 @@ describe('buildMotorResultSection', () => {
       // Should note Motor Cortex is untrusted
       expect(section).toContain('Motor Cortex is untrusted');
       // Should include Motor review dispatch for file analysis
-      expect(section).toContain('skill_review:true');
+      expect(section).toContain('core.skill(action:"review"');
     });
   });
 

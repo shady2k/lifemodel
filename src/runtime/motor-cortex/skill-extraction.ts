@@ -320,10 +320,15 @@ export async function extractSkillsFromWorkspace(
   // Step 6: Build policy
   let policy: SkillPolicy;
   if (isUpdate && existingPolicy) {
-    // Preserve user-controlled fields, reset status
+    // Preserve status if skill was already approved — content-only changes from task runs
+    // don't need re-review. Only new skills start at pending_review.
+    const preserveStatus =
+      existingPolicy.status === 'approved' || existingPolicy.status === 'reviewed';
     policy = {
       schemaVersion: 2,
-      status: 'pending_review',
+      status: preserveStatus ? existingPolicy.status : 'pending_review',
+      ...(preserveStatus && existingPolicy.approvedBy && { approvedBy: existingPolicy.approvedBy }),
+      ...(preserveStatus && existingPolicy.approvedAt && { approvedAt: existingPolicy.approvedAt }),
       // Preserve user-configured fields
       ...(existingPolicy.tools && { tools: existingPolicy.tools }),
       ...(existingPolicy.domains && { domains: existingPolicy.domains }),
@@ -350,7 +355,6 @@ export async function extractSkillsFromWorkspace(
         deletedFiles,
       },
     };
-    // Clear approval since content changed
     result.updated.push(skillName);
   } else {
     // Minimal policy for new skill

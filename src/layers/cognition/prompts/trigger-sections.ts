@@ -308,12 +308,10 @@ export function buildMotorResultSection(data: MotorResultData): string {
         task += `
 
 SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
-1. For each new/updated skill, call core.skill(action:"review", name:"skill-name") to get deterministic security facts (credentials, domains, files).
+1. For each new/updated skill, call core.skill(action:"review", name:"skill-name").
+   This runs deterministic extraction AND dispatches a Motor deep review automatically.
 2. Tell the user: "Analyzing skill files for security review..."
-3. For each skill, dispatch a Motor review task:
-   core.act(mode:"agentic", skill:"skill-name", skill_review:true, task:"Read all files and report findings")
-   Motor review gets read-only tools, no network, no synthetic tools. It reads SKILL.md, scripts/, references/.
-4. Do NOT present partial info — wait for the review motor_result on a later turn.`;
+3. Do NOT present partial info — wait for the review motor_result on a later turn.`;
       }
 
       return `<trigger type="motor_result">
@@ -325,13 +323,14 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
     case 'failed': {
       const failure = data.failure;
       const attemptLabel = attemptIndex !== undefined ? ` attempt ${String(attemptIndex)}` : '';
+      const skillLabel = data.skill ? ` for skill "${data.skill}"` : '';
 
       if (!failure) {
         // Legacy format (no structured failure)
         const errorMsg = data.error?.message ?? 'Unknown error';
         return `<trigger type="motor_result_failed">
-<context>Task run ${runId}${attemptLabel} failed. Error: ${errorMsg}</context>
-<task>Report the failure to the user clearly. Include the run ID (${runId}).</task>
+<context>Task run ${runId}${attemptLabel}${skillLabel} failed. Error: ${errorMsg}</context>
+<task>Report the failure to the user clearly. Include the run ID (${runId}).${data.skill ? ` The failed task was for skill "${data.skill}".` : ''}</task>
 </trigger>`;
       }
 
@@ -343,9 +342,14 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
         )
         .join('\n');
 
+      const skillRetryHint =
+        data.skillReview && data.skill
+          ? `\nThis was a skill review run for "${data.skill}". To retry, call: core.skill(action:"review", name:"${data.skill}").`
+          : '';
+
       return `<trigger type="motor_result_failed">
 <context>
-Task run ${runId}${attemptLabel} failed.
+Task run ${runId}${attemptLabel}${skillLabel} failed.
 Category: ${failure.category} | Retryable: ${String(failure.retryable)}
 ${failure.lastErrorCode ? `Last error: ${failure.lastErrorCode}\n` : ''}Last tool results:
 ${toolResultsStr || '  (none)'}${failure.hint ? `\nAnalysis: ${failure.hint}` : ''}
@@ -357,7 +361,7 @@ A background task failed. Follow this protocol:
 3. If you need more detail, call core.task(action:"log", runId:"${runId}") first.
 4. If not retryable or after 2 failed attempts, report the failure to the user clearly. Include the run ID (${runId}).
 Do NOT create a new core.act run for the same task — use retry instead.
-Exception: skill_review runs (read-only security analysis) can be re-dispatched via a new core.act(skill_review:true) call since they have maxAttempts=1.
+Exception: skill review runs (read-only security analysis) can be re-dispatched via core.skill(action:"review") since they have maxAttempts=1.${skillRetryHint}
 </task>
 </trigger>`;
     }

@@ -13,6 +13,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFile, writeFile, readdir, mkdir, lstat, realpath, stat } from 'node:fs/promises';
+import { existsSync, symlinkSync } from 'node:fs';
 import { join, relative, isAbsolute, resolve, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -351,9 +352,18 @@ async function executeBash(
     // Many tools (npm, node scripts) write errors to stderr even on exit 0.
     const combined = [output, stderr].filter(Boolean).join('\n') || '(no output)';
 
+    // Detect DNS failures in output even on exit 0 (e.g. node scripts with .catch(console.error)).
+    // These are unambiguous signs of blocked domains and the LLM needs the hint to call ask_user.
+    const dnsHint =
+      /EAI_AGAIN|ENOTFOUND|getaddrinfo.*fail|Could not resolve host|Could not contact DNS|fetch failed/i.test(
+        combined
+      )
+        ? '\nNote: The domain may not be in the allowed list. Use ask_user to request access to additional domains.'
+        : '';
+
     return {
-      ok: true,
-      output: combined,
+      ok: !dnsHint,
+      output: combined + dnsHint,
       retryable: false,
       provenance: validation.hasNetwork ? 'web' : 'internal',
       durationMs: Date.now() - startTime,
@@ -373,9 +383,19 @@ async function executeBash(
 
     const errorOutput = err.stderr ?? err.message ?? String(error);
 
-    // Add hint for network errors
+    // Add hint for network errors.
+    // DNS failures (EAI_AGAIN, ENOTFOUND) are unambiguous signs of blocked domains —
+    // detect them even from non-network commands (e.g. `node script.js` using fetch()).
+    // "fetch failed" is generic on the open internet but unambiguous inside a sandboxed container
+    // with restricted DNS — it means the SDK tried to reach a domain not in the allow list.
+    const isDnsFailure =
+      /EAI_AGAIN|ENOTFOUND|getaddrinfo.*fail|Could not resolve host|Could not contact DNS|fetch failed/i.test(
+        errorOutput
+      );
+    const isNetworkError =
+      validation.hasNetwork && /resolve|refused|reset|unreachable|Network/i.test(errorOutput);
     const networkHint =
-      validation.hasNetwork && /resolve|refused|reset|unreachable|Network/i.test(errorOutput)
+      isDnsFailure || isNetworkError
         ? '\nNote: The domain may not be in the allowed list. Use ask_user to request access to additional domains.'
         : '';
 
@@ -392,7 +412,10 @@ async function executeBash(
 
 // ─── Path Safety ─────────────────────────────────────────────────
 
-const ALLOWED_ROOTS = [WORKSPACE];
+// Read-only roots for pre-installed dependencies (symlinked into /workspace).
+// Without these, realpath() resolves the symlink outside /workspace → path traversal denied.
+const DEP_ROOTS = ['/opt/skill-deps/npm', '/opt/skill-deps/pip'];
+const ALLOWED_ROOTS = [WORKSPACE, ...DEP_ROOTS];
 const WRITE_ROOTS = [WORKSPACE];
 
 async function resolveSafePath(relativePath: string, roots?: string[]): Promise<string | null> {
@@ -991,6 +1014,25 @@ logToStderr('Tool-server starting');
 logToStderr(
   `  env: HOME=${process.env['HOME'] ?? '(unset)'} PATH=${(process.env['PATH'] ?? '(unset)').slice(0, 80)} NPM_CONFIG_CACHE=${process.env['NPM_CONFIG_CACHE'] ?? '(unset)'} PIP_USER=${process.env['PIP_USER'] ?? '(unset)'} PYTHONUSERBASE=${process.env['PYTHONUSERBASE'] ?? '(unset)'}`
 );
+
+// Symlink pre-installed dependencies into /workspace so both ESM `import` and CJS `require()` resolve them.
+// NODE_PATH only works for CJS; ESM walks node_modules dirs from the importing file upward.
+const DEP_SYMLINKS: { target: string; link: string }[] = [
+  { target: '/opt/skill-deps/npm/node_modules', link: '/workspace/node_modules' },
+  { target: '/opt/skill-deps/pip/site-packages', link: '/workspace/site-packages' },
+];
+
+for (const { target, link } of DEP_SYMLINKS) {
+  try {
+    if (existsSync(target) && !existsSync(link)) {
+      symlinkSync(target, link);
+      logToStderr(`  symlinked ${link} -> ${target}`);
+    }
+  } catch {
+    // Symlink failed (e.g. permission issue) — NODE_PATH/PYTHONPATH still works as fallback
+  }
+}
+
 resetWatchdog();
 
 process.stdin.on('data', (chunk: Buffer) => {

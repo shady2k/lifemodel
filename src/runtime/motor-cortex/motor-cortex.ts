@@ -28,7 +28,7 @@ import { runMotorLoop } from './motor-loop.js';
 import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
-import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
 import { rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -62,8 +62,12 @@ function validateWorkspaceOutput(dir: string, logger: Logger): { ok: boolean; re
         const stat = lstatSync(fullPath);
 
         if (stat.isSymbolicLink()) {
-          logger.warn({ path: fullPath }, 'Rejecting symlink in workspace output');
-          return `Symlink not allowed: ${entry}`;
+          // Remove symlinks silently — these are infrastructure artifacts
+          // (e.g. node_modules → /opt/skill-deps/npm/node_modules created by tool-server).
+          // They're not skill content and would break extraction if left in.
+          logger.debug({ path: fullPath }, 'Removing symlink from workspace output');
+          unlinkSync(fullPath);
+          continue;
         }
         if (!stat.isFile() && !stat.isDirectory()) {
           logger.warn(
@@ -1075,22 +1079,42 @@ export class MotorCortex {
       throw new Error(`Run ${runId} has no current attempt`);
     }
 
-    // Auto-extract domains from the pending question if no explicit domains provided.
-    // The sub-agent often asks "I need access to github.com, api.example.com" —
-    // parse those out so the user/Cognition doesn't have to repeat them.
+    // Extract domains from the pending question — these are authoritative because they come
+    // from our own BLOCKED message with the exact domain. Cognition may hallucinate domains
+    // (e.g. .io instead of .to), so prefer extracted domains when available.
     let effectiveDomains = domains;
-    if ((!effectiveDomains || effectiveDomains.length === 0) && attempt.pendingQuestion) {
+    if (attempt.pendingQuestion) {
       const extracted = extractDomainsFromText(attempt.pendingQuestion);
       if (extracted.length > 0) {
         effectiveDomains = extracted;
-        this.logger.info(
-          { runId, extractedDomains: extracted },
-          'Auto-extracted domains from pending question'
-        );
+        if (domains && domains.length > 0) {
+          this.logger.info(
+            { runId, callerDomains: domains, extractedDomains: extracted },
+            'Using extracted domains from pending question (overriding caller-provided domains)'
+          );
+        }
       }
     }
 
-    // Merge domains with existing run domains (union, deduped)
+    // DNS-validate domains before merging (reject hallucinated/typo domains)
+    if (effectiveDomains && effectiveDomains.length > 0) {
+      const dns = await import('node:dns/promises');
+      const validated: string[] = [];
+      for (const d of effectiveDomains) {
+        try {
+          await dns.resolve4(d);
+          validated.push(d);
+        } catch {
+          this.logger.warn(
+            { runId, domain: d },
+            'Skipping unresolvable domain (DNS lookup failed)'
+          );
+        }
+      }
+      effectiveDomains = validated;
+    }
+
+    // Merge validated domains with existing run domains (union, deduped)
     if (effectiveDomains && effectiveDomains.length > 0) {
       const existingDomains = run.domains ?? [];
       run.domains = Array.from(new Set([...existingDomains, ...effectiveDomains]));
@@ -1112,7 +1136,7 @@ export class MotorCortex {
       );
 
       // Rebuild system prompt so the model sees the updated domains.
-      // The caller should provide the new system prompt.
+      // The caller should provide the new system prompt with updated domains.
       const systemIdx = attempt.messages.findIndex((m) => m.role === 'system');
       if (systemIdx >= 0 && systemPrompt) {
         attempt.messages[systemIdx] = {
@@ -1138,14 +1162,39 @@ export class MotorCortex {
         }
       }
 
-      // Note: Domain persistence to skill policy is handled by Cognition via core.skill(action:"update")
+      // Persist approved domains to skill policy.json so future runs don't need re-approval.
+      if (run.skill && this.skillsDir && effectiveDomains.length > 0) {
+        try {
+          const { loadPolicy, savePolicy } = await import('../skills/skill-loader.js');
+          const { join } = await import('node:path');
+          const skillDir = join(this.skillsDir, run.skill);
+          const policy = await loadPolicy(skillDir);
+          if (policy) {
+            const existingDomains = new Set(policy.domains ?? []);
+            const newDomains = effectiveDomains.filter((d) => !existingDomains.has(d));
+            if (newDomains.length > 0) {
+              policy.domains = [...(policy.domains ?? []), ...newDomains];
+              await savePolicy(skillDir, policy);
+              this.logger.info(
+                { runId, skill: run.skill, newDomains, allDomains: policy.domains },
+                'Persisted approved domains to skill policy'
+              );
+            }
+          }
+        } catch (policyErr) {
+          this.logger.warn(
+            { runId, error: policyErr },
+            'Failed to persist domains to skill policy (non-fatal)'
+          );
+        }
+      }
     }
 
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)
     if (attempt.pendingToolCallId) {
       const domainNote =
         effectiveDomains && effectiveDomains.length > 0
-          ? ` Network access granted for: ${effectiveDomains.join(', ')}.`
+          ? ` Network access granted for: ${effectiveDomains.join(', ')}. Updated allowed domains: ${(run.domains ?? []).join(', ')}. You can now make requests to these domains.`
           : '';
       // Replace the BLOCKED result in-place (auto-pause already pushed one for this tool_call_id)
       const idx = attempt.messages.findIndex(

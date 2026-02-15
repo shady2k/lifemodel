@@ -414,12 +414,16 @@ export class AgenticLoop {
           break;
       }
 
-      // Mid-loop user message injection
-      const pendingMessages = context.drainPendingUserMessages?.() ?? [];
-      for (const signal of pendingMessages) {
-        const text = (signal.data as { text: string }).text;
-        messages.push({ role: 'user', content: text });
-        this.logger.debug({ text: text.slice(0, 50) }, 'Injected mid-loop user message');
+      // Mid-loop user message injection — only for user_message triggers.
+      // For thought/proactive triggers, user messages should be processed in their own tick
+      // with full tool access and no proactive budget constraint.
+      if (context.triggerSignal.type === 'user_message') {
+        const pendingMessages = context.drainPendingUserMessages?.() ?? [];
+        for (const signal of pendingMessages) {
+          const text = (signal.data as { text: string }).text;
+          messages.push({ role: 'user', content: text });
+          this.logger.debug({ text: text.slice(0, 50) }, 'Injected mid-loop user message');
+        }
       }
     }
 

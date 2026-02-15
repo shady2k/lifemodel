@@ -254,7 +254,7 @@ describe('skill-extraction', () => {
       expect(policy.status).toBe('pending_review');
     });
 
-    it('resets status to pending_review on update', async () => {
+    it('preserves approved status on update (content-only changes)', async () => {
       await preInstallSkill(
         'approved-skill',
         '---\nname: approved-skill\ndescription: Old\n---\n# Old',
@@ -267,6 +267,23 @@ describe('skill-extraction', () => {
       expect(result.updated).toEqual(['approved-skill']);
 
       const installedDir = join(skillsDir, 'approved-skill');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.status).toBe('approved');
+    });
+
+    it('resets status to pending_review on update of pending skill', async () => {
+      await preInstallSkill(
+        'pending-skill',
+        '---\nname: pending-skill\ndescription: Old\n---\n# Old',
+        createTestPolicy({ status: 'pending_review' })
+      );
+
+      await writeSkillMd('pending-skill', 'Updated', '# Updated');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['pending-skill']);
+
+      const installedDir = join(skillsDir, 'pending-skill');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.status).toBe('pending_review');
     });
@@ -303,7 +320,7 @@ describe('skill-extraction', () => {
 
       const installedDir = join(skillsDir, 'with-creds');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      expect(policy.status).toBe('pending_review');
+      expect(policy.status).toBe('approved'); // approved status preserved on content-only update
       expect(policy.credentialValues).toEqual({ api_key: 'sk-live-secret-12345' });
     });
 
@@ -401,7 +418,7 @@ describe('skill-extraction', () => {
 
       const installedDir = join(skillsDir, 'preserve-domains');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
-      expect(policy.status).toBe('pending_review');
+      expect(policy.status).toBe('approved'); // approved status preserved on content-only update
       expect(policy.domains).toEqual(['old.example.com']);
     });
 
