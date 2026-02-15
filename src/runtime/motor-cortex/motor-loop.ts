@@ -19,7 +19,6 @@ import type {
   TaskResult,
   FailureSummary,
   FailureCategory,
-  RunEvidence,
   SyntheticTool,
 } from './motor-protocol.js';
 import type { MotorStateManager } from './motor-state.js';
@@ -29,19 +28,20 @@ import {
   createWorkspace,
   SYNTHETIC_TOOL_DEFINITIONS,
 } from './motor-tools.js';
-import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import type { ContainerHandle } from '../container/types.js';
-import type { LoadedSkill } from '../skills/skill-types.js';
-import type { CredentialStore } from '../vault/credential-store.js';
-import { resolveCredentials, credentialToRuntimeKey } from '../vault/credential-store.js';
-import { readdir, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { credentialToRuntimeKey } from '../vault/credential-store.js';
+import { readdir, mkdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTaskLogger, redactCredentials } from './task-logger.js';
 import { validateToolArgs } from '../../utils/tool-validation.js';
 import { truncateToolOutput, TRUNCATION_DIR } from './tool-truncation.js';
+import type { PreparedDeps } from '../dependencies/dependency-manager.js';
 
 /**
  * Parameters for running the motor loop.
+ *
+ * Motor Cortex is a pure runtime - all context must be passed explicitly.
+ * The caller (core.act) resolves credentials, prepares workspaces, builds prompts, and installs deps.
  */
 export interface MotorLoopParams {
   /** The run (for run-level metadata like id, task, tools) */
@@ -65,15 +65,6 @@ export interface MotorLoopParams {
   /** Which synthetic tools to inject (required, controlled by caller) */
   syntheticTools: SyntheticTool[];
 
-  /** Skills directory for filesystem access (optional) */
-  skillsDir?: string;
-
-  /** Loaded skill to inject into system prompt (optional) */
-  skill?: LoadedSkill;
-
-  /** Credential store for resolving placeholders (optional) */
-  credentialStore?: CredentialStore;
-
   /** Base directory for persisting run artifacts (optional) */
   artifactsBaseDir?: string;
 
@@ -96,6 +87,16 @@ export interface MotorLoopParams {
 
   /** Abort signal for cancellation (optional) */
   abortSignal?: AbortSignal;
+
+  // === Explicit context (passed by caller, Motor doesn't know what it means) ===
+  /** Resolved credential name → value map */
+  credentials?: Record<string, string>;
+  /** Credential names (for save_credential scope check) */
+  credentialNames?: string[];
+
+  // === Dependencies (pre-installed by caller) ===
+  /** Pre-installed deps mounts (volume names + env) */
+  preparedDeps?: PreparedDeps;
 }
 
 /**
@@ -169,9 +170,6 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   if (run.domains && run.domains.length > 0) {
     await taskLog?.log(`  Domains: ${run.domains.join(', ')}`);
   }
-  if (run.skill) {
-    await taskLog?.log(`  Skill: ${run.skill}`);
-  }
   await taskLog?.log(`  Max iterations: ${String(attempt.maxIterations)}`);
   await taskLog?.log(`  Workspace: ${workspace}`);
   if (attempt.recoveryContext) {
@@ -180,10 +178,10 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
   // Collect resolved credential values for redaction.
   // Any credential value that appears in tool results or LLM output will be masked.
+  // Credentials are now passed explicitly via params.credentials (no credentialStore access).
   const credentialValues: string[] = [];
-  if (params.credentialStore) {
-    for (const name of params.credentialStore.list()) {
-      const value = params.credentialStore.get(name);
+  if (params.credentials) {
+    for (const value of Object.values(params.credentials)) {
       if (value && value.length >= 8) {
         // Only redact values long enough to be meaningful (avoid masking short strings)
         credentialValues.push(value);
@@ -244,29 +242,17 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
   // Scripts use process.env.NAME, so credentials must be in the shell env
   // from the start — not lazily when placeholders are detected.
   //
-  // If skill has requiredCredentials, filter delivery to only those names.
-  // Priority: skill.policy.credentialValues (skill-stored) → credentialStore (user env vars)
+  // Credentials are pre-resolved by core.act and passed via params.credentials.
   // Container env vars use plain NAME (no VAULT_ prefix) for ergonomic script access.
-  if (params.containerHandle && params.credentialStore) {
-    const skillRequiredCreds = params.skill?.policy?.requiredCredentials;
-
-    if (skillRequiredCreds && skillRequiredCreds.length > 0) {
-      // Filtered delivery: only required credentials
-      for (const name of skillRequiredCreds) {
-        // Check skill-stored credentials first, then user env vars
-        const skillValue = params.skill?.policy?.credentialValues?.[name];
-        const value = skillValue ?? params.credentialStore.get(name);
-        if (value) {
-          await params.containerHandle.deliverCredential(credentialToRuntimeKey(name), value);
-          // Add to redaction array for output masking
-          if (value.length >= 8) {
-            credentialValues.push(value);
-          }
+  if (params.containerHandle && params.credentials) {
+    for (const [name, value] of Object.entries(params.credentials)) {
+      if (value) {
+        await params.containerHandle.deliverCredential(credentialToRuntimeKey(name), value);
+        // Add to redaction array for output masking
+        if (value.length >= 8) {
+          credentialValues.push(value);
         }
       }
-    } else {
-      // No requiredCredentials declared — deliver nothing.
-      // Skills must declare requiredCredentials in policy.json to receive credentials.
     }
   }
 
@@ -463,7 +449,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
             const truncDirAbsolute = join(workspace, TRUNCATION_DIR) + '/';
             await cp(workspace, artifactsDir, {
               recursive: true,
-              filter: (src) =>
+              filter: (src: string) =>
                 src !== truncDirAbsolute.slice(0, -1) && !src.startsWith(truncDirAbsolute),
             });
             artifacts = workspaceFiles;
@@ -474,37 +460,12 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         }
       }
 
-      // Extract skills from workspace to data/skills/ (only on success)
-      let installedSkills: { created: string[]; updated: string[] } | undefined;
-      if (params.skillsDir) {
-        try {
-          // Aggregate evidence from all attempts for security review
-          const evidence = aggregateRunEvidence(run);
-          childLogger.info({ evidence }, 'Aggregated run evidence for skill review');
-
-          const extractionResult = await extractSkillsFromWorkspace(
-            workspace,
-            params.skillsDir,
-            run.id,
-            childLogger,
-            run.pendingCredentials,
-            evidence
-          );
-          if (extractionResult.created.length > 0 || extractionResult.updated.length > 0) {
-            installedSkills = extractionResult;
-            childLogger.info({ installedSkills }, 'Skills extracted from workspace');
-          }
-        } catch (error) {
-          childLogger.warn({ error }, 'Skill extraction failed');
-        }
-      }
-
       const result: TaskResult = {
         ok: true,
         summary: redactValues(llmResponse.content ?? 'Task completed without summary'),
         runId: run.id,
         ...(artifacts && { artifacts }),
-        ...(installedSkills && { installedSkills }),
+        // installedSkills populated by middleware (motor-cortex.ts) after loop completes
         stats: {
           iterations: i + 1,
           durationMs: Date.now() - new Date(attempt.startedAt).getTime(),
@@ -529,29 +490,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       await stateManager.updateRun(run);
 
-      // Emit completion signal
-      pushSignal(
-        createSignal(
-          'motor_result',
-          'motor.cortex',
-          { value: 1, confidence: 1 },
-          {
-            data: {
-              kind: 'motor_result',
-              runId: run.id,
-              status: 'completed',
-              attemptIndex: attempt.index,
-              result: {
-                ok: result.ok,
-                summary: result.summary,
-                stats: result.stats,
-                ...(result.installedSkills && { installedSkills: result.installedSkills }),
-              },
-            },
-          }
-        )
-      );
-
+      // Completion signal emitted by motor-cortex.ts middleware (after extraction enriches result)
       childLogger.info({ summary: result.summary }, 'Motor Cortex run completed');
       await taskLog?.log(
         `\nCOMPLETED (${(result.stats.durationMs / 1000).toFixed(1)}s, ${String(result.stats.iterations)} iterations, ${String(result.stats.errors)} errors)`
@@ -867,21 +806,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           continue;
         }
 
-        // Scope enforcement: if requiredCredentials is declared and non-empty,
-        // only allow names in that list. If absent/empty, allow any name
-        // (the credential name will be auto-added to requiredCredentials on persist).
-        const requiredCreds = params.skill?.policy?.requiredCredentials;
+        // Scope enforcement: if credentialNames is declared, only allow names in that list.
+        // If absent, allow any name (the caller will handle persistence).
         if (
-          params.skill &&
-          requiredCreds &&
-          requiredCreds.length > 0 &&
-          !requiredCreds.includes(credName)
+          params.credentialNames &&
+          params.credentialNames.length > 0 &&
+          !params.credentialNames.includes(credName)
         ) {
           messages.push({
             role: 'tool',
             content: JSON.stringify({
               ok: false,
-              output: `Credential "${credName}" not in skill's requiredCredentials. Allowed: ${requiredCreds.join(', ')}`,
+              output: `Credential "${credName}" not in allowed list. Allowed: ${params.credentialNames.join(', ')}`,
               error: 'permission_denied',
             }),
             tool_call_id: toolCall.id,
@@ -891,7 +827,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
             args: toolArgs,
             result: {
               ok: false,
-              output: `Credential "${credName}" not in skill's requiredCredentials. Allowed: ${requiredCreds.join(', ')}`,
+              output: `Credential "${credName}" not in allowed list. Allowed: ${params.credentialNames.join(', ')}`,
               errorCode: 'permission_denied',
               retryable: false,
               provenance: 'internal',
@@ -902,99 +838,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           continue;
         }
 
-        // Persist to policy.json for existing skills, or pendingCredentials for new skills
-        let persistError: string | null = null;
+        // Store in pendingCredentials on run (Cognition will persist after the run)
         const runtimeKey = credentialToRuntimeKey(credName);
-
-        if (params.skill?.path) {
-          // Existing skill: persist to policy.json
-          const policyPath = join(params.skill.path, 'policy.json');
-          try {
-            let existingPolicy: Record<string, unknown> = {};
-            try {
-              const raw = await readFile(policyPath, 'utf-8');
-              existingPolicy = JSON.parse(raw) as Record<string, unknown>;
-            } catch {
-              // No existing policy — will create one
-            }
-
-            const credentialValues: Record<string, string> =
-              (existingPolicy['credentialValues'] as Record<string, string> | undefined) ?? {};
-            credentialValues[credName] = credValue;
-
-            // Auto-register credential name in requiredCredentials if not already present
-            const existingRequired =
-              (existingPolicy['requiredCredentials'] as string[] | undefined) ?? [];
-            const updatedRequired = existingRequired.includes(credName)
-              ? existingRequired
-              : [...existingRequired, credName];
-
-            const updatedPolicy = {
-              ...existingPolicy,
-              credentialValues,
-              requiredCredentials: updatedRequired,
-            };
-            const tmpPath = join(params.skill.path, `.policy.json.tmp-${run.id}`);
-            await writeFile(tmpPath, JSON.stringify(updatedPolicy, null, 2), {
-              mode: 0o600, // Secure: only owner can read/write
-            });
-            // Atomic rename
-            const { rename } = await import('node:fs/promises');
-            await rename(tmpPath, policyPath);
-
-            childLogger.info(
-              { name: credName, skillPath: params.skill.path },
-              'Credential persisted to skill policy.json'
-            );
-          } catch (err) {
-            persistError = `Failed to persist credential: ${err instanceof Error ? err.message : String(err)}`;
-            childLogger.warn(
-              { name: credName, error: persistError },
-              'Failed to persist credential to policy.json'
-            );
-          }
-        } else {
-          // New skill (no skill dir yet): store in pendingCredentials on run
-          run.pendingCredentials = run.pendingCredentials ?? {};
-          run.pendingCredentials[credName] = credValue;
-          childLogger.info(
-            { name: credName },
-            'Credential stored in pendingCredentials for new skill'
-          );
-        }
-
-        if (persistError) {
-          messages.push({
-            role: 'tool',
-            content: JSON.stringify({
-              ok: false,
-              output: persistError,
-              error: 'execution_error',
-            }),
-            tool_call_id: toolCall.id,
-          });
-          step.toolCalls.push({
-            tool: 'save_credential',
-            args: toolArgs,
-            result: {
-              ok: false,
-              output: persistError,
-              errorCode: 'execution_error',
-              retryable: true,
-              provenance: 'internal',
-              durationMs: Date.now() - startTime,
-            },
-            durationMs: Date.now() - startTime,
-          });
-          continue;
-        }
+        run.pendingCredentials = run.pendingCredentials ?? {};
+        run.pendingCredentials[credName] = credValue;
+        childLogger.info({ name: credName }, 'Credential stored in pendingCredentials');
 
         // Best-effort delivery to container (fire-and-forget)
         if (params.containerHandle) {
           try {
             await params.containerHandle.deliverCredential(runtimeKey, credValue);
           } catch {
-            // Ignore delivery errors — credential is persisted for future runs
+            // Ignore delivery errors — credential is stored for future runs
           }
         }
 
@@ -1003,9 +858,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           credentialValues.push(credValue);
         }
 
-        // Also save to in-memory credentialStore for this run
-        if (params.credentialStore) {
-          params.credentialStore.set(credName, credValue);
+        // Also save to passed credentials for this run's duration
+        if (params.credentials) {
+          params.credentials[credName] = credValue;
         }
 
         const successMsg = `Credential "${credName}" saved. Available as $${runtimeKey} in this and future runs.`;
@@ -1045,12 +900,18 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
       const skipFields = SKIP_CREDENTIAL_RESOLUTION[toolName];
 
       let resolvedArgs = toolArgs;
-      if (params.credentialStore) {
-        const store = params.credentialStore;
+      // Credential placeholder resolution: resolve <credential:name> placeholders using explicit credentials.
+      // Motor Cortex is now a pure runtime — no credentialStore access.
+      // Placeholders in tool args are resolved to actual values from params.credentials.
+      if (params.credentials) {
         const allMissing: string[] = [];
+        // Create a minimal credential resolver from explicit credentials map
+        const credMap = params.credentials;
         const resolveValue = (val: unknown): unknown => {
           if (typeof val === 'string') {
-            const { resolved, missing } = resolveCredentials(val, store);
+            // Simple regex-based placeholder resolution (no store needed)
+            // Matches: <credential:NAME>, $NAME, ${NAME}
+            const { resolved, missing } = resolvePlaceholders(val, credMap);
             allMissing.push(...missing);
             return resolved;
           }
@@ -1092,6 +953,53 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           });
           continue;
         }
+      }
+
+      // Placeholder resolution helper: resolve <credential:NAME>, $NAME, ${NAME} using explicit credentials
+      function resolvePlaceholders(
+        text: string,
+        credentials: Record<string, string>
+      ): { resolved: string; missing: string[] } {
+        const missing: string[] = [];
+        let result = text;
+
+        // 1. Resolve <credential:NAME> placeholders (our convention, case-sensitive)
+        result = result.replace(
+          /<credential:([a-zA-Z0-9_]+)>/gi,
+          (_match: string, name: string) => {
+            const value = credentials[name];
+            if (value !== undefined) {
+              return value; // Replace with actual value
+            }
+            missing.push(name);
+            return _match; // Keep placeholder if missing
+          }
+        );
+
+        // 2. Resolve ${NAME} placeholders (shell-style, typically uppercase)
+        result = result.replace(/\$\{([A-ZA-Z0-9_]+)\}/gi, (_match: string, name: string) => {
+          const value = credentials[name];
+          if (value !== undefined) {
+            return value; // Replace with actual value
+          }
+          missing.push(name);
+          return _match; // Keep placeholder if missing
+        });
+
+        // 3. Resolve process.env.NAME placeholders (JavaScript-style)
+        result = result.replace(
+          /process\.env\.([A-ZA-Z0-9_]+)/gi,
+          (_match: string, name: string) => {
+            const value = credentials[name];
+            if (value !== undefined) {
+              return value; // Replace with actual value
+            }
+            missing.push(name);
+            return _match; // Keep placeholder if missing
+          }
+        );
+
+        return { resolved: result, missing };
       }
 
       // Log shell description if provided
@@ -1473,245 +1381,4 @@ export async function getFailureHint(
   }
 
   return undefined;
-}
-
-/**
- * Check if a tool is in the tools array.
- */
-function hasTool(tool: string, tools: string[]): boolean {
-  return tools.includes(tool);
-}
-
-/**
- * Aggregate evidence from all attempts' tool call traces.
- *
- * Collects deterministic observations from the actual run:
- * - Domains contacted via fetch (from tool args, not heuristics)
- * - Credentials saved via save_credential
- * - Tools used (including bash for network activity warning)
- *
- * @param run - The completed motor run
- * @returns Aggregated evidence for security review
- */
-export function aggregateRunEvidence(run: MotorRun): RunEvidence {
-  const fetchedDomains = new Set<string>();
-  const savedCredentials = new Set<string>();
-  const toolsUsed = new Set<string>();
-  let bashUsed = false;
-
-  // Iterate over ALL attempts (retries may have contacted different domains)
-  for (const attempt of run.attempts) {
-    for (const step of attempt.trace.steps) {
-      for (const toolCall of step.toolCalls) {
-        toolsUsed.add(toolCall.tool);
-
-        // Track bash usage for network activity warning
-        if (toolCall.tool === 'bash') {
-          bashUsed = true;
-        }
-
-        // Extract domains from fetch tool calls
-        if (toolCall.tool === 'fetch' && toolCall.args['url']) {
-          try {
-            const url = new URL(toolCall.args['url'] as string);
-            fetchedDomains.add(url.hostname.toLowerCase());
-          } catch {
-            // Invalid URL, skip
-          }
-        }
-
-        // Track saved credentials
-        if (toolCall.tool === 'save_credential' && toolCall.args['name']) {
-          savedCredentials.add(toolCall.args['name'] as string);
-        }
-      }
-    }
-  }
-
-  return {
-    fetchedDomains: [...fetchedDomains].sort(),
-    savedCredentials: [...savedCredentials].sort(),
-    toolsUsed: [...toolsUsed].sort(),
-    bashUsed,
-  };
-}
-
-/**
- * Build system prompt for the motor sub-agent.
- */
-export function buildMotorSystemPrompt(
-  run: MotorRun,
-  skill?: LoadedSkill,
-  recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterationsOverride?: number
-): string {
-  const tools = run.tools;
-  const toolDescriptions: Record<string, string> = {
-    read: '- read: Read a file (line numbers, offset/limit for pagination, max 2000 lines)',
-    write: '- write: Write content to a file (auto-creates directories)',
-    list: '- list: List files and directories (optional recursive mode)',
-    glob: '- glob: Find files by glob pattern (e.g., "**/*.ts")',
-    ask_user: '- ask_user: Ask the user a question (pauses execution)',
-    save_credential:
-      '- save_credential: Save a credential (e.g. API key from signup) for future runs',
-    bash: '- bash: Run commands (node, npm, npx, python, pip, curl, jq, grep, git, etc.). Supports pipes, loops (for/while), and conditionals. Full async Node.js via "node script.js".',
-    grep: '- grep: Search patterns across files (regex, max 100 matches)',
-    patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
-    fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
-  };
-
-  // Include only configured synthetic tools in the description
-  const allTools: string[] = [...run.tools, ...run.config.syntheticTools];
-  const toolsDesc = allTools.map((t) => toolDescriptions[t] ?? `- ${t}`).join('\n');
-
-  // Recovery context injection for retry attempts
-  const recoverySection = recoveryContext
-    ? `\n\n<recovery_context source="${recoveryContext.source}">
-Previous attempt (${recoveryContext.previousAttemptId}) failed.
-Guidance: ${recoveryContext.guidance}${
-        recoveryContext.constraints && recoveryContext.constraints.length > 0
-          ? `\nConstraints:\n${recoveryContext.constraints.map((c) => `- ${c}`).join('\n')}`
-          : ''
-      }
-</recovery_context>`
-    : '';
-
-  return `You are a task execution assistant. Your job is to complete the following task using the available tools.
-
-Task: ${run.task}
-
-Available tools:
-${toolsDesc}
-
-Guidelines:
-- Break down complex tasks into steps
-- Use read to inspect files (supports offset/limit for large files)
-- Use write to create or overwrite files (workspace only)
-- Use list/glob to discover workspace structure
-- Use grep to find content across files
-- Use patch for precise edits (prefer over full file rewrites)
-- Use fetch for HTTP requests (preferred over bash+curl — handles credentials, domain checks, HTML→markdown)
-- Use bash for runtime execution (node scripts, npm install, python, pip) and text processing with pipes
-- Be concise and direct in your responses
-- Report what you did and the result
-- If something is blocked, denied, or fails repeatedly (2+ times), call ask_user to report the problem and ask for guidance. Do NOT silently work around blockers by guessing or fabricating content.
-- When downloading files from a repository, always fetch the actual source content. Do NOT reconstruct or rewrite file contents from previews, summaries, or truncated output — download the raw file or copy from the saved .motor-output/ file instead.
-- File paths: use RELATIVE paths for workspace files (e.g. "output.txt", "SKILL.md"). Skill files are at workspace root and can be modified directly.
-- Credentials are environment variables. Use process.env.NAME in Node scripts, os.environ["NAME"] in Python, $NAME in bash commands and fetch headers. The system resolves $NAME in all tool arguments automatically.
-- Large tool outputs are automatically truncated and saved to .motor-output/. When you see "Output truncated", use read to view sections or bash cp to copy the file (e.g. bash({"command":"cp .motor-output/fetch-abc123.txt references/doc.md"})). NEVER write file contents from memory — always read or copy from the saved file.
-${
-  run.domains && run.domains.length > 0
-    ? `
-Allowed network domains:
-${run.domains.map((d) => `- ${d}`).join('\n')}
-Requests to any other domain will be BLOCKED.
-CRITICAL: When a domain is blocked, you MUST immediately call ask_user to request access. Do NOT try alternative URLs, do NOT try different domains, do NOT fabricate or guess content. Stop and ask_user FIRST.
-Do NOT run npm install or pip install — registries are not reachable. Pre-installed packages (if any) are already available via require() or import.
-For API calls, prefer the fetch tool. In bash/node scripts, use Node's built-in global fetch() (no import needed) or curl.`
-    : `
-Network access is disabled. All tasks must be completed using local tools only.
-Do NOT run npm install or pip install — there is no network access. Pre-installed packages (if any) are already available via require() or import.`
-}
-
-Maximum iterations: ${String(maxIterationsOverride ?? run.attempts[run.currentAttemptIndex]?.maxIterations ?? 20)}
-
-Begin by analyzing the task and planning your approach. Then execute step by step.${
-    hasTool('write', tools)
-      ? `
-
-You create and maintain Agent Skills — modular, filesystem-based capabilities. A Skill packages instructions, metadata, and optional resources (scripts, templates, reference docs) so the agent can reuse them automatically.
-
-Skill directory structure:
-  SKILL.md           — required: frontmatter metadata + step-by-step instructions
-  references/        — optional: API docs, schemas, examples
-  scripts/           — optional: helper scripts the instructions reference
-
-SKILL.md format:
----
-name: skill-name
-description: What this skill does and when to use it (max 1024 chars). Include BOTH what the skill does AND when the agent should trigger it.
----
-# Skill Name
-
-## Quick start
-[Minimal working example]
-
-## Instructions
-[Step-by-step procedures, organized by task type]
-
-## Examples
-[Concrete usage examples with expected inputs/outputs]
-
-## Edge cases
-[Error handling, fallbacks, known limitations]
-
-The frontmatter (name + description) is always loaded at startup so the agent knows the skill exists.
-The body is only loaded when the skill is triggered, so keep it focused and actionable.
-Reference files (references/, scripts/) are loaded on demand — link to them from the instructions.
-
-If an official SDK (npm or pip package) exists for the API, ALWAYS prefer it over raw HTTP calls.
-Mention the SDK in SKILL.md with installation instructions: "npm install package-name@x.y.z" or "pip install package-name==x.y.z".
-SKILL.md examples should use the SDK, not raw curl/fetch. Find the latest package version from the API documentation.
-
-Trust is always "needs_review" for new skills — the user reviews and approves before first use.
-
-Save files at the workspace root (e.g. write({path: "SKILL.md", content: "..."})).
-Reference files go in subdirectories: write({path: "references/api-docs.md", content: "..."}).
-These files will be automatically extracted and installed after your run completes.
-Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.`
-      : ''
-  }${
-    skill
-      ? `
-
-A skill is available for this task. Read its files before starting work.
-Skill: ${skill.frontmatter.name} — ${skill.frontmatter.description}
-Start by reading SKILL.md: read({path: "SKILL.md"}). Check for reference files too: list({path: "."}).
-${
-  skill.policy?.dependencies
-    ? `IMPORTANT: SKILL.md contains tested, working code examples. Use them EXACTLY as written — copy constructors, method names, and argument shapes from the examples. Do NOT guess or invent API usage. If something fails, re-read SKILL.md and compare your code against the examples before trying alternatives.
-Pre-installed packages are available — use require() or import directly.`
-    : `No SDK packages are pre-installed for this skill. SKILL.md examples may use SDK calls — do NOT copy them directly. Instead, use the fetch tool or Node's built-in global fetch() for raw HTTP API calls. Check the API documentation or reference files for the correct HTTP endpoints, methods, and request formats. Do NOT guess URL paths from SDK method names.`
-}
-You can modify skill files directly in the workspace using write or patch. Changes are automatically extracted and installed after your run completes.
-Do NOT run npm install or pip install — package registries are not reachable at runtime.
-${
-  skill.policy?.requiredCredentials && skill.policy.requiredCredentials.length > 0
-    ? `\nAvailable credentials (as env vars):\n${skill.policy.requiredCredentials.map((c) => `- ${c}`).join('\n')}\nUsage:\n  Node script: const apiKey = process.env.${String(skill.policy.requiredCredentials[0])};\n  Python:      api_key = os.environ["${String(skill.policy.requiredCredentials[0])}"]\n  bash:        curl -H "Authorization: Bearer $${String(skill.policy.requiredCredentials[0])}"\n  fetch tool:  {"Authorization": "Bearer $${String(skill.policy.requiredCredentials[0])}"}`
-    : ''
-}
-
-SKILL IMPROVEMENT REQUIREMENT:
-After completing the task, if ANY of these occurred, you MUST update the skill files before finishing:
-- You encountered errors following SKILL.md (wrong endpoints, incorrect parameters, deprecated methods)
-- You had to fetch external docs or reference files to figure out how to do something SKILL.md should have covered
-- SKILL.md only has SDK examples but you had to use raw HTTP (add HTTP examples alongside SDK ones)
-- You discovered missing information (correct URL paths, required headers, response formats)
-Update SKILL.md and/or reference files in the workspace using write or patch. Changes are reviewed before replacing the current version.
-Do NOT skip this step — future runs should not repeat the same discovery process.
-Note: you can only reach domains approved for this run.
-If you need a new domain, use ask_user to request it.`
-      : ''
-  }${recoverySection}`;
-}
-
-/**
- * Build initial messages for a new attempt.
- */
-export function buildInitialMessages(
-  run: MotorRun,
-  skill?: LoadedSkill,
-  recoveryContext?: MotorAttempt['recoveryContext'],
-  maxIterations?: number
-): Message[] {
-  return [
-    {
-      role: 'system',
-      content: buildMotorSystemPrompt(run, skill, recoveryContext, maxIterations),
-    },
-    {
-      role: 'user',
-      content: 'Begin the task.',
-    },
-  ];
 }

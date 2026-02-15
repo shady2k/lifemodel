@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createSkillTool } from '../../../../src/layers/cognition/tools/core/skill.js';
 import type { Tool } from '../../../../src/layers/cognition/tools/types.js';
+import { createTestPolicy } from '../../../helpers/factories.js';
 
 describe('core.skill tool', () => {
   let skillsDir: string;
@@ -27,7 +28,7 @@ describe('core.skill tool', () => {
     await rm(skillsDir, { recursive: true, force: true });
   });
 
-  async function createSkill(name: string, trust = 'pending_review'): Promise<void> {
+  async function createSkill(name: string, status: 'pending_review' | 'needs_reapproval' | 'reviewed' | 'approved' = 'pending_review'): Promise<void> {
     const skillDir = join(skillsDir, name);
     await mkdir(skillDir, { recursive: true });
     await writeFile(
@@ -37,11 +38,7 @@ describe('core.skill tool', () => {
     );
     await writeFile(
       join(skillDir, 'policy.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        trust,
-        allowedDomains: ['api.example.com'],
-      }),
+      JSON.stringify(createTestPolicy({ status })),
       'utf-8'
     );
   }
@@ -110,7 +107,7 @@ describe('core.skill tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       );
 
-      expect(result).toMatchObject({ success: true, trust: 'approved' });
+      expect(result).toMatchObject({ success: true, status: 'approved' });
     });
 
     it('allows approve for pending_review skill (user can skip review)', async () => {
@@ -121,7 +118,7 @@ describe('core.skill tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       );
 
-      expect(result).toMatchObject({ success: true, trust: 'approved' });
+      expect(result).toMatchObject({ success: true, status: 'approved' });
     });
   });
 
@@ -148,7 +145,7 @@ describe('core.skill tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       );
 
-      expect(result).toMatchObject({ success: true, trust: 'needs_reapproval' });
+      expect(result).toMatchObject({ success: true, status: 'needs_reapproval' });
     });
   });
 

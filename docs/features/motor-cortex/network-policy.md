@@ -103,7 +103,7 @@ ENTRYPOINT ["sh"]
 Domains flow from multiple sources, merged (union, deduplicated, lowercased) at each stage:
 
 ```
-policy.json domains    core.act({ domains })    core.task({ action:'retry', domains })
+policy.domains         core.act({ domains })    core.task({ action:'retry', domains })
          \                      |                         /
           └────── mergeDomains() ─── MotorRun.domains ──┘
                                           |
@@ -117,15 +117,16 @@ policy.json domains    core.act({ domains })    core.task({ action:'retry', doma
 
 On retry, new domains are unioned with existing `run.domains` — the set only grows, never shrinks within a run.
 
-### Domain Persistence at Extraction
+### Domain Persistence
 
 Creation domains and usage domains are **separate concerns**:
 
-- **Creation domains** (`run.domains`): Domains needed to build the skill (docs sites, skills.sh, etc.). These are NOT persisted to `policy.allowedDomains` — they would over-grant runtime permissions.
-- **Usage domains** (`policy.allowedDomains`): Runtime execution permissions. Set by the user during approval, preserved on skill updates.
-- **Evidence** (`policy.runEvidence.fetchedDomains`): Historical record of domains actually contacted during creation. Extracted from `fetch` tool call URLs across all attempts. Presented during security review for informed user consent.
+- **Creation domains** (`run.domains`): Domains needed to build the skill (docs sites, skills.sh, etc.). These are NOT persisted to `policy.domains` — they would over-grant runtime permissions.
+- **Usage domains** (`policy.domains`): Runtime execution permissions. Set by the user during approval (via `core.skill(action:"update")`), preserved on skill updates.
 
-For new skills, `allowedDomains` starts as `undefined` — the user specifies runtime domains during approval. For updated skills, existing `allowedDomains` are preserved (previously user-approved). On first real usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow).
+Cognition owns all policy persistence. Motor Cortex middleware handles post-run extraction only. The `core.skill(action:"update")` action allows modifying domains, credentials, tools, and dependencies.
+
+For new skills, `domains` starts as `undefined` — the user specifies runtime domains during approval. For updated skills, existing `domains` are preserved (previously user-approved). On first real usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow).
 
 ## Files
 
@@ -135,7 +136,7 @@ For new skills, `allowedDomains` starts as `undefined` — the user specifies ru
 | `src/runtime/container/netpolicy-image.ts` | Lazy build of `lifemodel-netpolicy:latest` helper image |
 | `src/runtime/container/container-manager.ts` | `buildCreateArgs()` network mode selection, pause/unpause flow with cleanup in `create()` |
 | `src/runtime/container/types.ts` | `ContainerConfig.allowedDomains`, `ContainerConfig.allowedPorts` |
-| `src/runtime/motor-cortex/motor-cortex.ts` | `startRun()` / `retryRun()` domain merging, threading to container config |
+| `src/runtime/motor-cortex/motor-cortex.ts` | Post-run extraction + pendingCredentials reconciliation. Domain merging handled by core.act caller |
 | `src/runtime/motor-cortex/motor-protocol.ts` | `MotorRun.domains` field |
 | `src/layers/cognition/tools/core/act.ts` | `domains` parameter on `core.act` |
 | `src/layers/cognition/tools/core/task.ts` | `domains` parameter on retry action |

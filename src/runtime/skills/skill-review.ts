@@ -1,7 +1,7 @@
 /**
  * Skill Review Service
  *
- * Deterministic fact collection from policy, run evidence, and instruction content.
+ * Deterministic fact collection from policy and instruction content.
  * Content references are advisory extraction hints, not authoritative policy.
  * The sandbox (Docker + iptables) is the real security boundary;
  * this layer provides visibility for informed user consent.
@@ -220,8 +220,8 @@ export interface SkillReview {
   /** Description from frontmatter */
   description: string;
 
-  /** Trust level interpretation */
-  trust: string;
+  /** Status level interpretation */
+  status: string;
 
   /** Domains allowed by policy (runtime permissions) */
   policyDomains: string[];
@@ -229,19 +229,14 @@ export interface SkillReview {
   /** Credentials declared in policy */
   policyCredentials: string[];
 
+  /** Tools allowed by policy */
+  policyTools: string[];
+
   /** Env var names referenced in skill files (observed, not authoritative) */
   referencedCredentials: string[];
 
   /** Domain names referenced via URLs in skill files (observed, not authoritative) */
   referencedDomains: string[];
-
-  /** Observed evidence from creation/update run */
-  evidence: {
-    fetchedDomains: string[];
-    savedCredentials: string[];
-    toolsUsed: string[];
-    bashUsed: boolean;
-  } | null;
 
   /** File inventory (deterministic) */
   files: SkillFileInventory[];
@@ -337,9 +332,8 @@ async function scanSkillFileInventory(skillPath: string): Promise<ScanResult> {
 /**
  * Generate a deterministic skill review for approval flow.
  *
- * Collects facts from the skill's policy (runtime permissions), evidence
- * from the creation run (what actually happened), file inventory, and
- * content references (observed env vars and URLs in instructions).
+ * Collects facts from the skill's policy (runtime permissions), file inventory,
+ * and content references (observed env vars and URLs in instructions).
  *
  * @param loaded - The loaded skill to review
  * @returns Deterministic review for Cognition to present
@@ -355,38 +349,38 @@ export async function reviewSkill(loaded: LoadedSkill): Promise<SkillReview> {
   const referencedCredentials = extractCredentialReferences(scan.allText);
   const referencedDomains = extractDomainReferences(scan.allText);
 
-  // Interpret trust level
-  let trust: string;
+  // Interpret status level
+  let status: string;
   if (!policy) {
-    trust = 'no_policy - skill has no security policy';
+    status = 'no_policy - skill has no security policy';
   } else {
-    switch (policy.trust) {
+    switch (policy.status) {
       case 'pending_review':
-        trust = 'pending_review - freshly created by Motor Cortex, never reviewed';
+        status = 'pending_review - freshly created by Motor Cortex, never reviewed';
         break;
       case 'reviewed':
-        trust = 'reviewed - security review done, waiting for user approval';
+        status = 'reviewed - security review done, waiting for user approval';
         break;
       case 'needs_reapproval':
-        trust = 'needs_reapproval - content changed since last approval';
+        status = 'needs_reapproval - content changed since last approval';
         break;
       case 'approved':
-        trust = 'approved - user has approved these permissions';
+        status = 'approved - user has approved these permissions';
         break;
       default:
-        trust = `unknown (${(policy as { trust: string }).trust})`;
+        status = `unknown (${(policy as { status: string }).status})`;
     }
   }
 
   return {
     name: loaded.frontmatter.name,
     description: loaded.frontmatter.description,
-    trust,
-    policyDomains: policy?.allowedDomains ?? [],
+    status,
+    policyDomains: policy?.domains ?? [],
     policyCredentials: policy?.requiredCredentials ?? [],
+    policyTools: policy?.tools ?? [],
     referencedCredentials,
     referencedDomains,
-    evidence: policy?.runEvidence ?? null,
     files,
     provenance: policy?.provenance ?? undefined,
     extractedFrom: policy?.extractedFrom ?? undefined,

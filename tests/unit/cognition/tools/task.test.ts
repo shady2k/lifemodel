@@ -98,7 +98,7 @@ describe('core.task tool', () => {
       );
 
       expect(result).toMatchObject({ success: true });
-      expect(mockMotorCortex.respondToRun).toHaveBeenCalledWith('run-123', 'yes', undefined);
+      expect(mockMotorCortex.respondToRun).toHaveBeenCalledWith('run-123', 'yes', undefined, undefined);
     });
 
     it('passes domains when provided', async () => {
@@ -107,7 +107,7 @@ describe('core.task tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       );
 
-      expect(mockMotorCortex.respondToRun).toHaveBeenCalledWith('run-123', 'yes', [
+      expect(mockMotorCortex.respondToRun).toHaveBeenCalledWith('run-123', 'yes', undefined, [
         'api.new.com',
       ]);
     });

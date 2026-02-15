@@ -245,7 +245,7 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
           }
 
           try {
-            const result = await motorCortex.respondToRun(runId, answer, domains);
+            const result = await motorCortex.respondToRun(runId, answer, undefined, domains);
             return {
               success: true,
               data: result,
@@ -365,7 +365,16 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
           try {
             const constraints = args['constraints'] as string[] | undefined;
             const domains = args['domains'] as string[] | undefined;
-            const result = await motorCortex.retryRun(runId, guidance, constraints, domains);
+            // SystemPrompt is reused from the previous attempt's system message
+            // (Motor Cortex extracts it from the attempt messages on auto-retry)
+            const systemPrompt = (args['systemPrompt'] as string | undefined) ?? '';
+            const result = await motorCortex.retryRun(
+              runId,
+              guidance,
+              systemPrompt,
+              constraints,
+              domains
+            );
             return {
               success: true,
               data: result,

@@ -78,7 +78,7 @@ describe('buildMotorResultSection', () => {
       const section = buildMotorResultSection(data);
 
       // Should have the new observability-focused wording
-      expect(section).toContain('not instrumented in run evidence');
+      expect(section).toContain('not instrumented in run');
       expect(section).toContain('enforced by the container firewall');
     });
 

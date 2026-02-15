@@ -1,8 +1,10 @@
 /**
  * Tests for core.skill tool
  *
- * Validates: read, approve, reject flows, error cases, tool metadata.
+ * Validates: read, approve, reject, update flows, error cases, tool metadata.
  * Uses temp directories with mock SKILL.md + policy.json.
+ *
+ * All policies use v2 schema (schemaVersion: 2, status, domains).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -13,24 +15,7 @@ import { createSkillTool } from '../../../../../../src/layers/cognition/tools/co
 import type { SkillResult } from '../../../../../../src/layers/cognition/tools/core/skill.js';
 import type { SkillPolicy } from '../../../../../../src/runtime/skills/skill-types.js';
 import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
-
-/** Minimal valid SKILL.md content */
-const SKILL_MD = `---
-name: test-skill
-description: A test skill for testing
----
-# Test Skill
-Do something useful.
-`;
-
-/** Create a policy.json with given trust state */
-function makePolicy(trust: 'needs_reapproval' | 'pending_review' | 'approved'): SkillPolicy {
-  return {
-    schemaVersion: 1,
-    trust,
-    allowedDomains: ['api.example.com'],
-  };
-}
+import { createTestPolicy, TEST_SKILL_MD } from '../../../../../helpers/factories.js';
 
 describe('core.skill tool', () => {
   let skillsDir: string;
@@ -49,7 +34,7 @@ describe('core.skill tool', () => {
   async function setupSkill(name: string, policy?: SkillPolicy): Promise<string> {
     const dir = join(skillsDir, name);
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'SKILL.md'), SKILL_MD);
+    await writeFile(join(dir, 'SKILL.md'), TEST_SKILL_MD);
     if (policy) {
       await writeFile(join(dir, 'policy.json'), JSON.stringify(policy));
     }
@@ -64,7 +49,7 @@ describe('core.skill tool', () => {
 
   describe('read', () => {
     it('returns full skill content with policy', async () => {
-      await setupSkill('test-skill', makePolicy('pending_review'));
+      await setupSkill('test-skill', createTestPolicy({ status: 'pending_review' }));
 
       const result = (await tool.execute({
         action: 'read',
@@ -78,9 +63,9 @@ describe('core.skill tool', () => {
       expect(result.frontmatter?.['description']).toBe('A test skill for testing');
       expect(result.body).toContain('# Test Skill');
       expect(result.body).toContain('Do something useful.');
-      expect(result.trust).toBe('pending_review');
+      expect(result.status).toBe('pending_review');
       expect(result.policy).toBeDefined();
-      expect(result.policy?.allowedDomains).toEqual(['api.example.com']);
+      expect(result.policy?.domains).toEqual(['api.example.com']);
     });
 
     it('works without policy.json', async () => {
@@ -95,12 +80,12 @@ describe('core.skill tool', () => {
       expect(result.skill).toBe('test-skill');
       expect(result.frontmatter?.['name']).toBe('test-skill');
       expect(result.body).toContain('# Test Skill');
-      expect(result.trust).toBe('no_policy');
+      expect(result.status).toBe('no_policy');
       expect(result.policy).toBeUndefined();
     });
 
-    it('works with any trust state', async () => {
-      await setupSkill('test-skill', makePolicy('approved'));
+    it('works with any status', async () => {
+      await setupSkill('test-skill', createTestPolicy());
 
       const result = (await tool.execute({
         action: 'read',
@@ -108,7 +93,7 @@ describe('core.skill tool', () => {
       })) as SkillResult;
 
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('approved');
+      expect(result.status).toBe('approved');
     });
 
     it('errors on nonexistent skill', async () => {
@@ -124,7 +109,7 @@ describe('core.skill tool', () => {
 
   describe('approve', () => {
     it('approves a pending_review skill (user can skip review)', async () => {
-      await setupSkill('test-skill', makePolicy('pending_review'));
+      await setupSkill('test-skill', createTestPolicy({ status: 'pending_review' }));
 
       const result = (await tool.execute(
         {
@@ -135,11 +120,11 @@ describe('core.skill tool', () => {
       )) as SkillResult;
 
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('approved');
+      expect(result.status).toBe('approved');
     });
 
     it('approves a needs_reapproval skill', async () => {
-      await setupSkill('test-skill', makePolicy('needs_reapproval'));
+      await setupSkill('test-skill', createTestPolicy({ status: 'needs_reapproval' }));
 
       const result = (await tool.execute(
         {
@@ -150,21 +135,38 @@ describe('core.skill tool', () => {
       )) as SkillResult;
 
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('approved');
+      expect(result.status).toBe('approved');
 
       const saved = await readPolicy('test-skill');
-      expect(saved.trust).toBe('approved');
+      expect(saved.status).toBe('approved');
       expect(saved.approvedBy).toBe('user');
+    });
+
+    it('approves a reviewed skill', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewed' }));
+
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe('approved');
     });
 
     it('stamps contentHash so approval survives subsequent loads', async () => {
       // Simulate a skill with a stale contentHash (content changed after extraction)
-      const policy = makePolicy('needs_reapproval');
-      policy.provenance = {
-        source: 'https://example.com',
-        fetchedAt: '2026-01-01T00:00:00Z',
-        contentHash: 'sha256:stale-hash-that-does-not-match',
-      };
+      const policy = createTestPolicy({
+        status: 'needs_reapproval',
+        provenance: {
+          source: 'https://example.com',
+          fetchedAt: '2026-01-01T00:00:00Z',
+          contentHash: 'sha256:stale-hash-that-does-not-match',
+        },
+      });
       await setupSkill('test-skill', policy);
 
       // Approve
@@ -176,18 +178,18 @@ describe('core.skill tool', () => {
         { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
       )) as SkillResult;
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('approved');
+      expect(result.status).toBe('approved');
 
       // Reload — loadSkill() checks contentHash; approval must survive
       const reloaded = await loadSkill('test-skill', skillsDir);
       expect('error' in reloaded).toBe(false);
       if (!('error' in reloaded)) {
-        expect(reloaded.policy?.trust).toBe('approved');
+        expect(reloaded.policy?.status).toBe('approved');
       }
     });
 
     it('errors if skill is already approved', async () => {
-      await setupSkill('test-skill', makePolicy('approved'));
+      await setupSkill('test-skill', createTestPolicy());
 
       const result = (await tool.execute(
         {
@@ -219,7 +221,7 @@ describe('core.skill tool', () => {
 
   describe('reject', () => {
     it('rejects a pending_review skill back to needs_reapproval', async () => {
-      await setupSkill('test-skill', makePolicy('pending_review'));
+      await setupSkill('test-skill', createTestPolicy({ status: 'pending_review' }));
 
       const result = (await tool.execute(
         {
@@ -230,10 +232,10 @@ describe('core.skill tool', () => {
       )) as SkillResult;
 
       expect(result.success).toBe(true);
-      expect(result.trust).toBe('needs_reapproval');
+      expect(result.status).toBe('needs_reapproval');
 
       const saved = await readPolicy('test-skill');
-      expect(saved.trust).toBe('needs_reapproval');
+      expect(saved.status).toBe('needs_reapproval');
       expect(saved.approvedBy).toBeUndefined();
       expect(saved.approvedAt).toBeUndefined();
     });
@@ -301,7 +303,7 @@ describe('core.skill tool', () => {
     it('has action parameter with enum', () => {
       const actionParam = tool.parameters.find((p) => p.name === 'action');
       expect(actionParam).toBeDefined();
-      expect(actionParam?.enum).toEqual(['read', 'review', 'approve', 'reject', 'delete']);
+      expect(actionParam?.enum).toEqual(['read', 'review', 'approve', 'reject', 'delete', 'update']);
     });
   });
 });

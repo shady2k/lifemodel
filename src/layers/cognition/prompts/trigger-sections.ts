@@ -252,7 +252,7 @@ export function buildMotorResultSection(data: MotorResultData): string {
           installedSkills.updated.length > 0
             ? `Skills updated: ${installedSkills.updated.join(', ')}.`
             : '';
-        context += ` ${createdStr} ${updatedStr} These are installed with trust: "pending_review" and need user approval.`;
+        context += ` ${createdStr} ${updatedStr} These are installed with status: "pending_review" and need user approval.`;
       }
 
       // Build task
@@ -271,7 +271,7 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
    Motor review gets read-only tools, no network, no synthetic tools. It reads SKILL.md, scripts/, references/.
 4. Do NOT present partial info — wait for the review motor_result on a later turn.
 5. When the review motor_result arrives, present the Motor analysis summary to the user along with the deterministic facts.
-   - If bash was used during creation, note: "Network activity beyond the fetch tool is not instrumented in run evidence, but all network access is still enforced by the container firewall"
+   - If bash was used during creation, note: "Network activity beyond the fetch tool is not instrumented in run, but all network access is still enforced by the container firewall"
    - For each referenced credential, tell the user to set the env var with VAULT_ prefix: export VAULT_<CREDENTIAL_NAME>="value"
      Example: if the skill references AGENTMAIL_API_KEY, the user must set VAULT_AGENTMAIL_API_KEY.
    - For policy domains, note which domains should be added to the skill policy for runtime network access.

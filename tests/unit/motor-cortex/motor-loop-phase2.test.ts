@@ -1,12 +1,16 @@
 /**
- * Unit tests for Motor Loop Phase 2: skill injection, approval flow, credential resolution.
- * Updated for attempt-based structure.
+ * Unit tests for Motor Cortex Phase 2: prompt builder, approval flow, credential resolution.
+ * Updated for the new architecture where Motor Cortex is a pure runtime.
+ *
+ * Key changes from original:
+ * - buildMotorSystemPrompt moved from motor-loop.ts to motor-prompt.ts
+ * - buildInitialMessages removed (messages created by motor-cortex.ts createAttempt)
+ * - Skill injection is now via callerInstructions (built by act.ts), not the prompt builder
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildMotorSystemPrompt, buildInitialMessages } from '../../../src/runtime/motor-cortex/motor-loop.js';
+import { buildMotorSystemPrompt } from '../../../src/runtime/motor-cortex/motor-prompt.js';
 import type { MotorRun, MotorAttempt } from '../../../src/runtime/motor-cortex/motor-protocol.js';
-import type { LoadedSkill } from '../../../src/runtime/skills/skill-types.js';
 
 function makeAttempt(overrides?: Partial<MotorAttempt>): MotorAttempt {
   return {
@@ -47,8 +51,6 @@ function makeRun(overrides?: Partial<MotorRun>): MotorRun {
     energyConsumed: 0,
     config: {
       syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
-      installDependencies: true,
-      mergePolicyDomains: true,
     },
     ...overrides,
   };
@@ -56,36 +58,48 @@ function makeRun(overrides?: Partial<MotorRun>): MotorRun {
 
 describe('buildMotorSystemPrompt', () => {
   it('includes all tool descriptions', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run);
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash', 'read', 'write', 'list'],
+      syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
+    });
 
     expect(prompt).toContain('bash:');
     expect(prompt).toContain('read:');
   });
 
-  it('includes new Phase 2 tools in descriptions', () => {
-    const run = makeRun({ tools: ['grep', 'patch'] });
-    const prompt = buildMotorSystemPrompt(run);
+  it('includes Phase 2 tools in descriptions', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['grep', 'patch'],
+      syntheticTools: [],
+    });
 
     expect(prompt).toContain('grep:');
     expect(prompt).toContain('patch:');
   });
 
   it('includes credential guidance', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run);
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+    });
     expect(prompt).toContain('Credentials are environment variables');
   });
 
   it('includes recovery context when provided', () => {
-    const run = makeRun();
-    const recoveryContext = {
-      source: 'cognition' as const,
-      previousAttemptId: 'att_0',
-      guidance: 'Try using a different URL: https://api.example.com/v2',
-      constraints: ['do not retry login more than once'],
-    };
-    const prompt = buildMotorSystemPrompt(run, undefined, recoveryContext);
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+      recoveryContext: {
+        source: 'cognition' as const,
+        previousAttemptId: 'att_0',
+        guidance: 'Try using a different URL: https://api.example.com/v2',
+        constraints: ['do not retry login more than once'],
+      },
+    });
 
     expect(prompt).toContain('<recovery_context source="cognition">');
     expect(prompt).toContain('Try using a different URL');
@@ -94,96 +108,73 @@ describe('buildMotorSystemPrompt', () => {
   });
 
   it('does not include recovery context when not provided', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run);
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+    });
     expect(prompt).not.toContain('<recovery_context');
   });
 });
 
-describe('skill injection into system prompt', () => {
-  const skill: LoadedSkill = {
-    frontmatter: {
-      name: 'weather-report',
-      description: 'Fetch weather data from a public API',
-    },
-    policy: {
-      schemaVersion: 1,
-      trust: 'approved',
-      requiredCredentials: ['weather_api_key'],
-    },
-    body: '# Weather Report\n\nUse curl -H "Authorization: Bearer <credential:weather_api_key>" to call the API.',
-    path: '/data/skills/weather-report',
-    skillPath: '/data/skills/weather-report/SKILL.md',
-  };
-
-  it('includes skill reference with workspace root paths', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run, skill);
+describe('callerInstructions injection', () => {
+  it('includes caller instructions when provided', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash', 'read'],
+      syntheticTools: [],
+      callerInstructions: 'Skill: weather-report\nread({path: "SKILL.md"})\nlist({path: "."})',
+    });
 
     expect(prompt).toContain('Skill: weather-report');
     expect(prompt).toContain('read({path: "SKILL.md"})');
     expect(prompt).toContain('list({path: "."})');
   });
 
-  it('includes credential guidance when skill has required credentials', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run, skill);
+  it('includes credential guidance in caller instructions', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash', 'read'],
+      syntheticTools: [],
+      callerInstructions: 'Available credentials (as env vars):\n- weather_api_key\nUsage:\n  Node script: const apiKey = process.env.weather_api_key;',
+    });
 
     expect(prompt).toContain('process.env.weather_api_key');
   });
 
-  it('does not inject skill tags when no skill provided', () => {
-    const run = makeRun();
-    const prompt = buildMotorSystemPrompt(run);
+  it('does not include skill content when no caller instructions', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+    });
 
-    expect(prompt).not.toContain('<skill');
-    expect(prompt).not.toContain('</skill>');
+    expect(prompt).not.toContain('Skill:');
   });
 });
 
-describe('buildInitialMessages', () => {
-  it('creates system message with skill reference when provided', () => {
-    const run = makeRun();
-    const skill: LoadedSkill = {
-      frontmatter: {
-        name: 'test',
-        description: 'Test',
-      },
-      body: 'Skill body',
-      path: '/test',
-      skillPath: '/test/SKILL.md',
-    };
+describe('domain handling', () => {
+  it('includes allowed domains', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+      domains: ['api.example.com', 'github.com'],
+    });
 
-    const messages = buildInitialMessages(run, skill);
-    expect(messages).toHaveLength(2);
-    expect(messages[0]?.role).toBe('system');
-    expect(messages[0]?.content).toContain('Skill: test');
-    expect(messages[0]?.content).toContain('read({path: "SKILL.md"})');
-    expect(messages[1]?.role).toBe('user');
-
+    expect(prompt).toContain('api.example.com');
+    expect(prompt).toContain('github.com');
+    expect(prompt).toContain('Allowed network domains');
   });
 
-  it('creates system message without skill', () => {
-    const run = makeRun();
-    const messages = buildInitialMessages(run);
-    expect(messages).toHaveLength(2);
-    expect(messages[0]?.content).not.toContain('<skill');
-    expect(messages[1]?.role).toBe('user');
-  });
+  it('shows no network when no domains', () => {
+    const prompt = buildMotorSystemPrompt({
+      task: 'Test task',
+      tools: ['bash'],
+      syntheticTools: [],
+    });
 
-  it('creates system message with recovery context', () => {
-    const run = makeRun();
-    const recoveryContext = {
-      source: 'cognition' as const,
-      previousAttemptId: 'att_0',
-      guidance: 'Use port 8080 instead of 443',
-    };
-
-    const messages = buildInitialMessages(run, undefined, recoveryContext);
-    expect(messages).toHaveLength(2);
-    expect(messages[0]?.content).toContain('<recovery_context');
-    expect(messages[0]?.content).toContain('Use port 8080 instead of 443');
-    expect(messages[1]?.role).toBe('user');
+    expect(prompt).toContain('Network access is disabled');
   });
 });
 

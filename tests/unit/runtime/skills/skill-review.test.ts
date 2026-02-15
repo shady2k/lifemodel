@@ -15,6 +15,7 @@ import {
 } from '../../../../src/runtime/skills/skill-review.js';
 import { loadSkill } from '../../../../src/runtime/skills/skill-loader.js';
 import type { LoadedSkill } from '../../../../src/runtime/skills/skill-types.js';
+import { createTestPolicy } from '../../../helpers/factories.js';
 
 describe('skill-review', () => {
   let skillDir: string;
@@ -84,12 +85,12 @@ describe('skill-review', () => {
     it('returns trust interpretation', async () => {
       const loaded = await createSkill({
         name: 'pending-skill',
-        policy: { schemaVersion: 1, trust: 'pending_review' },
+        policy: createTestPolicy({ status: 'pending_review' }),
       });
 
       const review = await reviewSkill(loaded);
 
-      expect(review.trust).toContain('pending_review');
+      expect(review.status).toContain('pending_review');
     });
 
     it('handles missing policy gracefully', async () => {
@@ -97,21 +98,20 @@ describe('skill-review', () => {
 
       const review = await reviewSkill(loaded);
 
-      expect(review.trust).toContain('no_policy');
+      expect(review.status).toContain('no_policy');
       expect(review.policyDomains).toEqual([]);
       expect(review.policyCredentials).toEqual([]);
     });
   });
 
   describe('policy extraction', () => {
-    it('extracts allowedDomains from policy', async () => {
+    it('extracts domains from policy', async () => {
       const loaded = await createSkill({
         name: 'domains-skill',
-        policy: {
-          schemaVersion: 1,
-          trust: 'approved',
-          allowedDomains: ['api.example.com', 'cdn.example.com'],
-        },
+        policy: createTestPolicy({
+          status: 'approved',
+          domains: ['api.example.com', 'cdn.example.com'],
+        }),
       });
 
       const review = await reviewSkill(loaded);
@@ -122,11 +122,10 @@ describe('skill-review', () => {
     it('extracts requiredCredentials from policy', async () => {
       const loaded = await createSkill({
         name: 'creds-skill',
-        policy: {
-          schemaVersion: 1,
-          trust: 'approved',
+        policy: createTestPolicy({
+          status: 'approved',
           requiredCredentials: ['API_KEY', 'SECRET_TOKEN'],
-        },
+        }),
       });
 
       const review = await reviewSkill(loaded);
@@ -135,39 +134,6 @@ describe('skill-review', () => {
     });
   });
 
-  describe('run evidence', () => {
-    it('returns null evidence when not in policy', async () => {
-      const loaded = await createSkill({
-        name: 'no-evidence-skill',
-        policy: { schemaVersion: 1, trust: 'approved' },
-      });
-
-      const review = await reviewSkill(loaded);
-
-      expect(review.evidence).toBeNull();
-    });
-
-    it('returns evidence from policy', async () => {
-      const evidence = {
-        fetchedDomains: ['api.github.com', 'raw.githubusercontent.com'],
-        savedCredentials: ['GITHUB_TOKEN'],
-        toolsUsed: ['fetch', 'write', 'bash'],
-        bashUsed: true,
-      };
-      const loaded = await createSkill({
-        name: 'evidence-skill',
-        policy: {
-          schemaVersion: 1,
-          trust: 'pending_review',
-          runEvidence: evidence,
-        },
-      });
-
-      const review = await reviewSkill(loaded);
-
-      expect(review.evidence).toEqual(evidence);
-    });
-  });
 
   describe('file inventory', () => {
     it('scans skill files', async () => {
@@ -194,7 +160,7 @@ describe('skill-review', () => {
     it('excludes policy.json from inventory', async () => {
       const loaded = await createSkill({
         name: 'policy-exclude-skill',
-        policy: { schemaVersion: 1, trust: 'approved' },
+        policy: createTestPolicy(),
       });
 
       const review = await reviewSkill(loaded);
@@ -212,11 +178,7 @@ describe('skill-review', () => {
       };
       const loaded = await createSkill({
         name: 'provenance-skill',
-        policy: {
-          schemaVersion: 1,
-          trust: 'approved',
-          provenance,
-        },
+        policy: createTestPolicy({ status: 'approved', provenance }),
       });
 
       const review = await reviewSkill(loaded);
@@ -391,16 +353,7 @@ describe('skill-review', () => {
         const loaded = await createSkill({
           name: 'agentmail-test',
           description: 'AgentMail API skill',
-          policy: {
-            schemaVersion: 1,
-            trust: 'pending_review',
-            runEvidence: {
-              fetchedDomains: ['agentmail.dev'],
-              savedCredentials: [],
-              toolsUsed: ['fetch'],
-              bashUsed: false,
-            },
-          },
+          policy: createTestPolicy({ status: 'pending_review' }),
         });
 
         // Modify the skill body to include references
@@ -442,7 +395,7 @@ Also see https://console.agentmail.to for dashboard access.
         const loaded = await createSkill({
           name: 'multi-file-skill',
           description: 'Skill with references in multiple files',
-          policy: { schemaVersion: 1, trust: 'pending_review' },
+          policy: createTestPolicy({ status: 'pending_review' }),
           files: [
             {
               path: 'scripts/setup.sh',

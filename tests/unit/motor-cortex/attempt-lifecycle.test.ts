@@ -6,7 +6,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { buildFailureSummary, getFailureHint, buildMotorSystemPrompt } from '../../../src/runtime/motor-cortex/motor-loop.js';
+import { buildFailureSummary, getFailureHint } from '../../../src/runtime/motor-cortex/motor-loop.js';
+import { buildMotorSystemPrompt } from '../../../src/runtime/motor-cortex/motor-prompt.js';
 import type { MotorRun, MotorAttempt, StepTrace, RunTrace } from '../../../src/runtime/motor-cortex/motor-protocol.js';
 import type { LLMProvider } from '../../../src/llm/provider.js';
 import type { Logger } from '../../../src/types/index.js';
@@ -221,7 +222,12 @@ describe('recovery context in system prompt', () => {
   it('includes recovery context in prompt for attempt 1+', () => {
     const run = makeRunForPrompt();
     const attempt = run.attempts[1]!;
-    const prompt = buildMotorSystemPrompt(run, undefined, attempt.recoveryContext);
+    const prompt = buildMotorSystemPrompt({
+      task: run.task,
+      tools: run.tools,
+      syntheticTools: run.config.syntheticTools,
+      recoveryContext: attempt.recoveryContext,
+    });
 
     expect(prompt).toContain('<recovery_context source="cognition">');
     expect(prompt).toContain('Use https://backup-api.example.com instead');
@@ -231,7 +237,13 @@ describe('recovery context in system prompt', () => {
 
   it('uses attempt maxIterations (15 for retry)', () => {
     const run = makeRunForPrompt();
-    const prompt = buildMotorSystemPrompt(run);
+    const attempt = run.attempts[1]!;
+    const prompt = buildMotorSystemPrompt({
+      task: run.task,
+      tools: run.tools,
+      syntheticTools: run.config.syntheticTools,
+      maxIterations: attempt.maxIterations,
+    });
 
     expect(prompt).toContain('Maximum iterations: 15');
   });

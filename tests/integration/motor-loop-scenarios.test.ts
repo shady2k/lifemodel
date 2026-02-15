@@ -60,13 +60,8 @@ describe('Motor Loop Scenario Tests', () => {
       const content = await readFile(filePath, 'utf-8');
       expect(content).toBe('hello world');
 
-      // Assert signal emitted
-      expect(pushSignal.count()).toBe(1);
-      const signal = pushSignal.getLastSignal();
-      expect(signal?.type).toBe('motor_result');
-      expect(signal?.data?.kind).toBe('motor_result');
-      expect(signal?.data?.status).toBe('completed');
-      expect(signal?.data?.result?.ok).toBe(true);
+      // No completion signal from runMotorLoop directly; emitted by motor-cortex middleware.
+      expect(pushSignal.count()).toBe(0);
 
       await cleanup();
     });
@@ -199,8 +194,8 @@ describe('Motor Loop Scenario Tests', () => {
       const content = await readFile(filePath, 'utf-8');
       expect(content).toBe('Hello, Alice!');
 
-      // Assert signal
-      expect(pushSignal.getLastSignal()?.data?.status).toBe('completed');
+      // No completion signal from runMotorLoop directly; emitted by motor-cortex middleware.
+      expect(pushSignal.count()).toBe(0);
 
       await cleanupPause();
       await cleanupResume();

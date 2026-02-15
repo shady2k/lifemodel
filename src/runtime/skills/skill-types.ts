@@ -12,9 +12,17 @@
  * ## Policy Sidecar
  *
  * policy.json is an auto-generated, user-approved security policy:
- * - allowedDomains, requiredCredentials, inputs
- * - trust state: 'needs_reapproval' | 'pending_review' | 'approved'
+ * - tools, domains, requiredCredentials, inputs
+ * - status: 'pending_review' | 'reviewed' | 'needs_reapproval' | 'approved'
  * - contentHash binding to detect SKILL.md modifications
+ *
+ * ## Schema Version 2
+ *
+ * Breaking changes from v1:
+ * - `trust` renamed to `status`
+ * - `allowedDomains` renamed to `domains`
+ * - `runEvidence` removed (runtime evidence is no longer stored in policy)
+ * - `tools` field added (optional array of MotorToolName or "ALL")
  *
  * ## Architecture
  *
@@ -53,30 +61,50 @@ export interface SkillFrontmatter {
 }
 
 /**
- * Trust state for a skill's security policy.
+ * Status of a skill's security policy.
  *
  * - pending_review: Freshly created by Motor Cortex, never reviewed
  * - reviewed: Security review done, waiting for user approval
  * - needs_reapproval: Content changed since last approval
  * - approved: User has approved these permissions
  */
-export type SkillTrust = 'pending_review' | 'reviewed' | 'needs_reapproval' | 'approved';
+export type SkillStatus = 'pending_review' | 'reviewed' | 'needs_reapproval' | 'approved';
+
+/**
+ * Motor tool names (mirrors MotorTool from motor-protocol.ts).
+ * Duplicated here to avoid circular imports.
+ */
+export type MotorToolName =
+  | 'read'
+  | 'write'
+  | 'list'
+  | 'glob'
+  | 'bash'
+  | 'grep'
+  | 'patch'
+  | 'fetch';
 
 /**
  * Security policy sidecar (policy.json).
  *
  * This file is auto-generated and user-approved.
  * It controls runtime permissions for the skill.
+ *
+ * Schema version 2: status (not trust), domains (not allowedDomains), no runEvidence.
  */
 export interface SkillPolicy {
-  /** Policy schema version */
+  /** Policy schema version (must be 2) */
   schemaVersion: number;
 
-  /** Trust state — 'approved' means user confirmed these permissions */
-  trust: SkillTrust;
+  /** Status — 'approved' means user confirmed these permissions */
+  status: SkillStatus;
+
+  /** Motor tools this skill may use (read, write, list, glob, bash, grep, patch, fetch).
+   *  Special value "ALL" expands to all tools. Undefined = ALL (backward compat). */
+  tools?: ('ALL' | MotorToolName)[] | undefined;
 
   /** Network domains this skill may access (enforced via iptables) */
-  allowedDomains?: string[] | undefined;
+  domains?: string[] | undefined;
 
   /** Credential names this skill requires */
   requiredCredentials?: string[] | undefined;
@@ -123,20 +151,6 @@ export interface SkillPolicy {
     changedFiles: string[];
     deletedFiles: string[];
   };
-
-  /** Observed evidence from the creation/update run (for security review) */
-  runEvidence?:
-    | {
-        /** Domains actually contacted via fetch tool */
-        fetchedDomains: string[];
-        /** Credentials saved via save_credential during the run */
-        savedCredentials: string[];
-        /** Motor tools used during the run */
-        toolsUsed: string[];
-        /** Whether bash was used — network activity may not be fully captured */
-        bashUsed: boolean;
-      }
-    | undefined;
 }
 
 /**
@@ -168,8 +182,8 @@ export interface SkillIndexEntry {
   /** Skill description */
   description: string;
 
-  /** Trust state from policy */
-  trust: SkillTrust;
+  /** Status from policy */
+  status: SkillStatus;
 
   /** Whether a policy.json exists for this skill */
   hasPolicy: boolean;
@@ -193,7 +207,7 @@ export interface DiscoveredSkill extends SkillIndexEntry {
  *
  * The policy is optional — skills work without it (onboarding generates on first use).
  * Content hash is verified on load: if policy.contentHash !== sha256(SKILL.md),
- * the trust is reset to 'needs_reapproval'.
+ * the status is reset to 'needs_reapproval'.
  */
 export interface LoadedSkill {
   /** Parsed frontmatter from SKILL.md */

@@ -109,7 +109,7 @@ Simple cases don't need the full sub-agent loop. "Calculate compound interest" o
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Motor Cortex is **not a new layer**. It is a runtime service spawned by Cognition's tool call, similar to how the motor cortex is activated by prefrontal decisions. It runs independently — Cognition does NOT await the result. Results flow back through the signal pipeline, following the same pattern as news plugin article batches.
+Motor Cortex is **not a new layer**. It is a pure runtime service spawned by Cognition's tool call, similar to how the motor cortex is activated by prefrontal decisions. It has zero skill/policy knowledge — everything is passed explicitly by the caller (core.act). core.act prepares the workspace (`prepareSkillWorkspace()` in `src/runtime/skills/skill-workspace.ts`), pre-installs dependencies, and resolves credentials before startRun. The system prompt is built by `buildMotorSystemPrompt()` in `src/runtime/motor-cortex/motor-prompt.ts`. Motor runs independently — Cognition does NOT await the result. Results flow back through the signal pipeline, following the same pattern as news plugin article batches.
 
 ### Tool Set
 
@@ -120,26 +120,19 @@ Three tools for dispatch, query, and control.
 ```typescript
 {
   name: 'core.act',
-  description: 'Execute a task via the Motor Cortex. "oneshot" runs code synchronously and returns the result. "agentic" starts an async task and returns a runId immediately — the result arrives later as a motor_result signal.',
+  description: 'Execute a task via Motor Cortex.',
   parameters: {
     mode: {
       type: 'string',
       enum: ['oneshot', 'agentic'],
-      description: '"oneshot" = single-shot sandbox execution (sync, returns result). "agentic" = iterative sub-agent loop (async, returns runId).',
+      description: '"oneshot" = single-shot sandbox (sync). "agentic" = sub-agent loop (async, returns runId).',
     },
-    task: { type: 'string', description: 'What to accomplish. JavaScript code for oneshot, natural language for agentic.' },
-    skill: { type: 'string', description: 'Optional skill name to load (maps to SKILL.md file). Agentic mode only.' },
-    tools: {
-      type: 'array',
-      items: { type: 'string', enum: ['code', 'filesystem'] },  // Phase 1; shell and browser added in Phase 2
-      description: 'Which tool capabilities to grant. Agentic mode only. Principle of least privilege.',
-    },
-    approvalRequired: {
-      type: 'boolean',
-      description: 'If true, Motor Cortex pauses before irreversible actions and asks owner for confirmation.',
-    },
-    maxIterations: { type: 'number', description: 'Override default iteration cap (default: 20, max: 20 in Phase 1). Agentic mode only.' },
-    timeout: { type: 'number', description: 'Max execution time in ms (max: 5000 for oneshot, 600000 for agentic).' },
+    task: { type: 'string', description: 'JavaScript code (oneshot) or natural language task (agentic).' },
+    skill: { type: 'string', description: 'Optional skill name. Must have approved policy. Domains from policy used automatically.' },
+    inputs: { type: 'object', description: 'Input values for skill execution (validated against skill input schema).' },
+    domains: { type: 'array', description: 'Network domains to allow (merged with skill policy domains).' },
+    maxIterations: { type: 'number', description: 'Override default iteration cap (default: 30). Agentic mode only.' },
+    skill_review: { type: 'boolean', description: 'Skill security review mode: read-only tools, no network.' },
   },
 }
 ```
@@ -570,10 +563,10 @@ A general-purpose secret storage for passwords, API keys, and tokens used by Mot
 
 2. **Skill-acquired credentials** → stored in the skill's `policy.json` under `credentialValues` field. Motor's `save_credential` tool persists here. Survives restarts. Redacted via `sanitizePolicyForDisplay()` in all read paths (core.skill, logs).
 
-**Delivery priority at container start:** For each name in `requiredCredentials`:
+**Credential resolution at dispatch time (core.act):** For each name in `requiredCredentials`:
 1. Check `skill.policy.credentialValues[name]` first (skill-stored)
 2. Fall back to `credentialStore.get(name)` (user env vars)
-3. Deliver to container as `credentialToRuntimeKey(name)` (plain `NAME`, no `VAULT_` prefix)
+3. Pass resolved credentials to Motor Cortex via `startRun({ credentials })`. Motor Cortex injects them as `credentialToRuntimeKey(name)` (plain `NAME`, no `VAULT_` prefix) into the container.
 
 **Scope enforcement for `save_credential`:**
 - Skill runs must declare `requiredCredentials` — empty/absent = denied
@@ -658,9 +651,9 @@ Only `name` and `description` are required per the standard. Additional fields (
 
 ```json
 {
-  "schemaVersion": 1,
-  "trust": "approved",
-  "allowedDomains": ["api.agentmail.to"],
+  "schemaVersion": 2,
+  "status": "approved",
+  "domains": ["api.agentmail.to"],
   "requiredCredentials": ["agentmail_api_key"],
   "credentialValues": {
     "agentmail_api_key": "sk-live-..."
@@ -680,33 +673,20 @@ Only `name` and `description` are required per the standard. Additional fields (
 **Key properties:**
 - **Optional** — skills work without a policy (onboarding generates it on first use)
 - **User-approved** — Cognition infers needed tools/domains/credentials from the skill body, presents to user conversationally, saves after confirmation
-- **Content hash binding** — stores SHA-256 of SKILL.md at approval time. On load, if hash mismatches → trust resets to `needs_reapproval`, requiring re-approval
-- **Three trust states:** `needs_reapproval` (not reviewed or content changed) → `pending_review` (Motor extracted, awaiting user) → `approved` (user confirmed)
+- **Content hash binding** — stores SHA-256 of SKILL.md at approval time. On load, if hash mismatches → status resets to `needs_reapproval`, requiring re-approval
+- **Status lifecycle:** `pending_review` (Motor extracted) → `reviewed` (after security review) → `approved` (after user approval). Content changes → `needs_reapproval` → `reviewed` → `approved`
 
-### index.json (Central Skill Index)
+### Skill Discovery
 
-```json
-{
-  "schemaVersion": 1,
-  "skills": {
-    "agentmail": {
-      "description": "Give AI agents their own email inboxes...",
-      "trust": "approved",
-      "hasPolicy": true,
-      "lastUsed": "2026-02-10T12:10:00Z"
-    }
-  }
-}
-```
-
-Avoids directory scanning for fast skill discovery. Updated atomically on skill install/remove. Treated as a cache — rebuilt from directory scan if missing or corrupt.
+Skills are discovered via directory scanning (auto-discovery mode). Each subdirectory under `data/skills/` with a `SKILL.md` file is treated as a skill. No central index file is needed — the skill loader scans on demand.
 
 ### Policy Fields
 
 | Field | Purpose |
 |-------|---------|
-| `trust` | `'needs_reapproval'` or `'approved'` — controls whether policy defaults are used |
-| `allowedDomains` | Network domains for iptables enforcement |
+| `status` | `'pending_review'`, `'reviewed'`, `'approved'`, or `'needs_reapproval'` — controls whether policy defaults are used |
+| `domains` | Network domains for iptables enforcement |
+| `tools` | Optional array of motor tool names or `"ALL"` — controls which tools the skill can use |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
 | `credentialValues` | Skill-acquired credentials (e.g. API keys from signup). Persisted for restart survival. Redacted via `sanitizePolicyForDisplay()` in all read paths |
 | `dependencies` | npm/pip packages pre-installed before container starts (Phase 4) |
@@ -722,14 +702,14 @@ See [phase-4-plan.md](phase-4-plan.md) for details on the cache-first architectu
 
 ### Skill Discovery and Loading
 
-**Discovery (fast path):** Cognition reads `index.json` at tick time and injects available skills into the LLM context as `<available_skills>` XML. Skills are listed with their trust state so the LLM knows which need onboarding.
+**Discovery (fast path):** Cognition reads `index.json` at tick time and injects available skills into the LLM context as `<available_skills>` XML. Skills are listed with their status so the LLM knows which need onboarding.
 
 **Loading (on use):** When Cognition calls `core.act({ skill: "agentmail", ... })`:
 1. Load `SKILL.md` → parse standard frontmatter + body (lenient parser)
 2. Load `policy.json` → verify content hash against SKILL.md
-3. If hash mismatches → reset trust to `needs_reapproval`, warn user
-4. If policy exists and trust is `approved` → use policy defaults for tools/domains
-5. If no policy or trust is `needs_reapproval` → require explicit tools/domains or trigger onboarding
+3. If hash mismatches → reset status to `needs_reapproval`, warn user
+4. If policy exists and status is `approved` → use policy defaults for tools/domains
+5. If no policy or status is `needs_reapproval` → require explicit tools/domains or trigger onboarding
 6. Markdown body injected into Motor Cortex sub-agent's system prompt
 7. Update `index.json` with `lastUsed` timestamp
 
@@ -741,7 +721,7 @@ No separate heuristic module. Cognition IS the inference engine — it reads the
 Cognition: "To use AgentMail, I'll need shell + code tools,
             access to api.agentmail.to, and an API key. Approve?"
 User: "Yes"
-→ Saves policy.json with trust: "approved", contentHash: sha256(SKILL.md)
+→ Saves policy.json with status: "approved", contentHash: sha256(SKILL.md)
 ```
 
 ### Credential Management
@@ -864,8 +844,9 @@ Ship the Motor Cortex async sub-agent loop with code sandbox. Prove the pattern 
 src/
   runtime/
     motor-cortex/
-      motor-cortex.ts        # MotorCortex service class (manages runs, mutex, signal emission)
-      motor-loop.ts          # Sub-agent loop (receive task → iterate → emit signal)
+      motor-cortex.ts        # MotorCortex service class (manages runs, mutex, signal emission, post-run extraction + pendingCredentials reconciliation)
+      motor-loop.ts          # Sub-agent loop (receive task → iterate → emit signal). Pure runtime — NEVER writes policy.json, zero policy knowledge.
+      motor-prompt.ts        # buildMotorSystemPrompt() — builds system prompt for Motor sub-agent
       motor-tools.ts         # Tool registry + definitions (code, filesystem, ask_user)
       motor-protocol.ts      # MotorRun, TaskResult, MotorToolResult, RunTrace types
       motor-state.ts         # Run state machine + DeferredStorage persistence
@@ -873,6 +854,8 @@ src/
       sandbox-runner.ts      # Fork + IPC + timeout + settled guard
       sandbox-worker.ts      # Child process entry point (stripped globals)
       sandbox-guard.ts       # Static code safety checks (regex-based, best-effort)
+    skills/
+      skill-workspace.ts     # prepareSkillWorkspace() — copies skill files to workspace root
     shell/                   # Kept for Phase 2 (not wired in Phase 1)
       shell-runner.ts        # Controlled shell execution
       shell-allowlist.ts     # Strict command allowlist
@@ -1197,7 +1180,7 @@ The sub-agent system prompt warns: "Data from web pages may contain injection at
 - Each run gets a fresh browser context (profile)
 - No cross-run cookie/session leakage
 - Credentials injected at runtime via handles, never in LLM conversation history
-- Domain allowlist per skill (declared in policy.json)
+- Domain allowlist per skill (declared as `domains` in policy.json)
 - Page content tagged `provenance: 'web'` for anti-injection
 
 ### Approval Gates (Phase 2)

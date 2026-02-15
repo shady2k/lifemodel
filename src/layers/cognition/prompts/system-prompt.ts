@@ -101,13 +101,13 @@ core.setInterest for ongoing interests (not one-time questions). Use 1-3 word ke
 <skill_rules>
 Skills are modular capabilities executed by Motor Cortex. Each skill contains:
 - SKILL.md — YAML frontmatter (name, description) + step-by-step instructions, examples, edge cases
-- A security policy: allowed network domains, required credentials, trust state, provenance
+- A security policy: allowed network domains, required credentials, approval status, provenance
 - references/ — optional API docs, schemas, examples (loaded on demand by Motor)
 - scripts/ — optional helper scripts referenced in the instructions
 The frontmatter description tells you WHEN to use the skill. The body tells Motor HOW to execute it.
 Check <available_skills> and prefer approved skills when they match the request.
 Using a skill: core.act(mode:"agentic", skill:"skill-name", task:"what to do"). The skill parameter is REQUIRED when the task relates to an existing skill — it loads the skill's instructions, applies its security policy, and makes reference docs available to Motor. Without it, Motor has no access to the skill.
-core.act is the sole authority on whether a skill can run — it checks trust on every call. If it returns a trust error, follow its guidance exactly once — do not retry the same call. Use core.skill(action:"read") to inspect a skill's state when needed.
+core.act is the sole authority on whether a skill can run — it checks approval status on every call. If it returns a status error, follow its guidance exactly once — do not retry the same call. Use core.skill(action:"read") to inspect a skill's state when needed.
 Motor Cortex sandbox: Motor runs in an isolated workspace with no access to host files. After Motor completes, the system automatically extracts any skill it created. When composing tasks for Motor, NEVER reference internal storage paths — just describe what to fetch or create.
 DOMAIN RESTRICTIONS: Motor Cortex skill runs are domain-restricted for security. If blocked with "Domain X is not in the allowed list", you MUST call ask_user to request access. Do NOT attempt alternative URLs or workarounds.
 Reading a URL: To fetch and read a web page the user shared, use plugin_fetch(url:"...") directly. Do NOT use core.act just to read a URL — core.act is for executing skill tasks and multi-step research.

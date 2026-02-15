@@ -10,6 +10,8 @@ import { Priority } from '../../src/types/priority.js';
 import type { Logger } from '../../src/types/logger.js';
 import { createAgent, type Agent } from '../../src/core/agent.js';
 import { createMetrics } from '../../src/core/metrics.js';
+import type { SkillPolicy, SkillStatus } from '../../src/runtime/skills/skill-types.js';
+import type { LoadedSkill } from '../../src/runtime/skills/skill-types.js';
 
 /**
  * Create a mock logger that captures all log calls.
@@ -224,4 +226,43 @@ export function createTestAgent(options: {
   );
 
   return { agent, logger, metrics };
+}
+
+// ─── Skill & Policy Factories ───────────────────────────────────────
+
+/** Minimal valid SKILL.md content. */
+export const TEST_SKILL_MD = `---
+name: test-skill
+description: A test skill for testing
+---
+# Test Skill
+Do something useful.
+`;
+
+/**
+ * Create a v2 SkillPolicy with sensible defaults.
+ * Single source of truth for policy schema in tests.
+ */
+export function createTestPolicy(overrides: Partial<SkillPolicy> & { status?: SkillStatus } = {}): SkillPolicy {
+  return {
+    schemaVersion: 2,
+    status: 'approved',
+    domains: ['api.example.com'],
+    ...overrides,
+  };
+}
+
+/**
+ * Create a LoadedSkill for unit tests.
+ * Policy defaults to approved with standard test domains.
+ */
+export function createTestLoadedSkill(overrides: Partial<LoadedSkill> = {}): LoadedSkill {
+  return {
+    frontmatter: { name: 'test-skill', description: 'A test skill' },
+    policy: createTestPolicy(),
+    body: '# Test Skill\nDo something useful.',
+    path: '/data/skills/test-skill',
+    skillPath: '/data/skills/test-skill/SKILL.md',
+    ...overrides,
+  };
 }

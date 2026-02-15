@@ -9,7 +9,7 @@
  */
 
 import type { Logger } from '../../types/index.js';
-import type { LLMProvider } from '../../llm/provider.js';
+import type { LLMProvider, Message } from '../../llm/provider.js';
 import type { Storage } from '../../storage/storage.js';
 import type { Signal } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
@@ -24,19 +24,15 @@ import type {
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import type { MotorFetchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
-import { runMotorLoop, buildInitialMessages, buildMotorSystemPrompt } from './motor-loop.js';
+import { runMotorLoop } from './motor-loop.js';
+import { extractSkillsFromWorkspace } from './skill-extraction.js';
 import { runSandbox } from '../sandbox/sandbox-runner.js';
 import { createWorkspace } from './motor-tools.js';
 import { existsSync } from 'node:fs';
-import { cp, rm, readFile as readFileAsync } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
-import type { PreparedDeps, SkillDependencies } from '../dependencies/dependency-manager.js';
-import { generateBaseline } from './skill-extraction.js';
-import type { LoadedSkill } from '../skills/skill-types.js';
-import type { CredentialStore } from '../vault/credential-store.js';
-import { loadSkill, savePolicy } from '../skills/skill-loader.js';
-import { mergeDomains } from '../container/network-policy.js';
+import type { PreparedDeps } from '../dependencies/dependency-manager.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
 
 /**
@@ -64,9 +60,6 @@ export interface MotorCortexDeps {
 
   /** Energy model for energy gating */
   energyModel: EnergyModel;
-
-  /** Credential store for resolving <credential:name> placeholders (optional) */
-  credentialStore?: CredentialStore;
 
   /** Skills directory absolute path (optional, default: data/skills) */
   skillsDir?: string;
@@ -97,7 +90,6 @@ export class MotorCortex {
   private readonly logger: Logger;
   private readonly energyModel: EnergyModel;
   private readonly stateManager: MotorStateManager;
-  private readonly credentialStore: CredentialStore | undefined;
   private readonly skillsDir: string | undefined;
   private readonly artifactsBaseDir: string | undefined;
   private readonly containerManager: ContainerManager | undefined;
@@ -118,12 +110,20 @@ export class MotorCortex {
   /** Active container handles for paused runs (keyed by runId) */
   private readonly activeContainers = new Map<string, ContainerHandle>();
 
+  /** Pre-installed deps for runs (keyed by runId, set by startRun, used by runLoopInBackground) */
+  private readonly runPreparedDeps = new Map<string, PreparedDeps>();
+
+  /** Resolved credentials for runs (keyed by runId, set by startRun, used by runLoopInBackground) */
+  private readonly runCredentials = new Map<
+    string,
+    { credentials?: Record<string, string>; credentialNames?: string[] }
+  >();
+
   constructor(deps: MotorCortexDeps) {
     this.llm = deps.llm;
     this.logger = deps.logger.child({ component: 'motor-cortex' });
     this.energyModel = deps.energyModel;
     this.stateManager = createMotorStateManager(deps.storage, this.logger);
-    this.credentialStore = deps.credentialStore;
     this.skillsDir = deps.skillsDir;
     this.artifactsBaseDir = deps.artifactsBaseDir;
     this.containerManager = deps.containerManager;
@@ -209,11 +209,14 @@ export class MotorCortex {
     index: number,
     run: MotorRun,
     maxIterations: number,
-    skill?: LoadedSkill,
+    systemPrompt: string,
     recoveryContext?: MotorAttempt['recoveryContext']
   ): MotorAttempt {
     const attemptId = `att_${String(index)}`;
-    const messages = buildInitialMessages(run, skill, recoveryContext, maxIterations);
+    const messages: Message[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Begin the task.' },
+    ];
 
     return {
       id: attemptId,
@@ -245,24 +248,47 @@ export class MotorCortex {
    * Returns immediately with runId. Result comes back via signal.
    * Enforces mutex - only one agentic run at a time.
    *
+   * Motor Cortex is a pure runtime - all config must be passed explicitly.
+   * Callers (core.act) build prompts, resolve credentials, and install deps.
+   *
    * @param params - Run parameters
    * @returns Run ID and status
    */
   async startRun(params: {
+    /** Task description for the sub-agent */
     task: string;
+    /** Tools available to the sub-agent */
     tools: MotorTool[];
+    /** Maximum iterations per attempt (default: 30) */
     maxIterations?: number;
-    timeout?: number;
-    skill?: LoadedSkill;
+    /** Network domains this run may access */
     domains?: string[];
-    /** Run configuration (defaults to full execution mode) */
-    config?: {
-      syntheticTools?: SyntheticTool[];
-      installDependencies?: boolean;
-      mergePolicyDomains?: boolean;
-    };
+    /** Synthetic tools to inject (ask_user, save_credential, request_approval) */
+    syntheticTools?: SyntheticTool[];
     /** Maximum attempts before giving up (default: DEFAULT_MAX_ATTEMPTS) */
     maxAttempts?: number;
+
+    // === Prompt (built by caller, opaque to Motor Cortex) ===
+    /** System prompt for the sub-agent (built by caller) */
+    systemPrompt: string;
+
+    // === Credentials (resolved by caller) ===
+    /** Resolved credential name → value map */
+    credentials?: Record<string, string>;
+    /** Credential names (for save_credential scope check) */
+    credentialNames?: string[];
+
+    // === Dependencies (pre-installed by caller) ===
+    /** Pre-installed deps mounts (volume names + env) */
+    preparedDeps?: PreparedDeps;
+
+    // === Workspace (pre-prepared by caller) ===
+    /** Pre-prepared workspace directory (skill files copied, baseline generated) */
+    workspacePath?: string;
+
+    // === Skill metadata (for extraction middleware, opaque to Motor Cortex) ===
+    /** Skill name (for post-run extraction and logging only) */
+    skillName?: string;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -293,37 +319,13 @@ export class MotorCortex {
     const maxIterations = params.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     const maxAttempts = params.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
 
-    // Build run config with defaults for full execution mode
+    // Build run config - synthetic tools are explicitly passed or default to all
     const runConfig: MotorRun['config'] = {
-      syntheticTools: params.config?.syntheticTools ?? [
-        'ask_user',
-        'save_credential',
-        'request_approval',
-      ],
-      installDependencies: params.config?.installDependencies ?? true,
-      mergePolicyDomains: params.config?.mergePolicyDomains ?? true,
+      syntheticTools: params.syntheticTools ?? ['ask_user', 'save_credential', 'request_approval'],
     };
 
-    // Merge skill policy domains with explicit domains (only when mergePolicyDomains is true)
-    let mergedDomains: string[] = [];
-    if (runConfig.mergePolicyDomains) {
-      const skillDomains = params.skill?.policy?.allowedDomains;
-      const explicitDomains = params.domains;
-      mergedDomains = mergeDomains(skillDomains, explicitDomains);
-    } else {
-      mergedDomains = params.domains ?? [];
-    }
-
-    // Pre-seed GitHub domains when task references skills.sh.
-    // Skills hosted on skills.sh resolve to GitHub raw content and the GitHub API,
-    // so pre-seeding avoids two domain-escalation round-trips that pause execution.
-    if (params.task.includes('skills.sh')) {
-      for (const ghDomain of ['raw.githubusercontent.com', 'api.github.com', 'github.com']) {
-        if (!mergedDomains.includes(ghDomain)) {
-          mergedDomains.push(ghDomain);
-        }
-      }
-    }
+    // Domains are now passed explicitly (caller already resolved from policy)
+    const mergedDomains = params.domains ?? [];
 
     const run: MotorRun = {
       id: runId,
@@ -337,19 +339,27 @@ export class MotorCortex {
       startedAt: now,
       energyConsumed: energyBefore - this.energyModel.getEnergy(),
       ...(mergedDomains.length > 0 && { domains: mergedDomains }),
+      ...(params.workspacePath && { workspacePath: params.workspacePath }),
+      ...(params.skillName && { skill: params.skillName }),
     };
 
-    // Set skill name on the run if one was provided
-    if (params.skill) {
-      run.skill = params.skill.frontmatter.name;
-    }
-
     // Create initial attempt (index 0, no recovery context)
-    const attempt0 = this.createAttempt(0, run, maxIterations, params.skill);
+    const attempt0 = this.createAttempt(0, run, maxIterations, params.systemPrompt);
     run.attempts.push(attempt0);
 
     // Persist run
     await this.stateManager.createRun(run);
+
+    // Store caller-provided deps and credentials for runLoopInBackground
+    if (params.preparedDeps) {
+      this.runPreparedDeps.set(runId, params.preparedDeps);
+    }
+    if (params.credentials ?? params.credentialNames) {
+      const credEntry: { credentials?: Record<string, string>; credentialNames?: string[] } = {};
+      if (params.credentials) credEntry.credentials = params.credentials;
+      if (params.credentialNames) credEntry.credentialNames = params.credentialNames;
+      this.runCredentials.set(runId, credEntry);
+    }
 
     this.logger.info({ runId, task: params.task, tools: params.tools }, 'Motor Cortex run created');
 
@@ -365,10 +375,11 @@ export class MotorCortex {
    * Retry a failed run with recovery guidance from Cognition.
    *
    * Creates a new attempt with clean message history but recovery context.
-   * Cognition provides corrective instructions; Motor handles execution.
+   * Cognition provides corrective instructions and the system prompt.
    *
    * @param runId - Run to retry
    * @param guidance - Corrective instructions from Cognition
+   * @param systemPrompt - System prompt for the retry attempt (built by caller)
    * @param constraints - Optional constraints for the retry
    * @param domains - Optional additional domains to allow (merged with existing)
    * @returns Run ID and new attempt index
@@ -376,6 +387,7 @@ export class MotorCortex {
   async retryRun(
     runId: string,
     guidance: string,
+    systemPrompt: string,
     constraints?: string[],
     domains?: string[]
   ): Promise<{ runId: string; attemptIndex: number; status: 'running' }> {
@@ -415,16 +427,7 @@ export class MotorCortex {
       ...(constraints && constraints.length > 0 && { constraints }),
     };
 
-    // Re-load skill if the run had one (so retry attempt gets skill instructions)
-    let skill: LoadedSkill | undefined;
-    if (run.skill && this.skillsDir) {
-      const skillResult = await loadSkill(run.skill, this.skillsDir);
-      if (!('error' in skillResult)) {
-        skill = skillResult;
-      }
-    }
-
-    // Set currentAttemptIndex BEFORE createAttempt (buildMotorSystemPrompt reads it for maxIterations)
+    // Set currentAttemptIndex BEFORE createAttempt
     const newIndex = run.attempts.length;
     run.currentAttemptIndex = newIndex;
 
@@ -434,29 +437,7 @@ export class MotorCortex {
       const allDomains = [...existingDomains, ...domains];
       run.domains = Array.from(new Set(allDomains));
 
-      // Persist newly granted domains to skill policy (same as respondToRun)
-      if (run.skill && this.skillsDir && skill?.policy) {
-        try {
-          const policyDomains = new Set(skill.policy.allowedDomains ?? []);
-          const newForPolicy = domains.filter((d) => !policyDomains.has(d));
-          if (newForPolicy.length > 0) {
-            const updatedPolicy = {
-              ...skill.policy,
-              allowedDomains: [...Array.from(policyDomains), ...newForPolicy],
-            };
-            await savePolicy(skill.path, updatedPolicy);
-            this.logger.info(
-              { runId, skill: run.skill, addedDomains: newForPolicy },
-              'Persisted new domains to skill policy on retry'
-            );
-          }
-        } catch (err) {
-          this.logger.warn(
-            { runId, skill: run.skill, error: err },
-            'Failed to persist domains to skill policy on retry (non-fatal)'
-          );
-        }
-      }
+      // Note: Domain persistence to skill policy is handled by Cognition via core.skill(action:"update")
     }
 
     // Create new attempt with fresh messages but recovery context
@@ -464,7 +445,7 @@ export class MotorCortex {
       newIndex,
       run,
       RETRY_MAX_ITERATIONS,
-      skill,
+      systemPrompt,
       recoveryContext
     );
     run.attempts.push(newAttempt);
@@ -506,84 +487,22 @@ export class MotorCortex {
       attempt.status = 'running';
       await this.stateManager.updateRun(run);
 
-      // Load skill for credential delivery and save_credential persistence
-      let loadedSkill: LoadedSkill | undefined;
-      if (run.skill && this.skillsDir) {
-        const skillResult = await loadSkill(run.skill, this.skillsDir);
-        if (!('error' in skillResult)) loadedSkill = skillResult;
-      }
-
+      // Motor Cortex is a pure runtime — workspace and deps are pre-prepared by caller.
       // Reuse existing workspace on resume (preserves files from prior iterations).
       let workspace: string;
       if (run.workspacePath && existsSync(run.workspacePath)) {
         workspace = run.workspacePath;
         this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
       } else {
-        // Fresh workspace - create it
+        // No pre-prepared workspace — create an empty one
         workspace = await createWorkspace();
         run.workspacePath = workspace;
-
-        // Copy skill files to workspace root on fresh init (only on first init, not on resume)
-        // The baseline existence check prevents re-copying on resume (workspace is reused)
-        const baselinePath = join(workspace, '.motor-baseline.json');
-        if (run.skill && this.skillsDir && !existsSync(baselinePath)) {
-          const skillSourceDir = join(this.skillsDir, run.skill);
-          try {
-            // Copy skill files to workspace, EXCLUDING policy.json
-            // (policy.json is host-side only — Motor sub-agent shouldn't know about it)
-            await cp(skillSourceDir, workspace, {
-              recursive: true,
-              filter: (src: string) =>
-                !src.endsWith('/policy.json') && !src.endsWith('\\policy.json'),
-            });
-            const baseline = await generateBaseline(workspace);
-            const { writeFile } = await import('node:fs/promises');
-            await writeFile(baselinePath, JSON.stringify(baseline, null, 2));
-            this.logger.info(
-              { runId: run.id, skill: run.skill, filesCount: Object.keys(baseline.files).length },
-              'Skill files copied to workspace root, baseline generated'
-            );
-          } catch (error) {
-            this.logger.warn(
-              { runId: run.id, skill: run.skill, error },
-              'Failed to copy skill files to workspace, continuing without them'
-            );
-          }
-        }
-
         await this.stateManager.updateRun(run);
       }
 
-      // Install skill dependencies (cache-first, prep container on miss)
-      // Read from HOST skill directory (not workspace) since policy.json is excluded from container
-      // Only install when config.installDependencies is true (default for normal execution)
-      let preparedDeps: PreparedDeps | null = null;
-      if (run.config.installDependencies && run.skill && this.skillsDir) {
-        const hostPolicyPath = join(this.skillsDir, run.skill, 'policy.json');
-        if (existsSync(hostPolicyPath)) {
-          try {
-            const policyRaw = JSON.parse(await readFileAsync(hostPolicyPath, 'utf8')) as Record<
-              string,
-              unknown
-            >;
-            if (policyRaw['dependencies']) {
-              const { installSkillDependencies } =
-                await import('../dependencies/dependency-manager.js');
-              const cacheDir = join(dirname(this.skillsDir), 'dependency-cache');
-              preparedDeps = await installSkillDependencies(
-                policyRaw['dependencies'] as SkillDependencies,
-                cacheDir,
-                run.skill,
-                this.logger
-              );
-            }
-          } catch (error) {
-            throw new Error(
-              `Dependency installation failed for skill "${run.skill}": ${error instanceof Error ? error.message : String(error)}`
-            );
-          }
-        }
-      }
+      // Retrieve caller-provided deps and credentials (stored in startRun)
+      const preparedDeps = this.runPreparedDeps.get(run.id);
+      const runCreds = this.runCredentials.get(run.id);
 
       // Reuse existing container (kept alive during pause) or create a new one
       containerHandle = this.activeContainers.get(run.id);
@@ -636,7 +555,7 @@ export class MotorCortex {
           {
             runId: run.id,
             containerId: containerHandle.containerId.slice(0, 12),
-            hasDeps: preparedDeps !== null,
+            hasDeps: !!preparedDeps,
           },
           'Container created for run'
         );
@@ -655,13 +574,70 @@ export class MotorCortex {
         workspace,
         abortSignal: abortController.signal,
         syntheticTools: run.config.syntheticTools,
-        ...(loadedSkill && { skill: loadedSkill }),
-        ...(this.skillsDir && { skillsDir: this.skillsDir }),
-        ...(this.credentialStore && { credentialStore: this.credentialStore }),
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
         ...(containerHandle && { containerHandle }),
         ...(this.fetchFn && { fetchFn: this.fetchFn }),
+        ...(runCreds?.credentials && { credentials: runCreds.credentials }),
+        ...(runCreds?.credentialNames && { credentialNames: runCreds.credentialNames }),
+        ...(preparedDeps && { preparedDeps }),
       });
+
+      // Post-loop skill extraction (middleware logic)
+      // Motor Cortex is now a pure runtime — extraction happens after loop completes
+      // Cast needed: runMotorLoop mutates run.status by reference, TS narrows it to 'running'
+      if (this.skillsDir && (run.status as string) === 'completed' && run.result?.ok) {
+        try {
+          const extractionResult = await extractSkillsFromWorkspace(
+            workspace,
+            this.skillsDir,
+            run.id,
+            this.logger,
+            run.pendingCredentials
+          );
+          if (extractionResult.created.length > 0 || extractionResult.updated.length > 0) {
+            // Enrich result with installed skills
+            run.result.installedSkills = extractionResult;
+            await this.stateManager.updateRun(run);
+            this.logger.info(
+              { runId: run.id, installedSkills: extractionResult },
+              'Skills extracted from workspace'
+            );
+          }
+        } catch (error) {
+          this.logger.warn(
+            { runId: run.id, error },
+            'Skill extraction failed after run completion'
+          );
+        }
+      }
+
+      // Emit completion signal AFTER extraction (so installedSkills is included)
+      // Motor loop sets run.status = 'completed' and run.result, but defers signal to here.
+      if ((run.status as string) === 'completed' && run.result) {
+        this.pushSignal(
+          createSignal(
+            'motor_result',
+            'motor.cortex',
+            { value: 1, confidence: 1 },
+            {
+              data: {
+                kind: 'motor_result',
+                runId: run.id,
+                status: 'completed',
+                attemptIndex: attempt.index,
+                result: {
+                  ok: run.result.ok,
+                  summary: run.result.summary,
+                  stats: run.result.stats,
+                  ...(run.result.installedSkills && {
+                    installedSkills: run.result.installedSkills,
+                  }),
+                },
+              },
+            }
+          )
+        );
+      }
 
       // Auto-retry for retryable failures: if loop returned without signal but attempt failed,
       // check if we should auto-retry before emitting failure signal
@@ -707,7 +683,9 @@ export class MotorCortex {
           }
 
           // Retry via retryRun (creates new attempt, re-creates container)
-          await this.retryRun(run.id, autoGuidance);
+          // Reuse system prompt from the current attempt (nothing changed about the task)
+          const prevSystemPrompt = attempt.messages.find((m) => m.role === 'system')?.content ?? '';
+          await this.retryRun(run.id, autoGuidance, prevSystemPrompt);
           return; // Exit this function — retryRun handles the rest
         }
 
@@ -796,6 +774,13 @@ export class MotorCortex {
     } finally {
       this.runAbortControllers.delete(run.id);
 
+      // Clean up per-run state on terminal status
+      const terminal = run.status === 'completed' || run.status === 'failed';
+      if (terminal) {
+        this.runPreparedDeps.delete(run.id);
+        this.runCredentials.delete(run.id);
+      }
+
       // Keep container alive when paused (awaiting_input / awaiting_approval) —
       // respondToRun / respondToApproval will call runLoopInBackground again,
       // which reuses the container. Only destroy on terminal states.
@@ -811,7 +796,6 @@ export class MotorCortex {
       }
 
       // Clean up truncation spillover files on terminal states only
-      const terminal = run.status === 'completed' || run.status === 'failed';
       if (terminal && run.workspacePath) {
         rm(join(run.workspacePath, TRUNCATION_DIR), { recursive: true, force: true }).catch(
           (err: unknown) => {
@@ -914,11 +898,13 @@ export class MotorCortex {
    *
    * @param runId - Run ID
    * @param answer - User's answer text
+   * @param systemPrompt - Updated system prompt (built by caller, e.g., with new domains)
    * @param domains - Optional additional domains to allow (merged with existing)
    */
   async respondToRun(
     runId: string,
     answer: string,
+    systemPrompt?: string,
     domains?: string[]
   ): Promise<{
     runId: string;
@@ -983,23 +969,12 @@ export class MotorCortex {
       );
 
       // Rebuild system prompt so the model sees the updated domains.
-      // Without this, the system prompt still lists the original domains,
-      // misleading the model even though tools accept the new ones.
+      // The caller should provide the new system prompt.
       const systemIdx = attempt.messages.findIndex((m) => m.role === 'system');
-      if (systemIdx >= 0) {
-        let skill: LoadedSkill | undefined;
-        if (run.skill && this.skillsDir) {
-          const skillResult = await loadSkill(run.skill, this.skillsDir);
-          if (!('error' in skillResult)) skill = skillResult;
-        }
+      if (systemIdx >= 0 && systemPrompt) {
         attempt.messages[systemIdx] = {
           role: 'system',
-          content: buildMotorSystemPrompt(
-            run,
-            skill,
-            attempt.recoveryContext,
-            attempt.maxIterations
-          ),
+          content: systemPrompt,
         };
       }
 
@@ -1020,34 +995,7 @@ export class MotorCortex {
         }
       }
 
-      // Persist newly granted domains back to the skill's policy.json so future
-      // runs don't hit the same wall. policy.json is excluded from content hash,
-      // so this won't invalidate trust (see skill-lifecycle.md Open Question #8).
-      if (run.skill && this.skillsDir) {
-        try {
-          const skillResult = await loadSkill(run.skill, this.skillsDir);
-          if (!('error' in skillResult) && skillResult.policy) {
-            const policyDomains = new Set(skillResult.policy.allowedDomains ?? []);
-            const newForPolicy = effectiveDomains.filter((d) => !policyDomains.has(d));
-            if (newForPolicy.length > 0) {
-              const updatedPolicy = {
-                ...skillResult.policy,
-                allowedDomains: [...Array.from(policyDomains), ...newForPolicy],
-              };
-              await savePolicy(skillResult.path, updatedPolicy);
-              this.logger.info(
-                { runId, skill: run.skill, addedDomains: newForPolicy },
-                'Persisted new domains to skill policy'
-              );
-            }
-          }
-        } catch (err) {
-          this.logger.warn(
-            { runId, skill: run.skill, error: err },
-            'Failed to persist domains to skill policy (non-fatal)'
-          );
-        }
-      }
+      // Note: Domain persistence to skill policy is handled by Cognition via core.skill(action:"update")
     }
 
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)

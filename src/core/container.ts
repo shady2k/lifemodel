@@ -562,7 +562,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       storage,
       logger,
       energyModel: agent.getEnergyModel(),
-      credentialStore,
       skillsDir,
       artifactsBaseDir,
       containerManager: containerMgr,
@@ -807,7 +806,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Register Motor Cortex tools if service is available
   if (motorCortex) {
-    layers.cognition.getToolRegistry().registerTool(createActTool(motorCortex));
+    const workspacesDir = resolve(storagePath, '..', 'motor-workspaces');
+    layers.cognition.getToolRegistry().registerTool(
+      createActTool({
+        motorCortex,
+        credentialStore,
+        skillsDir,
+        workspacesDir,
+        logger,
+      })
+    );
     layers.cognition.getToolRegistry().registerTool(createTaskTool(motorCortex, artifactsBaseDir));
     layers.cognition.getToolRegistry().registerTool(createCredentialTool({ credentialStore }));
     layers.cognition.getToolRegistry().registerTool(createSkillTool({ skillsDir }));

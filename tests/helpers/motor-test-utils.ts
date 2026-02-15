@@ -20,7 +20,7 @@ import type { MotorLoopParams } from '../../src/runtime/motor-cortex/motor-loop.
 import type { LLMProvider } from '../../src/llm/provider.js';
 import type { Logger } from '../../src/types/index.js';
 import type { Signal } from '../../src/types/signal.js';
-import { buildInitialMessages } from '../../src/runtime/motor-cortex/motor-loop.js';
+import { buildMotorSystemPrompt } from '../../src/runtime/motor-cortex/motor-prompt.js';
 import { createMockLogger } from './factories.js';
 
 /**
@@ -88,7 +88,7 @@ export function createTestMotorRun(overrides?: Partial<MotorRun>): MotorRun {
     id: 'test-run',
     status: 'running',
     task: 'Test task',
-    tools: ['bash', 'filesystem'],
+    tools: ['bash', 'read', 'write', 'list'],
     attempts: [attempt],
     currentAttemptIndex: 0,
     maxAttempts: 3,
@@ -96,8 +96,6 @@ export function createTestMotorRun(overrides?: Partial<MotorRun>): MotorRun {
     energyConsumed: 0,
     config: {
       syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
-      installDependencies: true,
-      mergePolicyDomains: true,
     },
     ...overrides,
   };
@@ -196,7 +194,7 @@ export interface TestLoopParamsOptions {
   /** Override the attempt (optional) */
   attempt?: MotorAttempt;
 
-  /** Tools to grant (default: ['filesystem', 'code']) */
+  /** Tools to grant (default: ['read', 'write', 'list']) */
   tools?: MotorTool[];
 
   /** Logger (default: createMockLogger()) */
@@ -205,10 +203,7 @@ export interface TestLoopParamsOptions {
   /** Task description (default: 'Test task') */
   task?: string;
 
-  /** Skills directory (optional) */
-  skillsDir?: string;
-
-  /** Credential store (optional) */
+  /** Credentials map (optional) */
   credentialStore?: Record<string, string>;
 
   /** Artifacts base directory (optional) */
@@ -228,7 +223,7 @@ export interface TestLoopParamsOptions {
  * - Real temp workspace (via mkdtemp)
  * - Mock logger, mock pushSignal, mock state manager
  * - Scripted LLM (caller provides)
- * - Default tools: ['read', 'write', 'list', 'code']
+ * - Default tools: ['read', 'write', 'list']
  *
  * IMPORTANT: Caller must clean up the workspace using cleanupTestLoopParams().
  */
@@ -251,7 +246,7 @@ export async function createTestLoopParams(
   const pushSignal = createMockPushSignal();
 
   // Create run and attempt
-  const tools = options.tools ?? ['filesystem', 'code'];
+  const tools = options.tools ?? ['read', 'write', 'list'];
   const task = options.task ?? 'Test task';
 
   const run =
@@ -262,11 +257,19 @@ export async function createTestLoopParams(
       workspacePath: workspace,
     });
 
-  // Build initial messages for the attempt
+  // Build initial messages for the attempt (system prompt + "Begin the task.")
+  const systemPrompt = buildMotorSystemPrompt({
+    task: run.task,
+    tools: run.tools,
+    syntheticTools: run.config.syntheticTools,
+  });
   const attempt =
     options.attempt ??
     createTestAttempt({
-      messages: buildInitialMessages(run),
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: 'Begin the task.' },
+      ],
     });
 
   // Add attempt to run if not already there
@@ -278,18 +281,6 @@ export async function createTestLoopParams(
   // Create run in state manager (required for updateRun to work)
   await stateManager.createRun(run);
 
-  // Create credential store mock if provided
-  const credentialStore = options.credentialStore
-    ? {
-        get: (key: string) => options.credentialStore?.[key] ?? null, // Return null for missing keys
-        has: (key: string) => key in (options.credentialStore ?? {}),
-        entries: () => Object.entries(options.credentialStore ?? {}),
-        set: () => {}, // Stub
-        delete: () => false, // Stub
-        list: () => [], // Stub
-      }
-    : undefined;
-
   const params: MotorLoopParams = {
     run,
     attempt,
@@ -297,11 +288,10 @@ export async function createTestLoopParams(
     stateManager,
     pushSignal: pushSignal.pushSignal.bind(pushSignal),
     logger,
-    skillsDir: options.skillsDir,
-    credentialStore,
     artifactsBaseDir: options.artifactsBaseDir ?? workspace,
     workspace,
     syntheticTools: run.config.syntheticTools,
+    ...(options.credentialStore !== undefined && { credentials: options.credentialStore }),
   };
 
   const cleanup = async () => {

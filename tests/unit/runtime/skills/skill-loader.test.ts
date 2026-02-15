@@ -18,6 +18,7 @@ import {
 import { mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createTestPolicy } from '../../../helpers/factories.js';
 
 describe('parseSkillFile', () => {
   it('parses Agent Skills standard format', () => {
@@ -222,21 +223,18 @@ describe('policy.json operations', () => {
   });
 
   it('saves and loads policy', async () => {
-    const policy = {
-      schemaVersion: 1,
-      trust: 'approved' as const,
-      allowedDomains: ['api.example.com'],
+    const policy = createTestPolicy({
       requiredCredentials: ['api_key'],
-      approvedBy: 'user' as const,
+      approvedBy: 'user',
       approvedAt: new Date().toISOString(),
-    };
+    });
 
     await savePolicy(testDir, policy);
     const loaded = await loadPolicy(testDir);
 
     expect(loaded).not.toBeNull();
-    expect(loaded?.trust).toBe('approved');
-    expect(loaded?.allowedDomains).toEqual(['api.example.com']);
+    expect(loaded?.status).toBe('approved');
+    expect(loaded?.domains).toEqual(['api.example.com']);
   });
 
   it('returns null for missing policy', async () => {
@@ -289,18 +287,15 @@ description: Test skill
 Body`;
     await writeFile(join(testDir, 'test-skill', 'SKILL.md'), skillContent, 'utf-8');
 
-    const policy = {
-      schemaVersion: 1,
-      trust: 'approved' as const,
-      allowedDomains: ['api.example.com'],
-      approvedBy: 'user' as const,
+    const policy = createTestPolicy({
+      approvedBy: 'user',
       approvedAt: new Date().toISOString(),
       provenance: {
         source: 'test',
         fetchedAt: new Date().toISOString(),
         // No contentHash - not testing hash verification here
       },
-    };
+    });
     await savePolicy(join(testDir, 'test-skill'), policy);
 
     const result = await loadSkill('test-skill', testDir);
@@ -308,7 +303,7 @@ Body`;
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
       expect(result.policy).toBeDefined();
-      expect(result.policy?.trust).toBe('approved');
+      expect(result.policy?.status).toBe('approved');
     }
   });
 
@@ -323,18 +318,15 @@ Original body`;
     // Create policy with hash of original directory
     const originalHash = await computeDirectoryHash(join(testDir, 'test-skill'));
 
-    const policy = {
-      schemaVersion: 1,
-      trust: 'approved' as const,
-      allowedDomains: ['api.example.com'],
-      approvedBy: 'user' as const,
+    const policy = createTestPolicy({
+      approvedBy: 'user',
       approvedAt: new Date().toISOString(),
       provenance: {
         source: 'test',
         fetchedAt: new Date().toISOString(),
         contentHash: originalHash,
       },
-    };
+    });
     await savePolicy(join(testDir, 'test-skill'), policy);
 
     // Modify SKILL.md after approval
@@ -350,7 +342,7 @@ Modified body`;
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
       // Trust should be reset to needs_reapproval due to hash mismatch
-      expect(result.policy?.trust).toBe('needs_reapproval');
+      expect(result.policy?.status).toBe('needs_reapproval');
     }
   });
 
@@ -365,25 +357,22 @@ Body`;
     // Create policy with correct hash (directory hash)
     const correctHash = await computeDirectoryHash(join(testDir, 'test-skill'));
 
-    const policy = {
-      schemaVersion: 1,
-      trust: 'approved' as const,
-      allowedDomains: ['api.example.com'],
-      approvedBy: 'user' as const,
+    const policy = createTestPolicy({
+      approvedBy: 'user',
       approvedAt: new Date().toISOString(),
       provenance: {
         source: 'test',
         fetchedAt: new Date().toISOString(),
         contentHash: correctHash,
       },
-    };
+    });
     await savePolicy(join(testDir, 'test-skill'), policy);
 
     const result = await loadSkill('test-skill', testDir);
 
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
-      expect(result.policy?.trust).toBe('approved');
+      expect(result.policy?.status).toBe('approved');
     }
   });
 

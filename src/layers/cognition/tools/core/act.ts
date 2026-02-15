@@ -5,23 +5,121 @@
  * "oneshot" runs JS code synchronously.
  * "agentic" starts an async sub-agent task.
  *
- * All sandboxed tools are always granted — container isolation is the security boundary.
- * Policy-aware skill loading handles trust gating and domain resolution.
+ * For skill runs, resolves everything from policy and passes explicit config to Motor Cortex.
+ * For non-skill runs, passes full tools and explicit domains.
  */
 
 import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
 import type { MotorTool, SyntheticTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
+import type { MotorToolName } from '../../../../runtime/skills/skill-types.js';
 import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
 import { isValidDomain } from '../../../../runtime/container/network-policy.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
+import type { CredentialStore } from '../../../../runtime/vault/credential-store.js';
+import { installSkillDependencies } from '../../../../runtime/dependencies/dependency-manager.js';
+import { buildMotorSystemPrompt } from '../../../../runtime/motor-cortex/motor-prompt.js';
+import { prepareSkillWorkspace } from '../../../../runtime/skills/skill-workspace.js';
 
 /**
- * All sandboxed tools are always granted.
+ * Build skill-specific instructions for the Motor Cortex sub-agent.
+ *
+ * This is business logic about skills — Motor Cortex doesn't know about it.
+ * The result is passed as `callerInstructions` to the prompt builder.
+ */
+function buildSkillInstructions(opts: {
+  hasWriteTool: boolean;
+  skillName?: string;
+  skillDescription?: string;
+  hasDependencies: boolean;
+  credentialNames?: string[];
+}): string {
+  const parts: string[] = [];
+
+  // Skill creation/modification instructions (when write tool is available)
+  if (opts.hasWriteTool) {
+    parts.push(`You create and maintain Agent Skills — modular, filesystem-based capabilities. A Skill packages instructions, metadata, and optional resources (scripts, templates, reference docs) so the agent can reuse them automatically.
+
+Skill directory structure:
+  SKILL.md           — required: frontmatter metadata + step-by-step instructions
+  references/        — optional: API docs, schemas, examples
+  scripts/           — optional: helper scripts the instructions reference
+
+SKILL.md format:
+---
+name: skill-name
+description: What this skill does and when to use it (max 1024 chars). Include BOTH what the skill does AND when the agent should trigger it.
+---
+# Skill Name
+
+## Quick start
+[Minimal working example]
+
+## Instructions
+[Step-by-step procedures, organized by task type]
+
+## Examples
+[Concrete usage examples with expected inputs/outputs]
+
+## Edge cases
+[Error handling, fallbacks, known limitations]
+
+The frontmatter (name + description) is always loaded at startup so the agent knows the skill exists.
+The body is only loaded when the skill is triggered, so keep it focused and actionable.
+Reference files (references/, scripts/) are loaded on demand — link to them from the instructions.
+
+If an official SDK (npm or pip package) exists for the API, ALWAYS prefer it over raw HTTP calls.
+Mention the SDK in SKILL.md with installation instructions: "npm install package-name@x.y.z" or "pip install package-name==x.y.z".
+SKILL.md examples should use the SDK, not raw curl/fetch. Find the latest package version from the API documentation.
+
+Status is always "pending_review" for new skills — the user reviews and approves before first use.
+
+Save files at the workspace root (e.g. write({path: "SKILL.md", content: "..."})).
+Reference files go in subdirectories: write({path: "references/api-docs.md", content: "..."}).
+These files will be automatically extracted and installed after your run completes.
+Name rules: must start with letter, lowercase a-z, numbers, hyphens. No leading/trailing/consecutive hyphens. Max 64 chars.`);
+  }
+
+  // Skill execution instructions (when running a specific skill)
+  if (opts.skillName && opts.skillDescription) {
+    const firstCred = opts.credentialNames?.[0] ?? '';
+    const credSection =
+      opts.credentialNames && opts.credentialNames.length > 0
+        ? `\nAvailable credentials (as env vars):\n${opts.credentialNames.map((c) => `- ${c}`).join('\n')}\nUsage:\n  Node script: const apiKey = process.env.${firstCred};\n  Python:      api_key = os.environ["${firstCred}"]\n  bash:        curl -H "Authorization: Bearer $${firstCred}"\n  fetch tool:  {"Authorization": "Bearer $${firstCred}"}`
+        : '';
+
+    const depSection = opts.hasDependencies
+      ? `IMPORTANT: SKILL.md contains tested, working code examples. Use them EXACTLY as written — copy constructors, method names, and argument shapes from the examples. Do NOT guess or invent API usage. If something fails, re-read SKILL.md and compare your code against the examples before trying alternatives.
+Pre-installed packages are available — use require() or import directly.`
+      : `No SDK packages are pre-installed for this skill. SKILL.md examples may use SDK calls — do NOT copy them directly. Instead, use the fetch tool or Node's built-in global fetch() for raw HTTP API calls. Check the API documentation or reference files for the correct HTTP endpoints, methods, and request formats. Do NOT guess URL paths from SDK method names.`;
+
+    parts.push(`A skill is available for this task. Read its files before starting work.
+Skill: ${opts.skillName} — ${opts.skillDescription}
+Start by reading SKILL.md: read({path: "SKILL.md"}). Check for reference files too: list({path: "."}).
+${depSection}
+You can modify skill files directly in the workspace using write or patch. Changes are automatically extracted and installed after your run completes.
+Do NOT run npm install or pip install — package registries are not reachable at runtime.
+${credSection}
+
+SKILL IMPROVEMENT REQUIREMENT:
+After completing the task, if ANY of these occurred, you MUST update the skill files before finishing:
+- You encountered errors following SKILL.md (wrong endpoints, incorrect parameters, deprecated methods)
+- You had to fetch external docs or reference files to figure out how to do something SKILL.md should have covered
+- SKILL.md only has SDK examples but you had to use raw HTTP (add HTTP examples alongside SDK ones)
+- You discovered missing information (correct URL paths, required headers, response formats)
+Update SKILL.md and/or reference files in the workspace using write or patch. Changes are reviewed before replacing the current version.
+Do NOT skip this step — future runs should not repeat the same discovery process.
+Note: you can only reach domains approved for this run.
+If you need a new domain, use ask_user to request it.`);
+  }
+
+  return parts.join('\n\n');
+}
+
+/**
+ * All sandboxed tools for non-skill runs.
  * Container isolation (--read-only, --network none, --cap-drop ALL) is the security boundary.
- * Restricting tools at the policy level caused the agent to waste iterations
- * (e.g., doing `cat` via bash when `read` tool was not granted).
  */
 const ALL_MOTOR_TOOLS: MotorTool[] = [
   'read',
@@ -35,9 +133,57 @@ const ALL_MOTOR_TOOLS: MotorTool[] = [
 ];
 
 /**
+ * Dependencies for the act tool.
+ */
+export interface ActToolDeps {
+  /** Motor Cortex service */
+  motorCortex: MotorCortex;
+
+  /** Credential store for resolving credentials */
+  credentialStore?: CredentialStore;
+
+  /** Skills directory absolute path */
+  skillsDir: string;
+
+  /** Base directory for motor workspaces */
+  workspacesDir: string;
+
+  /** Logger for diagnostics */
+  logger: {
+    debug: (...args: unknown[]) => void;
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+  };
+}
+
+/**
+ * Resolve policy.tools to actual MotorTool array.
+ * - undefined → ALL (backward compat)
+ * - ["ALL"] → ALL
+ * - ["read", "write", ...] → as-is
+ * - ["ALL", "read"] → error (ambiguous)
+ */
+function resolveTools(policyTools: ('ALL' | MotorToolName)[] | undefined): MotorTool[] {
+  if (!policyTools || policyTools.length === 0) {
+    return ALL_MOTOR_TOOLS;
+  }
+
+  if (policyTools.includes('ALL')) {
+    if (policyTools.length > 1) {
+      throw new Error('policy.tools cannot combine "ALL" with specific tools (ambiguous)');
+    }
+    return ALL_MOTOR_TOOLS;
+  }
+
+  return policyTools as MotorTool[];
+}
+
+/**
  * Create the core.act tool.
  */
-export function createActTool(motorCortex: MotorCortex): Tool {
+export function createActTool(deps: ActToolDeps): Tool {
+  const { motorCortex, credentialStore, skillsDir, workspacesDir, logger: actLogger } = deps;
   const parameters = [
     {
       name: 'mode',
@@ -165,16 +311,14 @@ export function createActTool(motorCortex: MotorCortex): Tool {
               };
             }
 
-            // Load skill (skip trust gating for review)
-            const skillResult = await loadSkill(skillName);
+            // Load skill (skip status gating for review)
+            const skillResult = await loadSkill(skillName, skillsDir);
             if ('error' in skillResult) {
               return {
                 success: false,
                 error: skillResult.error,
               };
             }
-            const loadedSkill = skillResult;
-
             // Skip input validation for review mode
 
             // Force read-only tools, empty domains, limited iterations
@@ -212,18 +356,41 @@ Output format — produce EXACTLY this structure:
 
 Be specific and actionable. Do NOT give generic advice. Every credential, domain, and setup step must come from actual file content you read.`;
 
+            // Prepare workspace with skill files (so review can read them)
+            let reviewWorkspacePath: string | undefined;
+            try {
+              const prepared = await prepareSkillWorkspace(
+                skillResult.path,
+                workspacesDir,
+                crypto.randomUUID(),
+                actLogger as Parameters<typeof prepareSkillWorkspace>[3]
+              );
+              reviewWorkspacePath = prepared.workspacePath;
+            } catch (err) {
+              return {
+                success: false,
+                error: `Failed to prepare skill workspace for review: ${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
+
+            // Build system prompt for review mode
+            const reviewSystemPrompt = buildMotorSystemPrompt({
+              task: reviewTask,
+              tools: reviewTools,
+              syntheticTools: [],
+              domains: reviewDomains,
+              maxIterations: reviewMaxIterations,
+            });
+
             const { runId } = await motorCortex.startRun({
               task: reviewTask,
               tools: reviewTools,
               maxIterations: reviewMaxIterations,
               maxAttempts: 1,
-              skill: loadedSkill,
               domains: reviewDomains,
-              config: {
-                syntheticTools: [],
-                installDependencies: false,
-                mergePolicyDomains: false,
-              },
+              syntheticTools: [], // No synthetic tools for review
+              systemPrompt: reviewSystemPrompt,
+              workspacePath: reviewWorkspacePath,
             });
 
             return {
@@ -243,12 +410,15 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
 
           // Load skill if specified
           let loadedSkill: LoadedSkill | undefined = undefined;
-          const tools: MotorTool[] = ALL_MOTOR_TOOLS;
+          let tools: MotorTool[] = ALL_MOTOR_TOOLS;
           let domains = explicitDomains;
+          let credentials: Record<string, string> | undefined;
+          let credentialNames: string[] | undefined;
+          let preparedDeps: Awaited<ReturnType<typeof installSkillDependencies>> | undefined;
           const warnings: string[] = [];
 
           if (skillName) {
-            const skillResult = await loadSkill(skillName);
+            const skillResult = await loadSkill(skillName, skillsDir);
             if ('error' in skillResult) {
               // Guide the model: if skill doesn't exist, it needs to be created
               // via core.act WITHOUT skill param (Scenario 7 from skill-lifecycle.md)
@@ -267,18 +437,18 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
 
             const policy = loadedSkill.policy;
 
-            // Trust gating — block unapproved skills
-            if (policy && policy.trust !== 'approved') {
-              const trustLabels: Record<string, string> = {
+            // Status gating — block unapproved skills
+            if (policy && policy.status !== 'approved') {
+              const statusLabels: Record<string, string> = {
                 pending_review: 'pending approval (new skill, not yet reviewed)',
                 reviewed: 'reviewed but not yet approved',
                 needs_reapproval: 'needs re-approval (content changed)',
               };
-              const trustLabel = trustLabels[policy.trust] ?? policy.trust;
+              const statusLabel = statusLabels[policy.status] ?? policy.status;
               return {
                 success: false,
                 error:
-                  `Skill "${skillName}" is ${trustLabel}. ` +
+                  `Skill "${skillName}" is ${statusLabel}. ` +
                   `If the user has already consented, call core.skill(action:"approve", name:"${skillName}") now. ` +
                   `Otherwise, use core.skill(action:"read", name:"${skillName}") to show them what it does first. ` +
                   `Do not retry core.act until the skill is approved.`,
@@ -296,20 +466,65 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
               };
             }
 
+            // Resolve tools from policy
+            try {
+              tools = resolveTools(policy.tools);
+            } catch (err) {
+              return {
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+
             // Domains: policy is authoritative for approved skills.
             // Cognition cannot grant arbitrary network access by passing explicit domains.
-            if (policy.allowedDomains && policy.allowedDomains.length > 0) {
-              domains = policy.allowedDomains;
+            if (policy.domains && policy.domains.length > 0) {
+              domains = [...policy.domains]; // Clone — don't mutate policy object
             } else {
               domains = [];
             }
             if (explicitDomains.length > 0) {
               warnings.push(
-                `Explicit domains ignored for skill "${skillName}" — use policy.allowedDomains instead.`
+                `Explicit domains ignored for skill "${skillName}" — use policy.domains instead.`
               );
             }
 
-            // Note: credentials are handled by Motor Cortex via CredentialStore
+            // Resolve credentials: policy.credentialValues + credentialStore
+            credentialNames = policy.requiredCredentials;
+            if (credentialNames && credentialNames.length > 0 && credentialStore) {
+              credentials = {};
+              for (const name of credentialNames) {
+                // Policy-stored values take precedence
+                const policyValue = policy.credentialValues?.[name];
+                if (policyValue) {
+                  credentials[name] = policyValue;
+                } else {
+                  const storeValue = credentialStore.get(name);
+                  if (storeValue) {
+                    credentials[name] = storeValue;
+                  }
+                }
+              }
+            }
+
+            // Pre-install dependencies if present
+            if (policy.dependencies) {
+              try {
+                const { join: pathJoin, dirname: pathDirname } = await import('node:path');
+                const cacheDir = pathJoin(pathDirname(skillsDir), 'dependency-cache');
+                preparedDeps = await installSkillDependencies(
+                  policy.dependencies,
+                  cacheDir,
+                  skillName,
+                  actLogger as Parameters<typeof installSkillDependencies>[3]
+                );
+              } catch (err) {
+                return {
+                  success: false,
+                  error: `Failed to install skill dependencies: ${err instanceof Error ? err.message : String(err)}`,
+                };
+              }
+            }
 
             // Validate inputs against skill schema
             const inputErrors = validateSkillInputs(loadedSkill, inputs);
@@ -333,6 +548,25 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
             };
           }
 
+          // Prepare workspace for skill runs (copy skill files + baseline)
+          let workspacePath: string | undefined;
+          if (loadedSkill) {
+            try {
+              const prepared = await prepareSkillWorkspace(
+                loadedSkill.path,
+                workspacesDir,
+                crypto.randomUUID(),
+                actLogger as Parameters<typeof prepareSkillWorkspace>[3]
+              );
+              workspacePath = prepared.workspacePath;
+            } catch (err) {
+              return {
+                success: false,
+                error: `Failed to prepare skill workspace: ${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
+          }
+
           // Build task with inputs if provided
           let fullTask = task;
           if (Object.keys(inputs).length > 0) {
@@ -342,21 +576,48 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
             fullTask = `${task}\n\nInputs:\n${inputStr}`;
           }
 
+          // Build system prompt
+          const syntheticTools: SyntheticTool[] = [
+            'ask_user',
+            'save_credential',
+            'request_approval',
+          ];
+          const hasDependencies = preparedDeps !== undefined;
+
+          // Build skill-specific instructions (business logic — Motor doesn't know about this)
+          const callerInstructions = buildSkillInstructions({
+            hasWriteTool: tools.includes('write'),
+            ...(loadedSkill && { skillName: loadedSkill.frontmatter.name }),
+            ...(loadedSkill && { skillDescription: loadedSkill.frontmatter.description }),
+            hasDependencies,
+            ...(credentialNames && { credentialNames }),
+          });
+
+          const systemPrompt = buildMotorSystemPrompt({
+            task: fullTask,
+            tools,
+            syntheticTools,
+            ...(domains.length > 0 && { domains }),
+            maxIterations,
+            ...(callerInstructions && { callerInstructions }),
+          });
+
           const { runId } = await motorCortex.startRun({
             task: fullTask,
             tools,
             maxIterations,
-            ...(loadedSkill && { skill: loadedSkill }),
             ...(domains.length > 0 && { domains }),
-            config: {
-              syntheticTools: [
-                'ask_user',
-                'save_credential',
-                'request_approval',
-              ] as SyntheticTool[],
-              installDependencies: true,
-              mergePolicyDomains: true,
-            },
+            syntheticTools,
+            systemPrompt,
+            // Credentials (passed explicitly)
+            ...(credentials && { credentials }),
+            ...(credentialNames && { credentialNames }),
+            // Dependencies (pre-installed)
+            ...(preparedDeps && { preparedDeps }),
+            // Workspace (pre-prepared for skill runs)
+            ...(workspacePath && { workspacePath }),
+            // Skill name (for extraction middleware)
+            ...(skillName && { skillName }),
           });
 
           // Note: Auto-discovery mode - no index.json to update

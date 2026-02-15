@@ -4,15 +4,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { sanitizePolicyForDisplay } from '../../../../src/runtime/skills/skill-types.js';
-import type { SkillPolicy } from '../../../../src/runtime/skills/skill-types.js';
+import { createTestPolicy } from '../../../helpers/factories.js';
 
 describe('sanitizePolicyForDisplay', () => {
-  const basePolicy: SkillPolicy = {
-    schemaVersion: 1,
-    trust: 'approved',
-    allowedDomains: ['api.example.com'],
+  const basePolicy = createTestPolicy({
     requiredCredentials: ['api_key', 'secret_token'],
-  };
+  });
 
   it('returns policy unchanged when no credentialValues', () => {
     const result = sanitizePolicyForDisplay(basePolicy);
@@ -20,13 +17,13 @@ describe('sanitizePolicyForDisplay', () => {
   });
 
   it('redacts all credential values to "[set]"', () => {
-    const policy: SkillPolicy = {
+    const policy = createTestPolicy({
       ...basePolicy,
       credentialValues: {
         api_key: 'sk-live-super-secret-key-12345',
         secret_token: 'tok_abc123xyz',
       },
-    };
+    });
 
     const result = sanitizePolicyForDisplay(policy);
 
@@ -37,28 +34,28 @@ describe('sanitizePolicyForDisplay', () => {
   });
 
   it('preserves all non-credential fields', () => {
-    const policy: SkillPolicy = {
+    const policy = createTestPolicy({
       ...basePolicy,
       credentialValues: { api_key: 'secret' },
       approvedBy: 'user',
       approvedAt: '2026-01-01T00:00:00Z',
-    };
+    });
 
     const result = sanitizePolicyForDisplay(policy);
 
-    expect(result.schemaVersion).toBe(1);
-    expect(result.trust).toBe('approved');
-    expect(result.allowedDomains).toEqual(['api.example.com']);
+    expect(result.schemaVersion).toBe(2);
+    expect(result.status).toBe('approved');
+    expect(result.domains).toEqual(['api.example.com']);
     expect(result.requiredCredentials).toEqual(['api_key', 'secret_token']);
     expect(result.approvedBy).toBe('user');
     expect(result.approvedAt).toBe('2026-01-01T00:00:00Z');
   });
 
   it('returns a new object (does not mutate original)', () => {
-    const policy: SkillPolicy = {
+    const policy = createTestPolicy({
       ...basePolicy,
       credentialValues: { api_key: 'secret' },
-    };
+    });
 
     const result = sanitizePolicyForDisplay(policy);
 
@@ -67,10 +64,10 @@ describe('sanitizePolicyForDisplay', () => {
   });
 
   it('handles empty credentialValues object', () => {
-    const policy: SkillPolicy = {
+    const policy = createTestPolicy({
       ...basePolicy,
       credentialValues: {},
-    };
+    });
 
     // Empty object is still truthy, so it should be processed
     const result = sanitizePolicyForDisplay(policy);

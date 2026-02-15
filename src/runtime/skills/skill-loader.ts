@@ -15,12 +15,13 @@
  * Instructions for the LLM...
  * ```
  *
- * ## Policy Sidecar (policy.json)
+ * ## Policy Sidecar (policy.json) - Schema v2
  * ```json
  * {
- *   "schemaVersion": 1,
- *   "trust": "approved",
- *   "allowedDomains": ["api.weather.com"],
+ *   "schemaVersion": 2,
+ *   "status": "approved",
+ *   "tools": ["ALL"],
+ *   "domains": ["api.weather.com"],
  *   "requiredCredentials": ["api_key"]
  * }
  * ```
@@ -336,6 +337,9 @@ export function validateDependencies(dependencies: Record<string, unknown>): str
 /**
  * Load policy.json from a skill directory.
  *
+ * Validates schemaVersion 2 and the new 'status' field.
+ * Logs a warning for v1 policies (no migration - clean break).
+ *
  * @param skillDir - Absolute path to skill directory
  * @returns SkillPolicy or null if absent/invalid
  */
@@ -351,20 +355,30 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
       return null;
     }
 
-    // Validate trust (accept legacy 'unknown' for migration)
-    if (
-      raw['trust'] !== 'pending_review' &&
-      raw['trust'] !== 'reviewed' &&
-      raw['trust'] !== 'needs_reapproval' &&
-      raw['trust'] !== 'approved' &&
-      raw['trust'] !== 'unknown' // Accept legacy value for migration
-    ) {
+    // Schema v1 is no longer supported - log migration warning
+    if (raw['schemaVersion'] === 1) {
+      // eslint-disable-next-line no-console -- one-time migration warning, no logger available
+      console.warn(
+        `[skill-loader] Policy v1 is deprecated. ` +
+          `Delete policy.json for skill "${skillDir}" to regenerate, ` +
+          `or manually update to schemaVersion 2 with 'status' (not 'trust') and 'domains' (not 'allowedDomains').`
+      );
       return null;
     }
 
-    // Migrate legacy trust name: unknown → needs_reapproval
-    if (raw['trust'] === 'unknown') {
-      raw['trust'] = 'needs_reapproval';
+    // Schema v2 validation
+    if (raw['schemaVersion'] !== 2) {
+      return null;
+    }
+
+    // Validate status
+    if (
+      raw['status'] !== 'pending_review' &&
+      raw['status'] !== 'reviewed' &&
+      raw['status'] !== 'needs_reapproval' &&
+      raw['status'] !== 'approved'
+    ) {
+      return null;
     }
 
     return raw as unknown as SkillPolicy;
@@ -428,7 +442,7 @@ export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[
         const indexEntry: SkillIndexEntry = {
           description: frontmatter.description,
           hasPolicy: policy !== null,
-          trust: policy?.trust ?? 'needs_reapproval',
+          status: policy?.status ?? 'needs_reapproval',
           lastUsed: extractedFrom?.timestamp,
         };
 
@@ -460,7 +474,7 @@ export async function getSkillNames(baseDir?: string): Promise<string[]> {
  * Load a skill by name from the skills directory.
  *
  * Returns frontmatter + optional policy + body.
- * Verifies content hash if policy exists — resets trust to 'needs_reapproval' on mismatch.
+ * Verifies content hash if policy exists — resets status to 'needs_reapproval' on mismatch.
  *
  * @param skillName - Skill name (directory name under data/skills/)
  * @param baseDir - Base directory (default: data/skills)
@@ -500,11 +514,11 @@ export async function loadSkill(
     if (policy?.provenance?.contentHash) {
       const currentHash = await computeDirectoryHash(skillDir);
       if (currentHash !== policy.provenance.contentHash) {
-        // Reset trust to needs_reapproval
-        policy = { ...policy, trust: 'needs_reapproval' };
+        // Reset status to needs_reapproval
+        policy = { ...policy, status: 'needs_reapproval' };
         await savePolicy(skillDir, policy);
 
-        // Skill content changed since approval — trust reset to needs_reapproval
+        // Skill content changed since approval — status reset to needs_reapproval
         // Hash mismatch is logged via the updated policy.json
       }
     }

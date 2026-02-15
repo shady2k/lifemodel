@@ -42,7 +42,7 @@ describe('buildAvailableSkillsSection', () => {
   it('renders skill as name: description with no trust badge', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
+        { name: 'web-scraper', description: 'Email skill', status: 'approved', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
@@ -60,7 +60,7 @@ describe('buildAvailableSkillsSection', () => {
   it('renders pending_review skill without badge or hint', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'new-skill', description: 'New skill', trust: 'pending_review', hasPolicy: true },
+        { name: 'new-skill', description: 'New skill', status: 'pending_review', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
@@ -73,7 +73,7 @@ describe('buildAvailableSkillsSection', () => {
   it('renders needs_reapproval skill without badge or hint', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'outdated-skill', description: 'Old skill', trust: 'needs_reapproval', hasPolicy: true },
+        { name: 'outdated-skill', description: 'Old skill', status: 'needs_reapproval', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
@@ -87,7 +87,7 @@ describe('buildAvailableSkillsSection', () => {
   it('renders needs_reapproval without policy — no badge, no hint', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
+        { name: 'weather', description: 'Weather skill', status: 'needs_reapproval', hasPolicy: false },
       ],
     });
     const result = buildAvailableSkillsSection(context);
@@ -100,9 +100,9 @@ describe('buildAvailableSkillsSection', () => {
   it('renders mixed trust states uniformly — no badges anywhere', () => {
     const context = createMockContext({
       availableSkills: [
-        { name: 'web-scraper', description: 'Email skill', trust: 'approved', hasPolicy: true },
-        { name: 'weather', description: 'Weather skill', trust: 'needs_reapproval', hasPolicy: false },
-        { name: 'new-skill', description: 'New skill', trust: 'pending_review', hasPolicy: true },
+        { name: 'web-scraper', description: 'Email skill', status: 'approved', hasPolicy: true },
+        { name: 'weather', description: 'Weather skill', status: 'needs_reapproval', hasPolicy: false },
+        { name: 'new-skill', description: 'New skill', status: 'pending_review', hasPolicy: true },
       ],
     });
     const result = buildAvailableSkillsSection(context);
@@ -118,7 +118,7 @@ describe('buildAvailableSkillsSection', () => {
 
   it('includes XML tags', () => {
     const context = createMockContext({
-      availableSkills: [{ name: 'test', description: 'Test', trust: 'approved', hasPolicy: true }],
+      availableSkills: [{ name: 'test', description: 'Test', status: 'approved', hasPolicy: true }],
     });
     const result = buildAvailableSkillsSection(context);
 
@@ -136,7 +136,7 @@ describe('buildAvailableSkillsSection', () => {
           {
             name: 'recent-skill',
             description: 'Recently used skill',
-            trust: 'approved',
+            status: 'approved',
             hasPolicy: true,
             lastUsed: '2026-02-10T10:00:00Z', // 2 hours ago
           },
@@ -155,7 +155,7 @@ describe('buildAvailableSkillsSection', () => {
           {
             name: 'unused-skill',
             description: 'Never used skill',
-            trust: 'approved',
+            status: 'approved',
             hasPolicy: true,
           },
         ],
@@ -172,7 +172,7 @@ describe('buildAvailableSkillsSection', () => {
           {
             name: 'invalid-skill',
             description: 'Invalid timestamp skill',
-            trust: 'approved',
+            status: 'approved',
             hasPolicy: true,
             lastUsed: 'not-a-date',
           },
@@ -193,7 +193,7 @@ describe('buildAvailableSkillsSection', () => {
           {
             name: 'future-skill',
             description: 'Future timestamp skill',
-            trust: 'approved',
+            status: 'approved',
             hasPolicy: true,
             lastUsed: '2026-02-10T14:00:00Z', // 2 hours in future (negative age)
           },

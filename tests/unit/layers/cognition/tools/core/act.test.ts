@@ -8,13 +8,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createActTool } from '../../../../../../src/layers/cognition/tools/core/act.js';
 import type { MotorCortex } from '../../../../../../src/runtime/motor-cortex/motor-cortex.js';
+import { createTestLoadedSkill, createTestPolicy, createMockLogger } from '../../../../../helpers/factories.js';
 
 // Mock skill-loader module with path that matches production code's import resolution
-// The production code at src/layers/cognition/tools/core/act.ts imports
-// from '../../../../runtime/skills/skill-loader.js' which resolves to src/runtime/skills/skill-loader.js
 vi.mock('../../../../../../src/runtime/skills/skill-loader.js', () => ({
   loadSkill: vi.fn(),
   validateSkillInputs: vi.fn(() => []),
+}));
+
+// Mock workspace, dependency, and prompt modules
+vi.mock('../../../../../../src/runtime/skills/skill-workspace.js', () => ({
+  prepareSkillWorkspace: vi.fn().mockResolvedValue('/tmp/mock-workspace'),
+}));
+vi.mock('../../../../../../src/runtime/dependencies/dependency-manager.js', () => ({
+  installSkillDependencies: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../../../../../src/runtime/motor-cortex/motor-prompt.js', () => ({
+  buildMotorSystemPrompt: vi.fn().mockReturnValue('mock system prompt'),
+}));
+vi.mock('../../../../../../src/runtime/container/network-policy.js', () => ({
+  isValidDomain: vi.fn().mockReturnValue(true),
 }));
 
 // Import the mocked functions
@@ -28,7 +41,12 @@ describe('core.act tool', () => {
     startRun: vi.fn(),
   } as unknown as MotorCortex;
 
-  const tool = createActTool(mockMotorCortex);
+  const tool = createActTool({
+    motorCortex: mockMotorCortex,
+    skillsDir: '/data/skills',
+    workspacesDir: '/tmp/workspaces',
+    logger: createMockLogger(),
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,13 +92,9 @@ describe('core.act tool', () => {
 
   describe('agentic mode - skill loading', () => {
     it('blocks needs_reapproval skill', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'needs_reapproval', schemaVersion: 1, allowedDomains: ['api.example.com'] },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'needs_reapproval' }) })
+      );
 
       const result = (await tool.execute({
         mode: 'agentic',
@@ -95,13 +109,9 @@ describe('core.act tool', () => {
     });
 
     it('blocks pending_review skill', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'pending_review', schemaVersion: 1, allowedDomains: ['api.example.com'] },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'pending_review' }) })
+      );
 
       const result = (await tool.execute({
         mode: 'agentic',
@@ -116,17 +126,9 @@ describe('core.act tool', () => {
     });
 
     it('succeeds for approved skill with all tools granted', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: {
-          trust: 'approved',
-          schemaVersion: 1,
-          allowedDomains: ['api.example.com'],
-        },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill()
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'run-ok',
@@ -148,17 +150,9 @@ describe('core.act tool', () => {
     });
 
     it('grants all tools to approved skill runs', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: {
-          trust: 'approved',
-          schemaVersion: 1,
-          allowedDomains: ['api.example.com'],
-        },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill()
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'run-123',
@@ -181,17 +175,9 @@ describe('core.act tool', () => {
     });
 
     it('uses only policy domains, ignores explicit domains for skill runs', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: {
-          trust: 'approved',
-          schemaVersion: 1,
-          allowedDomains: ['api.example.com'],
-        },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill()
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'run-123',
@@ -217,13 +203,9 @@ describe('core.act tool', () => {
     });
 
     it('blocks skill with no policy', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: undefined,
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: undefined })
+      );
 
       const result = (await tool.execute({
         mode: 'agentic',
@@ -317,13 +299,9 @@ describe('core.act tool', () => {
     const motorResultContext = { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' };
 
     it('rejects from non-allowed trigger (e.g. thought)', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'pending_review', schemaVersion: 1 },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'pending_review' }) })
+      );
 
       const result = (await tool.execute(
         {
@@ -354,13 +332,9 @@ describe('core.act tool', () => {
     });
 
     it('dispatches with read-only tools, empty domains, maxAttempts=1', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'pending_review', schemaVersion: 1 },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'pending_review' }) })
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'review-run-123',
@@ -384,23 +358,15 @@ describe('core.act tool', () => {
           domains: [], // empty domains
           maxAttempts: 1,
           maxIterations: 30,
-          config: {
-            syntheticTools: [],
-            installDependencies: false,
-            mergePolicyDomains: false,
-          },
+          syntheticTools: [],
         })
       );
     });
 
     it('bypasses trust gating for pending_review skill', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'pending_review', schemaVersion: 1 },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'pending_review' }) })
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'review-run-456',
@@ -421,13 +387,9 @@ describe('core.act tool', () => {
     });
 
     it('bypasses trust gating for needs_reapproval skill', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'needs_reapproval', schemaVersion: 1 },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill({ policy: createTestPolicy({ status: 'needs_reapproval' }) })
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'review-run-789',
@@ -450,13 +412,9 @@ describe('core.act tool', () => {
 
   describe('normal execution config', () => {
     it('passes full config with all synthetic tools for approved skill', async () => {
-      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
-        frontmatter: { name: 'test', description: 'Test' },
-        policy: { trust: 'approved', schemaVersion: 1, allowedDomains: ['api.example.com'] },
-        body: 'instructions',
-        path: '/path',
-        skillPath: '/path/SKILL.md',
-      });
+      (loadSkill as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createTestLoadedSkill()
+      );
 
       (mockMotorCortex.startRun as ReturnType<typeof vi.fn>).mockResolvedValue({
         runId: 'run-config-test',
@@ -471,11 +429,7 @@ describe('core.act tool', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method -- mock method in test
       expect(mockMotorCortex.startRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          config: {
-            syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
-            installDependencies: true,
-            mergePolicyDomains: true,
-          },
+          syntheticTools: ['ask_user', 'save_credential', 'request_approval'],
         })
       );
     });

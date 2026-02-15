@@ -301,26 +301,6 @@ export interface MotorAttempt {
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
 /**
- * Evidence collected during Motor Cortex execution.
- *
- * Captured from tool call traces - deterministic observations,
- * not heuristic scanning. Used for security review during approval.
- */
-export interface RunEvidence {
-  /** Domains actually contacted via fetch tool (from tool call args — reliable) */
-  fetchedDomains: string[];
-
-  /** Credentials saved via save_credential during the run */
-  savedCredentials: string[];
-
-  /** Motor tools used during the run */
-  toolsUsed: string[];
-
-  /** Whether bash was used — if true, network activity beyond fetch is unobservable */
-  bashUsed: boolean;
-}
-
-/**
  * A Motor Cortex run - complete execution state.
  *
  * This is persisted to storage and resumed after restart.
@@ -377,10 +357,6 @@ export interface MotorRun {
   config: {
     /** Which synthetic tools to inject (allow-list) */
     syntheticTools: SyntheticTool[];
-    /** Whether to install skill dependencies before running */
-    installDependencies: boolean;
-    /** Whether to merge skill policy domains into allowed domains */
-    mergePolicyDomains: boolean;
   };
 
   /** Credentials saved by save_credential before skill directory exists.
