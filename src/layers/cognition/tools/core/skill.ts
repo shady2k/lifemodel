@@ -135,7 +135,7 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
     name: 'core.skill',
     maxCallsPerTurn: 3,
     description:
-      "Read skill content, review for approval, approve/reject/delete/update a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review (transitions status to 'reviewed'). Use action=approve or reject to change status. Use action=delete to permanently remove a skill. Use action=update to modify policy fields: domains, credentials, tools, dependencies). Status lifecycle: pending_review → reviewed (after review) → approved (after user approval). Content changes → needs_reapproval → reviewed → approved. If user asks to approve a pending_review skill without review, ask them to confirm first — they may skip to review if they wish.",
+      "Read skill content, review for approval, approve/reject/delete/update a skill. Use action=read to inspect a skill's instructions and policy. Use action=review for security review (transitions: pending_review/needs_reapproval → reviewing, reviewing → reviewed). Use action=approve or reject to change status. Use action=delete to permanently remove a skill. Use action=update to modify policy fields: domains, credentials, tools, dependencies. Status lifecycle: pending_review → reviewing (after first review) → reviewed (after Motor deep review) → approved (after user approval). Content changes → needs_reapproval → reviewing → reviewed → approved.",
     tags: ['skills'],
     hasSideEffects: true,
     parameters,
@@ -180,19 +180,31 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
       if (action === 'review') {
         const review = await reviewSkill(loaded);
 
-        // Transition pending_review/needs_reapproval → reviewed after security review
-        if (
-          loaded.policy?.status === 'pending_review' ||
-          loaded.policy?.status === 'needs_reapproval'
-        ) {
-          await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewed' });
+        // Idempotent status transitions:
+        // Phase 1: pending_review/needs_reapproval → reviewing (deterministic extraction done, Motor deep review pending)
+        // Phase 2: reviewing → reviewed (Motor deep review complete, re-run deterministic extraction for fresh data)
+        // Already reviewed → no-op
+        if (loaded.policy) {
+          if (
+            loaded.policy.status === 'pending_review' ||
+            loaded.policy.status === 'needs_reapproval'
+          ) {
+            await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewing' });
+          } else if (loaded.policy.status === 'reviewing') {
+            await savePolicy(loaded.path, { ...loaded.policy, status: 'reviewed' });
+          }
+          // reviewed/approved → no-op
         }
 
         return { success: true, skill: skillName, review };
       }
 
-      // --- CONSENT GATE: approve, reject, delete, update require user_message trigger ---
-      if (context?.triggerType !== 'user_message') {
+      // --- CONSENT GATE ---
+      // approve, reject, delete: always require user_message trigger
+      // update: require user_message only for approved skills (seeding unapproved policy is allowed from any trigger)
+      const alwaysGated = action === 'approve' || action === 'reject' || action === 'delete';
+      const updateGated = action === 'update' && loaded.policy?.status === 'approved';
+      if ((alwaysGated || updateGated) && context?.triggerType !== 'user_message') {
         return {
           success: false,
           error:
@@ -262,17 +274,11 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
 
       // --- update (modify policy fields: domains, credentials, tools, dependencies) ---
       if (action === 'update') {
-        // Validate: requires skill with existing policy (except pending_review)
+        // Validate: requires skill with existing policy
         if (!loaded.policy) {
           return {
             success: false,
             error: `Skill "${skillName}" has no policy. Cannot update without policy. Use action=read to inspect it first.`,
-          };
-        }
-        if (loaded.policy.status === 'pending_review') {
-          return {
-            success: false,
-            error: `Skill "${skillName}" status is "pending_review". Cannot update without policy. Use action=review first.`,
           };
         }
 

@@ -28,11 +28,12 @@ The safety boundary for Motor Cortex is **infrastructure-level, not honor-system
 | State | Meaning | Can execute via core.act? |
 |-------|---------|--------------------------|
 | `pending_review` | Motor created/modified this skill, user hasn't reviewed yet | No — requires explicit tools param |
+| `reviewing` | Deterministic review done, Motor deep review in progress | No — requires explicit tools param |
 | `reviewed` | Security review completed, awaiting user approval | No — requires explicit tools param |
 | `approved` | User confirmed policy after reviewing | Yes — policy defaults apply |
 | `needs_reapproval` | Content hash mismatch detected at load time, or no policy exists | No — requires explicit tools or onboarding |
 
-**Distinction:** `pending_review` means "Motor produced this, it's new to the user." `needs_reapproval` means "this was previously approved but something changed (content hash mismatch) or policy is missing." Both block implicit execution — the difference is provenance and what Cognition tells the user.
+**Distinction:** `pending_review` means "Motor produced this, it's new to the user." `reviewing` means "the deterministic review ran, Motor deep review is in progress." `needs_reapproval` means "this was previously approved but something changed (content hash mismatch) or policy is missing." All non-approved statuses block implicit execution — the difference is provenance and what Cognition tells the user.
 
 ### Content Hash Scope
 
@@ -41,16 +42,19 @@ The content hash covers **all files in the skill directory** (SKILL.md, scripts/
 ### Status State Transitions
 
 ```
-(new skill extracted)           → pending_review
-pending_review + security review → reviewed
-reviewed + user approves        → approved
-reviewed + user rejects         → pending_review (stays, Cognition notes rejection)
-approved + content hash match   → approved (no change)
-approved + content hash mismatch → needs_reapproval (detected at load time)
-approved + Motor updates skill  → pending_review (extraction forces reset)
-needs_reapproval + user re-approves      → approved
-needs_reapproval + onboarding completes  → approved
-Content changes                 → needs_reapproval → reviewed → approved
+(new skill extracted)              → pending_review
+pending_review + core.skill review → reviewing (Phase 1: deterministic extraction)
+reviewing + core.skill review      → reviewed  (Phase 2: Motor deep review complete)
+reviewed + user approves           → approved
+reviewed + user rejects            → pending_review (stays, Cognition notes rejection)
+approved + content hash match      → approved (no change)
+approved + content hash mismatch   → needs_reapproval (detected at load time)
+reviewing + content hash mismatch  → needs_reapproval (detected at load time)
+approved + Motor updates skill     → pending_review (extraction forces reset)
+needs_reapproval + core.skill review → reviewing
+needs_reapproval + user re-approves  → approved
+needs_reapproval + onboarding completes → approved
+Content changes                    → needs_reapproval → reviewing → reviewed → approved
 ```
 
 ## Scenario 1: User Discovers a New Service
@@ -523,7 +527,7 @@ After extraction, Cognition must review each new/updated skill before presenting
    - Read-only tools: `read`, `list`, `glob`, `grep`
    - No network access (empty domains)
    - No synthetic tools (no `ask_user`, `save_credential`, `request_approval`)
-   - Limited iterations (max 10)
+   - Limited iterations (max 30)
    - Single attempt (no auto-retry)
 
 3. **Motor runtime as safety net:** If both layers miss something, Motor fails at runtime and reports back via `ask_user`.
@@ -533,27 +537,33 @@ After extraction, Cognition must review each new/updated skill before presenting
 ```
 1. COGNITION receives motor_result with installed skills
 2. For each skill, calls core.skill(action:"review", name:"<skill-name>")
+   → Status transitions: pending_review → reviewing (Phase 1)
 3. Review returns deterministic facts:
    - Description and status
    - Policy domains (runtime permissions)
    - Policy credentials
    - Referenced credentials (env vars observed in all skill files)
    - Referenced domains (URLs observed in all skill files)
+   - VAULT_ prefixed env var names for user setup
    - File inventory (path, size, truncated SHA-256 hash)
    - Whether bash was used
    - Provenance (source URL, fetch timestamp)
 4. Cognition tells user: "Analyzing skill files for security review..."
 5. Cognition dispatches Motor review: core.act(mode:"agentic", skill:"skill-name", skill_review:true, task:"Read all files...")
+   The motor_result signal includes skill and skillReview fields for identification.
 6. Motor review reads SKILL.md, scripts/, references/ and reports:
    - Each file's purpose and contents
    - Credentials referenced in each file
    - Domains referenced in each file
+   - Packages referenced (npm/pip)
    - Any security concerns or suspicious patterns
-7. When motor_result arrives (second signal), Cognition combines:
-   - Deterministic facts from step 3 (authoritative)
-   - Motor analysis from step 6 (advisory, may be incomplete)
-8. Cognition presents everything at once to user
-9. User approves → Cognition calls core.skill(action:"approve")
+7. When skill_review motor_result arrives (second signal), Cognition:
+   a. Calls core.skill(action:"review") again → reviewing → reviewed (Phase 2)
+   b. Seeds the policy: core.skill(action:"update", addDomains:[...], addCredentials:[...], addDependencies:[...])
+      (update is allowed from motor_result trigger for non-approved skills)
+   c. Presents Motor analysis + deterministic facts to user
+   d. Tells user to set credentials with VAULT_ prefix (e.g., VAULT_AGENTMAIL_API_KEY)
+8. User approves → Cognition calls core.skill(action:"approve")
 ```
 
 ### Content Reference Extraction
@@ -639,7 +649,7 @@ core.act({
 - Requires `skill` parameter
 - Forces read-only tools: `read`, `list`, `glob`, `grep`
 - Forces empty domains (no network access)
-- Forces `maxIterations: 10`, `maxAttempts: 1`
+- Forces `maxIterations: 30`, `maxAttempts: 1`
 - Bypasses status gating (can review `pending_review` and `needs_reapproval` skills)
 
 ## Open Questions

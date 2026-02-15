@@ -58,7 +58,7 @@ describe('buildMotorResultSection', () => {
       expect(section).toContain('Analyzing skill files');
     });
 
-    it('includes updated bash warning wording', () => {
+    it('does not include VAULT_ or bash warning text in install motor_result', () => {
       const data: MotorResultData = {
         kind: 'motor_result',
         runId: 'run-789',
@@ -77,9 +77,9 @@ describe('buildMotorResultSection', () => {
 
       const section = buildMotorResultSection(data);
 
-      // Should have the new observability-focused wording
-      expect(section).toContain('not instrumented in run');
-      expect(section).toContain('enforced by the container firewall');
+      // These instructions moved to the skill_review_result section
+      expect(section).not.toContain('not instrumented in run');
+      expect(section).not.toContain('enforced by the container firewall');
     });
 
     it('does not include review instructions for non-skill completions', () => {
@@ -126,6 +126,53 @@ describe('buildMotorResultSection', () => {
       expect(section).toContain('Motor Cortex is untrusted');
       // Should include Motor review dispatch for file analysis
       expect(section).toContain('skill_review:true');
+    });
+  });
+
+  describe('skill_review completed status', () => {
+    it('generates dedicated skill_review_result trigger', () => {
+      const data: MotorResultData = {
+        kind: 'motor_result',
+        runId: 'run-review-1',
+        status: 'completed',
+        attemptIndex: 0,
+        skillReview: true,
+        skill: 'agentmail',
+        result: {
+          ok: true,
+          summary: 'Reviewed skill files and found no issues',
+          stats: { iterations: 2, durationMs: 4000, energyCost: 0.03, errors: 0 },
+        },
+      };
+
+      const section = buildMotorResultSection(data);
+
+      expect(section).toContain('<trigger type="skill_review_result">');
+      expect(section).toContain('core.skill(action:"review"');
+      expect(section).toContain('core.skill(action:"update"');
+      expect(section).toContain('VAULT_');
+      expect(section).toContain('agentmail');
+    });
+
+    it('includes VAULT_ prefix instructions for credentials', () => {
+      const data: MotorResultData = {
+        kind: 'motor_result',
+        runId: 'run-review-2',
+        status: 'completed',
+        attemptIndex: 0,
+        skillReview: true,
+        skill: 'agentmail',
+        result: {
+          ok: true,
+          summary: 'Skill uses AGENTMAIL_API_KEY for authentication',
+          stats: { iterations: 2, durationMs: 3000, energyCost: 0.02, errors: 0 },
+        },
+      };
+
+      const section = buildMotorResultSection(data);
+
+      expect(section).toContain('VAULT_');
+      expect(section).toContain('VAULT_AGENTMAIL_API_KEY');
     });
   });
 

@@ -9,10 +9,14 @@
  * - Symlink rejection
  * - Status forced to "pending_review"
  * - Credential persistence
+ * - contentHash stamped in provenance
+ * - changedFiles and deletedFiles populated from baseline diff
+ * - Delete semantics (clean replacement)
+ * - Size limits (1MB per file, 10MB total)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdir, writeFile, readFile, symlink, rm, readdir } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, symlink, rm, readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -410,6 +414,141 @@ describe('skill-extraction', () => {
       const installedDir = join(skillsDir, 'new-skill-domains');
       const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
       expect(policy.domains).toBeUndefined();
+    });
+  });
+
+  describe('contentHash', () => {
+    it('stamps contentHash in policy.provenance for new skills', async () => {
+      await writeSkillMd('hash-new', 'A skill to test content hashing');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.created).toEqual(['hash-new']);
+
+      const installedDir = join(skillsDir, 'hash-new');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.provenance).toBeDefined();
+      expect(policy.provenance.contentHash).toMatch(/^sha256:/);
+    });
+
+    it('stamps contentHash in policy.provenance for updated skills', async () => {
+      await preInstallSkill(
+        'hash-update',
+        '---\nname: hash-update\ndescription: Old\n---\n# Old',
+        createTestPolicy()
+      );
+
+      // Modify workspace so extraction triggers
+      await writeSkillMd('hash-update', 'Updated hash skill', '# Modified content');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['hash-update']);
+
+      const installedDir = join(skillsDir, 'hash-update');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.provenance).toBeDefined();
+      expect(policy.provenance.contentHash).toMatch(/^sha256:/);
+    });
+  });
+
+  describe('changedFiles and deletedFiles', () => {
+    it('populates changedFiles when files are modified', async () => {
+      await preInstallSkill(
+        'diff-changed',
+        '---\nname: diff-changed\ndescription: Diff test\n---\n# Original',
+        createTestPolicy()
+      );
+
+      // Set up workspace with initial content and generate baseline
+      await writeSkillMd('diff-changed', 'Diff test', '# Original');
+      await writeBaseline();
+
+      // Modify SKILL.md after baseline
+      await writeSkillMd('diff-changed', 'Diff test', '# Modified after baseline');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['diff-changed']);
+
+      const installedDir = join(skillsDir, 'diff-changed');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.extractedFrom.changedFiles).toContain('SKILL.md');
+    });
+
+    it('populates deletedFiles when files are removed', async () => {
+      await preInstallSkill(
+        'diff-deleted',
+        '---\nname: diff-deleted\ndescription: Diff delete test\n---\n# Skill',
+        createTestPolicy()
+      );
+
+      // Set up workspace with SKILL.md + references/api.md
+      await writeSkillMd('diff-deleted', 'Diff delete test');
+      await mkdir(join(workspace, 'references'), { recursive: true });
+      await writeFile(join(workspace, 'references', 'api.md'), '# API Docs', 'utf-8');
+      await writeBaseline();
+
+      // Delete references/api.md after baseline
+      await rm(join(workspace, 'references', 'api.md'));
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result.updated).toEqual(['diff-deleted']);
+
+      const installedDir = join(skillsDir, 'diff-deleted');
+      const policy = JSON.parse(await readFile(join(installedDir, 'policy.json'), 'utf-8'));
+      expect(policy.extractedFrom.deletedFiles).toContain('references/api.md');
+    });
+  });
+
+  describe('delete semantics', () => {
+    it('removes deleted files from installed skill', async () => {
+      // Pre-install a skill with an extra file (scripts/old.sh)
+      const installedDir = await preInstallSkill(
+        'clean-replace',
+        '---\nname: clean-replace\ndescription: Clean replacement test\n---\n# Old',
+        createTestPolicy()
+      );
+      await mkdir(join(installedDir, 'scripts'), { recursive: true });
+      await writeFile(join(installedDir, 'scripts', 'old.sh'), '#!/bin/bash\necho old', 'utf-8');
+
+      // Set up workspace with only SKILL.md (no scripts/old.sh)
+      // No baseline = treated as new skill creation = rm + mkdir + cp
+      await writeSkillMd('clean-replace', 'Clean replacement test', '# New version');
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      // Has existing policy so it counts as update
+      expect(result.updated).toEqual(['clean-replace']);
+
+      // Verify scripts/old.sh no longer exists in installed dir
+      const oldShPath = join(skillsDir, 'clean-replace', 'scripts', 'old.sh');
+      await expect(access(oldShPath)).rejects.toThrow();
+    });
+  });
+
+  describe('size limits', () => {
+    it('skips extraction when file exceeds 1MB', async () => {
+      await writeSkillMd('big-file', 'Skill with oversized file');
+
+      // Write a file > 1MB
+      const largeContent = Buffer.alloc(1024 * 1024 + 1, 'x');
+      await writeFile(join(workspace, 'huge.bin'), largeContent);
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result).toEqual({ created: [], updated: [] });
+      expect(mockLogger.warn).toHaveBeenCalled();
+    });
+
+    it('skips extraction when total size exceeds 10MB', async () => {
+      await writeSkillMd('many-files', 'Skill with many large files');
+
+      // Write multiple files totaling > 10MB (each under 1MB individually)
+      const fileSize = 900 * 1024; // 900KB each
+      const fileContent = Buffer.alloc(fileSize, 'y');
+      for (let i = 0; i < 12; i++) {
+        await writeFile(join(workspace, `data-${String(i)}.bin`), fileContent);
+      }
+
+      const result = await extractSkillsFromWorkspace(workspace, skillsDir, runId, mockLogger);
+      expect(result).toEqual({ created: [], updated: [] });
+      expect(mockLogger.warn).toHaveBeenCalled();
     });
   });
 });

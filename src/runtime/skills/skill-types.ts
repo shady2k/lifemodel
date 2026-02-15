@@ -64,11 +64,17 @@ export interface SkillFrontmatter {
  * Status of a skill's security policy.
  *
  * - pending_review: Freshly created by Motor Cortex, never reviewed
- * - reviewed: Security review done, waiting for user approval
+ * - reviewing: Deterministic review done, Motor deep review in progress
+ * - reviewed: Security review complete, waiting for user approval
  * - needs_reapproval: Content changed since last approval
  * - approved: User has approved these permissions
  */
-export type SkillStatus = 'pending_review' | 'reviewed' | 'needs_reapproval' | 'approved';
+export type SkillStatus =
+  | 'pending_review'
+  | 'reviewing'
+  | 'reviewed'
+  | 'needs_reapproval'
+  | 'approved';
 
 /**
  * Motor tool names (mirrors MotorTool from motor-protocol.ts).

@@ -238,6 +238,9 @@ export interface SkillReview {
   /** Domain names referenced via URLs in skill files (observed, not authoritative) */
   referencedDomains: string[];
 
+  /** VAULT_ prefixed env var names for user setup (derived from all credentials) */
+  vaultEnvVars: string[];
+
   /** File inventory (deterministic) */
   files: SkillFileInventory[];
 
@@ -358,6 +361,9 @@ export async function reviewSkill(loaded: LoadedSkill): Promise<SkillReview> {
       case 'pending_review':
         status = 'pending_review - freshly created by Motor Cortex, never reviewed';
         break;
+      case 'reviewing':
+        status = 'reviewing - deterministic review done, Motor deep review in progress';
+        break;
       case 'reviewed':
         status = 'reviewed - security review done, waiting for user approval';
         break;
@@ -372,6 +378,15 @@ export async function reviewSkill(loaded: LoadedSkill): Promise<SkillReview> {
     }
   }
 
+  // Compute VAULT_ env var names from union of all credentials
+  const allCredentials = new Set([
+    ...(policy?.requiredCredentials ?? []),
+    ...referencedCredentials,
+  ]);
+  const vaultEnvVars = Array.from(allCredentials)
+    .map((name) => (name.startsWith('VAULT_') ? name : `VAULT_${name}`))
+    .sort();
+
   return {
     name: loaded.frontmatter.name,
     description: loaded.frontmatter.description,
@@ -381,6 +396,7 @@ export async function reviewSkill(loaded: LoadedSkill): Promise<SkillReview> {
     policyTools: policy?.tools ?? [],
     referencedCredentials,
     referencedDomains,
+    vaultEnvVars,
     files,
     provenance: policy?.provenance ?? undefined,
     extractedFrom: policy?.extractedFrom ?? undefined,

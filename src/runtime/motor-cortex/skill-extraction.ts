@@ -27,12 +27,23 @@
  * which has run state for reconciliation tracking.
  */
 
-import { readdir, readFile, lstat, cp, mkdir } from 'node:fs/promises';
+import { readdir, readFile, lstat, cp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Logger } from '../../types/logger.js';
 import type { SkillPolicy } from '../skills/skill-types.js';
-import { parseSkillFile, validateSkillFrontmatter, savePolicy } from '../skills/skill-loader.js';
+import {
+  parseSkillFile,
+  validateSkillFrontmatter,
+  savePolicy,
+  computeDirectoryHash,
+} from '../skills/skill-loader.js';
+
+/**
+ * Size limits for skill extraction.
+ */
+const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB per file
+const MAX_TOTAL_SIZE = 10 * 1024 * 1024; // 10MB total
 
 /**
  * Baseline manifest format.
@@ -98,6 +109,55 @@ async function scanSkillFiles(dir: string, relativeDir = ''): Promise<Record<str
   }
 
   return result;
+}
+
+/**
+ * Check total size of all files in a directory (excluding hidden, policy.json).
+ * Returns total bytes and per-file sizes.
+ */
+async function checkSizeLimits(
+  dir: string,
+  relativeDir = ''
+): Promise<{ totalBytes: number; oversizedFile?: string }> {
+  let totalBytes = 0;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return { totalBytes: 0 };
+  }
+
+  for (const entryName of entries) {
+    if (entryName.startsWith('.') || entryName === 'policy.json') continue;
+
+    const fullPath = join(dir, entryName);
+    const relativePath = relativeDir ? join(relativeDir, entryName) : entryName;
+    const stats = await lstat(fullPath);
+
+    if (stats.isSymbolicLink()) continue;
+
+    if (stats.isDirectory()) {
+      const nested = await checkSizeLimits(fullPath, relativePath);
+      totalBytes += nested.totalBytes;
+      if (nested.oversizedFile) return { totalBytes, oversizedFile: nested.oversizedFile };
+    } else if (stats.isFile()) {
+      if (stats.size > MAX_FILE_SIZE) {
+        return {
+          totalBytes,
+          oversizedFile: `${relativePath} (${String(stats.size)} bytes > ${String(MAX_FILE_SIZE)} limit)`,
+        };
+      }
+      totalBytes += stats.size;
+      if (totalBytes > MAX_TOTAL_SIZE) {
+        return {
+          totalBytes,
+          oversizedFile: `total size ${String(totalBytes)} bytes > ${String(MAX_TOTAL_SIZE)} limit`,
+        };
+      }
+    }
+  }
+
+  return { totalBytes };
 }
 
 /**
@@ -170,6 +230,16 @@ export async function extractSkillsFromWorkspace(
   // Step 3: Security checks on workspace
   await rejectSymlinks(workspace);
 
+  // Step 3b: Size limit enforcement
+  const sizeCheck = await checkSizeLimits(workspace);
+  if (sizeCheck.oversizedFile) {
+    logger.warn(
+      { skillName, oversizedFile: sizeCheck.oversizedFile },
+      'Skill extraction skipped: size limit exceeded'
+    );
+    return result;
+  }
+
   // Step 4: Check if this is an update (target dir already exists)
   let isUpdate = false;
   let existingPolicy: SkillPolicy | null = null;
@@ -186,6 +256,8 @@ export async function extractSkillsFromWorkspace(
   // prepareSkillWorkspace writes .motor-baseline.json at init time.
   // If present, compare current workspace state against baseline.
   // Unchanged workspace = no extraction needed (prevents status downgrade on normal runs).
+  const changedFiles: string[] = [];
+  const deletedFiles: string[] = [];
   if (isUpdate) {
     try {
       const baselinePath = join(workspace, '.motor-baseline.json');
@@ -193,27 +265,43 @@ export async function extractSkillsFromWorkspace(
       const baseline = JSON.parse(baselineContent) as MotorBaseline;
       const currentFiles = await scanSkillFiles(workspace);
 
-      // Compare: same keys and same hashes = no changes
-      const baselineKeys = Object.keys(baseline.files).sort();
-      const currentKeys = Object.keys(currentFiles).sort();
-      const keysMatch =
-        baselineKeys.length === currentKeys.length &&
-        baselineKeys.every((k, i) => k === currentKeys[i]);
-      const hashesMatch =
-        keysMatch && baselineKeys.every((k) => baseline.files[k] === currentFiles[k]);
+      // Compute actual changedFiles and deletedFiles
+      const baselineKeys = new Set(Object.keys(baseline.files));
+      const currentKeys = new Set(Object.keys(currentFiles));
 
-      if (hashesMatch) {
+      // Changed: files where hash differs OR files in current but not in baseline
+      for (const key of currentKeys) {
+        if (!baselineKeys.has(key) || baseline.files[key] !== currentFiles[key]) {
+          changedFiles.push(key);
+        }
+      }
+
+      // Deleted: files in baseline but not in current
+      for (const key of baselineKeys) {
+        if (!currentKeys.has(key)) {
+          deletedFiles.push(key);
+        }
+      }
+
+      if (changedFiles.length === 0 && deletedFiles.length === 0) {
         logger.debug({ skillName }, 'Workspace unchanged from baseline, skipping extraction');
         return result;
       }
-      logger.info({ skillName }, 'Workspace modified — extracting updated skill');
+      logger.info(
+        { skillName, changedFiles, deletedFiles },
+        'Workspace modified — extracting updated skill'
+      );
     } catch {
       // No baseline file — this is a new skill creation (no prepareSkillWorkspace), proceed normally
       logger.debug({ skillName }, 'No baseline file — treating as new skill creation');
     }
   }
 
-  // Step 5: Copy workspace files to target (excluding policy.json, hidden files)
+  // Step 5: Copy workspace files to target (clean replacement semantics)
+  // Remove existing target dir and recreate to handle deleted files
+  // (merge cp would leave deleted files behind)
+  // Preserve policy.json by reading it first (already done in Step 4)
+  await rm(targetDir, { recursive: true, force: true });
   await mkdir(targetDir, { recursive: true });
 
   // Copy files from workspace to target
@@ -225,6 +313,9 @@ export async function extractSkillsFromWorkspace(
       return !name.startsWith('.') && name !== 'policy.json';
     },
   });
+
+  // Step 5b: Compute content hash over the installed skill files
+  const contentHash = await computeDirectoryHash(targetDir);
 
   // Step 6: Build policy
   let policy: SkillPolicy;
@@ -245,11 +336,18 @@ export async function extractSkillsFromWorkspace(
         ...(existingPolicy.credentialValues ?? {}),
         ...(pendingCredentials ?? {}),
       },
+      provenance: {
+        ...(existingPolicy.provenance ?? {
+          source: 'motor-cortex',
+          fetchedAt: new Date().toISOString(),
+        }),
+        contentHash,
+      },
       extractedFrom: {
         runId,
         timestamp: new Date().toISOString(),
-        changedFiles: [],
-        deletedFiles: [],
+        changedFiles,
+        deletedFiles,
       },
     };
     // Clear approval since content changed
@@ -264,11 +362,16 @@ export async function extractSkillsFromWorkspace(
         Object.keys(pendingCredentials).length > 0 && {
           credentialValues: pendingCredentials,
         }),
+      provenance: {
+        source: 'motor-cortex',
+        fetchedAt: new Date().toISOString(),
+        contentHash,
+      },
       extractedFrom: {
         runId,
         timestamp: new Date().toISOString(),
-        changedFiles: [],
-        deletedFiles: [],
+        changedFiles,
+        deletedFiles,
       },
     };
     result.created.push(skillName);
@@ -278,7 +381,7 @@ export async function extractSkillsFromWorkspace(
   await savePolicy(targetDir, policy);
 
   logger.info(
-    { skillName, isUpdate, runId },
+    { skillName, isUpdate, runId, contentHash },
     isUpdate ? 'Skill updated from workspace' : 'Skill created from workspace'
   );
 

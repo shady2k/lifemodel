@@ -362,4 +362,7 @@ export interface MotorRun {
   /** Credentials saved by save_credential before skill directory exists.
    *  Merged into policy.json during extraction. */
   pendingCredentials?: Record<string, string>;
+
+  /** Whether this run is a skill security review */
+  skillReview?: boolean;
 }

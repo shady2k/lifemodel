@@ -334,6 +334,7 @@ Steps:
 1. List the workspace to find all files
 2. Read each file completely
 3. Use grep to find credentials (process.env, os.environ, $VAR) and domains (URLs, hostnames)
+4. Use grep to find package references: require(), import statements, package.json dependencies, pip install references
 
 Output format — produce EXACTLY this structure:
 
@@ -348,13 +349,16 @@ Output format — produce EXACTLY this structure:
 **Domains used:**
 - domain.com — what the skill uses it for
 
+**Packages referenced:**
+- ecosystem: package-name@version — what it's used for (e.g. "npm: agentmail@1.0.0 — SDK client")
+
 **Security assessment:**
 - Note any concerns or confirm no suspicious patterns found
 
 **Setup steps for user:**
 1. Numbered steps the user must complete (get API key, set env var, add domain to policy, etc.)
 
-Be specific and actionable. Do NOT give generic advice. Every credential, domain, and setup step must come from actual file content you read.`;
+Be specific and actionable. Do NOT give generic advice. Every credential, domain, package, and setup step must come from actual file content you read.`;
 
             // Prepare workspace with skill files (so review can read them)
             let reviewWorkspacePath: string | undefined;
@@ -391,6 +395,8 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
               syntheticTools: [], // No synthetic tools for review
               systemPrompt: reviewSystemPrompt,
               workspacePath: reviewWorkspacePath,
+              skillName,
+              skillReview: true,
             });
 
             return {
@@ -441,6 +447,7 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
             if (policy && policy.status !== 'approved') {
               const statusLabels: Record<string, string> = {
                 pending_review: 'pending approval (new skill, not yet reviewed)',
+                reviewing: 'under review (Motor deep review in progress)',
                 reviewed: 'reviewed but not yet approved',
                 needs_reapproval: 'needs re-approval (content changed)',
               };

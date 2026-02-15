@@ -680,6 +680,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 status: 'awaiting_approval',
                 attemptIndex: attempt.index,
                 approval: { action, expiresAt },
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
               },
             }
           )
@@ -720,6 +722,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 status: 'awaiting_input',
                 attemptIndex: attempt.index,
                 question,
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
               },
             }
           )
@@ -1219,6 +1223,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
                 status: 'awaiting_input',
                 attemptIndex: attempt.index,
                 question,
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
               },
             }
           )

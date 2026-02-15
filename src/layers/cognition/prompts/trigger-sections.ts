@@ -217,6 +217,45 @@ Never repeat your previous message. Max 1 tool call total.
 }
 
 /**
+ * Build dedicated trigger section for skill_review motor_result signals.
+ *
+ * When the Motor deep review completes, Cognition needs to:
+ * 1. Transition status to reviewed
+ * 2. Seed the policy with domains, credentials, packages
+ * 3. Present the complete review to the user
+ */
+function buildSkillReviewResultSection(data: MotorResultData): string {
+  const { runId, skill } = data;
+  const summary = data.result?.summary ?? 'No summary';
+
+  return `<trigger type="skill_review_result">
+<context>
+Skill review run ${runId} completed for skill "${skill ?? 'unknown'}".
+Motor analysis: ${summary}
+</context>
+
+<task>
+The Motor deep review for skill "${skill ?? 'unknown'}" is complete. Follow these steps:
+
+1. Call core.skill(action:"review", name:"${skill ?? ''}") to transition status from reviewing → reviewed.
+2. From the Motor analysis above AND the deterministic review, identify:
+   - Network domains the skill needs at runtime
+   - Credential env var names (IMPORTANT: users must set VAULT_<NAME>, e.g., VAULT_AGENTMAIL_API_KEY — not the raw env var name)
+   - npm/pip packages referenced in scripts
+3. Seed the policy with identified fields:
+   core.skill(action:"update", name:"${skill ?? ''}", addDomains:[...], addCredentials:[...], addDependencies:[...])
+4. Present the complete review to the user:
+   - What the skill does
+   - Policy domains (seeded)
+   - Required credentials with VAULT_ prefix instructions (e.g., "Set VAULT_AGENTMAIL_API_KEY in your environment")
+   - Package dependencies (seeded)
+   - Security assessment from Motor
+5. Ask user to approve. Do NOT call core.skill(action:"approve") on this turn — it requires a user_message trigger.
+</task>
+</trigger>`;
+}
+
+/**
  * Build dedicated trigger section for motor_result signals.
  *
  * Status-specific sections with clear instructions:
@@ -237,6 +276,11 @@ export function buildMotorResultSection(data: MotorResultData): string {
         ? `${String(stats.iterations)} iterations, ${(stats.durationMs / 1000).toFixed(1)}s`
         : '';
       const installedSkills = result?.installedSkills;
+
+      // Check if this is a skill_review motor_result
+      if (data.skillReview && data.skill) {
+        return buildSkillReviewResultSection(data);
+      }
 
       // Build context
       let context = `Task run ${runId} completed. Summary: ${summary}. Stats: ${statsLine}.`;
@@ -269,13 +313,7 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
 3. For each skill, dispatch a Motor review task:
    core.act(mode:"agentic", skill:"skill-name", skill_review:true, task:"Read all files and report findings")
    Motor review gets read-only tools, no network, no synthetic tools. It reads SKILL.md, scripts/, references/.
-4. Do NOT present partial info — wait for the review motor_result on a later turn.
-5. When the review motor_result arrives, present the Motor analysis summary to the user along with the deterministic facts.
-   - If bash was used during creation, note: "Network activity beyond the fetch tool is not instrumented in run, but all network access is still enforced by the container firewall"
-   - For each referenced credential, tell the user to set the env var with VAULT_ prefix: export VAULT_<CREDENTIAL_NAME>="value"
-     Example: if the skill references AGENTMAIL_API_KEY, the user must set VAULT_AGENTMAIL_API_KEY.
-   - For policy domains, note which domains should be added to the skill policy for runtime network access.
-6. Ask the user to approve. Do NOT call core.skill(action:"approve") on this turn — it requires a user_message trigger. Wait for the user to reply.`;
+4. Do NOT present partial info — wait for the review motor_result on a later turn.`;
       }
 
       return `<trigger type="motor_result">

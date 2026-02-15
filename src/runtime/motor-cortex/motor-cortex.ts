@@ -352,6 +352,9 @@ export class MotorCortex {
     // === Skill metadata (for extraction middleware, opaque to Motor Cortex) ===
     /** Skill name (for post-run extraction and logging only) */
     skillName?: string;
+
+    /** Whether this is a skill_review run (propagated to motor_result signals) */
+    skillReview?: boolean;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -404,6 +407,7 @@ export class MotorCortex {
       ...(mergedDomains.length > 0 && { domains: mergedDomains }),
       ...(params.workspacePath && { workspacePath: params.workspacePath }),
       ...(params.skillName && { skill: params.skillName }),
+      ...(params.skillReview && { skillReview: true }),
     };
 
     // Create initial attempt (index 0, no recovery context)
@@ -766,6 +770,8 @@ export class MotorCortex {
                     installedSkills: run.result.installedSkills,
                   }),
                 },
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
               },
             }
           )
@@ -843,6 +849,8 @@ export class MotorCortex {
                   message: attempt.failure?.hint ?? 'Model execution failed',
                   lastStep: `Iteration ${String(attempt.stepCursor)}`,
                 },
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
               },
             }
           )
@@ -900,6 +908,8 @@ export class MotorCortex {
               attemptIndex: attempt.index,
               failure: attempt.failure,
               error: { message },
+              ...(run.skill && { skill: run.skill }),
+              ...(run.skillReview && { skillReview: true }),
             },
           }
         )
@@ -1248,6 +1258,8 @@ export class MotorCortex {
               status: 'failed',
               attemptIndex: attempt.index,
               error: { message: 'Approval denied by user' },
+              ...(run.skill && { skill: run.skill }),
+              ...(run.skillReview && { skillReview: true }),
             },
           }
         )

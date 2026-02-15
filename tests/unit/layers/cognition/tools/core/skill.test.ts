@@ -1,13 +1,13 @@
 /**
  * Tests for core.skill tool
  *
- * Validates: read, approve, reject, update flows, error cases, tool metadata.
+ * Validates: read, approve, reject, review, update flows, consent gate, error cases, tool metadata.
  * Uses temp directories with mock SKILL.md + policy.json.
  *
  * All policies use v2 schema (schemaVersion: 2, status, domains).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,11 @@ import type { SkillResult } from '../../../../../../src/layers/cognition/tools/c
 import type { SkillPolicy } from '../../../../../../src/runtime/skills/skill-types.js';
 import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
 import { createTestPolicy, TEST_SKILL_MD } from '../../../../../helpers/factories.js';
+
+// Mock network-policy for update action validation
+vi.mock('../../../../../../src/runtime/container/network-policy.js', () => ({
+  isValidDomain: vi.fn().mockReturnValue(true),
+}));
 
 describe('core.skill tool', () => {
   let skillsDir: string;
@@ -123,6 +128,21 @@ describe('core.skill tool', () => {
       expect(result.status).toBe('approved');
     });
 
+    it('approves a reviewing skill (user can skip deep review)', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewing' }));
+
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'user_message', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe('approved');
+    });
+
     it('approves a needs_reapproval skill', async () => {
       await setupSkill('test-skill', createTestPolicy({ status: 'needs_reapproval' }));
 
@@ -216,6 +236,110 @@ describe('core.skill tool', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('has no policy');
+    });
+  });
+
+  describe('review', () => {
+    it('transitions pending_review to reviewing (Phase 1)', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'pending_review' }));
+
+      const result = (await tool.execute({
+        action: 'review',
+        name: 'test-skill',
+      })) as SkillResult;
+
+      expect(result.success).toBe(true);
+
+      const saved = await readPolicy('test-skill');
+      expect(saved.status).toBe('reviewing');
+    });
+
+    it('transitions reviewing to reviewed (Phase 2)', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewing' }));
+
+      const result = (await tool.execute({
+        action: 'review',
+        name: 'test-skill',
+      })) as SkillResult;
+
+      expect(result.success).toBe(true);
+
+      const saved = await readPolicy('test-skill');
+      expect(saved.status).toBe('reviewed');
+    });
+
+    it('no-op for already reviewed skill', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewed' }));
+
+      const result = (await tool.execute({
+        action: 'review',
+        name: 'test-skill',
+      })) as SkillResult;
+
+      expect(result.success).toBe(true);
+
+      const saved = await readPolicy('test-skill');
+      expect(saved.status).toBe('reviewed');
+    });
+
+    it('no-op for approved skill', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'approved' }));
+
+      const result = (await tool.execute({
+        action: 'review',
+        name: 'test-skill',
+      })) as SkillResult;
+
+      expect(result.success).toBe(true);
+
+      const saved = await readPolicy('test-skill');
+      expect(saved.status).toBe('approved');
+    });
+  });
+
+  describe('consent gate', () => {
+    it('blocks approve on non-user_message trigger', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'pending_review' }));
+
+      const result = (await tool.execute(
+        {
+          action: 'approve',
+          name: 'test-skill',
+        },
+        { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(false);
+    });
+
+    it('allows update on non-user_message for reviewing skill', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'reviewing' }));
+
+      const result = (await tool.execute(
+        {
+          action: 'update',
+          name: 'test-skill',
+          addDomains: ['test.com'],
+        },
+        { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(true);
+    });
+
+    it('blocks update on non-user_message for approved skill', async () => {
+      await setupSkill('test-skill', createTestPolicy({ status: 'approved' }));
+
+      const result = (await tool.execute(
+        {
+          action: 'update',
+          name: 'test-skill',
+          addDomains: ['test.com'],
+        },
+        { triggerType: 'motor_result', recipientId: 'test', correlationId: 'test' }
+      )) as SkillResult;
+
+      expect(result.success).toBe(false);
     });
   });
 

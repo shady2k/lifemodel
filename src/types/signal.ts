@@ -508,6 +508,12 @@ export interface MotorResultData {
 
   /** Approval request (present when status=awaiting_approval) */
   approval?: { action: string; expiresAt: string };
+
+  /** Skill name associated with this run (if any) */
+  skill?: string;
+
+  /** Whether this is a skill_review run result */
+  skillReview?: boolean;
 }
 
 /**

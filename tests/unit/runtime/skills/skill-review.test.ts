@@ -93,6 +93,17 @@ describe('skill-review', () => {
       expect(review.status).toContain('pending_review');
     });
 
+    it('returns reviewing status interpretation', async () => {
+      const loaded = await createSkill({
+        name: 'reviewing-skill',
+        policy: createTestPolicy({ status: 'reviewing' }),
+      });
+
+      const review = await reviewSkill(loaded);
+
+      expect(review.status).toContain('reviewing');
+    });
+
     it('handles missing policy gracefully', async () => {
       const loaded = await createSkill({ name: 'no-policy-skill' });
 
@@ -134,6 +145,69 @@ describe('skill-review', () => {
     });
   });
 
+  describe('vaultEnvVars', () => {
+    it('computes VAULT_ prefixed vars from policy credentials', async () => {
+      const loaded = await createSkill({
+        name: 'vault-creds-skill',
+        policy: createTestPolicy({
+          status: 'approved',
+          requiredCredentials: ['API_KEY', 'SECRET'],
+        }),
+      });
+
+      const review = await reviewSkill(loaded);
+
+      expect(review.vaultEnvVars).toContain('VAULT_API_KEY');
+      expect(review.vaultEnvVars).toContain('VAULT_SECRET');
+    });
+
+    it('deduplicates with referenced credentials', async () => {
+      const loaded = await createSkill({
+        name: 'vault-dedup-skill',
+        policy: createTestPolicy({
+          status: 'approved',
+          requiredCredentials: ['API_KEY'],
+        }),
+        files: [
+          {
+            path: 'scripts/run.js',
+            content: 'const a = process.env.API_KEY;\nconst b = process.env.OTHER_KEY;',
+          },
+        ],
+      });
+
+      const review = await reviewSkill(loaded);
+
+      expect(review.vaultEnvVars).toContain('VAULT_API_KEY');
+      expect(review.vaultEnvVars).toContain('VAULT_OTHER_KEY');
+      // No duplicates
+      const uniqueCount = new Set(review.vaultEnvVars).size;
+      expect(review.vaultEnvVars.length).toBe(uniqueCount);
+    });
+
+    it('does not double-prefix VAULT_ vars', async () => {
+      const loaded = await createSkill({
+        name: 'vault-noprefix-skill',
+        policy: createTestPolicy({
+          status: 'approved',
+          requiredCredentials: ['VAULT_MY_KEY'],
+        }),
+      });
+
+      const review = await reviewSkill(loaded);
+
+      expect(review.vaultEnvVars).toContain('VAULT_MY_KEY');
+      expect(review.vaultEnvVars).not.toContain('VAULT_VAULT_MY_KEY');
+    });
+
+    it('returns empty array when no credentials', async () => {
+      const loaded = await createSkill({ name: 'vault-empty-skill' });
+
+      const review = await reviewSkill(loaded);
+
+      expect(review.vaultEnvVars).toEqual([]);
+    });
+  });
 
   describe('file inventory', () => {
     it('scans skill files', async () => {

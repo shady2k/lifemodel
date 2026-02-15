@@ -247,6 +247,18 @@ describe('policy.json operations', () => {
     const loaded = await loadPolicy(testDir);
     expect(loaded).toBeNull();
   });
+
+  it('accepts reviewing status', async () => {
+    await writeFile(
+      join(testDir, 'policy.json'),
+      JSON.stringify({ schemaVersion: 2, status: 'reviewing' }),
+      'utf-8',
+    );
+    const loaded = await loadPolicy(testDir);
+
+    expect(loaded).not.toBeNull();
+    expect(loaded?.status).toBe('reviewing');
+  });
 });
 
 describe('loadSkill', () => {
@@ -342,6 +354,36 @@ Modified body`;
     expect('error' in result).toBe(false);
     if (!('error' in result)) {
       // Trust should be reset to needs_reapproval due to hash mismatch
+      expect(result.policy?.status).toBe('needs_reapproval');
+    }
+  });
+
+  it('resets reviewing status to needs_reapproval on hash mismatch', async () => {
+    const skillContent = `---
+name: test-skill
+description: Test skill
+---
+Body`;
+    await writeFile(join(testDir, 'test-skill', 'SKILL.md'), skillContent, 'utf-8');
+
+    await writeFile(
+      join(testDir, 'test-skill', 'policy.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        status: 'reviewing',
+        provenance: {
+          source: 'test',
+          fetchedAt: new Date().toISOString(),
+          contentHash: 'sha256:wrong-hash',
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = await loadSkill('test-skill', testDir);
+
+    expect('error' in result).toBe(false);
+    if (!('error' in result)) {
       expect(result.policy?.status).toBe('needs_reapproval');
     }
   });

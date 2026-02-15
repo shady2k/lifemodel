@@ -374,6 +374,7 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
     // Validate status
     if (
       raw['status'] !== 'pending_review' &&
+      raw['status'] !== 'reviewing' &&
       raw['status'] !== 'reviewed' &&
       raw['status'] !== 'needs_reapproval' &&
       raw['status'] !== 'approved'
@@ -514,12 +515,11 @@ export async function loadSkill(
     if (policy?.provenance?.contentHash) {
       const currentHash = await computeDirectoryHash(skillDir);
       if (currentHash !== policy.provenance.contentHash) {
-        // Reset status to needs_reapproval
-        policy = { ...policy, status: 'needs_reapproval' };
-        await savePolicy(skillDir, policy);
-
-        // Skill content changed since approval — status reset to needs_reapproval
-        // Hash mismatch is logged via the updated policy.json
+        // Reset status to needs_reapproval (from approved, reviewed, or reviewing)
+        if (policy.status !== 'pending_review' && policy.status !== 'needs_reapproval') {
+          policy = { ...policy, status: 'needs_reapproval' };
+          await savePolicy(skillDir, policy);
+        }
       }
     }
 
