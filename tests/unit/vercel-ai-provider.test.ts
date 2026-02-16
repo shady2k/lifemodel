@@ -210,10 +210,10 @@ describe('VercelAIProvider', () => {
       expect(Object.keys(props)).toContain('url');
       expect(Object.keys(props)).toContain('method');
 
-      // Minimal tool: no parameters (just name + description)
+      // Minimal tool: permissive object schema (accepts any arguments)
       const minimalTool = rawTools.find((t) => t.function.name === 'core.tools');
       expect(minimalTool).toBeTruthy();
-      expect(minimalTool!.function.parameters).toBeUndefined();
+      expect(minimalTool!.function.parameters).toEqual({ type: 'object' });
     });
 
     it('Local: tools passed to generateText have schemas intact', async () => {

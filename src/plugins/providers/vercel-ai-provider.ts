@@ -98,6 +98,8 @@ export class VercelAIProvider extends BaseLLMProvider {
   private readonly circuitBreaker: CircuitBreaker;
   /** Reasoning content extracted from local provider responses via custom fetch */
   private lastReasoningContent: string | null = null;
+  /** Raw tools to inject via fetch interceptor (workaround for AI SDK schema stripping) */
+  private pendingRawTools: Record<string, unknown>[] | null = null;
 
   constructor(config: VercelAIProviderConfig, logger?: Logger) {
     super(logger);
@@ -169,16 +171,35 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
-   * Create a fetch wrapper that intercepts Chat Completions responses
-   * to extract reasoning_content from local models (e.g., LM Studio with thinking enabled).
-   * The @ai-sdk/openai chat model doesn't parse this field, so we capture it here.
+   * Create a fetch wrapper for local providers that:
+   * 1. Fixes outgoing tool schemas (AI SDK v6 strips jsonSchema() properties)
+   * 2. Extracts reasoning_content from responses (LM Studio with thinking enabled)
+   *
+   * The @ai-sdk/openai provider doesn't support overriding tools via providerOptions
+   * (unlike @openrouter/ai-sdk-provider), so we intercept the fetch request and
+   * replace the broken tools in the JSON body.
+   * See: https://github.com/vercel/ai/issues/9761
    */
-  private createReasoningAwareFetch(): typeof globalThis.fetch {
+  private createLocalFetch(): typeof globalThis.fetch {
     return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const response = await globalThis.fetch(input, init);
+      // Fix outgoing request: replace broken tool schemas with raw tools
+      let modifiedInit = init;
+      if (this.pendingRawTools && init?.body && typeof init.body === 'string') {
+        try {
+          const body = JSON.parse(init.body) as Record<string, unknown>;
+          if (body['tools']) {
+            body['tools'] = this.pendingRawTools;
+            modifiedInit = { ...init, body: JSON.stringify(body) };
+          }
+        } catch {
+          // Parse failed — send original body
+        }
+      }
+
+      const response = await globalThis.fetch(input, modifiedInit);
       if (!response.ok) return response;
 
-      // Clone to read body without consuming the original
+      // Extract reasoning_content from response
       const cloned = response.clone();
       try {
         const json = (await cloned.json()) as Record<string, unknown>;
@@ -213,7 +234,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       return createOpenAI({
         baseURL: this.config.baseUrl,
         apiKey: 'no-key-required',
-        fetch: this.createReasoningAwareFetch(),
+        fetch: this.createLocalFetch(),
       }).chat(modelId);
     }
   }
@@ -520,8 +541,12 @@ export class VercelAIProvider extends BaseLLMProvider {
 
         return result;
       }
-      // Minimal tool (lazy schema) — name + description only
-      return { type: 'function', function: { name: fn.name, description: fn.description } };
+      // Minimal tool (lazy schema) — permissive object schema so the model can pass any arguments.
+      // Omitting parameters entirely would signal "no arguments", but these tools accept freeform JSON.
+      return {
+        type: 'function',
+        function: { name: fn.name, description: fn.description, parameters: { type: 'object' } },
+      };
     });
   }
 
@@ -628,16 +653,18 @@ export class VercelAIProvider extends BaseLLMProvider {
     }
 
     // Inject raw tool definitions to work around AI SDK v6 schema stripping.
-    // The SDK's jsonSchema() wrapper loses all properties by the time it reaches
-    // the provider — models receive tools with empty parameters. By injecting
-    // raw OpenAI-format tools via providerOptions, we override the broken
-    // SDK conversion. The provider spreads openrouterOptions over getArgs output,
-    // so our tools replace the SDK's broken ones.
+    // All providers (@ai-sdk/openai, @openrouter/ai-sdk-provider, Google Vertex)
+    // pass tool.inputSchema (a FlexibleSchema wrapper) directly to `parameters`
+    // instead of unwrapping via asSchema().jsonSchema. Models receive tools with
+    // { properties: {}, additionalProperties: false }.
+    // Upstream: https://github.com/vercel/ai/issues/9761 (unresolved as of v6.0.82)
+    // Workaround: inject raw OpenAI-format tools via providerOptions to override
+    // the broken SDK conversion.
     //
     // Apply strict mode transformation only for models that support it (OpenAI, Claude).
     // Weak models (GLM, DeepSeek, Qwen, etc.) receive canonical non-strict schemas
     // to avoid confusion with nullable type unions.
-    if (isOpenRouterConfig(this.config) && request.tools && request.tools.length > 0) {
+    if (request.tools && request.tools.length > 0) {
       const useStrict = overrides.supportsStrictToolSchema ?? false;
       const rawTools = this.convertToolsRaw(request.tools, useStrict);
       if (rawTools && rawTools.length > 0) {
@@ -724,6 +751,13 @@ export class VercelAIProvider extends BaseLLMProvider {
 
     // Build provider options (OpenRouter-specific body fields)
     const providerOptions = this.buildProviderOptions(modelId, overrides, request);
+
+    // Set raw tools for local fetch interceptor (AI SDK v6 schema stripping workaround)
+    if (!isOpenRouterConfig(this.config) && request.tools && request.tools.length > 0) {
+      this.pendingRawTools = this.convertToolsRaw(request.tools, false) ?? null;
+    } else {
+      this.pendingRawTools = null;
+    }
 
     // Get the model (pass request so parallelToolCalls reaches the model constructor)
     const model = this.getModel(modelId, request);
@@ -847,6 +881,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Capture reasoning from local provider's custom fetch if SDK didn't extract it
       const interceptedReasoning = this.lastReasoningContent;
       this.lastReasoningContent = null;
+      this.pendingRawTools = null;
 
       const duration = Date.now() - startTime;
 
@@ -908,6 +943,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       );
 
       // Map AI SDK errors to LLMError
+      this.pendingRawTools = null;
       throw this.mapAIErrorToLLMError(error);
     }
   }
