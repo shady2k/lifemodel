@@ -17,12 +17,8 @@ import type {
 import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
 import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
-import {
-  isGeminiModel,
-  ensureUserTurnForGemini,
-  sanitizeSystemMessagesForGemini,
-  addCacheControl,
-} from './gemini-transforms.js';
+import { addCacheControl } from './provider-transforms.js';
+import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 
 // Vercel AI SDK imports
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
@@ -687,24 +683,23 @@ export class VercelAIProvider extends BaseLLMProvider {
     const temperature =
       overrides.temperature === null ? undefined : (overrides.temperature ?? request.temperature);
 
-    // Copy messages for transformation (Gemini transforms + cache control mutate in place)
-    const messages: Message[] = request.messages.map((m) => ({
+    // Copy messages for transformation (compiler + cache control mutate in place)
+    let messages: Message[] = request.messages.map((m) => ({
       role: m.role,
       content: m.content,
       ...(m.tool_calls && { tool_calls: m.tool_calls }),
       ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+      ...(m.tool_name && { tool_name: m.tool_name }),
     }));
 
-    // Apply Gemini message transforms if needed
-    // Cast through unknown since Message interface lacks index signature
-    const transformable = messages as unknown as Record<string, unknown>[];
-    if (isGeminiModel(modelId)) {
-      ensureUserTurnForGemini(transformable);
-      sanitizeSystemMessagesForGemini(transformable);
-    }
+    // Compile transcript to provider-conformant structure
+    const policy = resolveTranscriptPolicy(this.config, modelId);
+    messages = compileTranscript(messages, policy, this.providerLogger);
 
     // Add cache control breakpoints (mutates content from string → Array)
     // Only for OpenRouter — local providers use /v1/responses which handles multipart correctly
+    // Cast through unknown since Message interface lacks index signature for array content
+    const transformable = messages as unknown as Record<string, unknown>[];
     if (isOpenRouterConfig(this.config)) {
       addCacheControl(transformable, modelId);
     }

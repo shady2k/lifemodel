@@ -63,12 +63,12 @@ This ensures OpenAI's strict mode enforces the nested structure at generation ti
 
 ## Provider Compatibility
 
-The `OpenRouterProvider` includes Gemini-specific message sanitization (see [ADR-001](../adr/001-gemini-message-sanitization.md)):
-- Leading system messages are left as-is (OpenRouter collapses them into Gemini's `system_instruction`)
-- Mid-conversation system messages are converted to `user` role with `[System]` prefix
-- First content message is ensured to be `user` role (synthetic `[autonomous processing]` message inserted if needed)
+The provider layer uses a **transcript compiler** to normalize messages for provider-specific constraints (see [ADR-001](../adr/001-gemini-message-sanitization.md)):
+- `STRICT_POLICY` (local providers) — merges consecutive same-role messages, collapses leading system messages
+- `GEMINI_POLICY` (Gemini via OpenRouter) — inserts synthetic user turn, converts mid-conversation system to user
+- `OPENROUTER_POLICY` (other OpenRouter models) — passthrough (OpenRouter normalizes)
 
-These transformations only apply to `google/*` models. Other models are unaffected.
+Policy is resolved automatically in `executeRequest()` based on provider config and model ID.
 
 ## Available Plugins
 
