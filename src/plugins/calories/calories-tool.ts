@@ -1361,7 +1361,7 @@ export function createCaloriesTool(
       targetItem.canonicalName = newName;
     }
     if (newBasis) {
-      targetItem.basis = newBasis;
+      targetItem.basis = normalizeBasis(newBasis);
     }
     targetItem.updatedAt = now;
 

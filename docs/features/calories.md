@@ -10,7 +10,7 @@ Track food intake, calories, and body weight with catalog-based matching and pro
 - **Bulk Logging**: Log multiple foods in a single tool call
 - **Multi-Day Search**: Find entries by food name across all history
 - **Statistics**: 7-day calorie trends with weight tracking
-- **Duplicate Detection**: Alerts when logging same item on same day
+- **Duplicate Detection**: Meal-type-aware — alerts only when same item logged in same meal
 - **Weight Tracking**: Record weight measurements with weekly check-in reminders
 - **Calorie Goal**: Manual target or TDEE-based calculation
 - **Deficit Monitoring**: Neuron emits signals when calorie deficit becomes significant
@@ -73,7 +73,7 @@ calories = resolveEntryCalories(entry, item)
 items                    → FoodItem[]       (catalog)
 food:YYYY-MM-DD          → FoodEntry[]      (date-partitioned log)
 weights                  → WeightEntry[]    (weight history)
-schema_version           → 2                (migration state)
+schema_version           → 3                (migration state)
 ```
 
 ## Tool API
@@ -112,7 +112,7 @@ calories({
 **Response includes:**
 - `results[]` — Per-entry status (matched/created/ambiguous)
 - `dailySummary` — Enriched daily summary with byMealType breakdown
-- `existingEntries` — Duplicates detected (same itemId on same date)
+- `existingEntries` — Duplicates detected (same itemId + same meal type on same date)
 
 **Response types:**
 
@@ -148,7 +148,8 @@ Example response:
       "breakfast": { "calories": 5, "count": 1 }
     },
     "entries": [
-      { "name": "Американо", "calories": 5, "mealType": "breakfast", "portion": { "quantity": 200, "unit": "ml" } }
+      { "name": "Американо", "calories": 5, "mealType": "breakfast", "portion": { "quantity": 200, "unit": "ml" } },
+      { "name": "Бекон", "calories": 191, "mealType": "breakfast", "portion": { "quantity": 45, "unit": "g" }, "caloriesPer100g": 425 }
     ]
   }
 }
@@ -296,7 +297,7 @@ calories({
 
 7. log response includes dailySummary — NEVER call summary after log
 
-8. Если existingEntries присутствует в ответе, сообщи пользователю о возможных дубликатах
+8. Если existingEntries присутствует в ответе, сообщи пользователю о возможных дубликатах (дубликат = тот же продукт в том же приёме пищи, разные приёмы = ОК)
 
 9. search: поиск по названию еды по всей истории (максимум 5 запросов)
 
@@ -321,13 +322,26 @@ Uses Levenshtein distance with normalization:
 
 ## Schema Migration
 
-The plugin automatically migrates from schema v1 (calories in FoodEntry) to v2 (pure relational):
+The plugin runs a migration chain on first tool `execute()` call:
 
-- **Lazy execution**: Runs on first tool `execute()` call
+- **Lazy execution**: Triggered on first use, not at startup
 - **Concurrency lock**: Module-level promise ensures single migration
-- **States**: `undefined` → `'migrating'` → `2`
-- **Orphan recovery**: Entries with missing items get reconstructed placeholder items
 - **Idempotent**: Safe to re-run after crash
+
+### v2: Pure Relational Model
+
+Removes `calories` field from FoodEntry (calories computed at read time via `resolveEntryCalories()`).
+
+- **States**: `undefined` → `'migrating'` → `2`
+- **Orphan recovery**: Entries referencing missing items get reconstructed placeholder items (crash-safe ordering: items persisted before entries)
+
+### v3: Basis Normalization
+
+Normalizes all weight-based item bases to per-100g canonical form via `normalizeBasis()`.
+
+- Converts `{caloriesPer: 60, perQuantity: 20, perUnit: "g"}` → `{caloriesPer: 300, perQuantity: 100, perUnit: "g"}`
+- Converts kg-based items to per-100g equivalent
+- At read time, `caloriesPer100g` is computed via `normalizeBasis()` for any g/kg-based item (handles both old and new formats)
 
 ## Neuron Behavior
 
