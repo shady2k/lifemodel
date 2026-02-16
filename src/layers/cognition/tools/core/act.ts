@@ -530,9 +530,24 @@ export function createActTool(deps: ActToolDeps): Tool {
             },
           };
         } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          // If blocked by active run mutex, guide the agent to use core.task
+          const activeRunMatch = /active run exists \(([^,]+), status: (\w+)\)/.exec(msg);
+          if (activeRunMatch) {
+            const activeRunId = activeRunMatch[1] ?? 'unknown';
+            const activeStatus = activeRunMatch[2] ?? '';
+            const hint =
+              activeStatus === 'awaiting_input'
+                ? `Do NOT call core.act again. Call the core_task tool instead: {"action":"cancel","runId":"${activeRunId}"} to cancel it, or {"action":"respond","runId":"${activeRunId}","answer":"..."} to answer the pending question.`
+                : `Do NOT call core.act again. Call the core_task tool instead: {"action":"cancel","runId":"${activeRunId}"} to cancel it, or {"action":"retry","runId":"${activeRunId}"} to retry it.`;
+            return {
+              success: false,
+              error: `${msg}. ${hint}`,
+            };
+          }
           return {
             success: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: msg,
           };
         }
       }

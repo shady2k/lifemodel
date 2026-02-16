@@ -13,6 +13,7 @@ import type { Message } from '../../llm/provider.js';
  *
  * Flow: created → running → awaiting_input → completed
  *                     ↘ failed
+ *                     ↘ cancelled (user-initiated via core.task cancel)
  */
 export type RunStatus =
   | 'created'
@@ -20,7 +21,8 @@ export type RunStatus =
   | 'awaiting_input'
   | 'awaiting_approval'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
 /**
  * Synthetic tools that can be injected into a Motor Cortex run.

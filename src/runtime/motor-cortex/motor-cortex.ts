@@ -922,7 +922,8 @@ export class MotorCortex {
       this.runAbortControllers.delete(run.id);
 
       // Clean up per-run state on terminal status
-      const terminal = run.status === 'completed' || run.status === 'failed';
+      const terminal =
+        run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
       if (terminal) {
         this.runPreparedDeps.delete(run.id);
         this.runCredentials.delete(run.id);
@@ -988,7 +989,7 @@ export class MotorCortex {
   async cancelRun(runId: string): Promise<{
     runId: string;
     previousStatus: RunStatus;
-    newStatus: 'failed';
+    newStatus: 'cancelled';
   }> {
     const run = await this.stateManager.getRun(runId);
     if (!run) {
@@ -997,7 +998,7 @@ export class MotorCortex {
 
     const previousStatus = run.status;
 
-    // Mark current attempt as failed
+    // Mark current attempt as failed (attempt has no 'cancelled' status)
     const currentAttempt = run.attempts[run.currentAttemptIndex];
     if (
       currentAttempt &&
@@ -1008,7 +1009,7 @@ export class MotorCortex {
       currentAttempt.completedAt = new Date().toISOString();
     }
 
-    run.status = 'failed';
+    run.status = 'cancelled';
     run.completedAt = new Date().toISOString();
 
     await this.stateManager.updateRun(run);
@@ -1033,11 +1034,11 @@ export class MotorCortex {
 
     // No signal emitted here — the cognition layer already knows (it called core.task.cancel
     // and got the tool result). Emitting a signal would trigger a redundant tick and duplicate message.
-    // The aborted motor loop also won't emit a signal because run.status is already 'failed'.
+    // The aborted motor loop also won't emit a signal because run.status is already terminal.
 
     this.logger.info({ runId, previousStatus }, 'Motor Cortex run canceled');
 
-    return { runId, previousStatus, newStatus: 'failed' };
+    return { runId, previousStatus, newStatus: 'cancelled' };
   }
 
   /**

@@ -119,6 +119,7 @@ When setting domains for skill runs, enumerate specific subdomains explicitly (e
 Credentials: Skills declare required credentials (e.g. API keys) as environment variables (VAULT_<NAME>). NEVER ask the user to paste API keys or secrets in chat. Instead tell them to set the environment variable: export VAULT_<CREDENTIAL_NAME>="value" and restart.
 If a run fails with a transient error, use core.task(action:"retry", guidance:"..."). If a skill's instructions are outdated, Motor self-heals within the same run — do not start a new run.
 When Motor asks the user a question (motor_result with awaiting_input), you MUST relay the question to the user in your response and set status to "awaiting_answer". When the user replies, call core.task(action:"respond", runId:"<id>", answer:"user's reply"). For domain access requests, also include domains: core.task(action:"respond", runId:"<id>", answer:"yes", domains:["github.com","raw.githubusercontent.com"]).
+IMPORTANT: Never call core.act while an active run exists — it will fail. To manage active runs, use the core_task tool (NOT core.act): core_task(action:"cancel", runId:"<id>") to cancel, core_task(action:"respond", runId:"<id>", answer:"...") to answer a pending question, or core_task(action:"retry", runId:"<id>") to retry. Do NOT try to bypass the active run by calling the API directly via plugin_fetch or core.act(mode:"oneshot").
 Do not surface internal skill mechanics unless the user asks or a trigger requires it.
 </skill_rules>
 

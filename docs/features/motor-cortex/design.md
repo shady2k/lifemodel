@@ -162,7 +162,7 @@ Originally designed as two tools (`core.tasks` for listing, `core.task` for cont
       description: 'Action to perform.',
     },
     runId: { type: 'string', description: 'Run ID (required for status, cancel, respond).' },
-    status: { type: 'string', enum: ['created', 'running', 'awaiting_input', 'completed', 'failed'], description: 'Filter by status (for list action only).' },
+    status: { type: 'string', enum: ['created', 'running', 'awaiting_input', 'completed', 'failed', 'cancelled'], description: 'Filter by status (for list action only).' },
     limit: { type: 'number', description: 'Max runs to return (for list action only).' },
     answer: { type: 'string', description: 'Answer to the pending question. Required when action is "respond".' },
   },
@@ -172,7 +172,7 @@ Originally designed as two tools (`core.tasks` for listing, `core.task` for cont
 **Returns:**
 - `list`: `{ runs: [{ id, status, task, startedAt, completedAt?, iterations, tools }], total }`
 - `status`: Full run details (status, steps, trace, pendingQuestion)
-- `cancel`: `{ runId, previousStatus, newStatus: 'failed' }`
+- `cancel`: `{ runId, previousStatus, newStatus: 'cancelled' }`
 - `respond`: `{ runId, previousStatus: 'awaiting_input', newStatus: 'running' }`
 - `approve`: `{ runId, previousStatus: 'awaiting_approval', newStatus: 'running' | 'failed' }`
 - `log`: `{ log: string }` — last 16KB of execution log
@@ -211,7 +211,7 @@ When a Motor Cortex run completes, fails, or needs user input, it emits a signal
 interface MotorResultData {
   kind: 'motor_result';
   runId: string;
-  status: 'completed' | 'failed' | 'awaiting_input';
+  status: 'completed' | 'failed' | 'cancelled' | 'awaiting_input';
 
   // When completed
   result?: {
@@ -326,11 +326,7 @@ core.task HANDLER
 ```
 
 ```typescript
-// Phase 1
-type RunStatus = 'created' | 'running' | 'awaiting_input' | 'completed' | 'failed';
-
-// Phase 2 adds:
-// | 'awaiting_approval' | 'cancelled'
+type RunStatus = 'created' | 'running' | 'awaiting_input' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
 ```
 
 `awaiting_input` is Phase 1 — even code/shell tasks may need clarification ("Which file do you mean?" / "This seems wrong, should I continue?").
