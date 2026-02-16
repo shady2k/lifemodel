@@ -651,8 +651,12 @@ export function createCaloriesTool(
 
         const calories = resolveCalories(entry, portion, chosenItem);
 
-        // Check for existing entries with same itemId (duplicate detection)
-        const existingWithSameItem = existingDateEntries.filter((e) => e.itemId === chosenItem.id);
+        // Check for existing entries with same itemId and same meal type (duplicate detection)
+        // Different meal types = intentional (e.g. raisins at breakfast and lunch)
+        const entryMealType = entry.meal_type ?? undefined;
+        const existingWithSameItem = existingDateEntries.filter(
+          (e) => e.itemId === chosenItem.id && e.mealType === entryMealType
+        );
         const existingEntries =
           existingWithSameItem.length > 0
             ? existingWithSameItem.map((e) => {
@@ -700,9 +704,11 @@ export function createCaloriesTool(
       if (decision.status === 'matched') {
         const calories = resolveCalories(entry, portion, decision.item);
 
-        // Check for existing entries with same itemId (duplicate detection)
+        // Check for existing entries with same itemId and same meal type (duplicate detection)
+        // Different meal types = intentional (e.g. raisins at breakfast and lunch)
+        const matchedMealType = entry.meal_type ?? undefined;
         const existingWithSameItem = existingDateEntries.filter(
-          (e) => e.itemId === decision.item.id
+          (e) => e.itemId === decision.item.id && e.mealType === matchedMealType
         );
         const existingEntries =
           existingWithSameItem.length > 0
@@ -1572,13 +1578,14 @@ export function createCaloriesTool(
 ACTIONS: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item
 
 KEY RULES:
-- log response includes dailySummary with daily totals — NEVER call summary after log
+- log response includes dailySummary with daily totals and byMealType subtotals — NEVER call summary after log
+- ALWAYS set meal_type on every entry when user groups food by meal (breakfast/lunch/dinner/snack). Response dailySummary.byMealType shows per-meal subtotals — use them to display meal subtotals to the user
 - name = pure food name, no quantities ("Americano", not "Americano 200ml")
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
 - If status="ambiguous", resolve via chooseItemId — do NOT create a new item for a different portion
 - log supports entries array for multiple items in one call
 - date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD
-- If existingEntries present in log response, inform user about potential duplicates
+- If existingEntries present in log response, ask user if the entry is a duplicate (entry IS already saved and counted in dailySummary — use dailySummary.totalCalories as the authoritative total)
 - search: find entries by food name across all dates (max 5 queries)
 - stats: multi-day calorie summary with weight trend (default 7 days)
 - update_item: modify existing food item (name or nutritional basis)
