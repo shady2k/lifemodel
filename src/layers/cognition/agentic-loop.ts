@@ -479,10 +479,13 @@ export class AgenticLoop {
             contentPreview: content?.slice(0, 100),
             triggerType: context.triggerSignal.type,
           },
-          'Malformed LLM response detected — retrying'
+          'Malformed LLM response detected — retrying with tools'
         );
-        state.forceRespond = true;
-        return null; // Retry via existing forceRespond machinery
+        // Retry WITH tools (don't strip them via forceRespond).
+        // The model may have intended a tool call (e.g. core.defer) but emitted
+        // plain text instead. Stripping tools on retry forces a {"response":...}
+        // which always sends a message — wrong for proactive triggers.
+        return null;
       }
 
       // Already retried — give up

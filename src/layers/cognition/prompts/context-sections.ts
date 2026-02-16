@@ -244,7 +244,7 @@ export function buildRuntimeSnapshotSection(
     autoParts.push(`energy ${describeLevel(agentState.energy)}`);
   }
   if (scope.includeSocialDebt) {
-    autoParts.push(`socialDebt ${describeLevel(agentState.socialDebt)}`);
+    autoParts.push(`socialDebt ${describeLevel(agentState.socialDebt)} (your need to connect)`);
   }
 
   if (scope.includeTaskPressure) {
