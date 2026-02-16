@@ -403,6 +403,7 @@ const caloriesPlugin: PluginV2 & {
         logger,
         factoryConfig.neuronConfig ?? {},
         primitives.storage,
+        recipientId,
         () => primitives.services.getTimezone(recipientId),
         () => createGetUserPatterns(primitives, recipientId)(),
         createGetCalorieGoal(primitives, recipientId)
@@ -432,12 +433,22 @@ export type {
   WeightEntry,
   Portion,
   LogResult,
+  LogResultItem,
   ListResult,
   SummaryResult,
+  DailySummary,
+  DailySummaryEntry,
+  SearchResult,
+  StatsResult,
+  UpdateItemResult,
+  DeleteItemResult,
+  NutrientBasis,
 } from './calories-types.js';
 export {
   CALORIES_PLUGIN_ID,
   CALORIES_EVENT_KINDS,
   CALORIES_STORAGE_KEYS,
+  resolveEntryCalories,
+  calculatePortionCalories,
 } from './calories-types.js';
 export type { CaloriesDeficitNeuronConfig } from './calories-neuron.js';

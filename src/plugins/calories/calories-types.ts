@@ -87,16 +87,28 @@ export interface Portion {
 
 /**
  * A logged food entry, referencing a FoodItem.
+ * Calories are NOT stored — computed at read time via resolveEntryCalories().
  */
 export interface FoodEntry {
   id: string;
   itemId: string;
-  calories: number;
   portion: Portion;
   mealType?: MealType;
   timestamp: string;
   recipientId: string;
   note?: string;
+}
+
+// ============================================================================
+// Relational Calories Helper
+// ============================================================================
+
+/**
+ * Resolve calories for an entry at read time.
+ * Must be called with a valid FoodItem (item guaranteed to exist via deletion guard).
+ */
+export function resolveEntryCalories(entry: FoodEntry, item: FoodItem): number {
+  return calculatePortionCalories(item, entry.portion);
 }
 
 // ============================================================================
@@ -133,6 +145,14 @@ export interface LogInput {
   entries: LogInputEntry[];
 }
 
+export interface ExistingEntryInfo {
+  entryId: string;
+  calories: number;
+  portion: Portion;
+  mealType?: MealType;
+  timestamp: string;
+}
+
 export type LogResultItem =
   | {
       status: 'matched';
@@ -141,6 +161,8 @@ export type LogResultItem =
       canonicalName: string;
       calories: number;
       portion: Portion;
+      existingEntries?: ExistingEntryInfo[];
+      warning?: string;
     }
   | {
       status: 'created';
@@ -149,6 +171,8 @@ export type LogResultItem =
       canonicalName: string;
       calories: number;
       portion: Portion;
+      existingEntries?: ExistingEntryInfo[];
+      warning?: string;
     }
   | {
       status: 'ambiguous';
@@ -159,12 +183,23 @@ export type LogResultItem =
         score: number;
       }[];
       suggestedPortion?: Portion;
+      warning?: string;
     };
 
+export interface DailySummaryEntry {
+  name: string;
+  calories: number;
+  mealType?: MealType;
+  portion: Portion;
+}
+
 export interface DailySummary {
+  date: string;
   totalCalories: number;
   goal: number | null;
   remaining: number | null;
+  byMealType: Partial<Record<MealType, { calories: number; count: number }>>;
+  entries: DailySummaryEntry[];
 }
 
 export interface LogResult {
@@ -235,6 +270,97 @@ export interface DeleteResult {
 }
 
 // ============================================================================
+// Tool API: Search Action
+// ============================================================================
+
+export interface SearchQueryResult {
+  query: string;
+  matchedItems: {
+    itemId: string;
+    canonicalName: string;
+    score: number;
+  }[];
+  entries: {
+    date: string;
+    entryId: string;
+    itemId: string;
+    name: string;
+    calories: number;
+    portion: Portion;
+    mealType?: MealType;
+  }[];
+  totalEntries: number;
+  totalCalories: number;
+  truncated: boolean;
+}
+
+export interface SearchResult {
+  success: true;
+  results: SearchQueryResult[];
+}
+
+// ============================================================================
+// Tool API: Stats Action
+// ============================================================================
+
+export interface StatsDay {
+  date: string;
+  totalCalories: number;
+  goal: number | null;
+  entryCount: number;
+  byMealType: Partial<Record<MealType, number>>;
+}
+
+export interface StatsResult {
+  success: true;
+  period: {
+    from: string;
+    to: string;
+  };
+  dailyCalories: StatsDay[];
+  averageCalories: number;
+  weightTrend: {
+    entries: WeightEntry[];
+    change: number | null;
+    direction: 'up' | 'down' | 'stable' | 'insufficient_data';
+  };
+  streak: number;
+}
+
+// ============================================================================
+// Tool API: Update Item Action
+// ============================================================================
+
+export interface UpdateItemResult {
+  success: boolean;
+  item?: FoodItem;
+  affectedEntryCount?: number;
+  candidates?: {
+    itemId: string;
+    canonicalName: string;
+    score: number;
+  }[];
+  error?: string;
+}
+
+// ============================================================================
+// Tool API: Delete Item Action
+// ============================================================================
+
+export interface DeleteItemResult {
+  success: boolean;
+  itemId?: string;
+  error?: string;
+  referencedBy?: {
+    count: number;
+    dateRange: {
+      from: string;
+      to: string;
+    };
+  };
+}
+
+// ============================================================================
 // Matching Types
 // ============================================================================
 
@@ -253,6 +379,7 @@ export const CALORIES_STORAGE_KEYS = {
   items: 'items',
   foodPrefix: 'food:',
   weights: 'weights',
+  schemaVersion: 'schema_version',
 } as const;
 
 // ============================================================================

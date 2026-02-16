@@ -23,7 +23,8 @@ import { detectChange, type ChangeDetectorConfig } from '../../layers/autonomic/
 import { Priority } from '../../types/priority.js';
 import { DateTime } from 'luxon';
 import type { FoodEntry } from './calories-types.js';
-import { CALORIES_STORAGE_KEYS } from './calories-types.js';
+import { CALORIES_STORAGE_KEYS, resolveEntryCalories } from './calories-types.js';
+import type { FoodItem } from './calories-types.js';
 import { getCurrentFoodDate } from './calories-tool.js';
 
 const NEURON_STATE_KEY = 'calories_deficit_neuron_state';
@@ -118,6 +119,7 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
 
   private readonly config: CaloriesDeficitNeuronConfig;
   private readonly storage: StoragePrimitive;
+  private readonly recipientId: string;
   private readonly getTimezone: GetTimezoneFunc;
   private readonly getUserPatterns: GetUserPatternsFunc;
   private readonly getCalorieGoal: GetCalorieGoalFunc;
@@ -126,6 +128,7 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
     logger: Logger,
     config: Partial<CaloriesDeficitNeuronConfig>,
     storage: StoragePrimitive,
+    recipientId: string,
     getTimezone: GetTimezoneFunc,
     getUserPatterns: GetUserPatternsFunc,
     getCalorieGoal: GetCalorieGoalFunc
@@ -133,6 +136,7 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
     super(logger);
     this.config = { ...DEFAULT_CALORIES_DEFICIT_CONFIG, ...config };
     this.storage = storage;
+    this.recipientId = recipientId;
     this.getTimezone = getTimezone;
     this.getUserPatterns = getUserPatterns;
     this.getCalorieGoal = getCalorieGoal;
@@ -198,7 +202,32 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
       const entries = await this.storage.get<FoodEntry[]>(
         `${CALORIES_STORAGE_KEYS.foodPrefix}${today}`
       );
-      const consumed = (entries ?? []).reduce((sum, e) => sum + e.calories, 0);
+
+      // Load items catalog for relational calorie resolution
+      const allItems = await this.storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items);
+      const itemsMap = new Map<string, FoodItem>();
+      for (const item of allItems ?? []) {
+        itemsMap.set(item.id, item);
+      }
+
+      // Compute calories using relational reads with recipient filter
+      let consumed = 0;
+      for (const entry of entries ?? []) {
+        // Recipient filter to prevent cross-user calorie mixing
+        if (entry.recipientId !== this.recipientId) continue;
+
+        const item = itemsMap.get(entry.itemId);
+        if (item) {
+          consumed += resolveEntryCalories(entry, item);
+        } else {
+          // Tolerate missing items - log warning but contribute 0 calories
+          // This handles pre-migration state gracefully
+          this.logger.warn(
+            { entryId: entry.id, itemId: entry.itemId },
+            'Missing item for entry - contributing 0 calories'
+          );
+        }
+      }
 
       // Compute deficit (0 = goal met, 1 = nothing eaten)
       const deficit = Math.max(0, goal - consumed) / goal;
@@ -410,6 +439,7 @@ export function createCaloriesDeficitNeuron(
   logger: Logger,
   config: Partial<CaloriesDeficitNeuronConfig>,
   storage: StoragePrimitive,
+  recipientId: string,
   getTimezone: GetTimezoneFunc,
   getUserPatterns: GetUserPatternsFunc,
   getCalorieGoal: GetCalorieGoalFunc
@@ -418,6 +448,7 @@ export function createCaloriesDeficitNeuron(
     logger,
     config,
     storage,
+    recipientId,
     getTimezone,
     getUserPatterns,
     getCalorieGoal

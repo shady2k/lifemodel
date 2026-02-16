@@ -21,9 +21,18 @@ import type {
   SummaryResult,
   SummaryEntryInfo,
   DailySummary,
+  DailySummaryEntry,
   GoalResult,
   DeleteResult,
+  DeleteItemResult,
   Unit,
+  SearchResult,
+  SearchQueryResult,
+  StatsResult,
+  StatsDay,
+  UpdateItemResult,
+  ExistingEntryInfo,
+  NutrientBasis,
 } from './calories-types.js';
 import {
   CALORIES_STORAGE_KEYS,
@@ -35,9 +44,24 @@ import {
   calculateBMR,
   calculateTDEE,
   calculatePortionCalories,
+  resolveEntryCalories,
 } from './calories-types.js';
-import { extractCanonicalName, decideMatch } from './calories-matching.js';
+import { extractCanonicalName, decideMatch, matchCandidates } from './calories-matching.js';
+import { ensureMigrated } from './calories-migration.js';
 import { DateTime } from 'luxon';
+
+/**
+ * Calculate the cutoff hour for food day boundary from sleep/wake patterns.
+ * Hours before the cutoff belong to the previous food day.
+ */
+function calculateCutoffHour(sleepHour: number, wakeHour: number): number {
+  if (sleepHour < wakeHour) {
+    return Math.floor((sleepHour + wakeHour) / 2);
+  }
+  const wakeNormalized = wakeHour + 24;
+  const midpoint = (sleepHour + wakeNormalized) / 2;
+  return Math.floor(midpoint % 24);
+}
 
 type GetTimezoneFunc = (recipientId: string) => string;
 type GetUserPatternsFunc = (
@@ -104,20 +128,53 @@ function getCurrentFoodDate(
   const sleepHour = userPatterns?.sleepHour ?? 23;
   const wakeHour = userPatterns?.wakeHour ?? 7;
 
-  let cutoff: number;
-  if (sleepHour < wakeHour) {
-    cutoff = Math.floor((sleepHour + wakeHour) / 2);
-  } else {
-    const wakeNormalized = wakeHour + 24;
-    const midpoint = (sleepHour + wakeNormalized) / 2;
-    cutoff = Math.floor(midpoint % 24);
-  }
+  const cutoff = calculateCutoffHour(sleepHour, wakeHour);
 
   if (hour < cutoff) {
     return now.minus({ days: 1 }).toFormat('yyyy-MM-dd');
   }
 
   return now.toFormat('yyyy-MM-dd');
+}
+
+/**
+ * Determine the food date for a specific entry timestamp.
+ * Used for after-midnight logging: an entry at 2 AM with timestamp "01:30"
+ * should go to yesterday's partition based on user patterns.
+ *
+ * Falls back to effectiveDate if timestamp is invalid.
+ */
+function getFoodDateForTimestamp(
+  isoTimestamp: string,
+  timezone: string,
+  userPatterns: { wakeHour?: number; sleepHour?: number } | null,
+  effectiveDate: string
+): { date: string; warning?: string } {
+  // Parse the timestamp in the user's timezone
+  const dt = DateTime.fromISO(isoTimestamp, { zone: timezone });
+
+  if (!dt.isValid) {
+    return {
+      date: effectiveDate,
+      warning: `Invalid timestamp "${isoTimestamp}", using current date`,
+    };
+  }
+
+  // Get the cutoff hour for day boundary
+  const sleepHour = userPatterns?.sleepHour ?? 23;
+  const wakeHour = userPatterns?.wakeHour ?? 7;
+  const cutoff = calculateCutoffHour(sleepHour, wakeHour);
+
+  // Determine if the entry falls before the cutoff (still "yesterday")
+  const entryHour = dt.hour;
+  let entryDate = dt.toFormat('yyyy-MM-dd');
+
+  if (entryHour < cutoff) {
+    // Entry is before cutoff, belongs to previous day
+    entryDate = dt.minus({ days: 1 }).toFormat('yyyy-MM-dd');
+  }
+
+  return { date: entryDate };
 }
 
 /**
@@ -495,24 +552,60 @@ export function createCaloriesTool(
   }
 
   /**
-   * Compute daily summary for a given date.
+   * Compute daily summary for a given date with relational reads.
    */
   async function computeDailySummary(recipientId: string, date: string): Promise<DailySummary> {
     const entries = await loadFoodEntries(date, recipientId);
-    const totalCalories = entries.reduce((sum, e) => sum + e.calories, 0);
+
+    // Load all items for relational calorie resolution
+    const itemIds = [...new Set(entries.map((e) => e.itemId))];
+    const itemsMap = await getItemsMap(itemIds);
+
+    // Compute per-entry calories and aggregate
+    const byMealType: Partial<Record<MealType, { calories: number; count: number }>> = {};
+    let totalCalories = 0;
+    const summaryEntries: DailySummaryEntry[] = [];
+
+    for (const entry of entries) {
+      const item = itemsMap[entry.itemId];
+      const calories = item ? resolveEntryCalories(entry, item) : 0;
+      totalCalories += calories;
+
+      if (entry.mealType) {
+        const meal = byMealType[entry.mealType] ?? { calories: 0, count: 0 };
+        meal.calories += calories;
+        meal.count += 1;
+        byMealType[entry.mealType] = meal;
+      }
+
+      const summaryEntry: DailySummaryEntry = {
+        name: item?.canonicalName ?? 'Unknown',
+        calories,
+        portion: entry.portion,
+      };
+      if (entry.mealType) summaryEntry.mealType = entry.mealType;
+      summaryEntries.push(summaryEntry);
+    }
+
     const userModel = await getUserModel(recipientId);
     const goal = userModel?.calorie_goal ?? null;
+
     return {
+      date,
       totalCalories,
       goal,
       remaining: goal !== null ? goal - totalCalories : null,
+      byMealType,
+      entries: summaryEntries,
     };
   }
 
   async function logFood(
     input: LogInput,
     recipientId: string,
-    effectiveDate: string
+    effectiveDate: string,
+    timezone: string,
+    userPatterns: { wakeHour?: number; sleepHour?: number } | null
   ): Promise<LogResult> {
     const items = await loadItems(recipientId);
     const results: LogResultItem[] = [];
@@ -523,24 +616,60 @@ export function createCaloriesTool(
       const parsed = extractCanonicalName(entry.name);
       const portion = entry.portion ?? parsed.defaultPortion ?? getDefaultPortion();
 
+      // Determine date partition for this entry (after-midnight fix)
+      let entryDate = effectiveDate;
+      let warning: string | undefined;
+
+      if (entry.timestamp) {
+        const dateResult = getFoodDateForTimestamp(
+          entry.timestamp,
+          timezone,
+          userPatterns,
+          effectiveDate
+        );
+        entryDate = dateResult.date;
+        warning = dateResult.warning;
+      }
+
+      // Load existing entries for this date to check duplicates
+      const existingDateEntries = await loadFoodEntries(entryDate, recipientId);
+
       // If explicit item choice provided, use it
       if (entry.chooseItemId) {
         const chosenItem = items.find((i) => i.id === entry.chooseItemId);
         if (!chosenItem) {
-          results.push({
+          const ambiguousResult: LogResultItem = {
             status: 'ambiguous',
             originalName: entry.name,
             candidates: [],
             suggestedPortion: portion,
-          });
+          };
+          if (warning) ambiguousResult.warning = warning;
+          results.push(ambiguousResult);
           continue;
         }
 
         const calories = resolveCalories(entry, portion, chosenItem);
+
+        // Check for existing entries with same itemId (duplicate detection)
+        const existingWithSameItem = existingDateEntries.filter((e) => e.itemId === chosenItem.id);
+        const existingEntries =
+          existingWithSameItem.length > 0
+            ? existingWithSameItem.map((e) => {
+                const info: ExistingEntryInfo = {
+                  entryId: e.id,
+                  calories: calculatePortionCalories(chosenItem, e.portion),
+                  portion: e.portion,
+                  timestamp: e.timestamp,
+                };
+                if (e.mealType) info.mealType = e.mealType;
+                return info;
+              })
+            : undefined;
+
         const foodEntry: FoodEntry = {
           id: generateId('food'),
           itemId: chosenItem.id,
-          calories,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -549,16 +678,19 @@ export function createCaloriesTool(
           foodEntry.mealType = entry.meal_type;
         }
 
-        await saveFoodEntry(effectiveDate, foodEntry);
+        await saveFoodEntry(entryDate, foodEntry);
 
-        results.push({
+        const result: LogResultItem = {
           status: 'matched',
           entryId: foodEntry.id,
           itemId: chosenItem.id,
           canonicalName: chosenItem.canonicalName,
           calories,
           portion,
-        });
+        };
+        if (existingEntries) result.existingEntries = existingEntries;
+        if (warning) result.warning = warning;
+        results.push(result);
         continue;
       }
 
@@ -567,10 +699,28 @@ export function createCaloriesTool(
 
       if (decision.status === 'matched') {
         const calories = resolveCalories(entry, portion, decision.item);
+
+        // Check for existing entries with same itemId (duplicate detection)
+        const existingWithSameItem = existingDateEntries.filter(
+          (e) => e.itemId === decision.item.id
+        );
+        const existingEntries =
+          existingWithSameItem.length > 0
+            ? existingWithSameItem.map((e) => {
+                const info: ExistingEntryInfo = {
+                  entryId: e.id,
+                  calories: calculatePortionCalories(decision.item, e.portion),
+                  portion: e.portion,
+                  timestamp: e.timestamp,
+                };
+                if (e.mealType) info.mealType = e.mealType;
+                return info;
+              })
+            : undefined;
+
         const foodEntry: FoodEntry = {
           id: generateId('food'),
           itemId: decision.item.id,
-          calories,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -579,23 +729,26 @@ export function createCaloriesTool(
           foodEntry.mealType = entry.meal_type;
         }
 
-        await saveFoodEntry(effectiveDate, foodEntry);
+        await saveFoodEntry(entryDate, foodEntry);
 
-        results.push({
+        const result: LogResultItem = {
           status: 'matched',
           entryId: foodEntry.id,
           itemId: decision.item.id,
           canonicalName: decision.item.canonicalName,
           calories,
           portion,
-        });
+        };
+        if (existingEntries) result.existingEntries = existingEntries;
+        if (warning) result.warning = warning;
+        results.push(result);
 
         logger.info(
-          { entryId: foodEntry.id, itemId: decision.item.id, calories },
+          { entryId: foodEntry.id, itemId: decision.item.id, calories, date: entryDate },
           'Food entry logged (matched)'
         );
       } else if (decision.status === 'ambiguous') {
-        results.push({
+        const ambiguousResult: LogResultItem = {
           status: 'ambiguous',
           originalName: entry.name,
           candidates: decision.candidates.map((c) => ({
@@ -604,7 +757,9 @@ export function createCaloriesTool(
             score: c.score,
           })),
           suggestedPortion: portion,
-        });
+        };
+        if (warning) ambiguousResult.warning = warning;
+        results.push(ambiguousResult);
 
         logger.info(
           { originalName: entry.name, candidateCount: decision.candidates.length },
@@ -619,12 +774,14 @@ export function createCaloriesTool(
           entry.calories_per_100g === undefined
         ) {
           // Can't create without calorie data
-          results.push({
+          const noDataResult: LogResultItem = {
             status: 'ambiguous',
             originalName: entry.name,
             candidates: [],
             suggestedPortion: portion,
-          });
+          };
+          if (warning) noDataResult.warning = warning;
+          results.push(noDataResult);
           continue;
         }
 
@@ -648,10 +805,10 @@ export function createCaloriesTool(
         await saveItem(newItem);
         items.push(newItem); // Add to local cache for subsequent matches
 
+        // No duplicate detection for new items (by definition, no existing entries)
         const foodEntry: FoodEntry = {
           id: generateId('food'),
           itemId: newItem.id,
-          calories,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -660,25 +817,60 @@ export function createCaloriesTool(
           foodEntry.mealType = entry.meal_type;
         }
 
-        await saveFoodEntry(effectiveDate, foodEntry);
+        await saveFoodEntry(entryDate, foodEntry);
 
-        results.push({
+        const result: LogResultItem = {
           status: 'created',
           entryId: foodEntry.id,
           itemId: newItem.id,
           canonicalName: newItem.canonicalName,
           calories,
           portion,
-        });
+        };
+        if (warning) result.warning = warning;
+        results.push(result);
 
         logger.info(
-          { entryId: foodEntry.id, itemId: newItem.id, name: newItem.canonicalName, calories },
+          {
+            entryId: foodEntry.id,
+            itemId: newItem.id,
+            name: newItem.canonicalName,
+            calories,
+            date: entryDate,
+          },
           'Food entry logged (new item created)'
         );
       }
     }
 
-    const dailySummary = await computeDailySummary(recipientId, effectiveDate);
+    // Use the date where entries actually landed (may differ from effectiveDate after midnight)
+    const entryDates =
+      results
+        .filter(
+          (r): r is LogResultItem & { status: 'matched' | 'created' } =>
+            r.status === 'matched' || r.status === 'created'
+        )
+        .map((r) => r.entryId).length > 0
+        ? [
+            ...new Set(
+              input.entries.map((e) => {
+                if (e.timestamp) {
+                  const { date } = getFoodDateForTimestamp(
+                    e.timestamp,
+                    timezone,
+                    userPatterns,
+                    effectiveDate
+                  );
+                  return date;
+                }
+                return effectiveDate;
+              })
+            ),
+          ]
+        : [effectiveDate];
+
+    const summaryDate = entryDates.length === 1 && entryDates[0] ? entryDates[0] : effectiveDate;
+    const dailySummary = await computeDailySummary(recipientId, summaryDate);
     return { success: true, results, dailySummary };
   }
 
@@ -715,23 +907,33 @@ export function createCaloriesTool(
 
   async function getSummary(recipientId: string, date: string): Promise<SummaryResult> {
     const entries = await loadFoodEntries(date, recipientId);
-    const totalCalories = entries.reduce((sum, e) => sum + e.calories, 0);
 
+    // Load all items for relational calorie resolution
+    const itemIds = [...new Set(entries.map((e) => e.itemId))];
+    const itemsMap = await getItemsMap(itemIds);
+
+    // Compute calories using relational reads
+    let totalCalories = 0;
     const byMealType: Partial<Record<MealType, number>> = {};
+
     for (const entry of entries) {
+      const item = itemsMap[entry.itemId];
+      const calories = item ? resolveEntryCalories(entry, item) : 0;
+      totalCalories += calories;
+
       if (entry.mealType) {
-        byMealType[entry.mealType] = (byMealType[entry.mealType] ?? 0) + entry.calories;
+        byMealType[entry.mealType] = (byMealType[entry.mealType] ?? 0) + calories;
       }
     }
 
     // Build per-entry breakdown with item names
-    const itemIds = [...new Set(entries.map((e) => e.itemId))];
-    const itemsMap = await getItemsMap(itemIds);
     const summaryEntries: SummaryEntryInfo[] = entries.map((e) => {
+      const item = itemsMap[e.itemId];
+      const calories = item ? resolveEntryCalories(e, item) : 0;
       const info: SummaryEntryInfo = {
         entryId: e.id,
-        name: itemsMap[e.itemId]?.canonicalName ?? 'Unknown',
-        calories: e.calories,
+        name: item?.canonicalName ?? 'Unknown',
+        calories,
       };
       if (e.mealType) {
         info.mealType = e.mealType;
@@ -857,17 +1059,349 @@ export function createCaloriesTool(
     }
 
     if (entryId.startsWith('weight_')) {
-      const weights = await loadWeights(recipientId);
-      const idx = weights.findIndex((w) => w.id === entryId);
+      const allWeights = (await storage.get<WeightEntry[]>(CALORIES_STORAGE_KEYS.weights)) ?? [];
+      const idx = allWeights.findIndex((w) => w.id === entryId && w.recipientId === recipientId);
       if (idx !== -1) {
-        weights.splice(idx, 1);
-        await storage.set(CALORIES_STORAGE_KEYS.weights, weights);
+        allWeights.splice(idx, 1);
+        await storage.set(CALORIES_STORAGE_KEYS.weights, allWeights);
         logger.info({ entryId }, 'Weight entry deleted');
         return { success: true, entryId };
       }
     }
 
     return { success: false, error: 'Entry not found' };
+  }
+
+  // ============================================================================
+  // New Actions: Search, Stats, Update Item, Delete Item
+  // ============================================================================
+
+  /**
+   * Search for food entries by query across all date partitions.
+   */
+  async function searchFood(
+    recipientId: string,
+    queries: string[],
+    maxResults: number
+  ): Promise<SearchResult> {
+    const items = await loadItems(recipientId);
+    const results: SearchQueryResult[] = [];
+
+    // Get all date partitions
+    const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+    const allEntries: { date: string; entry: FoodEntry }[] = [];
+
+    for (const key of dateKeys) {
+      const dateMatch = key.replace(CALORIES_STORAGE_KEYS.foodPrefix, '');
+      const entries = await storage.get<FoodEntry[]>(key);
+      if (entries) {
+        for (const entry of entries) {
+          if (entry.recipientId === recipientId) {
+            allEntries.push({ date: dateMatch, entry });
+          }
+        }
+      }
+    }
+
+    // Build items map for calorie resolution
+    const itemsMap = await getItemsMap([...new Set(allEntries.map((e) => e.entry.itemId))]);
+
+    for (const query of queries) {
+      // Find matching items
+      const candidates = matchCandidates(query, items);
+      const matchedItems = candidates
+        .filter((c) => c.score >= 0.5)
+        .map((c) => ({
+          itemId: c.item.id,
+          canonicalName: c.item.canonicalName,
+          score: c.score,
+        }));
+
+      const matchedItemIds = new Set(matchedItems.map((m) => m.itemId));
+
+      // Filter entries by matching items
+      const matchingEntries = allEntries
+        .filter((e) => matchedItemIds.has(e.entry.itemId))
+        .map((e) => {
+          const item = itemsMap[e.entry.itemId];
+          const calories = item ? resolveEntryCalories(e.entry, item) : 0;
+          const entry: {
+            date: string;
+            entryId: string;
+            itemId: string;
+            name: string;
+            calories: number;
+            portion: Portion;
+            mealType?: MealType;
+          } = {
+            date: e.date,
+            entryId: e.entry.id,
+            itemId: e.entry.itemId,
+            name: item?.canonicalName ?? 'Unknown',
+            calories,
+            portion: e.entry.portion,
+          };
+          if (e.entry.mealType) entry.mealType = e.entry.mealType;
+          return entry;
+        });
+
+      // Calculate totals before truncation
+      const totalEntries = matchingEntries.length;
+      const totalCalories = matchingEntries.reduce((sum, e) => sum + e.calories, 0);
+      const truncated = matchingEntries.length > maxResults;
+
+      results.push({
+        query,
+        matchedItems,
+        entries: matchingEntries.slice(0, maxResults),
+        totalEntries,
+        totalCalories,
+        truncated,
+      });
+    }
+
+    return { success: true, results };
+  }
+
+  /**
+   * Get multi-day statistics with weight trend and streak.
+   */
+  async function getStats(recipientId: string, days: number): Promise<StatsResult> {
+    const tz = getTimezone(recipientId);
+    const userPatterns = getUserPatterns(recipientId);
+    const today = getCurrentFoodDate(tz, userPatterns);
+    const todayDt = DateTime.fromISO(today, { zone: tz });
+
+    const dailyCalories: StatsDay[] = [];
+    let totalCalories = 0;
+    let streak = 0;
+
+    const userModel = await getUserModel(recipientId);
+    const goal = userModel?.calorie_goal ?? null;
+
+    // Pre-load all items once (avoids N+1 reads per day)
+    const allItemsRaw = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+    const globalItemsMap: Record<string, FoodItem> = {};
+    for (const item of allItemsRaw) {
+      globalItemsMap[item.id] = item;
+    }
+
+    // Load entries for each day
+    for (let i = days - 1; i >= 0; i--) {
+      const date = todayDt.minus({ days: i }).toFormat('yyyy-MM-dd');
+      const entries = await loadFoodEntries(date, recipientId);
+
+      let dayCalories = 0;
+      const byMealType: Partial<Record<MealType, number>> = {};
+
+      for (const entry of entries) {
+        const item = globalItemsMap[entry.itemId];
+        const calories = item ? resolveEntryCalories(entry, item) : 0;
+        dayCalories += calories;
+
+        if (entry.mealType) {
+          byMealType[entry.mealType] = (byMealType[entry.mealType] ?? 0) + calories;
+        }
+      }
+
+      dailyCalories.push({
+        date,
+        totalCalories: dayCalories,
+        goal,
+        entryCount: entries.length,
+        byMealType,
+      });
+
+      totalCalories += dayCalories;
+
+      // Update streak (consecutive days with logging)
+      if (entries.length > 0) {
+        streak++;
+      } else if (i > 0) {
+        // Only reset streak if not today (today might be incomplete)
+        streak = 0;
+      }
+    }
+
+    const averageCalories = Math.round(totalCalories / days);
+
+    // Weight trend
+    const weights = await loadWeights(recipientId);
+    const recentWeights = weights
+      .filter((w) => {
+        const daysAgo = DateTime.fromISO(w.measuredAt, { zone: tz }).diff(todayDt, 'days').days;
+        return Math.abs(daysAgo) <= days;
+      })
+      .sort((a, b) => new Date(b.measuredAt).getTime() - new Date(a.measuredAt).getTime());
+
+    let weightChange: number | null = null;
+    let direction: StatsResult['weightTrend']['direction'] = 'insufficient_data';
+
+    if (recentWeights.length >= 2) {
+      const latestWeight = recentWeights[0];
+      const oldestWeight = recentWeights[recentWeights.length - 1];
+      if (latestWeight && oldestWeight) {
+        const latest = latestWeight.weight;
+        const oldest = oldestWeight.weight;
+        weightChange = latest - oldest;
+
+        if (Math.abs(weightChange) < 0.5) {
+          direction = 'stable';
+        } else if (weightChange > 0) {
+          direction = 'up';
+        } else {
+          direction = 'down';
+        }
+      }
+    }
+
+    return {
+      success: true,
+      period: {
+        from: dailyCalories[0]?.date ?? today,
+        to: dailyCalories[dailyCalories.length - 1]?.date ?? today,
+      },
+      dailyCalories,
+      averageCalories,
+      weightTrend: {
+        entries: recentWeights.slice(0, 10), // Limit to 10 most recent
+        change: weightChange,
+        direction,
+      },
+      streak,
+    };
+  }
+
+  /**
+   * Update an existing food item.
+   */
+  async function updateItem(
+    recipientId: string,
+    itemId?: string,
+    name?: string,
+    newName?: string,
+    newBasis?: NutrientBasis
+  ): Promise<UpdateItemResult> {
+    const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+    let targetItem: FoodItem | undefined;
+
+    if (itemId) {
+      targetItem = allItems.find((i) => i.id === itemId && i.recipientId === recipientId);
+    } else if (name) {
+      // Fuzzy match by name
+      const candidates = matchCandidates(
+        name,
+        allItems.filter((i) => i.recipientId === recipientId)
+      );
+      const top = candidates[0];
+
+      if (!top || top.score < 0.5) {
+        return { success: false, error: 'No matching item found' };
+      }
+
+      if (candidates.length > 1 && candidates[1] && top.score - candidates[1].score < 0.1) {
+        // Ambiguous match
+        return {
+          success: false,
+          candidates: candidates.slice(0, 3).map((c) => ({
+            itemId: c.item.id,
+            canonicalName: c.item.canonicalName,
+            score: c.score,
+          })),
+        };
+      }
+
+      targetItem = top.item;
+    } else {
+      return { success: false, error: 'Either item_id or name is required' };
+    }
+
+    if (!targetItem) {
+      return { success: false, error: 'Item not found' };
+    }
+
+    // Update fields
+    const now = new Date().toISOString();
+    if (newName) {
+      targetItem.canonicalName = newName;
+    }
+    if (newBasis) {
+      targetItem.basis = newBasis;
+    }
+    targetItem.updatedAt = now;
+
+    // Save updated items
+    await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
+
+    // Count affected entries
+    const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+    let affectedEntryCount = 0;
+
+    for (const key of dateKeys) {
+      const entries = await storage.get<FoodEntry[]>(key);
+      if (entries) {
+        affectedEntryCount += entries.filter((e) => e.itemId === targetItem.id).length;
+      }
+    }
+
+    logger.info(
+      { itemId: targetItem.id, name: targetItem.canonicalName, affectedEntryCount },
+      'Food item updated'
+    );
+
+    return {
+      success: true,
+      item: targetItem,
+      affectedEntryCount,
+    };
+  }
+
+  /**
+   * Delete a food item (with referential integrity check).
+   */
+  async function deleteItem(recipientId: string, itemId: string): Promise<DeleteItemResult> {
+    const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+    const targetItem = allItems.find((i) => i.id === itemId && i.recipientId === recipientId);
+
+    if (!targetItem) {
+      return { success: false, error: 'Item not found' };
+    }
+
+    // Check for references in entries
+    const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+    const referencingDates: string[] = [];
+
+    for (const key of dateKeys) {
+      const entries = await storage.get<FoodEntry[]>(key);
+      if (entries?.some((e) => e.itemId === itemId && e.recipientId === recipientId)) {
+        referencingDates.push(key.replace(CALORIES_STORAGE_KEYS.foodPrefix, ''));
+      }
+    }
+
+    if (referencingDates.length > 0) {
+      return {
+        success: false,
+        error: 'Cannot delete item: it has food entries referencing it',
+        referencedBy: {
+          count: referencingDates.length,
+          dateRange: {
+            from: referencingDates.sort()[0] ?? '',
+            to: referencingDates.sort()[referencingDates.length - 1] ?? '',
+          },
+        },
+      };
+    }
+
+    // No references - safe to delete
+    const idx = allItems.findIndex((i) => i.id === itemId);
+    if (idx !== -1) {
+      allItems.splice(idx, 1);
+      await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
+    }
+
+    logger.info({ itemId, name: targetItem.canonicalName }, 'Food item deleted');
+
+    return { success: true, itemId };
   }
 
   // ============================================================================
@@ -886,7 +1420,18 @@ export function createCaloriesTool(
     properties: {
       action: {
         type: 'string',
-        enum: ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'],
+        enum: [
+          'log',
+          'list',
+          'summary',
+          'goal',
+          'log_weight',
+          'delete',
+          'search',
+          'stats',
+          'update_item',
+          'delete_item',
+        ],
         description: 'Action to perform',
       },
       entries: {
@@ -982,6 +1527,41 @@ export function createCaloriesTool(
         type: 'string',
         description: 'Entry ID for delete action',
       },
+      queries: {
+        type: 'array',
+        description: 'Search queries for search action (max 5)',
+        items: { type: 'string' },
+      },
+      max_results: {
+        type: 'number',
+        description: 'Max results per query for search action (default: 50)',
+      },
+      days: {
+        type: 'number',
+        description: 'Number of days for stats action (default: 7, max: 30)',
+      },
+      item_id: {
+        type: 'string',
+        description: 'Item ID for update_item or delete_item action',
+      },
+      name: {
+        type: 'string',
+        description: 'Name for fuzzy item matching (update_item action)',
+      },
+      new_name: {
+        type: 'string',
+        description: 'New name for update_item action',
+      },
+      new_basis: {
+        type: 'object',
+        description: 'New nutritional basis for update_item action',
+        properties: {
+          caloriesPer: { type: 'number' },
+          perQuantity: { type: 'number' },
+          perUnit: { type: 'string' },
+        },
+        required: ['caloriesPer', 'perQuantity', 'perUnit'],
+      },
     },
     required: ['action'],
     additionalProperties: false,
@@ -989,7 +1569,7 @@ export function createCaloriesTool(
 
   const TOOL_DESCRIPTION = `Food and calorie tracking.
 
-ACTIONS: log, list, summary, goal, log_weight, delete
+ACTIONS: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item
 
 KEY RULES:
 - log response includes dailySummary with daily totals — NEVER call summary after log
@@ -997,7 +1577,12 @@ KEY RULES:
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
 - If status="ambiguous", resolve via chooseItemId — do NOT create a new item for a different portion
 - log supports entries array for multiple items in one call
-- date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD`;
+- date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD
+- If existingEntries present in log response, inform user about potential duplicates
+- search: find entries by food name across all dates (max 5 queries)
+- stats: multi-day calorie summary with weight trend (default 7 days)
+- update_item: modify existing food item (name or nutritional basis)
+- delete_item: remove item only if no entries reference it`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
@@ -1008,9 +1593,21 @@ KEY RULES:
       {
         name: 'action',
         type: 'string',
-        description: 'Action: log, list, summary, goal, log_weight, delete',
+        description:
+          'Action: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item',
         required: true,
-        enum: ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'],
+        enum: [
+          'log',
+          'list',
+          'summary',
+          'goal',
+          'log_weight',
+          'delete',
+          'search',
+          'stats',
+          'update_item',
+          'delete_item',
+        ],
       },
       {
         name: 'entries',
@@ -1063,13 +1660,67 @@ KEY RULES:
         description: 'Entry ID for delete action',
         required: false,
       },
+      {
+        name: 'queries',
+        type: 'array',
+        description: 'Search queries for search action (max 5)',
+        required: false,
+      },
+      {
+        name: 'max_results',
+        type: 'number',
+        description: 'Max results per query for search action (default: 50)',
+        required: false,
+      },
+      {
+        name: 'days',
+        type: 'number',
+        description: 'Number of days for stats action (default: 7, max: 30)',
+        required: false,
+      },
+      {
+        name: 'item_id',
+        type: 'string',
+        description: 'Item ID for update_item or delete_item action',
+        required: false,
+      },
+      {
+        name: 'name',
+        type: 'string',
+        description: 'Name for fuzzy item matching (update_item action)',
+        required: false,
+      },
+      {
+        name: 'new_name',
+        type: 'string',
+        description: 'New name for update_item action',
+        required: false,
+      },
+      {
+        name: 'new_basis',
+        type: 'object',
+        description:
+          'New nutritional basis for update_item action: { caloriesPer, perQuantity, perUnit }',
+        required: false,
+      },
     ],
     validate: (args) => {
       const a = args as Record<string, unknown>;
       if (!a['action'] || typeof a['action'] !== 'string') {
         return { success: false, error: 'action: required' };
       }
-      const validActions = ['log', 'list', 'summary', 'goal', 'log_weight', 'delete'];
+      const validActions = [
+        'log',
+        'list',
+        'summary',
+        'goal',
+        'log_weight',
+        'delete',
+        'search',
+        'stats',
+        'update_item',
+        'delete_item',
+      ];
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
       }
@@ -1101,12 +1752,113 @@ KEY RULES:
         }
       }
 
+      if (a['action'] === 'search') {
+        const queries = a['queries'];
+        if (!Array.isArray(queries) || queries.length === 0) {
+          return {
+            success: false,
+            error: 'queries: required for search action (array of strings)',
+          };
+        }
+        if (queries.length > 5) {
+          return { success: false, error: 'queries: max 5 queries allowed' };
+        }
+        const maxResults = a['max_results'];
+        if (
+          maxResults !== undefined &&
+          (typeof maxResults !== 'number' ||
+            !Number.isFinite(maxResults) ||
+            maxResults < 1 ||
+            maxResults > 200)
+        ) {
+          return { success: false, error: 'max_results: must be a number between 1 and 200' };
+        }
+      }
+
+      if (a['action'] === 'stats') {
+        const days = a['days'];
+        if (days !== undefined && (typeof days !== 'number' || days < 1 || days > 30)) {
+          return { success: false, error: 'days: must be a number between 1 and 30' };
+        }
+      }
+
+      if (a['action'] === 'delete_item') {
+        const itemId = a['item_id'];
+        if (!itemId || typeof itemId !== 'string') {
+          return { success: false, error: 'item_id: required for delete_item action' };
+        }
+      }
+
+      if (a['action'] === 'update_item') {
+        const itemId = a['item_id'];
+        const name = a['name'];
+        if (!itemId && !name) {
+          return {
+            success: false,
+            error: 'Either item_id or name is required for update_item action',
+          };
+        }
+        const newName = a['new_name'];
+        if (newName !== undefined && (typeof newName !== 'string' || newName.trim().length === 0)) {
+          return { success: false, error: 'new_name: must be a non-empty string' };
+        }
+        const newBasis = a['new_basis'];
+        if (!newName && !newBasis) {
+          return {
+            success: false,
+            error: 'Either new_name or new_basis is required for update_item action',
+          };
+        }
+        // Validate new_basis structure if provided
+        if (newBasis && typeof newBasis === 'object') {
+          const basis = newBasis as Record<string, unknown>;
+          if (
+            typeof basis['caloriesPer'] !== 'number' ||
+            !Number.isFinite(basis['caloriesPer']) ||
+            typeof basis['perQuantity'] !== 'number' ||
+            !Number.isFinite(basis['perQuantity']) ||
+            typeof basis['perUnit'] !== 'string'
+          ) {
+            return {
+              success: false,
+              error:
+                'new_basis: must have caloriesPer (number), perQuantity (number), perUnit (string)',
+            };
+          }
+          if (basis['caloriesPer'] < 0) {
+            return { success: false, error: 'new_basis.caloriesPer: must be >= 0' };
+          }
+          if (basis['perQuantity'] <= 0) {
+            return { success: false, error: 'new_basis.perQuantity: must be > 0' };
+          }
+          if (!VALID_UNITS.includes(basis['perUnit'] as Unit)) {
+            return {
+              success: false,
+              error: `new_basis.perUnit: must be one of [${VALID_UNITS.join(', ')}]`,
+            };
+          }
+        }
+      }
+
       return { success: true, data: a };
     },
     execute: async (
       args,
       context?: PluginToolContext
-    ): Promise<LogResult | ListResult | SummaryResult | GoalResult | DeleteResult> => {
+    ): Promise<
+      | LogResult
+      | ListResult
+      | SummaryResult
+      | GoalResult
+      | DeleteResult
+      | SearchResult
+      | StatsResult
+      | UpdateItemResult
+      | DeleteItemResult
+    > => {
+      // Run migration on first execute (lazy, not in activate which is sync)
+      await ensureMigrated(storage, logger);
+
       const action = args['action'] as string;
       const recipientId = context?.recipientId;
 
@@ -1146,7 +1898,7 @@ KEY RULES:
             entries = parsed.entries;
           }
 
-          return logFood({ entries }, recipientId, effectiveDate);
+          return logFood({ entries }, recipientId, effectiveDate, timezone, userPatterns);
         }
 
         case 'list': {
@@ -1188,6 +1940,39 @@ KEY RULES:
             return { success: false, error: 'entry_id required for delete action' } as DeleteResult;
           }
           return deleteEntry(entryId, recipientId);
+        }
+
+        case 'search': {
+          const queries = args['queries'] as string[];
+          const maxResults = args['max_results'] as number | undefined;
+          return searchFood(recipientId, queries, maxResults ?? 50);
+        }
+
+        case 'stats': {
+          const days = args['days'] as number | undefined;
+          const safeDays = Math.min(Math.max(days ?? 7, 1), 30);
+          return getStats(recipientId, safeDays);
+        }
+
+        case 'update_item': {
+          return updateItem(
+            recipientId,
+            args['item_id'] as string | undefined,
+            args['name'] as string | undefined,
+            args['new_name'] as string | undefined,
+            args['new_basis'] as NutrientBasis | undefined
+          );
+        }
+
+        case 'delete_item': {
+          const itemId = args['item_id'] as string | undefined;
+          if (!itemId) {
+            return {
+              success: false,
+              error: 'item_id required for delete_item action',
+            } as DeleteItemResult;
+          }
+          return deleteItem(recipientId, itemId);
         }
 
         default:

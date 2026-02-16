@@ -5,7 +5,7 @@
  * preventing duplicate emissions on the same day.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CaloriesDeficitNeuron, DEFAULT_CALORIES_DEFICIT_CONFIG } from '../../../src/plugins/calories/calories-neuron.js';
 import type { AgentState } from '../../../src/types/agent/state.js';
 import { DateTime, Settings } from 'luxon';
@@ -85,6 +85,7 @@ describe('CaloriesDeficitNeuron persistence', () => {
       mockLogger as any,
       {},
       storage,
+      'test-recipient',
       () => TZ,
       () => null,
       async () => goal,
