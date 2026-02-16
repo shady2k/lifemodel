@@ -18,6 +18,7 @@ import type {
   LogResult,
   LogResultItem,
   ListResult,
+  ListEntryInfo,
   SummaryResult,
   SummaryEntryInfo,
   DailySummary,
@@ -919,9 +920,30 @@ export function createCaloriesTool(
     }
 
     const itemIds = [...new Set(entries.map((e) => e.itemId))];
-    const items = await getItemsMap(itemIds);
+    const itemsMap = await getItemsMap(itemIds);
 
-    return { success: true, date, entries, items };
+    // Resolve calories per entry
+    let totalCalories = 0;
+    const enrichedEntries: ListEntryInfo[] = entries.map((e) => {
+      const item = itemsMap[e.itemId];
+      const calories = item ? resolveEntryCalories(e, item) : 0;
+      totalCalories += calories;
+
+      const info: ListEntryInfo = {
+        entryId: e.id,
+        name: item?.canonicalName ?? 'Unknown',
+        calories,
+        portion: e.portion,
+        timestamp: e.timestamp,
+      };
+      if (e.mealType) info.mealType = e.mealType;
+      if (item?.basis.perUnit === 'g' && item.basis.perQuantity === 100) {
+        info.caloriesPer100g = item.basis.caloriesPer;
+      }
+      return info;
+    });
+
+    return { success: true, date, totalCalories, entries: enrichedEntries };
   }
 
   async function getSummary(recipientId: string, date: string): Promise<SummaryResult> {

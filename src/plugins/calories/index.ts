@@ -435,6 +435,7 @@ export type {
   LogResult,
   LogResultItem,
   ListResult,
+  ListEntryInfo,
   SummaryResult,
   DailySummary,
   DailySummaryEntry,

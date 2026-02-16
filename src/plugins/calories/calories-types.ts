@@ -219,11 +219,21 @@ export interface ListInput {
   limit?: number;
 }
 
+export interface ListEntryInfo {
+  entryId: string;
+  name: string;
+  calories: number;
+  portion: Portion;
+  mealType?: MealType;
+  caloriesPer100g?: number;
+  timestamp: string;
+}
+
 export interface ListResult {
   success: boolean;
   date: string;
-  entries: FoodEntry[];
-  items: Record<string, FoodItem>; // itemId → FoodItem for display
+  totalCalories: number;
+  entries: ListEntryInfo[];
 }
 
 export interface SummaryEntryInfo {
