@@ -305,6 +305,11 @@ async function installNpm(
     logger.info({ hash, volumeName, ecosystem: 'npm' }, 'npm dependencies cached in volume');
     return volumeName;
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(
+      { hash, volumeName, ecosystem: 'npm', containerName, error: msg },
+      'npm dependency install failed'
+    );
     // Clean up the volume and ready marker on failure
     await clearVolumeReady(lockDir, 'npm', hash);
     try {
@@ -384,7 +389,7 @@ async function installPip(
       `${volumeName}:/workspace`,
       CONTAINER_IMAGE,
       '-c',
-      `printf '%s\\n' ${packages.map((p) => `'${p.name}==${p.version}'`).join(' ')} > /workspace/requirements.txt && pip install --target /workspace/site-packages --only-binary :all: -r /workspace/requirements.txt 2>&1 && test -d /workspace/site-packages && test $(ls /workspace/site-packages | wc -l) -gt 0`,
+      `printf '%s\\n' ${packages.map((p) => `'${p.version === 'latest' ? p.name : `${p.name}==${p.version}`}'`).join(' ')} > /workspace/requirements.txt && pip install --no-user --target /workspace/site-packages -r /workspace/requirements.txt 2>&1 && test -d /workspace/site-packages && test $(ls /workspace/site-packages | wc -l) -gt 0`,
     ];
 
     logger.info(
@@ -403,6 +408,11 @@ async function installPip(
     logger.info({ hash, volumeName, ecosystem: 'pip' }, 'pip dependencies cached in volume');
     return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(
+      { hash, volumeName, ecosystem: 'pip', containerName, error: msg },
+      'pip dependency install failed'
+    );
     await clearVolumeReady(lockDir, 'pip', hash);
     try {
       await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });

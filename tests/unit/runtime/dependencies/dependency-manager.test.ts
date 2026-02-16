@@ -157,11 +157,11 @@ describe('validateDependencies', () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it('rejects "latest" version', () => {
+  it('allows "latest" version', () => {
     const errors = validateDependencies({
       npm: { packages: [{ name: 'foo', version: 'latest' }] },
     });
-    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.length).toBe(0);
   });
 
   it('rejects invalid package names (URLs)', () => {
@@ -660,6 +660,37 @@ describe('pip prep container commands', () => {
       (c) => c.cmd === 'docker' && c.args[0] === 'cp'
     );
     expect(cpCall).toBeUndefined();
+  });
+
+  it('omits version pin for "latest" in pip requirements', async () => {
+    await installSkillDependencies(
+      { pip: { packages: [{ name: 'agentmail', version: 'latest' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain("'agentmail'");
+    expect(shellCmd).not.toContain('agentmail==latest');
+  });
+
+  it('uses pinned version in pip requirements', async () => {
+    await installSkillDependencies(
+      { pip: { packages: [{ name: 'requests', version: '2.32.3' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain("'requests==2.32.3'");
   });
 
   it('returns a volume name for pip', async () => {

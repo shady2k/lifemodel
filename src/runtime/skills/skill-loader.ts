@@ -264,9 +264,10 @@ const PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
 
 /**
  * Exact version pin pattern (digits and dots only, e.g. "1.0.0", "2.3").
+ * Also allows "latest" — npm treats it as a dist-tag, pip omits the pin.
  * Rejects ranges (^, ~, >=, *), URLs, git refs, and local paths.
  */
-const EXACT_VERSION_REGEX = /^\d+(\.\d+)*$/;
+const EXACT_VERSION_REGEX = /^(\d+(\.\d+)*|latest)$/;
 
 /**
  * Known dependency ecosystems.
