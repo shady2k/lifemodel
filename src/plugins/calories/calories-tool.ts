@@ -584,6 +584,10 @@ export function createCaloriesTool(
         portion: entry.portion,
       };
       if (entry.mealType) summaryEntry.mealType = entry.mealType;
+      // Show kcal/100g for weight-based items (basis is normalized to per-100g)
+      if (item?.basis.perUnit === 'g' && item.basis.perQuantity === 100) {
+        summaryEntry.caloriesPer100g = item.basis.caloriesPer;
+      }
       summaryEntries.push(summaryEntry);
     }
 
@@ -791,11 +795,20 @@ export function createCaloriesTool(
           continue;
         }
 
-        // Prefer calories_per_100g for item basis when available
-        const basis =
-          entry.calories_per_100g !== undefined
-            ? { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' as Unit }
-            : { caloriesPer: calories, perQuantity: portion.quantity, perUnit: portion.unit };
+        // Normalize weight-based items to per-100g basis (canonical form)
+        let basis: NutrientBasis;
+        if (entry.calories_per_100g !== undefined) {
+          basis = { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' as Unit };
+        } else if ((portion.unit === 'g' || portion.unit === 'kg') && calories > 0) {
+          const grams = portion.unit === 'kg' ? portion.quantity * 1000 : portion.quantity;
+          basis = {
+            caloriesPer: Math.round((calories / grams) * 100),
+            perQuantity: 100,
+            perUnit: 'g' as Unit,
+          };
+        } else {
+          basis = { caloriesPer: calories, perQuantity: portion.quantity, perUnit: portion.unit };
+        }
 
         const newItem: FoodItem = {
           id: generateId('item'),
@@ -1578,7 +1591,8 @@ export function createCaloriesTool(
 ACTIONS: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item
 
 KEY RULES:
-- log response includes dailySummary with daily totals and byMealType subtotals — NEVER call summary after log
+- log response includes dailySummary with daily totals, byMealType subtotals, and per-entry portion + caloriesPer100g — NEVER call summary after log
+- When displaying entries, show portion (e.g. "170 г") and caloriesPer100g (e.g. "350 ккал/100г") when available
 - ALWAYS set meal_type on every entry when user groups food by meal (breakfast/lunch/dinner/snack). Response dailySummary.byMealType shows per-meal subtotals — use them to display meal subtotals to the user
 - name = pure food name, no quantities ("Americano", not "Americano 200ml")
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically

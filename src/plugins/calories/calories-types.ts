@@ -191,6 +191,7 @@ export interface DailySummaryEntry {
   calories: number;
   mealType?: MealType;
   portion: Portion;
+  caloriesPer100g?: number;
 }
 
 export interface DailySummary {
