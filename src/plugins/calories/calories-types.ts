@@ -91,7 +91,7 @@ export interface Portion {
  */
 export interface FoodEntry {
   id: string;
-  itemId: string;
+  dishId: string;
   portion: Portion;
   mealType?: MealType;
   timestamp: string;
@@ -138,7 +138,7 @@ export interface LogInputEntry {
   meal_type?: MealType;
   timestamp?: string;
   /** Explicit item selection to resolve ambiguity */
-  chooseItemId?: string;
+  chooseDishId?: string;
 }
 
 export interface LogInput {
@@ -157,7 +157,7 @@ export type LogResultItem =
   | {
       status: 'matched';
       entryId: string;
-      itemId: string;
+      dishId: string;
       canonicalName: string;
       calories: number;
       portion: Portion;
@@ -167,7 +167,7 @@ export type LogResultItem =
   | {
       status: 'created';
       entryId: string;
-      itemId: string;
+      dishId: string;
       canonicalName: string;
       calories: number;
       portion: Portion;
@@ -178,7 +178,7 @@ export type LogResultItem =
       status: 'ambiguous';
       originalName: string;
       candidates: {
-        itemId: string;
+        dishId: string;
         canonicalName: string;
         score: number;
       }[];
@@ -221,6 +221,7 @@ export interface ListInput {
 
 export interface ListEntryInfo {
   entryId: string;
+  dishId: string;
   name: string;
   calories: number;
   portion: Portion;
@@ -278,6 +279,7 @@ export interface DeleteResult {
   success: boolean;
   entryId?: string;
   error?: string;
+  dailySummary?: DailySummary;
 }
 
 // ============================================================================
@@ -287,14 +289,14 @@ export interface DeleteResult {
 export interface SearchQueryResult {
   query: string;
   matchedItems: {
-    itemId: string;
+    dishId: string;
     canonicalName: string;
     score: number;
   }[];
   entries: {
     date: string;
     entryId: string;
-    itemId: string;
+    dishId: string;
     name: string;
     calories: number;
     portion: Portion;
@@ -346,8 +348,9 @@ export interface UpdateItemResult {
   success: boolean;
   item?: FoodItem;
   affectedEntryCount?: number;
+  dailySummary?: DailySummary;
   candidates?: {
-    itemId: string;
+    dishId: string;
     canonicalName: string;
     score: number;
   }[];
@@ -360,7 +363,7 @@ export interface UpdateItemResult {
 
 export interface DeleteItemResult {
   success: boolean;
-  itemId?: string;
+  dishId?: string;
   error?: string;
   referencedBy?: {
     count: number;

@@ -109,7 +109,7 @@ describe('Calories Tool - Migration', () => {
 
     const entryWithCalories = {
       id: 'food_123',
-      itemId: 'item_bacon',
+      dishId: 'item_bacon',
       calories: 191, // v1 field
       portion: { quantity: 45, unit: 'g' as const },
       timestamp: '2026-01-10T08:00:00Z',
@@ -121,7 +121,7 @@ describe('Calories Tool - Migration', () => {
     await tool.execute({ action: 'list' }, context);
 
     // Verify migration completed
-    expect(storage._store['schema_version']).toBe(3);
+    expect(storage._store['schema_version']).toBe(4);
 
     // Verify calories field removed from entry
     const migratedEntries = storage._store['food:2026-01-10'] as FoodEntry[];
@@ -132,10 +132,10 @@ describe('Calories Tool - Migration', () => {
   it('should recover orphan entries with calorie data', async () => {
     const { tool, storage, context } = setupTool();
 
-    // Entry with non-existent itemId but has calories
+    // Entry with non-existent dishId but has calories
     const orphanEntry = {
       id: 'food_orphan',
-      itemId: 'item_missing',
+      dishId: 'item_missing',
       calories: 150,
       portion: { quantity: 100, unit: 'g' as const },
       timestamp: '2026-01-10T08:00:00Z',
@@ -149,7 +149,7 @@ describe('Calories Tool - Migration', () => {
     const result = await tool.execute({ action: 'list' }, context);
 
     // Verify migration completed
-    expect(storage._store['schema_version']).toBe(3);
+    expect(storage._store['schema_version']).toBe(4);
 
     // Should have created an orphan item
     const items = storage._store[CALORIES_STORAGE_KEYS.items] as FoodItem[];
@@ -160,17 +160,17 @@ describe('Calories Tool - Migration', () => {
     // Entry should reference the orphan item
     const entries = storage._store['food:2026-01-10'] as FoodEntry[];
     expect(entries).toBeDefined();
-    expect(entries[0].itemId).toMatch(/^orphan_/);
+    expect(entries[0].dishId).toMatch(/^orphan_/);
   });
 
   it('should skip migration if already v3', async () => {
     const { tool, storage, context } = setupTool();
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     await tool.execute({ action: 'list' }, context);
 
     // Should still be v3
-    expect(storage._store['schema_version']).toBe(3);
+    expect(storage._store['schema_version']).toBe(4);
   });
 });
 
@@ -190,7 +190,7 @@ describe('Calories Tool - Relational Reads', () => {
     };
     const entry: FoodEntry = {
       id: 'food_123',
-      itemId: 'item_bacon',
+      dishId: 'item_bacon',
       portion: { quantity: 45, unit: 'g' },
       timestamp: '2026-01-10T08:00:00Z',
       recipientId: 'user_test',
@@ -198,7 +198,7 @@ describe('Calories Tool - Relational Reads', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-01-10'] = [entry];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     // Get summary
     const result = await tool.execute({ action: 'summary', date: '2026-01-10' }, context);
@@ -215,7 +215,7 @@ describe('Calories Tool - Relational Reads', () => {
 
     const entry: FoodEntry = {
       id: 'food_missing',
-      itemId: 'item_nonexistent',
+      dishId: 'item_nonexistent',
       portion: { quantity: 100, unit: 'g' },
       timestamp: '2026-01-10T08:00:00Z',
       recipientId: 'user_test',
@@ -223,7 +223,7 @@ describe('Calories Tool - Relational Reads', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [];
     storage._store['food:2026-01-10'] = [entry];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({ action: 'summary', date: '2026-01-10' }, context);
 
@@ -250,14 +250,14 @@ describe('Calories Tool - Search Action', () => {
 
     const entry1: FoodEntry = {
       id: 'food_1',
-      itemId: 'item_coffee',
+      dishId: 'item_coffee',
       portion: { quantity: 200, unit: 'ml' },
       timestamp: '2026-01-10T08:00:00Z',
       recipientId: 'user_test',
     };
     const entry2: FoodEntry = {
       id: 'food_2',
-      itemId: 'item_coffee',
+      dishId: 'item_coffee',
       portion: { quantity: 400, unit: 'ml' },
       timestamp: '2026-01-09T08:00:00Z',
       recipientId: 'user_test',
@@ -266,7 +266,7 @@ describe('Calories Tool - Search Action', () => {
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-01-10'] = [entry1];
     storage._store['food:2026-01-09'] = [entry2];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({ action: 'search', queries: ['американо'] }, context);
 
@@ -296,7 +296,7 @@ describe('Calories Tool - Search Action', () => {
     for (let i = 0; i < 100; i++) {
       const entry: FoodEntry = {
         id: `food_${i}`,
-        itemId: 'item_coffee',
+        dishId: 'item_coffee',
         portion: { quantity: 200, unit: 'ml' },
         timestamp: `2026-01-${String(10 + (i % 20)).padStart(2, '0')}T08:00:00Z`,
         recipientId: 'user_test',
@@ -309,7 +309,7 @@ describe('Calories Tool - Search Action', () => {
     }
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({ action: 'search', queries: ['американо'], max_results: 10 }, context);
 
@@ -345,10 +345,10 @@ describe('Calories Tool - Search Action', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [coffee, yogurt];
     storage._store['food:2026-01-10'] = [
-      { id: 'food_1', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
-      { id: 'food_2', itemId: 'item_yogurt', portion: { quantity: 140, unit: 'g' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
+      { id: 'food_1', dishId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
+      { id: 'food_2', dishId: 'item_yogurt', portion: { quantity: 140, unit: 'g' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({ action: 'search', queries: ['американо', 'йогурт'] }, context);
 
@@ -384,7 +384,7 @@ describe('Calories Tool - Stats Action', () => {
       storage._store[`food:${dateStr}`] = [
         {
           id: `food_${i}`,
-          itemId: 'item_coffee',
+          dishId: 'item_coffee',
           portion: { quantity: 200, unit: 'ml' },
           timestamp: `${dateStr}T08:00:00Z`,
           recipientId: 'user_test',
@@ -397,7 +397,7 @@ describe('Calories Tool - Stats Action', () => {
       { id: 'weight_1', weight: 75, measuredAt: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
       { id: 'weight_2', weight: 75.5, measuredAt: '2026-02-09T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({ action: 'stats', days: 7 }, context);
 
@@ -426,11 +426,11 @@ describe('Calories Tool - Update Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'update_dish',
-      item_id: 'item_coffee',
+      dish_id: 'item_coffee',
       new_name: 'Американо с молоком',
     }, context);
 
@@ -454,17 +454,57 @@ describe('Calories Tool - Update Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'update_dish',
-      item_id: 'item_coffee',
+      dish_id: 'item_coffee',
       new_basis: { caloriesPer: 10, perQuantity: 200, perUnit: 'ml' },
     }, context);
 
     expect(result.success).toBe(true);
     if ('item' in result && result.item) {
       expect(result.item.basis.caloriesPer).toBe(10);
+    }
+  });
+
+  it('should return dailySummary with recalculated calories after basis update', async () => {
+    const { tool, storage, context } = setupTool();
+
+    const item: FoodItem = {
+      id: 'item_pasta',
+      canonicalName: 'Макароны',
+      measurementKind: 'weight',
+      basis: { caloriesPer: 350, perQuantity: 100, perUnit: 'g' },
+      createdAt: '2026-01-10T10:00:00Z',
+      updatedAt: '2026-01-10T10:00:00Z',
+      recipientId: 'user_test',
+    };
+
+    const entry: FoodEntry = {
+      id: 'food_pasta1',
+      dishId: 'item_pasta',
+      portion: { quantity: 170, unit: 'g' },
+      timestamp: '2026-02-16T12:00:00Z',
+      recipientId: 'user_test',
+    };
+
+    storage._store[CALORIES_STORAGE_KEYS.items] = [item];
+    storage._store['food:2026-02-16'] = [entry];
+    storage._store['schema_version'] = 4;
+
+    const result = await tool.execute({
+      action: 'update_dish',
+      dish_id: 'item_pasta',
+      new_basis: { caloriesPer: 130, perQuantity: 100, perUnit: 'g' },
+    }, context);
+
+    expect(result.success).toBe(true);
+    // Should include dailySummary with recalculated calories (170g × 130/100 = 221)
+    if ('dailySummary' in result && result.dailySummary) {
+      expect(result.dailySummary.totalCalories).toBe(221);
+    } else {
+      throw new Error('Expected dailySummary in update_dish result');
     }
   });
 
@@ -493,7 +533,7 @@ describe('Calories Tool - Update Item Action', () => {
     ];
 
     storage._store[CALORIES_STORAGE_KEYS.items] = items;
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'update_dish',
@@ -524,13 +564,13 @@ describe('Calories Tool - Delete Item Action', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-01-10'] = [
-      { id: 'food_1', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
+      { id: 'food_1', dishId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'delete_dish',
-      item_id: 'item_coffee',
+      dish_id: 'item_coffee',
     }, context);
 
     expect(result.success).toBe(false);
@@ -553,11 +593,11 @@ describe('Calories Tool - Delete Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'delete_dish',
-      item_id: 'item_coffee',
+      dish_id: 'item_coffee',
     }, context);
 
     expect(result.success).toBe(true);
@@ -583,9 +623,9 @@ describe('Calories Tool - Duplicate Detection', () => {
     // Existing entry for today
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-02-16'] = [
-      { id: 'food_existing', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, mealType: 'breakfast', timestamp: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
+      { id: 'food_existing', dishId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, mealType: 'breakfast', timestamp: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'log',
@@ -618,7 +658,7 @@ describe('Calories Tool - After-Midnight Fix', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     // Log entry with timestamp 01:30 AM - before cutoff (3 AM for 23-7 sleep pattern)
     // Should go to yesterday's partition
@@ -653,7 +693,7 @@ describe('Calories Tool - After-Midnight Fix', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 3;
+    storage._store['schema_version'] = 4;
 
     const result = await tool.execute({
       action: 'log',
@@ -671,5 +711,180 @@ describe('Calories Tool - After-Midnight Fix', () => {
         expect(logResult.warning).toContain('Invalid timestamp');
       }
     }
+  });
+});
+
+describe('Calories Tool - Intra-Batch Deduplication', () => {
+  beforeEach(() => {
+    resetMigrationState();
+    vi.clearAllMocks();
+  });
+
+  it('should collapse identical entries within a single batch', async () => {
+    const { tool, storage, context } = setupTool();
+    storage._store[CALORIES_STORAGE_KEYS.items] = [];
+    storage._store['schema_version'] = 4;
+
+    // Send 3 identical "Трилече" entries in one batch — only 1 should be saved
+    const result = await tool.execute({
+      action: 'log',
+      entries: [
+        { name: 'Трилече', portion: { quantity: 100, unit: 'g' }, calories_per_100g: 245, meal_type: 'snack' },
+        { name: 'Трилече', portion: { quantity: 100, unit: 'g' }, calories_per_100g: 245, meal_type: 'snack' },
+        { name: 'Трилече', portion: { quantity: 100, unit: 'g' }, calories_per_100g: 245, meal_type: 'snack' },
+      ],
+    }, context);
+
+    expect(result.success).toBe(true);
+    // Only 1 result — the other 2 were deduped
+    expect((result as { results: unknown[] }).results).toHaveLength(1);
+
+    // Verify only 1 entry was actually saved in storage
+    const dateKeys = await storage.keys('food:*');
+    let totalEntries = 0;
+    for (const key of dateKeys) {
+      const entries = await storage.get<FoodEntry[]>(key);
+      if (entries) totalEntries += entries.length;
+    }
+    expect(totalEntries).toBe(1);
+  });
+
+  it('should keep entries with different meal types as separate', async () => {
+    const { tool, storage, context } = setupTool();
+    storage._store[CALORIES_STORAGE_KEYS.items] = [];
+    storage._store['schema_version'] = 4;
+
+    // Same food at different meals — should NOT be deduped
+    const result = await tool.execute({
+      action: 'log',
+      entries: [
+        { name: 'Изюм', portion: { quantity: 30, unit: 'g' }, calories_per_100g: 300, meal_type: 'breakfast' },
+        { name: 'Изюм', portion: { quantity: 30, unit: 'g' }, calories_per_100g: 300, meal_type: 'snack' },
+      ],
+    }, context);
+
+    expect(result.success).toBe(true);
+    expect((result as { results: unknown[] }).results).toHaveLength(2);
+  });
+
+  it('should keep entries with different portions as separate', async () => {
+    const { tool, storage, context } = setupTool();
+    storage._store[CALORIES_STORAGE_KEYS.items] = [];
+    storage._store['schema_version'] = 4;
+
+    // Same food, different portions — should NOT be deduped
+    const result = await tool.execute({
+      action: 'log',
+      entries: [
+        { name: 'Кофе', portion: { quantity: 200, unit: 'ml' }, calories_estimate: 5 },
+        { name: 'Кофе', portion: { quantity: 400, unit: 'ml' }, calories_estimate: 10 },
+      ],
+    }, context);
+
+    expect(result.success).toBe(true);
+    expect((result as { results: unknown[] }).results).toHaveLength(2);
+  });
+
+  it('should add dedup warning to the surviving entry', async () => {
+    const { tool, storage, context } = setupTool();
+    storage._store[CALORIES_STORAGE_KEYS.items] = [];
+    storage._store['schema_version'] = 4;
+
+    const result = await tool.execute({
+      action: 'log',
+      entries: [
+        { name: 'Трилече', portion: { quantity: 100, unit: 'g' }, calories_per_100g: 245, meal_type: 'snack' },
+        { name: 'Трилече', portion: { quantity: 100, unit: 'g' }, calories_per_100g: 245, meal_type: 'snack' },
+      ],
+    }, context);
+
+    const results = (result as { results: Array<{ warning?: string }> }).results;
+    expect(results).toHaveLength(1);
+    expect(results[0].warning).toContain('Duplicate');
+  });
+});
+
+describe('Calories Tool - Unlog Returns Daily Summary', () => {
+  beforeEach(() => {
+    resetMigrationState();
+    vi.clearAllMocks();
+  });
+
+  it('should return updated daily summary after deleting an entry', async () => {
+    const { tool, storage, context } = setupTool();
+
+    const item: FoodItem = {
+      id: 'item_coffee',
+      canonicalName: 'Американо',
+      measurementKind: 'volume',
+      basis: { caloriesPer: 5, perQuantity: 200, perUnit: 'ml' },
+      createdAt: '2026-01-10T10:00:00Z',
+      updatedAt: '2026-01-10T10:00:00Z',
+      recipientId: 'user_test',
+    };
+    storage._store[CALORIES_STORAGE_KEYS.items] = [item];
+    storage._store['food:2026-02-16'] = [
+      { id: 'food_keep', dishId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
+      { id: 'food_delete', dishId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-02-16T10:00:00Z', recipientId: 'user_test' },
+    ];
+    storage._store['schema_version'] = 4;
+
+    const result = await tool.execute({
+      action: 'unlog',
+      entry_id: 'food_delete',
+    }, context);
+
+    expect(result.success).toBe(true);
+    // Should include daily summary with updated totals
+    expect((result as { dailySummary: { totalCalories: number } }).dailySummary).toBeDefined();
+    expect((result as { dailySummary: { totalCalories: number } }).dailySummary.totalCalories).toBe(5);
+    // Only 1 entry should remain
+    const remaining = storage._store['food:2026-02-16'] as FoodEntry[];
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].id).toBe('food_keep');
+  });
+});
+
+describe('Calories Tool - Auto-Update Dish Basis', () => {
+  beforeEach(() => {
+    resetMigrationState();
+    vi.clearAllMocks();
+  });
+
+  it('should update dish basis when log provides different calories_per_100g', async () => {
+    const { tool, storage, context } = setupTool();
+
+    // Existing dish with 350 kcal/100g (wrong — dry pasta rate)
+    const item: FoodItem = {
+      id: 'item_pasta',
+      canonicalName: 'Макароны',
+      measurementKind: 'weight',
+      basis: { caloriesPer: 350, perQuantity: 100, perUnit: 'g' },
+      createdAt: '2026-01-10T10:00:00Z',
+      updatedAt: '2026-01-10T10:00:00Z',
+      recipientId: 'user_test',
+    };
+    storage._store[CALORIES_STORAGE_KEYS.items] = [item];
+    storage._store['schema_version'] = 4;
+
+    // Log with corrected calories_per_100g (130 — cooked pasta)
+    const result = await tool.execute({
+      action: 'log',
+      entries: [{ name: 'Макароны', portion: { quantity: 170, unit: 'g' }, calories_per_100g: 130 }],
+    }, context);
+
+    expect(result.success).toBe(true);
+
+    // The dish basis should have been updated
+    const items = storage._store[CALORIES_STORAGE_KEYS.items] as FoodItem[];
+    const pasta = items.find((i) => i.id === 'item_pasta');
+    expect(pasta).toBeDefined();
+    expect(pasta!.basis.caloriesPer).toBe(130);
+    expect(pasta!.basis.perQuantity).toBe(100);
+    expect(pasta!.basis.perUnit).toBe('g');
+
+    // The daily summary should reflect the corrected calories
+    const logResult = result as { dailySummary: { totalCalories: number } };
+    expect(logResult.dailySummary.totalCalories).toBe(221); // 170g × 130/100
   });
 });

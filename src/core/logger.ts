@@ -208,18 +208,30 @@ export function createConversationLogger(
 
   // Cleanup old conversation logs
   const maxFiles = 10;
-  const conversationFiles = fs
+  const allConversationFiles = fs
     .readdirSync(logDir)
     .filter((f) => f.startsWith('conversation-') && f.endsWith('.log'))
     .map((f) => {
       const filePath = path.join(logDir, f);
       const stats = fs.statSync(filePath);
       return { name: f, path: filePath, mtime: stats.mtime.getTime(), size: stats.size };
-    })
+    });
+
+  // Delete empty log files (stale from restarts that never received messages)
+  for (const file of allConversationFiles.filter((f) => f.size === 0)) {
+    try {
+      fs.unlinkSync(file.path);
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // Keep only maxFiles non-empty logs
+  const nonEmptyFiles = allConversationFiles
     .filter((f) => f.size > 0)
     .sort((a, b) => b.mtime - a.mtime);
 
-  for (const file of conversationFiles.slice(maxFiles)) {
+  for (const file of nonEmptyFiles.slice(maxFiles)) {
     try {
       fs.unlinkSync(file.path);
     } catch {

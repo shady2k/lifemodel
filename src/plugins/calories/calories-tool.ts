@@ -238,11 +238,11 @@ export function createCaloriesTool(
     await storage.set(CALORIES_STORAGE_KEYS.weights, weights);
   }
 
-  async function getItemsMap(itemIds: string[]): Promise<Record<string, FoodItem>> {
+  async function getItemsMap(dishIds: string[]): Promise<Record<string, FoodItem>> {
     const all = await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items);
     const items = all ?? [];
     const map: Record<string, FoodItem> = {};
-    for (const id of itemIds) {
+    for (const id of dishIds) {
       const item = items.find((i) => i.id === id);
       if (item) map[id] = item;
     }
@@ -358,7 +358,7 @@ export function createCaloriesTool(
         'calories_per_100g',
         'meal_type',
         'timestamp',
-        'chooseItemId',
+        'chooseDishId',
       ]);
       const unknownFields = Object.keys(entry).filter((k) => !KNOWN_FIELDS.has(k));
       if (unknownFields.length > 0) {
@@ -421,9 +421,32 @@ export function createCaloriesTool(
         }
 
         if (typeof unit !== 'string' || !VALID_UNITS.includes(unit as Unit)) {
+          // Suggest the correct unit for common aliases weak models use
+          const UNIT_ALIASES: Record<string, string> = {
+            piece: 'item',
+            pcs: 'item',
+            pc: 'item',
+            pieces: 'item',
+            items: 'item',
+            portion: 'serving',
+            portions: 'serving',
+            servings: 'serving',
+            gram: 'g',
+            grams: 'g',
+            kilogram: 'kg',
+            kilograms: 'kg',
+            liter: 'l',
+            liters: 'l',
+            milliliter: 'ml',
+            milliliters: 'ml',
+          };
+          const unitStr = typeof unit === 'string' ? unit : String(unit);
+          const suggestion =
+            typeof unit === 'string' ? UNIT_ALIASES[unit.toLowerCase()] : undefined;
+          const hint = suggestion ? `. Use "${suggestion}" instead of "${unitStr}"` : '';
           return {
             success: false,
-            error: `entries[${String(i)}].portion.unit: must be one of [${VALID_UNITS.join(', ')}]`,
+            error: `entries[${String(i)}].portion.unit: must be one of [${VALID_UNITS.join(', ')}]${hint}`,
           };
         }
 
@@ -505,16 +528,16 @@ export function createCaloriesTool(
         normalized.timestamp = timestampRaw;
       }
 
-      // Validate and normalize 'chooseItemId' (optional, can be null)
-      const chooseItemIdRaw = entry['chooseItemId'];
-      if (chooseItemIdRaw !== null && chooseItemIdRaw !== undefined) {
-        if (typeof chooseItemIdRaw !== 'string') {
+      // Validate and normalize 'chooseDishId' (optional, can be null)
+      const chooseDishIdRaw = entry['chooseDishId'];
+      if (chooseDishIdRaw !== null && chooseDishIdRaw !== undefined) {
+        if (typeof chooseDishIdRaw !== 'string') {
           return {
             success: false,
-            error: `entries[${String(i)}].chooseItemId: must be a string`,
+            error: `entries[${String(i)}].chooseDishId: must be a string`,
           };
         }
-        normalized.chooseItemId = chooseItemIdRaw;
+        normalized.chooseDishId = chooseDishIdRaw;
       }
 
       entries.push(normalized);
@@ -553,14 +576,48 @@ export function createCaloriesTool(
   }
 
   /**
+   * Auto-update a dish's basis when the input provides a different calories_per_100g.
+   * This ensures that corrections via log propagate to the dish definition.
+   */
+  async function maybeUpdateDishBasis(entry: LogInputEntry, item: FoodItem): Promise<boolean> {
+    if (entry.calories_per_100g === undefined) return false;
+
+    // Check if the dish basis differs from the provided value
+    const currentBasis = normalizeBasis(item.basis);
+    if (
+      currentBasis.perUnit === 'g' &&
+      currentBasis.perQuantity === 100 &&
+      currentBasis.caloriesPer === entry.calories_per_100g
+    ) {
+      return false; // Already matches
+    }
+
+    // Update the dish basis
+    item.basis = { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' };
+    item.updatedAt = new Date().toISOString();
+
+    const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+    const idx = allItems.findIndex((i) => i.id === item.id);
+    if (idx !== -1) {
+      allItems[idx] = item;
+      await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
+      logger.info(
+        { dishId: item.id, name: item.canonicalName, newBasis: item.basis },
+        'Dish basis auto-updated from log input'
+      );
+    }
+    return true;
+  }
+
+  /**
    * Compute daily summary for a given date with relational reads.
    */
   async function computeDailySummary(recipientId: string, date: string): Promise<DailySummary> {
     const entries = await loadFoodEntries(date, recipientId);
 
     // Load all items for relational calorie resolution
-    const itemIds = [...new Set(entries.map((e) => e.itemId))];
-    const itemsMap = await getItemsMap(itemIds);
+    const dishIds = [...new Set(entries.map((e) => e.dishId))];
+    const itemsMap = await getItemsMap(dishIds);
 
     // Compute per-entry calories and aggregate
     const byMealType: Partial<Record<MealType, { calories: number; count: number }>> = {};
@@ -568,7 +625,7 @@ export function createCaloriesTool(
     const summaryEntries: DailySummaryEntry[] = [];
 
     for (const entry of entries) {
-      const item = itemsMap[entry.itemId];
+      const item = itemsMap[entry.dishId];
       const calories = item ? resolveEntryCalories(entry, item) : 0;
       totalCalories += calories;
 
@@ -617,7 +674,37 @@ export function createCaloriesTool(
     const results: LogResultItem[] = [];
     const now = new Date().toISOString();
 
+    // Intra-batch deduplication: collapse identical entries within the same request.
+    // Entries match when they share the same name + meal_type + portion (quantity & unit).
+    const deduped: LogInputEntry[] = [];
+    const dedupWarnings = new Map<number, string>(); // index → warning
     for (const entry of input.entries) {
+      const existingIdx = deduped.findIndex(
+        (d) =>
+          d.name === entry.name &&
+          (d.meal_type ?? undefined) === (entry.meal_type ?? undefined) &&
+          d.portion?.quantity === entry.portion?.quantity &&
+          d.portion?.unit === entry.portion?.unit
+      );
+      if (existingIdx !== -1) {
+        // Already have this entry — skip duplicate, record warning on original
+        const existing = dedupWarnings.get(existingIdx);
+        dedupWarnings.set(
+          existingIdx,
+          existing
+            ? existing
+            : `Duplicate "${entry.name}" removed from batch (appeared multiple times in one request)`
+        );
+        logger.warn(
+          { name: entry.name, mealType: entry.meal_type },
+          'Intra-batch duplicate removed'
+        );
+      } else {
+        deduped.push(entry);
+      }
+    }
+
+    for (const [loopIdx, entry] of deduped.entries()) {
       // Extract canonical name and portion from input
       const parsed = extractCanonicalName(entry.name);
       const portion = entry.portion ?? parsed.defaultPortion ?? getDefaultPortion();
@@ -641,8 +728,8 @@ export function createCaloriesTool(
       const existingDateEntries = await loadFoodEntries(entryDate, recipientId);
 
       // If explicit item choice provided, use it
-      if (entry.chooseItemId) {
-        const chosenItem = items.find((i) => i.id === entry.chooseItemId);
+      if (entry.chooseDishId) {
+        const chosenItem = items.find((i) => i.id === entry.chooseDishId);
         if (!chosenItem) {
           const ambiguousResult: LogResultItem = {
             status: 'ambiguous',
@@ -655,13 +742,16 @@ export function createCaloriesTool(
           continue;
         }
 
+        // Auto-update dish basis if input provides different calories_per_100g
+        await maybeUpdateDishBasis(entry, chosenItem);
+
         const calories = resolveCalories(entry, portion, chosenItem);
 
-        // Check for existing entries with same itemId and same meal type (duplicate detection)
+        // Check for existing entries with same dishId and same meal type (duplicate detection)
         // Different meal types = intentional (e.g. raisins at breakfast and lunch)
         const entryMealType = entry.meal_type ?? undefined;
         const existingWithSameItem = existingDateEntries.filter(
-          (e) => e.itemId === chosenItem.id && e.mealType === entryMealType
+          (e) => e.dishId === chosenItem.id && e.mealType === entryMealType
         );
         const existingEntries =
           existingWithSameItem.length > 0
@@ -679,7 +769,7 @@ export function createCaloriesTool(
 
         const foodEntry: FoodEntry = {
           id: generateId('food'),
-          itemId: chosenItem.id,
+          dishId: chosenItem.id,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -693,13 +783,14 @@ export function createCaloriesTool(
         const result: LogResultItem = {
           status: 'matched',
           entryId: foodEntry.id,
-          itemId: chosenItem.id,
+          dishId: chosenItem.id,
           canonicalName: chosenItem.canonicalName,
           calories,
           portion,
         };
         if (existingEntries) result.existingEntries = existingEntries;
-        if (warning) result.warning = warning;
+        const dedupWarn = dedupWarnings.get(loopIdx);
+        if (warning || dedupWarn) result.warning = [warning, dedupWarn].filter(Boolean).join('; ');
         results.push(result);
         continue;
       }
@@ -708,13 +799,16 @@ export function createCaloriesTool(
       const decision = decideMatch(parsed.canonicalName, items);
 
       if (decision.status === 'matched') {
+        // Auto-update dish basis if input provides different calories_per_100g
+        await maybeUpdateDishBasis(entry, decision.item);
+
         const calories = resolveCalories(entry, portion, decision.item);
 
-        // Check for existing entries with same itemId and same meal type (duplicate detection)
+        // Check for existing entries with same dishId and same meal type (duplicate detection)
         // Different meal types = intentional (e.g. raisins at breakfast and lunch)
         const matchedMealType = entry.meal_type ?? undefined;
         const existingWithSameItem = existingDateEntries.filter(
-          (e) => e.itemId === decision.item.id && e.mealType === matchedMealType
+          (e) => e.dishId === decision.item.id && e.mealType === matchedMealType
         );
         const existingEntries =
           existingWithSameItem.length > 0
@@ -732,7 +826,7 @@ export function createCaloriesTool(
 
         const foodEntry: FoodEntry = {
           id: generateId('food'),
-          itemId: decision.item.id,
+          dishId: decision.item.id,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -746,17 +840,19 @@ export function createCaloriesTool(
         const result: LogResultItem = {
           status: 'matched',
           entryId: foodEntry.id,
-          itemId: decision.item.id,
+          dishId: decision.item.id,
           canonicalName: decision.item.canonicalName,
           calories,
           portion,
         };
         if (existingEntries) result.existingEntries = existingEntries;
-        if (warning) result.warning = warning;
+        const dedupWarn2 = dedupWarnings.get(loopIdx);
+        if (warning || dedupWarn2)
+          result.warning = [warning, dedupWarn2].filter(Boolean).join('; ');
         results.push(result);
 
         logger.info(
-          { entryId: foodEntry.id, itemId: decision.item.id, calories, date: entryDate },
+          { entryId: foodEntry.id, dishId: decision.item.id, calories, date: entryDate },
           'Food entry logged (matched)'
         );
       } else if (decision.status === 'ambiguous') {
@@ -764,7 +860,7 @@ export function createCaloriesTool(
           status: 'ambiguous',
           originalName: entry.name,
           candidates: decision.candidates.map((c) => ({
-            itemId: c.item.id,
+            dishId: c.item.id,
             canonicalName: c.item.canonicalName,
             score: c.score,
           })),
@@ -821,7 +917,7 @@ export function createCaloriesTool(
         // No duplicate detection for new items (by definition, no existing entries)
         const foodEntry: FoodEntry = {
           id: generateId('food'),
-          itemId: newItem.id,
+          dishId: newItem.id,
           portion,
           timestamp: entry.timestamp ?? now,
           recipientId,
@@ -835,18 +931,20 @@ export function createCaloriesTool(
         const result: LogResultItem = {
           status: 'created',
           entryId: foodEntry.id,
-          itemId: newItem.id,
+          dishId: newItem.id,
           canonicalName: newItem.canonicalName,
           calories,
           portion,
         };
-        if (warning) result.warning = warning;
+        const dedupWarn3 = dedupWarnings.get(loopIdx);
+        if (warning || dedupWarn3)
+          result.warning = [warning, dedupWarn3].filter(Boolean).join('; ');
         results.push(result);
 
         logger.info(
           {
             entryId: foodEntry.id,
-            itemId: newItem.id,
+            dishId: newItem.id,
             name: newItem.canonicalName,
             calories,
             date: entryDate,
@@ -866,7 +964,7 @@ export function createCaloriesTool(
         .map((r) => r.entryId).length > 0
         ? [
             ...new Set(
-              input.entries.map((e) => {
+              deduped.map((e) => {
                 if (e.timestamp) {
                   const { date } = getFoodDateForTimestamp(
                     e.timestamp,
@@ -912,18 +1010,19 @@ export function createCaloriesTool(
       entries = entries.slice(0, limit);
     }
 
-    const itemIds = [...new Set(entries.map((e) => e.itemId))];
-    const itemsMap = await getItemsMap(itemIds);
+    const dishIds = [...new Set(entries.map((e) => e.dishId))];
+    const itemsMap = await getItemsMap(dishIds);
 
     // Resolve calories per entry
     let totalCalories = 0;
     const enrichedEntries: ListEntryInfo[] = entries.map((e) => {
-      const item = itemsMap[e.itemId];
+      const item = itemsMap[e.dishId];
       const calories = item ? resolveEntryCalories(e, item) : 0;
       totalCalories += calories;
 
       const info: ListEntryInfo = {
         entryId: e.id,
+        dishId: e.dishId,
         name: item?.canonicalName ?? 'Unknown',
         calories,
         portion: e.portion,
@@ -944,15 +1043,15 @@ export function createCaloriesTool(
     const entries = await loadFoodEntries(date, recipientId);
 
     // Load all items for relational calorie resolution
-    const itemIds = [...new Set(entries.map((e) => e.itemId))];
-    const itemsMap = await getItemsMap(itemIds);
+    const dishIds = [...new Set(entries.map((e) => e.dishId))];
+    const itemsMap = await getItemsMap(dishIds);
 
     // Compute calories using relational reads
     let totalCalories = 0;
     const byMealType: Partial<Record<MealType, number>> = {};
 
     for (const entry of entries) {
-      const item = itemsMap[entry.itemId];
+      const item = itemsMap[entry.dishId];
       const calories = item ? resolveEntryCalories(entry, item) : 0;
       totalCalories += calories;
 
@@ -963,7 +1062,7 @@ export function createCaloriesTool(
 
     // Build per-entry breakdown with item names
     const summaryEntries: SummaryEntryInfo[] = entries.map((e) => {
-      const item = itemsMap[e.itemId];
+      const item = itemsMap[e.dishId];
       const calories = item ? resolveEntryCalories(e, item) : 0;
       const info: SummaryEntryInfo = {
         entryId: e.id,
@@ -1088,7 +1187,10 @@ export function createCaloriesTool(
           entries.splice(idx, 1);
           await storage.set(key, entries);
           logger.info({ entryId }, 'Food entry deleted');
-          return { success: true, entryId };
+          // Extract date from storage key (format: "food:YYYY-MM-DD")
+          const date = key.replace(CALORIES_STORAGE_KEYS.foodPrefix, '');
+          const dailySummary = await computeDailySummary(recipientId, date);
+          return { success: true, entryId, dailySummary };
         }
       }
     }
@@ -1139,7 +1241,7 @@ export function createCaloriesTool(
     }
 
     // Build items map for calorie resolution
-    const itemsMap = await getItemsMap([...new Set(allEntries.map((e) => e.entry.itemId))]);
+    const itemsMap = await getItemsMap([...new Set(allEntries.map((e) => e.entry.dishId))]);
 
     for (const query of queries) {
       // Find matching items
@@ -1147,23 +1249,23 @@ export function createCaloriesTool(
       const matchedItems = candidates
         .filter((c) => c.score >= 0.5)
         .map((c) => ({
-          itemId: c.item.id,
+          dishId: c.item.id,
           canonicalName: c.item.canonicalName,
           score: c.score,
         }));
 
-      const matchedItemIds = new Set(matchedItems.map((m) => m.itemId));
+      const matchedDishIds = new Set(matchedItems.map((m) => m.dishId));
 
       // Filter entries by matching items
       const matchingEntries = allEntries
-        .filter((e) => matchedItemIds.has(e.entry.itemId))
+        .filter((e) => matchedDishIds.has(e.entry.dishId))
         .map((e) => {
-          const item = itemsMap[e.entry.itemId];
+          const item = itemsMap[e.entry.dishId];
           const calories = item ? resolveEntryCalories(e.entry, item) : 0;
           const entry: {
             date: string;
             entryId: string;
-            itemId: string;
+            dishId: string;
             name: string;
             calories: number;
             portion: Portion;
@@ -1171,7 +1273,7 @@ export function createCaloriesTool(
           } = {
             date: e.date,
             entryId: e.entry.id,
-            itemId: e.entry.itemId,
+            dishId: e.entry.dishId,
             name: item?.canonicalName ?? 'Unknown',
             calories,
             portion: e.entry.portion,
@@ -1230,7 +1332,7 @@ export function createCaloriesTool(
       const byMealType: Partial<Record<MealType, number>> = {};
 
       for (const entry of entries) {
-        const item = globalItemsMap[entry.itemId];
+        const item = globalItemsMap[entry.dishId];
         const calories = item ? resolveEntryCalories(entry, item) : 0;
         dayCalories += calories;
 
@@ -1312,7 +1414,8 @@ export function createCaloriesTool(
    */
   async function updateItem(
     recipientId: string,
-    itemId?: string,
+    effectiveDate: string,
+    dishId?: string,
     name?: string,
     newName?: string,
     newBasis?: NutrientBasis
@@ -1320,8 +1423,8 @@ export function createCaloriesTool(
     const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
     let targetItem: FoodItem | undefined;
 
-    if (itemId) {
-      targetItem = allItems.find((i) => i.id === itemId && i.recipientId === recipientId);
+    if (dishId) {
+      targetItem = allItems.find((i) => i.id === dishId && i.recipientId === recipientId);
     } else if (name) {
       // Fuzzy match by name
       const candidates = matchCandidates(
@@ -1339,7 +1442,7 @@ export function createCaloriesTool(
         return {
           success: false,
           candidates: candidates.slice(0, 3).map((c) => ({
-            itemId: c.item.id,
+            dishId: c.item.id,
             canonicalName: c.item.canonicalName,
             score: c.score,
           })),
@@ -1348,7 +1451,7 @@ export function createCaloriesTool(
 
       targetItem = top.item;
     } else {
-      return { success: false, error: 'Either item_id or name is required' };
+      return { success: false, error: 'Either dish_id or name is required' };
     }
 
     if (!targetItem) {
@@ -1375,28 +1478,31 @@ export function createCaloriesTool(
     for (const key of dateKeys) {
       const entries = await storage.get<FoodEntry[]>(key);
       if (entries) {
-        affectedEntryCount += entries.filter((e) => e.itemId === targetItem.id).length;
+        affectedEntryCount += entries.filter((e) => e.dishId === targetItem.id).length;
       }
     }
 
     logger.info(
-      { itemId: targetItem.id, name: targetItem.canonicalName, affectedEntryCount },
+      { dishId: targetItem.id, name: targetItem.canonicalName, affectedEntryCount },
       'Food item updated'
     );
+
+    const dailySummary = await computeDailySummary(recipientId, effectiveDate);
 
     return {
       success: true,
       item: targetItem,
       affectedEntryCount,
+      dailySummary,
     };
   }
 
   /**
    * Delete a food item (with referential integrity check).
    */
-  async function deleteItem(recipientId: string, itemId: string): Promise<DeleteItemResult> {
+  async function deleteItem(recipientId: string, dishId: string): Promise<DeleteItemResult> {
     const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
-    const targetItem = allItems.find((i) => i.id === itemId && i.recipientId === recipientId);
+    const targetItem = allItems.find((i) => i.id === dishId && i.recipientId === recipientId);
 
     if (!targetItem) {
       return { success: false, error: 'Item not found' };
@@ -1408,7 +1514,7 @@ export function createCaloriesTool(
 
     for (const key of dateKeys) {
       const entries = await storage.get<FoodEntry[]>(key);
-      if (entries?.some((e) => e.itemId === itemId && e.recipientId === recipientId)) {
+      if (entries?.some((e) => e.dishId === dishId && e.recipientId === recipientId)) {
         referencingDates.push(key.replace(CALORIES_STORAGE_KEYS.foodPrefix, ''));
       }
     }
@@ -1428,15 +1534,15 @@ export function createCaloriesTool(
     }
 
     // No references - safe to delete
-    const idx = allItems.findIndex((i) => i.id === itemId);
+    const idx = allItems.findIndex((i) => i.id === dishId);
     if (idx !== -1) {
       allItems.splice(idx, 1);
       await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
     }
 
-    logger.info({ itemId, name: targetItem.canonicalName }, 'Food item deleted');
+    logger.info({ dishId, name: targetItem.canonicalName }, 'Food item deleted');
 
-    return { success: true, itemId };
+    return { success: true, dishId: dishId };
   }
 
   // ============================================================================
@@ -1523,9 +1629,9 @@ export function createCaloriesTool(
               type: 'string',
               description: 'ISO timestamp override (optional)',
             },
-            chooseItemId: {
+            chooseDishId: {
               type: 'string',
-              description: 'Explicit item ID to resolve ambiguity',
+              description: 'Explicit dish ID (starts with "item_") to resolve ambiguity',
             },
           },
           required: ['name'],
@@ -1575,9 +1681,10 @@ export function createCaloriesTool(
         type: 'number',
         description: 'Number of days for stats action (default: 7, max: 30)',
       },
-      item_id: {
+      dish_id: {
         type: 'string',
-        description: 'Dish ID for update_dish or delete_dish action (NOT for unlog)',
+        description:
+          'Dish ID (starts with "item_") for update_dish or delete_dish action — NOT entry_id',
       },
       name: {
         type: 'string',
@@ -1609,18 +1716,22 @@ ACTIONS: log, list, summary, goal, log_weight, unlog, search, stats, update_dish
 KEY RULES:
 - log response includes dailySummary with daily totals, byMealType subtotals, and per-entry portion + caloriesPer100g — NEVER call summary after log
 - When displaying entries, show portion (e.g. "170 г") and caloriesPer100g (e.g. "350 ккал/100г") when available
-- ALWAYS set meal_type on every entry when user groups food by meal (breakfast/lunch/dinner/snack). Response dailySummary.byMealType shows per-meal subtotals — use them to display meal subtotals to the user
+- ALWAYS set meal_type on every entry when user groups food by meal (breakfast/lunch/dinner/snack)
+- DISPLAY FORMAT: Always group entries by meal type (breakfast, lunch, snack, dinner) with per-meal subtotals from dailySummary.byMealType. Show grand total, goal, and remaining at the end. Entries without mealType go under "Other"
 - name = pure food name, no quantities ("Americano", not "Americano 200ml")
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
-- If status="ambiguous", resolve via chooseItemId — do NOT create a new item for a different portion
-- log supports entries array for multiple items in one call
+- If status="ambiguous", resolve via chooseDishId — do NOT create a new item for a different portion
+- log supports entries array for multiple items in one call — each entry must be a DISTINCT food item. NEVER send the same food name with the same portion and meal_type more than once (duplicates are auto-removed)
 - date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD
 - If existingEntries present in log response, ask user if the entry is a duplicate (entry IS already saved and counted in dailySummary — use dailySummary.totalCalories as the authoritative total)
+- unlog response includes updated dailySummary — use it to show corrected totals immediately
+- For cooked foods (pasta, rice, porridge, potatoes), use COOKED kcal/100g values, not dry/raw
 - search: find entries by food name across all dates (max 5 queries)
 - stats: multi-day calorie summary with weight trend (default 7 days)
-- update_dish: modify existing dish definition (name or nutritional basis)
-- unlog: remove a logged entry by entry_id (get IDs from list response)
-- delete_dish: remove a dish definition entirely — only if no entries reference it`;
+- update_dish: modify existing dish definition (name or nutritional basis). Returns dailySummary with recalculated totals. Use dish_id (starts with "item_") from list response, NOT entry_id (starts with "food_")
+- unlog: remove a logged entry by entry_id (starts with "food_", from list response)
+- delete_dish: remove a dish definition entirely — only if no entries reference it
+- list response includes both entryId (for unlog) and dishId (for update_dish/delete_dish) — use the correct one`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
@@ -1651,7 +1762,7 @@ KEY RULES:
         name: 'entries',
         type: 'array',
         description:
-          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, calories_per_100g?, meal_type?, chooseItemId?}',
+          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, calories_per_100g?, meal_type?, chooseDishId?}',
         required: false,
       },
       {
@@ -1695,7 +1806,8 @@ KEY RULES:
       {
         name: 'entry_id',
         type: 'string',
-        description: 'Entry ID for unlog action (from list response entryId)',
+        description:
+          'Entry ID for unlog action (starts with "food_", from list response entryId field)',
         required: false,
       },
       {
@@ -1717,9 +1829,10 @@ KEY RULES:
         required: false,
       },
       {
-        name: 'item_id',
+        name: 'dish_id',
         type: 'string',
-        description: 'Dish ID for update_dish or delete_dish action (NOT for unlog)',
+        description:
+          'Dish ID (starts with "item_") for update_dish or delete_dish action — NOT entry_id',
         required: false,
       },
       {
@@ -1822,19 +1935,19 @@ KEY RULES:
       }
 
       if (a['action'] === 'delete_dish') {
-        const itemId = a['item_id'];
-        if (!itemId || typeof itemId !== 'string') {
-          return { success: false, error: 'item_id: required for delete_dish action' };
+        const dishId = a['dish_id'];
+        if (!dishId || typeof dishId !== 'string') {
+          return { success: false, error: 'dish_id: required for delete_dish action' };
         }
       }
 
       if (a['action'] === 'update_dish') {
-        const itemId = a['item_id'];
+        const dishId = a['dish_id'];
         const name = a['name'];
-        if (!itemId && !name) {
+        if (!dishId && !name) {
           return {
             success: false,
-            error: 'Either item_id or name is required for update_dish action',
+            error: 'Either dish_id or name is required for update_dish action',
           };
         }
         const newName = a['new_name'];
@@ -1996,7 +2109,8 @@ KEY RULES:
         case 'update_dish': {
           return updateItem(
             recipientId,
-            args['item_id'] as string | undefined,
+            effectiveDate,
+            args['dish_id'] as string | undefined,
             args['name'] as string | undefined,
             args['new_name'] as string | undefined,
             args['new_basis'] as NutrientBasis | undefined
@@ -2004,14 +2118,14 @@ KEY RULES:
         }
 
         case 'delete_dish': {
-          const itemId = args['item_id'] as string | undefined;
-          if (!itemId) {
+          const dishId = args['dish_id'] as string | undefined;
+          if (!dishId) {
             return {
               success: false,
-              error: 'item_id required for delete_dish action',
+              error: 'dish_id required for delete_dish action',
             } as DeleteItemResult;
           }
-          return deleteItem(recipientId, itemId);
+          return deleteItem(recipientId, dishId);
         }
 
         default:

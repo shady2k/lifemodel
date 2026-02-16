@@ -210,14 +210,14 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
       // Compute calories using relational reads
       let consumed = 0;
       for (const entry of entries ?? []) {
-        const item = itemsMap.get(entry.itemId);
+        const item = itemsMap.get(entry.dishId);
         if (item) {
           consumed += resolveEntryCalories(entry, item);
         } else {
           // Tolerate missing items - log warning but contribute 0 calories
           // This handles pre-migration state gracefully
           this.logger.warn(
-            { entryId: entry.id, itemId: entry.itemId },
+            { entryId: entry.id, dishId: entry.dishId },
             'Missing item for entry - contributing 0 calories'
           );
         }

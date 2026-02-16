@@ -132,6 +132,11 @@ export class SystemHealthMonitor {
   private currentStressLevel: StressLevel = 'normal';
   private stressLevelChangedAt: number = Date.now();
   private lastHealthyAt: number = Date.now();
+  private startedAt = 0;
+
+  /** Warmup period after start() during which all readings return 'normal'.
+   *  Prevents startup CPU burst from triggering false stress alerts. */
+  private static readonly WARMUP_MS = 3000;
 
   private running = false;
 
@@ -153,6 +158,7 @@ export class SystemHealthMonitor {
 
     this.lastCpuUsage = process.cpuUsage();
     this.lastCpuTime = Date.now();
+    this.startedAt = Date.now();
 
     this.running = true;
     this.logger.info('System health monitor started');
@@ -177,6 +183,20 @@ export class SystemHealthMonitor {
    * Get current system health snapshot.
    */
   getHealth(): SystemHealth {
+    // During warmup, return normal to avoid false stress from startup CPU burst
+    if (Date.now() - this.startedAt < SystemHealthMonitor.WARMUP_MS) {
+      // Still sample to advance the CPU baseline, but discard the reading
+      this.getCpuPercent();
+      if (this.eventLoopMonitor) this.eventLoopMonitor.reset();
+      return {
+        eventLoopLagMs: 0,
+        cpuPercent: 0,
+        stressLevel: 'normal',
+        activeLayers: STRESS_LEVEL_LAYERS.normal,
+        stressDurationMs: 0,
+      };
+    }
+
     const eventLoopLagMs = this.getEventLoopLag();
     const cpuPercent = this.getCpuPercent();
 

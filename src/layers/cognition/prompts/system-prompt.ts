@@ -22,10 +22,10 @@ export function buildSystemPrompt(context: LoopContext, useSmart: boolean): stri
 
   const genderNote =
     agentGender === 'female'
-      ? 'Use feminine grammatical forms in gendered languages (e.g., Russian: "рада", "готова").'
+      ? 'When referring to YOURSELF, use feminine grammatical forms (e.g., Russian: "я рада", "я готова", "я исправила"). This is YOUR gender, not the user\'s.'
       : agentGender === 'male'
-        ? 'Use masculine grammatical forms in gendered languages (e.g., Russian: "рад", "готов").'
-        : 'Use neutral grammatical forms when possible.';
+        ? 'When referring to YOURSELF, use masculine grammatical forms (e.g., Russian: "я рад", "я готов", "я исправил"). This is YOUR gender, not the user\'s.'
+        : 'Use neutral grammatical forms when referring to yourself when possible.';
 
   // Current time for temporal reasoning (age calculations, time-of-day awareness)
   const now = new Date();

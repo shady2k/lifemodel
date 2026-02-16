@@ -292,14 +292,17 @@ export class MessageComposer {
     if (context.userState) {
       const { name, energy, availability, mood, confidence, gender } = context.userState;
 
-      // Gender hint for grammatical agreement
+      // Gender hint for grammatical agreement when addressing the user
       let genderHint = '';
       if (gender === 'male') {
-        genderHint = '\n- Gender: male (use masculine grammatical forms)';
+        genderHint =
+          '\n- Gender: male (when addressing or referring to THE USER, use masculine forms — e.g., "ты сделал", "тебе нужно")';
       } else if (gender === 'female') {
-        genderHint = '\n- Gender: female (use feminine grammatical forms)';
+        genderHint =
+          '\n- Gender: female (when addressing or referring to THE USER, use feminine forms — e.g., "ты сделала", "тебе нужно")';
       } else {
-        genderHint = '\n- Gender: unknown (use masculine grammatical forms by default)';
+        genderHint =
+          '\n- Gender: unknown (when addressing the user, use masculine forms by default)';
       }
 
       userStateSection = `

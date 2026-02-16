@@ -3,12 +3,14 @@
  *
  * v2: Remove calories from FoodEntry (pure relational)
  * v3: Normalize all weight-based item bases to per-100g
+ * v4: Rename itemId → dishId in FoodEntry (clearer naming)
  *
  * Migration states:
  * - undefined: never migrated, run from v1
  * - 'migrating': interrupted, re-run (idempotent)
  * - 2: v2 done, run v3
- * - 3: fully migrated, skip
+ * - 3: v3 done, run v4
+ * - 4: fully migrated, skip
  *
  * Concurrency: module-level promise lock ensures only one migration runs.
  */
@@ -18,7 +20,7 @@ import type { StoragePrimitive } from '../../types/plugin.js';
 import type { FoodItem, FoodEntry, NutrientBasis } from './calories-types.js';
 import { CALORIES_STORAGE_KEYS } from './calories-types.js';
 
-const TARGET_SCHEMA_VERSION = 3;
+const TARGET_SCHEMA_VERSION = 4;
 
 let migrationPromise: Promise<void> | null = null;
 
@@ -31,10 +33,10 @@ export function resetMigrationState(): void {
 
 /**
  * Derive a deterministic ID for an orphan item.
- * Uses the original itemId + recipientId to prevent duplicates on re-run.
+ * Uses the original dishId + recipientId to prevent duplicates on re-run.
  */
-function deriveOrphanItemId(originalItemId: string, recipientId: string): string {
-  const hash = simpleHash(`${recipientId}:${originalItemId}`);
+function deriveOrphanItemId(originalDishId: string, recipientId: string): string {
+  const hash = simpleHash(`${recipientId}:${originalDishId}`);
   return `orphan_${hash}`;
 }
 
@@ -81,7 +83,7 @@ export function normalizeBasis(basis: NutrientBasis): NutrientBasis {
  */
 function reconstructItemFromEntry(
   entry: FoodEntry & { calories: number },
-  originalItemId: string
+  originalDishId: string
 ): FoodItem {
   const { portion, calories } = entry;
 
@@ -105,8 +107,8 @@ function reconstructItemFromEntry(
   const now = new Date().toISOString();
 
   return {
-    id: deriveOrphanItemId(originalItemId, entry.recipientId),
-    canonicalName: `Recovered Item (${originalItemId})`,
+    id: deriveOrphanItemId(originalDishId, entry.recipientId),
+    canonicalName: `Recovered Item (${originalDishId})`,
     measurementKind,
     basis: normalizeBasis(rawBasis),
     createdAt: now,
@@ -136,8 +138,8 @@ async function runMigrationV2(
     itemsMap.set(item.id, item);
   }
 
-  // Track orphan itemIds to avoid duplicates
-  const orphanItemIds = new Set<string>();
+  // Track orphan dishIds to avoid duplicates
+  const orphanDishIds = new Set<string>();
 
   // Step 3: Scan all date partitions — build transforms in memory first
   const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
@@ -147,8 +149,21 @@ async function runMigrationV2(
   // Collect all cleaned entries per key before writing anything
   const cleanedByKey = new Map<string, FoodEntry[]>();
 
+  // Legacy type for reading pre-v4 data (had 'itemId' field, now 'dishId')
+  interface LegacyFoodEntry {
+    id: string;
+    itemId?: string;
+    dishId?: string;
+    calories?: number;
+    portion: FoodEntry['portion'];
+    mealType?: FoodEntry['mealType'];
+    timestamp: string;
+    recipientId: string;
+    note?: string;
+  }
+
   for (const key of dateKeys) {
-    const entries = await storage.get<(FoodEntry & { calories?: number })[]>(key);
+    const entries = await storage.get<LegacyFoodEntry[]>(key);
     if (!entries || entries.length === 0) continue;
 
     const cleanedEntries: FoodEntry[] = [];
@@ -156,32 +171,37 @@ async function runMigrationV2(
     for (const entry of entries) {
       entriesProcessed++;
 
+      // Support both old 'itemId' and new 'dishId' field names
+      const entryDishId = entry.dishId ?? entry.itemId ?? '';
+
       // Check if this entry references an existing item
-      const existingItem = itemsMap.get(entry.itemId);
+      const existingItem = itemsMap.get(entryDishId);
 
       if (!existingItem) {
         // Orphaned entry - need to recover if it has calories data
         if (typeof entry.calories === 'number') {
-          // Check if we already created an orphan for this itemId
-          const orphanId = deriveOrphanItemId(entry.itemId, entry.recipientId);
+          // Check if we already created an orphan for this dishId
+          const orphanId = deriveOrphanItemId(entryDishId, entry.recipientId);
           let orphanItem: FoodItem | undefined = orphanItems.find((o) => o.id === orphanId);
 
           if (!orphanItem) {
             // Create new orphan item (basis already normalized in reconstructItemFromEntry)
             orphanItem = reconstructItemFromEntry(
-              entry as FoodEntry & { calories: number },
-              entry.itemId
+              { ...entry, dishId: entryDishId, calories: entry.calories } as FoodEntry & {
+                calories: number;
+              },
+              entryDishId
             );
             orphanItems.push(orphanItem);
             itemsMap.set(orphanItem.id, orphanItem);
-            orphanItemIds.add(orphanId);
+            orphanDishIds.add(orphanId);
             orphansRecovered++;
           }
 
           // Update entry to point to orphan
           const cleanedEntry: FoodEntry = {
             id: entry.id,
-            itemId: orphanItem.id,
+            dishId: orphanItem.id,
             portion: entry.portion,
             timestamp: entry.timestamp,
             recipientId: entry.recipientId,
@@ -192,15 +212,15 @@ async function runMigrationV2(
         } else {
           // Entry without calories data and item doesn't exist - skip
           logger.warn(
-            { entryId: entry.id, itemId: entry.itemId },
+            { entryId: entry.id, dishId: entryDishId },
             'Skipping orphan entry without calories data'
           );
         }
       } else {
-        // Normal entry - just strip calories field
+        // Normal entry - just strip calories field, write with new 'dishId' field
         const cleanedEntry: FoodEntry = {
           id: entry.id,
-          itemId: entry.itemId,
+          dishId: entryDishId,
           portion: entry.portion,
           timestamp: entry.timestamp,
           recipientId: entry.recipientId,
@@ -260,10 +280,44 @@ async function runMigrationV3(storage: StoragePrimitive, logger: Logger): Promis
     await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
   }
 
-  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, TARGET_SCHEMA_VERSION);
+  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, 3);
 
   logger.info({ normalized, totalItems: allItems.length }, 'Schema v3 migration complete');
   return normalized;
+}
+
+/**
+ * Run the schema v4 migration (rename itemId → dishId in FoodEntry).
+ */
+async function runMigrationV4(storage: StoragePrimitive, logger: Logger): Promise<number> {
+  logger.info({}, 'Starting schema v4 migration (itemId → dishId rename)');
+
+  const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+  let entriesRenamed = 0;
+
+  for (const key of dateKeys) {
+    // Read raw JSON — entries may have old 'itemId' or new 'dishId'
+    const entries = await storage.get<Record<string, unknown>[]>(key);
+    if (!entries || entries.length === 0) continue;
+
+    let modified = false;
+    for (const entry of entries) {
+      if ('itemId' in entry && !('dishId' in entry)) {
+        entry['dishId'] = entry['itemId'];
+        delete entry['itemId'];
+        entriesRenamed++;
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      await storage.set(key, entries);
+    }
+  }
+
+  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, TARGET_SCHEMA_VERSION);
+  logger.info({ entriesRenamed }, 'Schema v4 migration complete');
+  return entriesRenamed;
 }
 
 /**
@@ -295,8 +349,14 @@ export async function ensureMigrated(storage: StoragePrimitive, logger: Logger):
 
     // Run v3 (basis normalization) — always runs if version < 3
     const versionAfterV2 = (await storage.get<number>(CALORIES_STORAGE_KEYS.schemaVersion)) ?? 0;
-    if (versionAfterV2 < TARGET_SCHEMA_VERSION) {
+    if (versionAfterV2 < 3) {
       await runMigrationV3(storage, logger);
+    }
+
+    // Run v4 (rename itemId → dishId) — always runs if version < 4
+    const versionAfterV3 = (await storage.get<number>(CALORIES_STORAGE_KEYS.schemaVersion)) ?? 0;
+    if (versionAfterV3 < TARGET_SCHEMA_VERSION) {
+      await runMigrationV4(storage, logger);
     }
   })();
 
