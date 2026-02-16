@@ -85,7 +85,6 @@ describe('CaloriesDeficitNeuron persistence', () => {
       mockLogger as any,
       {},
       storage,
-      'test-recipient',
       () => TZ,
       () => null,
       async () => goal,

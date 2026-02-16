@@ -119,7 +119,6 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
 
   private readonly config: CaloriesDeficitNeuronConfig;
   private readonly storage: StoragePrimitive;
-  private readonly recipientId: string;
   private readonly getTimezone: GetTimezoneFunc;
   private readonly getUserPatterns: GetUserPatternsFunc;
   private readonly getCalorieGoal: GetCalorieGoalFunc;
@@ -128,7 +127,6 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
     logger: Logger,
     config: Partial<CaloriesDeficitNeuronConfig>,
     storage: StoragePrimitive,
-    recipientId: string,
     getTimezone: GetTimezoneFunc,
     getUserPatterns: GetUserPatternsFunc,
     getCalorieGoal: GetCalorieGoalFunc
@@ -136,7 +134,6 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
     super(logger);
     this.config = { ...DEFAULT_CALORIES_DEFICIT_CONFIG, ...config };
     this.storage = storage;
-    this.recipientId = recipientId;
     this.getTimezone = getTimezone;
     this.getUserPatterns = getUserPatterns;
     this.getCalorieGoal = getCalorieGoal;
@@ -210,12 +207,9 @@ export class CaloriesDeficitNeuron extends BaseNeuron {
         itemsMap.set(item.id, item);
       }
 
-      // Compute calories using relational reads with recipient filter
+      // Compute calories using relational reads
       let consumed = 0;
       for (const entry of entries ?? []) {
-        // Recipient filter to prevent cross-user calorie mixing
-        if (entry.recipientId !== this.recipientId) continue;
-
         const item = itemsMap.get(entry.itemId);
         if (item) {
           consumed += resolveEntryCalories(entry, item);
@@ -439,7 +433,6 @@ export function createCaloriesDeficitNeuron(
   logger: Logger,
   config: Partial<CaloriesDeficitNeuronConfig>,
   storage: StoragePrimitive,
-  recipientId: string,
   getTimezone: GetTimezoneFunc,
   getUserPatterns: GetUserPatternsFunc,
   getCalorieGoal: GetCalorieGoalFunc
@@ -448,7 +441,6 @@ export function createCaloriesDeficitNeuron(
     logger,
     config,
     storage,
-    recipientId,
     getTimezone,
     getUserPatterns,
     getCalorieGoal
