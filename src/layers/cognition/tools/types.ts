@@ -54,6 +54,14 @@ export interface Tool {
    * Undefined = no limit.
    */
   maxCallsPerTurn?: number;
+  /**
+   * Optional plugin-provided summary for the completed-actions ledger.
+   * When present, called instead of the generic summarizer.
+   */
+  summarize?: (
+    args: Record<string, unknown>,
+    resultData: Record<string, unknown> | undefined
+  ) => string;
 }
 
 /**

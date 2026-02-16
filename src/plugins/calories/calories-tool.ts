@@ -1461,11 +1461,11 @@ export function createCaloriesTool(
           'summary',
           'goal',
           'log_weight',
-          'delete',
+          'unlog',
           'search',
           'stats',
-          'update_item',
-          'delete_item',
+          'update_dish',
+          'delete_dish',
         ],
         description: 'Action to perform',
       },
@@ -1560,7 +1560,7 @@ export function createCaloriesTool(
       },
       entry_id: {
         type: 'string',
-        description: 'Entry ID for delete action',
+        description: 'Entry ID for unlog action (from list response entryId)',
       },
       queries: {
         type: 'array',
@@ -1577,19 +1577,19 @@ export function createCaloriesTool(
       },
       item_id: {
         type: 'string',
-        description: 'Item ID for update_item or delete_item action',
+        description: 'Dish ID for update_dish or delete_dish action (NOT for unlog)',
       },
       name: {
         type: 'string',
-        description: 'Name for fuzzy item matching (update_item action)',
+        description: 'Name for fuzzy dish matching (update_dish action)',
       },
       new_name: {
         type: 'string',
-        description: 'New name for update_item action',
+        description: 'New name for update_dish action',
       },
       new_basis: {
         type: 'object',
-        description: 'New nutritional basis for update_item action',
+        description: 'New nutritional basis for update_dish action',
         properties: {
           caloriesPer: { type: 'number' },
           perQuantity: { type: 'number' },
@@ -1604,7 +1604,7 @@ export function createCaloriesTool(
 
   const TOOL_DESCRIPTION = `Food and calorie tracking.
 
-ACTIONS: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item
+ACTIONS: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish
 
 KEY RULES:
 - log response includes dailySummary with daily totals, byMealType subtotals, and per-entry portion + caloriesPer100g — NEVER call summary after log
@@ -1618,8 +1618,9 @@ KEY RULES:
 - If existingEntries present in log response, ask user if the entry is a duplicate (entry IS already saved and counted in dailySummary — use dailySummary.totalCalories as the authoritative total)
 - search: find entries by food name across all dates (max 5 queries)
 - stats: multi-day calorie summary with weight trend (default 7 days)
-- update_item: modify existing food item (name or nutritional basis)
-- delete_item: remove item only if no entries reference it`;
+- update_dish: modify existing dish definition (name or nutritional basis)
+- unlog: remove a logged entry by entry_id (get IDs from list response)
+- delete_dish: remove a dish definition entirely — only if no entries reference it`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',
@@ -1631,7 +1632,7 @@ KEY RULES:
         name: 'action',
         type: 'string',
         description:
-          'Action: log, list, summary, goal, log_weight, delete, search, stats, update_item, delete_item',
+          'Action: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish',
         required: true,
         enum: [
           'log',
@@ -1639,11 +1640,11 @@ KEY RULES:
           'summary',
           'goal',
           'log_weight',
-          'delete',
+          'unlog',
           'search',
           'stats',
-          'update_item',
-          'delete_item',
+          'update_dish',
+          'delete_dish',
         ],
       },
       {
@@ -1694,7 +1695,7 @@ KEY RULES:
       {
         name: 'entry_id',
         type: 'string',
-        description: 'Entry ID for delete action',
+        description: 'Entry ID for unlog action (from list response entryId)',
         required: false,
       },
       {
@@ -1718,26 +1719,26 @@ KEY RULES:
       {
         name: 'item_id',
         type: 'string',
-        description: 'Item ID for update_item or delete_item action',
+        description: 'Dish ID for update_dish or delete_dish action (NOT for unlog)',
         required: false,
       },
       {
         name: 'name',
         type: 'string',
-        description: 'Name for fuzzy item matching (update_item action)',
+        description: 'Name for fuzzy dish matching (update_dish action)',
         required: false,
       },
       {
         name: 'new_name',
         type: 'string',
-        description: 'New name for update_item action',
+        description: 'New name for update_dish action',
         required: false,
       },
       {
         name: 'new_basis',
         type: 'object',
         description:
-          'New nutritional basis for update_item action: { caloriesPer, perQuantity, perUnit }',
+          'New nutritional basis for update_dish action: { caloriesPer, perQuantity, perUnit }',
         required: false,
       },
     ],
@@ -1752,11 +1753,11 @@ KEY RULES:
         'summary',
         'goal',
         'log_weight',
-        'delete',
+        'unlog',
         'search',
         'stats',
-        'update_item',
-        'delete_item',
+        'update_dish',
+        'delete_dish',
       ];
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
@@ -1778,13 +1779,14 @@ KEY RULES:
         a['_validatedEntries'] = parsed.entries;
       }
 
-      if (a['action'] === 'delete') {
-        // entry_id is required for delete (no aliases — middleware handles fuzzy suggestions)
+      if (a['action'] === 'unlog') {
+        // entry_id is required for unlog (no aliases — middleware handles fuzzy suggestions)
         const entryId = a['entry_id'];
         if (!entryId || typeof entryId !== 'string') {
           return {
             success: false,
-            error: 'entry_id: required for delete action (string, e.g. "food_abc123")',
+            error:
+              'entry_id: required for unlog action (string, e.g. "food_abc123" — get IDs from list response)',
           };
         }
       }
@@ -1819,20 +1821,20 @@ KEY RULES:
         }
       }
 
-      if (a['action'] === 'delete_item') {
+      if (a['action'] === 'delete_dish') {
         const itemId = a['item_id'];
         if (!itemId || typeof itemId !== 'string') {
-          return { success: false, error: 'item_id: required for delete_item action' };
+          return { success: false, error: 'item_id: required for delete_dish action' };
         }
       }
 
-      if (a['action'] === 'update_item') {
+      if (a['action'] === 'update_dish') {
         const itemId = a['item_id'];
         const name = a['name'];
         if (!itemId && !name) {
           return {
             success: false,
-            error: 'Either item_id or name is required for update_item action',
+            error: 'Either item_id or name is required for update_dish action',
           };
         }
         const newName = a['new_name'];
@@ -1843,7 +1845,7 @@ KEY RULES:
         if (!newName && !newBasis) {
           return {
             success: false,
-            error: 'Either new_name or new_basis is required for update_item action',
+            error: 'Either new_name or new_basis is required for update_dish action',
           };
         }
         // Validate new_basis structure if provided
@@ -1971,10 +1973,10 @@ KEY RULES:
           return logWeight(weight, recipientId);
         }
 
-        case 'delete': {
+        case 'unlog': {
           const entryId = args['entry_id'] as string | undefined;
           if (!entryId) {
-            return { success: false, error: 'entry_id required for delete action' } as DeleteResult;
+            return { success: false, error: 'entry_id required for unlog action' } as DeleteResult;
           }
           return deleteEntry(entryId, recipientId);
         }
@@ -1991,7 +1993,7 @@ KEY RULES:
           return getStats(recipientId, safeDays);
         }
 
-        case 'update_item': {
+        case 'update_dish': {
           return updateItem(
             recipientId,
             args['item_id'] as string | undefined,
@@ -2001,12 +2003,12 @@ KEY RULES:
           );
         }
 
-        case 'delete_item': {
+        case 'delete_dish': {
           const itemId = args['item_id'] as string | undefined;
           if (!itemId) {
             return {
               success: false,
-              error: 'item_id required for delete_item action',
+              error: 'item_id required for delete_dish action',
             } as DeleteItemResult;
           }
           return deleteItem(recipientId, itemId);
@@ -2015,6 +2017,41 @@ KEY RULES:
         default:
           return { success: false, error: `Unknown action: ${action}` } as DeleteResult;
       }
+    },
+    summarize: (
+      args: Record<string, unknown>,
+      resultData: Record<string, unknown> | undefined
+    ): string => {
+      const action = typeof args['action'] === 'string' ? args['action'] : '';
+
+      if (action === 'log' || action === 'quick_log') {
+        const rawEntries = args['entries'];
+        const entries = Array.isArray(rawEntries)
+          ? (rawEntries as Record<string, unknown>[])
+          : undefined;
+        const foodNames =
+          entries
+            ?.map((e) => {
+              const name = typeof e['name'] === 'string' ? e['name'] : '?';
+              return `"${name}"`;
+            })
+            .join(', ') ?? '?';
+
+        const rawTotal = resultData?.['totalCalories'] ?? resultData?.['total_calories'];
+        const calStr =
+          typeof rawTotal === 'number' || typeof rawTotal === 'string'
+            ? ` → total: ${String(rawTotal)} kcal`
+            : '';
+        return `calories.${action}: ${foodNames}${calStr}`;
+      }
+
+      if (action === 'unlog') {
+        const rawId = args['entry_id'];
+        const id = typeof rawId === 'string' ? rawId : '?';
+        return `calories.unlog: entry ${id}`;
+      }
+
+      return `calories.${action || 'unknown'}`;
     },
   };
 

@@ -429,7 +429,7 @@ describe('Calories Tool - Update Item Action', () => {
     storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
-      action: 'update_item',
+      action: 'update_dish',
       item_id: 'item_coffee',
       new_name: 'Американо с молоком',
     }, context);
@@ -457,7 +457,7 @@ describe('Calories Tool - Update Item Action', () => {
     storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
-      action: 'update_item',
+      action: 'update_dish',
       item_id: 'item_coffee',
       new_basis: { caloriesPer: 10, perQuantity: 200, perUnit: 'ml' },
     }, context);
@@ -496,7 +496,7 @@ describe('Calories Tool - Update Item Action', () => {
     storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
-      action: 'update_item',
+      action: 'update_dish',
       name: 'йогурт',
       new_name: 'Новый йогурт',
     }, context);
@@ -529,7 +529,7 @@ describe('Calories Tool - Delete Item Action', () => {
     storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
-      action: 'delete_item',
+      action: 'delete_dish',
       item_id: 'item_coffee',
     }, context);
 
@@ -556,7 +556,7 @@ describe('Calories Tool - Delete Item Action', () => {
     storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
-      action: 'delete_item',
+      action: 'delete_dish',
       item_id: 'item_coffee',
     }, context);
 

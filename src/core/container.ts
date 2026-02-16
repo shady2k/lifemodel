@@ -797,6 +797,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         execute: tool.execute,
         tags: tool.tags ?? [],
         ...(tool.rawParameterSchema && { rawParameterSchema: tool.rawParameterSchema }),
+        ...(tool.summarize && { summarize: tool.summarize }),
       });
     },
     (toolName) => {

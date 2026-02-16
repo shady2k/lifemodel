@@ -89,9 +89,9 @@ schema_version           → 3                (migration state)
 | `stats` | Multi-day statistics with weight trend |
 | `goal` | Set or get calorie goal |
 | `log_weight` | Record body weight |
-| `delete` | Delete a food/weight entry |
-| `update_item` | Modify a food item's name or basis |
-| `delete_item` | Remove a food item (guarded) |
+| `unlog` | Remove a logged food/weight entry |
+| `update_dish` | Modify a dish definition's name or basis |
+| `delete_dish` | Remove a dish definition (guarded) |
 
 ### Log Action
 
@@ -237,28 +237,28 @@ Response:
 }
 ```
 
-### Update Item Action
+### Update Dish Action
 
-Modify an existing food item:
+Modify an existing dish definition:
 
 ```typescript
 calories({
-  action: "update_item",
+  action: "update_dish",
   item_id: "item_xxx",  // or use name for fuzzy match
   new_name: "Американо с молоком",
   new_basis: { caloriesPer: 45, perQuantity: 200, perUnit: "ml" }
 })
 ```
 
-Response includes `affectedEntryCount` — all entries referencing this item automatically get updated calories (relational model).
+Response includes `affectedEntryCount` — all entries referencing this dish automatically get updated calories (relational model).
 
-### Delete Item Action
+### Delete Dish Action
 
-Remove a food item (with referential integrity guard):
+Remove a dish definition (with referential integrity guard):
 
 ```typescript
 calories({
-  action: "delete_item",
+  action: "delete_dish",
   item_id: "item_xxx"
 })
 ```
@@ -303,9 +303,11 @@ calories({
 
 10. stats: статистика за несколько дней с трендом веса
 
-11. update_item: изменить название или калорийность продукта
+11. update_dish: изменить название или калорийность продукта
 
-12. delete_item: удалить продукт (защита от удаления, если есть записи)
+12. delete_dish: удалить продукт (защита от удаления, если есть записи)
+
+13. unlog: удалить запись из дневника (entry_id из ответа list)
 ```
 
 ## Matching Algorithm
@@ -396,7 +398,7 @@ User: "поставь цель 2000"
 → goal with daily_target=2000
 
 User: "измени калорийность бекона на 450 ккал/100г"
-→ update_item with name="Бекон", new_basis={caloriesPer:450, perQuantity:100, perUnit:"g"}
+→ update_dish with name="Бекон", new_basis={caloriesPer:450, perQuantity:100, perUnit:"g"}
 ```
 
 ## Configuration

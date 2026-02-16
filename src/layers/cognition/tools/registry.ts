@@ -177,6 +177,17 @@ export class ToolRegistry {
   }
 
   /**
+   * Get the plugin-provided summarizer for a tool (if any).
+   */
+  getToolSummarizer(
+    name: string
+  ):
+    | ((args: Record<string, unknown>, resultData: Record<string, unknown> | undefined) => string)
+    | undefined {
+    return this.tools.get(name)?.summarize;
+  }
+
+  /**
    * Get all registered tool names.
    */
   getToolNames(): ToolName[] {

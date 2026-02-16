@@ -780,6 +780,16 @@ export interface PluginTool {
    * @param context - Execution context (NOT visible to LLM) - contains chatId, userId, etc.
    */
   execute: (args: Record<string, unknown>, context?: PluginToolContext) => Promise<unknown>;
+
+  /**
+   * Optional summary for the completed-actions ledger.
+   * Produces a short human-readable string (e.g. 'calories.log: "Бекон" → total: 500 kcal').
+   * When absent, core uses a generic fallback.
+   */
+  summarize?: (
+    args: Record<string, unknown>,
+    resultData: Record<string, unknown> | undefined
+  ) => string;
 }
 
 /**

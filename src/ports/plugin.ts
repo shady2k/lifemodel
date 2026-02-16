@@ -249,6 +249,11 @@ export interface PluginTool {
   ) => Promise<PluginToolResult> | PluginToolResult;
   /** Capability tags for discovery */
   tags?: string[];
+  /** Optional summary for completed-actions ledger */
+  summarize?: (
+    args: Record<string, unknown>,
+    resultData: Record<string, unknown> | undefined
+  ) => string;
 }
 
 /**

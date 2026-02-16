@@ -481,11 +481,11 @@ export async function executeToolCalls(
       callbacks?.onCompletedAction &&
       context.recipientId
     ) {
-      const summary = summarizeToolCall(
-        toolName,
-        args,
-        result.data as Record<string, unknown> | undefined
-      );
+      const pluginSummarizer = toolRegistry.getToolSummarizer(toolName);
+      const resultData = result.data as Record<string, unknown> | undefined;
+      const summary = pluginSummarizer
+        ? pluginSummarizer(args, resultData)
+        : summarizeToolCall(toolName, args, resultData);
       callbacks.onCompletedAction(context.recipientId, toolName, summary);
     }
 
@@ -710,14 +710,9 @@ function processRepeatedFailure(
 export function summarizeToolCall(
   toolName: string,
   args: Record<string, unknown>,
-  resultData: Record<string, unknown> | undefined
+  _resultData: Record<string, unknown> | undefined
 ): string {
   const action = typeof args['action'] === 'string' ? args['action'] : '';
-
-  // Plugin-specific summaries
-  if (toolName.startsWith('plugin_calories') || toolName.includes('calories')) {
-    return summarizeCaloriesTool(action, args, resultData);
-  }
 
   // Generic fallback: toolName.action(key identifiers from args)
   const keyArgs = Object.entries(args)
@@ -732,41 +727,6 @@ export function summarizeToolCall(
 
   const actionPart = action ? `.${action}` : '';
   return `${toolName}${actionPart}(${keyArgs})`;
-}
-
-function summarizeCaloriesTool(
-  action: string,
-  args: Record<string, unknown>,
-  resultData: Record<string, unknown> | undefined
-): string {
-  if (action === 'log' || action === 'quick_log') {
-    const rawEntries = args['entries'];
-    const entries = Array.isArray(rawEntries)
-      ? (rawEntries as Record<string, unknown>[])
-      : undefined;
-    const foodNames =
-      entries
-        ?.map((e) => {
-          const name = typeof e['name'] === 'string' ? e['name'] : '?';
-          const portion = typeof e['portion'] === 'string' ? ` ${e['portion']}` : '';
-          return `"${name}"${portion}`;
-        })
-        .join(', ') ?? '?';
-
-    const rawTotal = resultData?.['totalCalories'] ?? resultData?.['total_calories'];
-    const totalCal =
-      typeof rawTotal === 'number' || typeof rawTotal === 'string' ? rawTotal : undefined;
-    const calStr = totalCal != null ? ` → total: ${String(totalCal)} kcal` : '';
-    return `calories.${action}: ${foodNames}${calStr}`;
-  }
-
-  if (action === 'delete') {
-    const rawId = args['id'] ?? args['entryId'];
-    const id = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : '?';
-    return `calories.delete: entry ${String(id)}`;
-  }
-
-  return `calories.${action || 'unknown'}`;
 }
 
 function applyImmediateIntentIfNeeded(
