@@ -121,7 +121,7 @@ describe('Calories Tool - Migration', () => {
     await tool.execute({ action: 'list' }, context);
 
     // Verify migration completed
-    expect(storage._store['schema_version']).toBe(2);
+    expect(storage._store['schema_version']).toBe(3);
 
     // Verify calories field removed from entry
     const migratedEntries = storage._store['food:2026-01-10'] as FoodEntry[];
@@ -149,7 +149,7 @@ describe('Calories Tool - Migration', () => {
     const result = await tool.execute({ action: 'list' }, context);
 
     // Verify migration completed
-    expect(storage._store['schema_version']).toBe(2);
+    expect(storage._store['schema_version']).toBe(3);
 
     // Should have created an orphan item
     const items = storage._store[CALORIES_STORAGE_KEYS.items] as FoodItem[];
@@ -163,14 +163,14 @@ describe('Calories Tool - Migration', () => {
     expect(entries[0].itemId).toMatch(/^orphan_/);
   });
 
-  it('should skip migration if already v2', async () => {
+  it('should skip migration if already v3', async () => {
     const { tool, storage, context } = setupTool();
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     await tool.execute({ action: 'list' }, context);
 
-    // Should still be v2
-    expect(storage._store['schema_version']).toBe(2);
+    // Should still be v3
+    expect(storage._store['schema_version']).toBe(3);
   });
 });
 
@@ -198,7 +198,7 @@ describe('Calories Tool - Relational Reads', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-01-10'] = [entry];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     // Get summary
     const result = await tool.execute({ action: 'summary', date: '2026-01-10' }, context);
@@ -223,7 +223,7 @@ describe('Calories Tool - Relational Reads', () => {
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [];
     storage._store['food:2026-01-10'] = [entry];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({ action: 'summary', date: '2026-01-10' }, context);
 
@@ -266,7 +266,7 @@ describe('Calories Tool - Search Action', () => {
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
     storage._store['food:2026-01-10'] = [entry1];
     storage._store['food:2026-01-09'] = [entry2];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({ action: 'search', queries: ['американо'] }, context);
 
@@ -309,7 +309,7 @@ describe('Calories Tool - Search Action', () => {
     }
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({ action: 'search', queries: ['американо'], max_results: 10 }, context);
 
@@ -348,7 +348,7 @@ describe('Calories Tool - Search Action', () => {
       { id: 'food_1', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
       { id: 'food_2', itemId: 'item_yogurt', portion: { quantity: 140, unit: 'g' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({ action: 'search', queries: ['американо', 'йогурт'] }, context);
 
@@ -397,7 +397,7 @@ describe('Calories Tool - Stats Action', () => {
       { id: 'weight_1', weight: 75, measuredAt: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
       { id: 'weight_2', weight: 75.5, measuredAt: '2026-02-09T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({ action: 'stats', days: 7 }, context);
 
@@ -426,7 +426,7 @@ describe('Calories Tool - Update Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'update_item',
@@ -454,7 +454,7 @@ describe('Calories Tool - Update Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'update_item',
@@ -493,7 +493,7 @@ describe('Calories Tool - Update Item Action', () => {
     ];
 
     storage._store[CALORIES_STORAGE_KEYS.items] = items;
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'update_item',
@@ -526,7 +526,7 @@ describe('Calories Tool - Delete Item Action', () => {
     storage._store['food:2026-01-10'] = [
       { id: 'food_1', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, timestamp: '2026-01-10T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'delete_item',
@@ -553,7 +553,7 @@ describe('Calories Tool - Delete Item Action', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'delete_item',
@@ -585,7 +585,7 @@ describe('Calories Tool - Duplicate Detection', () => {
     storage._store['food:2026-02-16'] = [
       { id: 'food_existing', itemId: 'item_coffee', portion: { quantity: 200, unit: 'ml' }, mealType: 'breakfast', timestamp: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
     ];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'log',
@@ -618,7 +618,7 @@ describe('Calories Tool - After-Midnight Fix', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     // Log entry with timestamp 01:30 AM - before cutoff (3 AM for 23-7 sleep pattern)
     // Should go to yesterday's partition
@@ -653,7 +653,7 @@ describe('Calories Tool - After-Midnight Fix', () => {
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['schema_version'] = 2;
+    storage._store['schema_version'] = 3;
 
     const result = await tool.execute({
       action: 'log',

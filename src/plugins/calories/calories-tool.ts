@@ -48,7 +48,7 @@ import {
   resolveEntryCalories,
 } from './calories-types.js';
 import { extractCanonicalName, decideMatch, matchCandidates } from './calories-matching.js';
-import { ensureMigrated } from './calories-migration.js';
+import { ensureMigrated, normalizeBasis } from './calories-migration.js';
 import { DateTime } from 'luxon';
 
 /**
@@ -585,9 +585,10 @@ export function createCaloriesTool(
         portion: entry.portion,
       };
       if (entry.mealType) summaryEntry.mealType = entry.mealType;
-      // Show kcal/100g for weight-based items (basis is normalized to per-100g)
-      if (item?.basis.perUnit === 'g' && item.basis.perQuantity === 100) {
-        summaryEntry.caloriesPer100g = item.basis.caloriesPer;
+      // Show kcal/100g for weight-based items
+      if (item && (item.basis.perUnit === 'g' || item.basis.perUnit === 'kg')) {
+        const normalized = normalizeBasis(item.basis);
+        summaryEntry.caloriesPer100g = normalized.caloriesPer;
       }
       summaryEntries.push(summaryEntry);
     }
@@ -796,20 +797,12 @@ export function createCaloriesTool(
           continue;
         }
 
-        // Normalize weight-based items to per-100g basis (canonical form)
-        let basis: NutrientBasis;
-        if (entry.calories_per_100g !== undefined) {
-          basis = { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' as Unit };
-        } else if ((portion.unit === 'g' || portion.unit === 'kg') && calories > 0) {
-          const grams = portion.unit === 'kg' ? portion.quantity * 1000 : portion.quantity;
-          basis = {
-            caloriesPer: Math.round((calories / grams) * 100),
-            perQuantity: 100,
-            perUnit: 'g' as Unit,
-          };
-        } else {
-          basis = { caloriesPer: calories, perQuantity: portion.quantity, perUnit: portion.unit };
-        }
+        // Build basis and normalize weight-based items to per-100g
+        const rawBasis: NutrientBasis =
+          entry.calories_per_100g !== undefined
+            ? { caloriesPer: entry.calories_per_100g, perQuantity: 100, perUnit: 'g' as Unit }
+            : { caloriesPer: calories, perQuantity: portion.quantity, perUnit: portion.unit };
+        const basis = normalizeBasis(rawBasis);
 
         const newItem: FoodItem = {
           id: generateId('item'),
@@ -937,8 +930,9 @@ export function createCaloriesTool(
         timestamp: e.timestamp,
       };
       if (e.mealType) info.mealType = e.mealType;
-      if (item?.basis.perUnit === 'g' && item.basis.perQuantity === 100) {
-        info.caloriesPer100g = item.basis.caloriesPer;
+      if (item && (item.basis.perUnit === 'g' || item.basis.perUnit === 'kg')) {
+        const normalized = normalizeBasis(item.basis);
+        info.caloriesPer100g = normalized.caloriesPer;
       }
       return info;
     });

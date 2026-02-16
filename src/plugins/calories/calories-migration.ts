@@ -1,12 +1,14 @@
 /**
  * Calories Plugin Schema Migration
  *
- * Migrates from schema v1 (calories stored in FoodEntry) to v2 (pure relational).
+ * v2: Remove calories from FoodEntry (pure relational)
+ * v3: Normalize all weight-based item bases to per-100g
  *
  * Migration states:
- * - undefined: never migrated, run migration
+ * - undefined: never migrated, run from v1
  * - 'migrating': interrupted, re-run (idempotent)
- * - 2: done, skip
+ * - 2: v2 done, run v3
+ * - 3: fully migrated, skip
  *
  * Concurrency: module-level promise lock ensures only one migration runs.
  */
@@ -16,7 +18,7 @@ import type { StoragePrimitive } from '../../types/plugin.js';
 import type { FoodItem, FoodEntry, NutrientBasis } from './calories-types.js';
 import { CALORIES_STORAGE_KEYS } from './calories-types.js';
 
-const TARGET_SCHEMA_VERSION = 2;
+const TARGET_SCHEMA_VERSION = 3;
 
 let migrationPromise: Promise<void> | null = null;
 
@@ -29,7 +31,7 @@ export function resetMigrationState(): void {
 
 /**
  * Derive a deterministic ID for an orphan item.
- * Uses the original itemId to prevent duplicates on re-run.
+ * Uses the original itemId + recipientId to prevent duplicates on re-run.
  */
 function deriveOrphanItemId(originalItemId: string, recipientId: string): string {
   const hash = simpleHash(`${recipientId}:${originalItemId}`);
@@ -50,8 +52,32 @@ function simpleHash(str: string): string {
 }
 
 /**
+ * Normalize a weight-based basis to per-100g canonical form.
+ * Returns the basis unchanged if not weight-based.
+ */
+export function normalizeBasis(basis: NutrientBasis): NutrientBasis {
+  if (basis.perUnit === 'g' && basis.perQuantity !== 100) {
+    return {
+      caloriesPer: Math.round((basis.caloriesPer / basis.perQuantity) * 100),
+      perQuantity: 100,
+      perUnit: 'g',
+    };
+  }
+  if (basis.perUnit === 'kg') {
+    // Convert kg basis to per-100g: e.g. 2500 kcal per 1 kg = 250 kcal per 100g
+    const gramsQuantity = basis.perQuantity * 1000;
+    return {
+      caloriesPer: Math.round((basis.caloriesPer / gramsQuantity) * 100),
+      perQuantity: 100,
+      perUnit: 'g',
+    };
+  }
+  return basis;
+}
+
+/**
  * Reconstruct a FoodItem from an orphaned entry's calorie data.
- * Uses the old calories field + portion to derive a basis.
+ * Uses the old calories field + portion to derive a normalized basis.
  */
 function reconstructItemFromEntry(
   entry: FoodEntry & { calories: number },
@@ -69,8 +95,8 @@ function reconstructItemFromEntry(
     measurementKind = 'count';
   }
 
-  // Create basis from the entry's calorie data
-  const basis: NutrientBasis = {
+  // Create basis from the entry's calorie data, then normalize
+  const rawBasis: NutrientBasis = {
     caloriesPer: calories,
     perQuantity: portion.quantity,
     perUnit: portion.unit,
@@ -82,7 +108,7 @@ function reconstructItemFromEntry(
     id: deriveOrphanItemId(originalItemId, entry.recipientId),
     canonicalName: `Recovered Item (${originalItemId})`,
     measurementKind,
-    basis,
+    basis: normalizeBasis(rawBasis),
     createdAt: now,
     updatedAt: now,
     recipientId: entry.recipientId,
@@ -90,17 +116,9 @@ function reconstructItemFromEntry(
 }
 
 /**
- * Run the schema v2 migration.
- *
- * Steps:
- * 1. Set schema_version to 'migrating'
- * 2. Load all items into map
- * 3. Scan all food:* date partitions
- * 4. For each entry: recover orphan or strip calories field
- * 5. Save cleaned entries and updated items catalog
- * 6. Set schema_version to 2
+ * Run the schema v2 migration (relational model).
  */
-async function runMigration(
+async function runMigrationV2(
   storage: StoragePrimitive,
   logger: Logger
 ): Promise<{ entriesProcessed: number; orphansRecovered: number }> {
@@ -149,7 +167,7 @@ async function runMigration(
           let orphanItem: FoodItem | undefined = orphanItems.find((o) => o.id === orphanId);
 
           if (!orphanItem) {
-            // Create new orphan item
+            // Create new orphan item (basis already normalized in reconstructItemFromEntry)
             orphanItem = reconstructItemFromEntry(
               entry as FoodEntry & { calories: number },
               entry.itemId
@@ -197,8 +215,6 @@ async function runMigration(
   }
 
   // Step 4: Persist items FIRST (with recovered orphans) — crash-safe ordering
-  // If we crash after this but before entry writes, re-run finds items exist and
-  // entries still have old calories field, which gets stripped on retry.
   const updatedItems = Array.from(itemsMap.values());
   await storage.set(CALORIES_STORAGE_KEYS.items, updatedItems);
 
@@ -207,8 +223,8 @@ async function runMigration(
     await storage.set(key, entries);
   }
 
-  // Step 6: Mark migration complete
-  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, TARGET_SCHEMA_VERSION);
+  // Step 6: Mark v2 complete
+  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, 2);
 
   logger.info(
     { entriesProcessed, orphansRecovered, totalItems: updatedItems.length },
@@ -216,6 +232,38 @@ async function runMigration(
   );
 
   return { entriesProcessed, orphansRecovered };
+}
+
+/**
+ * Run the schema v3 migration (normalize all weight-based bases to per-100g).
+ */
+async function runMigrationV3(storage: StoragePrimitive, logger: Logger): Promise<number> {
+  logger.info({}, 'Starting schema v3 migration (basis normalization)');
+
+  const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+  let normalized = 0;
+
+  for (const item of allItems) {
+    const newBasis = normalizeBasis(item.basis);
+    if (
+      newBasis.caloriesPer !== item.basis.caloriesPer ||
+      newBasis.perQuantity !== item.basis.perQuantity ||
+      newBasis.perUnit !== item.basis.perUnit
+    ) {
+      item.basis = newBasis;
+      item.updatedAt = new Date().toISOString();
+      normalized++;
+    }
+  }
+
+  if (normalized > 0) {
+    await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
+  }
+
+  await storage.set(CALORIES_STORAGE_KEYS.schemaVersion, TARGET_SCHEMA_VERSION);
+
+  logger.info({ normalized, totalItems: allItems.length }, 'Schema v3 migration complete');
+  return normalized;
 }
 
 /**
@@ -235,14 +283,22 @@ export async function ensureMigrated(storage: StoragePrimitive, logger: Logger):
   );
 
   if (currentVersion === TARGET_SCHEMA_VERSION) {
-    logger.debug({}, 'Schema v2 already migrated, skipping');
     return;
   }
 
-  // Start migration
-  migrationPromise = runMigration(storage, logger).then(() => {
-    /* resolve void */
-  });
+  // Start migration chain
+  migrationPromise = (async () => {
+    // Run v2 if needed (relational model)
+    if (currentVersion === undefined || currentVersion === 'migrating') {
+      await runMigrationV2(storage, logger);
+    }
+
+    // Run v3 (basis normalization) — always runs if version < 3
+    const versionAfterV2 = (await storage.get<number>(CALORIES_STORAGE_KEYS.schemaVersion)) ?? 0;
+    if (versionAfterV2 < TARGET_SCHEMA_VERSION) {
+      await runMigrationV3(storage, logger);
+    }
+  })();
 
   try {
     await migrationPromise;
