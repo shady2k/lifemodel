@@ -184,6 +184,12 @@ export type LogResultItem =
       }[];
       suggestedPortion?: Portion;
       warning?: string;
+    }
+  | {
+      status: 'failed';
+      originalName: string;
+      reason: string;
+      suggestedPortion?: Portion;
     };
 
 export interface DailySummaryEntry {

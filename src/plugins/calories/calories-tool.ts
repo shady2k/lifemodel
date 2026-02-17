@@ -883,12 +883,11 @@ export function createCaloriesTool(
         ) {
           // Can't create without calorie data
           const noDataResult: LogResultItem = {
-            status: 'ambiguous',
+            status: 'failed',
             originalName: entry.name,
-            candidates: [],
+            reason: 'No calorie data. Provide calories_per_100g or calories_estimate.',
             suggestedPortion: portion,
           };
-          if (warning) noDataResult.warning = warning;
           results.push(noDataResult);
           continue;
         }
@@ -982,7 +981,8 @@ export function createCaloriesTool(
 
     const summaryDate = entryDates.length === 1 && entryDates[0] ? entryDates[0] : effectiveDate;
     const dailySummary = await computeDailySummary(recipientId, summaryDate);
-    return { success: true, results, dailySummary };
+    const allLogged = results.every((r) => r.status === 'matched' || r.status === 'created');
+    return { success: allLogged, results, dailySummary };
   }
 
   function inferMeasurementKind(unit: Unit): FoodItem['measurementKind'] {
@@ -1721,6 +1721,7 @@ KEY RULES:
 - name = pure food name, no quantities ("Americano", not "Americano 200ml")
 - When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
 - If status="ambiguous", resolve via chooseDishId — do NOT create a new item for a different portion
+- If status="failed", the item was NOT logged — check reason field and retry with the missing data
 - log supports entries array for multiple items in one call — each entry must be a DISTINCT food item. NEVER send the same food name with the same portion and meal_type more than once (duplicates are auto-removed)
 - date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD
 - If existingEntries present in log response, ask user if the entry is a duplicate (entry IS already saved and counted in dailySummary — use dailySummary.totalCalories as the authoritative total)
