@@ -490,22 +490,28 @@ export class CoreLoop {
         });
       }
 
-      // Defer signals that need LLM processing if COGNITION is busy
+      // Defer signals that need LLM processing if COGNITION is busy or disabled by stress
       // These signals must wait for COGNITION to be free — otherwise they're consumed and lost
       const deferrableTypes = ['thought', 'message_reaction', 'user_message', 'motor_result'];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
-      if (this.pendingCognition && hasDeferrableSignals) {
+      const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
+      if (!cognitionAvailable && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
         const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
+
+        const deferReason = this.pendingCognition
+          ? 'COGNITION busy'
+          : `COGNITION disabled (stress: ${stressLevel})`;
 
         withTraceContext(tickCtx, () => {
           this.logger.debug(
             {
+              reason: deferReason,
               thoughts: toDefer.filter((s) => s.type === 'thought').length,
               reactions: toDefer.filter((s) => s.type === 'message_reaction').length,
               userMessages: toDefer.filter((s) => s.type === 'user_message').length,
             },
-            'COGNITION busy, deferring signals to next tick'
+            `Deferring signals to next tick: ${deferReason}`
           );
         });
 
