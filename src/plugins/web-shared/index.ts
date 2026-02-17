@@ -43,3 +43,27 @@ export {
 
 // robots.txt
 export { isAllowedByRobots, clearRobotsCache } from './robots.js';
+
+// Telegram parsing
+export type { MessageType, TelegramParsedMessage, TelegramParsedContent } from './telegram.js';
+
+export {
+  isTelegramUrl,
+  normalizeTelegramUrl,
+  parseTelegramHtml,
+  formatTelegramAsMarkdown,
+  MESSAGE_TYPE_TAG,
+  MESSAGE_TYPE_EMOJI,
+  cleanText,
+  truncate,
+  buildMediaTags,
+  detectMessageTypes,
+  extractPoll,
+  extractDocument,
+  extractVoiceDuration,
+  extractLocation,
+  extractContact,
+  extractForwardedFrom,
+  extractReplyTo,
+  extractLinkPreview,
+} from './telegram.js';

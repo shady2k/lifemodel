@@ -4,20 +4,17 @@
  * Fetches messages from public Telegram channels using the web preview.
  * Uses t.me/s/{channel} which provides public access without authentication.
  *
- * Comprehensive support for all message types based on RSSHub's implementation:
- * - Text messages
- * - Photos, videos, GIFs
- * - Voice messages, documents, music
- * - Stickers (static, animated, video)
- * - Polls, locations, contacts
- * - Forwarded messages, replies
- * - Link previews
- * - Unsupported content (with fallback)
+ * Parsing logic lives in web-shared/telegram.ts (shared with web-fetch plugin).
+ * This module handles: fetching, rate limiting, pagination, and mapping to FetchedArticle.
  */
 
-import type { HTMLElement } from 'node-html-parser';
-import { parse } from 'node-html-parser';
 import type { FetchedArticle } from '../types.js';
+import {
+  parseTelegramHtml,
+  truncate,
+  type TelegramParsedMessage,
+  type TelegramParsedContent,
+} from '../../web-shared/telegram.js';
 
 /**
  * Fetch timeout in milliseconds.
@@ -48,362 +45,53 @@ export interface TelegramFetchResult {
 }
 
 /**
- * Message type detected from HTML.
+ * Map a TelegramParsedMessage to a FetchedArticle.
+ *
+ * Reconstructs the same title/summary format as the original parseMessageElement:
+ * - Title: media tags + forwarded indicator + text excerpt (or type-specific content)
+ * - Summary: reply context + continuation text + poll details + link preview
  */
-type MessageType =
-  | 'text'
-  | 'photo'
-  | 'video'
-  | 'gif'
-  | 'voice'
-  | 'document'
-  | 'music'
-  | 'sticker'
-  | 'poll'
-  | 'location'
-  | 'contact'
-  | 'unsupported'
-  | 'service';
-
-/**
- * Emoji tags for message types (optional display).
- */
-const MESSAGE_TYPE_EMOJI: Record<MessageType, string> = {
-  text: '',
-  photo: '🖼',
-  video: '🎬',
-  gif: '🎞',
-  voice: '🎤',
-  document: '📎',
-  music: '🎵',
-  sticker: '🏷',
-  poll: '📊',
-  location: '📍',
-  contact: '👤',
-  unsupported: '⚠️',
-  service: 'ℹ️',
-};
-
-/**
- * Text tags for message types.
- */
-const MESSAGE_TYPE_TAG: Record<MessageType, string> = {
-  text: '',
-  photo: '[Photo]',
-  video: '[Video]',
-  gif: '[GIF]',
-  voice: '[Voice]',
-  document: '[Document]',
-  music: '[Music]',
-  sticker: '[Sticker]',
-  poll: '[Poll]',
-  location: '[Location]',
-  contact: '[Contact]',
-  unsupported: '[Unsupported]',
-  service: '[Service]',
-};
-
-/**
- * Clean text by decoding HTML entities and normalizing whitespace.
- */
-function cleanText(text: string): string {
-  if (!text) return '';
-
-  return text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/&#(\d+);/gi, (_, code: string) => String.fromCharCode(parseInt(code, 10)))
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Truncate text to a maximum length.
- */
-function truncate(text: string, maxLength: number): string {
-  if (text.length <= maxLength) return text;
-  return text.slice(0, maxLength - 3) + '...';
-}
-
-/**
- * Detect all media/content types present in a message.
- */
-function detectMessageTypes(messageEl: HTMLElement): MessageType[] {
-  const types: MessageType[] = [];
-
-  // Service message (pinned, channel photo update, etc.)
-  if (messageEl.classList.contains('service_message')) {
-    types.push('service');
-    return types;
-  }
-
-  // Video/GIF
-  const videoPlayer = messageEl.querySelector('.tgme_widget_message_video_player');
-  if (videoPlayer) {
-    const hasPlayIcon = videoPlayer.querySelector('.message_video_play');
-    types.push(hasPlayIcon ? 'video' : 'gif');
-  }
-
-  // Photo
-  if (messageEl.querySelector('.tgme_widget_message_photo')) {
-    types.push('photo');
-  }
-
-  // Voice message
-  if (messageEl.querySelector('audio.tgme_widget_message_voice')) {
-    types.push('voice');
-  }
-
-  // Document/Music
-  const docWrap = messageEl.querySelector('.tgme_widget_message_document_wrap');
-  if (docWrap) {
-    const isMusic = docWrap.querySelector('.audio');
-    types.push(isMusic ? 'music' : 'document');
-  }
-
-  // Sticker (regular, animated, video)
-  if (
-    messageEl.querySelector('.tgme_widget_message_sticker') ||
-    messageEl.querySelector('.tgme_widget_message_tgsticker') ||
-    messageEl.querySelector('.tgme_widget_message_videosticker')
-  ) {
-    types.push('sticker');
-  }
-
-  // Poll
-  if (messageEl.querySelector('.tgme_widget_message_poll')) {
-    types.push('poll');
-  }
-
-  // Location
-  if (messageEl.querySelector('.tgme_widget_message_location_wrap')) {
-    types.push('location');
-  }
-
-  // Contact
-  if (messageEl.querySelector('.tgme_widget_message_contact_name')) {
-    types.push('contact');
-  }
-
-  // Unsupported content
-  const unsupported = messageEl.querySelector('.message_media_not_supported');
-  if (unsupported) {
-    // Check if there's partial support
-    const hasPartialSupport = messageEl.querySelector('.media_supported_cont');
-    if (!hasPartialSupport) {
-      types.push('unsupported');
-    }
-  }
-
-  // Text (check last, as most messages have text)
-  if (messageEl.querySelector('.tgme_widget_message_text')) {
-    types.push('text');
-  }
-
-  return types;
-}
-
-/**
- * Extract poll information.
- */
-function extractPoll(messageEl: HTMLElement): string | null {
-  const pollEl = messageEl.querySelector('.tgme_widget_message_poll');
-  if (!pollEl) return null;
-
-  const question = pollEl.querySelector('.tgme_widget_message_poll_question')?.text;
-  const type = pollEl.querySelector('.tgme_widget_message_poll_type')?.text;
-  const options = pollEl.querySelectorAll('.tgme_widget_message_poll_option');
-
-  const optionTexts = options.map((opt) => {
-    const percent = opt.querySelector('.tgme_widget_message_poll_option_percent')?.text ?? '';
-    const text = opt.querySelector('.tgme_widget_message_poll_option_text')?.text ?? '';
-    return `${percent} ${text}`.trim();
-  });
-
-  return [question, type ? `(${type})` : '', ...optionTexts].filter(Boolean).join('\n');
-}
-
-/**
- * Extract document/file information.
- */
-function extractDocument(messageEl: HTMLElement): string | null {
-  const docWrap = messageEl.querySelector('.tgme_widget_message_document_wrap');
-  if (!docWrap) return null;
-
-  const title = docWrap.querySelector('.tgme_widget_message_document_title')?.text;
-  const extra = docWrap.querySelector('.tgme_widget_message_document_extra')?.text;
-
-  return [title, extra].filter(Boolean).join(' - ');
-}
-
-/**
- * Extract voice message duration.
- */
-function extractVoiceDuration(messageEl: HTMLElement): string | null {
-  const duration = messageEl.querySelector('.tgme_widget_message_voice_duration')?.text;
-  return duration ?? null;
-}
-
-/**
- * Extract location information.
- * Currently returns a simple string since the web preview only shows a map image.
- */
-function extractLocation(_messageEl: HTMLElement): string {
-  // Location shows as a map image in web preview, no additional details available
-  return 'Shared location';
-}
-
-/**
- * Extract contact information.
- */
-function extractContact(messageEl: HTMLElement): string | null {
-  const name = messageEl.querySelector('.tgme_widget_message_contact_name')?.text;
-  const phone = messageEl.querySelector('.tgme_widget_message_contact_phone')?.text;
-
-  if (!name && !phone) return null;
-  return [name, phone].filter(Boolean).join(': ');
-}
-
-/**
- * Extract forwarded source information.
- */
-function extractForwardedFrom(messageEl: HTMLElement): string | null {
-  const fwdEl = messageEl.querySelector('.tgme_widget_message_forwarded_from');
-  if (!fwdEl) return null;
-
-  const nameEl = fwdEl.querySelector('.tgme_widget_message_forwarded_from_name');
-  const authorEl = fwdEl.querySelector('.tgme_widget_message_forwarded_from_author');
-
-  const name = nameEl?.text ?? '';
-  const author = authorEl?.text ?? '';
-
-  const source = [name, author].filter(Boolean).join(' - ').replace('Forwarded from', '').trim();
-  return source || null;
-}
-
-/**
- * Extract reply context.
- */
-function extractReplyTo(messageEl: HTMLElement): string | null {
-  const replyEl = messageEl.querySelector('.tgme_widget_message_reply');
-  if (!replyEl) return null;
-
-  const author = replyEl.querySelector('.tgme_widget_message_author_name')?.text;
-  const text = replyEl.querySelector('.tgme_widget_message_metatext')?.text;
-
-  return [author ? `@${author}` : '', text].filter(Boolean).join(': ') || null;
-}
-
-/**
- * Extract link preview information.
- */
-function extractLinkPreview(messageEl: HTMLElement): string | null {
-  const previewEl = messageEl.querySelector('.tgme_widget_message_link_preview');
-  if (!previewEl) return null;
-
-  const site = previewEl.querySelector('.link_preview_site_name')?.text;
-  const title = previewEl.querySelector('.link_preview_title')?.text;
-  const desc = previewEl.querySelector('.link_preview_description')?.text;
-  const href = previewEl.getAttribute('href');
-
-  const parts = [site, title, desc].filter(Boolean);
-  if (parts.length === 0) return null;
-
-  return parts.join(' - ') + (href ? ` (${href})` : '');
-}
-
-/**
- * Build media type tags for title.
- */
-function buildMediaTags(types: MessageType[], useEmoji = false): string {
-  const tags = types
-    .filter((t) => t !== 'text') // Don't tag pure text
-    .map((t) => (useEmoji ? MESSAGE_TYPE_EMOJI[t] : MESSAGE_TYPE_TAG[t]))
-    .filter(Boolean);
-
-  return tags.join(' ');
-}
-
-/**
- * Extract message data from a Telegram message element.
- */
-function parseMessageElement(
-  messageEl: HTMLElement,
+function telegramMsgToArticle(
+  msg: TelegramParsedMessage,
   channelHandle: string,
   channelName: string
-): FetchedArticle | null {
-  // Get post ID (format: "channel/messageId")
-  const postId = messageEl.getAttribute('data-post');
-  if (!postId) return null;
-
-  const messageId = postId.split('/')[1];
-  if (!messageId) return null;
-
-  // Detect all content types
-  const types = detectMessageTypes(messageEl);
-
-  // Skip if no content detected at all
-  if (types.length === 0) return null;
-
-  // Extract text content
-  const textEl = messageEl.querySelector('.tgme_widget_message_text');
-  const text = textEl ? cleanText(textEl.text) : '';
-
-  // Extract metadata
-  const forwardedFrom = extractForwardedFrom(messageEl);
-  const replyTo = extractReplyTo(messageEl);
-
-  // Extract date
-  const dateEl = messageEl.querySelector('.tgme_widget_message_date time');
-  const dateStr = dateEl?.getAttribute('datetime');
-  const publishedAt = dateStr ? new Date(dateStr) : undefined;
-
+): FetchedArticle {
   // Build title
-  const mediaTags = buildMediaTags(types);
   let title = '';
 
   // Start with media tags
-  if (mediaTags) {
-    title = mediaTags + ' ';
+  if (msg.mediaTags) {
+    title = msg.mediaTags + ' ';
   }
 
   // Add forwarded indicator
-  if (forwardedFrom) {
-    title += `[Fwd: ${truncate(forwardedFrom, 25)}] `;
+  if (msg.forwardedFrom) {
+    title += `[Fwd: ${truncate(msg.forwardedFrom, 25)}] `;
   }
 
   // Add text content or type-specific content
-  if (text) {
-    const firstLine = text.split(/[\n.]/).find((l) => l.trim()) ?? text;
+  if (msg.text) {
+    const firstLine = msg.text.split(/[\n.]/).find((l) => l.trim()) ?? msg.text;
     title += truncate(firstLine, 150);
-  } else if (types.includes('poll')) {
-    const pollInfo = extractPoll(messageEl);
-    title += pollInfo ? truncate(pollInfo.split('\n')[0] ?? 'Poll', 150) : 'Poll';
-  } else if (types.includes('document') || types.includes('music')) {
-    const docInfo = extractDocument(messageEl);
-    title += docInfo ?? 'Document';
-  } else if (types.includes('voice')) {
-    const duration = extractVoiceDuration(messageEl);
-    title += duration ? `Voice message (${duration})` : 'Voice message';
-  } else if (types.includes('location')) {
-    title += extractLocation(messageEl);
-  } else if (types.includes('contact')) {
-    const contactInfo = extractContact(messageEl);
-    title += contactInfo ?? 'Contact';
-  } else if (types.includes('unsupported')) {
+  } else if (msg.mediaTypes.includes('poll')) {
+    title += msg.poll ? truncate(msg.poll.split('\n')[0] ?? 'Poll', 150) : 'Poll';
+  } else if (msg.mediaTypes.includes('document') || msg.mediaTypes.includes('music')) {
+    title += msg.document ?? 'Document';
+  } else if (msg.mediaTypes.includes('voice')) {
+    title += msg.voiceDuration ? `Voice message (${msg.voiceDuration})` : 'Voice message';
+  } else if (msg.mediaTypes.includes('location')) {
+    title += msg.location ?? 'Shared location';
+  } else if (msg.mediaTypes.includes('contact')) {
+    title += msg.contact ?? 'Contact';
+  } else if (msg.mediaTypes.includes('unsupported')) {
     title += 'View in Telegram';
-  } else if (types.includes('sticker')) {
+  } else if (msg.mediaTypes.includes('sticker')) {
     title += 'Sticker';
-  } else if (types.includes('photo')) {
+  } else if (msg.mediaTypes.includes('photo')) {
     title += 'Photo';
-  } else if (types.includes('video')) {
+  } else if (msg.mediaTypes.includes('video')) {
     title += 'Video';
-  } else if (types.includes('gif')) {
+  } else if (msg.mediaTypes.includes('gif')) {
     title += 'GIF';
   }
 
@@ -412,41 +100,40 @@ function parseMessageElement(
   // Build summary
   const summaryParts: string[] = [];
 
-  if (replyTo) {
-    summaryParts.push(`Reply to: ${replyTo}`);
+  if (msg.replyTo) {
+    summaryParts.push(`Reply to: ${msg.replyTo}`);
   }
 
-  if (text) {
-    const lines = text.split('\n').filter((l) => l.trim());
+  if (msg.text) {
+    const lines = msg.text.split('\n').filter((l) => l.trim());
     if (lines.length > 1) {
       summaryParts.push(truncate(lines.slice(1).join(' '), 400));
     }
   }
 
   // Add poll details to summary
-  if (types.includes('poll')) {
-    const pollInfo = extractPoll(messageEl);
-    if (pollInfo) {
-      const pollLines = pollInfo.split('\n').slice(1); // Skip question (in title)
-      if (pollLines.length > 0) {
-        summaryParts.push(pollLines.join(' | '));
-      }
+  if (msg.mediaTypes.includes('poll') && msg.poll) {
+    const pollLines = msg.poll.split('\n').slice(1); // Skip question (in title)
+    if (pollLines.length > 0) {
+      summaryParts.push(pollLines.join(' | '));
     }
   }
 
   // Add link preview to summary
-  const linkPreview = extractLinkPreview(messageEl);
-  if (linkPreview) {
-    summaryParts.push(`Link: ${linkPreview}`);
+  if (msg.linkPreview) {
+    summaryParts.push(`Link: ${msg.linkPreview}`);
   }
 
   const summary = summaryParts.length > 0 ? truncate(summaryParts.join(' — '), 500) : undefined;
 
+  // Parse date
+  const publishedAt = msg.date ? new Date(msg.date) : undefined;
+
   return {
-    id: `tg_${channelHandle}_${messageId}`,
-    title: title || `Message ${messageId}`,
+    id: `tg_${channelHandle}_${msg.id}`,
+    title: title || `Message ${msg.id}`,
     summary,
-    url: `https://t.me/${channelHandle}/${messageId}`,
+    url: `https://t.me/${channelHandle}/${msg.id}`,
     sourceId: `telegram:${channelHandle}`,
     sourceName: channelName,
     publishedAt: publishedAt && !isNaN(publishedAt.getTime()) ? publishedAt : undefined,
@@ -454,44 +141,21 @@ function parseMessageElement(
 }
 
 /**
- * Result of parsing channel HTML.
+ * Convert parsed Telegram content to FetchedArticles.
  */
-interface ParseResult {
-  articles: FetchedArticle[];
-  /** Cursor for next page (older messages) */
-  nextBefore: string | null;
-}
+function parsedToArticles(
+  parsed: TelegramParsedContent,
+  channelHandle: string,
+  channelName: string
+): { articles: FetchedArticle[]; nextBefore: string | null } {
+  const articles = parsed.messages.map((msg) =>
+    telegramMsgToArticle(msg, channelHandle, channelName)
+  );
 
-/**
- * Parse the HTML response from t.me/s/{channel}.
- * Extracts all messages using proper HTML parsing.
- */
-function parseChannelHtml(html: string, channelHandle: string, channelName: string): ParseResult {
-  const root = parse(html);
-  const articles: FetchedArticle[] = [];
-
-  // Find all message elements (excluding service messages optionally)
-  const messageElements = root.querySelectorAll('.tgme_widget_message');
-
-  for (const messageEl of messageElements) {
-    const article = parseMessageElement(messageEl, channelHandle, channelName);
-    if (article) {
-      articles.push(article);
-    }
-  }
-
-  // Sort by message ID descending (newest first)
-  articles.sort((a, b) => {
-    const idA = parseInt(a.id.split('_').pop() ?? '0', 10);
-    const idB = parseInt(b.id.split('_').pop() ?? '0', 10);
-    return idB - idA;
-  });
-
-  // Extract pagination cursor for older messages
-  const loadMoreEl = root.querySelector('.tme_messages_more');
-  const nextBefore = loadMoreEl?.getAttribute('data-before') ?? null;
-
-  return { articles, nextBefore };
+  return {
+    articles,
+    nextBefore: parsed.nextBefore ?? null,
+  };
 }
 
 /**
@@ -599,8 +263,9 @@ export async function fetchTelegramChannel(
       };
     }
 
-    // Parse messages
-    const { articles, nextBefore } = parseChannelHtml(html, handle, channelName);
+    // Parse messages using shared parser
+    const parsed = parseTelegramHtml(html, handle);
+    const { articles, nextBefore } = parsedToArticles(parsed, handle, channelName);
 
     return {
       success: true,
@@ -640,7 +305,8 @@ export function parseHtml(
   channelHandle: string,
   channelName: string
 ): FetchedArticle[] {
-  return parseChannelHtml(html, channelHandle, channelName).articles;
+  const parsed = parseTelegramHtml(html, channelHandle);
+  return parsedToArticles(parsed, channelHandle, channelName).articles;
 }
 
 /**

@@ -31,6 +31,12 @@ import {
   MAX_REDIRECTS,
 } from '../web-shared/safety.js';
 import { isAllowedByRobots } from '../web-shared/robots.js';
+import {
+  isTelegramUrl,
+  normalizeTelegramUrl,
+  parseTelegramHtml,
+  formatTelegramAsMarkdown,
+} from '../web-shared/telegram.js';
 
 // ═══════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -46,6 +52,10 @@ const ALLOWED_CONTENT_TYPES = new Set([
 
 /** User agent for requests */
 const USER_AGENT = 'LifeModel/1.0 (Web Fetch)';
+
+/** Browser-like user agent for sites that block bot UAs (e.g., Telegram) */
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // ═══════════════════════════════════════════════════════════════
 // TURNDOWN SETUP
@@ -264,10 +274,28 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
 
   logger.debug({ requestId, url: input.url, limits }, 'Starting fetch');
 
+  // Detect and normalize Telegram URLs before validation
+  // (so SSRF checks run on the actual URL we'll fetch)
+  let telegramPostId: string | undefined;
+  let isTelegram = false;
+  let inputUrl = input.url;
+
+  try {
+    const parsed = new URL(input.url);
+    if (isTelegramUrl(parsed)) {
+      isTelegram = true;
+      const normalized = normalizeTelegramUrl(parsed);
+      telegramPostId = normalized.postId;
+      inputUrl = normalized.url.href;
+    }
+  } catch {
+    // Invalid URL — will fail validation below
+  }
+
   // Validate initial URL
-  const validation = validateUrl(input.url);
+  const validation = validateUrl(inputUrl);
   if (!validation.valid) {
-    logger.warn({ requestId, url: input.url, error: validation.error }, 'URL validation failed');
+    logger.warn({ requestId, url: inputUrl, error: validation.error }, 'URL validation failed');
     return createErrorEnvelope(requestId, validation.error);
   }
 
@@ -275,8 +303,8 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
   const redirects: RedirectHop[] = [];
   let redirectCount = 0;
 
-  // Check robots.txt if enabled
-  if (respectRobots) {
+  // Check robots.txt if enabled (skip for Telegram — /s/ pages are public preview)
+  if (respectRobots && !isTelegram) {
     const allowed = await isAllowedByRobots(currentUrl);
     if (!allowed) {
       logger.info({ requestId, url: input.url }, 'Blocked by robots.txt');
@@ -312,7 +340,7 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
           signal: controller.signal,
           redirect: 'manual', // Handle redirects manually for security
           headers: {
-            'User-Agent': USER_AGENT,
+            'User-Agent': isTelegram ? BROWSER_USER_AGENT : USER_AGENT,
             Accept: 'text/html, application/xhtml+xml, text/plain, application/json',
             'Accept-Language': 'en-US,en;q=0.9',
           },
@@ -498,6 +526,19 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
           markdown = '```\n' + text + '\n```';
         }
         plainText = text;
+      } else if (
+        isTelegram &&
+        (baseContentType === 'text/html' || baseContentType === 'application/xhtml+xml')
+      ) {
+        // Telegram HTML — use specialized parser instead of Turndown
+        const tgParsed = parseTelegramHtml(text);
+
+        // If a specific post was requested, filter to just that message
+        if (telegramPostId) {
+          tgParsed.messages = tgParsed.messages.filter((m) => m.id === telegramPostId);
+        }
+
+        markdown = formatTelegramAsMarkdown(tgParsed);
       } else {
         // HTML - convert to markdown
         const turndown = createTurndown();
