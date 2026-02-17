@@ -38,17 +38,19 @@ const ANOMALY_THRESHOLD = 0.4;
 const MIN_EXPECTED_CALORIES = 200;
 /** Waking hours progress threshold before checking (60%) */
 const MIN_DAY_PROGRESS = 0.6;
+/** Cooldown between anomaly checks in ms (1 hour) */
+const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
 
 /** Persisted state for once-per-day emission */
 interface PersistedAnomalyState {
   lastEmittedDate: string | null; // YYYY-MM-DD
 }
 
-/** Cached baseline for a specific date */
+/** Cached baseline for a specific date (null data = insufficient history) */
 interface CachedBaseline {
   date: string; // The date this baseline was computed for
   hour: number; // Wake-relative hour when computed
-  data: Record<number, HourlyBaseline>;
+  data: Record<number, HourlyBaseline> | null;
 }
 
 /** Baseline statistics per wake-relative hour */
@@ -218,7 +220,6 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
 
   private readonly config: CaloriesAnomalyNeuronConfig;
   private readonly storage: StoragePrimitive;
-  private readonly recipientId: string;
   private readonly getTimezone: GetTimezoneFunc;
   private readonly getUserPatterns: GetUserPatternsFunc;
   private readonly getCalorieGoal: GetCalorieGoalFunc;
@@ -226,12 +227,13 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
   // Async guards
   private computeInFlight = false;
   private pendingSignal: Signal | undefined;
+  /** Timestamp of last completed check — cooldown prevents per-tick recomputation */
+  private lastCheckAt = 0;
 
   constructor(
     logger: Logger,
     config: Partial<CaloriesAnomalyNeuronConfig>,
     storage: StoragePrimitive,
-    recipientId: string,
     getTimezone: GetTimezoneFunc,
     getUserPatterns: GetUserPatternsFunc,
     getCalorieGoal: GetCalorieGoalFunc
@@ -239,7 +241,6 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
     super(logger);
     this.config = { ...DEFAULT_CALORIES_ANOMALY_CONFIG, ...config };
     this.storage = storage;
-    this.recipientId = recipientId;
     this.getTimezone = getTimezone;
     this.getUserPatterns = getUserPatterns;
     this.getCalorieGoal = getCalorieGoal;
@@ -264,8 +265,8 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
       return signal;
     }
 
-    // Skip if computation already in flight
-    if (this.computeInFlight) {
+    // Skip if computation already in flight or recently completed
+    if (this.computeInFlight || Date.now() - this.lastCheckAt < CHECK_COOLDOWN_MS) {
       return undefined;
     }
 
@@ -280,6 +281,7 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
       })
       .finally(() => {
         this.computeInFlight = false;
+        this.lastCheckAt = Date.now();
       });
 
     return undefined;
@@ -573,8 +575,9 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
       }
     }
 
-    // Check minimum days
+    // Check minimum days — cache negative result to avoid recomputing every tick
     if (validDays < this.config.minBaselineDays) {
+      await this.cacheBaseline(today, null);
       return null;
     }
 
@@ -631,8 +634,7 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
     const entries = await this.storage.get<FoodEntry[]>(
       `${CALORIES_STORAGE_KEYS.foodPrefix}${date}`
     );
-    // Filter by recipient
-    return (entries ?? []).filter((e) => e.recipientId === this.recipientId);
+    return entries ?? [];
   }
 
   /**
@@ -681,7 +683,10 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
     }
   }
 
-  private async cacheBaseline(today: string, data: Record<number, HourlyBaseline>): Promise<void> {
+  private async cacheBaseline(
+    today: string,
+    data: Record<number, HourlyBaseline> | null
+  ): Promise<void> {
     const tz = this.getTimezone();
     const patterns = this.getUserPatterns();
     const localHour = getLocalHour(tz);
@@ -742,7 +747,6 @@ export function createCaloriesAnomalyNeuron(
   logger: Logger,
   config: Partial<CaloriesAnomalyNeuronConfig>,
   storage: StoragePrimitive,
-  recipientId: string,
   getTimezone: GetTimezoneFunc,
   getUserPatterns: GetUserPatternsFunc,
   getCalorieGoal: GetCalorieGoalFunc
@@ -751,7 +755,6 @@ export function createCaloriesAnomalyNeuron(
     logger,
     config,
     storage,
-    recipientId,
     getTimezone,
     getUserPatterns,
     getCalorieGoal

@@ -408,7 +408,6 @@ const caloriesPlugin: PluginV2 & {
         logger,
         factoryConfig.neuronConfig ?? {},
         primitives.storage,
-        recipientId,
         () => primitives.services.getTimezone(recipientId),
         () => createGetUserPatterns(primitives, recipientId)(),
         createGetCalorieGoal(primitives, recipientId)

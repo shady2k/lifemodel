@@ -353,7 +353,6 @@ The `CaloriesAnomalyNeuron` uses anomaly detection to signal only when today's i
 - Uses **wake-relative hours** for both baseline building and comparison (handles shift workers)
 - Reads food entries directly from plugin storage (no core changes)
 - **Relational reads**: Loads items catalog, uses `resolveEntryCalories()`
-- **Recipient filter**: Only counts entries for the neuron's user
 - Stays dormant if no calorie goal is set
 - Skips during sleep hours (alertness < 0.3)
 - **Timing guard**: Only checks after 60% of waking hours elapsed (too early = not enough signal)

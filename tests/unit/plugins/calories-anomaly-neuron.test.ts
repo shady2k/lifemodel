@@ -132,7 +132,6 @@ describe('CaloriesAnomalyNeuron', () => {
       mockLogger as any,
       {},
       storage,
-      RECIPIENT_ID,
       () => TZ,
       () => patterns,
       async () => goal,
@@ -406,29 +405,6 @@ describe('CaloriesAnomalyNeuron', () => {
       const signal = neuron.check(createAgentState(), 0.8, 'test-2');
       // Silent because expected calories too low (floor guard)
       expect(signal).toBeUndefined();
-    });
-  });
-
-  describe('recipient filtering', () => {
-    it('should only count entries for matching recipient', async () => {
-      // Entries for different recipient - not for default user
-      const otherRecipientEntries: FoodEntry[] = [
-        createFoodEntry('other-1', 'item-1', 7, TODAY, 'breakfast', 'other-user'),
-        createFoodEntry('other-2', 'item-2', 12, TODAY, 'lunch', 'other-user'),
-        createFoodEntry('other-3', 'item-3', 18, TODAY, 'dinner', 'other-user'),
-      ];
-      const store = createStorageWithBaseline(7, 1500, 3, otherRecipientEntries);
-      const storage = createMockStorage(store);
-
-      setFakeNow(NOW_4PM);
-      const neuron = createNeuron(storage);
-
-      neuron.check(createAgentState(), 0.8, 'test-1');
-      await new Promise(resolve => setTimeout(resolve, 100)); // Increased timeout for async baseline computation
-
-      const signal = neuron.check(createAgentState(), 0.8, 'test-2');
-      // Should fire because default recipient has no food
-      expect(signal).toBeDefined();
     });
   });
 
