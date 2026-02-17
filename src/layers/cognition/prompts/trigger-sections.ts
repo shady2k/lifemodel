@@ -51,11 +51,12 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 </context>
 
 <task>
-You are initiating contact — not replying to the conversation above. All user requests in the history were already fulfilled (see completed_actions).
+IMPORTANT: The conversation above is FINISHED. You are NOT continuing it. You are starting fresh contact.
+Do NOT reference, summarize, or follow up on anything from the conversation history above (food, reminders, tasks, etc.). The user already received those responses.
 Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
 
 Choose ONE action:
-• Send a NEW message on a new topic: {"response": "your message"}
+• Send a message on a COMPLETELY DIFFERENT topic (ask about their day, share a thought, etc.): {"response": "your message"}
 • Skip messaging: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
 You may call tools (e.g. core.memory) to prepare, but do not repeat completed actions. Max 3 tool calls total.

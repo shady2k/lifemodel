@@ -98,8 +98,7 @@ describe('Proactive Contact', () => {
 
       // Should have proactive contact section
       expect(fullPrompt).toContain('<trigger type="proactive_contact">');
-      expect(fullPrompt).toContain('not replying to the conversation');
-      expect(fullPrompt).toContain('You are initiating contact');
+      expect(fullPrompt).toContain('conversation above is FINISHED');
     });
 
     it('includes time since last message in prompt', async () => {
@@ -152,7 +151,7 @@ describe('Proactive Contact', () => {
       // Prompt gives agent decision guidance with tool limit
       expect(fullPrompt).toContain('Choose ONE action');
       expect(fullPrompt).toContain('Max 3 tool calls');
-      expect(fullPrompt).toContain('Send a NEW message');
+      expect(fullPrompt).toContain('COMPLETELY DIFFERENT topic');
       expect(fullPrompt).toContain('Skip messaging');
     });
 
