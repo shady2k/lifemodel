@@ -37,6 +37,7 @@ import type {
   MemorySearchPrimitive,
   MemorySearchOptions,
   MemorySearchResult,
+  FireContext,
 } from '../types/plugin.js';
 import type { MemoryProvider } from '../layers/cognition/tools/core/memory.js';
 import { isNeuronPlugin, isFilterPlugin } from '../types/plugin.js';
@@ -1121,7 +1122,8 @@ export class PluginLoader {
   async dispatchPluginEvent(
     pluginId: string,
     eventKind: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    fireContext?: FireContext
   ): Promise<void> {
     const state = this.plugins.get(pluginId);
     if (!state) {
@@ -1130,7 +1132,7 @@ export class PluginLoader {
     }
 
     if (state.plugin.lifecycle.onEvent) {
-      await state.plugin.lifecycle.onEvent(eventKind, payload);
+      await state.plugin.lifecycle.onEvent(eventKind, payload, fireContext);
     }
   }
 

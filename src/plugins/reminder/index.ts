@@ -15,6 +15,7 @@ import type {
   MigrationBundle,
   EventSchema,
   ScheduleEntry,
+  FireContext,
 } from '../../types/plugin.js';
 import { DateTime } from 'luxon';
 import {
@@ -196,7 +197,11 @@ const lifecycle: PluginLifecycleV2 = {
   /**
    * Handle plugin events (called by scheduler when reminders fire).
    */
-  async onEvent(eventKind: string, payload: Record<string, unknown>): Promise<void> {
+  async onEvent(
+    eventKind: string,
+    payload: Record<string, unknown>,
+    fireContext?: FireContext
+  ): Promise<void> {
     if (!pluginPrimitives) return;
 
     if (eventKind === REMINDER_EVENT_KINDS.REMINDER_DUE) {
@@ -204,7 +209,9 @@ const lifecycle: PluginLifecycleV2 = {
         payload as unknown as ReminderDueData,
         pluginPrimitives.storage,
         pluginPrimitives.logger,
-        pluginPrimitives.intentEmitter
+        pluginPrimitives.intentEmitter,
+        fireContext,
+        (rid) => pluginPrimitives?.services.getTimezone(rid) ?? 'UTC'
       );
     } else if (eventKind === REMINDER_EVENT_KINDS.REMINDER_ADVANCE_NOTICE) {
       handleReminderAdvanceNotice(

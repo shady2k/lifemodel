@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Logger } from '../types/logger.js';
 import type { Signal, PluginEventData } from '../types/signal.js';
+import type { FireContext } from '../types/plugin.js';
 import type { SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import { withTraceContext, createTraceContext } from './trace-context.js';
 
@@ -26,7 +27,8 @@ export type SignalPushCallback = (signal: Signal) => void;
 export type PluginEventCallback = (
   pluginId: string,
   eventKind: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  fireContext?: FireContext
 ) => Promise<void>;
 
 /**
@@ -224,15 +226,41 @@ export class SchedulerService {
             break;
           }
 
+          // SNAPSHOT scheduledFor BEFORE markFired (which advances nextFireAt for recurring)
+          const scheduledFor = new Date(entry.nextFireAt.getTime());
+
+          // Clone payload to prevent cross-mutation between signal and plugin callback
+          let clonedPayload: Record<string, unknown>;
+          try {
+            clonedPayload = structuredClone(entry.data);
+          } catch (cloneError) {
+            // Fallback to JSON deep copy (schedule data is always JSON-serializable via storage)
+            this.logger.warn(
+              { scheduleId: entry.id, error: String(cloneError) },
+              'structuredClone failed, using JSON deep copy fallback'
+            );
+            clonedPayload = JSON.parse(JSON.stringify(entry.data)) as Record<string, unknown>;
+          }
+
           const correlationId = entry.id;
-          const signal = this.createPluginEventSignal(pluginId, entry.data, fireId, correlationId);
 
           // Wrap schedule firing with trace context (signal.id as root)
           await withTraceContext(
-            createTraceContext(signal.id, { correlationId, spanId: `fire_${fireId}` }),
+            createTraceContext(crypto.randomUUID(), { correlationId, spanId: `fire_${fireId}` }),
             async () => {
               // IMPORTANT: Record fireId BEFORE emitting for at-most-once semantics
               await scheduler.markFired(entry.id, fireId, now);
+
+              // CAPTURE firedAt AFTER markFired
+              const firedAt = new Date();
+
+              // Build FireContext for plugins
+              const fireContext: FireContext = {
+                scheduledFor,
+                firedAt,
+                fireId,
+                scheduleId: entry.id,
+              };
 
               // Get event kind from data
               const rawKind = entry.data['kind'];
@@ -241,7 +269,17 @@ export class SchedulerService {
               // Notify plugin of its event (for internal state updates)
               if (this.pluginEventCallback) {
                 try {
-                  await this.pluginEventCallback(pluginId, eventKind, entry.data);
+                  // Clone again for plugin callback to isolate from signal
+                  let pluginPayload: Record<string, unknown>;
+                  try {
+                    pluginPayload = structuredClone(entry.data);
+                  } catch {
+                    pluginPayload = JSON.parse(JSON.stringify(entry.data)) as Record<
+                      string,
+                      unknown
+                    >;
+                  }
+                  await this.pluginEventCallback(pluginId, eventKind, pluginPayload, fireContext);
                 } catch (error) {
                   this.logger.error(
                     {
@@ -258,6 +296,14 @@ export class SchedulerService {
               // Check emitSignal flag in schedule data - set by plugin-loader from manifest
               const emitSignal = entry.data['emitSignal'];
               if (this.signalCallback && emitSignal !== false) {
+                const signal = this.createPluginEventSignal(
+                  pluginId,
+                  clonedPayload,
+                  fireId,
+                  correlationId,
+                  scheduledFor,
+                  firedAt
+                );
                 this.signalCallback(signal);
               }
 
@@ -295,17 +341,21 @@ export class SchedulerService {
     pluginId: string,
     data: Record<string, unknown>,
     fireId: string,
-    scheduleId?: string
+    scheduleId?: string,
+    scheduledFor?: Date,
+    firedAt?: Date
   ): Signal {
     const rawKind = data['kind'];
     const eventKind = typeof rawKind === 'string' ? rawKind : `${pluginId}:scheduled`;
-    const now = new Date();
+    const now = firedAt ?? new Date();
 
     const signalData: PluginEventData = {
       kind: 'plugin_event',
       eventKind,
       pluginId,
       fireId,
+      ...(scheduledFor && { scheduledFor: scheduledFor.toISOString() }),
+      ...(firedAt && { firedAt: firedAt.toISOString() }),
       payload: data,
     };
 

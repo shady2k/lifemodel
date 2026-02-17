@@ -362,6 +362,12 @@ export interface PluginEventData {
   /** Idempotency key for scheduled signals */
   fireId?: string;
 
+  /** When the schedule was supposed to fire (ISO string) - for overdue detection */
+  scheduledFor?: string;
+
+  /** When the schedule actually fired (ISO string) - for overdue detection */
+  firedAt?: string;
+
   /** Plugin-specific payload */
   payload: Record<string, unknown>;
 }

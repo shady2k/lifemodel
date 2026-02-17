@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SchedulerService, createSchedulerService } from '../../../src/core/scheduler-service.js';
 import type { SchedulerPrimitiveImpl } from '../../../src/core/scheduler-primitive.js';
+import type { ScheduleEntry } from '../../../src/types/plugin.js';
 import { createMockLogger } from '../../helpers/factories.js';
 
 /**
@@ -12,7 +13,12 @@ import { createMockLogger } from '../../helpers/factories.js';
  */
 function createMockSchedulerPrimitive(
   pluginId: string,
-  options: { dueSchedules?: Array<{ entry: { id: string; data: Record<string, unknown> }; fireId: string }> } = {}
+  options: {
+    dueSchedules?: Array<{
+      entry: { id: string; data: Record<string, unknown>; nextFireAt: Date };
+      fireId: string;
+    }>;
+  } = {}
 ): SchedulerPrimitiveImpl {
   const { dueSchedules = [] } = options;
 
@@ -174,7 +180,10 @@ describe('SchedulerService', () => {
     it('skips paused plugins', async () => {
       const scheduler = createMockSchedulerPrimitive('test-plugin', {
         dueSchedules: [
-          { entry: { id: 'sched-1', data: { kind: 'test:event' } }, fireId: 'fire-1' },
+          {
+            entry: { id: 'sched-1', data: { kind: 'test:event' }, nextFireAt: new Date() },
+            fireId: 'fire-1',
+          },
         ],
       });
       service.registerScheduler('test-plugin', scheduler);
@@ -193,7 +202,10 @@ describe('SchedulerService', () => {
       const signalCallback = vi.fn();
       const scheduler = createMockSchedulerPrimitive('test-plugin', {
         dueSchedules: [
-          { entry: { id: 'sched-1', data: { kind: 'test:event' } }, fireId: 'fire-1' },
+          {
+            entry: { id: 'sched-1', data: { kind: 'test:event' }, nextFireAt: new Date() },
+            fireId: 'fire-1',
+          },
         ],
       });
       service.registerScheduler('test-plugin', scheduler);
@@ -209,7 +221,10 @@ describe('SchedulerService', () => {
       const signalCallback = vi.fn();
       const scheduler = createMockSchedulerPrimitive('test-plugin', {
         dueSchedules: [
-          { entry: { id: 'sched-1', data: { kind: 'test:event' } }, fireId: 'fire-1' },
+          {
+            entry: { id: 'sched-1', data: { kind: 'test:event' }, nextFireAt: new Date() },
+            fireId: 'fire-1',
+          },
         ],
       });
       service.registerScheduler('test-plugin', scheduler);
@@ -223,6 +238,87 @@ describe('SchedulerService', () => {
       service.resumePlugin('test-plugin');
       await service.tick();
       expect(signalCallback).toHaveBeenCalled();
+    });
+
+    it('passes fireContext with correct scheduledFor to plugin callback', async () => {
+      const scheduledFor = new Date('2024-01-15T09:00:00Z');
+      const pluginEventCallback = vi.fn();
+      const scheduler = createMockSchedulerPrimitive('test-plugin', {
+        dueSchedules: [
+          {
+            entry: { id: 'sched-1', data: { kind: 'test:event' }, nextFireAt: scheduledFor },
+            fireId: 'fire-1',
+          },
+        ],
+      });
+      service.registerScheduler('test-plugin', scheduler);
+      service.setPluginEventCallback(pluginEventCallback);
+      service.setSignalCallback(vi.fn());
+
+      await service.tick();
+
+      expect(pluginEventCallback).toHaveBeenCalled();
+      const call = pluginEventCallback.mock.calls[0];
+      expect(call[0]).toBe('test-plugin'); // pluginId
+      expect(call[1]).toBe('test:event'); // eventKind
+      expect(call[3]).toBeDefined(); // fireContext
+      const fireContext = call[3];
+      expect(fireContext.scheduledFor).toEqual(scheduledFor);
+      expect(fireContext.fireId).toBe('fire-1');
+      expect(fireContext.scheduleId).toBe('sched-1');
+      expect(fireContext.firedAt).toBeInstanceOf(Date);
+    });
+
+    it('enriches signal with scheduledFor and firedAt ISO strings', async () => {
+      const scheduledFor = new Date('2024-01-15T09:00:00Z');
+      const signalCallback = vi.fn();
+      const scheduler = createMockSchedulerPrimitive('test-plugin', {
+        dueSchedules: [
+          {
+            entry: { id: 'sched-1', data: { kind: 'test:event' }, nextFireAt: scheduledFor },
+            fireId: 'fire-1',
+          },
+        ],
+      });
+      service.registerScheduler('test-plugin', scheduler);
+      service.setPluginEventCallback(vi.fn());
+      service.setSignalCallback(signalCallback);
+
+      await service.tick();
+
+      expect(signalCallback).toHaveBeenCalled();
+      const signal = signalCallback.mock.calls[0][0];
+      expect(signal.data.scheduledFor).toBe(scheduledFor.toISOString());
+      expect(signal.data.firedAt).toBeDefined();
+      // Verify firedAt is a valid ISO string
+      expect(new Date(signal.data.firedAt).getTime()).not.toBeNaN();
+    });
+
+    it('clones payload to prevent cross-mutation', async () => {
+      const pluginEventCallback = vi.fn();
+      const signalCallback = vi.fn();
+      const originalData = { kind: 'test:event', mutable: { value: 1 } };
+      const scheduler = createMockSchedulerPrimitive('test-plugin', {
+        dueSchedules: [
+          {
+            entry: { id: 'sched-1', data: originalData, nextFireAt: new Date() },
+            fireId: 'fire-1',
+          },
+        ],
+      });
+      service.registerScheduler('test-plugin', scheduler);
+      service.setPluginEventCallback(pluginEventCallback);
+      service.setSignalCallback(signalCallback);
+
+      await service.tick();
+
+      // Mutate the payload in the callback
+      const pluginPayload = pluginEventCallback.mock.calls[0][2];
+      pluginPayload.mutable.value = 999;
+
+      // Signal payload should NOT be affected
+      const signal = signalCallback.mock.calls[0][0];
+      expect(signal.data.payload.mutable.value).toBe(1);
     });
   });
 

@@ -126,3 +126,24 @@ This enables:
 - Completion tracking without losing recurrence state
 - Audit trail of all reminder activity
 
+## Overdue Detection via FireContext
+
+When the scheduler fires a schedule, it passes a `FireContext` to the plugin's `onEvent`:
+
+```typescript
+interface FireContext {
+  scheduledFor: Date;  // snapshot of nextFireAt BEFORE markFired()
+  firedAt: Date;       // wall clock AFTER markFired()
+  fireId: string;
+  scheduleId: string;
+}
+```
+
+**Why `scheduledFor` is snapshotted before `markFired`:** For recurring schedules, `markFired()` advances `nextFireAt` to the next occurrence. Without the snapshot, the plugin would see the *next* due time instead of the one that just fired.
+
+**Overdue threshold:** If `firedAt - scheduledFor > 5 minutes`, the reminder intention includes a note: `"was due at 14:30, delayed ~17 minutes"`. This applies uniformly to both one-time and recurring reminders.
+
+**Payload cloning:** The scheduler `structuredClone`s `entry.data` separately for the signal and the plugin callback, preventing cross-mutation between the two consumers.
+
+**Backward compatibility:** If `fireContext` is not available (e.g., manually triggered events), overdue detection falls back to `data.scheduledAt`. If neither is available, overdue detection is skipped.
+

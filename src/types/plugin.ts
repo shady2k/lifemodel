@@ -673,6 +673,21 @@ export interface PluginSignalData {
 }
 
 /**
+ * Context passed to onEvent when a scheduled event fires.
+ * Provides accurate timing information for overdue detection.
+ */
+export interface FireContext {
+  /** When the schedule was supposed to fire (captured BEFORE markFired advances it) */
+  scheduledFor: Date;
+  /** When the schedule actually fired */
+  firedAt: Date;
+  /** Idempotency key for this fire */
+  fireId: string;
+  /** Schedule ID that fired */
+  scheduleId: string;
+}
+
+/**
  * V2 Plugin lifecycle interface.
  */
 export interface PluginLifecycleV2 {
@@ -707,8 +722,16 @@ export interface PluginLifecycleV2 {
    * Called when a plugin event is fired (e.g., from scheduler).
    * Use this to handle scheduled events, update internal state, etc.
    * Called BEFORE the signal reaches cognition layer.
+   *
+   * @param eventKind Namespaced event kind (e.g., 'reminder:reminder_due')
+   * @param payload The schedule data payload
+   * @param fireContext Timing context with scheduledFor/firedAt for overdue detection
    */
-  onEvent?(eventKind: string, payload: Record<string, unknown>): Promise<void>;
+  onEvent?(
+    eventKind: string,
+    payload: Record<string, unknown>,
+    fireContext?: FireContext
+  ): Promise<void>;
 }
 
 /**

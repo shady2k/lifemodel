@@ -24,6 +24,7 @@ import type {
   PluginTool,
   ScheduleEntry,
   EventSchema,
+  FireContext,
 } from '../../types/plugin.js';
 import type { Neuron } from '../../layers/autonomic/neuron-registry.js';
 import { createCaloriesTool } from './calories-tool.js';
@@ -341,7 +342,11 @@ const lifecycle: PluginLifecycleV2 = {
     }
   },
 
-  async onEvent(eventKind: string, payload: Record<string, unknown>): Promise<void> {
+  async onEvent(
+    eventKind: string,
+    payload: Record<string, unknown>,
+    _fireContext?: FireContext
+  ): Promise<void> {
     if (!pluginPrimitives) return;
 
     if (eventKind === CALORIES_EVENT_KINDS.WEIGHT_CHECKIN) {

@@ -10,6 +10,7 @@ import type {
   PluginTool,
   PluginToolContext,
   ScheduleOptions,
+  FireContext,
 } from '../../types/plugin.js';
 import type {
   Reminder,
@@ -1186,7 +1187,9 @@ export async function handleReminderDue(
   data: ReminderDueData,
   storage: PluginPrimitives['storage'],
   logger: Logger,
-  intentEmitter: PluginPrimitives['intentEmitter']
+  intentEmitter: PluginPrimitives['intentEmitter'],
+  fireContext?: FireContext,
+  getTimezone?: (recipientId: string) => string
 ): Promise<void> {
   logger.info(
     {
@@ -1199,12 +1202,22 @@ export async function handleReminderDue(
     'Reminder due'
   );
 
-  // Detect overdue delivery (>5 min late) — only for non-recurring reminders.
-  // For recurring reminders, scheduledAt in the schedule data is stale (set once at creation),
-  // so overdue detection would give false positives on subsequent fires.
-  const scheduledAt = !data.isRecurring && data.scheduledAt ? new Date(data.scheduledAt) : null;
-  const delayMs = scheduledAt ? Date.now() - scheduledAt.getTime() : 0;
+  // UNIFIED overdue detection for both one-time and recurring reminders
+  // Use fireContext.scheduledFor (accurate) or fall back to data.scheduledAt (backward compat)
+  const scheduledFor =
+    fireContext?.scheduledFor ?? (data.scheduledAt ? new Date(data.scheduledAt) : null);
+  const firedAt = fireContext?.firedAt ?? new Date();
+  const delayMs = scheduledFor ? firedAt.getTime() - scheduledFor.getTime() : 0;
   const isOverdue = delayMs > 5 * 60 * 1000;
+
+  // Build overdue note with user's timezone
+  let overdueNote = '';
+  if (isOverdue && scheduledFor) {
+    const tz = getTimezone?.(data.recipientId) ?? 'UTC';
+    const scheduledTimeStr = DateTime.fromJSDate(scheduledFor, { zone: tz }).toFormat('HH:mm');
+    const delayMinutes = Math.round(delayMs / 60000);
+    overdueNote = ` Note: was due at ${scheduledTimeStr}, delayed ~${String(delayMinutes)} minutes.`;
+  }
 
   if (data.isRecurring) {
     // Read fireCount from storage (source of truth) — schedule data's fireCount is stale
@@ -1218,8 +1231,8 @@ export async function handleReminderDue(
           reminder.fireCount = storedFireCount + 1;
           await storage.set(REMINDER_STORAGE_KEYS.REMINDERS, stored);
 
-          // Create occurrence entry for this fire
-          await createOccurrenceOnFire(storage, data.reminderId, scheduledAt, logger);
+          // Create occurrence entry for this fire with accurate scheduledFor
+          await createOccurrenceOnFire(storage, data.reminderId, scheduledFor, logger);
         }
       }
     } catch (error) {
@@ -1229,13 +1242,13 @@ export async function handleReminderDue(
     // Emit pending intention for recurring reminders after first fire
     if (storedFireCount > 0) {
       intentEmitter.emitPendingIntention(
-        `Recurring reminder (fired ${String(storedFireCount + 1)} times): "${data.content}".`,
+        `Recurring reminder (fired ${String(storedFireCount + 1)} times): "${data.content}".${overdueNote}`,
         data.recipientId
       );
     }
   } else if (isOverdue) {
     intentEmitter.emitPendingIntention(
-      `Reminder: "${data.content}". Note: this was delayed by ~${String(Math.round(delayMs / 60000))} minutes.`,
+      `Reminder: "${data.content}".${overdueNote}`,
       data.recipientId
     );
   }

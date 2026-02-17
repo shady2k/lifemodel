@@ -18,6 +18,7 @@ import type {
   StoragePrimitive,
   FilterPluginV2,
   EventSchema,
+  FireContext,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
 import type { NewsArticle } from '../../types/news.js';
@@ -778,7 +779,11 @@ const lifecycle: PluginLifecycleV2 = {
   /**
    * Handle plugin events (called by scheduler for feed polling).
    */
-  async onEvent(eventKind: string, _payload: Record<string, unknown>): Promise<void> {
+  async onEvent(
+    eventKind: string,
+    _payload: Record<string, unknown>,
+    _fireContext?: FireContext
+  ): Promise<void> {
     if (!pluginPrimitives) return;
 
     if (eventKind === NEWS_EVENT_KINDS.POLL_FEEDS) {
