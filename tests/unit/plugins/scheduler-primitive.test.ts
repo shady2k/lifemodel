@@ -258,4 +258,68 @@ describe('SchedulerPrimitive', () => {
       expect(() => SchedulerPrimitiveImpl.validateCron('* * *')).toThrow('expected 5-6 fields');
     });
   });
+
+  describe('skipCurrentOccurrence', () => {
+    it('should return null for non-existent schedule', async () => {
+      const result = await scheduler.skipCurrentOccurrence('nonexistent');
+      expect(result).toBeNull();
+    });
+
+    it('should return null for one-time schedule', async () => {
+      const now = new Date();
+      const futureTime = new Date(now.getTime() + 60000);
+
+      await scheduler.schedule({
+        id: 'one-time',
+        fireAt: futureTime,
+        data: { action: 'once' },
+      });
+
+      const result = await scheduler.skipCurrentOccurrence('one-time');
+      expect(result).toBeNull();
+    });
+
+    it('should return null if nextFireAt is already past (no-op)', async () => {
+      const now = new Date();
+      const pastTime = new Date(now.getTime() - 1000);
+
+      await scheduler.schedule({
+        id: 'recurring-past',
+        fireAt: pastTime,
+        recurrence: {
+          frequency: 'daily',
+          interval: 1,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        data: { action: 'repeat' },
+      });
+
+      const result = await scheduler.skipCurrentOccurrence('recurring-past');
+      expect(result).toBeNull();
+    });
+
+    it('should advance recurring schedule if nextFireAt is in future', async () => {
+      const now = new Date();
+      const futureTime = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 1 day from now
+
+      await scheduler.schedule({
+        id: 'recurring-future',
+        fireAt: futureTime,
+        recurrence: {
+          frequency: 'daily',
+          interval: 1,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        data: { action: 'repeat' },
+      });
+
+      const result = await scheduler.skipCurrentOccurrence('recurring-future');
+      expect(result).toBeTruthy();
+      expect(result!.getTime()).toBeGreaterThan(now.getTime());
+      // Should be more than 1 day in the future (original was 1 day, advanced by 1 more)
+      expect(result!.getTime()).toBeGreaterThan(futureTime.getTime());
+    });
+  });
 });

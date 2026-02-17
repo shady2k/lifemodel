@@ -510,6 +510,17 @@ export interface SchedulerPrimitive {
    * @returns true if schedule was found and updated, false if not found
    */
   updateScheduleData(scheduleId: string, data: Record<string, unknown>): Promise<boolean>;
+
+  /**
+   * Skip the current occurrence of a recurring schedule and advance to the next.
+   * Used when a user completes a recurring reminder before it fires.
+   * @param scheduleId The schedule ID to skip
+   * @returns The new nextFireAt after advancing, or null if:
+   *   - schedule not found or not recurring
+   *   - nextFireAt is already past (no-op — schedule will advance on its own)
+   *   - recurrence ended after advancing
+   */
+  skipCurrentOccurrence(scheduleId: string): Promise<Date | null>;
 }
 
 /**

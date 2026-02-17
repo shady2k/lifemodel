@@ -227,6 +227,45 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   }
 
   /**
+   * Skip the current occurrence of a recurring schedule and advance to the next.
+   * Used when a user completes a recurring reminder before it fires.
+   *
+   * @param scheduleId The schedule ID to skip
+   * @returns The new nextFireAt, or null if schedule not found/not recurring/ended
+   */
+  async skipCurrentOccurrence(scheduleId: string): Promise<Date | null> {
+    const entry = this.schedules.get(scheduleId);
+    if (!entry?.recurrence) {
+      return null;
+    }
+
+    const now = new Date();
+
+    // If nextFireAt is in the past, it's already due to fire — nothing to skip.
+    // Return null to signal no action taken (caller should not treat this as a new date).
+    if (entry.nextFireAt <= now) {
+      return null;
+    }
+
+    // Advance to next occurrence
+    await this.advanceRecurringSchedule(entry, now);
+
+    // Check if recurrence ended after advancing
+    if (!this.schedules.has(entry.id)) {
+      return null;
+    }
+
+    await this.persistSchedules();
+
+    this.logger.debug(
+      { scheduleId, nextFireAt: entry.nextFireAt.toISOString() },
+      'Skipped current occurrence'
+    );
+
+    return entry.nextFireAt;
+  }
+
+  /**
    * Check for due schedules and return those that should fire.
    * Called by SchedulerService on each tick.
    *

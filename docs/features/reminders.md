@@ -81,3 +81,48 @@ The daily agenda schedule is restart-safe: it uses a stable ID and checks for ex
 ## Tool Schema
 
 The reminder tool uses `rawParameterSchema` to provide OpenAI with proper JSON Schema structure for the anchor parameter. This ensures the LLM generates correctly structured anchors instead of guessing from description text.
+
+## Completion Semantics
+
+Reminders support a `complete` action to mark them as done:
+
+### One-time Reminders
+
+When a one-time reminder is completed:
+- Status changes from `active` to `completed`
+- Associated schedules are cancelled
+- An occurrence record is created with `completedAt` timestamp
+- `lastCompletedAt` and `completedCount` are updated on the parent
+
+### Recurring Reminders
+
+When a recurring reminder is completed:
+- Status remains `active` (recurrence continues)
+- `lastCompletedAt` and `completedCount` are updated
+- An occurrence record is created or updated
+- If completing **before** the scheduled fire time: schedule advances to next occurrence
+- If completing **after** the scheduled fire time: no schedule change (already advanced)
+
+The `complete` action returns `nextFireAt` for recurring reminders, allowing the agent to tell the user when the next occurrence will fire.
+
+## Occurrence Ledger
+
+Each reminder has an append-only occurrence ledger that tracks the history of fires and completions:
+
+```
+Reminder (parent)          ReminderOccurrence (ledger)
+─────────────────          ────────────────────────────
+id                         id
+content                    reminderId → parent
+recurrence                 sequence (1, 2, 3...)
+status: active|cancelled   scheduledAt
+lastCompletedAt (cache)    firedAt?
+completedCount (cache)     completedAt?
+                           status: fired|completed|skipped
+```
+
+This enables:
+- History queries ("Did I complete the utilities reminder in January?")
+- Completion tracking without losing recurrence state
+- Audit trail of all reminder activity
+

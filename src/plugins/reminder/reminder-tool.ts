@@ -19,6 +19,7 @@ import type {
   AdvanceNotice,
   ReminderAdvanceNoticeData,
   RelativeTime,
+  ReminderOccurrence,
 } from './reminder-types.js';
 import { REMINDER_EVENT_KINDS, REMINDER_STORAGE_KEYS } from './reminder-types.js';
 import { resolveSemanticAnchor, formatRecurrence } from './date-parser.js';
@@ -52,6 +53,10 @@ interface ReminderToolResult {
   error?: string;
   receivedParams?: string[];
   schema?: Record<string, unknown>;
+  /** For complete action: when next occurrence fires (recurring only) */
+  nextFireAt?: Date;
+  /** For complete action: updated completed count */
+  completedCount?: number;
 }
 
 /**
@@ -163,6 +168,11 @@ const SCHEMA_CANCEL = {
   reminderId: { type: 'string', required: true, description: 'ID returned by create or list' },
 };
 
+const SCHEMA_COMPLETE = {
+  action: { type: 'string', required: true, enum: ['complete'] },
+  reminderId: { type: 'string', required: true, description: 'ID returned by create or list' },
+};
+
 const SCHEMA_LIST = {
   action: { type: 'string', required: true, enum: ['list'] },
   limit: { type: 'number', required: false, default: 10 },
@@ -180,7 +190,7 @@ const REMINDER_RAW_SCHEMA = {
   properties: {
     action: {
       type: 'string',
-      enum: ['create', 'list', 'cancel'],
+      enum: ['create', 'list', 'cancel', 'complete'],
       description: 'Action to perform',
     },
     content: {
@@ -349,6 +359,10 @@ export function createReminderTools(
       for (const r of stored) {
         r.triggerAt = new Date(r.triggerAt);
         r.createdAt = new Date(r.createdAt);
+        // Revive lastCompletedAt date if present
+        if (r.lastCompletedAt) {
+          r.lastCompletedAt = new Date(r.lastCompletedAt);
+        }
         // Handle existing reminders without new fields (for backward compatibility)
         const reminderPartial = r as Partial<Reminder> & { triggerAt: Date; createdAt: Date };
         if (reminderPartial.advanceNotice === undefined) {
@@ -357,6 +371,10 @@ export function createReminderTools(
         if (reminderPartial.advanceNoticeScheduleId === undefined) {
           reminderPartial.advanceNoticeScheduleId = null;
         }
+        if (reminderPartial.lastCompletedAt === undefined) {
+          reminderPartial.lastCompletedAt = null;
+        }
+        reminderPartial.completedCount ??= 0;
         map.set(r.id, r);
       }
     }
@@ -368,6 +386,52 @@ export function createReminderTools(
    */
   async function saveReminders(reminders: Map<string, Reminder>): Promise<void> {
     await storage.set(REMINDER_STORAGE_KEYS.REMINDERS, Array.from(reminders.values()));
+  }
+
+  /**
+   * Load all reminder occurrences from storage.
+   */
+  async function loadOccurrences(): Promise<Map<string, ReminderOccurrence>> {
+    const stored = await storage.get<ReminderOccurrence[]>(
+      REMINDER_STORAGE_KEYS.REMINDER_OCCURRENCES
+    );
+    const map = new Map<string, ReminderOccurrence>();
+    if (stored) {
+      for (const occ of stored) {
+        occ.scheduledAt = new Date(occ.scheduledAt);
+        if (occ.firedAt) occ.firedAt = new Date(occ.firedAt);
+        if (occ.completedAt) occ.completedAt = new Date(occ.completedAt);
+        map.set(occ.id, occ);
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Save all reminder occurrences to storage.
+   */
+  async function saveOccurrences(occurrences: Map<string, ReminderOccurrence>): Promise<void> {
+    await storage.set(REMINDER_STORAGE_KEYS.REMINDER_OCCURRENCES, Array.from(occurrences.values()));
+  }
+
+  /**
+   * Create a new occurrence for a reminder.
+   */
+  function createOccurrence(
+    reminderId: string,
+    sequence: number,
+    scheduledAt: Date,
+    status: 'fired' | 'completed' | 'skipped' = 'fired'
+  ): ReminderOccurrence {
+    return {
+      id: `occ_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      reminderId,
+      sequence,
+      scheduledAt,
+      firedAt: status === 'fired' ? new Date() : null,
+      completedAt: status === 'completed' ? new Date() : null,
+      status,
+    };
   }
 
   /**
@@ -458,6 +522,8 @@ export function createReminderTools(
         createdAt: new Date(),
         timezone: resolved.recurrence ? timezone : null,
         fireCount: 0,
+        lastCompletedAt: null,
+        completedCount: 0,
         scheduleId: null,
         advanceNotice: advanceNotice ?? null,
         advanceNoticeScheduleId: null,
@@ -692,11 +758,188 @@ export function createReminderTools(
     }
   }
 
+  /**
+   * Complete a reminder.
+   * For one-time: sets status to 'completed', cancels schedules, creates occurrence.
+   * For recurring: updates parent cache, creates/updates occurrence, advances schedule if needed.
+   */
+  async function completeReminder(
+    reminderId: string,
+    recipientId: string
+  ): Promise<ReminderToolResult> {
+    try {
+      const reminders = await loadReminders();
+      const reminder = reminders.get(reminderId);
+
+      // Guard: not found
+      if (!reminder) {
+        return {
+          success: false,
+          action: 'complete',
+          error: 'Reminder not found',
+        };
+      }
+
+      // Guard: wrong recipient
+      if (reminder.recipientId !== recipientId) {
+        logger.warn(
+          {
+            reminderId,
+            requestedRecipientId: recipientId,
+            actualRecipientId: reminder.recipientId,
+          },
+          'Attempted to complete reminder from different recipient'
+        );
+        return {
+          success: false,
+          action: 'complete',
+          error: 'Reminder not found',
+        };
+      }
+
+      // Guard: already completed (one-time)
+      if (reminder.status === 'completed') {
+        return {
+          success: false,
+          action: 'complete',
+          error: 'Reminder already completed',
+        };
+      }
+
+      // Guard: cancelled
+      if (reminder.status === 'cancelled') {
+        return {
+          success: false,
+          action: 'complete',
+          error: 'Reminder is cancelled',
+        };
+      }
+
+      const now = new Date();
+      const occurrences = await loadOccurrences();
+      const isRecurring = reminder.recurrence !== null;
+
+      if (isRecurring) {
+        // RECURRING: Update parent cache, create/update occurrence, maybe skip schedule
+
+        // Find existing occurrence for current cycle (scheduledAt close to now or in past)
+        const schedule = reminder.scheduleId
+          ? (await scheduler.getSchedules()).find((s) => s.id === reminder.scheduleId)
+          : null;
+        const nextFireAt = schedule?.nextFireAt ?? reminder.triggerAt;
+
+        // Find or create occurrence
+        let occurrence = Array.from(occurrences.values())
+          .filter((o) => o.reminderId === reminderId && o.status === 'fired')
+          .sort((a, b) => (b.firedAt?.getTime() ?? 0) - (a.firedAt?.getTime() ?? 0))[0];
+
+        if (occurrence) {
+          // Update existing occurrence to completed
+          occurrence.status = 'completed';
+          occurrence.completedAt = now;
+        } else {
+          // Create new occurrence for completion before fire
+          const existing = Array.from(occurrences.values()).filter(
+            (o) => o.reminderId === reminderId
+          );
+          const sequence =
+            existing.length > 0 ? Math.max(...existing.map((o) => o.sequence)) + 1 : 0;
+          occurrence = createOccurrence(reminderId, sequence, nextFireAt, 'completed');
+          occurrences.set(occurrence.id, occurrence);
+        }
+
+        // Update parent cache
+        reminder.lastCompletedAt = now;
+        reminder.completedCount++;
+
+        // If completing before fire, skip current occurrence on schedule
+        let newNextFireAt: Date | null = null;
+        if (reminder.scheduleId && nextFireAt > now) {
+          newNextFireAt = await scheduler.skipCurrentOccurrence(reminder.scheduleId);
+          if (newNextFireAt) {
+            // Also advance advance notice schedule if exists
+            if (reminder.advanceNoticeScheduleId) {
+              await scheduler.skipCurrentOccurrence(reminder.advanceNoticeScheduleId);
+            }
+          }
+        }
+
+        await saveReminders(reminders);
+        await saveOccurrences(occurrences);
+
+        logger.info(
+          {
+            reminderId,
+            completedCount: reminder.completedCount,
+            nextFireAt: newNextFireAt,
+          },
+          'Recurring reminder completed'
+        );
+
+        const result: ReminderToolResult = {
+          success: true,
+          action: 'complete',
+          reminderId,
+          completedCount: reminder.completedCount,
+        };
+
+        if (newNextFireAt) {
+          result.nextFireAt = newNextFireAt;
+        }
+
+        return result;
+      } else {
+        // ONE-TIME: Set status to completed, cancel schedules, create occurrence
+
+        reminder.status = 'completed';
+        reminder.lastCompletedAt = now;
+        reminder.completedCount = 1;
+
+        // Cancel main schedule
+        if (reminder.scheduleId) {
+          await scheduler.cancel(reminder.scheduleId);
+        }
+
+        // Cancel advance notice schedule if exists
+        if (reminder.advanceNoticeScheduleId) {
+          await scheduler.cancel(reminder.advanceNoticeScheduleId);
+        }
+
+        // Create occurrence
+        const occurrence = createOccurrence(reminderId, 0, reminder.triggerAt, 'completed');
+        occurrences.set(occurrence.id, occurrence);
+
+        await saveReminders(reminders);
+        await saveOccurrences(occurrences);
+
+        logger.info({ reminderId }, 'One-time reminder completed');
+
+        return {
+          success: true,
+          action: 'complete',
+          reminderId,
+          completedCount: 1,
+        };
+      }
+    } catch (error) {
+      logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to complete reminder'
+      );
+      return {
+        success: false,
+        action: 'complete',
+        error: 'Failed to complete reminder',
+      };
+    }
+  }
+
   const reminderTool: PluginTool = {
     name: 'reminder',
     description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
-Actions: create, list, cancel. Use 'anchor' with type:"recurring" for repeating reminders.
-Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice' parameter.`,
+Actions: create, list, cancel, complete. Use 'anchor' with type:"recurring" for repeating reminders.
+Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice' parameter.
+Use 'complete' to mark a reminder as done (one-time) or acknowledge completion (recurring).`,
     tags: [
       'one-time',
       'recurring',
@@ -706,6 +949,7 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
       'create',
       'list',
       'cancel',
+      'complete',
       'advance-notice',
     ],
     rawParameterSchema: REMINDER_RAW_SCHEMA,
@@ -713,9 +957,9 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
       {
         name: 'action',
         type: 'string',
-        description: 'Action to perform: "create", "list", or "cancel"',
+        description: 'Action to perform: "create", "list", "cancel", or "complete"',
         required: true,
-        enum: ['create', 'list', 'cancel'],
+        enum: ['create', 'list', 'cancel', 'complete'],
       },
       {
         name: 'content',
@@ -765,8 +1009,8 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
       if (!a['action'] || typeof a['action'] !== 'string') {
         return { success: false, error: 'action: required' };
       }
-      if (!['create', 'list', 'cancel'].includes(a['action'])) {
-        return { success: false, error: 'action: must be one of [create, list, cancel]' };
+      if (!['create', 'list', 'cancel', 'complete'].includes(a['action'])) {
+        return { success: false, error: 'action: must be one of [create, list, cancel, complete]' };
       }
       return { success: true, data: a };
     },
@@ -779,7 +1023,12 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
           error: 'Missing or invalid action parameter',
           receivedParams: Object.keys(args),
           schema: {
-            availableActions: { create: SCHEMA_CREATE, list: SCHEMA_LIST, cancel: SCHEMA_CANCEL },
+            availableActions: {
+              create: SCHEMA_CREATE,
+              list: SCHEMA_LIST,
+              cancel: SCHEMA_CANCEL,
+              complete: SCHEMA_COMPLETE,
+            },
           },
         };
       }
@@ -883,14 +1132,33 @@ Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice
           return cancelReminder(reminderId, recipientId);
         }
 
+        case 'complete': {
+          const reminderId = args['reminderId'];
+          if (typeof reminderId !== 'string' || !reminderId) {
+            return {
+              success: false,
+              action: 'complete',
+              error: 'Missing required parameter: reminderId',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_COMPLETE,
+            };
+          }
+          return completeReminder(reminderId, recipientId);
+        }
+
         default:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "create", "list", or "cancel".`,
+            error: `Unknown action: ${action}. Use "create", "list", "cancel", or "complete".`,
             receivedParams: Object.keys(args),
             schema: {
-              availableActions: { create: SCHEMA_CREATE, list: SCHEMA_LIST, cancel: SCHEMA_CANCEL },
+              availableActions: {
+                create: SCHEMA_CREATE,
+                list: SCHEMA_LIST,
+                cancel: SCHEMA_CANCEL,
+                complete: SCHEMA_COMPLETE,
+              },
             },
           };
       }
@@ -938,6 +1206,9 @@ export async function handleReminderDue(
           storedFireCount = reminder.fireCount;
           reminder.fireCount = storedFireCount + 1;
           await storage.set(REMINDER_STORAGE_KEYS.REMINDERS, stored);
+
+          // Create occurrence entry for this fire
+          await createOccurrenceOnFire(storage, data.reminderId, scheduledAt, logger);
         }
       }
     } catch (error) {
@@ -955,6 +1226,54 @@ export async function handleReminderDue(
     intentEmitter.emitPendingIntention(
       `Reminder: "${data.content}". Note: this was delayed by ~${String(Math.round(delayMs / 60000))} minutes.`,
       data.recipientId
+    );
+  }
+}
+
+/**
+ * Create an occurrence entry when a reminder fires.
+ * Internal helper for handleReminderDue.
+ */
+async function createOccurrenceOnFire(
+  storage: PluginPrimitives['storage'],
+  reminderId: string,
+  scheduledAt: Date | null,
+  logger: Logger
+): Promise<void> {
+  try {
+    const stored = await storage.get<ReminderOccurrence[]>(
+      REMINDER_STORAGE_KEYS.REMINDER_OCCURRENCES
+    );
+    const occurrences = stored ?? [];
+
+    // Revive dates from JSON serialization
+    for (const occ of occurrences) {
+      occ.scheduledAt = new Date(occ.scheduledAt);
+      if (occ.firedAt) occ.firedAt = new Date(occ.firedAt);
+      if (occ.completedAt) occ.completedAt = new Date(occ.completedAt);
+    }
+
+    // Derive sequence from max existing + 1 (safe for gaps/pruning)
+    const existing = occurrences.filter((o) => o.reminderId === reminderId);
+    const sequence = existing.length > 0 ? Math.max(...existing.map((o) => o.sequence)) + 1 : 0;
+
+    const occurrence: ReminderOccurrence = {
+      id: `occ_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      reminderId,
+      sequence,
+      scheduledAt: scheduledAt ?? new Date(),
+      firedAt: new Date(),
+      completedAt: null,
+      status: 'fired',
+    };
+
+    occurrences.push(occurrence);
+    await storage.set(REMINDER_STORAGE_KEYS.REMINDER_OCCURRENCES, occurrences);
+  } catch (error) {
+    // Non-critical: log but don't fail the reminder delivery
+    logger.error(
+      { reminderId, error: error instanceof Error ? error.message : String(error) },
+      'Failed to create occurrence entry'
     );
   }
 }

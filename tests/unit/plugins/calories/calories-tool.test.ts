@@ -375,9 +375,10 @@ describe('Calories Tool - Stats Action', () => {
       recipientId: 'user_test',
     };
 
-    // Create entries for 7 days
+    // Create entries for 7 days (relative to today so test doesn't break as dates advance)
+    const today = new Date();
     for (let i = 0; i < 7; i++) {
-      const date = new Date('2026-02-16');
+      const date = new Date(today);
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
 
@@ -393,9 +394,12 @@ describe('Calories Tool - Stats Action', () => {
     }
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
+    const recentWeight = new Date(today);
+    const olderWeight = new Date(today);
+    olderWeight.setDate(olderWeight.getDate() - 7);
     storage._store[CALORIES_STORAGE_KEYS.weights] = [
-      { id: 'weight_1', weight: 75, measuredAt: '2026-02-16T08:00:00Z', recipientId: 'user_test' },
-      { id: 'weight_2', weight: 75.5, measuredAt: '2026-02-09T08:00:00Z', recipientId: 'user_test' },
+      { id: 'weight_1', weight: 75, measuredAt: recentWeight.toISOString(), recipientId: 'user_test' },
+      { id: 'weight_2', weight: 75.5, measuredAt: olderWeight.toISOString(), recipientId: 'user_test' },
     ];
     storage._store['schema_version'] = 4;
 
@@ -481,16 +485,17 @@ describe('Calories Tool - Update Item Action', () => {
       recipientId: 'user_test',
     };
 
+    const todayStr = new Date().toISOString().split('T')[0];
     const entry: FoodEntry = {
       id: 'food_pasta1',
       dishId: 'item_pasta',
       portion: { quantity: 170, unit: 'g' },
-      timestamp: '2026-02-16T12:00:00Z',
+      timestamp: `${todayStr}T12:00:00Z`,
       recipientId: 'user_test',
     };
 
     storage._store[CALORIES_STORAGE_KEYS.items] = [item];
-    storage._store['food:2026-02-16'] = [entry];
+    storage._store[`food:${todayStr}`] = [entry];
     storage._store['schema_version'] = 4;
 
     const result = await tool.execute({

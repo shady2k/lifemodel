@@ -12,6 +12,38 @@ import type { RecurrenceSpec } from '../../types/plugin.js';
 export type ReminderStatus = 'active' | 'completed' | 'cancelled';
 
 /**
+ * Status of a reminder occurrence (ledger entry).
+ */
+export type OccurrenceStatus = 'fired' | 'completed' | 'skipped';
+
+/**
+ * A single occurrence of a reminder (append-only ledger).
+ * One entry per cycle, tracks history of fires/completions.
+ */
+export interface ReminderOccurrence {
+  /** Unique occurrence ID */
+  id: string;
+
+  /** Parent reminder ID */
+  reminderId: string;
+
+  /** Sequence number (1, 2, 3...) */
+  sequence: number;
+
+  /** When this occurrence was scheduled to fire */
+  scheduledAt: Date;
+
+  /** When this occurrence actually fired (if it fired) */
+  firedAt: Date | null;
+
+  /** When this occurrence was completed (if user completed it) */
+  completedAt: Date | null;
+
+  /** Current status of this occurrence */
+  status: OccurrenceStatus;
+}
+
+/**
  * A stored reminder.
  */
 export interface Reminder {
@@ -47,6 +79,12 @@ export interface Reminder {
 
   /** Number of times fired (for recurring) */
   fireCount: number;
+
+  /** When this reminder was last completed (cache for quick access) */
+  lastCompletedAt: Date | null;
+
+  /** How many times this reminder has been completed (cache for quick access) */
+  completedCount: number;
 
   /** Associated schedule ID (from scheduler primitive) */
   scheduleId: string | null;
@@ -233,6 +271,23 @@ export interface CancelReminderResult {
 }
 
 /**
+ * Result of completing a reminder.
+ */
+export interface CompleteReminderResult {
+  /** Whether completion succeeded */
+  success: boolean;
+
+  /** Error message if failed */
+  error?: string;
+
+  /** For recurring reminders: when the next occurrence fires */
+  nextFireAt?: Date;
+
+  /** Updated completed count */
+  completedCount?: number;
+}
+
+/**
  * Reminder due event data (emitted when reminder fires).
  */
 export interface ReminderDueData {
@@ -304,4 +359,6 @@ export const REMINDER_EVENT_KINDS = {
 export const REMINDER_STORAGE_KEYS = {
   /** All reminders */
   REMINDERS: 'reminders',
+  /** All reminder occurrences (append-only ledger) */
+  REMINDER_OCCURRENCES: 'reminder_occurrences',
 } as const;

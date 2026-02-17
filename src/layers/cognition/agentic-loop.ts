@@ -17,7 +17,7 @@ import type { Logger } from '../../types/logger.js';
 import type { LoopConfig, LoopState, Terminal } from '../../types/cognition.js';
 import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
 import type { ToolRegistry } from './tools/registry.js';
-import type { Message } from '../../llm/provider.js';
+import { type Message, LLMError } from '../../llm/provider.js';
 
 // Types — re-exported for backward compatibility (7+ external importers)
 export type {
@@ -261,7 +261,29 @@ export class AgenticLoop {
         ...(triggerTimeout !== undefined && { timeoutMs: triggerTimeout }),
       };
 
-      const response = await this.llm.completeWithTools(request, llmOptions);
+      let response: Awaited<ReturnType<typeof this.llm.completeWithTools>>;
+      try {
+        response = await this.llm.completeWithTools(request, llmOptions);
+      } catch (error) {
+        // Hard provider error (HTTP 500, timeout, etc.) — escalate to smart model
+        if (error instanceof LLMError && error.retryable && !useSmart) {
+          useSmart = true;
+          state.providerErrorRetried = false;
+          // Reset iteration so the smart model gets a full budget
+          state.iteration = 0;
+          this.logger.warn(
+            { provider: error.provider, statusCode: error.statusCode },
+            'Hard provider error — escalating to smart model'
+          );
+          messages = buildInitialMessages(context, useSmart, promptBuilders);
+          if (context.previousAttempt) {
+            addPreviousAttemptMessages(messages, context.previousAttempt, state);
+          }
+          messages = validateToolCallPairs(messages, this.logger);
+          continue;
+        }
+        throw error;
+      }
 
       // Capture chain-of-thought if present (cleaned from JSON wrapper)
       // Use same allowPlainText policy to avoid capturing leaked prompt text as thoughts
