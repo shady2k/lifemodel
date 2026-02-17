@@ -828,17 +828,26 @@ export function createReminderTools(
           : null;
         const nextFireAt = schedule?.nextFireAt ?? reminder.triggerAt;
 
-        // Find or create occurrence
-        let occurrence = Array.from(occurrences.values())
+        // Find existing fired occurrence for current cycle
+        const firedOccurrence = Array.from(occurrences.values())
           .filter((o) => o.reminderId === reminderId && o.status === 'fired')
           .sort((a, b) => (b.firedAt?.getTime() ?? 0) - (a.firedAt?.getTime() ?? 0))[0];
 
-        if (occurrence) {
+        // Determine if the current cycle already fired.
+        // Check the occurrence ledger first; fall back to comparing fireCount vs
+        // completedCount for reminders that fired before the ledger was introduced.
+        // If fireCount > completedCount, there's an unacknowledged fire (post-fire completion).
+        const currentCycleAlreadyFired =
+          !!firedOccurrence || reminder.fireCount > reminder.completedCount;
+
+        let occurrence: ReminderOccurrence;
+        if (firedOccurrence) {
           // Update existing occurrence to completed
-          occurrence.status = 'completed';
-          occurrence.completedAt = now;
+          firedOccurrence.status = 'completed';
+          firedOccurrence.completedAt = now;
+          occurrence = firedOccurrence;
         } else {
-          // Create new occurrence for completion before fire
+          // Create new occurrence for completion (pre-fire or legacy fire without ledger)
           const existing = Array.from(occurrences.values()).filter(
             (o) => o.reminderId === reminderId
           );
@@ -852,9 +861,11 @@ export function createReminderTools(
         reminder.lastCompletedAt = now;
         reminder.completedCount++;
 
-        // If completing before fire, skip current occurrence on schedule
+        // Only skip if completing BEFORE fire. If the current cycle already fired
+        // (tracked by occurrence ledger or fireCount), the scheduler already advanced
+        // nextFireAt to the NEXT cycle — skipping would jump an extra cycle.
         let newNextFireAt: Date | null = null;
-        if (reminder.scheduleId && nextFireAt > now) {
+        if (!currentCycleAlreadyFired && reminder.scheduleId && nextFireAt > now) {
           newNextFireAt = await scheduler.skipCurrentOccurrence(reminder.scheduleId);
           if (newNextFireAt) {
             // Also advance advance notice schedule if exists

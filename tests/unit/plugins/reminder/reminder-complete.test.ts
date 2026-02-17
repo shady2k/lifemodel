@@ -322,6 +322,49 @@ describe('reminder tool - complete action', () => {
       expect(completeResult.nextFireAt).toBeDefined();
     });
 
+    it('should NOT skip schedule when completing after fire (post-fire completion)', async () => {
+      // This tests the real-world scenario: reminder fires → scheduler advances → user completes later.
+      // Without this guard, complete would call skipCurrentOccurrence and jump an extra cycle.
+      const createResult = await reminderTool.execute(
+        {
+          action: 'create',
+          content: 'Pay utilities',
+          anchor: {
+            type: 'recurring',
+            recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 15 },
+            confidence: 0.9,
+            originalPhrase: 'every month on the 15th',
+          },
+        },
+        ctx
+      );
+
+      const reminderId = createResult.reminderId!;
+
+      // Simulate: reminder already fired (fireCount incremented by handleReminderDue)
+      // but no occurrence in ledger (legacy reminder that fired before ledger existed)
+      const reminders = storageData[REMINDER_STORAGE_KEYS.REMINDERS] as Reminder[];
+      const reminder = reminders.find((r) => r.id === reminderId)!;
+      reminder.fireCount = 1; // Already fired once
+
+      // Capture schedule's nextFireAt before complete
+      const scheduleId = reminder.scheduleId!;
+      const scheduleBefore = schedules.get(scheduleId)!;
+      const nextFireBefore = scheduleBefore.nextFireAt;
+
+      const completeResult = await reminderTool.execute(
+        { action: 'complete', reminderId },
+        ctx
+      );
+
+      expect(completeResult.success).toBe(true);
+      expect(completeResult.completedCount).toBe(1);
+      // nextFireAt should NOT have changed (no skip)
+      expect(completeResult.nextFireAt).toBeUndefined();
+      // Schedule's nextFireAt should remain the same
+      expect(schedules.get(scheduleId)!.nextFireAt).toEqual(nextFireBefore);
+    });
+
     it('should preserve occurrence history after multiple complete cycles', async () => {
       // Create a recurring reminder
       const createResult = await reminderTool.execute(
