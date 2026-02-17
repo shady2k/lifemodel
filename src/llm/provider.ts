@@ -160,6 +160,9 @@ export interface CompletionResponse {
 
   /** Raw finish reason from provider (e.g., AI SDK 6's rawFinishReason) */
   rawFinishReason?: string | undefined;
+
+  /** Upstream provider name (e.g., "DeepInfra", "SiliconFlow" from OpenRouter) */
+  upstreamProvider?: string | undefined;
 }
 
 /**

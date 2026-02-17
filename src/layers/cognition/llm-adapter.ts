@@ -200,6 +200,7 @@ export class LLMAdapter implements CognitionLLM {
           finishReason: response.finishReason,
           duration,
           usage: response.usage,
+          ...(response.upstreamProvider && { upstreamProvider: response.upstreamProvider }),
         },
         'LLM completion with tools done'
       );

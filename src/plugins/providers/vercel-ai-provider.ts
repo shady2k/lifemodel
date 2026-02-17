@@ -994,6 +994,12 @@ export class VercelAIProvider extends BaseLLMProvider {
       response.rawFinishReason = result.rawFinishReason;
     }
 
+    // Extract upstream provider name from OpenRouter response headers
+    const upstreamProvider = result.response.headers?.['x-openrouter-provider'];
+    if (upstreamProvider) {
+      response.upstreamProvider = upstreamProvider;
+    }
+
     // Map tool calls - AI SDK tool calls have different structures
     if (result.toolCalls && result.toolCalls.length > 0) {
       response.toolCalls = result.toolCalls.map((tc): ToolCall => {
@@ -1002,7 +1008,20 @@ export class VercelAIProvider extends BaseLLMProvider {
         const toolCallId =
           typeof toolCallIdRaw === 'string' ? toolCallIdRaw : String(toolCallIdRaw);
         const toolName = typeof toolNameRaw === 'string' ? toolNameRaw : String(toolNameRaw);
-        const args = tc['input'] as JsonObject;
+        // AI SDK gives parsed args as tc.input. Normally an object, but weak models
+        // (e.g., GLM-4.7) double-stringify their arguments, so the SDK parses one layer
+        // and leaves tc.input as a string. Detect and unwrap before re-stringifying.
+        let args: unknown = tc['input'];
+        if (typeof args === 'string') {
+          try {
+            const parsed: unknown = JSON.parse(args);
+            if (typeof parsed === 'object' && parsed !== null) {
+              args = parsed;
+            }
+          } catch {
+            // Not valid JSON — will be handled downstream by robustJsonParse
+          }
+        }
         return {
           id: toolCallId,
           type: 'function',

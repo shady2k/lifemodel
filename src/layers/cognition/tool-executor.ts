@@ -43,7 +43,34 @@ function robustJsonParse(argsString: string): Record<string, unknown> | null {
 
   // Try standard JSON.parse first
   try {
-    return JSON.parse(trimmed) as Record<string, unknown>;
+    let parsed: unknown = JSON.parse(trimmed);
+    // Unwrap double-stringification: some models (e.g., GLM-4.7) return arguments
+    // as a JSON string whose value is another JSON string. After one parse we get
+    // a string like '{"action":"create",...}' instead of an object. Parse again.
+    if (typeof parsed === 'string') {
+      // Try direct parse of the inner string
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        // Inner JSON might be truncated (SiliconFlow GLM-4.7 drops closing braces).
+        // Count unmatched braces and try to repair.
+        const inner: string = parsed as string;
+        const openBraces = (inner.match(/\{/g) ?? []).length;
+        const closeBraces = (inner.match(/\}/g) ?? []).length;
+        const missing = openBraces - closeBraces;
+        if (missing > 0) {
+          try {
+            parsed = JSON.parse(inner + '}'.repeat(missing));
+          } catch {
+            // Still can't parse — fall through to recovery
+          }
+        }
+      }
+    }
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    // Parsed successfully but not an object — fall through to recovery
   } catch {
     // Fall through to recovery attempts
   }
