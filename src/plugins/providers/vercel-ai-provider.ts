@@ -78,7 +78,7 @@ const OPENROUTER_DEFAULTS = {
   smartModel: 'anthropic/claude-sonnet-4',
 };
 
-const DEFAULT_TIMEOUT = 120_000; // 2 minutes
+const DEFAULT_TIMEOUT = 180_000; // 3 minutes (local models need more time)
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY = 1000;
 const DEFAULT_CIRCUIT_RESET_TIMEOUT = 60_000;

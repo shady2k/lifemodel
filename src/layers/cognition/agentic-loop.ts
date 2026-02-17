@@ -76,15 +76,15 @@ import { getTraceContext } from '../../core/trace-context.js';
 function getTimeoutForTrigger(triggerType: SignalType): number | undefined {
   switch (triggerType) {
     case 'user_message':
-      return undefined; // Use provider default (120s)
+      return undefined; // Use provider default (180s)
     case 'message_reaction':
-      return 60_000; // Low priority but needs enough time for cold starts/retries
+      return 120_000; // Low priority but local models need more time
     case 'contact_urge':
     case 'thought':
     case 'plugin_event':
-      return 60_000; // Background processing, pressure re-triggers
+      return 120_000; // Background processing, pressure re-triggers
     default:
-      return 60_000; // Safe default for any other proactive trigger
+      return 120_000; // Safe default for any other proactive trigger
   }
 }
 
