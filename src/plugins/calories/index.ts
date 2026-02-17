@@ -9,7 +9,7 @@
  * - Custom dish learning (auto-created when user provides calories)
  * - Weight tracking with weekly check-in reminders
  * - Calorie goal setting (manual or TDEE-based calculation)
- * - Neuron-based deficit monitoring (proactive reminders)
+ * - Neuron-based anomaly detection (signals only on abnormal days)
  *
  * This plugin follows the principle of zero core changes - the neuron
  * reads directly from plugin storage rather than requiring state enrichment.
@@ -29,9 +29,9 @@ import type {
 import type { Neuron } from '../../layers/autonomic/neuron-registry.js';
 import { createCaloriesTool } from './calories-tool.js';
 import {
-  CaloriesDeficitNeuron,
-  DEFAULT_CALORIES_DEFICIT_CONFIG,
-  type CaloriesDeficitNeuronConfig,
+  CaloriesAnomalyNeuron,
+  DEFAULT_CALORIES_ANOMALY_CONFIG,
+  type CaloriesAnomalyNeuronConfig,
 } from './calories-neuron.js';
 import {
   CALORIES_PLUGIN_ID,
@@ -51,7 +51,7 @@ let pluginTools: PluginTool[] = [];
 /**
  * Neuron instance (created via factory, stored for reference).
  */
-let neuronInstance: CaloriesDeficitNeuron | null = null;
+let neuronInstance: CaloriesAnomalyNeuron | null = null;
 
 /**
  * Plugin manifest.
@@ -62,10 +62,10 @@ const manifest: PluginManifestV2 = {
   name: 'Calories Tracking Plugin',
   version: '1.0.0',
   description:
-    'Track food intake, calories, and body weight with proactive deficit monitoring and weekly weight check-ins',
+    'Track food intake, calories, and body weight with anomaly detection and weekly weight check-ins',
   provides: [
     { type: 'tool', id: 'calories' },
-    { type: 'neuron', id: 'calories-deficit' },
+    { type: 'neuron', id: 'calories-anomaly' },
   ],
   requires: ['scheduler', 'storage', 'signalEmitter', 'logger'],
   limits: {
@@ -371,7 +371,7 @@ const lifecycle: PluginLifecycleV2 = {
  * SocialDebtNeuron that only read from AgentState.
  */
 interface CaloriesNeuronFactoryConfig {
-  neuronConfig?: Partial<CaloriesDeficitNeuronConfig>;
+  neuronConfig?: Partial<CaloriesAnomalyNeuronConfig>;
   recipientId?: string;
 }
 
@@ -381,7 +381,7 @@ interface CaloriesNeuronFactoryConfig {
 const caloriesPlugin: PluginV2 & {
   neuron: {
     create: (logger: Logger, config?: unknown) => Neuron;
-    defaultConfig: CaloriesDeficitNeuronConfig;
+    defaultConfig: CaloriesAnomalyNeuronConfig;
   };
 } = {
   manifest,
@@ -404,10 +404,11 @@ const caloriesPlugin: PluginV2 & {
       const factoryConfig = (config ?? {}) as CaloriesNeuronFactoryConfig;
       const recipientId = factoryConfig.recipientId ?? 'default';
 
-      neuronInstance = new CaloriesDeficitNeuron(
+      neuronInstance = new CaloriesAnomalyNeuron(
         logger,
         factoryConfig.neuronConfig ?? {},
         primitives.storage,
+        recipientId,
         () => primitives.services.getTimezone(recipientId),
         () => createGetUserPatterns(primitives, recipientId)(),
         createGetCalorieGoal(primitives, recipientId)
@@ -424,7 +425,7 @@ const caloriesPlugin: PluginV2 & {
 
       return neuronInstance;
     },
-    defaultConfig: DEFAULT_CALORIES_DEFICIT_CONFIG,
+    defaultConfig: DEFAULT_CALORIES_ANOMALY_CONFIG,
   },
 };
 
@@ -456,4 +457,4 @@ export {
   resolveEntryCalories,
   calculatePortionCalories,
 } from './calories-types.js';
-export type { CaloriesDeficitNeuronConfig } from './calories-neuron.js';
+export type { CaloriesAnomalyNeuronConfig } from './calories-neuron.js';

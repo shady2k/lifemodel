@@ -13,7 +13,7 @@ Track food intake, calories, and body weight with catalog-based matching and pro
 - **Duplicate Detection**: Meal-type-aware — alerts only when same item logged in same meal
 - **Weight Tracking**: Record weight measurements with weekly check-in reminders
 - **Calorie Goal**: Manual target or TDEE-based calculation
-- **Deficit Monitoring**: Neuron emits signals when calorie deficit becomes significant
+- **Anomaly Detection**: Neuron signals only when intake is anomalously low vs user's historical pattern
 
 ## Architecture
 
@@ -347,18 +347,20 @@ Normalizes all weight-based item bases to per-100g canonical form via `normalize
 
 ## Neuron Behavior
 
-The `CaloriesDeficitNeuron` monitors calorie intake throughout the day:
+The `CaloriesAnomalyNeuron` uses anomaly detection to signal only when today's intake is significantly below the user's own historical pattern:
 
+- Learns the user's eating pattern from the past 14 days (minimum 3 tracked days)
+- Uses **wake-relative hours** for both baseline building and comparison (handles shift workers)
 - Reads food entries directly from plugin storage (no core changes)
 - **Relational reads**: Loads items catalog, uses `resolveEntryCalories()`
 - **Recipient filter**: Only counts entries for the neuron's user
 - Stays dormant if no calorie goal is set
 - Skips during sleep hours (alertness < 0.3)
-- Pressure increases as day progresses
-- Emits signal when deficit > 50% after 2 PM
-- HIGH priority when deficit > 80% after 6 PM
-- Refractory period: 2 hours (avoid nagging)
-- Dormant after 11 PM (eating window closed)
+- **Timing guard**: Only checks after 60% of waking hours elapsed (too early = not enough signal)
+- **Floor guard**: Skips if expected calories < 200 kcal (protects OMAD / late eaters)
+- **Anomaly score**: `max(calorieDeviation, mealDeviation)` — fires if > 40% below expected pace
+- **Once per day**: After emitting, no more signals that day. No escalation
+- Normal days = complete silence
 
 ### Weight Check-in
 
