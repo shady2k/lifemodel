@@ -467,3 +467,34 @@ ${lines.join('\n')}
 Invoke via core.act with skill parameter.
 </available_skills>`;
 }
+
+/**
+ * Build commitments section for proactive trigger context.
+ * Shows active commitments (promises the agent has made).
+ * Overdue commitments are flagged for attention.
+ */
+export function buildCommitmentsSection(context: LoopContext): string | null {
+  const commitments = context.activeCommitments;
+  if (!commitments || commitments.length === 0) {
+    return null;
+  }
+
+  const now = Date.now();
+  const lines = commitments.map((c) => {
+    const dueAt = new Date(c.dueAt);
+    const isOverdue = dueAt.getTime() < now;
+    const overdueFlag = isOverdue ? ' [OVERDUE]' : '';
+    const sourceNote = c.source === 'implicit' ? ' (implied)' : '';
+    return `- "${c.text}"${overdueFlag}${sourceNote}`;
+  });
+
+  const hasOverdue = commitments.some((c) => new Date(c.dueAt).getTime() < now);
+  const overdueNote = hasOverdue
+    ? '\nAt least one commitment is overdue. Acknowledge and either fulfill or repair.'
+    : '';
+
+  return `<commitments>
+${lines.join('\n')}
+You made these promises.${overdueNote}
+</commitments>`;
+}

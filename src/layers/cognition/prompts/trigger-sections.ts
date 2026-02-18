@@ -180,6 +180,30 @@ If the task is complete, you can cancel it with plugin.reminder(action:"cancel",
 </trigger>`;
   }
 
+  // Handle commitment overdue events (Phase 5: Commitment Tracking)
+  if (eventKind === 'commitment:overdue') {
+    const commitmentId = (data['commitmentId'] as string | undefined) ?? '';
+    const text = (data['text'] as string | undefined) ?? 'Unknown commitment';
+    const dueAt = data['dueAt'] as string | undefined;
+
+    return `<trigger type="commitment_overdue">
+<context>
+You promised: "${text}"
+Due: ${dueAt ?? 'unknown'}
+You missed this commitment.
+</context>
+
+<task>
+Acknowledge the breach and repair it.
+1. If you can still fulfill it: do so now, then call core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
+2. If not: acknowledge to the user, explain, then call core.commitment(action:"mark_repaired", commitmentId:"${commitmentId}", repairNote:"how you made it right").
+3. If circumstances changed: call core.commitment(action:"cancel", commitmentId:"${commitmentId}").
+
+Never ignore a broken promise. Always acknowledge and repair.
+</task>
+</trigger>`;
+  }
+
   // Generic plugin event format
   return `<trigger type="plugin_event">
 <context>

@@ -130,8 +130,13 @@ function robustJsonParse(argsString: string): Record<string, unknown> | null {
  * This allows subsequent tools in the same loop to see the data.
  * - core.remember: User facts should be immediately queryable
  * - core.setInterest: Topic interests should be immediately visible
+ * - core.commitment: Commitments should be immediately visible
  */
-export const IMMEDIATE_INTENT_TOOLS = ['core.remember', 'core.setInterest'] as const;
+export const IMMEDIATE_INTENT_TOOLS = [
+  'core.remember',
+  'core.setInterest',
+  'core.commitment',
+] as const;
 
 /**
  * Create a signature for a tool call to detect repeated identical calls.

@@ -27,6 +27,7 @@ import {
   createEscalateTool,
   createDeferTool,
   createSayTool,
+  createCommitmentTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
@@ -452,6 +453,9 @@ export class ToolRegistry {
 
     // Say tool (intermediate messages - intercepted by agentic loop)
     this.tools.set('core.say', createSayTool());
+
+    // Commitment tool (track promises the agent makes)
+    this.tools.set('core.commitment', createCommitmentTool());
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

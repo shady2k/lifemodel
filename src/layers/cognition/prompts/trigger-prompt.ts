@@ -17,6 +17,7 @@ import {
   buildRuntimeSnapshotSection,
   buildCompletedActionsSection,
   buildAvailableSkillsSection,
+  buildCommitmentsSection,
 } from './context-sections.js';
 import {
   buildProactiveContactSection,
@@ -75,6 +76,12 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
   const behaviorRulesSection = buildBehaviorRulesSection(context);
   if (behaviorRulesSection) {
     sections.push(behaviorRulesSection);
+  }
+
+  // Active commitments (promises the agent has made) - after behavior rules
+  const commitmentsSection = buildCommitmentsSection(context);
+  if (commitmentsSection) {
+    sections.push(commitmentsSection);
   }
 
   // Runtime snapshot (conditional, for state-related queries)

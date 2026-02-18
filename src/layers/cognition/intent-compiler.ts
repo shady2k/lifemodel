@@ -228,6 +228,50 @@ export function toolResultToIntent(result: ToolResult, context: LoopContext): In
       };
     }
 
+    case 'core.commitment': {
+      // core.commitment → COMMITMENT intent
+      const action = data['action'] as string;
+      if (!action) return null;
+
+      // Handle create action
+      if (action === 'create') {
+        const commitments = data['commitments'] as
+          | { id: string; text: string; dueAt: Date; source: string; confidence: number }[]
+          | undefined;
+        const commitment = commitments?.[0];
+        if (!commitment) return null;
+
+        return {
+          type: 'COMMITMENT',
+          payload: {
+            action: 'create',
+            commitmentId: commitment.id,
+            text: commitment.text,
+            dueAt: commitment.dueAt,
+            source: commitment.source as 'explicit' | 'implicit',
+            confidence: commitment.confidence,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // Handle mark_kept, mark_repaired, cancel actions
+      if (['mark_kept', 'mark_repaired', 'cancel'].includes(action)) {
+        return {
+          type: 'COMMITMENT',
+          payload: {
+            action: action as 'mark_kept' | 'mark_repaired' | 'cancel',
+            commitmentId: data['commitmentId'] as string,
+            repairNote: data['repairNote'] as string | undefined,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // list_active doesn't produce an intent
+      return null;
+    }
+
     // core.thought is handled separately via thoughtToolResultToIntent
     // because it has complex depth/recursion logic
 

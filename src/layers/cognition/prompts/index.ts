@@ -13,6 +13,7 @@ export {
   buildBehaviorRulesSection,
   buildRuntimeSnapshotSection,
   buildCompletedActionsSection,
+  buildCommitmentsSection,
 } from './context-sections.js';
 export {
   buildProactiveContactSection,

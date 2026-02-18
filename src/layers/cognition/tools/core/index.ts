@@ -20,6 +20,7 @@ export { createDeferTool } from './defer.js';
 export { createSayTool } from './say.js';
 export { createCredentialTool } from './credential.js';
 export { createSkillTool } from './skill.js';
+export { createCommitmentTool } from './commitment.js';
 
 // Types
 export type {

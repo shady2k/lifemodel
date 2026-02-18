@@ -22,7 +22,8 @@ export type IntentType =
   | 'EMIT_METRIC'
   | 'EMIT_THOUGHT'
   | 'REMEMBER'
-  | 'SET_INTEREST';
+  | 'SET_INTEREST'
+  | 'COMMITMENT';
 
 /**
  * Trace metadata for intent tracking in logs.
@@ -309,6 +310,44 @@ export interface SetInterestIntent {
 }
 
 /**
+ * Commitment action types.
+ */
+export type CommitmentAction = 'create' | 'mark_kept' | 'mark_repaired' | 'cancel' | 'list_active';
+
+/**
+ * Source of a commitment.
+ */
+export type CommitmentSource = 'explicit' | 'implicit';
+
+/**
+ * Manage commitments (promises) the agent makes.
+ * Enables follow-up and repair — the "it actually cares" moment.
+ */
+export interface CommitmentIntent {
+  type: 'COMMITMENT';
+  payload: {
+    /** Action to perform */
+    action: CommitmentAction;
+    /** Commitment ID (for mark_kept, mark_repaired, cancel) */
+    commitmentId?: string | undefined;
+    /** What the agent promised (for create) */
+    text?: string | undefined;
+    /** When the commitment is due (for create) */
+    dueAt?: Date | undefined;
+    /** Whether explicit or implied (for create) */
+    source?: CommitmentSource | undefined;
+    /** Confidence level (for create) */
+    confidence?: number | undefined;
+    /** How the breach was repaired (for mark_repaired) */
+    repairNote?: string | undefined;
+    /** Recipient context */
+    recipientId?: string | undefined;
+  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
+}
+
+/**
  * Union of all intent types.
  */
 export type Intent =
@@ -323,4 +362,5 @@ export type Intent =
   | EmitMetricIntent
   | EmitThoughtIntent
   | RememberIntent
-  | SetInterestIntent;
+  | SetInterestIntent
+  | CommitmentIntent;

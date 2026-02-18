@@ -58,7 +58,7 @@ import {
 } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
-import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
+import type { MemoryProvider, MemoryEntry } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
 import type { SoulProvider } from '../storage/soul-provider.js';
 import type { AlertnessMode } from '../types/agent/state.js';
@@ -1193,12 +1193,13 @@ export class CoreLoop {
    * during loop execution so subsequent tools can see the data.
    */
   applyImmediateIntent(intent: Intent): void {
-    // Only apply REMEMBER, SET_INTEREST, and SEND_MESSAGE immediately
+    // Only apply REMEMBER, SET_INTEREST, COMMITMENT, and SEND_MESSAGE immediately
     // SEND_MESSAGE is used for intermediate acknowledgments during tool processing
     // Other intents should wait for normal intent processing
     if (
       intent.type !== 'REMEMBER' &&
       intent.type !== 'SET_INTEREST' &&
+      intent.type !== 'COMMITMENT' &&
       intent.type !== 'SEND_MESSAGE'
     ) {
       this.logger.warn(
@@ -1735,8 +1736,186 @@ export class CoreLoop {
             });
             break;
           }
+
+          case 'COMMITMENT': {
+            const {
+              action,
+              commitmentId,
+              text,
+              dueAt,
+              source,
+              confidence,
+              repairNote,
+              recipientId: commitmentRecipientId,
+            } = intent.payload;
+            const trace = intent.trace;
+
+            if (!this.memoryProvider) {
+              this.logger.warn({ action }, 'COMMITMENT skipped: no MemoryProvider');
+              break;
+            }
+
+            if (action === 'create') {
+              if (!commitmentId || !text || !dueAt) {
+                this.logger.error(
+                  { commitmentId, text, dueAt },
+                  'COMMITMENT create: missing fields'
+                );
+                break;
+              }
+
+              // Store commitment as MemoryEntry
+              const entry: MemoryEntry = {
+                id: commitmentId,
+                type: 'fact',
+                content: text,
+                timestamp: new Date(),
+                recipientId: commitmentRecipientId,
+                tags: ['commitment', 'state:active'],
+                confidence: confidence ?? 0.9,
+                metadata: {
+                  kind: 'commitment',
+                  dueAt: dueAt.toISOString(),
+                  source: source ?? 'explicit',
+                  createdAt: new Date().toISOString(),
+                },
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
+              };
+
+              this.memoryProvider.save(entry).catch((err: unknown) => {
+                this.logger.error(
+                  { commitmentId, error: err instanceof Error ? err.message : String(err) },
+                  'Failed to save commitment'
+                );
+              });
+
+              // Record completed action
+              if (commitmentRecipientId && this.conversationManager) {
+                const dueDate = new Date(dueAt);
+                const summary = `promise: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" (due ${dueDate.toLocaleDateString()})`;
+                this.conversationManager
+                  .addCompletedAction(commitmentRecipientId, {
+                    tool: 'core.commitment',
+                    summary,
+                  })
+                  .catch((err: unknown) => {
+                    this.logger.warn(
+                      { error: err instanceof Error ? err.message : String(err) },
+                      'Failed to record completed action for commitment'
+                    );
+                  });
+              }
+
+              this.logger.info(
+                { commitmentId, text: text.slice(0, 50), dueAt, source },
+                'Commitment created'
+              );
+              this.metrics.counter('commitments_created', { source: source ?? 'explicit' });
+            } else if (action === 'mark_kept') {
+              // Update commitment status to kept
+              if (commitmentId) {
+                void this.updateCommitmentStatus(commitmentId, 'kept', commitmentRecipientId);
+                this.logger.info({ commitmentId }, 'Commitment marked as kept');
+                this.metrics.counter('commitments_kept');
+              }
+            } else if (action === 'mark_repaired') {
+              // Update commitment status to repaired with note
+              if (commitmentId) {
+                void this.updateCommitmentStatus(
+                  commitmentId,
+                  'repaired',
+                  commitmentRecipientId,
+                  repairNote
+                );
+                this.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
+                this.metrics.counter('commitments_repaired');
+              }
+            } else if (action === 'cancel') {
+              // Update commitment status to cancelled
+              if (commitmentId) {
+                void this.updateCommitmentStatus(commitmentId, 'cancelled', commitmentRecipientId);
+                this.logger.info({ commitmentId }, 'Commitment cancelled');
+                this.metrics.counter('commitments_cancelled');
+              }
+            }
+            break;
+          }
         }
       });
+    }
+  }
+
+  /**
+   * Update commitment status in memory.
+   * Helper method for COMMITMENT intent handling.
+   */
+  private async updateCommitmentStatus(
+    commitmentId: string,
+    status: 'kept' | 'breached' | 'repaired' | 'cancelled',
+    recipientId?: string,
+    repairNote?: string
+  ): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    try {
+      // Search for the commitment by ID
+      const result = await this.memoryProvider.search('', {
+        limit: 100,
+        metadata: { kind: 'commitment' },
+      });
+
+      const commitment = result.entries.find((e) => e.id === commitmentId);
+      if (!commitment) {
+        this.logger.warn({ commitmentId }, 'Commitment not found for status update');
+        return;
+      }
+
+      // Update tags (remove old state, add new state)
+      const oldTags = commitment.tags ?? [];
+      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
+      newTags.push(`state:${status}`);
+
+      // Update metadata
+      const metadata = {
+        ...(commitment.metadata ?? {}),
+        status,
+        [`${status}At`]: new Date().toISOString(),
+      };
+
+      if (repairNote) {
+        metadata['repairNote'] = repairNote;
+      }
+
+      // Save updated entry
+      const updatedEntry: MemoryEntry = {
+        ...commitment,
+        tags: newTags,
+        metadata,
+      };
+
+      await this.memoryProvider.save(updatedEntry);
+
+      // Record completed action for kept/repaired
+      if (recipientId && this.conversationManager && (status === 'kept' || status === 'repaired')) {
+        const summary = `commitment ${status}: "${commitment.content.slice(0, 30)}..."`;
+        this.conversationManager
+          .addCompletedAction(recipientId, {
+            tool: 'core.commitment',
+            summary,
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(
+              { error: err instanceof Error ? err.message : String(err) },
+              'Failed to record completed action for commitment update'
+            );
+          });
+      }
+    } catch (err) {
+      this.logger.error(
+        { commitmentId, status, error: err instanceof Error ? err.message : String(err) },
+        'Failed to update commitment status'
+      );
     }
   }
 

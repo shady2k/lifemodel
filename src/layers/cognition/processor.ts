@@ -34,6 +34,7 @@ import {
 import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { createToolRegistry, type MemoryProvider, type MemoryEntry } from './tools/registry.js';
+import type { CommitmentSummary } from '../../types/agent/commitment.js';
 import type { SoulProvider, FullSoulState } from '../../storage/soul-provider.js';
 import {
   processBatchReflection,
@@ -380,6 +381,9 @@ export class CognitionProcessor implements CognitionLayer {
     // Get behavioral rules learned from user feedback
     const behaviorRules = await this.getBehaviorRules(recipientId);
 
+    // Get active commitments (promises the agent has made)
+    const activeCommitments = await this.getActiveCommitments(recipientId);
+
     // Load available skills for Motor Cortex
     const availableSkills = await discoverSkills();
 
@@ -423,6 +427,8 @@ export class CognitionProcessor implements CognitionLayer {
       drainPendingUserMessages: context.drainPendingUserMessages,
       // Phase 3: Interest-driven proactivity - surface user interests for proactive triggers
       userInterests: this.userModel?.getInterests() ?? undefined,
+      // Phase 5: Commitment tracking - surface active commitments for follow-up/repair
+      activeCommitments: activeCommitments.length > 0 ? activeCommitments : undefined,
     };
 
     // Mark surfaced intentions as consumed (delete from memory)
@@ -817,6 +823,58 @@ export class CognitionProcessor implements CognitionLayer {
       this.logger.trace(
         { error: error instanceof Error ? error.message : 'Unknown' },
         'Failed to get behavior rules'
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Get active commitments (promises the agent has made).
+   * Returns commitments sorted by due date (soonest first).
+   */
+  private async getActiveCommitments(recipientId?: string): Promise<CommitmentSummary[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      // Search for active commitments
+      const result = await this.memoryProvider.search('', {
+        limit: 20,
+        metadata: { kind: 'commitment' },
+      });
+
+      const now = Date.now();
+      const activeCommitments = result.entries
+        .filter((entry) => {
+          // Only include active commitments
+          if (!entry.tags?.includes('commitment')) return false;
+          if (!entry.tags.includes('state:active')) return false;
+          // Filter by recipient if specified
+          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
+          return true;
+        })
+        .map((entry): CommitmentSummary => {
+          const dueAtStr = entry.metadata?.['dueAt'] as string | undefined;
+          const dueAt = dueAtStr ? new Date(dueAtStr) : new Date();
+          return {
+            id: entry.id,
+            text: entry.content,
+            dueAt,
+            isOverdue: dueAt.getTime() < now,
+            source:
+              (entry.metadata?.['source'] as 'explicit' | 'implicit' | undefined) ?? 'explicit',
+            confidence: entry.confidence ?? 0.9,
+          };
+        })
+        .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime())
+        .slice(0, 5); // Max 5 commitments shown
+
+      return activeCommitments;
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get active commitments'
       );
       return [];
     }

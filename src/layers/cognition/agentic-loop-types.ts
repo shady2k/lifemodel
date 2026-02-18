@@ -17,6 +17,7 @@ import type { MemoryEntry } from './tools/registry.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
 import type { DiscoveredSkill } from '../../runtime/skills/skill-types.js';
+import type { CommitmentSummary } from '../../types/agent/commitment.js';
 
 /**
  * Request for LLM completion with native tool calling.
@@ -191,6 +192,9 @@ export interface LoopContext {
 
   /** User's topic interests (weights + urgency) for interest-driven proactivity */
   userInterests?: Interests | undefined;
+
+  /** Active commitments (promises the agent has made) for follow-up and repair */
+  activeCommitments?: CommitmentSummary[] | undefined;
 }
 
 /**
