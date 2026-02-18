@@ -342,12 +342,8 @@ const lifecycle: PluginLifecycleV2 = {
     }
   },
 
-  async onEvent(
-    eventKind: string,
-    payload: Record<string, unknown>,
-    _fireContext?: FireContext
-  ): Promise<void> {
-    if (!pluginPrimitives) return;
+  async onEvent(eventKind: string, payload: Record<string, unknown>, _fireContext?: FireContext) {
+    if (!pluginPrimitives) return undefined;
 
     if (eventKind === CALORIES_EVENT_KINDS.WEIGHT_CHECKIN) {
       const recipientId = payload['recipientId'];
@@ -356,10 +352,11 @@ const lifecycle: PluginLifecycleV2 = {
           { payload },
           'Invalid weight checkin payload: missing recipientId'
         );
-        return;
+        return undefined;
       }
       await handleWeightCheckin({ recipientId }, pluginPrimitives);
     }
+    return undefined;
   },
 };
 

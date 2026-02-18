@@ -716,7 +716,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // 6. Wire scheduler to dispatch events to plugins
   schedulerService.setPluginEventCallback(async (pluginId, eventKind, payload, fireContext) => {
-    await pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload, fireContext);
+    return pluginLoader.dispatchPluginEvent(pluginId, eventKind, payload, fireContext);
   });
 
   // 7. Discover and load plugins (triggers dynamic neuron registration via callbacks)

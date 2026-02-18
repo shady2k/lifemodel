@@ -1349,6 +1349,17 @@ function formatAdvanceNoticeDuration(before: RelativeTime): string {
  * Emits pending intentions for today's upcoming reminders so the agent
  * is aware of appointments on first user contact.
  */
+/**
+ * Result from daily agenda processing — used by onEvent to enrich the signal
+ * or suppress it when there's nothing to report.
+ */
+export interface DailyAgendaResult {
+  /** Formatted agenda items within the 18h horizon (e.g., '"Pay internet" at 09:00'). */
+  agendaItems: string[];
+  /** True when no reminders are due within the horizon — caller should suppress the signal. */
+  suppressSignal: boolean;
+}
+
 export async function handleDailyAgenda(
   storage: PluginPrimitives['storage'],
   scheduler: PluginPrimitives['scheduler'],
@@ -1356,14 +1367,16 @@ export async function handleDailyAgenda(
   intentEmitter: PluginPrimitives['intentEmitter'],
   getTimezone: GetTimezoneFunc,
   recipientId: string
-): Promise<void> {
+): Promise<DailyAgendaResult> {
+  const empty: DailyAgendaResult = { agendaItems: [], suppressSignal: true };
+
   try {
     logger.debug({ recipientId }, 'Daily agenda handler started');
 
     const reminders = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);
     if (!reminders || reminders.length === 0) {
       logger.debug({ recipientId }, 'No reminders found for daily agenda');
-      return;
+      return empty;
     }
 
     logger.debug(
@@ -1380,7 +1393,7 @@ export async function handleDailyAgenda(
         { recipientId, totalReminders: reminders.length },
         'No active reminders with schedules for daily agenda'
       );
-      return;
+      return empty;
     }
 
     // Get all schedules to find nextFireAt
@@ -1426,10 +1439,12 @@ export async function handleDailyAgenda(
     }
 
     logger.info({ recipientId, emitted, total: activeReminders.length }, 'Daily agenda processed');
+    return { agendaItems, suppressSignal: agendaItems.length === 0 };
   } catch (error) {
     logger.error(
       { error: error instanceof Error ? error.message : String(error), recipientId },
       'Failed to process daily agenda'
     );
+    return empty;
   }
 }

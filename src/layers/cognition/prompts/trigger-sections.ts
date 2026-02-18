@@ -108,6 +108,27 @@ Deliver this news with URLs inline.
 </trigger>`;
   }
 
+  // Handle daily agenda events — pre-filtered agenda items from plugin
+  if (eventKind === 'reminder:daily_agenda') {
+    const agendaItems = data['agendaItems'] as string[] | undefined;
+    const hasItems = agendaItems && agendaItems.length > 0;
+
+    const itemsList = hasItems
+      ? agendaItems.map((item, i) => `${String(i + 1)}. ${item}`).join('\n')
+      : '';
+
+    return `<trigger type="daily_agenda">
+<context>
+Morning agenda trigger.${hasItems ? `\nReminders due today:\n${itemsList}` : '\nNo reminders due today.'}
+</context>
+
+<task>
+You are initiating morning contact.
+${hasItems ? 'Execute any actionable daily reminders listed above (e.g., check news channels). Mention only the reminders shown here — do NOT call plugin_reminder list or mention other reminders.' : 'Greet the user warmly. Do NOT call plugin_reminder list or mention any reminders.'}
+</task>
+</trigger>`;
+  }
+
   // Generic plugin event format
   return `<trigger type="plugin_event">
 <context>

@@ -201,8 +201,8 @@ const lifecycle: PluginLifecycleV2 = {
     eventKind: string,
     payload: Record<string, unknown>,
     fireContext?: FireContext
-  ): Promise<void> {
-    if (!pluginPrimitives) return;
+  ): Promise<{ suppressSignal?: boolean; enrichment?: Record<string, unknown> } | undefined> {
+    if (!pluginPrimitives) return undefined;
 
     if (eventKind === REMINDER_EVENT_KINDS.REMINDER_DUE) {
       await handleReminderDue(
@@ -221,7 +221,7 @@ const lifecycle: PluginLifecycleV2 = {
         pluginPrimitives.intentEmitter
       );
     } else if (eventKind === REMINDER_EVENT_KINDS.DAILY_AGENDA) {
-      await handleDailyAgenda(
+      const result = await handleDailyAgenda(
         pluginPrimitives.storage,
         pluginPrimitives.scheduler,
         pluginPrimitives.logger,
@@ -229,7 +229,15 @@ const lifecycle: PluginLifecycleV2 = {
         (rid) => pluginPrimitives?.services.getTimezone(rid) ?? 'Europe/Moscow',
         (payload['recipientId'] as string | undefined) ?? 'default'
       );
+      return {
+        suppressSignal: result.suppressSignal,
+        enrichment: {
+          agendaItems: result.agendaItems,
+          excludeTools: ['plugin.reminder'],
+        },
+      };
     }
+    return undefined;
   },
 };
 

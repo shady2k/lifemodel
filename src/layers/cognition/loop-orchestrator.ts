@@ -128,6 +128,24 @@ export function filterToolsForContext(
       if (name === 'core.task' || name === 'core_task') return false;
     }
 
+    // Plugin-declared tool exclusions: plugins can set excludeTools in signal enrichment
+    // to prevent the LLM from calling tools that would undermine pre-computed data.
+    if (context.triggerSignal.type === 'plugin_event') {
+      const signalData = context.triggerSignal.data as { excludeTools?: string[] } | undefined;
+      if (Array.isArray(signalData?.excludeTools)) {
+        // Check both dot and underscore forms (sanitized vs internal)
+        const dotName = name.replace(/_/, '.');
+        const underscoreName = name.replace(/\./, '_');
+        if (
+          signalData.excludeTools.includes(name) ||
+          signalData.excludeTools.includes(dotName) ||
+          signalData.excludeTools.includes(underscoreName)
+        ) {
+          return false;
+        }
+      }
+    }
+
     return true;
   });
 }

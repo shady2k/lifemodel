@@ -723,6 +723,10 @@ export interface PluginLifecycleV2 {
    * Use this to handle scheduled events, update internal state, etc.
    * Called BEFORE the signal reaches cognition layer.
    *
+   * Return an object to control signal behavior:
+   * - suppressSignal: true → don't emit signal to cognition (skip this tick)
+   * - enrichment: additional data merged into signal payload
+   *
    * @param eventKind Namespaced event kind (e.g., 'reminder:reminder_due')
    * @param payload The schedule data payload
    * @param fireContext Timing context with scheduledFor/firedAt for overdue detection
@@ -731,7 +735,7 @@ export interface PluginLifecycleV2 {
     eventKind: string,
     payload: Record<string, unknown>,
     fireContext?: FireContext
-  ): Promise<void>;
+  ): Promise<{ suppressSignal?: boolean; enrichment?: Record<string, unknown> } | undefined>;
 }
 
 /**

@@ -22,6 +22,17 @@ import { withTraceContext, createTraceContext } from './trace-context.js';
 export type SignalPushCallback = (signal: Signal) => void;
 
 /**
+ * Result from plugin event callback — allows plugins to enrich the signal
+ * payload or suppress the signal entirely.
+ */
+export interface PluginEventResult {
+  /** If true, scheduler will NOT emit a signal to cognition for this event. */
+  suppressSignal?: boolean;
+  /** Additional data merged into the signal payload (e.g., pre-filtered agenda items). */
+  enrichment?: Record<string, unknown>;
+}
+
+/**
  * Callback type for notifying plugins of events.
  */
 export type PluginEventCallback = (
@@ -29,7 +40,7 @@ export type PluginEventCallback = (
   eventKind: string,
   payload: Record<string, unknown>,
   fireContext?: FireContext
-) => Promise<void>;
+) => Promise<PluginEventResult | undefined>;
 
 /**
  * Scheduler service configuration.
@@ -267,6 +278,7 @@ export class SchedulerService {
               const eventKind = typeof rawKind === 'string' ? rawKind : `${pluginId}:scheduled`;
 
               // Notify plugin of its event (for internal state updates)
+              let callbackResult: PluginEventResult | undefined = undefined;
               if (this.pluginEventCallback) {
                 try {
                   // Clone again for plugin callback to isolate from signal
@@ -279,7 +291,12 @@ export class SchedulerService {
                       unknown
                     >;
                   }
-                  await this.pluginEventCallback(pluginId, eventKind, pluginPayload, fireContext);
+                  callbackResult = await this.pluginEventCallback(
+                    pluginId,
+                    eventKind,
+                    pluginPayload,
+                    fireContext
+                  );
                 } catch (error) {
                   this.logger.error(
                     {
@@ -292,10 +309,16 @@ export class SchedulerService {
                 }
               }
 
-              // Create and emit signal to wake cognition (unless suppressed by schedule config)
-              // Check emitSignal flag in schedule data - set by plugin-loader from manifest
+              // Merge plugin enrichment into signal payload
+              if (callbackResult?.enrichment) {
+                Object.assign(clonedPayload, callbackResult.enrichment);
+              }
+
+              // Create and emit signal to wake cognition (unless suppressed)
+              // Suppression: schedule-level emitSignal flag OR plugin callback suppressSignal
               const emitSignal = entry.data['emitSignal'];
-              if (this.signalCallback && emitSignal !== false) {
+              const pluginSuppressed = callbackResult?.suppressSignal === true;
+              if (this.signalCallback && emitSignal !== false && !pluginSuppressed) {
                 const signal = this.createPluginEventSignal(
                   pluginId,
                   clonedPayload,

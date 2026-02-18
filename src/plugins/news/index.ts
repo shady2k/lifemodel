@@ -779,16 +779,13 @@ const lifecycle: PluginLifecycleV2 = {
   /**
    * Handle plugin events (called by scheduler for feed polling).
    */
-  async onEvent(
-    eventKind: string,
-    _payload: Record<string, unknown>,
-    _fireContext?: FireContext
-  ): Promise<void> {
-    if (!pluginPrimitives) return;
+  async onEvent(eventKind: string, _payload: Record<string, unknown>, _fireContext?: FireContext) {
+    if (!pluginPrimitives) return undefined;
 
     if (eventKind === NEWS_EVENT_KINDS.POLL_FEEDS) {
       await handlePollFeeds(pluginPrimitives);
     }
+    return undefined;
   },
 };
 

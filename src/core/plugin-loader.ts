@@ -1124,7 +1124,7 @@ export class PluginLoader {
     eventKind: string,
     payload: Record<string, unknown>,
     fireContext?: FireContext
-  ): Promise<void> {
+  ): Promise<{ suppressSignal?: boolean; enrichment?: Record<string, unknown> } | undefined> {
     const state = this.plugins.get(pluginId);
     if (!state) {
       this.logger.warn({ pluginId, eventKind }, 'Plugin not found for event dispatch');
@@ -1132,8 +1132,9 @@ export class PluginLoader {
     }
 
     if (state.plugin.lifecycle.onEvent) {
-      await state.plugin.lifecycle.onEvent(eventKind, payload, fireContext);
+      return state.plugin.lifecycle.onEvent(eventKind, payload, fireContext);
     }
+    return undefined;
   }
 
   /**
