@@ -35,6 +35,8 @@ import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
 import { createToolRegistry, type MemoryProvider, type MemoryEntry } from './tools/registry.js';
 import type { CommitmentSummary } from '../../types/agent/commitment.js';
+import type { DesireSummary } from '../../types/agent/desire.js';
+import type { OpinionSummary, PredictionSummary } from '../../types/agent/perspective.js';
 import type { SoulProvider, FullSoulState } from '../../storage/soul-provider.js';
 import {
   processBatchReflection,
@@ -384,6 +386,12 @@ export class CognitionProcessor implements CognitionLayer {
     // Get active commitments (promises the agent has made)
     const activeCommitments = await this.getActiveCommitments(recipientId);
 
+    // Get active desires (wants the agent has)
+    const activeDesires = await this.getActiveDesires(recipientId);
+
+    // Get perspectives (opinions and predictions)
+    const { opinions, predictions } = await this.getPerspectives(recipientId);
+
     // Load available skills for Motor Cortex
     const availableSkills = await discoverSkills();
 
@@ -429,6 +437,11 @@ export class CognitionProcessor implements CognitionLayer {
       userInterests: this.userModel?.getInterests() ?? undefined,
       // Phase 5: Commitment tracking - surface active commitments for follow-up/repair
       activeCommitments: activeCommitments.length > 0 ? activeCommitments : undefined,
+      // Phase 6: Desire-driven proactivity - surface active desires for want-driven contact
+      activeDesires: activeDesires.length > 0 ? activeDesires : undefined,
+      // Phase 7: Perspectives - surface opinions and predictions for inner life
+      opinions: opinions.length > 0 ? opinions : undefined,
+      predictions: predictions.length > 0 ? predictions : undefined,
     };
 
     // Mark surfaced intentions as consumed (delete from memory)
@@ -877,6 +890,139 @@ export class CognitionProcessor implements CognitionLayer {
         'Failed to get active commitments'
       );
       return [];
+    }
+  }
+
+  /**
+   * Get active desires (wants the agent has).
+   * Returns desires sorted by intensity (strongest first).
+   */
+  private async getActiveDesires(recipientId?: string): Promise<DesireSummary[]> {
+    if (!this.memoryProvider) {
+      return [];
+    }
+
+    try {
+      // Search for active desires
+      const result = await this.memoryProvider.search('', {
+        limit: 20,
+        metadata: { kind: 'desire' },
+      });
+
+      const activeDesires = result.entries
+        .filter((entry) => {
+          // Only include active desires
+          if (!entry.tags?.includes('desire')) return false;
+          if (!entry.tags.includes('state:active')) return false;
+          // Filter by recipient if specified
+          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
+          return true;
+        })
+        .map((entry): DesireSummary => {
+          return {
+            id: entry.id,
+            want: entry.content,
+            intensity: (entry.metadata?.['intensity'] as number | undefined) ?? 0.5,
+            source:
+              (entry.metadata?.['source'] as
+                | 'user_signal'
+                | 'self_inference'
+                | 'commitment_followup'
+                | undefined) ?? 'self_inference',
+            evidence: (entry.metadata?.['evidence'] as string | undefined) ?? '',
+          };
+        })
+        .sort((a, b) => b.intensity - a.intensity)
+        .slice(0, 3); // Max 3 desires shown
+
+      return activeDesires;
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get active desires'
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Get perspectives (opinions and predictions).
+   * Returns active opinions and pending predictions.
+   */
+  private async getPerspectives(
+    recipientId?: string
+  ): Promise<{ opinions: OpinionSummary[]; predictions: PredictionSummary[] }> {
+    if (!this.memoryProvider) {
+      return { opinions: [], predictions: [] };
+    }
+
+    try {
+      // Get opinions
+      const opinionsResult = await this.memoryProvider.search('', {
+        limit: 20,
+        metadata: { kind: 'opinion' },
+      });
+
+      const opinions: OpinionSummary[] = opinionsResult.entries
+        .filter((entry) => {
+          if (!entry.tags?.includes('opinion')) return false;
+          if (!entry.tags.includes('state:active')) return false;
+          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
+          return true;
+        })
+        .map((entry): OpinionSummary => {
+          return {
+            id: entry.id,
+            topic: (entry.metadata?.['topic'] as string | undefined) ?? 'unknown',
+            stance: (entry.metadata?.['stance'] as string | undefined) ?? entry.content,
+            confidence: (entry.metadata?.['confidence'] as number | undefined) ?? 0.5,
+          };
+        })
+        .slice(0, 3); // Max 3 opinions shown
+
+      // Get predictions
+      const predictionsResult = await this.memoryProvider.search('', {
+        limit: 20,
+        metadata: { kind: 'prediction' },
+      });
+
+      const now = Date.now();
+      const predictions: PredictionSummary[] = predictionsResult.entries
+        .filter((entry) => {
+          if (!entry.tags?.includes('prediction')) return false;
+          if (!entry.tags.includes('state:pending')) return false;
+          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
+          return true;
+        })
+        .map((entry): PredictionSummary => {
+          const horizonAtStr = entry.metadata?.['horizonAt'] as string | undefined;
+          const horizonAt = horizonAtStr ? new Date(horizonAtStr) : new Date();
+          const status =
+            (entry.metadata?.['status'] as
+              | 'pending'
+              | 'confirmed'
+              | 'missed'
+              | 'mixed'
+              | undefined) ?? 'pending';
+          return {
+            id: entry.id,
+            claim: entry.content,
+            horizonAt,
+            confidence: (entry.metadata?.['confidence'] as number | undefined) ?? 0.5,
+            status,
+            isOverdue: horizonAt.getTime() < now,
+          };
+        })
+        .sort((a, b) => a.horizonAt.getTime() - b.horizonAt.getTime())
+        .slice(0, 3); // Max 3 predictions shown
+
+      return { opinions, predictions };
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : 'Unknown' },
+        'Failed to get perspectives'
+      );
+      return { opinions: [], predictions: [] };
     }
   }
 

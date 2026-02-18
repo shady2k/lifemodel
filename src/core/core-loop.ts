@@ -1841,8 +1841,390 @@ export class CoreLoop {
             }
             break;
           }
+
+          case 'DESIRE': {
+            const {
+              action,
+              desireId,
+              want,
+              intensity,
+              source,
+              evidence,
+              recipientId: desireRecipientId,
+            } = intent.payload;
+            const trace = intent.trace;
+
+            if (!this.memoryProvider) {
+              this.logger.warn({ action }, 'DESIRE skipped: no MemoryProvider');
+              break;
+            }
+
+            if (action === 'create') {
+              if (!desireId || !want) {
+                this.logger.error({ desireId, want }, 'DESIRE create: missing fields');
+                break;
+              }
+
+              // Store desire as MemoryEntry
+              const entry: MemoryEntry = {
+                id: desireId,
+                type: 'fact',
+                content: want,
+                timestamp: new Date(),
+                recipientId: desireRecipientId,
+                tags: ['desire', 'state:active'],
+                confidence: intensity ?? 0.5,
+                metadata: {
+                  kind: 'desire',
+                  intensity: intensity ?? 0.5,
+                  source: source ?? 'self_inference',
+                  evidence: evidence ?? '',
+                  createdAt: new Date().toISOString(),
+                },
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
+              };
+
+              this.memoryProvider.save(entry).catch((err: unknown) => {
+                this.logger.error(
+                  { desireId, error: err instanceof Error ? err.message : String(err) },
+                  'Failed to save desire'
+                );
+              });
+
+              this.logger.info(
+                { desireId, want: want.slice(0, 50), intensity, source },
+                'Desire created'
+              );
+              this.metrics.counter('desires_created', { source: source ?? 'self_inference' });
+            } else if (action === 'adjust') {
+              // Update desire intensity
+              if (desireId) {
+                void this.updateDesireStatus(desireId, 'active', desireRecipientId, intensity);
+                this.logger.info({ desireId, intensity }, 'Desire intensity adjusted');
+                this.metrics.counter('desires_adjusted');
+              }
+            } else if (action === 'resolve') {
+              // Mark desire as satisfied
+              if (desireId) {
+                void this.updateDesireStatus(desireId, 'satisfied', desireRecipientId);
+                this.logger.info({ desireId }, 'Desire resolved');
+                this.metrics.counter('desires_resolved');
+              }
+            }
+            break;
+          }
+
+          case 'PERSPECTIVE': {
+            const {
+              action,
+              opinionId,
+              predictionId,
+              topic,
+              stance,
+              rationale,
+              confidence,
+              claim,
+              horizonAt,
+              outcome,
+              recipientId: perspectiveRecipientId,
+            } = intent.payload;
+            const trace = intent.trace;
+
+            if (!this.memoryProvider) {
+              this.logger.warn({ action }, 'PERSPECTIVE skipped: no MemoryProvider');
+              break;
+            }
+
+            if (action === 'set_opinion') {
+              if (!opinionId || !topic || !stance) {
+                this.logger.error(
+                  { opinionId, topic, stance },
+                  'PERSPECTIVE set_opinion: missing fields'
+                );
+                break;
+              }
+
+              // Store opinion as MemoryEntry
+              const entry: MemoryEntry = {
+                id: opinionId,
+                type: 'fact',
+                content: `${topic}: ${stance}`,
+                timestamp: new Date(),
+                recipientId: perspectiveRecipientId,
+                tags: ['opinion', 'state:active'],
+                confidence: confidence ?? 0.7,
+                metadata: {
+                  kind: 'opinion',
+                  topic,
+                  stance,
+                  rationale: rationale ?? '',
+                  confidence: confidence ?? 0.7,
+                  createdAt: new Date().toISOString(),
+                },
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
+              };
+
+              this.memoryProvider.save(entry).catch((err: unknown) => {
+                this.logger.error(
+                  { opinionId, error: err instanceof Error ? err.message : String(err) },
+                  'Failed to save opinion'
+                );
+              });
+
+              this.logger.info(
+                { opinionId, topic, stance: stance.slice(0, 50), confidence },
+                'Opinion created'
+              );
+              this.metrics.counter('opinions_created');
+            } else if (action === 'predict') {
+              if (!predictionId || !claim || !horizonAt) {
+                this.logger.error(
+                  { predictionId, claim, horizonAt },
+                  'PERSPECTIVE predict: missing fields'
+                );
+                break;
+              }
+
+              // Store prediction as MemoryEntry
+              const entry: MemoryEntry = {
+                id: predictionId,
+                type: 'fact',
+                content: claim,
+                timestamp: new Date(),
+                recipientId: perspectiveRecipientId,
+                tags: ['prediction', 'state:pending'],
+                confidence: confidence ?? 0.6,
+                metadata: {
+                  kind: 'prediction',
+                  claim,
+                  horizonAt: horizonAt.toISOString(),
+                  confidence: confidence ?? 0.6,
+                  status: 'pending',
+                  createdAt: new Date().toISOString(),
+                },
+                tickId: trace?.tickId,
+                parentSignalId: trace?.parentSignalId,
+              };
+
+              this.memoryProvider.save(entry).catch((err: unknown) => {
+                this.logger.error(
+                  { predictionId, error: err instanceof Error ? err.message : String(err) },
+                  'Failed to save prediction'
+                );
+              });
+
+              this.logger.info(
+                { predictionId, claim: claim.slice(0, 50), horizonAt, confidence },
+                'Prediction created'
+              );
+              this.metrics.counter('predictions_created');
+            } else if (action === 'resolve_prediction') {
+              if (predictionId && outcome) {
+                void this.updatePredictionStatus(predictionId, outcome, perspectiveRecipientId);
+                this.logger.info({ predictionId, outcome }, 'Prediction resolved');
+                this.metrics.counter('predictions_resolved', { outcome });
+              }
+            } else if (action === 'revise_opinion') {
+              if (opinionId) {
+                void this.updateOpinionStatus(
+                  opinionId,
+                  stance,
+                  confidence,
+                  perspectiveRecipientId
+                );
+                this.logger.info({ opinionId }, 'Opinion revised');
+                this.metrics.counter('opinions_revised');
+              }
+            }
+            break;
+          }
         }
       });
+    }
+  }
+
+  /**
+   * Update prediction status in memory.
+   * If prediction is missed, enqueues a reflection thought.
+   */
+  private async updatePredictionStatus(
+    predictionId: string,
+    outcome: 'confirmed' | 'missed' | 'mixed',
+    _recipientId?: string
+  ): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    try {
+      const result = await this.memoryProvider.search('', {
+        limit: 100,
+        metadata: { kind: 'prediction' },
+      });
+
+      const prediction = result.entries.find((e) => e.id === predictionId);
+      if (!prediction) {
+        this.logger.warn({ predictionId }, 'Prediction not found for status update');
+        return;
+      }
+
+      const claim = prediction.content;
+
+      // Update tags
+      const oldTags = prediction.tags ?? [];
+      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
+      newTags.push(`state:${outcome}`);
+
+      // Update metadata
+      const metadata = {
+        ...(prediction.metadata ?? {}),
+        status: outcome,
+        resolvedAt: new Date().toISOString(),
+      };
+
+      const updatedEntry: MemoryEntry = {
+        ...prediction,
+        tags: newTags,
+        metadata,
+      };
+
+      await this.memoryProvider.save(updatedEntry);
+
+      // If missed, enqueue reflection thought (Phase 7.2)
+      if (outcome === 'missed') {
+        const thoughtContent = `My prediction was wrong: "${claim}". What can I learn from this?`;
+        this.enqueueThoughtSignal(
+          {
+            kind: 'thought',
+            content: thoughtContent,
+            triggerSource: 'memory',
+            depth: 0,
+            rootThoughtId: `pred_missed_${predictionId}`,
+          },
+          'cognition.thought'
+        );
+        this.logger.info(
+          { predictionId, claim },
+          'Reflection thought enqueued for missed prediction'
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        { predictionId, outcome, error: err instanceof Error ? err.message : String(err) },
+        'Failed to update prediction status'
+      );
+    }
+  }
+
+  /**
+   * Update opinion status in memory.
+   */
+  private async updateOpinionStatus(
+    opinionId: string,
+    newStance?: string,
+    newConfidence?: number,
+    _recipientId?: string
+  ): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    try {
+      const result = await this.memoryProvider.search('', {
+        limit: 100,
+        metadata: { kind: 'opinion' },
+      });
+
+      const opinion = result.entries.find((e) => e.id === opinionId);
+      if (!opinion) {
+        this.logger.warn({ opinionId }, 'Opinion not found for status update');
+        return;
+      }
+
+      // Update metadata
+      const metadata: Record<string, unknown> = {
+        ...(opinion.metadata ?? {}),
+        previousStance: opinion.metadata?.['stance'],
+        revisedAt: new Date().toISOString(),
+      };
+
+      if (newStance) {
+        metadata['stance'] = newStance;
+      }
+      if (newConfidence !== undefined) {
+        metadata['confidence'] = newConfidence;
+      }
+
+      const topicValue = opinion.metadata?.['topic'];
+      const topic = typeof topicValue === 'string' ? topicValue : 'topic';
+
+      const updatedEntry: MemoryEntry = {
+        ...opinion,
+        content: newStance ? `${topic}: ${newStance}` : opinion.content,
+        metadata,
+      };
+
+      await this.memoryProvider.save(updatedEntry);
+    } catch (err) {
+      this.logger.error(
+        { opinionId, error: err instanceof Error ? err.message : String(err) },
+        'Failed to update opinion status'
+      );
+    }
+  }
+
+  /**
+   * Update desire status in memory.
+   * Helper method for DESIRE intent handling.
+   */
+  private async updateDesireStatus(
+    desireId: string,
+    status: 'active' | 'satisfied' | 'stale' | 'dropped',
+    _recipientId?: string,
+    newIntensity?: number
+  ): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    try {
+      // Search for the desire by ID
+      const result = await this.memoryProvider.search('', {
+        limit: 100,
+        metadata: { kind: 'desire' },
+      });
+
+      const desire = result.entries.find((e) => e.id === desireId);
+      if (!desire) {
+        this.logger.warn({ desireId }, 'Desire not found for status update');
+        return;
+      }
+
+      // Update tags (remove old state, add new state)
+      const oldTags = desire.tags ?? [];
+      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
+      newTags.push(`state:${status}`);
+
+      // Update metadata
+      const metadata = {
+        ...(desire.metadata ?? {}),
+        status,
+        [`${status}At`]: new Date().toISOString(),
+      };
+
+      if (newIntensity !== undefined) {
+        metadata['intensity'] = newIntensity;
+      }
+
+      // Save updated entry
+      const updatedEntry: MemoryEntry = {
+        ...desire,
+        tags: newTags,
+        metadata,
+      };
+
+      await this.memoryProvider.save(updatedEntry);
+    } catch (err) {
+      this.logger.error(
+        { desireId, status, error: err instanceof Error ? err.message : String(err) },
+        'Failed to update desire status'
+      );
     }
   }
 

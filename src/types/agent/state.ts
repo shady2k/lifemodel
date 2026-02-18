@@ -44,6 +44,13 @@ export interface AgentState {
    */
   pendingThoughtCount: number;
 
+  /**
+   * Pressure from active desires (0-1).
+   * Higher when agent has strong unsatisfied wants.
+   * Drives proactive contact through wanting, not guilt.
+   */
+  desirePressure: number;
+
   /** Timestamp of last tick. */
   lastTickAt: Date;
 
@@ -88,6 +95,7 @@ export function createDefaultAgentState(): AgentState {
     acquaintancePending: false,
     thoughtPressure: 0.0,
     pendingThoughtCount: 0,
+    desirePressure: 0.0,
     lastTickAt: new Date(),
     tickInterval: 30_000, // 30 seconds default
   };

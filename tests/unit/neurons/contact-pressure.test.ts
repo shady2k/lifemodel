@@ -20,16 +20,16 @@ describe('ContactPressureNeuron', () => {
         taskPressure: 0,
         acquaintancePressure: 0,
       });
-      // With current weights: socialDebt=0.35, curiosity=0.25
-      // Pressure = (1.0*0.35 + 0*0.2 + 0.5*0.25 + 0*0.2) = 0.35 + 0.125 = 0.475
+      // With current weights: socialDebt=0.3, curiosity=0.2, desirePressure=0.2
+      // Pressure = (1.0*0.3 + 0*0.2 + 0.5*0.2 + 0*0.1 + 0*0.2) = 0.3 + 0.1 = 0.4
 
       const signal = neuron.check(state, 0.5, 'test-tick-1');
 
       expect(signal).toBeDefined();
       expect(signal?.type).toBe('contact_pressure');
       // Check pressure is in reasonable range (behavior test, not exact calculation)
-      expect(signal?.metrics.value).toBeGreaterThan(0.4);
-      expect(signal?.metrics.value).toBeLessThan(0.5);
+      expect(signal?.metrics.value).toBeGreaterThan(0.35);
+      expect(signal?.metrics.value).toBeLessThan(0.45);
     });
 
     it('emits with HIGH priority when pressure exceeds threshold', () => {
@@ -40,7 +40,7 @@ describe('ContactPressureNeuron', () => {
         taskPressure: 0.5,
         acquaintancePressure: 0.5,
       });
-      // With current weights: pressure = 1.0*0.35 + 0.5*0.2 + 1.0*0.25 + 0.5*0.2 = 0.85 > 0.6
+      // With current weights: pressure = 1.0*0.3 + 0.5*0.2 + 1.0*0.2 + 0.5*0.1 + 0*0.2 = 0.65 > 0.6
 
       const signal = neuron.check(state, 0.5, 'test-tick-1');
 
@@ -56,7 +56,7 @@ describe('ContactPressureNeuron', () => {
         taskPressure: 0,
         acquaintancePressure: 0,
       });
-      // With current weights: pressure = 0.5*0.35 + 0*0.2 + 0.3*0.25 + 0*0.2 = 0.25 < 0.6
+      // With current weights: pressure = 0.5*0.3 + 0*0.2 + 0.3*0.2 + 0*0.1 + 0*0.2 = 0.21 < 0.6
 
       const signal = neuron.check(state, 0.5, 'test-tick-1');
 
@@ -185,12 +185,13 @@ describe('ContactPressureNeuron', () => {
     it('calculates pressure from weighted state values', () => {
       const neuron = createContactPressureNeuron(logger);
 
-      // All factors at 1.0
+      // All factors at 1.0 including desirePressure
       const maxState = createAgentState({
         socialDebt: 1.0,
         taskPressure: 1.0,
         curiosity: 1.0,
         acquaintancePressure: 1.0,
+        desirePressure: 1.0,
       });
       const maxSignal = neuron.check(maxState, 0.5, 'tick-1');
       expect(maxSignal?.metrics.value).toBeCloseTo(1.0, 2);
@@ -203,6 +204,7 @@ describe('ContactPressureNeuron', () => {
           taskPressure: 0,
           curiosity: 0,
           acquaintancePressure: 0,
+          desirePressure: 0,
         },
       });
 

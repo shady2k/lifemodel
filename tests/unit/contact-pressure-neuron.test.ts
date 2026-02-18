@@ -41,6 +41,7 @@ function createAgentState(overrides: Partial<AgentState> = {}): AgentState {
     acquaintancePending: false,
     thoughtPressure: 0,
     pendingThoughtCount: 0,
+    desirePressure: 0,
     lastTickAt: new Date(),
     tickInterval: 1000,
     ...overrides,
@@ -54,7 +55,8 @@ function calculateExpectedPressure(state: AgentState): number {
     state.socialDebt * weights.socialDebt +
     state.taskPressure * weights.taskPressure +
     state.curiosity * weights.curiosity +
-    state.acquaintancePressure * weights.acquaintancePressure
+    state.acquaintancePressure * weights.acquaintancePressure +
+    state.desirePressure * weights.desirePressure
   );
 }
 
@@ -82,8 +84,8 @@ describe('ContactPressureNeuron', () => {
 
   describe('Emission based on emitThreshold', () => {
     it('should emit signal on first check when pressure >= emitThreshold', () => {
-      // socialDebt=0.6 -> pressure = 0.6 * 0.4 = 0.24 (above 0.2 threshold)
-      const state = createAgentState({ socialDebt: 0.6 });
+      // socialDebt=0.7 -> pressure = 0.7 * 0.3 = 0.21 (above 0.2 threshold)
+      const state = createAgentState({ socialDebt: 0.7 });
       const expectedPressure = calculateExpectedPressure(state);
       expect(expectedPressure).toBeGreaterThanOrEqual(0.2);
 
@@ -95,7 +97,7 @@ describe('ContactPressureNeuron', () => {
     });
 
     it('should NOT emit signal on first check when pressure < emitThreshold', () => {
-      // socialDebt=0.3 -> pressure = 0.3 * 0.4 = 0.12 (below 0.2 threshold)
+      // socialDebt=0.3 -> pressure = 0.3 * 0.3 = 0.09 (below 0.2 threshold)
       const state = createAgentState({ socialDebt: 0.3 });
       const expectedPressure = calculateExpectedPressure(state);
       expect(expectedPressure).toBeLessThan(0.2);
@@ -106,15 +108,18 @@ describe('ContactPressureNeuron', () => {
     });
 
     it('should emit exactly at emitThreshold', () => {
-      // Find socialDebt value that produces exactly 0.2 pressure with current weights
-      // With socialDebt=0.35, curiosity=0.25: need socialDebt where 0.35*x + 0.25*0.5 = 0.2
-      // 0.35x + 0.125 = 0.2 -> x = 0.075/0.35 ≈ 0.214
-      // Use custom weights to make test deterministic
+      // Use custom weights to make test deterministic - only socialDebt matters
       const testNeuron = new ContactPressureNeuron(createTestLogger(), {
-        weights: { socialDebt: 0.4, taskPressure: 0.2, curiosity: 0.1, acquaintancePressure: 0.3 },
+        weights: {
+          socialDebt: 1.0,
+          taskPressure: 0,
+          curiosity: 0,
+          acquaintancePressure: 0,
+          desirePressure: 0,
+        },
       });
-      const state = createAgentState({ socialDebt: 0.5, curiosity: 0, taskPressure: 0, acquaintancePressure: 0 });
-      // pressure = 0.5 * 0.4 = 0.2 (exactly at threshold)
+      const state = createAgentState({ socialDebt: 0.2, taskPressure: 0, curiosity: 0, acquaintancePressure: 0, desirePressure: 0 });
+      // pressure = 0.2 * 1.0 = 0.2 (exactly at threshold)
 
       const signal = testNeuron.check(state, 1.0, 'test-corr-1');
 
@@ -301,22 +306,29 @@ describe('ContactPressureNeuron', () => {
   describe('Pressure calculation', () => {
     it('should correctly weight all contributing factors', () => {
       const state = createAgentState({
-        socialDebt: 1.0, // weight 0.4
+        socialDebt: 1.0, // weight 0.3
         taskPressure: 1.0, // weight 0.2
-        curiosity: 1.0, // weight 0.1
-        acquaintancePressure: 1.0, // weight 0.3
+        curiosity: 1.0, // weight 0.2
+        acquaintancePressure: 1.0, // weight 0.1
+        desirePressure: 1.0, // weight 0.2
       });
 
       const signal = neuron.check(state, 1.0, 'test-corr-1');
 
-      // All factors at 1.0: 0.4 + 0.2 + 0.1 + 0.3 = 1.0
+      // All factors at 1.0: 0.3 + 0.2 + 0.2 + 0.1 + 0.2 = 1.0
       expect(signal?.metrics.value).toBe(1.0);
     });
 
     it('should calculate partial pressure correctly', () => {
       // Use custom weights to make test deterministic
       const testNeuron = new ContactPressureNeuron(createTestLogger(), {
-        weights: { socialDebt: 0.4, taskPressure: 0.2, curiosity: 0.1, acquaintancePressure: 0.3 },
+        weights: {
+          socialDebt: 0.4,
+          taskPressure: 0.2,
+          curiosity: 0.1,
+          acquaintancePressure: 0.2,
+          desirePressure: 0.1,
+        },
       });
       const state = createAgentState({
         socialDebt: 0.5, // 0.5 * 0.4 = 0.2
@@ -339,6 +351,7 @@ describe('ContactPressureNeuron', () => {
       expect(signal?.metrics['contrib_taskPressure']).toBeDefined();
       expect(signal?.metrics['contrib_curiosity']).toBeDefined();
       expect(signal?.metrics['contrib_acquaintancePressure']).toBeDefined();
+      expect(signal?.metrics['contrib_desirePressure']).toBeDefined();
     });
   });
 
@@ -351,6 +364,7 @@ describe('ContactPressureNeuron', () => {
         taskPressure: 1.0,
         curiosity: 1.0,
         acquaintancePressure: 1.0,
+        desirePressure: 1.0,
       });
 
       const signal = neuron.check(state, 1.0, 'test-corr-1');
@@ -359,7 +373,8 @@ describe('ContactPressureNeuron', () => {
     });
 
     it('should set normal priority when pressure < highPriorityThreshold', () => {
-      const state = createAgentState({ socialDebt: 0.6 }); // pressure = 0.24
+      // With new weights: socialDebt=1.0 -> 1.0 * 0.3 = 0.3
+      const state = createAgentState({ socialDebt: 1.0 }); // pressure = 0.3
       const signal = neuron.check(state, 1.0, 'test-corr-1');
 
       expect(signal?.priority).toBe(2); // Priority.NORMAL = 2
@@ -383,7 +398,7 @@ describe('ContactPressureNeuron', () => {
 
       expect(result).toBeDefined();
       expect(result?.output).toBeCloseTo(expectedPressure, 4);
-      expect(result?.contributions).toHaveLength(4);
+      expect(result?.contributions).toHaveLength(5); // Now 5 factors including desirePressure
     });
   });
 
@@ -396,6 +411,7 @@ describe('ContactPressureNeuron', () => {
           taskPressure: 0.2,
           curiosity: 0.1,
           userAvailability: 0.3, // Old key name
+          desirePressure: 0.0,
         } as any, // Cast to any since types don't include old key
       });
 
@@ -408,7 +424,7 @@ describe('ContactPressureNeuron', () => {
 
       expect(signal).toBeDefined();
       expect(signal?.metrics.value).not.toBeNaN();
-      // With socialDebt=1, acquaintancePressure=1: 1*0.4 + 1*0.3 = 0.7
+      // With socialDebt=1, acquaintancePressure=1: 1*0.4 + 1*0.3 + 0*0.0 = 0.7
       expect(signal?.metrics.value).toBeCloseTo(0.7, 2);
     });
 
@@ -421,6 +437,7 @@ describe('ContactPressureNeuron', () => {
           curiosity: 0.1,
           acquaintancePressure: 0.5, // New key with different value
           userAvailability: 0.1, // Old key - should be ignored
+          desirePressure: 0.0,
         } as any,
       });
 
@@ -430,8 +447,8 @@ describe('ContactPressureNeuron', () => {
       });
       const signal = neuronWithBoth.check(state, 1.0, 'test-corr-1');
 
-      // Weighted average: 1.0*0.5 / (0.4+0.2+0.1+0.5) = 0.5/1.2 = 0.417
-      // If it used userAvailability (0.1), it would be: 1.0*0.1 / (0.4+0.2+0.1+0.1) = 0.1/0.8 = 0.125
+      // Weighted average: 1.0*0.5 / (0.4+0.2+0.1+0.5+0.0) = 0.5/1.2 = 0.417
+      // If it used userAvailability (0.1), it would be: 1.0*0.1 / (0.4+0.2+0.1+0.1+0.0) = 0.1/0.8 = 0.125
       expect(signal?.metrics.value).toBeCloseTo(0.417, 2); // Uses acquaintancePressure weight
       expect(signal?.metrics.value).not.toBeCloseTo(0.125, 2); // NOT using userAvailability
     });

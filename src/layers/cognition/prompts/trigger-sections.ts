@@ -76,10 +76,17 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
     ? `\n\nUser's interests (sorted by weight):\n${formatInterests(interests).join('\n')}`
     : '';
 
+  // Build desires hint (Phase 6: Lightweight Desires)
+  const desires = context.activeDesires;
+  const desireHint =
+    desires && desires.length > 0
+      ? '\nYou have active desires. Consider acting on one of them.'
+      : '';
+
   return `<trigger type="proactive_contact">
 <context>
 Last conversation: ${timeContext || 'unknown'} ago
-Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}${interestsSection}
+Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}${interestsSection}${desireHint}
 </context>
 
 <task>
@@ -88,6 +95,7 @@ Do NOT reference, summarize, or follow up on anything from the conversation hist
 Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
 
 Choose ONE action:
+• Act on a desire: Check <active_desires> section. Pick something you genuinely want, message about it. {"response": "your message"}
 • Share something relevant: Use core.memory({action:"search", types:["fact"], tags:["<interest_topic>"]}) to find related news/facts, then share what you find with {"response": "message with URL"}. Skip if nothing interesting found.
 • Ask a curious question: Something you genuinely want to know about them or their interests. {"response": "your question"}
 • Different topic: Check in about their day, share a thought, start fresh. {"response": "your message"}
@@ -200,6 +208,45 @@ Acknowledge the breach and repair it.
 3. If circumstances changed: call core.commitment(action:"cancel", commitmentId:"${commitmentId}").
 
 Never ignore a broken promise. Always acknowledge and repair.
+</task>
+</trigger>`;
+  }
+
+  // Handle prediction due events (Phase 7: Opinions + Predictions)
+  if (eventKind === 'perspective:prediction_due') {
+    const predictionId = (data['predictionId'] as string | undefined) ?? '';
+    const claim = (data['claim'] as string | undefined) ?? 'Unknown prediction';
+    const confidence = (data['confidence'] as number | undefined) ?? 0.5;
+
+    return `<trigger type="prediction_due">
+<context>
+Your prediction: "${claim}"
+Confidence: ${String(confidence)}
+The prediction horizon has arrived. Time to evaluate.
+</context>
+
+<task>
+Check if the prediction outcome is now known.
+1. If outcome is known: call core.perspective(action:"resolve_prediction", predictionId:"${predictionId}", outcome:"confirmed"|"missed"|"mixed").
+2. If still uncertain: defer or acknowledge uncertainty to the user.
+</task>
+</trigger>`;
+  }
+
+  // Handle prediction missed events (Phase 7: Opinions + Predictions)
+  if (eventKind === 'perspective:prediction_missed') {
+    const claim = (data['claim'] as string | undefined) ?? 'Unknown prediction';
+
+    return `<trigger type="prediction_missed">
+<context>
+You predicted: "${claim}"
+This prediction was incorrect.
+</context>
+
+<task>
+Acknowledge being wrong. Learning from mistakes is valuable.
+1. If this affects an opinion, consider revising it with core.perspective(action:"revise_opinion").
+2. Note what you learned for future predictions.
 </task>
 </trigger>`;
   }

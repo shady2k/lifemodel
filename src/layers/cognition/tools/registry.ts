@@ -28,6 +28,8 @@ import {
   createDeferTool,
   createSayTool,
   createCommitmentTool,
+  createDesireTool,
+  createPerspectiveTool,
 } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
@@ -456,6 +458,12 @@ export class ToolRegistry {
 
     // Commitment tool (track promises the agent makes)
     this.tools.set('core.commitment', createCommitmentTool());
+
+    // Desire tool (track wants for proactive behavior)
+    this.tools.set('core.desire', createDesireTool());
+
+    // Perspective tool (track opinions and predictions)
+    this.tools.set('core.perspective', createPerspectiveTool());
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

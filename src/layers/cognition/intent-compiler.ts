@@ -272,6 +272,129 @@ export function toolResultToIntent(result: ToolResult, context: LoopContext): In
       return null;
     }
 
+    case 'core.desire': {
+      // core.desire → DESIRE intent
+      const action = data['action'] as string;
+      if (!action) return null;
+
+      // Handle create action
+      if (action === 'create') {
+        const desires = data['desires'] as
+          | { id: string; want: string; intensity: number; source: string; evidence: string }[]
+          | undefined;
+        const desire = desires?.[0];
+        if (!desire) return null;
+
+        return {
+          type: 'DESIRE',
+          payload: {
+            action: 'create',
+            desireId: desire.id,
+            want: desire.want,
+            intensity: desire.intensity,
+            source: desire.source as 'user_signal' | 'self_inference' | 'commitment_followup',
+            evidence: desire.evidence,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // Handle adjust, resolve actions
+      if (['adjust', 'resolve'].includes(action)) {
+        return {
+          type: 'DESIRE',
+          payload: {
+            action: action as 'adjust' | 'resolve',
+            desireId: data['desireId'] as string,
+            intensity: data['intensity'] as number | undefined,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // list_active doesn't produce an intent
+      return null;
+    }
+
+    case 'core.perspective': {
+      // core.perspective → PERSPECTIVE intent
+      const action = data['action'] as string;
+      if (!action) return null;
+
+      // Handle set_opinion action
+      if (action === 'set_opinion') {
+        const opinions = data['opinions'] as
+          | { id: string; topic: string; stance: string; confidence: number }[]
+          | undefined;
+        const opinion = opinions?.[0];
+        if (!opinion) return null;
+
+        return {
+          type: 'PERSPECTIVE',
+          payload: {
+            action: 'set_opinion',
+            opinionId: opinion.id,
+            topic: opinion.topic,
+            stance: opinion.stance,
+            confidence: opinion.confidence,
+            rationale: data['rationale'] as string | undefined,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // Handle predict action
+      if (action === 'predict') {
+        const predictions = data['predictions'] as
+          | { id: string; claim: string; horizonAt: Date; confidence: number }[]
+          | undefined;
+        const prediction = predictions?.[0];
+        if (!prediction) return null;
+
+        return {
+          type: 'PERSPECTIVE',
+          payload: {
+            action: 'predict',
+            predictionId: prediction.id,
+            claim: prediction.claim,
+            horizonAt: prediction.horizonAt,
+            confidence: prediction.confidence,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // Handle resolve_prediction action
+      if (action === 'resolve_prediction') {
+        return {
+          type: 'PERSPECTIVE',
+          payload: {
+            action: 'resolve_prediction',
+            predictionId: data['predictionId'] as string,
+            outcome: data['outcome'] as 'confirmed' | 'missed' | 'mixed',
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // Handle revise_opinion action
+      if (action === 'revise_opinion') {
+        return {
+          type: 'PERSPECTIVE',
+          payload: {
+            action: 'revise_opinion',
+            opinionId: data['opinionId'] as string,
+            stance: data['newStance'] as string,
+            confidence: data['confidence'] as number | undefined,
+            recipientId: context.recipientId,
+          },
+        };
+      }
+
+      // list doesn't produce an intent
+      return null;
+    }
+
     // core.thought is handled separately via thoughtToolResultToIntent
     // because it has complex depth/recursion logic
 

@@ -21,6 +21,8 @@ export { createSayTool } from './say.js';
 export { createCredentialTool } from './credential.js';
 export { createSkillTool } from './skill.js';
 export { createCommitmentTool } from './commitment.js';
+export { createDesireTool } from './desire.js';
+export { createPerspectiveTool } from './perspective.js';
 
 // Types
 export type {

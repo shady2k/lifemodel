@@ -18,6 +18,8 @@ import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schem
 import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
 import type { DiscoveredSkill } from '../../runtime/skills/skill-types.js';
 import type { CommitmentSummary } from '../../types/agent/commitment.js';
+import type { DesireSummary } from '../../types/agent/desire.js';
+import type { OpinionSummary, PredictionSummary } from '../../types/agent/perspective.js';
 
 /**
  * Request for LLM completion with native tool calling.
@@ -195,6 +197,13 @@ export interface LoopContext {
 
   /** Active commitments (promises the agent has made) for follow-up and repair */
   activeCommitments?: CommitmentSummary[] | undefined;
+
+  /** Active desires (wants the agent has) for want-driven proactivity */
+  activeDesires?: DesireSummary[] | undefined;
+
+  /** Active opinions and pending predictions for perspective awareness */
+  opinions?: OpinionSummary[] | undefined;
+  predictions?: PredictionSummary[] | undefined;
 }
 
 /**

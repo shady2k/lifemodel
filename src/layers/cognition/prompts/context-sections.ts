@@ -498,3 +498,74 @@ ${lines.join('\n')}
 You made these promises.${overdueNote}
 </commitments>`;
 }
+
+/**
+ * Build active desires section for proactive trigger context.
+ * Shows top desires (wants the agent has) for want-driven proactivity.
+ * Sorted by intensity (strongest first).
+ */
+export function buildActiveDesiresSection(context: LoopContext): string | null {
+  const desires = context.activeDesires;
+  if (!desires || desires.length === 0) {
+    return null;
+  }
+
+  // Sort by intensity (strongest first) and take top 3
+  const sorted = [...desires].sort((a, b) => b.intensity - a.intensity).slice(0, 3);
+
+  const lines = sorted.map((d) => {
+    const intensityLabel = d.intensity > 0.7 ? ' (strong)' : d.intensity > 0.4 ? '' : ' (mild)';
+    const sourceNote = d.source === 'user_signal' ? ' [from conversation]' : '';
+    return `- "${d.want}"${intensityLabel}${sourceNote}`;
+  });
+
+  return `<active_desires>
+${lines.join('\n')}
+Things you genuinely want. Pick one to act on, or defer.
+</active_desires>`;
+}
+
+/**
+ * Build perspectives section for context.
+ * Shows active opinions and pending predictions.
+ */
+export function buildPerspectivesSection(context: LoopContext): string | null {
+  const opinions = context.opinions;
+  const predictions = context.predictions;
+
+  if ((!opinions || opinions.length === 0) && (!predictions || predictions.length === 0)) {
+    return null;
+  }
+
+  const parts: string[] = [];
+
+  // Opinions
+  if (opinions && opinions.length > 0) {
+    const opinionLines = opinions.map((o) => {
+      const confidenceLabel =
+        o.confidence > 0.8 ? ' (confident)' : o.confidence < 0.5 ? ' (tentative)' : '';
+      return `- ${o.topic}: ${o.stance}${confidenceLabel}`;
+    });
+    parts.push(`<opinions>
+${opinionLines.join('\n')}
+Your current views. You may reference these naturally.
+</opinions>`);
+  }
+
+  // Predictions
+  if (predictions && predictions.length > 0) {
+    const now = Date.now();
+    const predictionLines = predictions.map((p) => {
+      const isOverdue = new Date(p.horizonAt).getTime() < now;
+      const overdueFlag = isOverdue ? ' [OVERDUE - resolve now]' : '';
+      const statusNote = p.status !== 'pending' ? ` (${p.status})` : '';
+      return `- "${p.claim}"${overdueFlag}${statusNote}`;
+    });
+    parts.push(`<predictions>
+${predictionLines.join('\n')}
+Claims you made about the future. Resolve when outcome is known.
+</predictions>`);
+  }
+
+  return parts.length > 0 ? parts.join('\n\n') : null;
+}

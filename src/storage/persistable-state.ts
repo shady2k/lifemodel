@@ -78,6 +78,7 @@ export function createEmptyPersistableState(): PersistableState {
         acquaintancePending: false,
         thoughtPressure: 0.0,
         pendingThoughtCount: 0,
+        desirePressure: 0.0,
         lastTickAt: new Date(),
         tickInterval: 30_000,
       },
@@ -92,10 +93,11 @@ export function createEmptyPersistableState(): PersistableState {
     rules: [],
     neuronWeights: {
       contactPressure: {
-        socialDebt: 0.4,
+        socialDebt: 0.3,
         taskPressure: 0.2,
-        curiosity: 0.1,
-        acquaintancePressure: 0.3,
+        curiosity: 0.2,
+        acquaintancePressure: 0.1,
+        desirePressure: 0.2,
       },
       alertness: {
         energy: 0.4,

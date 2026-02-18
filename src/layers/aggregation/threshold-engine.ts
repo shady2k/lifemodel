@@ -301,6 +301,25 @@ export class ThresholdEngine {
       };
     }
 
+    // Check for high desire pressure - agent wants something (Phase 6)
+    // This enables want-driven proactive contact instead of guilt-driven
+    const desirePressureSignals = signals.filter((s) => {
+      if (s.type !== 'desire_pressure') return false;
+      // Only wake for high pressure (0.6+)
+      return s.metrics.value >= 0.6;
+    });
+    if (desirePressureSignals.length > 0) {
+      const maxPressure = Math.max(...desirePressureSignals.map((s) => s.metrics.value));
+      return {
+        shouldWake: true,
+        trigger: 'threshold_crossed',
+        reason: `Strong desire pressure (${(maxPressure * 100).toFixed(0)}%)`,
+        triggerSignals: desirePressureSignals,
+        value: maxPressure,
+        threshold: 0.6,
+      };
+    }
+
     // Check for plugin events (scheduled reminders, etc.)
     const pluginEvents = signals.filter((s) => s.type === 'plugin_event');
     if (pluginEvents.length > 0) {

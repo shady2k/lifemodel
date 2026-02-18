@@ -23,7 +23,9 @@ export type IntentType =
   | 'EMIT_THOUGHT'
   | 'REMEMBER'
   | 'SET_INTEREST'
-  | 'COMMITMENT';
+  | 'COMMITMENT'
+  | 'DESIRE'
+  | 'PERSPECTIVE';
 
 /**
  * Trace metadata for intent tracking in logs.
@@ -348,6 +350,42 @@ export interface CommitmentIntent {
 }
 
 /**
+ * Desire action types.
+ */
+export type DesireAction = 'create' | 'adjust' | 'resolve' | 'list_active';
+
+/**
+ * Source of a desire.
+ */
+export type DesireSource = 'user_signal' | 'self_inference' | 'commitment_followup';
+
+/**
+ * Manage desires (wants) the agent has.
+ * Enables want-driven proactivity — positive motivation, not guilt.
+ */
+export interface DesireIntent {
+  type: 'DESIRE';
+  payload: {
+    /** Action to perform */
+    action: DesireAction;
+    /** Desire ID (for adjust, resolve) */
+    desireId?: string | undefined;
+    /** What the agent wants (for create) */
+    want?: string | undefined;
+    /** Intensity level 0-1 (for create, adjust) */
+    intensity?: number | undefined;
+    /** How this desire was created (for create) */
+    source?: DesireSource | undefined;
+    /** Evidence/context for why this desire exists (for create) */
+    evidence?: string | undefined;
+    /** Recipient context */
+    recipientId?: string | undefined;
+  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
+}
+
+/**
  * Union of all intent types.
  */
 export type Intent =
@@ -363,4 +401,55 @@ export type Intent =
   | EmitThoughtIntent
   | RememberIntent
   | SetInterestIntent
-  | CommitmentIntent;
+  | CommitmentIntent
+  | DesireIntent
+  | PerspectiveIntent;
+
+/**
+ * Perspective action types.
+ */
+export type PerspectiveAction =
+  | 'set_opinion'
+  | 'predict'
+  | 'resolve_prediction'
+  | 'revise_opinion'
+  | 'list';
+
+/**
+ * Prediction status for resolution.
+ */
+export type PredictionOutcome = 'confirmed' | 'missed' | 'mixed';
+
+/**
+ * Manage opinions and predictions the agent has.
+ * Enables perspective and inner life.
+ */
+export interface PerspectiveIntent {
+  type: 'PERSPECTIVE';
+  payload: {
+    /** Action to perform */
+    action: PerspectiveAction;
+    /** Opinion ID (for revise_opinion) */
+    opinionId?: string | undefined;
+    /** Prediction ID (for resolve_prediction) */
+    predictionId?: string | undefined;
+    /** Topic (for set_opinion) */
+    topic?: string | undefined;
+    /** Stance/view (for set_opinion, revise_opinion) */
+    stance?: string | undefined;
+    /** Rationale (for set_opinion) */
+    rationale?: string | undefined;
+    /** Confidence level (for set_opinion, predict) */
+    confidence?: number | undefined;
+    /** Prediction claim (for predict) */
+    claim?: string | undefined;
+    /** Prediction horizon (for predict) */
+    horizonAt?: Date | undefined;
+    /** Prediction outcome (for resolve_prediction) */
+    outcome?: PredictionOutcome | undefined;
+    /** Recipient context */
+    recipientId?: string | undefined;
+  };
+  /** Trace metadata for log analysis */
+  trace?: IntentTrace | undefined;
+}

@@ -131,11 +131,15 @@ function robustJsonParse(argsString: string): Record<string, unknown> | null {
  * - core.remember: User facts should be immediately queryable
  * - core.setInterest: Topic interests should be immediately visible
  * - core.commitment: Commitments should be immediately visible
+ * - core.desire: Desires should be immediately visible
+ * - core.perspective: Perspectives should be immediately visible
  */
 export const IMMEDIATE_INTENT_TOOLS = [
   'core.remember',
   'core.setInterest',
   'core.commitment',
+  'core.desire',
+  'core.perspective',
 ] as const;
 
 /**

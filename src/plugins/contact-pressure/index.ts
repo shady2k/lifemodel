@@ -46,6 +46,7 @@ export interface ContactPressureNeuronConfig {
     taskPressure: number;
     curiosity: number;
     acquaintancePressure: number;
+    desirePressure: number;
   };
 }
 
@@ -64,10 +65,11 @@ export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
   emitThreshold: 0.2,
   emitWhileAbove: true,
   weights: {
-    socialDebt: 0.35,
+    socialDebt: 0.3,
     taskPressure: 0.2,
-    curiosity: 0.25,
-    acquaintancePressure: 0.2,
+    curiosity: 0.2,
+    acquaintancePressure: 0.1,
+    desirePressure: 0.2,
   },
 };
 
@@ -278,6 +280,11 @@ export class ContactPressureNeuron extends BaseNeuron {
         name: 'acquaintancePressure',
         value: state.acquaintancePressure,
         weight: this.config.weights.acquaintancePressure,
+      },
+      {
+        name: 'desirePressure',
+        value: state.desirePressure,
+        weight: this.config.weights.desirePressure,
       },
     ]);
   }
