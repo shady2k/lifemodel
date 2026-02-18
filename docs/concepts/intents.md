@@ -16,6 +16,9 @@ Layers don't mutate state directly. They return Intents that CoreLoop applies.
 | `EMIT_THOUGHT` | Share internal thinking with memory |
 | `REMEMBER` | Store user facts with provenance tracking |
 | `SET_INTEREST` | Update topic interest weight |
+| `COMMITMENT` | Create, fulfill, repair, or cancel commitments |
+| `DESIRE` | Create, adjust, or resolve wants |
+| `PERSPECTIVE` | Set opinions, make/resolve predictions |
 
 ## Why Intents?
 
@@ -32,6 +35,9 @@ Most intents are batched and processed after the agentic loop completes. However
 |--------|---------------|
 | `REMEMBER` | User facts should be queryable by following tools |
 | `SET_INTEREST` | Topic weights should be visible for interest-based decisions |
+| `COMMITMENT` | Commitments should be immediately visible to subsequent tools |
+| `DESIRE` | Desires should be immediately visible to subsequent tools |
+| `PERSPECTIVE` | Perspectives should be immediately visible to subsequent tools |
 
 ### The Problem
 
@@ -44,7 +50,7 @@ Without immediate processing:
 
 ### The Solution
 
-`REMEMBER` and `SET_INTEREST` intents are applied immediately via callback during loop execution. The result is marked `immediatelyApplied = true` to skip duplicate processing in final intent compilation.
+`REMEMBER`, `SET_INTEREST`, `COMMITMENT`, `DESIRE`, and `PERSPECTIVE` intents are applied immediately via callback during loop execution. The result is marked `immediatelyApplied = true` to skip duplicate processing in final intent compilation.
 
 ```
 1. LLM calls core.remember(gender="male") → returns {success: true}

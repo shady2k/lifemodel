@@ -55,10 +55,13 @@ Fixed 1-second tick drives all processing:
 
 1. Collect signals from channels (sensory input)
 2. Update thought pressure (from memory)
-3. AUTONOMIC layer: neurons emit internal signals
-4. AGGREGATION layer: collect, aggregate, decide wake threshold
-5. COGNITION layer: (if woken) process with LLM
-6. Apply intents returned by all layers
+3. Update desire pressure (from active desires in memory)
+4. Check overdue commitments (emit commitment:due / commitment:overdue signals)
+5. Check overdue predictions (emit perspective:prediction_due signals)
+6. AUTONOMIC layer: neurons emit internal signals
+7. AGGREGATION layer: collect, aggregate, decide wake threshold
+8. COGNITION layer: (if woken) process with LLM
+9. Apply intents returned by all layers
 
 ---
 
@@ -102,8 +105,8 @@ src/layers/cognition/
   prompts/
     system-prompt.ts           # Identity, rules, time awareness (runtime-dynamic)
     trigger-prompt.ts          # Assembles context sections + trigger-specific section
-    context-sections.ts        # User profile, thoughts, soul, behavioral rules, available skills, runtime snapshot
-    trigger-sections.ts        # Proactive contact, plugin events, thought, reaction
+    context-sections.ts        # User profile, thoughts, soul, behavioral rules, commitments, desires, perspectives, available skills, runtime snapshot
+    trigger-sections.ts        # Proactive contact, plugin events (commitments, predictions, self-scheduled), thought, reaction
     runtime-snapshot.ts        # State query detection, level descriptions, scope
 
   messages/
@@ -134,7 +137,7 @@ src/
 ├── channels/       # Sensory organs (Telegram, etc.)
 ├── ports/          # External service adapters
 ├── storage/        # Persistence, memory, conversations
-├── types/          # Signal, Intent, Cognition types
+├── types/          # Signal, Intent, Cognition, Commitment, Desire, Perspective types
 ├── models/         # UserModel for preferences
 └── config/         # Configuration loading
 ```

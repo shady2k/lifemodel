@@ -9,6 +9,13 @@ The agent stores and retrieves information like human memory.
 | **Fact** | Objective information | "Bitcoin dropped 15%" |
 | **Thought** | Internal reasoning | "User seems interested in AI" |
 | **Observation** | Behavioral pattern | "User active in evenings" |
+| **Intention** | Pending insights for next conversation | "Want to ask about their new job" |
+| **Commitment** | Promises the agent made | "Check in about interview" |
+| **Desire** | Wants driving proactive behavior | "Learn about their new project" |
+| **Opinion** | Agent's formed views | "I think X overstates the risk" |
+| **Prediction** | Claims about the future | "They'll enjoy that restaurant" |
+
+All these are stored as `MemoryEntry` facts with distinguishing tags and `metadata.kind`.
 
 ## Storage
 

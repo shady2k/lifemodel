@@ -26,10 +26,11 @@ Contact pressure is a weighted combination:
 
 | Factor | Weight | Description |
 |--------|--------|-------------|
-| `socialDebt` | 0.4 | How long since last interaction |
-| `acquaintancePressure` | 0.3 | Pressure to learn user's name |
-| `taskPressure` | 0.2 | Pending things to discuss |
-| `curiosity` | 0.1 | Agent's desire to engage |
+| `socialDebt` | 0.25 | How long since last interaction |
+| `taskPressure` | 0.20 | Pending things to discuss |
+| `curiosity` | 0.25 | Agent's desire to engage |
+| `acquaintancePressure` | 0.10 | Pressure to learn user's name |
+| `desirePressure` | 0.20 | Active wants driving initiative |
 
 ## Protection Mechanisms
 
@@ -39,6 +40,24 @@ Multiple layers prevent spam:
 2. **ThresholdEngine cooldown (30min):** Minimum time between waking Cognition
 3. **AckRegistry:** Cognition-controlled deferrals with custom durations
 4. **`core.defer` tool:** LLM can explicitly defer proactive contact
+
+## Curiosity Dynamics
+
+Curiosity is not static — it fluctuates based on the agent's interests:
+
+- **Bump**: +0.1–0.15 when a new interest is set (via `core.setInterest`)
+- **Decay**: Slow return toward 0.5 baseline (0.01/hour)
+- **Trigger hint**: When curiosity > 0.6, proactive contact triggers include: "Your curiosity is elevated. Consider asking about something you're genuinely interested in."
+
+## Desire-Driven Proactivity
+
+Desires complement social debt as a driver of proactive contact:
+
+- **Source**: Created by the agent via `core.desire` tool during conversations
+- **Pressure calculation**: CoreLoop scans active desires every 30s, computes pressure from max intensity (60%) + count factor (40%)
+- **Neuron**: `DesirePressureNeuron` reads `state.desirePressure` and emits `desire_pressure` signals
+- **Threshold**: Agent wakes for proactive contact when desire pressure ≥ 0.6
+- **Prompt**: Active desires are surfaced in proactive contact triggers for the LLM to act on
 
 ## LLM Deferral (core.defer)
 

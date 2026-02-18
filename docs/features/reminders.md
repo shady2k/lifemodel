@@ -147,3 +147,25 @@ interface FireContext {
 
 **Backward compatibility:** If `fireContext` is not available (e.g., manually triggered events), overdue detection falls back to `data.scheduledAt`. If neither is available, overdue detection is skipped.
 
+## Self-Scheduled Reminders (Phase 4)
+
+The agent can schedule reminders for itself using the `internal: true` flag:
+
+```typescript
+core.schedule({
+  content: "Follow up on their job interview",
+  anchor: { type: "relative", relative: { unit: "hour", amount: 24 } },
+  internal: true
+})
+```
+
+Self-scheduled reminders fire as `reminder:self_scheduled` plugin events and produce a dedicated trigger:
+
+```xml
+<trigger type="self_scheduled">
+<context>You scheduled this for yourself: "Follow up on their job interview"</context>
+<task>Act on your own reminder. You set this because it mattered.</task>
+</trigger>
+```
+
+This enables **agent autonomy** — the agent can decide to do something later and actually follow through.

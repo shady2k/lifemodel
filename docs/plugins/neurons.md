@@ -29,6 +29,7 @@ This prevents:
 | SocialDebtNeuron | Contact debt | `social_debt` signal |
 | ContactPressureNeuron | Combined urgency | `contact_pressure` signal |
 | ThoughtsNeuron | Thought pressure | `thought_pressure` signal |
+| DesirePressureNeuron | Desire pressure | `desire_pressure` signal |
 
 ## Custom Neurons
 

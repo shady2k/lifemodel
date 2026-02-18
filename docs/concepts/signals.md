@@ -13,6 +13,7 @@ Signals are the nervous system's universal currency. Everything flowing through 
 - `energy` - Agent's energy level changed
 - `alertness` - Alertness mode changed
 - `contact_pressure` - Combined contact urgency
+- `desire_pressure` - Want-driven initiative pressure
 
 ### Time
 - `tick` - Every second
@@ -26,7 +27,13 @@ Signals are the nervous system's universal currency. Everything flowing through 
 - `novelty` - Something new detected
 
 ### Plugin
-- `plugin_event` - Namespaced events (e.g., `news:article_batch`)
+- `plugin_event` - Namespaced events:
+  - `news:article_batch` - News articles
+  - `reminder:reminder_due` - Reminder due
+  - `reminder:self_scheduled` - Self-scheduled agent reminder
+  - `commitment:due` - Commitment deadline reached
+  - `commitment:overdue` - Commitment breach (past grace period)
+  - `perspective:prediction_due` - Prediction horizon passed
 
 ### Thought
 - Internal thoughts from COGNITION layer

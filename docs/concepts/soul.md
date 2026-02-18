@@ -212,12 +212,26 @@ Instead of mechanical text matching, existing rules are passed to the reflection
 
 ## Implementation Status
 
-- ✅ Phase 1: Soul Foundation (types, storage)
-- ✅ Phase 2: Soul Awareness (system prompt integration)
-- ✅ Phase 2.5: Unresolved Tensions visibility
-- ✅ Phase 3: Post-Response Reflection
-- ✅ Phase 3.5: Soft Learning (tiered dissonance)
-- ✅ Phase 4: Parliament Deliberation
-- ⏳ Phase 5: Sleep Cycle Maintenance
-- ✅ Phase 6: Soul Tools for Nika
-- ✅ Phase 7: Behavioral Self-Learning
+- Phase 1: Soul Foundation (types, storage)
+- Phase 2: Soul Awareness (system prompt integration)
+- Phase 2.5: Unresolved Tensions visibility
+- Phase 3: Post-Response Reflection
+- Phase 3.5: Soft Learning (tiered dissonance)
+- Phase 4: Parliament Deliberation
+- Phase 5: Sleep Cycle Maintenance
+- Phase 6: Soul Tools for Nika
+- Phase 7: Behavioral Self-Learning
+
+## Case Law Promotion from Opinions
+
+Opinions that are repeatedly validated (revised with same-or-higher confidence 3+ times) are automatically promoted to soul precedents via `SoulProvider.addPrecedent()`. This creates **identity evolution** -- the agent's temporary views can become part of who it is.
+
+### Promotion Flow
+
+```
+Opinion created → revised upward → validationCount++ → at 3 → addPrecedent()
+```
+
+- Promoted precedents are **non-binding** (can be overridden by stronger evidence)
+- Scoped to the opinion's topic
+- Tracked via `validationCount` in opinion metadata
