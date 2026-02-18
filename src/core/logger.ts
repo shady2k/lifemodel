@@ -99,7 +99,7 @@ function ensureLogDir(logDir: string): void {
  */
 function createTraceMixin(): () => Record<string, unknown> {
   // Cache these keys to avoid repeated string allocations
-  const TRACE_KEYS = ['traceId', 'correlationId', 'parentId', 'spanId'] as const;
+  const TRACE_KEYS = ['traceId', 'correlationId', 'parentId', 'spanId', 'caller'] as const;
 
   return () => {
     const ctx = getTraceContext();

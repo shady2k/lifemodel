@@ -46,6 +46,7 @@ import type { SignalFilter } from '../layers/autonomic/filter-registry.js';
 import type { Intent } from '../types/intent.js';
 import { createStoragePrimitive, type StoragePrimitiveImpl } from './storage-primitive.js';
 import { validateAgainstParameters } from '../layers/cognition/tools/validation.js';
+import { withCaller } from './trace-context.js';
 import type { ToolParameter } from '../layers/cognition/tools/types.js';
 import { createSchedulerPrimitive, SchedulerPrimitiveImpl } from './scheduler-primitive.js';
 import type { SchedulerService } from './scheduler-service.js';
@@ -1200,7 +1201,6 @@ export class PluginLoader {
       throw new ValidationError(manifest.id, `Invalid version: ${versionStr}`);
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (!manifest.provides || manifest.provides.length === 0) {
       throw new ValidationError(manifest.id, 'Must provide at least one component');
     }
@@ -1259,7 +1259,8 @@ export class PluginLoader {
         query: string,
         options?: MemorySearchOptions
       ): Promise<MemorySearchResult> => {
-        if (!this.memoryProvider) {
+        const mp = this.memoryProvider;
+        if (!mp) {
           return { entries: [], pagination: { page: 1, totalPages: 1, hasMore: false, total: 0 } };
         }
 
@@ -1269,13 +1270,15 @@ export class PluginLoader {
         const offset = Math.max(0, options?.offset ?? 0);
         const minConfidence = options?.minConfidence ?? 0.3;
 
-        const result = await this.memoryProvider.search(query, {
-          types: ['fact'], // Enforced: plugins can only search facts
-          limit,
-          offset,
-          minConfidence,
-          metadata: { pluginId }, // Filter at search level, not post-pagination
-        });
+        const result = await withCaller(`plugin:${pluginId}:search`, () =>
+          mp.search(query, {
+            types: ['fact'], // Enforced: plugins can only search facts
+            limit,
+            offset,
+            minConfidence,
+            metadata: { pluginId }, // Filter at search level, not post-pagination
+          })
+        );
 
         const pluginEntries = result.entries;
 
@@ -1400,7 +1403,7 @@ export class PluginLoader {
       }
 
       // Type guard: eventKind must be a string to call startsWith
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive check for runtime safety
+
       const eventKind = input.data?.kind;
       if (typeof eventKind !== 'string') {
         const error = `Invalid event kind: expected string, got ${typeof eventKind}`;

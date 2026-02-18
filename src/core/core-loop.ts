@@ -33,7 +33,12 @@ import type {
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import type { PluginEventData } from '../types/signal.js';
-import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
+import {
+  createTraceContext,
+  withTraceContext,
+  withCaller,
+  type TraceContext,
+} from './trace-context.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -1030,7 +1035,8 @@ export class CoreLoop {
    * Throttled to run at most once per 30 seconds (desires change slowly).
    */
   private async updateDesirePressure(): Promise<void> {
-    if (!this.memoryProvider) return;
+    const mp = this.memoryProvider;
+    if (!mp) return;
 
     // Throttle: only check every 30 seconds
     const now = Date.now();
@@ -1038,14 +1044,8 @@ export class CoreLoop {
     this.lastDesirePressureCheckAt = now;
 
     try {
-      const result = await this.memoryProvider.search('', {
-        limit: 20,
-        metadata: { kind: 'desire' },
-      });
-
-      // Filter to active desires only
-      const activeDesires = result.entries.filter(
-        (e) => e.tags?.includes('desire') && e.tags?.includes('state:active')
+      const activeDesires = await withCaller('updateDesirePressure', () =>
+        mp.findByKind('desire', { state: 'active', limit: 20 })
       );
       if (activeDesires.length === 0) {
         this.agent.updateState({ desirePressure: 0 });
@@ -1093,21 +1093,16 @@ export class CoreLoop {
    * Throttled to run at most once per 60 seconds.
    */
   private async checkOverdueCommitments(): Promise<void> {
-    if (!this.memoryProvider) return;
+    const mp = this.memoryProvider;
+    if (!mp) return;
 
     const now = Date.now();
     if (now - this.lastCommitmentCheckAt < 60_000) return;
     this.lastCommitmentCheckAt = now;
 
     try {
-      const result = await this.memoryProvider.search('', {
-        limit: 50,
-        metadata: { kind: 'commitment' },
-      });
-
-      // Filter to active commitments only
-      const activeCommitments = result.entries.filter(
-        (e) => e.tags?.includes('commitment') && e.tags?.includes('state:active')
+      const activeCommitments = await withCaller('checkOverdueCommitments', () =>
+        mp.findByKind('commitment', { state: 'active', limit: 50 })
       );
 
       const nowDate = new Date();
@@ -1218,21 +1213,16 @@ export class CoreLoop {
    * Throttled to run at most once per 60 seconds.
    */
   private async checkOverduePredictions(): Promise<void> {
-    if (!this.memoryProvider) return;
+    const mp = this.memoryProvider;
+    if (!mp) return;
 
     const now = Date.now();
     if (now - this.lastPredictionCheckAt < 60_000) return;
     this.lastPredictionCheckAt = now;
 
     try {
-      const result = await this.memoryProvider.search('', {
-        limit: 50,
-        metadata: { kind: 'prediction' },
-      });
-
-      // Filter to pending predictions only
-      const pendingPredictions = result.entries.filter(
-        (e) => e.tags?.includes('prediction') && e.tags?.includes('state:pending')
+      const pendingPredictions = await withCaller('checkOverduePredictions', () =>
+        mp.findByKind('prediction', { state: 'pending', limit: 50 })
       );
 
       const nowDate = new Date();
@@ -2336,12 +2326,7 @@ export class CoreLoop {
     if (!this.memoryProvider) return;
 
     try {
-      const result = await this.memoryProvider.search('', {
-        limit: 100,
-        metadata: { kind: 'prediction' },
-      });
-
-      const prediction = result.entries.find((e) => e.id === predictionId);
+      const prediction = await this.memoryProvider.getById(predictionId);
       if (!prediction) {
         this.logger.warn({ predictionId }, 'Prediction not found for status update');
         return;
@@ -2417,12 +2402,7 @@ export class CoreLoop {
     if (!this.memoryProvider) return;
 
     try {
-      const result = await this.memoryProvider.search('', {
-        limit: 100,
-        metadata: { kind: 'opinion' },
-      });
-
-      const opinion = result.entries.find((e) => e.id === opinionId);
+      const opinion = await this.memoryProvider.getById(opinionId);
       if (!opinion) {
         this.logger.warn({ opinionId }, 'Opinion not found for status update');
         return;
@@ -2522,13 +2502,7 @@ export class CoreLoop {
     if (!this.memoryProvider) return;
 
     try {
-      // Search for the desire by ID
-      const result = await this.memoryProvider.search('', {
-        limit: 100,
-        metadata: { kind: 'desire' },
-      });
-
-      const desire = result.entries.find((e) => e.id === desireId);
+      const desire = await this.memoryProvider.getById(desireId);
       if (!desire) {
         this.logger.warn({ desireId }, 'Desire not found for status update');
         return;
@@ -2579,13 +2553,7 @@ export class CoreLoop {
     if (!this.memoryProvider) return;
 
     try {
-      // Search for the commitment by ID
-      const result = await this.memoryProvider.search('', {
-        limit: 100,
-        metadata: { kind: 'commitment' },
-      });
-
-      const commitment = result.entries.find((e) => e.id === commitmentId);
+      const commitment = await this.memoryProvider.getById(commitmentId);
       if (!commitment) {
         this.logger.warn({ commitmentId }, 'Commitment not found for status update');
         return;

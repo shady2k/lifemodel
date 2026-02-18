@@ -47,6 +47,7 @@ import {
 } from './soul/index.js';
 import type { PendingReflection } from '../../types/agent/soul.js';
 import { getPrimaryRecipientId } from '../../core/globals.js';
+import { withCaller } from '../../core/trace-context.js';
 
 /**
  * Configuration for COGNITION processor.
@@ -846,27 +847,18 @@ export class CognitionProcessor implements CognitionLayer {
    * Returns commitments sorted by due date (soonest first).
    */
   private async getActiveCommitments(recipientId?: string): Promise<CommitmentSummary[]> {
-    if (!this.memoryProvider) {
+    const mp = this.memoryProvider;
+    if (!mp) {
       return [];
     }
 
     try {
-      // Search for active commitments
-      const result = await this.memoryProvider.search('', {
-        limit: 20,
-        metadata: { kind: 'commitment' },
-      });
+      const entries = await withCaller('getActiveCommitments', () =>
+        mp.findByKind('commitment', { state: 'active', recipientId, limit: 20 })
+      );
 
       const now = Date.now();
-      const activeCommitments = result.entries
-        .filter((entry) => {
-          // Only include active commitments
-          if (!entry.tags?.includes('commitment')) return false;
-          if (!entry.tags.includes('state:active')) return false;
-          // Filter by recipient if specified
-          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
-          return true;
-        })
+      const activeCommitments = entries
         .map((entry): CommitmentSummary => {
           const dueAtStr = entry.metadata?.['dueAt'] as string | undefined;
           const dueAt = dueAtStr ? new Date(dueAtStr) : new Date();
@@ -898,26 +890,17 @@ export class CognitionProcessor implements CognitionLayer {
    * Returns desires sorted by intensity (strongest first).
    */
   private async getActiveDesires(recipientId?: string): Promise<DesireSummary[]> {
-    if (!this.memoryProvider) {
+    const mp = this.memoryProvider;
+    if (!mp) {
       return [];
     }
 
     try {
-      // Search for active desires
-      const result = await this.memoryProvider.search('', {
-        limit: 20,
-        metadata: { kind: 'desire' },
-      });
+      const entries = await withCaller('getActiveDesires', () =>
+        mp.findByKind('desire', { state: 'active', recipientId, limit: 20 })
+      );
 
-      const activeDesires = result.entries
-        .filter((entry) => {
-          // Only include active desires
-          if (!entry.tags?.includes('desire')) return false;
-          if (!entry.tags.includes('state:active')) return false;
-          // Filter by recipient if specified
-          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
-          return true;
-        })
+      const activeDesires = entries
         .map((entry): DesireSummary => {
           return {
             id: entry.id,
@@ -952,24 +935,18 @@ export class CognitionProcessor implements CognitionLayer {
   private async getPerspectives(
     recipientId?: string
   ): Promise<{ opinions: OpinionSummary[]; predictions: PredictionSummary[] }> {
-    if (!this.memoryProvider) {
+    const mp = this.memoryProvider;
+    if (!mp) {
       return { opinions: [], predictions: [] };
     }
 
     try {
       // Get opinions
-      const opinionsResult = await this.memoryProvider.search('', {
-        limit: 20,
-        metadata: { kind: 'opinion' },
-      });
+      const opinionEntries = await withCaller('getPerspectives:opinions', () =>
+        mp.findByKind('opinion', { state: 'active', recipientId, limit: 20 })
+      );
 
-      const opinions: OpinionSummary[] = opinionsResult.entries
-        .filter((entry) => {
-          if (!entry.tags?.includes('opinion')) return false;
-          if (!entry.tags.includes('state:active')) return false;
-          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
-          return true;
-        })
+      const opinions: OpinionSummary[] = opinionEntries
         .map((entry): OpinionSummary => {
           return {
             id: entry.id,
@@ -981,19 +958,12 @@ export class CognitionProcessor implements CognitionLayer {
         .slice(0, 3); // Max 3 opinions shown
 
       // Get predictions
-      const predictionsResult = await this.memoryProvider.search('', {
-        limit: 20,
-        metadata: { kind: 'prediction' },
-      });
+      const predictionEntries = await withCaller('getPerspectives:predictions', () =>
+        mp.findByKind('prediction', { state: 'pending', recipientId, limit: 20 })
+      );
 
       const now = Date.now();
-      const predictions: PredictionSummary[] = predictionsResult.entries
-        .filter((entry) => {
-          if (!entry.tags?.includes('prediction')) return false;
-          if (!entry.tags.includes('state:pending')) return false;
-          if (recipientId && entry.recipientId && entry.recipientId !== recipientId) return false;
-          return true;
-        })
+      const predictions: PredictionSummary[] = predictionEntries
         .map((entry): PredictionSummary => {
           const horizonAtStr = entry.metadata?.['horizonAt'] as string | undefined;
           const horizonAt = horizonAtStr ? new Date(horizonAtStr) : new Date();

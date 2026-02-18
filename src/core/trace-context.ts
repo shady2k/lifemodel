@@ -27,6 +27,8 @@ export interface TraceContext {
   parentId?: string;
   /** Current span ID for this operation */
   spanId?: string;
+  /** Calling function/method name for downstream log attribution */
+  caller?: string;
 }
 
 const asyncLocalStorage = new AsyncLocalStorage<TraceContext>();
@@ -53,6 +55,25 @@ export function withTraceContext<T>(context: TraceContext, fn: () => T): T {
  */
 export function getTraceContext(): TraceContext | undefined {
   return asyncLocalStorage.getStore();
+}
+
+/**
+ * Run a function with a `caller` tag added to the current trace context.
+ * Inherits all existing trace fields; only overrides `caller`.
+ * If no trace context exists, creates a minimal one with just the caller.
+ *
+ * @example
+ * ```ts
+ * await withCaller('checkOverdueCommitments', async () => {
+ *   // All logs here automatically get caller='checkOverdueCommitments'
+ *   await memoryProvider.search('', { ... });
+ * });
+ * ```
+ */
+export function withCaller<T>(caller: string, fn: () => T): T {
+  const current = asyncLocalStorage.getStore();
+  const ctx: TraceContext = current ? { ...current, caller } : { traceId: 'untraced', caller };
+  return asyncLocalStorage.run(ctx, fn);
 }
 
 /**

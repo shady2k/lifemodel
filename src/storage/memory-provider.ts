@@ -232,7 +232,17 @@ export class JsonMemoryProvider implements MemoryProvider {
     const hasMoreResults = offset + limited.length < totalMatched;
 
     this.logger.debug(
-      { query, results: limited.length, totalMatched, limit, offset, page, totalPages },
+      {
+        query: trimmedQuery || undefined,
+        filter: metadataFilter,
+        types,
+        results: limited.length,
+        totalMatched,
+        limit,
+        offset,
+        page,
+        totalPages,
+      },
       'Memory search completed'
     );
 
@@ -347,6 +357,45 @@ export class JsonMemoryProvider implements MemoryProvider {
       })
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       .slice(0, limit);
+  }
+
+  /**
+   * Find entries by metadata kind and optional state tag.
+   * Direct filtered scan — no scoring, no pagination overhead.
+   */
+  async findByKind(
+    kind: string,
+    options?: {
+      state?: string | undefined;
+      recipientId?: string | undefined;
+      limit?: number | undefined;
+    }
+  ): Promise<MemoryEntry[]> {
+    await this.ensureLoaded();
+
+    const state = options?.state;
+    const recipientId = options?.recipientId;
+    const limit = options?.limit ?? 50;
+
+    const results: MemoryEntry[] = [];
+    for (const entry of this.entries) {
+      if (entry.metadata?.['kind'] !== kind) continue;
+      if (state && !entry.tags?.includes(`state:${state}`)) continue;
+      if (recipientId && entry.recipientId && entry.recipientId !== recipientId) continue;
+      results.push(entry);
+      if (results.length >= limit) break;
+    }
+
+    this.logger.debug({ kind, state, results: results.length }, 'findByKind completed');
+    return results;
+  }
+
+  /**
+   * Get a single entry by ID.
+   */
+  async getById(id: string): Promise<MemoryEntry | undefined> {
+    await this.ensureLoaded();
+    return this.entries.find((e) => e.id === id);
   }
 
   /**

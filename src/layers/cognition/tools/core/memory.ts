@@ -7,6 +7,7 @@
 import type { StructuredFact } from '../../../../types/cognition.js';
 import type { Tool, ToolParameter } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
+import { withCaller } from '../../../../core/trace-context.js';
 
 /**
  * Memory search options.
@@ -140,6 +141,25 @@ export interface MemoryProvider {
    * Cleans up fully-decayed rules (effectiveWeight < 0.05) as side effect.
    */
   getBehaviorRules(options?: BehaviorRuleOptions): Promise<BehaviorRule[]>;
+
+  /**
+   * Find entries by metadata kind and optional state tag.
+   * Direct filtered scan — no scoring or pagination overhead.
+   */
+  findByKind(
+    kind: string,
+    options?: {
+      state?: string | undefined;
+      recipientId?: string | undefined;
+      limit?: number | undefined;
+    }
+  ): Promise<MemoryEntry[]>;
+
+  /**
+   * Get a single entry by ID.
+   * O(n) scan — avoids the overhead of search() for targeted lookups.
+   */
+  getById(id: string): Promise<MemoryEntry | undefined>;
 }
 
 /**
@@ -236,7 +256,8 @@ Mention available results on other pages only if explicitly relevant or user ask
 
       switch (action) {
         case 'search': {
-          if (!deps.memoryProvider) {
+          const mp = deps.memoryProvider;
+          if (!mp) {
             return { success: false, action: 'search', message: 'Memory provider not available' };
           }
 
@@ -259,7 +280,9 @@ Mention available results on other pages only if explicitly relevant or user ask
           // Use context.recipientId - system knows the current conversation
           if (context?.recipientId) options.recipientId = context.recipientId;
 
-          const searchResult = await deps.memoryProvider.search(query, options);
+          const searchResult = await withCaller('tool:memory.search', () =>
+            mp.search(query, options)
+          );
           const { page, totalPages, hasMoreResults, totalMatched } = searchResult.metadata;
 
           // Generate LLM-friendly summary with pagination info
