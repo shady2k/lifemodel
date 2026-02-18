@@ -93,9 +93,9 @@ export function createEmptyPersistableState(): PersistableState {
     rules: [],
     neuronWeights: {
       contactPressure: {
-        socialDebt: 0.3,
+        socialDebt: 0.25,
         taskPressure: 0.2,
-        curiosity: 0.2,
+        curiosity: 0.25,
         acquaintancePressure: 0.1,
         desirePressure: 0.2,
       },

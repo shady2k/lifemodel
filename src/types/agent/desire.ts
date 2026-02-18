@@ -84,5 +84,6 @@ export interface DesireToolResult {
   desireId?: string | undefined;
   desires?: DesireSummary[];
   total?: number | undefined;
+  intensity?: number | undefined;
   error?: string | undefined;
 }

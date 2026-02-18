@@ -195,6 +195,7 @@ function handleAdjust(args: Record<string, unknown>): DesireToolResult {
     success: true,
     action: 'adjust',
     desireId,
+    intensity: intensityRaw,
   };
 }
 

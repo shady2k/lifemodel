@@ -95,5 +95,6 @@ export interface CommitmentToolResult {
   commitmentId?: string | undefined;
   commitments?: CommitmentSummary[];
   total?: number | undefined;
+  repairNote?: string | undefined;
   error?: string | undefined;
 }

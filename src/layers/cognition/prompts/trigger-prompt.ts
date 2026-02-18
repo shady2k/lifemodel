@@ -18,6 +18,8 @@ import {
   buildCompletedActionsSection,
   buildAvailableSkillsSection,
   buildCommitmentsSection,
+  buildActiveDesiresSection,
+  buildPerspectivesSection,
 } from './context-sections.js';
 import {
   buildProactiveContactSection,
@@ -82,6 +84,18 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
   const commitmentsSection = buildCommitmentsSection(context);
   if (commitmentsSection) {
     sections.push(commitmentsSection);
+  }
+
+  // Active desires (wants driving proactive behavior) - after commitments
+  const desiresSection = buildActiveDesiresSection(context);
+  if (desiresSection) {
+    sections.push(desiresSection);
+  }
+
+  // Perspectives (opinions and predictions) - after desires
+  const perspectivesSection = buildPerspectivesSection(context);
+  if (perspectivesSection) {
+    sections.push(perspectivesSection);
   }
 
   // Runtime snapshot (conditional, for state-related queries)

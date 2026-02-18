@@ -32,6 +32,7 @@ import type {
   MessageReactionData,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
+import type { PluginEventData } from '../types/signal.js';
 import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type {
   AutonomicResult,
@@ -61,6 +62,7 @@ import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import type { MemoryProvider, MemoryEntry } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
 import type { SoulProvider } from '../storage/soul-provider.js';
+import type { Precedent } from '../types/agent/soul.js';
 import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
@@ -450,6 +452,13 @@ export class CoreLoop {
 
         // Update thought pressure before neurons run
         await this.updateThoughtPressure();
+
+        // Update desire pressure before neurons run (Phase 6)
+        await this.updateDesirePressure();
+
+        // Scan for overdue commitments and predictions (Phases 5, 7)
+        await this.checkOverdueCommitments();
+        await this.checkOverduePredictions();
       });
 
       // ============================================================================
@@ -1011,6 +1020,274 @@ export class CoreLoop {
     }
   }
 
+  /** Throttle: last time desire pressure was computed */
+  private lastDesirePressureCheckAt = 0;
+
+  /**
+   * Update desire pressure in agent state.
+   *
+   * Desire pressure = weighted combination of active desire count and max intensity.
+   * Throttled to run at most once per 30 seconds (desires change slowly).
+   */
+  private async updateDesirePressure(): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    // Throttle: only check every 30 seconds
+    const now = Date.now();
+    if (now - this.lastDesirePressureCheckAt < 30_000) return;
+    this.lastDesirePressureCheckAt = now;
+
+    try {
+      const result = await this.memoryProvider.search('', {
+        limit: 20,
+        metadata: { kind: 'desire' },
+      });
+
+      // Filter to active desires only
+      const activeDesires = result.entries.filter(
+        (e) => e.tags?.includes('desire') && e.tags?.includes('state:active')
+      );
+      if (activeDesires.length === 0) {
+        this.agent.updateState({ desirePressure: 0 });
+        return;
+      }
+
+      // Extract intensities from metadata
+      const intensities = activeDesires.map((e) => {
+        const raw = e.metadata?.['intensity'];
+        return typeof raw === 'number' ? raw : (e.confidence ?? 0.5);
+      });
+
+      // Pressure formula:
+      // - maxIntensity (60%): strongest want dominates
+      // - countFactor (40%): more wants = more pressure (capped at 5)
+      const maxIntensity = Math.max(...intensities);
+      const countFactor = Math.min(1, activeDesires.length / 5);
+      const pressure = Math.min(1, maxIntensity * 0.6 + countFactor * 0.4);
+
+      this.agent.updateState({ desirePressure: pressure });
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to update desire pressure'
+      );
+    }
+  }
+
+  /** IDs of commitments already signaled as due (dedup) */
+  private readonly signaledDueCommitments = new Set<string>();
+  /** IDs of commitments already signaled as overdue (dedup) */
+  private readonly signaledOverdueCommitments = new Set<string>();
+  /** Grace period before a due commitment becomes overdue (1 hour) */
+  private static readonly COMMITMENT_GRACE_PERIOD_MS = 60 * 60 * 1000;
+  /** Throttle: last time overdue commitments were checked */
+  private lastCommitmentCheckAt = 0;
+
+  /**
+   * Check for due and overdue active commitments and emit plugin_event signals.
+   *
+   * Two-stage lifecycle:
+   * 1. `commitment:due` fires when dueAt <= now (nudge: "act on this now")
+   * 2. `commitment:overdue` fires when dueAt + grace period <= now (breach: "you missed it, repair")
+   *
+   * Throttled to run at most once per 60 seconds.
+   */
+  private async checkOverdueCommitments(): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    const now = Date.now();
+    if (now - this.lastCommitmentCheckAt < 60_000) return;
+    this.lastCommitmentCheckAt = now;
+
+    try {
+      const result = await this.memoryProvider.search('', {
+        limit: 50,
+        metadata: { kind: 'commitment' },
+      });
+
+      // Filter to active commitments only
+      const activeCommitments = result.entries.filter(
+        (e) => e.tags?.includes('commitment') && e.tags?.includes('state:active')
+      );
+
+      const nowDate = new Date();
+      for (const entry of activeCommitments) {
+        const dueAtStr = entry.metadata?.['dueAt'];
+        if (typeof dueAtStr !== 'string') continue;
+
+        const dueAt = new Date(dueAtStr);
+        if (dueAt > nowDate) continue; // Not yet due
+
+        const recipientId = entry.recipientId ?? this.primaryRecipientId ?? 'default';
+        const msSinceDue = now - dueAt.getTime();
+
+        // Stage 1: commitment:due (fires at dueAt)
+        if (!this.signaledDueCommitments.has(entry.id)) {
+          const signalData: PluginEventData = {
+            kind: 'plugin_event',
+            eventKind: 'commitment:due',
+            pluginId: 'commitment',
+            fireId: `due_${entry.id}_${String(now)}`,
+            payload: {
+              commitmentId: entry.id,
+              recipientId,
+              text: entry.content,
+              dueAt: dueAtStr,
+              source: (entry.metadata?.['source'] as string | undefined) ?? 'explicit',
+            },
+          };
+
+          const signal: Signal = {
+            id: randomUUID(),
+            type: 'plugin_event',
+            source: 'plugin.commitment' as SignalSource,
+            timestamp: nowDate,
+            priority: Priority.HIGH,
+            metrics: { value: 1, confidence: 1 },
+            data: signalData,
+            expiresAt: new Date(now + 60_000),
+          };
+
+          this.pushSignal(signal);
+          this.signaledDueCommitments.add(entry.id);
+
+          this.logger.info(
+            { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
+            'Commitment due, signal emitted'
+          );
+          continue; // Don't emit overdue in the same scan — give grace period
+        }
+
+        // Stage 2: commitment:overdue (fires after grace period)
+        if (
+          msSinceDue >= CoreLoop.COMMITMENT_GRACE_PERIOD_MS &&
+          !this.signaledOverdueCommitments.has(entry.id)
+        ) {
+          const signalData: PluginEventData = {
+            kind: 'plugin_event',
+            eventKind: 'commitment:overdue',
+            pluginId: 'commitment',
+            fireId: `overdue_${entry.id}_${String(now)}`,
+            payload: {
+              commitmentId: entry.id,
+              recipientId,
+              text: entry.content,
+              dueAt: dueAtStr,
+              source: (entry.metadata?.['source'] as string | undefined) ?? 'explicit',
+            },
+          };
+
+          const signal: Signal = {
+            id: randomUUID(),
+            type: 'plugin_event',
+            source: 'plugin.commitment' as SignalSource,
+            timestamp: nowDate,
+            priority: Priority.HIGH,
+            metrics: { value: 1, confidence: 1 },
+            data: signalData,
+            expiresAt: new Date(now + 60_000),
+          };
+
+          this.pushSignal(signal);
+          this.signaledOverdueCommitments.add(entry.id);
+
+          this.logger.info(
+            { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
+            'Overdue commitment detected, signal emitted'
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to check overdue commitments'
+      );
+    }
+  }
+
+  /** IDs of predictions already signaled as due (dedup) */
+  private readonly signaledDuePredictions = new Set<string>();
+  /** Throttle: last time overdue predictions were checked */
+  private lastPredictionCheckAt = 0;
+
+  /**
+   * Check for predictions past their horizon and emit plugin_event signals.
+   *
+   * Scans memory for pending predictions whose horizonAt has passed.
+   * Emits one `perspective:prediction_due` signal per overdue prediction (deduped).
+   * Throttled to run at most once per 60 seconds.
+   */
+  private async checkOverduePredictions(): Promise<void> {
+    if (!this.memoryProvider) return;
+
+    const now = Date.now();
+    if (now - this.lastPredictionCheckAt < 60_000) return;
+    this.lastPredictionCheckAt = now;
+
+    try {
+      const result = await this.memoryProvider.search('', {
+        limit: 50,
+        metadata: { kind: 'prediction' },
+      });
+
+      // Filter to pending predictions only
+      const pendingPredictions = result.entries.filter(
+        (e) => e.tags?.includes('prediction') && e.tags?.includes('state:pending')
+      );
+
+      const nowDate = new Date();
+      for (const entry of pendingPredictions) {
+        const horizonAtStr = entry.metadata?.['horizonAt'];
+        if (typeof horizonAtStr !== 'string') continue;
+
+        const horizonAt = new Date(horizonAtStr);
+        if (horizonAt > nowDate) continue; // Not yet due
+
+        // Already signaled this prediction
+        if (this.signaledDuePredictions.has(entry.id)) continue;
+
+        // Emit prediction_due signal
+        const signalData: PluginEventData = {
+          kind: 'plugin_event',
+          eventKind: 'perspective:prediction_due',
+          pluginId: 'perspective',
+          fireId: `due_${entry.id}_${String(now)}`,
+          payload: {
+            predictionId: entry.id,
+            recipientId: entry.recipientId ?? this.primaryRecipientId ?? 'default',
+            claim: entry.content,
+            horizonAt: horizonAtStr,
+            confidence: (entry.metadata?.['confidence'] as number | undefined) ?? 0.6,
+          },
+        };
+
+        const signal: Signal = {
+          id: randomUUID(),
+          type: 'plugin_event',
+          source: 'plugin.perspective' as SignalSource,
+          timestamp: nowDate,
+          priority: Priority.NORMAL,
+          metrics: { value: 1, confidence: 1 },
+          data: signalData,
+          expiresAt: new Date(now + 60_000),
+        };
+
+        this.pushSignal(signal);
+        this.signaledDuePredictions.add(entry.id);
+
+        this.logger.info(
+          { predictionId: entry.id, horizonAt: horizonAtStr, claim: entry.content.slice(0, 50) },
+          'Overdue prediction detected, signal emitted'
+        );
+      }
+    } catch (error) {
+      this.logger.trace(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to check overdue predictions'
+      );
+    }
+  }
+
   /**
    * Process through AUTONOMIC layer.
    */
@@ -1193,13 +1470,15 @@ export class CoreLoop {
    * during loop execution so subsequent tools can see the data.
    */
   applyImmediateIntent(intent: Intent): void {
-    // Only apply REMEMBER, SET_INTEREST, COMMITMENT, and SEND_MESSAGE immediately
+    // Only apply data-writing intents immediately so subsequent tools see them
     // SEND_MESSAGE is used for intermediate acknowledgments during tool processing
     // Other intents should wait for normal intent processing
     if (
       intent.type !== 'REMEMBER' &&
       intent.type !== 'SET_INTEREST' &&
       intent.type !== 'COMMITMENT' &&
+      intent.type !== 'DESIRE' &&
+      intent.type !== 'PERSPECTIVE' &&
       intent.type !== 'SEND_MESSAGE'
     ) {
       this.logger.warn(
@@ -2090,6 +2369,9 @@ export class CoreLoop {
 
       await this.memoryProvider.save(updatedEntry);
 
+      // Clear from due dedup set so it won't block future signals
+      this.signaledDuePredictions.delete(predictionId);
+
       // If missed, enqueue reflection thought (Phase 7.2)
       if (outcome === 'missed') {
         const thoughtContent = `My prediction was wrong: "${claim}". What can I learn from this?`;
@@ -2116,8 +2398,15 @@ export class CoreLoop {
     }
   }
 
+  /** Validation count threshold for promoting an opinion to a soul precedent */
+  private static readonly OPINION_PROMOTION_THRESHOLD = 3;
+
   /**
    * Update opinion status in memory.
+   *
+   * Tracks validation count: when an opinion is revised with same-or-higher
+   * confidence, it counts as a validation. After reaching the promotion
+   * threshold, the opinion is promoted to a soul precedent (case law).
    */
   private async updateOpinionStatus(
     opinionId: string,
@@ -2139,11 +2428,23 @@ export class CoreLoop {
         return;
       }
 
+      const oldConfidence =
+        typeof opinion.metadata?.['confidence'] === 'number' ? opinion.metadata['confidence'] : 0.5;
+      const oldValidationCount =
+        typeof opinion.metadata?.['validationCount'] === 'number'
+          ? opinion.metadata['validationCount']
+          : 0;
+
+      // A revision with same-or-higher confidence counts as validation
+      const isValidation = newConfidence !== undefined && newConfidence >= oldConfidence;
+      const newValidationCount = isValidation ? oldValidationCount + 1 : oldValidationCount;
+
       // Update metadata
       const metadata: Record<string, unknown> = {
         ...(opinion.metadata ?? {}),
         previousStance: opinion.metadata?.['stance'],
         revisedAt: new Date().toISOString(),
+        validationCount: newValidationCount,
       };
 
       if (newStance) {
@@ -2155,6 +2456,12 @@ export class CoreLoop {
 
       const topicValue = opinion.metadata?.['topic'];
       const topic = typeof topicValue === 'string' ? topicValue : 'topic';
+      const stance =
+        typeof metadata['stance'] === 'string'
+          ? metadata['stance']
+          : typeof opinion.metadata?.['stance'] === 'string'
+            ? opinion.metadata['stance']
+            : '';
 
       const updatedEntry: MemoryEntry = {
         ...opinion,
@@ -2163,6 +2470,37 @@ export class CoreLoop {
       };
 
       await this.memoryProvider.save(updatedEntry);
+
+      // Promote to soul precedent if validation threshold reached
+      if (
+        newValidationCount >= CoreLoop.OPINION_PROMOTION_THRESHOLD &&
+        oldValidationCount < CoreLoop.OPINION_PROMOTION_THRESHOLD &&
+        this.soulProvider
+      ) {
+        const rationale =
+          typeof opinion.metadata?.['rationale'] === 'string' ? opinion.metadata['rationale'] : '';
+
+        const precedent: Precedent = {
+          id: `prec_${opinionId}`,
+          situation: `Forming a view on: ${topic}`,
+          choice: stance,
+          reasoning:
+            rationale || `Validated ${String(newValidationCount)} times through experience`,
+          valuesPrioritized: ['honesty', 'informed_judgment'],
+          outcome: 'helped',
+          binding: false, // Non-binding — can be overridden by stronger evidence
+          scopeConditions: [`topic:${topic}`],
+          createdAt: new Date(),
+        };
+
+        await this.soulProvider.addPrecedent(precedent);
+
+        this.logger.info(
+          { opinionId, topic, validationCount: newValidationCount, precedentId: precedent.id },
+          'Opinion promoted to soul precedent (case law)'
+        );
+        this.metrics.counter('opinions_promoted_to_precedent');
+      }
     } catch (err) {
       this.logger.error(
         { opinionId, error: err instanceof Error ? err.message : String(err) },
@@ -2277,6 +2615,10 @@ export class CoreLoop {
       };
 
       await this.memoryProvider.save(updatedEntry);
+
+      // Clear from dedup sets so it won't block future signals if re-activated
+      this.signaledDueCommitments.delete(commitmentId);
+      this.signaledOverdueCommitments.delete(commitmentId);
 
       // Record completed action for kept/repaired
       if (recipientId && this.conversationManager && (status === 'kept' || status === 'repaired')) {

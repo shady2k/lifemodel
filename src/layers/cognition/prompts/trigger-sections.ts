@@ -188,6 +188,28 @@ If the task is complete, you can cancel it with plugin.reminder(action:"cancel",
 </trigger>`;
   }
 
+  // Handle commitment due events (Phase 5: Commitment Tracking)
+  if (eventKind === 'commitment:due') {
+    const commitmentId = (data['commitmentId'] as string | undefined) ?? '';
+    const text = (data['text'] as string | undefined) ?? 'Unknown commitment';
+    const dueAt = data['dueAt'] as string | undefined;
+
+    return `<trigger type="commitment_due">
+<context>
+You promised: "${text}"
+Due: ${dueAt ?? 'now'}
+This commitment is due now.
+</context>
+
+<task>
+Act on your commitment now.
+1. If you can fulfill it: do so, then call core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
+2. If you need more time: let the user know and follow up soon.
+3. If circumstances changed: call core.commitment(action:"cancel", commitmentId:"${commitmentId}") and explain.
+</task>
+</trigger>`;
+  }
+
   // Handle commitment overdue events (Phase 5: Commitment Tracking)
   if (eventKind === 'commitment:overdue') {
     const commitmentId = (data['commitmentId'] as string | undefined) ?? '';

@@ -84,8 +84,8 @@ describe('ContactPressureNeuron', () => {
 
   describe('Emission based on emitThreshold', () => {
     it('should emit signal on first check when pressure >= emitThreshold', () => {
-      // socialDebt=0.7 -> pressure = 0.7 * 0.3 = 0.21 (above 0.2 threshold)
-      const state = createAgentState({ socialDebt: 0.7 });
+      // socialDebt=0.8 -> pressure = 0.8 * 0.25 = 0.2 (at 0.2 threshold)
+      const state = createAgentState({ socialDebt: 0.8 });
       const expectedPressure = calculateExpectedPressure(state);
       expect(expectedPressure).toBeGreaterThanOrEqual(0.2);
 

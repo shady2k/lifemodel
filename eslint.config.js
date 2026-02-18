@@ -27,6 +27,9 @@ export default tseslint.config(
       'no-console': 'error',
       // Disable: contradicts no-non-null-assertion (strict wants no `!`, stylistic wants `!` over `as T`)
       '@typescript-eslint/non-nullable-type-assertion-style': 'off',
+      // Disable: produces false positives on optional fields (e.g. tags?: string[])
+      // where ?. is required by tsc but flagged as unnecessary by the rule
+      '@typescript-eslint/no-unnecessary-condition': 'off',
       // Allow || on primitives where falsy-coalescing is intentional (e.g. empty string fallback)
       '@typescript-eslint/prefer-nullish-coalescing': [
         'error',

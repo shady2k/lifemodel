@@ -293,6 +293,7 @@ function handleResolvePrediction(args: Record<string, unknown>): PerspectiveTool
     success: true,
     action: 'resolve_prediction',
     predictionId,
+    outcome,
   };
 }
 
@@ -333,6 +334,8 @@ function handleReviseOpinion(args: Record<string, unknown>): PerspectiveToolResu
     success: true,
     action: 'revise_opinion',
     opinionId,
+    newStance: newStance,
+    confidence: confidenceRaw,
   };
 }
 

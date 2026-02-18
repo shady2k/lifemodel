@@ -141,5 +141,8 @@ export interface PerspectiveToolResult {
   opinions?: OpinionSummary[];
   predictions?: PredictionSummary[];
   total?: number | undefined;
+  outcome?: PredictionStatus | undefined;
+  newStance?: string | undefined;
+  confidence?: number | undefined;
   error?: string | undefined;
 }

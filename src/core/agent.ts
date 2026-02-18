@@ -275,7 +275,8 @@ export class Agent {
     | 'taskPressure'
     | 'curiosity'
     | 'acquaintancePressure'
-    | 'thoughtPressure' {
+    | 'thoughtPressure'
+    | 'desirePressure' {
     return [
       'energy',
       'socialDebt',
@@ -283,6 +284,7 @@ export class Agent {
       'curiosity',
       'acquaintancePressure',
       'thoughtPressure',
+      'desirePressure',
     ].includes(key);
   }
 
@@ -440,12 +442,17 @@ export class Agent {
    * Update specific state fields.
    * Used by CoreLoop to set thought pressure before neurons run.
    */
-  updateState(updates: Partial<Pick<AgentState, 'thoughtPressure' | 'pendingThoughtCount'>>): void {
+  updateState(
+    updates: Partial<Pick<AgentState, 'thoughtPressure' | 'pendingThoughtCount' | 'desirePressure'>>
+  ): void {
     if (updates.thoughtPressure !== undefined) {
       this.state.thoughtPressure = round3(Math.max(0, Math.min(1, updates.thoughtPressure)));
     }
     if (updates.pendingThoughtCount !== undefined) {
       this.state.pendingThoughtCount = Math.max(0, Math.floor(updates.pendingThoughtCount));
+    }
+    if (updates.desirePressure !== undefined) {
+      this.state.desirePressure = round3(Math.max(0, Math.min(1, updates.desirePressure)));
     }
   }
 

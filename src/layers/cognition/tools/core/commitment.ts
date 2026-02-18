@@ -242,6 +242,7 @@ function handleMarkRepaired(args: Record<string, unknown>): CommitmentToolResult
     success: true,
     action: 'mark_repaired',
     commitmentId,
+    repairNote,
   };
 }
 
