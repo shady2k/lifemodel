@@ -394,7 +394,13 @@ export class CognitionProcessor implements CognitionLayer {
       triggerSignal,
       agentState: context.agentState,
       agentIdentity: identity
-        ? { name: identity.name, gender: identity.gender, values: identity.values }
+        ? {
+            name: identity.name,
+            gender: identity.gender,
+            values: identity.values,
+            personality: identity.personality,
+            preferences: identity.preferences,
+          }
         : undefined,
       conversationHistory: isAutonomousTrigger
         ? [] // Autonomous triggers: use core.memory if context needed

@@ -9,6 +9,7 @@ import type { Intent } from '../../types/intent.js';
 import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { FullSoulState } from '../../storage/soul-provider.js';
+import type { PersonalityTraits, AgentPreferences } from '../../types/agent/identity.js';
 import type { ToolResult, LoopState, Terminal, ExecutedTool } from '../../types/cognition.js';
 import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { MemoryEntry } from './tools/registry.js';
@@ -98,6 +99,10 @@ export interface AgentIdentityContext {
   name: string;
   gender?: 'female' | 'male' | 'neutral';
   values?: string[];
+  /** Personality traits (0-1 scale) that affect behavior */
+  personality?: PersonalityTraits;
+  /** Preferences that adapt to user */
+  preferences?: AgentPreferences;
 }
 
 /**

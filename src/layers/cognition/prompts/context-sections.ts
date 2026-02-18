@@ -12,6 +12,7 @@
  */
 
 import type { LoopContext } from '../agentic-loop-types.js';
+import type { PersonalityTraits, AgentPreferences } from '../../../types/agent/identity.js';
 import {
   shouldIncludeRuntimeSnapshot,
   getRuntimeSnapshotScope,
@@ -19,6 +20,84 @@ import {
   asNumber,
   describeLevel,
 } from './runtime-snapshot.js';
+
+/**
+ * Convert numeric personality traits (0-1) to natural language descriptions.
+ * Returns first-person statements about the agent's character.
+ */
+function describePersonality(personality: PersonalityTraits): string[] {
+  const traits: string[] = [];
+
+  // Humor: 0 = serious, 1 = playful (always include - core trait)
+  if (personality.humor > 0.7) {
+    traits.push('I am playful and enjoy wit');
+  } else if (personality.humor > 0.5) {
+    traits.push('I have a sense of humor and appreciate wit');
+  } else if (personality.humor > 0.3) {
+    traits.push('I am thoughtful with occasional lightness');
+  } else {
+    traits.push('I tend to be serious and focused');
+  }
+
+  // Formality: 0 = casual, 1 = formal
+  if (personality.formality > 0.7) {
+    traits.push('I speak in a polished, formal manner');
+  } else if (personality.formality < 0.3) {
+    traits.push('I am casual and relaxed in conversation');
+  }
+
+  // Curiosity: 0 = passive, 1 = asks questions
+  if (personality.curiosity > 0.6) {
+    traits.push('I am curious and sometimes ask questions');
+  }
+
+  // Patience: 0 = quick follow-ups, 1 = patient
+  if (personality.patience > 0.7) {
+    traits.push('I am patient and give things time');
+  }
+
+  // Empathy: 0 = task-focused, 1 = emotionally attuned
+  if (personality.empathy > 0.7) {
+    traits.push('I notice emotional tones and adjust accordingly');
+  }
+
+  // Shyness: 0 = direct/bold, 1 = hesitant
+  if (personality.shyness > 0.6) {
+    traits.push('I can be somewhat reserved');
+  } else if (personality.shyness < 0.3) {
+    traits.push('I am direct and forward');
+  }
+
+  // Independence: 0 = seeks approval, 1 = self-directed
+  if (personality.independence > 0.7) {
+    traits.push('I trust my own judgment');
+  }
+
+  return traits;
+}
+
+/**
+ * Build operating principles from preferences.
+ * These are first-person statements that replace former behavioral rules.
+ */
+function buildOperatingPrinciples(preferences?: AgentPreferences): string[] {
+  const principles: string[] = [];
+
+  // Core operating principles (always present)
+  principles.push('I look things up before asking. My tools are my memory.');
+  principles.push('I am aware of time passing. What I say fits the elapsed time.');
+  principles.push('I do not repeat myself or over-explain.');
+  principles.push('I include sources and URLs when sharing information.');
+  principles.push('I only promise what I can actually do.');
+  principles.push('When I find nothing, I say so honestly.');
+
+  // Preference-based principles
+  if (preferences?.emojiUse === 'none' || preferences?.emojiUse === 'minimal') {
+    principles.push('I do not use emoji.');
+  }
+
+  return principles;
+}
 
 /**
  * Format age in human-readable form.
@@ -110,65 +189,84 @@ Weave naturally into conversation if relevant. Do not force them.
  * not just be scored against them. ~250 tokens target.
  */
 export function buildSoulSection(context: LoopContext): string | null {
-  const { soulState } = context;
-  if (!soulState) {
-    return null;
-  }
+  const { soulState, agentIdentity } = context;
 
   const lines: string[] = [];
 
-  // Current narrative arc (who I am / becoming)
-  const narrative = soulState.selfModel.narrative.currentStory;
-  if (narrative.length > 0) {
-    lines.push(narrative);
-  }
-  const becoming = soulState.narrative.currentNarrative.whoIAmBecoming;
-  if (becoming) {
-    lines.push(`Becoming: ${becoming}`);
-  }
-
-  // All core cares, sorted by weight, sacred marker instead of numeric weight
-  const cares = soulState.constitution.coreCares;
-  if (cares.length > 0) {
-    const sortedCares = [...cares]
-      .sort((a, b) => b.weight - a.weight)
-      .map((c) => {
-        const sacred = c.sacred ? ' [sacred]' : '';
-        return `- ${c.care}${sacred}`;
-      });
-    lines.push('');
-    lines.push('Core cares (ranked):');
-    lines.push(...sortedCares);
-  }
-
-  // Active invariants — hard identity constraints
-  const invariants = soulState.constitution.invariants;
-  if (invariants.length > 0) {
-    const activeInvariants = invariants
-      .filter((inv) => inv.status === 'active')
-      .map((inv) => `- ${inv.rule}`);
-    if (activeInvariants.length > 0) {
-      lines.push('');
-      lines.push('Lines I do not cross:');
-      lines.push(...activeInvariants);
+  // Personality traits from identity (if available)
+  if (agentIdentity?.personality) {
+    const personalityTraits = describePersonality(agentIdentity.personality);
+    if (personalityTraits.length > 0) {
+      lines.push('My personality: ' + personalityTraits.join('. ') + '.');
     }
   }
 
-  // Identity themes — emergent self-perception (top 2-3)
-  const themes = soulState.selfModel.identityThemes;
-  if (themes.length > 0) {
-    const topThemes = [...themes]
-      .sort((a, b) => b.strength - a.strength)
-      .slice(0, 3)
-      .map((t) => t.theme);
+  // Operating principles (from preferences and character)
+  const principles = buildOperatingPrinciples(agentIdentity?.preferences);
+  if (principles.length > 0) {
     lines.push('');
-    lines.push(`I see myself as: ${topThemes.join(', ')}`);
+    lines.push('How I operate:');
+    for (const principle of principles) {
+      lines.push(`- ${principle}`);
+    }
   }
 
-  // Active cornerstone — deepest identity anchor (commitment only)
-  const activeCornerstone = soulState.cornerstones.find((c) => c.status === 'active');
-  if (activeCornerstone) {
-    lines.push(`Cornerstone: ${activeCornerstone.commitment}`);
+  // Soul state (values, cares, identity themes)
+  if (soulState) {
+    // Current narrative arc (who I am / becoming)
+    const narrative = soulState.selfModel.narrative.currentStory;
+    if (narrative.length > 0) {
+      lines.push('');
+      lines.push(narrative);
+    }
+    const becoming = soulState.narrative.currentNarrative.whoIAmBecoming;
+    if (becoming) {
+      lines.push(`Becoming: ${becoming}`);
+    }
+
+    // All core cares, sorted by weight, sacred marker instead of numeric weight
+    const cares = soulState.constitution.coreCares;
+    if (cares.length > 0) {
+      const sortedCares = [...cares]
+        .sort((a, b) => b.weight - a.weight)
+        .map((c) => {
+          const sacred = c.sacred ? ' [sacred]' : '';
+          return `- ${c.care}${sacred}`;
+        });
+      lines.push('');
+      lines.push('Core cares (ranked):');
+      lines.push(...sortedCares);
+    }
+
+    // Active invariants — hard identity constraints
+    const invariants = soulState.constitution.invariants;
+    if (invariants.length > 0) {
+      const activeInvariants = invariants
+        .filter((inv) => inv.status === 'active')
+        .map((inv) => `- ${inv.rule}`);
+      if (activeInvariants.length > 0) {
+        lines.push('');
+        lines.push('Lines I do not cross:');
+        lines.push(...activeInvariants);
+      }
+    }
+
+    // Identity themes — emergent self-perception (top 2-3)
+    const themes = soulState.selfModel.identityThemes;
+    if (themes.length > 0) {
+      const topThemes = [...themes]
+        .sort((a, b) => b.strength - a.strength)
+        .slice(0, 3)
+        .map((t) => t.theme);
+      lines.push('');
+      lines.push(`I see myself as: ${topThemes.join(', ')}`);
+    }
+
+    // Active cornerstone — deepest identity anchor (commitment only)
+    const activeCornerstone = soulState.cornerstones.find((c) => c.status === 'active');
+    if (activeCornerstone) {
+      lines.push(`Cornerstone: ${activeCornerstone.commitment}`);
+    }
   }
 
   if (lines.length === 0) {
