@@ -503,7 +503,6 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
       const dateStr = date.toISODate();
       if (!dateStr) continue;
 
-      // loadDayEntries already filters by recipientId
       const entries = await this.loadDayEntries(dateStr);
 
       // Skip zero-entry days

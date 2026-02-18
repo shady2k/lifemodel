@@ -78,11 +78,10 @@ const manifest: PluginManifestV2 = {
  * Get user patterns from UserModel via plugin services.
  */
 function createGetUserPatterns(
-  primitives: PluginPrimitives,
-  recipientId: string
+  primitives: PluginPrimitives
 ): () => { wakeHour?: number; sleepHour?: number } | null {
   return () => {
-    const patterns = primitives.services.getUserPatterns(recipientId);
+    const patterns = primitives.services.getUserPatterns();
     if (!patterns) return null;
     const result: { wakeHour?: number; sleepHour?: number } = {};
     if (patterns.wakeHour !== null) {
@@ -98,12 +97,9 @@ function createGetUserPatterns(
 /**
  * Get calorie goal from user model via plugin services.
  */
-function createGetCalorieGoal(
-  primitives: PluginPrimitives,
-  recipientId: string
-): () => Promise<number | null> {
+function createGetCalorieGoal(primitives: PluginPrimitives): () => Promise<number | null> {
   return () => {
-    const prop = primitives.services.getUserProperty('calorie_goal', recipientId);
+    const prop = primitives.services.getUserProperty('calorie_goal');
     if (!prop || typeof prop.value !== 'number') return Promise.resolve(null);
     return Promise.resolve(prop.value);
   };
@@ -213,10 +209,9 @@ function nextSundayAt(hour: number, timezone: string): Date {
  */
 async function scheduleWeightCheckin(
   primitives: PluginPrimitives,
-  recipientId: string,
   userTimezone: string
 ): Promise<void> {
-  const scheduleId = `weight_checkin_${recipientId}`;
+  const scheduleId = 'weight_checkin';
 
   // Check if valid schedule already exists (restart-safe)
   const existing = await primitives.scheduler.getSchedules();
@@ -230,7 +225,7 @@ async function scheduleWeightCheckin(
   }
 
   // Get user's wake hour pattern from UserModel
-  const userPatterns = primitives.services.getUserPatterns(recipientId);
+  const userPatterns = primitives.services.getUserPatterns();
   // If no wake hour learned yet, wait until we have data to schedule appropriately
   if (!userPatterns?.wakeHour) {
     primitives.logger.debug(
@@ -248,7 +243,6 @@ async function scheduleWeightCheckin(
     timezone: userTimezone,
     data: {
       kind: CALORIES_EVENT_KINDS.WEIGHT_CHECKIN,
-      recipientId,
     },
   });
 
@@ -261,19 +255,14 @@ async function scheduleWeightCheckin(
 /**
  * Handle weight check-in event.
  */
-async function handleWeightCheckin(
-  payload: { recipientId: string },
-  primitives: PluginPrimitives
-): Promise<void> {
-  const { recipientId } = payload;
-
-  // Get last weight entry
+async function handleWeightCheckin(primitives: PluginPrimitives): Promise<void> {
+  // Get last weight entry (no recipientId filtering — neuron serves the primary user)
   const weights = await primitives.storage.get<WeightEntry[]>(CALORIES_STORAGE_KEYS.weights);
-  const userWeights = (weights ?? [])
-    .filter((w) => w.recipientId === recipientId)
-    .sort((a, b) => new Date(b.measuredAt).getTime() - new Date(a.measuredAt).getTime());
+  const sortedWeights = (weights ?? []).sort(
+    (a, b) => new Date(b.measuredAt).getTime() - new Date(a.measuredAt).getTime()
+  );
 
-  const lastWeight = userWeights[0];
+  const lastWeight = sortedWeights[0];
 
   let thoughtContent: string;
   if (lastWeight) {
@@ -288,7 +277,7 @@ async function handleWeightCheckin(
   // Save as pending intention — surfaces in next user-facing conversation
   primitives.intentEmitter.emitPendingIntention(thoughtContent);
 
-  primitives.logger.info({ recipientId, hasLastWeight: !!lastWeight }, 'Weight check-in triggered');
+  primitives.logger.info({ hasLastWeight: !!lastWeight }, 'Weight check-in triggered');
 }
 
 /**
@@ -310,10 +299,48 @@ const lifecycle: PluginLifecycleV2 = {
       createCaloriesTool(
         primitives,
         (recipientId) => primitives.services.getTimezone(recipientId),
-        (recipientId) => createGetUserPatterns(primitives, recipientId)(),
+        (recipientId) => {
+          const patterns = primitives.services.getUserPatterns(recipientId);
+          if (!patterns) return null;
+          const result: { wakeHour?: number; sleepHour?: number } = {};
+          if (patterns.wakeHour !== null) result.wakeHour = patterns.wakeHour;
+          if (patterns.sleepHour !== null) result.sleepHour = patterns.sleepHour;
+          return result;
+        },
         createGetUserModel(primitives)
       ),
     ];
+
+    // Schedule weight check-in (moved from neuron factory — no recipientId needed)
+    const timezone = primitives.services.getTimezone();
+    scheduleWeightCheckin(primitives, timezone).catch((err: unknown) => {
+      primitives.logger.error(
+        { error: err instanceof Error ? err.message : String(err) },
+        'Failed to schedule weight check-in'
+      );
+    });
+
+    // Lazy migration: cancel old recipientId-suffixed schedule if it exists
+    Promise.resolve(primitives.scheduler.getSchedules())
+      .then((schedules) => {
+        const oldSchedule = schedules.find((s: ScheduleEntry) => s.id === 'weight_checkin_default');
+        if (oldSchedule) {
+          primitives.scheduler
+            .cancel('weight_checkin_default')
+            .then(() => {
+              primitives.logger.info({}, 'Migrated: cancelled old weight_checkin_default schedule');
+            })
+            .catch((err: unknown) => {
+              primitives.logger.warn(
+                { error: err instanceof Error ? err.message : String(err) },
+                'Failed to cancel old weight_checkin_default schedule'
+              );
+            });
+        }
+      })
+      .catch(() => {
+        /* getSchedules failure already logged by scheduler */
+      });
 
     primitives.logger.info({}, 'Calories plugin activated');
   },
@@ -342,19 +369,12 @@ const lifecycle: PluginLifecycleV2 = {
     }
   },
 
-  async onEvent(eventKind: string, payload: Record<string, unknown>, _fireContext?: FireContext) {
+  async onEvent(eventKind: string, _payload: Record<string, unknown>, _fireContext?: FireContext) {
     if (!pluginPrimitives) return undefined;
 
     if (eventKind === CALORIES_EVENT_KINDS.WEIGHT_CHECKIN) {
-      const recipientId = payload['recipientId'];
-      if (typeof recipientId !== 'string') {
-        pluginPrimitives.logger.error(
-          { payload },
-          'Invalid weight checkin payload: missing recipientId'
-        );
-        return undefined;
-      }
-      await handleWeightCheckin({ recipientId }, pluginPrimitives);
+      // Accept payloads with or without recipientId (old schedules may include it)
+      await handleWeightCheckin(pluginPrimitives);
     }
     return undefined;
   },
@@ -369,7 +389,6 @@ const lifecycle: PluginLifecycleV2 = {
  */
 interface CaloriesNeuronFactoryConfig {
   neuronConfig?: Partial<CaloriesAnomalyNeuronConfig>;
-  recipientId?: string;
 }
 
 /**
@@ -399,25 +418,15 @@ const caloriesPlugin: PluginV2 & {
       const primitives = pluginPrimitives;
 
       const factoryConfig = (config ?? {}) as CaloriesNeuronFactoryConfig;
-      const recipientId = factoryConfig.recipientId ?? 'default';
 
       neuronInstance = new CaloriesAnomalyNeuron(
         logger,
         factoryConfig.neuronConfig ?? {},
         primitives.storage,
-        () => primitives.services.getTimezone(recipientId),
-        () => createGetUserPatterns(primitives, recipientId)(),
-        createGetCalorieGoal(primitives, recipientId)
+        () => primitives.services.getTimezone(),
+        () => createGetUserPatterns(primitives)(),
+        createGetCalorieGoal(primitives)
       );
-
-      // Schedule weight check-in when neuron is created
-      const timezone = primitives.services.getTimezone(recipientId);
-      scheduleWeightCheckin(primitives, recipientId, timezone).catch((err: unknown) => {
-        logger.error(
-          { error: err instanceof Error ? err.message : String(err) },
-          'Failed to schedule weight check-in'
-        );
-      });
 
       return neuronInstance;
     },
