@@ -106,12 +106,17 @@ describe('ContactPressureNeuron', () => {
     });
 
     it('should emit exactly at emitThreshold', () => {
-      // socialDebt=0.5 -> pressure = 0.5 * 0.4 = 0.2 (exactly at threshold)
-      const state = createAgentState({ socialDebt: 0.5 });
-      const expectedPressure = calculateExpectedPressure(state);
-      expect(expectedPressure).toBe(0.2);
+      // Find socialDebt value that produces exactly 0.2 pressure with current weights
+      // With socialDebt=0.35, curiosity=0.25: need socialDebt where 0.35*x + 0.25*0.5 = 0.2
+      // 0.35x + 0.125 = 0.2 -> x = 0.075/0.35 ≈ 0.214
+      // Use custom weights to make test deterministic
+      const testNeuron = new ContactPressureNeuron(createTestLogger(), {
+        weights: { socialDebt: 0.4, taskPressure: 0.2, curiosity: 0.1, acquaintancePressure: 0.3 },
+      });
+      const state = createAgentState({ socialDebt: 0.5, curiosity: 0, taskPressure: 0, acquaintancePressure: 0 });
+      // pressure = 0.5 * 0.4 = 0.2 (exactly at threshold)
 
-      const signal = neuron.check(state, 1.0, 'test-corr-1');
+      const signal = testNeuron.check(state, 1.0, 'test-corr-1');
 
       expect(signal).toBeDefined();
       expect(signal?.metrics.value).toBe(0.2);
@@ -141,8 +146,9 @@ describe('ContactPressureNeuron', () => {
       // Reset to bypass refractory and allow new check
       neuron.reset();
 
-      // Second: below threshold
-      const lowState = createAgentState({ socialDebt: 0.3 }); // pressure = 0.12
+      // Second: below threshold - use very low values to ensure below 0.2
+      // With socialDebt=0.35, curiosity=0.25: 0.1*0.35 + 0.1*0.25 = 0.06 < 0.2
+      const lowState = createAgentState({ socialDebt: 0.1, curiosity: 0.1 });
       const signal = neuron.check(lowState, 1.0, 'test-corr-2');
       expect(signal).toBeUndefined();
     });
@@ -308,6 +314,10 @@ describe('ContactPressureNeuron', () => {
     });
 
     it('should calculate partial pressure correctly', () => {
+      // Use custom weights to make test deterministic
+      const testNeuron = new ContactPressureNeuron(createTestLogger(), {
+        weights: { socialDebt: 0.4, taskPressure: 0.2, curiosity: 0.1, acquaintancePressure: 0.3 },
+      });
       const state = createAgentState({
         socialDebt: 0.5, // 0.5 * 0.4 = 0.2
         taskPressure: 0.5, // 0.5 * 0.2 = 0.1
@@ -315,9 +325,9 @@ describe('ContactPressureNeuron', () => {
         acquaintancePressure: 0.0,
       });
 
-      const signal = neuron.check(state, 1.0, 'test-corr-1');
+      const signal = testNeuron.check(state, 1.0, 'test-corr-1');
 
-      // (0.2 + 0.1) / 1.0 = 0.3 (weighted average)
+      // 0.2 + 0.1 = 0.3 (weighted sum)
       expect(signal?.metrics.value).toBeCloseTo(0.3, 4);
     });
 
@@ -369,9 +379,10 @@ describe('ContactPressureNeuron', () => {
       neuron.check(state, 1.0, 'test-corr-1');
 
       const result = neuron.getLastNeuronResult();
+      const expectedPressure = calculateExpectedPressure(state);
 
       expect(result).toBeDefined();
-      expect(result?.output).toBeCloseTo(0.4, 4); // socialDebt * 0.4
+      expect(result?.output).toBeCloseTo(expectedPressure, 4);
       expect(result?.contributions).toHaveLength(4);
     });
   });

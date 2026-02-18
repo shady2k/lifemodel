@@ -37,8 +37,11 @@ export interface AgentConfig {
     base: number;
   };
 
-  /** Social debt accumulation rate per tick (default: 0.001) */
+  /** Social debt accumulation rate per tick (default: 0.005) */
   socialDebtRate?: number;
+
+  /** Curiosity decay rate toward 0.5 baseline per hour (default: 0.01) */
+  curiosityDecayRatePerHour?: number;
 }
 
 const DEFAULT_TICK_RATE = {
@@ -99,6 +102,7 @@ export class Agent {
       identity: this.identity,
       tickRate: config.tickRate ?? DEFAULT_TICK_RATE,
       socialDebtRate: config.socialDebtRate ?? 0.005, // Increased from 0.001 for faster accumulation
+      curiosityDecayRatePerHour: config.curiosityDecayRatePerHour ?? 0.01, // Decay toward 0.5 baseline
     };
 
     this.logger.info({ name: this.identity.name, energy: this.state.energy }, 'Agent initialized');
@@ -176,6 +180,25 @@ export class Agent {
 
     // Accumulate social debt
     this.setStateValue('socialDebt', this.state.socialDebt + this.config.socialDebtRate);
+
+    // Decay curiosity toward 0.5 baseline (slow return to equilibrium)
+    const curiosityBaseline = 0.5;
+    if (this.state.curiosity !== curiosityBaseline) {
+      // Calculate decay based on time elapsed since last tick
+      // decay per tick = rate per hour * (tickInterval / hour in ms)
+      const tickIntervalMs = this.state.tickInterval;
+      const decayPerTick = this.config.curiosityDecayRatePerHour * (tickIntervalMs / 3_600_000);
+
+      if (this.state.curiosity > curiosityBaseline) {
+        // Decay downward toward baseline
+        const newCuriosity = Math.max(curiosityBaseline, this.state.curiosity - decayPerTick);
+        this.state.curiosity = round3(newCuriosity);
+      } else {
+        // Increase upward toward baseline
+        const newCuriosity = Math.min(curiosityBaseline, this.state.curiosity + decayPerTick);
+        this.state.curiosity = round3(newCuriosity);
+      }
+    }
 
     // Update alertness mode based on state
     this.updateAlertnessMode();

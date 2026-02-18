@@ -1725,6 +1725,14 @@ export class CoreLoop {
             );
 
             this.metrics.counter('interests_set', { intensity, urgent: String(urgent) });
+
+            // Bump curiosity when user shows interest (Phase 2: Dynamic Curiosity)
+            // Random bump between 0.1-0.15 to add natural variation
+            const curiosityBump = 0.1 + Math.random() * 0.05;
+            this.agent.applyIntent({
+              type: 'UPDATE_STATE',
+              payload: { key: 'curiosity', value: curiosityBump, delta: true },
+            });
             break;
           }
         }

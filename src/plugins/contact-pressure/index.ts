@@ -64,10 +64,10 @@ export const DEFAULT_CONTACT_PRESSURE_CONFIG: ContactPressureNeuronConfig = {
   emitThreshold: 0.2,
   emitWhileAbove: true,
   weights: {
-    socialDebt: 0.4,
+    socialDebt: 0.35,
     taskPressure: 0.2,
-    curiosity: 0.1,
-    acquaintancePressure: 0.3,
+    curiosity: 0.25,
+    acquaintancePressure: 0.2,
   },
 };
 

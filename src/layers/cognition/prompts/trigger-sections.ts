@@ -44,10 +44,17 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
     ? 'User did not respond to your last message'
     : 'Social debt accumulated';
 
+  // Check if curiosity is elevated (Phase 2: Dynamic Curiosity)
+  const curiosity = context.agentState.curiosity;
+  const curiosityNote =
+    curiosity > 0.6
+      ? "\nYour curiosity is elevated. Consider asking about something you're genuinely interested in."
+      : '';
+
   return `<trigger type="proactive_contact">
 <context>
 Last conversation: ${timeContext || 'unknown'} ago
-Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}
+Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}
 </context>
 
 <task>
