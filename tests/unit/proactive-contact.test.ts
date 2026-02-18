@@ -150,7 +150,7 @@ describe('Proactive Contact', () => {
         .join('\n\n');
       // Prompt gives agent decision guidance with tool limit
       expect(fullPrompt).toContain('Choose ONE action');
-      expect(fullPrompt).toContain('Max 3 tool calls');
+      expect(fullPrompt).toContain('Max 5 tool calls');
       expect(fullPrompt).toContain('Different topic'); // Phase 3: Expanded from "COMPLETELY DIFFERENT topic"
       expect(fullPrompt).toContain('Skip messaging');
     });

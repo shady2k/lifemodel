@@ -58,6 +58,9 @@ export interface CognitionProcessorConfig {
 
   /** Emit typing indicator before LLM calls */
   emitTypingIndicator: boolean;
+
+  /** Optional directory for built-in skills */
+  builtinSkillsDir?: string;
 }
 
 /**
@@ -394,7 +397,7 @@ export class CognitionProcessor implements CognitionLayer {
     const { opinions, predictions } = await this.getPerspectives(recipientId);
 
     // Load available skills for Motor Cortex
-    const availableSkills = await discoverSkills();
+    const availableSkills = await discoverSkills(undefined, this.config.builtinSkillsDir);
 
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:

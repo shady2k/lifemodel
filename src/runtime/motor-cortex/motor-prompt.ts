@@ -67,6 +67,8 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   grep: '- grep: Search patterns across files (regex, max 100 matches)',
   patch: '- patch: Find-and-replace text in a file (whitespace-flexible matching)',
   fetch: '- fetch: Fetch a URL (GET/POST). Returns page content. Prefer over curl.',
+  websearch:
+    '- websearch: Search the web for information. Returns titles, URLs, and snippets. Use to discover URLs before fetching.',
 };
 
 /**

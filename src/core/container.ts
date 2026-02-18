@@ -62,13 +62,18 @@ import { PersistentAckRegistry } from '../layers/aggregation/persistent-ack-regi
 import { createMotorCortex, type MotorCortex } from '../runtime/motor-cortex/motor-cortex.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
 import { createCredentialTool } from '../layers/cognition/tools/core/credential.js';
 import { createSkillTool } from '../layers/cognition/tools/core/skill.js';
 import { fetchPage } from '../plugins/web-fetch/fetcher.js';
-import type { MotorFetchFn } from '../runtime/motor-cortex/motor-tools.js';
+import type { MotorFetchFn, MotorSearchFn } from '../runtime/motor-cortex/motor-tools.js';
+import {
+  createProviderInstances,
+  getDefaultProviderId,
+} from '../plugins/web-search/providers/registry.js';
 
 /**
  * Application configuration.
@@ -194,11 +199,14 @@ export interface Container {
  *
  * @param logger Logger instance
  */
-function createLayers(logger: Logger): CoreLoopLayers {
+function createLayers(logger: Logger, builtinSkillsDir?: string): CoreLoopLayers {
   return {
     autonomic: createAutonomicProcessor(logger),
     aggregation: createAggregationProcessor(logger),
-    cognition: createCognitionProcessor(logger),
+    cognition: createCognitionProcessor(
+      logger,
+      builtinSkillsDir ? { builtinSkillsDir } : undefined
+    ),
   };
 }
 
@@ -557,6 +565,32 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       };
     };
 
+    // Wire search adapter: wraps web-search plugin providers → MotorSearchFn shape
+    let motorSearchFn: MotorSearchFn | undefined;
+    const searchProviders = createProviderInstances(logger);
+    const defaultSearchId = getDefaultProviderId();
+    if (defaultSearchId) {
+      const defaultProvider = searchProviders.get(defaultSearchId);
+      if (defaultProvider) {
+        motorSearchFn = async (query, opts) => {
+          const limit = opts?.limit ?? 5;
+          const searchResult = await defaultProvider.search({ query, limit });
+          if (!searchResult.ok) {
+            return { ok: false, results: [] };
+          }
+          return {
+            ok: true,
+            results: searchResult.results.map((r) => ({
+              title: r.title,
+              url: r.url,
+              snippet: r.snippet,
+            })),
+          };
+        };
+        logger.info({ provider: defaultSearchId }, 'Motor search adapter configured');
+      }
+    }
+
     motorCortex = createMotorCortex({
       llm: llmProvider,
       storage,
@@ -566,9 +600,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       artifactsBaseDir,
       containerManager: containerMgr,
       fetchFn: motorFetchFn,
+      ...(motorSearchFn && { searchFn: motorSearchFn }),
     });
 
-    logger.info({ hasFetch: true }, 'Motor Cortex service initialized');
+    logger.info({ hasFetch: true, hasSearch: !!motorSearchFn }, 'Motor Cortex service initialized');
   }
 
   // Create recipient registry for message routing (with persistence)
@@ -592,8 +627,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     pluginConfigs: mergedConfig.plugins.configs,
   });
 
+  // Compute builtin skills directory (ESM-safe, relative to this file)
+  const containerThisDir = dirname(fileURLToPath(import.meta.url));
+  const builtinSkillsDir = resolve(containerThisDir, '..', 'runtime', 'builtin-skills');
+
   // 3. Create layers FIRST (AUTONOMIC works without neurons initially)
-  const layers = createLayers(logger);
+  const layers = createLayers(logger, builtinSkillsDir);
 
   // 4. Wire neuron callbacks: PluginLoader → AUTONOMIC
   // This must happen BEFORE loading any neuron plugins
@@ -814,6 +853,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         credentialStore,
         skillsDir,
         workspacesDir,
+        builtinSkillsDir,
         logger,
       })
     );

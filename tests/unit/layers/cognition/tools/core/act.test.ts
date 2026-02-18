@@ -33,7 +33,7 @@ vi.mock('../../../../../../src/runtime/container/network-policy.js', () => ({
 // Import the mocked functions
 import { loadSkill } from '../../../../../../src/runtime/skills/skill-loader.js';
 
-const ALL_MOTOR_TOOLS = ['read', 'write', 'list', 'glob', 'bash', 'grep', 'patch', 'fetch'];
+const ALL_MOTOR_TOOLS = ['read', 'write', 'list', 'glob', 'bash', 'grep', 'patch', 'fetch', 'websearch'];
 
 describe('core.act tool', () => {
   const mockMotorCortex = {

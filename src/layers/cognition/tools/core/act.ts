@@ -137,6 +137,7 @@ const ALL_MOTOR_TOOLS: MotorTool[] = [
   'grep',
   'patch',
   'fetch',
+  'websearch',
 ];
 
 /**
@@ -154,6 +155,9 @@ export interface ActToolDeps {
 
   /** Base directory for motor workspaces */
   workspacesDir: string;
+
+  /** Optional directory for built-in skills */
+  builtinSkillsDir?: string;
 
   /** Logger for diagnostics */
   logger: {
@@ -190,7 +194,14 @@ function resolveTools(policyTools: ('ALL' | MotorToolName)[] | undefined): Motor
  * Create the core.act tool.
  */
 export function createActTool(deps: ActToolDeps): Tool {
-  const { motorCortex, credentialStore, skillsDir, workspacesDir, logger: actLogger } = deps;
+  const {
+    motorCortex,
+    credentialStore,
+    skillsDir,
+    workspacesDir,
+    builtinSkillsDir,
+    logger: actLogger,
+  } = deps;
   const parameters = [
     {
       name: 'mode',
@@ -238,7 +249,7 @@ export function createActTool(deps: ActToolDeps): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. All tools are always available: read, write, list, glob, bash, grep, patch, ask_user, fetch. Skills with approved policy provide domains automatically. To save or create a skill, use agentic mode. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. All tools are always available: read, write, list, glob, bash, grep, patch, ask_user, fetch, websearch. Skills with approved policy provide domains automatically. To save or create a skill, use agentic mode. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -293,7 +304,7 @@ export function createActTool(deps: ActToolDeps): Tool {
           const warnings: string[] = [];
 
           if (skillName) {
-            const skillResult = await loadSkill(skillName, skillsDir);
+            const skillResult = await loadSkill(skillName, skillsDir, builtinSkillsDir);
             if ('error' in skillResult) {
               // Guide the model: if skill doesn't exist, it needs to be created
               // via core.act WITHOUT skill param (Scenario 7 from skill-lifecycle.md)
@@ -312,8 +323,8 @@ export function createActTool(deps: ActToolDeps): Tool {
 
             const policy = loadedSkill.policy;
 
-            // Status gating — block unapproved skills
-            if (policy && policy.status !== 'approved') {
+            // Status gating — block unapproved skills (builtin skills bypass)
+            if (policy && policy.status !== 'approved' && !loadedSkill.isBuiltIn) {
               const statusLabels: Record<string, string> = {
                 pending_review: 'pending approval (new skill, not yet reviewed)',
                 reviewing: 'under review (Motor deep review in progress)',
@@ -513,6 +524,8 @@ export function createActTool(deps: ActToolDeps): Tool {
             ...(workspacePath && { workspacePath }),
             // Skill name (for extraction middleware)
             ...(skillName && { skillName }),
+            // Builtin skills get auto-allowed search domains
+            ...(loadedSkill?.isBuiltIn && { autoAllowSearchDomains: true }),
           });
 
           // Note: Auto-discovery mode - no index.json to update

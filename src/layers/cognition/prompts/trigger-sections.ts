@@ -95,13 +95,13 @@ Do NOT reference, summarize, or follow up on anything from the conversation hist
 Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
 
 Choose ONE action:
-• Act on a desire: Check <active_desires> section. Pick something you genuinely want, message about it. {"response": "your message"}
-• Share something relevant: Use core.memory({action:"search", types:["fact"], tags:["<interest_topic>"]}) to find related news/facts, then share what you find with {"response": "message with URL"}. Skip if nothing interesting found.
+• Act on a desire: Check <active_desires> section. Pick one you genuinely want. If you have tools to pursue it (web search, memory, skills) — DO THE RESEARCH FIRST, then share what you found. Don't ask the user for permission to look things up. {"response": "what you found or learned"}
+• Share something relevant: Use plugin_webSearch or core.memory({action:"search", types:["fact"], tags:["<interest_topic>"]}) to find related news/facts, then share what you find with {"response": "message with URL"}. Skip if nothing interesting found.
 • Ask a curious question: Something you genuinely want to know about them or their interests. {"response": "your question"}
 • Different topic: Check in about their day, share a thought, start fresh. {"response": "your message"}
 • Skip messaging: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
-You may call tools to prepare, but do not repeat completed actions. Max 3 tool calls total.
+You may call tools to research and prepare before messaging. Do not repeat completed actions. Max 5 tool calls total.
 </task>
 </trigger>`;
 }
@@ -339,9 +339,12 @@ ${activeConvWarning}Thought: ${content ?? JSON.stringify(data)}
 </context>
 
 <task>
-Available tools: core.setInterest, core.remember, core.memory({ action: "search", types: ["fact"] })
+Available tools: core.setInterest, core.remember, core.desire, core.memory({ action: "search", types: ["fact"] })
 Not available: core.thought, core.say, core.state, core.agent
 Message history is NOT indexed for thought processing. Do not search types: ["message"].
+
+If this thought reveals something you genuinely want to explore, learn, or do — create a desire with core.desire.
+Examples: curiosity about a topic → desire to research it. Noticing a user pattern → desire to understand it. Reading about something relevant → desire to share it.
 
 Most thoughts complete with {"response": ""} after 0-2 tool calls. Tool budget: 3 calls max.
 

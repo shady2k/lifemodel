@@ -404,16 +404,10 @@ export async function savePolicy(skillDir: string, policy: SkillPolicy): Promise
 }
 
 /**
- * Discover all available skills by scanning the skills directory.
- *
- * Auto-discovery mode: always scans the directory, no index.json caching.
- *
- * @param baseDir - Base directory (default: data/skills)
- * @returns Array of discovered skills with names
+ * Scan a single directory for skills.
+ * Returns discovered skills, optionally marking them as built-in.
  */
-export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[]> {
-  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
-
+async function scanSkillsDir(dir: string, isBuiltIn: boolean): Promise<DiscoveredSkill[]> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     const skills: DiscoveredSkill[] = [];
@@ -446,6 +440,7 @@ export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[
           hasPolicy: policy !== null,
           status: policy?.status ?? 'needs_reapproval',
           lastUsed: extractedFrom?.timestamp,
+          ...(isBuiltIn && { isBuiltIn: true }),
         };
 
         skills.push({ name: entry.name, ...indexEntry });
@@ -457,9 +452,37 @@ export async function discoverSkills(baseDir?: string): Promise<DiscoveredSkill[
 
     return skills;
   } catch {
-    // Skills directory doesn't exist yet
+    // Directory doesn't exist yet
     return [];
   }
+}
+
+/**
+ * Discover all available skills by scanning the skills directory.
+ *
+ * Auto-discovery mode: always scans the directory, no index.json caching.
+ * When builtinDir is provided, scans it first, then user dir.
+ * User skills override builtin skills on name conflict.
+ *
+ * @param baseDir - Base directory (default: data/skills)
+ * @param builtinDir - Optional directory for built-in skills
+ * @returns Array of discovered skills with names
+ */
+export async function discoverSkills(
+  baseDir?: string,
+  builtinDir?: string
+): Promise<DiscoveredSkill[]> {
+  const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
+
+  // Scan builtin skills first, then user skills (user overrides on name conflict)
+  const builtinSkills = builtinDir ? await scanSkillsDir(builtinDir, true) : [];
+  const userSkills = await scanSkillsDir(dir, false);
+
+  // Merge: user skills take precedence over builtin on name conflict
+  const userNames = new Set(userSkills.map((s) => s.name));
+  const merged = [...builtinSkills.filter((s) => !userNames.has(s.name)), ...userSkills];
+
+  return merged;
 }
 
 /**
@@ -477,14 +500,17 @@ export async function getSkillNames(baseDir?: string): Promise<string[]> {
  *
  * Returns frontmatter + optional policy + body.
  * Verifies content hash if policy exists — resets status to 'needs_reapproval' on mismatch.
+ * When builtinDir is provided, falls back to it if the skill is not found in the user dir.
  *
  * @param skillName - Skill name (directory name under data/skills/)
  * @param baseDir - Base directory (default: data/skills)
+ * @param builtinDir - Optional directory for built-in skills (fallback)
  * @returns LoadedSkill or error object
  */
 export async function loadSkill(
   skillName: string,
-  baseDir?: string
+  baseDir?: string,
+  builtinDir?: string
 ): Promise<LoadedSkill | { error: string }> {
   const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
 
@@ -494,10 +520,30 @@ export async function loadSkill(
     return { error: `Invalid skill name: "${skillName}"` };
   }
 
+  // Check user dir first, fallback to builtin dir
+  let effectiveSkillDir = skillDir;
   const skillPath = join(skillDir, 'SKILL.md');
+  try {
+    await stat(skillPath);
+  } catch {
+    // Not found in user dir — try builtin dir
+    if (builtinDir) {
+      const builtinSkillDir = resolve(builtinDir, skillName);
+      if (builtinSkillDir.startsWith(builtinDir + '/') || builtinSkillDir === builtinDir) {
+        try {
+          await stat(join(builtinSkillDir, 'SKILL.md'));
+          effectiveSkillDir = builtinSkillDir;
+        } catch {
+          // Not in builtin either — fall through to normal error handling
+        }
+      }
+    }
+  }
+
+  const effectiveSkillPath = join(effectiveSkillDir, 'SKILL.md');
 
   try {
-    const content = await readFile(skillPath, 'utf-8');
+    const content = await readFile(effectiveSkillPath, 'utf-8');
     const parsed = parseSkillFile(content);
 
     if ('error' in parsed) {
@@ -510,26 +556,29 @@ export async function loadSkill(
     }
 
     const frontmatter = toSkillFrontmatter(parsed.frontmatter);
-    let policy = await loadPolicy(skillDir);
+    let policy = await loadPolicy(effectiveSkillDir);
 
     // Content hash verification
     if (policy?.provenance?.contentHash) {
-      const currentHash = await computeDirectoryHash(skillDir);
+      const currentHash = await computeDirectoryHash(effectiveSkillDir);
       if (currentHash !== policy.provenance.contentHash) {
         // Reset status to needs_reapproval (from approved, reviewed, or reviewing)
         if (policy.status !== 'pending_review' && policy.status !== 'needs_reapproval') {
           policy = { ...policy, status: 'needs_reapproval' };
-          await savePolicy(skillDir, policy);
+          await savePolicy(effectiveSkillDir, policy);
         }
       }
     }
+
+    const isBuiltInSkill = builtinDir ? effectiveSkillDir.startsWith(builtinDir) : false;
 
     return {
       frontmatter,
       policy: policy ?? undefined,
       body: parsed.body,
-      path: skillDir,
-      skillPath,
+      path: effectiveSkillDir,
+      skillPath: effectiveSkillPath,
+      ...(isBuiltInSkill && { isBuiltIn: true }),
     };
   } catch (error) {
     return {

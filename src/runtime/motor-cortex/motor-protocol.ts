@@ -37,7 +37,16 @@ export type SyntheticTool = 'ask_user' | 'save_credential' | 'request_approval';
 /**
  * Tools available to the Motor Cortex sub-agent.
  */
-export type MotorTool = 'read' | 'write' | 'list' | 'glob' | 'bash' | 'grep' | 'patch' | 'fetch';
+export type MotorTool =
+  | 'read'
+  | 'write'
+  | 'list'
+  | 'glob'
+  | 'bash'
+  | 'grep'
+  | 'patch'
+  | 'fetch'
+  | 'websearch';
 
 /**
  * Result from executing a Motor Cortex tool.
@@ -367,4 +376,7 @@ export interface MotorRun {
 
   /** Whether this run is a skill security review */
   skillReview?: boolean;
+
+  /** Whether domains from websearch results should be auto-added to allowedDomains */
+  autoAllowSearchDomains?: boolean;
 }

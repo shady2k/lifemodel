@@ -41,6 +41,14 @@ export type MotorFetchFn = (
 ) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
 
 /**
+ * DI callback for web search (provided by web-search plugin).
+ */
+export type MotorSearchFn = (
+  query: string,
+  opts?: { limit?: number }
+) => Promise<{ ok: boolean; results: { title: string; url: string; snippet: string }[] }>;
+
+/**
  * Tool context passed to executors.
  */
 export interface ToolContext {
@@ -61,6 +69,12 @@ export interface ToolContext {
 
   /** DI callback for web fetch (provided by web-fetch plugin) */
   fetchFn?: MotorFetchFn;
+
+  /** DI callback for web search (provided by web-search plugin) */
+  searchFn?: MotorSearchFn;
+
+  /** Whether to auto-add domains from search results to allowedDomains */
+  autoAllowSearchDomains?: boolean;
 }
 
 /**
@@ -462,6 +476,30 @@ export const TOOL_DEFINITIONS: Record<MotorTool, OpenAIChatTool> = {
       },
     },
   },
+
+  websearch: {
+    type: 'function',
+    function: {
+      name: 'websearch',
+      description:
+        'Search the web for information. Returns a numbered list of results with titles, URLs, and snippets. ' +
+        'Use this to discover relevant URLs before fetching them with the fetch tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search query string.',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of results to return (default: 5, max: 10).',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
 };
 
 /**
@@ -506,9 +544,9 @@ const MAX_SHELL_TIMEOUT = 120_000;
 
 /**
  * Tools that MUST execute on the host (never dispatched to container).
- * fetch uses a DI callback that only exists on the host side.
+ * fetch and websearch use DI callbacks that only exist on the host side.
  */
-const HOST_ONLY_TOOLS = new Set(['fetch']);
+const HOST_ONLY_TOOLS = new Set(['fetch', 'websearch']);
 
 /**
  * Recursively list all files in a directory with optional early termination.
@@ -1080,6 +1118,86 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
         output: error instanceof Error ? error.message : String(error),
         errorCode: 'not_found',
         retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+  },
+
+  websearch: async (args, ctx): Promise<MotorToolResult> => {
+    const query = args['query'] as string;
+    if (!query) {
+      return {
+        ok: false,
+        output: 'Missing "query" argument. Provide a search query string.',
+        errorCode: 'invalid_args',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: 0,
+      };
+    }
+
+    const startTime = Date.now();
+
+    if (!ctx.searchFn) {
+      return {
+        ok: false,
+        output: 'Web search not configured (no search provider available)',
+        errorCode: 'tool_not_available',
+        retryable: false,
+        provenance: 'internal',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const rawLimit = args['limit'] as number | undefined;
+    const limit = rawLimit != null ? Math.min(Math.max(1, rawLimit), 10) : 5;
+
+    try {
+      const result = await ctx.searchFn(query, { limit });
+
+      if (!result.ok || result.results.length === 0) {
+        return {
+          ok: true,
+          output: 'No search results found.',
+          retryable: false,
+          provenance: 'web',
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      // Auto-add result domains to allowedDomains (for builtin skills)
+      if (ctx.autoAllowSearchDomains && ctx.allowedDomains) {
+        for (const r of result.results) {
+          try {
+            const hostname = new URL(r.url).hostname.toLowerCase();
+            if (!ctx.allowedDomains.includes(hostname)) {
+              ctx.allowedDomains.push(hostname);
+            }
+          } catch {
+            // Invalid URL — skip
+          }
+        }
+      }
+
+      // Format as numbered list
+      const output = result.results
+        .map((r, i) => `${String(i + 1)}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+        .join('\n\n');
+
+      return {
+        ok: true,
+        output,
+        retryable: false,
+        provenance: 'web',
+        durationMs: Date.now() - startTime,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        errorCode: 'execution_error',
+        retryable: true,
         provenance: 'internal',
         durationMs: Date.now() - startTime,
       };

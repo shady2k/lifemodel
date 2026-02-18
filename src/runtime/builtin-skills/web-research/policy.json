@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 2,
+  "status": "approved",
+  "tools": ["websearch", "fetch", "read", "write", "bash"],
+  "domains": [],
+  "approvedBy": "builtin",
+  "provenance": {
+    "source": "builtin"
+  }
+}

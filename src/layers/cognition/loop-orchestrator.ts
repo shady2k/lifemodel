@@ -99,13 +99,14 @@ export function filterToolsForContext(
       return false;
     }
 
-    // Thought processing: limited tool set (memory + remember + setInterest only)
+    // Thought processing: limited tool set (memory + remember + setInterest + desire only)
     if (isThoughtTrigger) {
       if (name === 'core.thought' || name === 'core_thought') return false; // prevents loops
       if (name === 'core.say' || name === 'core_say') return false; // no user waiting
       if (name === 'core.state' || name === 'core_state') return false; // snapshot sufficient
       if (name === 'core.agent' || name === 'core_agent') return false; // no micro-updates
       if (name === 'core.schedule' || name === 'core_schedule') return false; // schedule during conversation, not reflection
+      // core.desire is explicitly ALLOWED — thoughts are where desires form
     }
 
     // Reaction processing: limited tool set (setInterest + remember + memory only)
@@ -166,8 +167,8 @@ export function maybeSetProactiveToolBudget(
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);
 
   if (isProactive) {
-    state.proactiveToolBudget = 4;
-    logger.debug({ budget: 4 }, 'Proactive contact: tool budget set');
+    state.proactiveToolBudget = 6;
+    logger.debug({ budget: 6 }, 'Proactive contact: tool budget set');
   } else if (isThoughtTrigger) {
     state.proactiveToolBudget = 2;
     logger.debug({ budget: 2 }, 'Thought processing: tool budget set');

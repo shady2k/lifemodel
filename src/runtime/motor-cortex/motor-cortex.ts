@@ -22,7 +22,7 @@ import type {
   SyntheticTool,
 } from './motor-protocol.js';
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
-import type { MotorFetchFn } from './motor-tools.js';
+import type { MotorFetchFn, MotorSearchFn } from './motor-tools.js';
 import { type MotorStateManager, createMotorStateManager } from './motor-state.js';
 import { runMotorLoop } from './motor-loop.js';
 import { extractSkillsFromWorkspace } from './skill-extraction.js';
@@ -139,6 +139,9 @@ export interface MotorCortexDeps {
 
   /** DI callback for web fetch (provided by web-fetch plugin) */
   fetchFn?: MotorFetchFn;
+
+  /** DI callback for web search (provided by web-search plugin) */
+  searchFn?: MotorSearchFn;
 }
 
 /**
@@ -161,6 +164,7 @@ export class MotorCortex {
   private readonly artifactsBaseDir: string | undefined;
   private readonly containerManager: ContainerManager | undefined;
   private readonly fetchFn: MotorFetchFn | undefined;
+  private readonly searchFn: MotorSearchFn | undefined;
 
   /** Whether Docker isolation is available */
   private dockerAvailable: boolean | null = null;
@@ -195,6 +199,7 @@ export class MotorCortex {
     this.artifactsBaseDir = deps.artifactsBaseDir;
     this.containerManager = deps.containerManager;
     this.fetchFn = deps.fetchFn;
+    this.searchFn = deps.searchFn;
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -359,6 +364,9 @@ export class MotorCortex {
 
     /** Whether this is a skill_review run (propagated to motor_result signals) */
     skillReview?: boolean;
+
+    /** Whether domains from websearch results should be auto-added to allowedDomains */
+    autoAllowSearchDomains?: boolean;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -412,6 +420,7 @@ export class MotorCortex {
       ...(params.workspacePath && { workspacePath: params.workspacePath }),
       ...(params.skillName && { skill: params.skillName }),
       ...(params.skillReview && { skillReview: true }),
+      ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
     };
 
     // Create initial attempt (index 0, no recovery context)
@@ -652,6 +661,8 @@ export class MotorCortex {
         ...(this.artifactsBaseDir && { artifactsBaseDir: this.artifactsBaseDir }),
         ...(containerHandle && { containerHandle }),
         ...(this.fetchFn && { fetchFn: this.fetchFn }),
+        ...(this.searchFn && { searchFn: this.searchFn }),
+        ...(run.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
         ...(runCreds?.credentials && { credentials: runCreds.credentials }),
         ...(runCreds?.credentialNames && { credentialNames: runCreds.credentialNames }),
         ...(preparedDeps && { preparedDeps }),

@@ -88,7 +88,8 @@ export type MotorToolName =
   | 'bash'
   | 'grep'
   | 'patch'
-  | 'fetch';
+  | 'fetch'
+  | 'websearch';
 
 /**
  * Security policy sidecar (policy.json).
@@ -145,7 +146,7 @@ export interface SkillPolicy {
     | undefined;
 
   /** Who approved this policy */
-  approvedBy?: 'user' | undefined;
+  approvedBy?: 'user' | 'builtin' | undefined;
 
   /** When this policy was approved */
   approvedAt?: string | undefined;
@@ -196,6 +197,9 @@ export interface SkillIndexEntry {
 
   /** Last time this skill was used (ISO timestamp) */
   lastUsed?: string | undefined;
+
+  /** Whether this skill is a built-in skill (shipped with the system) */
+  isBuiltIn?: boolean | undefined;
 }
 
 /**
@@ -230,6 +234,9 @@ export interface LoadedSkill {
 
   /** Absolute path to the SKILL.md file */
   skillPath: string;
+
+  /** Whether this skill is a built-in skill (shipped with the system) */
+  isBuiltIn?: boolean | undefined;
 }
 
 /**

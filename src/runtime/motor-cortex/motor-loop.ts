@@ -84,6 +84,15 @@ export interface MotorLoopParams {
     }
   ) => Promise<{ ok: boolean; status: number; content: string; contentType: string }>;
 
+  /** DI callback for web search (optional) */
+  searchFn?: (
+    query: string,
+    opts?: { limit?: number }
+  ) => Promise<{ ok: boolean; results: { title: string; url: string; snippet: string }[] }>;
+
+  /** Whether to auto-add domains from search results to allowedDomains */
+  autoAllowSearchDomains?: boolean;
+
   /** Abort signal for cancellation (optional) */
   abortSignal?: AbortSignal;
 
@@ -209,6 +218,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     ...(params.containerHandle && { containerHandle: params.containerHandle }),
     ...(params.run.domains && { allowedDomains: params.run.domains }),
     ...(params.fetchFn && { fetchFn: params.fetchFn }),
+    ...(params.searchFn && { searchFn: params.searchFn }),
+    ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
   };
 
   // Get tool definitions
