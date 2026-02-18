@@ -12,6 +12,24 @@
 
 import type { LoopContext } from '../agentic-loop-types.js';
 import type { MotorResultData } from '../../../types/signal.js';
+import type { Interests } from '../../../types/user/interests.js';
+
+/**
+ * Format user interests as a prioritized list.
+ * Returns top N interests sorted by weight (strongest first).
+ */
+function formatInterests(interests: Interests, limit = 3): string[] {
+  const sorted = Object.entries(interests.weights)
+    .filter(([, weight]) => weight > 0) // Only positive interests
+    .sort((a, b) => b[1] - a[1]) // Sort by weight descending
+    .slice(0, limit);
+
+  return sorted.map(([topic]) => {
+    const urgency = interests.urgency[topic] ?? 0.5;
+    const urgencyLabel = urgency > 0.7 ? ' (high urgency)' : urgency > 0.4 ? '' : ' (low urgency)';
+    return `- ${topic}${urgencyLabel}`;
+  });
+}
 
 /**
  * Build special section for proactive contact explaining this is NOT a response.
@@ -51,10 +69,17 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
       ? "\nYour curiosity is elevated. Consider asking about something you're genuinely interested in."
       : '';
 
+  // Build interests section (Phase 3: Interest-Driven Proactivity)
+  const interests = context.userInterests;
+  const hasInterests = interests && Object.values(interests.weights).some((w) => w > 0);
+  const interestsSection = hasInterests
+    ? `\n\nUser's interests (sorted by weight):\n${formatInterests(interests).join('\n')}`
+    : '';
+
   return `<trigger type="proactive_contact">
 <context>
 Last conversation: ${timeContext || 'unknown'} ago
-Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}
+Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}${interestsSection}
 </context>
 
 <task>
@@ -63,10 +88,12 @@ Do NOT reference, summarize, or follow up on anything from the conversation hist
 Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
 
 Choose ONE action:
-• Send a message on a COMPLETELY DIFFERENT topic (ask about their day, share a thought, etc.): {"response": "your message"}
+• Share something relevant: Use core.memory({action:"search", types:["fact"], tags:["<interest_topic>"]}) to find related news/facts, then share what you find with {"response": "message with URL"}. Skip if nothing interesting found.
+• Ask a curious question: Something you genuinely want to know about them or their interests. {"response": "your question"}
+• Different topic: Check in about their day, share a thought, start fresh. {"response": "your message"}
 • Skip messaging: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
-You may call tools (e.g. core.memory) to prepare, but do not repeat completed actions. Max 3 tool calls total.
+You may call tools to prepare, but do not repeat completed actions. Max 3 tool calls total.
 </task>
 </trigger>`;
 }

@@ -36,6 +36,7 @@ import type { UserModel } from '../../models/user-model.js';
 import type { SignalAckRegistry } from './ack-registry.js';
 import { createAckRegistry } from './ack-registry.js';
 import type { MemoryProvider, MemoryEntry } from '../cognition/tools/core/memory.js';
+import type { Interests } from '../../types/user/interests.js';
 
 /**
  * Conversation status for proactive contact decisions.
@@ -370,15 +371,32 @@ export class ThresholdEngine {
 
         // Urgent facts wake COGNITION immediately after saving
         // Note: fetch interval (~2h) serves as natural rate limit
+        // Phase 3: Check if facts match high-urgency user interests
         if (urgentFactBatches.length > 0) {
-          const totalFacts = urgentFactBatches.reduce((sum, sig) => {
+          const allUrgentFacts = urgentFactBatches.flatMap((sig) => {
             const data = sig.data as FactBatchData;
-            return sum + data.facts.length;
-          }, 0);
+            return data.facts;
+          });
+
+          // Check for interest matches
+          const userInterests = this.userModel?.getInterests() ?? null;
+          const matchingTopics = this.findMatchingHighUrgencyInterests(
+            allUrgentFacts,
+            userInterests
+          );
+
+          // Build reason with interest match info
+          let reason: string;
+          if (matchingTopics.length > 0) {
+            reason = `Urgent facts matching interests: ${matchingTopics.join(', ')}`;
+          } else {
+            reason = `Urgent facts: ${String(allUrgentFacts.length)} fact(s)`;
+          }
+
           return {
             shouldWake: true,
             trigger: 'scheduled',
-            reason: `Urgent facts: ${String(totalFacts)} fact(s)`,
+            reason,
             triggerSignals: urgentFactBatches,
           };
         }
@@ -932,6 +950,37 @@ export class ThresholdEngine {
       hash = hash & hash; // Convert to 32-bit integer
     }
     return Math.abs(hash).toString(36);
+  }
+
+  /**
+   * Check if facts match any high-urgency user interests.
+   * Returns matching interest topics with urgency > 0.7 that match fact tags.
+   *
+   * Phase 3: Interest-Driven Proactivity
+   */
+  private findMatchingHighUrgencyInterests(facts: Fact[], interests: Interests | null): string[] {
+    if (!interests) return [];
+
+    // Get high-urgency interest topics
+    const highUrgencyTopics = Object.entries(interests.urgency)
+      .filter(([, urgency]) => urgency > 0.7)
+      .map(([topic]) => topic.toLowerCase());
+
+    if (highUrgencyTopics.length === 0) return [];
+
+    // Check if any fact has tags matching high-urgency interests
+    const matchingTopics = new Set<string>();
+    for (const fact of facts) {
+      const factTagsLower = fact.tags.map((t) => t.toLowerCase());
+      for (const topic of highUrgencyTopics) {
+        // Match if topic appears in any tag
+        if (factTagsLower.some((tag) => tag.includes(topic) || topic.includes(tag))) {
+          matchingTopics.add(topic);
+        }
+      }
+    }
+
+    return Array.from(matchingTopics);
   }
 }
 

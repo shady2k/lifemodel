@@ -421,6 +421,8 @@ export class CognitionProcessor implements CognitionLayer {
         enableSmartRetry: context.runtimeConfig?.enableSmartRetry ?? true,
       },
       drainPendingUserMessages: context.drainPendingUserMessages,
+      // Phase 3: Interest-driven proactivity - surface user interests for proactive triggers
+      userInterests: this.userModel?.getInterests() ?? undefined,
     };
 
     // Mark surfaced intentions as consumed (delete from memory)

@@ -10,6 +10,7 @@ import type { Signal } from '../../types/signal.js';
 import type { AgentState } from '../../types/agent/state.js';
 import type { FullSoulState } from '../../storage/soul-provider.js';
 import type { PersonalityTraits, AgentPreferences } from '../../types/agent/identity.js';
+import type { Interests } from '../../types/user/interests.js';
 import type { ToolResult, LoopState, Terminal, ExecutedTool } from '../../types/cognition.js';
 import type { CompletedAction } from '../../storage/conversation-manager.js';
 import type { MemoryEntry } from './tools/registry.js';
@@ -187,6 +188,9 @@ export interface LoopContext {
 
   /** Callback to drain pending user messages for mid-loop injection */
   drainPendingUserMessages: (() => Signal[]) | undefined;
+
+  /** User's topic interests (weights + urgency) for interest-driven proactivity */
+  userInterests?: Interests | undefined;
 }
 
 /**
