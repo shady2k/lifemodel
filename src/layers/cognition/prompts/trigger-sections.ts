@@ -163,6 +163,23 @@ ${hasItems ? 'Execute any actionable daily reminders listed above (e.g., check n
 </trigger>`;
   }
 
+  // Handle self-scheduled reminder events (agent's own commitments)
+  if (eventKind === 'reminder:self_scheduled') {
+    const content = (data['content'] as string | undefined) ?? 'Unknown task';
+    const isRecurring = data['isRecurring'] === true;
+
+    return `<trigger type="self_scheduled">
+<context>
+You scheduled this for yourself: "${content}"${isRecurring ? ' (recurring)' : ''}
+</context>
+
+<task>
+Act on your own reminder. You set this because it mattered.
+If the task is complete, you can cancel it with plugin.reminder(action:"cancel", reminderId:"${(data['reminderId'] as string | undefined) ?? ''}").
+</task>
+</trigger>`;
+  }
+
   // Generic plugin event format
   return `<trigger type="plugin_event">
 <context>

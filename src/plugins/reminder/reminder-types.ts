@@ -94,6 +94,12 @@ export interface Reminder {
 
   /** Advance notice schedule ID (from scheduler primitive) */
   advanceNoticeScheduleId: string | null;
+
+  /**
+   * Whether this is an internal reminder (self-scheduled by the agent).
+   * Internal reminders trigger self_scheduled events instead of user reminders.
+   */
+  internal?: boolean;
 }
 
 /**
@@ -311,6 +317,9 @@ export interface ReminderDueData {
 
   /** ISO timestamp of when the reminder was originally scheduled to fire */
   scheduledAt?: string;
+
+  /** Whether this is a self-scheduled (internal) reminder */
+  internal?: boolean;
 }
 
 /**
@@ -351,6 +360,8 @@ export const REMINDER_EVENT_KINDS = {
   REMINDER_ADVANCE_NOTICE: 'reminder:advance_notice',
   /** Daily agenda check — emits pending intentions for today's reminders */
   DAILY_AGENDA: 'reminder:daily_agenda',
+  /** Self-scheduled reminder (agent's own commitment) */
+  SELF_SCHEDULED: 'reminder:self_scheduled',
 } as const;
 
 /**

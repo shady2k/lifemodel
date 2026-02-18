@@ -162,6 +162,11 @@ const SCHEMA_CREATE = {
     },
   },
   tags: { type: 'array', items: 'string', required: false },
+  internal: {
+    type: 'boolean',
+    required: false,
+    description: "Self-scheduled reminder (agent's own commitment)",
+  },
 };
 
 const SCHEMA_CANCEL = {
@@ -334,6 +339,10 @@ const REMINDER_RAW_SCHEMA = {
       type: 'number',
       description: 'Max reminders to return (list only, default: 10)',
     },
+    internal: {
+      type: 'boolean',
+      description: "Self-scheduled reminder (agent's own commitment, not user-facing)",
+    },
   },
   required: ['action'],
   additionalProperties: false,
@@ -473,7 +482,8 @@ export function createReminderTools(
     anchor: SemanticDateAnchor,
     recipientId: string,
     tags?: string[],
-    advanceNotice?: AdvanceNotice
+    advanceNotice?: AdvanceNotice,
+    internal?: boolean
   ): Promise<ReminderToolResult> {
     try {
       const timezone = getTimezone(recipientId);
@@ -528,6 +538,7 @@ export function createReminderTools(
         scheduleId: null,
         advanceNotice: advanceNotice ?? null,
         advanceNoticeScheduleId: null,
+        internal: internal ?? false,
       };
 
       if (tags) {
@@ -535,13 +546,14 @@ export function createReminderTools(
       }
 
       const scheduleData: Record<string, unknown> = {
-        kind: REMINDER_EVENT_KINDS.REMINDER_DUE,
+        kind: internal ? REMINDER_EVENT_KINDS.SELF_SCHEDULED : REMINDER_EVENT_KINDS.REMINDER_DUE,
         reminderId,
         recipientId,
         content,
         isRecurring: resolved.recurrence !== null,
         fireCount: 0,
         scheduledAt: resolved.triggerAt.toISOString(),
+        internal: internal ?? false,
       };
       if (tags) {
         scheduleData['tags'] = tags;
@@ -951,7 +963,8 @@ export function createReminderTools(
     description: `Manage reminders. Supports ONE-TIME and RECURRING (daily/weekly/monthly).
 Actions: create, list, cancel, complete. Use 'anchor' with type:"recurring" for repeating reminders.
 Supports advance notice (e.g., "remind me 30 minutes before") via 'advanceNotice' parameter.
-Use 'complete' to mark a reminder as done (one-time) or acknowledge completion (recurring).`,
+Use 'complete' to mark a reminder as done (one-time) or acknowledge completion (recurring).
+Set 'internal:true' for self-scheduled reminders (your own commitments, not user-facing).`,
     tags: [
       'one-time',
       'recurring',
@@ -1012,6 +1025,12 @@ Use 'complete' to mark a reminder as done (one-time) or acknowledge completion (
         name: 'limit',
         type: 'number',
         description: 'Max reminders to return (list only, default: 10)',
+        required: false,
+      },
+      {
+        name: 'internal',
+        type: 'boolean',
+        description: "Self-scheduled reminder (agent's own commitment, not user-facing)",
         required: false,
       },
     ],
@@ -1115,12 +1134,16 @@ Use 'complete' to mark a reminder as done (one-time) or acknowledge completion (
           const normalizedAdvanceNotice =
             advanceNoticeArg === null ? undefined : (advanceNoticeArg as unknown as AdvanceNotice);
 
+          // Extract internal flag
+          const internal = args['internal'] === true;
+
           return createReminder(
             content,
             anchorArg as unknown as SemanticDateAnchor,
             recipientId,
             tags,
-            normalizedAdvanceNotice
+            normalizedAdvanceNotice,
+            internal
           );
         }
 
@@ -1198,9 +1221,42 @@ export async function handleReminderDue(
       content: data.content,
       isRecurring: data.isRecurring,
       fireCount: data.fireCount,
+      internal: data.internal,
     },
     'Reminder due'
   );
+
+  // Handle self-scheduled (internal) reminders differently
+  // For internal reminders, we only update storage (fire count) and let the signal
+  // flow to trigger-sections for the self_scheduled trigger section
+  if (data.internal) {
+    // Update fireCount for recurring internal reminders
+    if (data.isRecurring) {
+      try {
+        const stored = await storage.get<Reminder[]>(REMINDER_STORAGE_KEYS.REMINDERS);
+        if (stored) {
+          const reminder = stored.find((r) => r.id === data.reminderId);
+          if (reminder) {
+            reminder.fireCount += 1;
+            await storage.set(REMINDER_STORAGE_KEYS.REMINDERS, stored);
+            await createOccurrenceOnFire(
+              storage,
+              data.reminderId,
+              fireContext?.scheduledFor ?? null,
+              logger
+            );
+          }
+        }
+      } catch (error) {
+        logger.error(
+          { reminderId: data.reminderId, error },
+          'Failed to update internal reminder fire count'
+        );
+      }
+    }
+    // Don't emit pending intention - the signal itself carries the self_scheduled trigger
+    return;
+  }
 
   // UNIFIED overdue detection for both one-time and recurring reminders
   // Use fireContext.scheduledFor (accurate) or fall back to data.scheduledAt (backward compat)

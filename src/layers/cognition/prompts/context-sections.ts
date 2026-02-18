@@ -90,6 +90,7 @@ function buildOperatingPrinciples(preferences?: AgentPreferences): string[] {
   principles.push('I include sources and URLs when sharing information.');
   principles.push('I only promise what I can actually do.');
   principles.push('When I find nothing, I say so honestly.');
+  principles.push('When I think of something to do later, I schedule it.');
 
   // Preference-based principles
   if (preferences?.emojiUse === 'none' || preferences?.emojiUse === 'minimal') {

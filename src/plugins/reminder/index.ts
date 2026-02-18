@@ -85,6 +85,26 @@ const dailyAgendaSchema = z.object({
 });
 
 /**
+ * Zod schema for self_scheduled event validation.
+ */
+const selfScheduledSchema = z.object({
+  kind: z.literal('plugin_event'),
+  eventKind: z.literal(REMINDER_EVENT_KINDS.SELF_SCHEDULED),
+  pluginId: z.literal(REMINDER_PLUGIN_ID),
+  fireId: z.string().optional(),
+  payload: z.object({
+    reminderId: z.string(),
+    recipientId: z.string(),
+    content: z.string(),
+    isRecurring: z.boolean(),
+    fireCount: z.number(),
+    tags: z.array(z.string()).optional(),
+    scheduledAt: z.string().optional(),
+    internal: z.literal(true),
+  }),
+});
+
+/**
  * Plugin state (set during activation).
  */
 let pluginPrimitives: PluginPrimitives | null = null;
@@ -132,8 +152,12 @@ const lifecycle: PluginLifecycleV2 = {
       REMINDER_EVENT_KINDS.DAILY_AGENDA,
       dailyAgendaSchema as unknown as EventSchema
     );
+    primitives.services.registerEventSchema(
+      REMINDER_EVENT_KINDS.SELF_SCHEDULED,
+      selfScheduledSchema as unknown as EventSchema
+    );
     primitives.logger.debug(
-      'Registered event schemas for reminder_due, reminder_advance_notice, and daily_agenda'
+      'Registered event schemas for reminder_due, reminder_advance_notice, daily_agenda, and self_scheduled'
     );
 
     // Schedule daily agenda (restart-safe)
@@ -205,6 +229,15 @@ const lifecycle: PluginLifecycleV2 = {
     if (!pluginPrimitives) return undefined;
 
     if (eventKind === REMINDER_EVENT_KINDS.REMINDER_DUE) {
+      await handleReminderDue(
+        payload as unknown as ReminderDueData,
+        pluginPrimitives.storage,
+        pluginPrimitives.logger,
+        pluginPrimitives.intentEmitter,
+        fireContext,
+        (rid) => pluginPrimitives?.services.getTimezone(rid) ?? 'UTC'
+      );
+    } else if (eventKind === REMINDER_EVENT_KINDS.SELF_SCHEDULED) {
       await handleReminderDue(
         payload as unknown as ReminderDueData,
         pluginPrimitives.storage,
