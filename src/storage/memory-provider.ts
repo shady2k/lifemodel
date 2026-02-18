@@ -392,7 +392,10 @@ export class JsonMemoryProvider implements MemoryProvider {
       // Clamp elapsed to >= 0 to guard against future timestamps (clock skew)
       const elapsed = Math.max(0, now - referenceTime);
 
-      const halfLife = source === 'pattern' ? HALF_LIFE_PATTERN_MS : HALF_LIFE_USER_FEEDBACK_MS;
+      const halfLife =
+        source === 'pattern' || source === 'implicit_correction'
+          ? HALF_LIFE_PATTERN_MS
+          : HALF_LIFE_USER_FEEDBACK_MS;
       const effectiveWeight = baseWeight * Math.pow(0.5, elapsed / halfLife);
 
       if (effectiveWeight < 0.05) {

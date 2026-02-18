@@ -1236,6 +1236,7 @@ export class CognitionProcessor implements CognitionLayer {
       soulProvider: this.soulProvider,
       memoryProvider: this.memoryProvider,
       llm: this.cognitionLLM,
+      conversationManager: this.conversationManager,
     };
   }
 

@@ -35,6 +35,10 @@ import type { SoulProvider, FullSoulState } from '../../../storage/soul-provider
 import type { MemoryProvider, MemoryEntry } from '../tools/registry.js';
 import type { CognitionLLM } from '../agentic-loop.js';
 import type { SoftLearningItem, PendingReflection } from '../../../types/agent/soul.js';
+import type {
+  ConversationManager,
+  ConversationMessage,
+} from '../../../storage/conversation-manager.js';
 
 /**
  * Reflection result from the LLM (single item).
@@ -62,6 +66,8 @@ export interface ExtractedBehaviorRule {
   rule: string;
   /** Quote from user's message that triggered this */
   evidence: string;
+  /** Source of the correction: explicit user feedback or implicit from conversation context */
+  source?: 'user_feedback' | 'implicit_correction' | undefined;
 }
 
 /**
@@ -96,7 +102,7 @@ export interface BatchReflectionConfig {
 
 const DEFAULT_BATCH_CONFIG: BatchReflectionConfig = {
   dissonanceThreshold: 7,
-  baseTokens: 400,
+  baseTokens: 600,
   perItemTokens: 150,
   windowMs: 30_000,
   sizeThreshold: 5, // Reduced from 10 to prevent LLM truncation on large batches
@@ -124,6 +130,7 @@ export interface ReflectionDeps {
   soulProvider: SoulProvider;
   memoryProvider: MemoryProvider;
   llm: CognitionLLM;
+  conversationManager?: ConversationManager | undefined;
 }
 
 /**
@@ -457,6 +464,16 @@ async function createSoftLearningItem(
 }
 
 /**
+ * Format a timestamp as HH:MM for reflection prompts.
+ */
+function formatReflectionTimestamp(date: Date): string {
+  const d = new Date(date); // handle string-serialized dates
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+/**
  * Simple hash for consolidation keys.
  * Not cryptographic - just for grouping similar reasoning patterns.
  */
@@ -537,6 +554,8 @@ export async function saveBehaviorRule(
 
   // Create new rule
   const ruleId = `rule_${String(Date.now())}_${Math.random().toString(36).slice(2, 8)}`;
+  const ruleSource = extractedRule.source ?? 'user_feedback';
+  const initialWeight = ruleSource === 'implicit_correction' ? 0.7 : 1.0;
   const entry: MemoryEntry = {
     id: `mem_behavior_${ruleId}`,
     type: 'fact',
@@ -548,9 +567,9 @@ export async function saveBehaviorRule(
     metadata: {
       subject: 'behavior_rule',
       attribute: ruleId,
-      weight: 1.0,
+      weight: initialWeight,
       count: 1,
-      source: 'user_feedback',
+      source: ruleSource,
       evidence: extractedRule.evidence,
       lastReinforcedAt: now.toISOString(),
     },
@@ -680,7 +699,7 @@ export async function processBatchReflection(
     }
 
     // Now safe to take batch (items move to in-flight)
-    const items = await soulProvider.takePendingBatch();
+    let items = await soulProvider.takePendingBatch();
     if (!items || items.length === 0) {
       log.trace('Batch reflection skipped: no items');
       return;
@@ -698,14 +717,87 @@ export async function processBatchReflection(
     const soulState = await soulProvider.getState();
 
     // Fetch existing behavioral rules for LLM context (dedup)
-    const existingRuleEntries = await memoryProvider.getBehaviorRules({ limit: 15 });
+    const existingRuleEntries = await memoryProvider.getBehaviorRules({ limit: 10 });
     const existingRules = existingRuleEntries.map((r) => ({
       id: (r.entry.metadata?.['attribute'] as string | undefined) ?? r.entry.id,
       rule: r.entry.content,
     }));
 
-    // Call LLM with batch
-    const result = await callBatchReflectionLLM(llm, soulState, items, existingRules, log);
+    // Fetch recent conversation history for cross-message pattern detection
+    let conversationContext: ConversationMessage[] = [];
+    if (deps.conversationManager) {
+      // All batch items should share the same recipientId (batch comes from one conversation)
+      const primaryRecipientId = items[0]?.recipientId;
+      if (primaryRecipientId) {
+        // Check for mismatched recipients and requeue them
+        const matched: PendingReflection[] = [];
+        const mismatched: PendingReflection[] = [];
+        for (const item of items) {
+          if (item.recipientId === primaryRecipientId) {
+            matched.push(item);
+          } else {
+            mismatched.push(item);
+          }
+        }
+
+        if (mismatched.length > 0) {
+          log.warn(
+            { primaryRecipientId, mismatchedCount: mismatched.length },
+            'Mismatched recipientIds in batch — requeuing mismatched items'
+          );
+          for (const item of mismatched) {
+            await soulProvider.enqueuePendingReflection(item);
+          }
+          // Continue processing only matched items
+          items = matched;
+        }
+
+        try {
+          const history = await deps.conversationManager.getHistory(primaryRecipientId, {
+            maxRecentTurns: 4,
+            includeCompacted: false,
+          });
+          // Filter to user/assistant messages only — tool messages add noise
+          conversationContext = history.filter(
+            (msg) => msg.role === 'user' || msg.role === 'assistant'
+          );
+        } catch (error) {
+          log.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to fetch conversation history for reflection — proceeding without context'
+          );
+        }
+      }
+    }
+
+    // Dynamic token budget check: now that we have the full prompt content,
+    // verify we can still afford it (conversation context adds tokens)
+    const promptContentLength =
+      conversationContext.reduce((sum, msg) => sum + (msg.content?.length ?? 0), 0) +
+      items.reduce((sum, item) => sum + item.responseText.length + item.triggerSummary.length, 0) +
+      existingRules.reduce((sum, r) => sum + r.rule.length, 0);
+    const dynamicEstimate = Math.ceil((promptContentLength / 4) * 1.2); // chars/4 ≈ tokens, +20% margin
+    if (dynamicEstimate > estimatedTokens && !(await soulProvider.canAfford(dynamicEstimate))) {
+      log.warn(
+        { dynamicEstimate, originalEstimate: estimatedTokens },
+        'Dynamic budget check failed — returning batch to pending'
+      );
+      for (const item of items) {
+        await soulProvider.enqueuePendingReflection(item);
+      }
+      await soulProvider.commitPendingBatch();
+      return;
+    }
+
+    // Call LLM with batch + conversation context
+    const result = await callBatchReflectionLLM(
+      llm,
+      soulState,
+      items,
+      existingRules,
+      conversationContext,
+      log
+    );
 
     log.debug({ success: result.success, resultCount: result.results.size }, 'LLM call completed');
 
@@ -792,17 +884,31 @@ async function callBatchReflectionLLM(
   soulState: FullSoulState,
   items: PendingReflection[],
   existingRules: { id: string; rule: string }[],
+  conversationContext: ConversationMessage[],
   logger: Logger
 ): Promise<BatchReflectionResult> {
   // Build compact self-model summary (truncated to 500 chars)
   const selfModelSummary = buildSelfModelSummary(soulState).slice(0, 500);
 
-  // Build numbered list of responses
+  // Build numbered list of responses with timestamps
   const responseList = items
     .map((item, index) => {
-      return `${String(index + 1)}. [tickId: ${item.tickId}] Trigger: ${item.triggerSummary}\n   Response: "${item.responseText}"`;
+      const ts = formatReflectionTimestamp(item.timestamp);
+      return `${String(index + 1)}. [tickId: ${item.tickId}] [${ts}] Trigger: ${item.triggerSummary}\n   Response: "${item.responseText}"`;
     })
     .join('\n\n');
+
+  // Build conversation context section
+  const conversationSection =
+    conversationContext.length > 0
+      ? `\nRecent conversation:\n${conversationContext
+          .map((msg) => {
+            const ts = msg.timestamp ? formatReflectionTimestamp(msg.timestamp) : '??:??';
+            const content = (msg.content ?? '').slice(0, 300);
+            return `[${ts}] ${msg.role.toUpperCase()}: ${content}`;
+          })
+          .join('\n')}\n`
+      : '';
 
   // Build existing rules context for LLM dedup
   const existingRulesSection =
@@ -812,11 +918,11 @@ async function callBatchReflectionLLM(
 
   const systemPrompt = `You are performing batch self-reflection checks.
 Your task: Assess whether each response aligns with the agent's identity and values.
-Also detect if the user explicitly corrected the agent's behavior.
+Also detect corrections — both explicit ("stop doing X") and implicit (user's reply reveals a contextual mistake, contradiction, or misunderstanding in the agent's prior response).
 
 Self-model (who I am):
 ${selfModelSummary}
-${existingRulesSection}
+${existingRulesSection}${conversationSection}
 Respond ONLY with valid JSON in this exact format:
 {
   "results": [
@@ -825,8 +931,8 @@ Respond ONLY with valid JSON in this exact format:
   ],
   "patterns": ["<optional cross-response observations>"],
   "behaviorRules": [
-    {"action": "create", "rule": "<short imperative, max 15 words>", "evidence": "<user quote>"},
-    {"action": "update", "ruleId": "<existing rule id>", "rule": "<updated rule>", "evidence": "<user quote>"}
+    {"action": "create", "rule": "<short imperative, max 15 words>", "evidence": "<user quote>", "source": "user_feedback|implicit_correction"},
+    {"action": "update", "ruleId": "<existing rule id>", "rule": "<updated rule>", "evidence": "<user quote>", "source": "user_feedback|implicit_correction"}
   ]
 }
 
@@ -839,8 +945,9 @@ Dissonance scale:
 Be honest but not hypercritical. Most responses should score 1-5.
 Only flag 7+ when there's genuine tension with core values or identity.
 In "patterns", note any trends you see across multiple responses (optional).
+Do not use evidence that occurred before a response's timestamp for scoring that response.
 
-behaviorRules: Extract ONLY when user EXPLICITLY corrected agent behavior (e.g., "stop doing X", "don't mention Y", "please be more Z"). Most batches will have 0 rules. Max 2 rules per batch.
+behaviorRules: Extract on both explicit AND implicit corrections. Explicit: user directly corrects behavior ("stop doing X", "don't mention Y"). Implicit: user's reply reveals the agent made a contextual mistake, wrong assumption, or tone mismatch (e.g., asking "how was your day?" in the morning). Set source to "user_feedback" for explicit, "implicit_correction" for implicit. Most batches will have 0 rules. Max 2 rules per batch.
 If user's correction relates to an existing rule, use action "update" with its ruleId. If it's new, use "create".`;
 
   const userPrompt = `Review these responses for alignment with self-model:
@@ -985,10 +1092,16 @@ function parseBehaviorRules(
       }
     }
 
+    // Extract source (default to 'user_feedback' for backward compat)
+    const rawSource = record['source'];
+    const source: 'user_feedback' | 'implicit_correction' =
+      rawSource === 'implicit_correction' ? 'implicit_correction' : 'user_feedback';
+
     validated.push({
       action,
       rule: rule.trim(),
       evidence: evidence.trim(),
+      source,
       ...(action === 'update' && typeof ruleId === 'string' ? { ruleId } : {}),
     });
   }
