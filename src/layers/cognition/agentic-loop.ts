@@ -172,8 +172,9 @@ export class AgenticLoop {
     // Validate tool_call/result pair integrity (safety net for history slicing bugs)
     messages = validateToolCallPairs(messages, this.logger);
 
-    // Get tools with full schemas
-    const allTools = this.toolRegistry.getToolsAsOpenAIFormat();
+    // Get tools with lazy schemas (name + description only, ~300 tokens instead of ~3500).
+    // Full schemas are auto-injected on validation failure (schema-on-fail pattern).
+    const allTools = this.toolRegistry.getToolsWithLazySchema();
 
     while (!state.aborted) {
       // Check limits

@@ -23,7 +23,7 @@ import { MAX_REPEATED_FAILED_CALLS, MAX_REPEATED_IDENTICAL_CALLS } from '../../t
 import { unsanitizeToolName } from '../../llm/tool-schema.js';
 import type { Message, ToolCall } from '../../llm/provider.js';
 import type { ToolRegistry } from './tools/registry.js';
-import type { ToolContext } from './tools/types.js';
+import type { Tool, ToolContext, ToolParameter } from './tools/types.js';
 import type { LoopContext, LoopCallbacks, ToolExecutionOutcome } from './agentic-loop-types.js';
 import { prevalidateToolArgs } from './tools/validation.js';
 
@@ -165,6 +165,28 @@ export function getCallSignature(toolName: string, args: Record<string, unknown>
   return `${toolName}:${JSON.stringify(sortedArgs)}`;
 }
 
+/**
+ * Build a compact schema snippet from ToolParameter[] for the schema-on-fail response.
+ * Only used when rawParameterSchema is not available.
+ */
+function buildSchemaSnippet(parameters: ToolParameter[]): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+
+  for (const param of parameters) {
+    const prop: Record<string, unknown> = { type: param.type, description: param.description };
+    if (param.enum && param.enum.length > 0) {
+      prop['enum'] = param.enum;
+    }
+    properties[param.name] = prop;
+    if (param.required) {
+      required.push(param.name);
+    }
+  }
+
+  return { type: 'object', properties, required };
+}
+
 export interface ExecuteToolCallsParams {
   toolCalls: ToolCall[];
   /** Chain-of-thought content from the LLM response (preserved in assistant message) */
@@ -245,22 +267,26 @@ export async function executeToolCalls(
       );
       // Count toward tool call limit to prevent infinite loops on malformed JSON
       state.toolCallCount++;
-      // Tell the model exactly what's wrong — truncated JSON is the most common cause
+      // Tell the model exactly what's wrong and include schema for self-correction
       const rawArgs = toolCall.function.arguments.trim();
       const errorDetail =
         rawArgs.length > 0
           ? `Malformed JSON in arguments: "${rawArgs}" — your JSON is truncated or missing a closing brace. `
           : 'Empty arguments. ';
+
+      // Include full schema so model can self-correct without calling core.tools
+      const failedTool = toolRegistry.getTools().find((t) => t.name === toolName);
+      const schemaForError = failedTool
+        ? (failedTool.rawParameterSchema ?? buildSchemaSnippet(failedTool.parameters))
+        : undefined;
+
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
         tool_name: toolCall.function.name,
         content: JSON.stringify({
-          error:
-            errorDetail +
-            'Call core.tools({ action: "describe", name: "' +
-            toolCall.function.name +
-            '" }) to get the required parameters.',
+          error: errorDetail + 'Retry with valid JSON using the schema below.',
+          ...(schemaForError && { schema: schemaForError }),
         }),
       });
       continue;
@@ -278,7 +304,8 @@ export async function executeToolCalls(
           prevalidation.error,
           state,
           messages,
-          logger
+          logger,
+          tool
         );
         if (outcome) return outcome;
         continue;
@@ -294,7 +321,8 @@ export async function executeToolCalls(
           validation.error,
           state,
           messages,
-          logger
+          logger,
+          tool
         );
         if (outcome) return outcome;
         continue;
@@ -578,7 +606,8 @@ function processToolValidationFailure(
   error: string,
   state: LoopState,
   messages: Message[],
-  logger: Logger
+  logger: Logger,
+  toolSchema?: Tool | null
 ): ToolExecutionOutcome | null {
   // Track repeated failed calls to detect loops
   const callSig = getCallSignature(toolName, args);
@@ -597,7 +626,14 @@ function processToolValidationFailure(
   // Count toward tool call limit to prevent infinite loops
   state.toolCallCount++;
 
-  // Build structured error following ChatGPT best practices
+  // Build structured error following ChatGPT best practices.
+  // Include full schema on first failure so the model can self-correct (schema-on-fail pattern).
+  // This eliminates the need for models to call core.tools before using a tool.
+  const schemaPayload =
+    !isRepeatedFailure && toolSchema
+      ? { schema: toolSchema.rawParameterSchema ?? buildSchemaSnippet(toolSchema.parameters) }
+      : undefined;
+
   const errorContent = {
     success: false,
     error: {
@@ -605,6 +641,7 @@ function processToolValidationFailure(
       message: error,
       retryable: !isRepeatedFailure,
     },
+    ...schemaPayload,
     hint: isRepeatedFailure
       ? {
           notes: [
@@ -615,7 +652,7 @@ function processToolValidationFailure(
         }
       : {
           notes: [
-            'Fix the parameter error and call the tool again.',
+            'Fix the parameter error and retry using the schema above.',
             'IMPORTANT: If you produce text output instead of calling the tool, the loop stops and no further retry will happen.',
           ],
         },
