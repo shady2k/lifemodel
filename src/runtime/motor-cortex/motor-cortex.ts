@@ -34,6 +34,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
 import type { PreparedDeps } from '../dependencies/dependency-manager.js';
+import type { LockService, ScriptRunRequest, ScriptRunResult } from './script-types.js';
+import { ScriptRunner } from './script-runner.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
 
 /**
@@ -142,6 +144,9 @@ export interface MotorCortexDeps {
 
   /** DI callback for web search (provided by web-search plugin) */
   searchFn?: MotorSearchFn;
+
+  /** Lock service for script mode mutual exclusion (optional) */
+  lockService?: LockService;
 }
 
 /**
@@ -165,6 +170,7 @@ export class MotorCortex {
   private readonly containerManager: ContainerManager | undefined;
   private readonly fetchFn: MotorFetchFn | undefined;
   private readonly searchFn: MotorSearchFn | undefined;
+  private readonly scriptRunner: ScriptRunner | undefined;
 
   /** Whether Docker isolation is available */
   private dockerAvailable: boolean | null = null;
@@ -200,6 +206,15 @@ export class MotorCortex {
     this.containerManager = deps.containerManager;
     this.fetchFn = deps.fetchFn;
     this.searchFn = deps.searchFn;
+
+    // Create ScriptRunner when both containerManager and lockService are available
+    if (deps.containerManager && deps.lockService) {
+      this.scriptRunner = new ScriptRunner({
+        containerManager: deps.containerManager,
+        lockService: deps.lockService,
+        logger: this.logger,
+      });
+    }
 
     this.logger.info('Motor Cortex service initialized');
   }
@@ -272,6 +287,46 @@ export class MotorCortex {
       result: toolResult.output,
       durationMs: Date.now() - startTime,
     };
+  }
+
+  /**
+   * Execute a script (deterministic Docker job, no LLM loop).
+   *
+   * Unlike agentic runs, scripts:
+   * - Don't use the LLM or tool-server
+   * - Don't have a mutex (can run alongside agentic runs)
+   * - Are limited by concurrency semaphore in ScriptRunner (max 2)
+   * - Read SCRIPT_INPUTS env, write JSON to stdout
+   */
+  async executeScript(request: ScriptRunRequest): Promise<ScriptRunResult> {
+    if (!this.scriptRunner) {
+      return {
+        ok: false,
+        runId: crypto.randomUUID(),
+        error: {
+          code: 'DOCKER_UNAVAILABLE',
+          message: 'Script runner not available (Docker or lock service missing)',
+        },
+        stats: { durationMs: 0, exitCode: undefined },
+      };
+    }
+
+    const dockerReady = await this.isDockerAvailable();
+    if (!dockerReady) {
+      return {
+        ok: false,
+        runId: crypto.randomUUID(),
+        error: {
+          code: 'DOCKER_UNAVAILABLE',
+          message: 'Docker is not available for script execution',
+        },
+        stats: { durationMs: 0, exitCode: undefined },
+      };
+    }
+
+    this.logger.info({ scriptId: request.scriptId, task: request.task }, 'Executing script');
+
+    return this.scriptRunner.execute(request);
   }
 
   /**

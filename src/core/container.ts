@@ -64,6 +64,7 @@ import {
 } from './recipient-registry.js';
 import { PersistentAckRegistry } from '../layers/aggregation/persistent-ack-registry.js';
 import { createMotorCortex, type MotorCortex } from '../runtime/motor-cortex/motor-cortex.js';
+import { createLockService } from '../runtime/lock/lock-service.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve, dirname } from 'node:path';
@@ -607,6 +608,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       }
     }
 
+    const lockService = createLockService();
+
     motorCortex = createMotorCortex({
       llm: llmProvider,
       storage,
@@ -615,6 +618,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       skillsDir,
       artifactsBaseDir,
       containerManager: containerMgr,
+      lockService,
       fetchFn: motorFetchFn,
       ...(motorSearchFn && { searchFn: motorSearchFn }),
     });

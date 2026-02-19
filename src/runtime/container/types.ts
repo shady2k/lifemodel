@@ -10,6 +10,7 @@
  */
 
 import type { MotorToolResult } from '../motor-cortex/motor-protocol.js';
+import type { ScriptContainerConfig, ScriptContainerResult } from '../motor-cortex/script-types.js';
 
 // ─── IPC Protocol ────────────────────────────────────────────────
 
@@ -219,12 +220,27 @@ export interface ContainerManager {
 
   /** Destroy all Motor Cortex containers */
   destroyAll(): Promise<void>;
+
+  /**
+   * Run a script in a container (no IPC, no tool-server).
+   * Returns stdout + exit code after the process completes or times out.
+   */
+  runScript(
+    runId: string,
+    config: ScriptContainerConfig,
+    timeoutMs: number
+  ): Promise<ScriptContainerResult>;
 }
+
+export type { ScriptContainerConfig, ScriptContainerResult };
 
 // ─── Constants ───────────────────────────────────────────────────
 
 /** Docker label for identifying Motor Cortex containers */
 export const CONTAINER_LABEL = 'com.lifemodel.component=motor-cortex';
+
+/** Docker label for identifying script containers */
+export const SCRIPT_CONTAINER_LABEL = 'com.lifemodel.component=script';
 
 /** Docker image name */
 export const CONTAINER_IMAGE = 'lifemodel-motor:latest';

@@ -21,9 +21,12 @@ import {
   type ToolExecuteRequest,
   type ToolExecuteResponse,
   type ToolServerResponse,
+  type ScriptContainerConfig,
+  type ScriptContainerResult,
   FrameDecoder,
   encodeFrame,
   CONTAINER_LABEL,
+  SCRIPT_CONTAINER_LABEL,
   CONTAINER_IMAGE,
   DEFAULT_MEMORY_LIMIT,
   DEFAULT_CPU_LIMIT,
@@ -360,6 +363,104 @@ function buildCreateArgs(
 
   // Image
   args.push(CONTAINER_IMAGE);
+
+  return args;
+}
+
+/**
+ * Build `docker create` args for a script container.
+ *
+ * Key differences from agentic buildCreateArgs():
+ * - No workspace volume mount
+ * - Custom entrypoint (not tool-server)
+ * - SCRIPT_INPUTS env var with JSON inputs
+ * - Uses SCRIPT_CONTAINER_LABEL for identification
+ * - Optional profile volume mount
+ */
+function buildScriptCreateArgs(
+  containerName: string,
+  config: ScriptContainerConfig,
+  resolvedHosts: Map<string, string[]>
+): string[] {
+  const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+
+  const args: string[] = [
+    'create',
+    '--name',
+    containerName,
+    '--label',
+    SCRIPT_CONTAINER_LABEL,
+
+    // Security flags
+    '--read-only',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+
+    // Resource limits
+    '--pids-limit',
+    '64',
+    '--memory',
+    '512m',
+    '--cpus',
+    '1.0',
+
+    // Writable temp
+    '--tmpfs',
+    '/tmp:rw,noexec,nosuid,size=64m',
+  ];
+
+  // Network configuration
+  if (hasDomains) {
+    args.push('--network', 'bridge');
+    args.push('--dns', '127.0.0.1');
+    args.push('--sysctl', 'net.ipv6.conf.all.disable_ipv6=1');
+
+    for (const [domain, ips] of resolvedHosts.entries()) {
+      for (const ip of ips) {
+        args.push('--add-host', `${domain}:${ip}`);
+      }
+    }
+  } else {
+    args.push('--network', 'none');
+  }
+
+  // Profile volume mount (e.g., browser profile)
+  if (config.profileMount) {
+    const { volumeName, containerPath, mode } = config.profileMount;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(volumeName)) {
+      throw new Error(`Invalid profile volume name: ${volumeName}`);
+    }
+    args.push('-v', `${volumeName}:${containerPath}:${mode}`);
+  }
+
+  // Run as node user (UID 1000)
+  args.push('--user', '1000:1000');
+
+  // Environment: SCRIPT_INPUTS
+  args.push('-e', `SCRIPT_INPUTS=${config.inputsJson}`);
+
+  // Extra environment variables
+  if (config.extraEnv) {
+    for (const [key, value] of Object.entries(config.extraEnv)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Entrypoint override (must come before image)
+  // docker create syntax: docker create [OPTIONS] IMAGE [COMMAND] [ARG...]
+  // --entrypoint sets the binary, remaining args are the CMD
+  const [entryBinary, ...entryArgs] = config.entrypoint;
+  if (entryBinary) {
+    args.push('--entrypoint', entryBinary);
+  }
+
+  // Image
+  args.push(config.image);
+
+  // Command args (after image)
+  args.push(...entryArgs);
 
   return args;
 }
@@ -703,6 +804,29 @@ export function createContainerManager(logger: Logger): ContainerManager {
         log.warn({ error }, 'Failed to prune containers');
       }
 
+      // Prune stale script containers (label-based)
+      try {
+        const { stdout: scriptStdout } = await execFileAsync(
+          'docker',
+          ['ps', '-a', '--filter', `label=${SCRIPT_CONTAINER_LABEL}`, '--format', '{{.ID}}'],
+          { timeout: 10_000 }
+        );
+        if (scriptStdout.trim()) {
+          const ids = scriptStdout.trim().split('\n');
+          for (const id of ids) {
+            try {
+              await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
+              pruned++;
+              log.info({ containerId: id }, 'Pruned stale script container');
+            } catch {
+              // Ignore
+            }
+          }
+        }
+      } catch (error) {
+        log.warn({ error }, 'Failed to prune script containers');
+      }
+
       // Also prune orphaned workspace volumes (motor-ws-* prefix)
       try {
         const { stdout: volumeList } = await execFileAsync(
@@ -747,6 +871,145 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
 
       return pruned;
+    },
+
+    async runScript(
+      runId: string,
+      config: ScriptContainerConfig,
+      timeoutMs: number
+    ): Promise<ScriptContainerResult> {
+      // Ensure image exists
+      if (config.image === CONTAINER_IMAGE) {
+        const built = await ensureImage((msg) => {
+          log.info(msg);
+        });
+        if (!built) {
+          throw new Error('Failed to build Motor Cortex container image');
+        }
+      }
+      // Future: ensureBrowserImage() for BROWSER_IMAGE
+
+      const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+      let resolvedPolicy: NetworkPolicy | null = null;
+
+      if (hasDomains) {
+        const netpolicyBuilt = await ensureNetpolicyImage((msg) => {
+          log.info(msg);
+        });
+        if (!netpolicyBuilt) {
+          log.warn(
+            { runId },
+            'Network policy helper failed — falling back to --network none for script'
+          );
+          // Clear domains so buildScriptCreateArgs uses --network none
+          config = { ...config, allowedDomains: undefined };
+        } else {
+          try {
+            resolvedPolicy = await resolveNetworkPolicy(config.allowedDomains ?? []);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to resolve network policy for script: ${message}`);
+          }
+        }
+      }
+
+      // Generate container name
+      const random = randomBytes(4).toString('hex');
+      const containerName = `script-${runId.slice(0, 8)}-${random}`;
+
+      // Build create args
+      const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
+      const createArgs = buildScriptCreateArgs(containerName, config, resolvedHosts);
+      log.info(
+        { containerName, runId, image: config.image, hasDomains },
+        'Creating script container'
+      );
+
+      let containerId: string;
+      try {
+        const { stdout } = await execFileAsync('docker', createArgs, { timeout: 30_000 });
+        containerId = stdout.trim();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to create script container: ${message}`);
+      }
+
+      const shortId = containerId.slice(0, 12);
+
+      try {
+        if (hasDomains && resolvedPolicy) {
+          // Start → pause → iptables → unpause flow (same as agentic)
+          await execFileAsync('docker', ['start', containerId], { timeout: 10_000 });
+          await execFileAsync('docker', ['pause', containerId], { timeout: 10_000 });
+          await applyNetworkPolicy(containerId, resolvedPolicy, log);
+          await execFileAsync('docker', ['unpause', containerId], { timeout: 10_000 });
+        } else {
+          // No network: just start (detached)
+          await execFileAsync('docker', ['start', containerId], { timeout: 10_000 });
+        }
+
+        // Race: docker wait vs timeout
+        const exitCode = await Promise.race([
+          // docker wait returns exit code when container stops
+          execFileAsync('docker', ['wait', containerId], {
+            timeout: timeoutMs + 5_000, // small buffer over script timeout
+          }).then(({ stdout: exitStr }) => parseInt(exitStr.trim(), 10)),
+
+          // Timeout: force-kill and return -1
+          new Promise<number>((resolve) => {
+            setTimeout(() => {
+              log.warn({ containerId: shortId, timeoutMs }, 'Script timed out');
+              execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 }).catch(() => {
+                /* best effort */
+              });
+              resolve(-1);
+            }, timeoutMs);
+          }),
+        ]);
+
+        // Capture stdout (1MB cap)
+        let stdout = '';
+        if (exitCode !== -1) {
+          try {
+            const { stdout: rawStdout } = await execFileAsync(
+              'docker',
+              ['logs', '--stdout', containerId],
+              { timeout: 10_000, maxBuffer: 1024 * 1024 }
+            );
+            stdout = rawStdout;
+          } catch {
+            log.warn({ containerId: shortId }, 'Failed to capture script stdout');
+          }
+
+          // Log stderr for diagnostics
+          try {
+            const { stdout: rawStderr } = await execFileAsync(
+              'docker',
+              ['logs', '--stderr', containerId],
+              { timeout: 10_000, maxBuffer: 256 * 1024 }
+            );
+            if (rawStderr.trim()) {
+              log.debug({ containerId: shortId, stderr: rawStderr.trim() }, 'Script stderr');
+            }
+          } catch {
+            // Ignore stderr capture failures
+          }
+        }
+
+        log.info(
+          { containerId: shortId, exitCode, stdoutLength: stdout.length },
+          'Script container finished'
+        );
+
+        return { exitCode, stdout };
+      } finally {
+        // Always clean up the container
+        try {
+          await execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 });
+        } catch {
+          // Container may already be gone (timeout path)
+        }
+      }
     },
 
     async destroyAll(): Promise<void> {

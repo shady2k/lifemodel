@@ -207,9 +207,9 @@ export function createActTool(deps: ActToolDeps): Tool {
       name: 'mode',
       type: 'string' as const,
       description:
-        'Execution mode: "oneshot" for executable JavaScript only (eval), "agentic" for all other tasks (file ops, research, skill creation)',
+        'Execution mode: "oneshot" for executable JavaScript only (eval), "agentic" for all other tasks (file ops, research, skill creation), "script" for deterministic Docker-based scripts (no LLM loop)',
       required: true,
-      enum: ['oneshot', 'agentic'] as const,
+      enum: ['oneshot', 'agentic', 'script'] as const,
     },
     {
       name: 'task',
@@ -238,6 +238,13 @@ export function createActTool(deps: ActToolDeps): Tool {
       required: false,
     },
     {
+      name: 'scriptId',
+      type: 'string' as const,
+      description:
+        'Script ID for script mode (e.g., "news.telegram_group.fetch"). Required for script mode, ignored for other modes.',
+      required: false,
+    },
+    {
       name: 'domains',
       type: 'array' as const,
       description:
@@ -249,7 +256,7 @@ export function createActTool(deps: ActToolDeps): Tool {
   return {
     name: 'core.act',
     description:
-      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. All tools are always available: read, write, list, glob, bash, grep, patch, ask_user, fetch, websearch. Skills with approved policy provide domains automatically. To save or create a skill, use agentic mode. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
+      'Execute a task via Motor Cortex. "oneshot" runs ONLY executable JavaScript (e.g., Date.now(), JSON.parse(...)). "agentic" starts an async sub-agent for everything else: file creation, research, API calls, skill creation. "script" runs a registered Docker script synchronously (no LLM loop, returns result directly). All tools are always available: read, write, list, glob, bash, grep, patch, ask_user, fetch, websearch. Skills with approved policy provide domains automatically. To save or create a skill, use agentic mode. Results arrive via motor_result signal. IMPORTANT: When starting an agentic task, always tell the user the run ID so they can track it.',
     tags: ['motor', 'execution', 'async'],
     hasSideEffects: true,
     parameters,
@@ -566,9 +573,48 @@ export function createActTool(deps: ActToolDeps): Tool {
         }
       }
 
+      if (mode === 'script') {
+        const scriptId = args['scriptId'] as string | undefined;
+        if (!scriptId) {
+          return {
+            success: false,
+            error: 'Missing required parameter: scriptId (required for script mode)',
+          };
+        }
+
+        const inputs = (args['inputs'] as Record<string, unknown> | undefined) ?? {};
+        const timeoutMs = args['maxIterations'] as number | undefined; // Reuse maxIterations field for timeout
+
+        try {
+          const result = await motorCortex.executeScript({
+            task,
+            scriptId,
+            inputs,
+            timeoutMs,
+          });
+
+          return {
+            success: result.ok,
+            data: {
+              mode: 'script',
+              scriptId,
+              runId: result.runId,
+              ...(result.output !== undefined && { output: result.output }),
+              ...(result.error && { error: result.error }),
+              stats: result.stats,
+            },
+          };
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+
       return {
         success: false,
-        error: `Unknown mode: ${mode}. Use "oneshot" or "agentic".`,
+        error: `Unknown mode: ${mode}. Use "oneshot", "agentic", or "script".`,
       };
     },
   };
