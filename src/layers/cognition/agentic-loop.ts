@@ -266,22 +266,55 @@ export class AgenticLoop {
       try {
         response = await this.llm.completeWithTools(request, llmOptions);
       } catch (error) {
-        // Hard provider error (HTTP 500, timeout, etc.) — escalate to smart model
-        if (error instanceof LLMError && error.retryable && !useSmart) {
-          useSmart = true;
-          state.providerErrorRetried = false;
-          // Reset iteration so the smart model gets a full budget
-          state.iteration = 0;
-          this.logger.warn(
-            { provider: error.provider, statusCode: error.statusCode },
-            'Hard provider error — escalating to smart model'
-          );
-          messages = buildInitialMessages(context, useSmart, promptBuilders);
-          if (context.previousAttempt) {
-            addPreviousAttemptMessages(messages, context.previousAttempt, state);
+        if (error instanceof LLMError) {
+          const errorMeta = {
+            provider: error.provider,
+            statusCode: error.statusCode,
+            ...(error.upstreamProvider && { upstreamProvider: error.upstreamProvider }),
+          };
+
+          // Hard provider error (HTTP 500, timeout, etc.) — escalate to smart model
+          if (error.retryable && !useSmart) {
+            useSmart = true;
+            state.providerErrorRetried = false;
+            // Reset iteration so the smart model gets a full budget
+            state.iteration = 0;
+            this.logger.warn(errorMeta, 'Hard provider error — escalating to smart model');
+            messages = buildInitialMessages(context, useSmart, promptBuilders);
+            if (context.previousAttempt) {
+              addPreviousAttemptMessages(messages, context.previousAttempt, state);
+            }
+            messages = validateToolCallPairs(messages, this.logger);
+            continue;
           }
-          messages = validateToolCallPairs(messages, this.logger);
-          continue;
+
+          // Non-retryable error (401, 403, etc.) — retry once (meta-provider may route differently)
+          if (!error.retryable) {
+            if (!state.nonRetryableErrorRetried) {
+              state.nonRetryableErrorRetried = true;
+              this.logger.warn(
+                errorMeta,
+                'Non-retryable provider error — retrying once (upstream re-routing)'
+              );
+              continue;
+            }
+            // Already retried once — escalate to smart model if not already
+            if (!useSmart) {
+              useSmart = true;
+              state.nonRetryableErrorRetried = false;
+              state.iteration = 0;
+              this.logger.warn(
+                errorMeta,
+                'Non-retryable error persists — escalating to smart model'
+              );
+              messages = buildInitialMessages(context, useSmart, promptBuilders);
+              if (context.previousAttempt) {
+                addPreviousAttemptMessages(messages, context.previousAttempt, state);
+              }
+              messages = validateToolCallPairs(messages, this.logger);
+              continue;
+            }
+          }
         }
         throw error;
       }

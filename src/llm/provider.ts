@@ -189,17 +189,20 @@ export class LLMError extends Error {
   readonly provider: string;
   readonly statusCode?: number | undefined;
   readonly retryable: boolean;
+  /** Upstream provider name from meta-provider routing (e.g., "DeepInfra" from OpenRouter) */
+  readonly upstreamProvider?: string | undefined;
 
   constructor(
     message: string,
     provider: string,
-    options?: { statusCode?: number; retryable?: boolean }
+    options?: { statusCode?: number; retryable?: boolean; upstreamProvider?: string }
   ) {
     super(message);
     this.name = 'LLMError';
     this.provider = provider;
     this.statusCode = options?.statusCode;
     this.retryable = options?.retryable ?? false;
+    this.upstreamProvider = options?.upstreamProvider;
   }
 }
 

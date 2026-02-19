@@ -131,8 +131,63 @@ describe('AgenticLoop hard provider error failover', () => {
     expect(llm.completeWithTools).toHaveBeenCalledTimes(1);
   });
 
-  it('re-throws non-retryable errors without escalation', async () => {
-    const error = new LLMError('Invalid API key', 'openrouter', {
+  it('retries non-retryable error once before escalating to smart', async () => {
+    const error = new LLMError('User not found', 'openrouter', {
+      statusCode: 401,
+      retryable: false,
+    });
+
+    const llm: CognitionLLM = {
+      complete: vi.fn(),
+      completeWithTools: vi.fn()
+        // First call: 401 from upstream provider
+        .mockRejectedValueOnce(error)
+        // Second call (retry): succeeds via different upstream
+        .mockResolvedValueOnce(makeSuccessResponse('OK')),
+    };
+
+    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
+    const result = await loop.run(makeContext());
+
+    // Should retry once with same model
+    expect(llm.completeWithTools).toHaveBeenCalledTimes(2);
+    const firstCall = vi.mocked(llm.completeWithTools).mock.calls[0];
+    const secondCall = vi.mocked(llm.completeWithTools).mock.calls[1];
+    expect(firstCall[1]?.useSmart).toBe(false);
+    expect(secondCall[1]?.useSmart).toBe(false); // same model on retry
+    expect(result.success).toBe(true);
+  });
+
+  it('escalates to smart after non-retryable retry fails', async () => {
+    const error = new LLMError('User not found', 'openrouter', {
+      statusCode: 401,
+      retryable: false,
+    });
+
+    const llm: CognitionLLM = {
+      complete: vi.fn(),
+      completeWithTools: vi.fn()
+        // First call: 401
+        .mockRejectedValueOnce(error)
+        // Second call (retry): 401 again
+        .mockRejectedValueOnce(error)
+        // Third call (smart model): succeeds
+        .mockResolvedValueOnce(makeSuccessResponse('OK')),
+    };
+
+    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
+    const result = await loop.run(makeContext());
+
+    expect(llm.completeWithTools).toHaveBeenCalledTimes(3);
+    const calls = vi.mocked(llm.completeWithTools).mock.calls;
+    expect(calls[0][1]?.useSmart).toBe(false);
+    expect(calls[1][1]?.useSmart).toBe(false); // retry with same model
+    expect(calls[2][1]?.useSmart).toBe(true); // escalated
+    expect(result.success).toBe(true);
+  });
+
+  it('throws non-retryable error after smart model also fails', async () => {
+    const error = new LLMError('User not found', 'openrouter', {
       statusCode: 401,
       retryable: false,
     });
@@ -142,11 +197,20 @@ describe('AgenticLoop hard provider error failover', () => {
       completeWithTools: vi.fn().mockRejectedValue(error),
     };
 
-    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
-    await expect(loop.run(makeContext())).rejects.toThrow('Invalid API key');
+    // previousAttempt triggers useSmart = true from the start
+    const context = makeContext({
+      previousAttempt: {
+        toolResults: [],
+        executedTools: [],
+        reason: 'test retry',
+      },
+    });
 
-    // Should only try once (not retryable)
-    expect(llm.completeWithTools).toHaveBeenCalledTimes(1);
+    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
+    await expect(loop.run(context)).rejects.toThrow('User not found');
+
+    // Smart model: retry once, then throw (no further escalation possible)
+    expect(llm.completeWithTools).toHaveBeenCalledTimes(2);
   });
 
   it('re-throws non-LLMError exceptions without escalation', async () => {

@@ -202,7 +202,7 @@ describe('transcript-compiler', () => {
   });
 
   describe('OPENROUTER_POLICY', () => {
-    it('passes through messages unchanged', () => {
+    it('merges consecutive same-role messages', () => {
       const messages: Message[] = [
         sys('System 1'),
         sys('System 2'),
@@ -213,8 +213,26 @@ describe('transcript-compiler', () => {
 
       const result = compileTranscript(messages, OPENROUTER_POLICY);
 
-      // Input === output
-      expect(result).toEqual(messages);
+      // Consecutive assistant messages merged (AI SDK Anthropic adapter validates locally)
+      expect(result).toHaveLength(3);
+      expect(result[0]).toEqual(sys('System 1\n\nSystem 2'));
+      expect(result[1]).toEqual(user('Hello'));
+      expect(result[2]).toEqual(assistant('Response 1\n\nResponse 2'));
+    });
+
+    it('preserves multiple leading system messages', () => {
+      const messages: Message[] = [
+        sys('Identity'),
+        sys('Context'),
+        user('Hello'),
+      ];
+
+      const result = compileTranscript(messages, OPENROUTER_POLICY);
+
+      // maxLeadingSystemMessages is Infinity, but mergeConsecutiveRoles merges them
+      expect(result).toHaveLength(2);
+      expect(result[0]?.role).toBe('system');
+      expect(result[1]?.role).toBe('user');
     });
   });
 
@@ -269,7 +287,7 @@ describe('transcript-compiler', () => {
     it('returns OPENROUTER_POLICY for OpenRouter with non-Gemini model', () => {
       const policy = resolveTranscriptPolicy(openRouterConfig, 'anthropic/claude-3.5-sonnet');
       expect(policy.name).toBe('openrouter');
-      expect(policy.mergeConsecutiveRoles).toBe(false);
+      expect(policy.mergeConsecutiveRoles).toBe(true);
     });
   });
 

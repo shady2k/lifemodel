@@ -26,6 +26,10 @@ export interface CircuitBreakerConfig {
   name?: string;
   /** Optional logger */
   logger?: Logger;
+  /** Predicate to decide if an error should count toward the failure threshold.
+   *  Return true to count (default), false to skip.
+   *  Non-retryable errors (401, 403) are request-specific and shouldn't trip the circuit. */
+  shouldCountFailure?: (error: unknown) => boolean;
 }
 
 const DEFAULT_CONFIG: CircuitBreakerConfig = {
@@ -110,7 +114,10 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (error) {
-      this.onFailure();
+      const shouldCount = this.config.shouldCountFailure;
+      if (!shouldCount || shouldCount(error)) {
+        this.onFailure();
+      }
       throw error;
     }
   }

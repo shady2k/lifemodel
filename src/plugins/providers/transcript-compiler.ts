@@ -51,12 +51,14 @@ export const STRICT_POLICY: TranscriptPolicy = {
 };
 
 /**
- * OpenRouter policy — let OpenRouter handle normalization.
- * OpenRouter silently merges consecutive same-role messages before forwarding.
+ * OpenRouter policy — merge consecutive roles locally.
+ * While OpenRouter normalizes server-side, the Vercel AI SDK validates
+ * messages *client-side* per provider adapter. The Anthropic adapter rejects
+ * consecutive same-role messages before the request is sent.
  */
 export const OPENROUTER_POLICY: TranscriptPolicy = {
   name: 'openrouter',
-  mergeConsecutiveRoles: false,
+  mergeConsecutiveRoles: true,
   maxLeadingSystemMessages: Infinity,
   requireLeadingUserTurn: false,
   convertMidSystemToUser: false,

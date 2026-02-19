@@ -113,6 +113,10 @@ export class VercelAIProvider extends BaseLLMProvider {
       maxFailures: 3,
       resetTimeout: DEFAULT_CIRCUIT_RESET_TIMEOUT,
       timeout: DEFAULT_TIMEOUT,
+      // Only count retryable errors (500, timeout) toward the circuit breaker threshold.
+      // Non-retryable errors (401, 403, schema validation) are request-specific failures,
+      // not indications that the service is down.
+      shouldCountFailure: (error: unknown) => !(error instanceof LLMError) || error.retryable,
     };
     if (this.providerLogger) {
       circuitConfig.logger = this.providerLogger;
@@ -333,6 +337,7 @@ export class VercelAIProvider extends BaseLLMProvider {
         message: error.message,
         statusCode: error.statusCode,
         retryable: error.retryable,
+        ...(error.upstreamProvider && { upstreamProvider: error.upstreamProvider }),
       };
     }
     if (error instanceof Error) {
@@ -345,6 +350,44 @@ export class VercelAIProvider extends BaseLLMProvider {
       errorType: 'unknown',
       message: String(error),
     };
+  }
+
+  /**
+   * Extract upstream provider name from AI SDK error response headers.
+   * OpenRouter returns the routing target in x-openrouter-provider header.
+   */
+  private extractUpstreamProvider(error: unknown): string | undefined {
+    if (error instanceof Error && 'responseHeaders' in error) {
+      const headers = (error as { responseHeaders: Record<string, string> }).responseHeaders;
+      const provider = headers?.['x-openrouter-provider'];
+      if (provider) return provider;
+      // Log available headers for debugging if provider header is missing
+      if (headers && typeof headers === 'object') {
+        const headerKeys = Object.keys(headers).filter((k) => k.startsWith('x-'));
+        if (headerKeys.length > 0) {
+          this.providerLogger?.debug(
+            { availableHeaders: headerKeys },
+            'No x-openrouter-provider in error response headers'
+          );
+        }
+      }
+    }
+    // Also check responseBody for provider info (some error formats embed it)
+    if (error instanceof Error && 'responseBody' in error) {
+      const body = (error as { responseBody: string }).responseBody;
+      if (typeof body === 'string') {
+        try {
+          const parsed = JSON.parse(body) as Record<string, unknown>;
+          const metadata = parsed['metadata'] as Record<string, unknown> | undefined;
+          if (metadata?.['provider_name'] && typeof metadata['provider_name'] === 'string') {
+            return metadata['provider_name'];
+          }
+        } catch {
+          // not JSON, ignore
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -438,7 +481,27 @@ export class VercelAIProvider extends BaseLLMProvider {
       // call site in executeRequest where we cast back to Message[].
       const rawContent = (msg as unknown as Record<string, unknown>)['content'];
       if (Array.isArray(rawContent)) {
-        // Multipart content with cache_control — propagate via providerOptions on each part
+        const providerKey = isOpenRouterConfig(this.config) ? 'openrouter' : 'openai';
+
+        // System messages only accept string content in the AI SDK.
+        // Extract text and move cache_control to message-level providerOptions.
+        if (msg.role === 'system') {
+          const text = rawContent
+            .map((p: Record<string, unknown>) => (typeof p['text'] === 'string' ? p['text'] : ''))
+            .join('\n\n');
+          const firstCacheControl = rawContent.find(
+            (p: Record<string, unknown>) => p['cache_control']
+          ) as Record<string, unknown> | undefined;
+          const result: Record<string, unknown> = { role: 'system', content: text };
+          if (firstCacheControl?.['cache_control']) {
+            result['providerOptions'] = {
+              [providerKey]: { cacheControl: firstCacheControl['cache_control'] },
+            };
+          }
+          return result as { role: string; content: string };
+        }
+
+        // User/assistant: multipart content with cache_control on each part
         const parts = rawContent.map((part: Record<string, unknown>) => {
           const converted: Record<string, unknown> = {
             type: part['type'],
@@ -446,9 +509,7 @@ export class VercelAIProvider extends BaseLLMProvider {
           };
           if (part['cache_control']) {
             converted['providerOptions'] = {
-              [isOpenRouterConfig(this.config) ? 'openrouter' : 'openai']: {
-                cacheControl: part['cache_control'],
-              },
+              [providerKey]: { cacheControl: part['cache_control'] },
             };
           }
           return converted;
@@ -1088,10 +1149,14 @@ export class VercelAIProvider extends BaseLLMProvider {
         ? (error as { statusCode: number }).statusCode
         : undefined;
 
+    // Extract upstream provider from OpenRouter response headers (available on APICallError)
+    const upstreamProvider = this.extractUpstreamProvider(error);
+
     if (statusCode === 429) {
       return new LLMError(`Rate limit: ${message}`, this.name, {
         statusCode: 429,
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1099,6 +1164,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       return new LLMError(`Server error: ${message}`, this.name, {
         statusCode,
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1106,6 +1172,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       return new LLMError(`Request timeout: ${message}`, this.name, {
         statusCode: 408,
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1114,6 +1181,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       return new LLMError(`Rate limit: ${message}`, this.name, {
         statusCode: 429,
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1121,6 +1189,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     if (error instanceof Error && error.name === 'AbortError') {
       return new LLMError('Request timed out', this.name, {
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1130,6 +1199,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       return new LLMError(`Server error: ${message}`, this.name, {
         statusCode: parseInt(serverErrorMatch[1], 10),
         retryable: true,
+        ...(upstreamProvider && { upstreamProvider }),
       });
     }
 
@@ -1137,6 +1207,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     return new LLMError(message, this.name, {
       ...(statusCode !== undefined && { statusCode }),
       retryable: false,
+      ...(upstreamProvider && { upstreamProvider }),
     });
   }
 

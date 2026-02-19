@@ -595,6 +595,9 @@ export interface LoopState {
 
   /** Whether a provider-error retry has already been attempted (prevents stripping tools on provider failures) */
   providerErrorRetried: boolean;
+
+  /** Whether a non-retryable error retry has already been attempted (meta-provider upstream routing) */
+  nonRetryableErrorRetried: boolean;
 }
 
 /**
@@ -619,6 +622,7 @@ export function createLoopState(): LoopState {
     collectedThoughts: [],
     malformedRetried: false,
     providerErrorRetried: false,
+    nonRetryableErrorRetried: false,
   };
 }
 

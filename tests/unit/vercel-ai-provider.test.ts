@@ -100,11 +100,11 @@ describe('VercelAIProvider', () => {
     expect(content[0]?.['toolName']).toBe('core_memory');
   });
 
-  it('uses provider-specific cache control key', () => {
+  it('uses provider-specific cache control key for user messages', () => {
     const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
     const messages = [
       {
-        role: 'system',
+        role: 'user',
         content: [
           {
             type: 'text',
@@ -121,6 +121,33 @@ describe('VercelAIProvider', () => {
 
     const parts = converted[0]?.content as Record<string, unknown>[];
     const providerOptions = parts[0]?.['providerOptions'] as Record<string, unknown>;
+    expect(providerOptions?.['openai']).toEqual({ cacheControl: { type: 'ephemeral' } });
+  });
+
+  it('converts system message array content to string with message-level providerOptions', () => {
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const messages = [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'text',
+            text: 'hello',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+    ] as unknown as Message[];
+
+    const converted = (
+      provider as unknown as {
+        convertMessages: (m: Message[]) => { role: string; content: unknown; providerOptions?: unknown }[];
+      }
+    ).convertMessages(messages);
+
+    // System messages must have string content (AI SDK CoreSystemMessage requirement)
+    expect(converted[0]?.content).toBe('hello');
+    const providerOptions = converted[0]?.providerOptions as Record<string, unknown>;
     expect(providerOptions?.['openai']).toEqual({ cacheControl: { type: 'ephemeral' } });
   });
 
