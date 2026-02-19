@@ -40,6 +40,7 @@ import {
   createDeferredStorage,
   createStateManager,
   createConversationManager,
+  migrateToHierarchical,
 } from '../storage/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
@@ -352,6 +353,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create storage with deferred writes (batches disk I/O, prevents race conditions)
   const storagePath = mergedConfig.paths.state;
+
+  // Migrate flat colon-delimited files to hierarchical directory structure
+  await migrateToHierarchical(storagePath, '.json', logger);
+
   const jsonStorage = createJSONStorage(storagePath, { logger });
   const storage = createDeferredStorage(jsonStorage, logger, {
     flushIntervalMs: 30_000, // Flush every 30 seconds

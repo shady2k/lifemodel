@@ -1,5 +1,15 @@
-import { mkdir, readFile, writeFile, unlink, access, rename, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import {
+  mkdir,
+  readFile,
+  writeFile,
+  unlink,
+  access,
+  rename,
+  readdir,
+  rmdir,
+  stat,
+} from 'node:fs/promises';
+import { join, resolve, dirname } from 'node:path';
 import type { Storage } from './storage.js';
 import type { Logger } from '../types/logger.js';
 
@@ -18,12 +28,46 @@ export interface JSONStorageConfig {
 }
 
 /**
+ * Validate a storage key to prevent path traversal attacks.
+ * Throws on invalid keys.
+ */
+function validateKey(key: string, basePath: string): void {
+  if (key.includes('..')) {
+    throw new Error(`Invalid storage key: contains '..': ${key}`);
+  }
+  if (key.startsWith('/') || key.startsWith('\\')) {
+    throw new Error(`Invalid storage key: starts with path separator: ${key}`);
+  }
+  if (key.includes('\\')) {
+    throw new Error(`Invalid storage key: contains backslash: ${key}`);
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(key)) {
+    throw new Error(`Invalid storage key: contains control characters: ${key}`);
+  }
+  // Verify resolved path stays under basePath
+  const converted = key.replace(/:/g, '/');
+  const resolved = resolve(basePath, converted);
+  if (!resolved.startsWith(resolve(basePath))) {
+    throw new Error(`Invalid storage key: resolves outside base path: ${key}`);
+  }
+}
+
+/**
+ * Convert a colon-delimited key to a filesystem path segment.
+ */
+function keyToPath(key: string): string {
+  return key.replace(/:/g, '/');
+}
+
+/**
  * JSON file-based storage implementation.
  *
  * Features:
  * - Atomic writes (temp file + rename)
  * - Optional backup before overwrite
  * - Automatic directory creation
+ * - Hierarchical key mapping (`:` → `/` in filesystem)
  */
 export class JSONStorage implements Storage {
   private readonly basePath: string;
@@ -42,21 +86,24 @@ export class JSONStorage implements Storage {
    * Get the full path for a key.
    */
   private getPath(key: string): string {
-    return join(this.basePath, `${key}${this.extension}`);
+    validateKey(key, this.basePath);
+    return join(this.basePath, `${keyToPath(key)}${this.extension}`);
   }
 
   /**
    * Get the backup path for a key.
    */
   private getBackupPath(key: string): string {
-    return join(this.basePath, `${key}.backup${this.extension}`);
+    validateKey(key, this.basePath);
+    return join(this.basePath, `${keyToPath(key)}.backup${this.extension}`);
   }
 
   /**
    * Get the temp path for atomic writes.
    */
   private getTempPath(key: string): string {
-    return join(this.basePath, `${key}.tmp${this.extension}`);
+    validateKey(key, this.basePath);
+    return join(this.basePath, `${keyToPath(key)}.tmp${this.extension}`);
   }
 
   /**
@@ -64,6 +111,14 @@ export class JSONStorage implements Storage {
    */
   private async ensureDir(): Promise<void> {
     await mkdir(this.basePath, { recursive: true });
+  }
+
+  /**
+   * Ensure the parent directory of a file path exists.
+   */
+  private async ensureParentDir(filePath: string): Promise<void> {
+    const dir = dirname(filePath);
+    await mkdir(dir, { recursive: true });
   }
 
   async load(key: string): Promise<unknown> {
@@ -183,6 +238,9 @@ export class JSONStorage implements Storage {
     const tempPath = this.getTempPath(key);
     const backupPath = this.getBackupPath(key);
 
+    // Ensure parent directory exists for nested keys
+    await this.ensureParentDir(tempPath);
+
     // Serialize data
     const content = JSON.stringify(data, null, 2);
 
@@ -207,12 +265,38 @@ export class JSONStorage implements Storage {
 
     try {
       await unlink(path);
-      return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return false;
       }
       throw error;
+    }
+
+    // Clean up empty parent directories up to basePath
+    await this.cleanupEmptyDirs(dirname(path));
+
+    return true;
+  }
+
+  /**
+   * Walk up parent directories, removing empty ones until basePath.
+   */
+  private async cleanupEmptyDirs(dir: string): Promise<void> {
+    const resolvedBase = resolve(this.basePath);
+    let current = resolve(dir);
+
+    while (current !== resolvedBase && current.startsWith(resolvedBase)) {
+      try {
+        await rmdir(current);
+        current = dirname(current);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOTEMPTY' || code === 'ENOENT') {
+          break;
+        }
+        this.logger?.debug({ dir: current, error }, 'Error cleaning up directory');
+        break;
+      }
     }
   }
 
@@ -229,10 +313,14 @@ export class JSONStorage implements Storage {
 
   async keys(pattern?: string): Promise<string[]> {
     try {
-      const files = await readdir(this.basePath);
+      const files = await readdir(this.basePath, { recursive: true });
       let keys = files
         .filter((f) => f.endsWith(this.extension) && !f.includes('.backup') && !f.includes('.tmp'))
-        .map((f) => f.slice(0, -this.extension.length));
+        .map((f) => {
+          // Normalize path separators to colons and strip extension
+          const withoutExt = f.slice(0, -this.extension.length);
+          return withoutExt.replace(/[/\\]/g, ':');
+        });
 
       if (pattern) {
         const regex = new RegExp(pattern.replace(/\*/g, '.*'));
@@ -277,4 +365,92 @@ export function createJSONStorage(
     basePath,
     ...options,
   });
+}
+
+/**
+ * Migrate flat colon-delimited files to hierarchical directory structure.
+ *
+ * Scans basePath (non-recursively) for files with `:` in their name and moves
+ * them to the corresponding nested directory path. Safe to call on every startup —
+ * returns immediately if no flat colon-files exist.
+ */
+export async function migrateToHierarchical(
+  basePath: string,
+  _extension: string,
+  logger?: Logger
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(basePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return; // No state dir yet — nothing to migrate
+    }
+    throw error;
+  }
+
+  // Filter for files with colons (candidates for migration)
+  const colonFiles = files.filter((f) => f.includes(':'));
+  if (colonFiles.length === 0) {
+    return; // Fast path: nothing to migrate
+  }
+
+  let migrated = 0;
+  let skipped = 0;
+
+  for (const file of colonFiles) {
+    // Process both primary and backup files
+    const isTmp = file.includes('.tmp');
+    if (isTmp) continue; // Skip temp files
+
+    const targetRelative = file.replace(/:/g, '/');
+    const sourcePath = join(basePath, file);
+    const targetPath = join(basePath, targetRelative);
+
+    // Verify source is actually a file (not a directory that somehow has : in name)
+    try {
+      const srcStat = await stat(sourcePath);
+      if (!srcStat.isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    // Collision check
+    try {
+      const targetStat = await stat(targetPath);
+      // Target exists — check if same size
+      const srcStat = await stat(sourcePath);
+      if (targetStat.size === srcStat.size) {
+        // Same size: assume duplicate, delete the flat file
+        await unlink(sourcePath);
+        migrated++;
+      } else {
+        logger?.warn(
+          {
+            source: file,
+            target: targetRelative,
+            sourceSize: srcStat.size,
+            targetSize: targetStat.size,
+          },
+          'Migration collision: flat and nested files differ, skipping'
+        );
+        skipped++;
+      }
+      continue;
+    } catch {
+      // Target doesn't exist — proceed with move
+    }
+
+    // Create target directory and move
+    await mkdir(dirname(targetPath), { recursive: true });
+    await rename(sourcePath, targetPath);
+    migrated++;
+  }
+
+  if (migrated > 0 || skipped > 0) {
+    logger?.info(
+      { migrated, skipped },
+      'Storage migration: flat files moved to hierarchical structure'
+    );
+  }
 }
