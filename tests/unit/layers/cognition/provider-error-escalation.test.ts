@@ -62,7 +62,6 @@ function createEmptyToolRegistry(): ToolRegistry {
   return {
     getTools: () => [],
     getToolsAsOpenAIFormat: () => [],
-    getToolsWithLazySchema: () => [],
     hasToolSideEffects: () => false,
     getMaxCallsPerTurn: () => undefined,
     execute: vi.fn(),

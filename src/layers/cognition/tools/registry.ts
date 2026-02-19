@@ -279,12 +279,13 @@ export class ToolRegistry {
   /**
    * Get all tools in OpenAI Chat Completions format (full schemas).
    * Used for native tool calling via the `tools` parameter.
-   * Note: This sends ~3000 tokens per request - consider using getToolsWithLazySchema() instead.
+   * core.tools is excluded — with full schemas always sent, the meta-tool is redundant.
+   * It remains registered internally (callable if referenced in history).
    */
   getToolsAsOpenAIFormat(): OpenAIChatTool[] {
-    return Array.from(this.tools.values()).map(
-      (tool) => toolToOpenAIFormat(tool) as OpenAIChatTool
-    );
+    return Array.from(this.tools.values())
+      .filter((tool) => tool.name !== 'core.tools')
+      .map((tool) => toolToOpenAIFormat(tool) as OpenAIChatTool);
   }
 
   /**

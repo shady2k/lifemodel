@@ -172,9 +172,9 @@ export class AgenticLoop {
     // Validate tool_call/result pair integrity (safety net for history slicing bugs)
     messages = validateToolCallPairs(messages, this.logger);
 
-    // Get tools with lazy schemas (name + description only, ~300 tokens instead of ~3500).
-    // Full schemas are auto-injected on validation failure (schema-on-fail pattern).
-    const allTools = this.toolRegistry.getToolsWithLazySchema();
+    // Send full tool schemas — models need them to call tools correctly on first attempt.
+    // Lazy schemas (ADR-004 Option 1) were reverted: see docs/adr/004-prompt-token-optimization.md.
+    const allTools = this.toolRegistry.getToolsAsOpenAIFormat();
 
     while (!state.aborted) {
       // Check limits

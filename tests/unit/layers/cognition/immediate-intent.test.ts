@@ -168,14 +168,6 @@ describe('Immediate Intent Processing', () => {
             parameters: { type: 'object', properties: {}, required: [] },
           },
         })),
-      getToolsWithLazySchema: () =>
-        tools.map((t) => ({
-          type: 'function',
-          function: {
-            name: t.name.replace(/\./g, '_'),
-            description: t.description.split('\n')[0],
-          },
-        })),
       hasToolSideEffects: (name: string) => toolMap.get(name)?.hasSideEffects ?? false,
       getMaxCallsPerTurn: (name: string) => toolMap.get(name)?.maxCallsPerTurn,
       execute: vi.fn().mockImplementation(async (request: { name: string; toolCallId: string }) => {

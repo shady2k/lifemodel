@@ -1709,30 +1709,14 @@ export function createCaloriesTool(
     additionalProperties: false,
   };
 
-  const TOOL_DESCRIPTION = `Food and calorie tracking.
+  const TOOL_DESCRIPTION = `Food and calorie tracking. Actions: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish.
 
-ACTIONS: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish
-
-KEY RULES:
-- log response includes dailySummary with daily totals, byMealType subtotals, and per-entry portion + caloriesPer100g — NEVER call summary after log
-- When displaying entries, show portion (e.g. "170 г") and caloriesPer100g (e.g. "350 ккал/100г") when available
-- ALWAYS set meal_type on every entry when user groups food by meal (breakfast/lunch/dinner/snack)
-- DISPLAY FORMAT: Always group entries by meal type (breakfast, lunch, snack, dinner) with per-meal subtotals from dailySummary.byMealType. Show grand total, goal, and remaining at the end. Entries without mealType go under "Other"
-- name = pure food name, no quantities ("Americano", not "Americano 200ml")
-- When user gives kcal/100g, use calories_per_100g (with portion in g/kg) — tool computes total automatically
-- If status="ambiguous", resolve via chooseDishId — do NOT create a new item for a different portion
-- If status="failed", the item was NOT logged — check reason field and retry with the missing data
-- log supports entries array for multiple items in one call — each entry must be a DISTINCT food item. NEVER send the same food name with the same portion and meal_type more than once (duplicates are auto-removed)
-- date parameter supports: "today", "yesterday", "tomorrow", or YYYY-MM-DD
-- If existingEntries present in log response, ask user if the entry is a duplicate (entry IS already saved and counted in dailySummary — use dailySummary.totalCalories as the authoritative total)
-- unlog response includes updated dailySummary — use it to show corrected totals immediately
-- For cooked foods (pasta, rice, porridge, potatoes), use COOKED kcal/100g values, not dry/raw
-- search: find entries by food name across all dates (max 5 queries)
-- stats: multi-day calorie summary with weight trend (default 7 days)
-- update_dish: modify existing dish definition (name or nutritional basis). Returns dailySummary with recalculated totals. Use dish_id (starts with "item_") from list response, NOT entry_id (starts with "food_")
-- unlog: remove a logged entry by entry_id (starts with "food_", from list response)
-- delete_dish: remove a dish definition entirely — only if no entries reference it
-- list response includes both entryId (for unlog) and dishId (for update_dish/delete_dish) — use the correct one`;
+Rules:
+- ALWAYS set meal_type when user groups by meal. Batch multiple items in entries array (distinct items only).
+- log response has dailySummary (totals + byMealType) — NEVER call summary after log. existingEntries = possible duplicate (already saved).
+- status="ambiguous" → resolve via chooseDishId. status="failed" → NOT logged, check reason.
+- name = pure food ("Americano" not "Americano 200ml"). Use calories_per_100g for kcal/100g input. Cooked kcal for cooked foods.
+- date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog.`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',

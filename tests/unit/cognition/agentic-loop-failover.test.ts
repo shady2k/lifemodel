@@ -58,7 +58,6 @@ function makeContext(overrides?: Partial<LoopContext>): LoopContext {
 function makeToolRegistry(): ToolRegistry {
   return {
     getToolsAsOpenAIFormat: () => [],
-    getToolsWithLazySchema: () => [],
     getMaxCallsPerTurn: () => undefined,
   } as unknown as ToolRegistry;
 }

@@ -30,7 +30,7 @@ Every LLM request in the agentic loop consumes 13-14K input tokens before the mo
 
 ## Options Investigated
 
-### Option 1: Lazy Tool Schema Loading ✅ (ACCEPTED)
+### Option 1: Lazy Tool Schema Loading ↩️ (REVERTED)
 
 **Mechanism:** Send only tool name + first-line description for all tools except `core.tools`. The LLM calls `core.tools({ action: "describe", name: "..." })` to get the full schema before calling any tool.
 
@@ -41,6 +41,14 @@ Every LLM request in the agentic loop consumes 13-14K input tokens before the mo
 **Trade-off:** Adds one extra LLM round-trip per unique tool used. For a typical request using 2-3 tools, that's 2-3 extra `core.tools` calls. But each call is cheap (~50 output tokens) and the model learns tool schemas quickly.
 
 **Risk:** Low. The infrastructure is already tested. Models may occasionally call tools without fetching schema first — but validation catches this and the error message guides them to use `core.tools`.
+
+**REVERTED:** Production data showed lazy schemas **cost more** than they save:
+- Model guesses wrong without schema → 3 parallel failures → 3× full schema in error responses → extra round-trip
+- Breakfast logging: 29,699 tokens (lazy) vs ~23,054 tokens (full schemas) — **+29% waste**
+- Zero prompt cache hits because prompt structure shifts between calls (schema in errors vs. not)
+- The pattern was designed for 100-400 tools (Speakeasy's scale), not our ~25 tools where the full schema cost (~3K tokens) is modest
+
+**Lessons learned:** Lazy infrastructure (`getToolsWithLazySchema()`, `toolToMinimalFormat()`, `core.tools` meta-tool) is preserved for future use if the toolset grows past ~50 tools. The schema-on-fail error pattern was also removed from validation errors — with full schemas in the `tools` parameter, error messages only need to describe what went wrong, not repeat the schema.
 
 ### Option 2: Filter Tools by Trigger Type ✅ (ACCEPTED)
 
@@ -132,7 +140,7 @@ Additionally: when truncating history, remove 20% at once rather than a little e
 
 Implement Options 1-5 in order of impact and effort:
 
-1. **Lazy tool schemas** — Wire up `getToolsWithLazySchema()` (low effort, ~3K savings)
+1. ~~**Lazy tool schemas**~~ — REVERTED: cost +29% in production (see Option 1)
 2. **Conditional `<skill_rules>`** — Gate on trigger type (low effort, ~500-700 savings)
 3. **Tool output trimming in history** — Summarize old tool results (medium effort, ~1,500-3K savings)
 4. **Filter tools by trigger type** — Extend `filterToolsForContext()` (medium effort, ~1K savings)
@@ -142,7 +150,7 @@ Implement Options 1-5 in order of impact and effort:
 
 ## Consequences
 
-- Extra LLM round-trip per unique tool used (lazy loading) — acceptable given ~3K token savings
-- Need to monitor for regressions where model calls tools without fetching schema first
+- ~~Extra LLM round-trip per unique tool used (lazy loading)~~ — Reverted; full schemas sent again
+- ~~Need to monitor for regressions where model calls tools without fetching schema first~~ — N/A
 - History trimming requires careful testing to ensure no critical context is lost
 - Tool filtering per trigger type needs a test matrix for each trigger × tool combination
