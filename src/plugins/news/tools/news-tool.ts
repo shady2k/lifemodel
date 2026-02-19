@@ -15,6 +15,7 @@ import type {
   StoragePrimitive,
   IntentEmitterPrimitive,
   MemorySearchPrimitive,
+  ScriptRunnerPrimitive,
 } from '../../../types/plugin.js';
 import type { Logger } from '../../../types/logger.js';
 import type {
@@ -23,12 +24,14 @@ import type {
   NewsToolResult,
   NewsSummary,
   NewsArticleEntry,
+  FetchedArticle,
 } from '../types.js';
 import { NEWS_STORAGE_KEYS, NEWS_PLUGIN_ID, NEWS_EVENT_KINDS } from '../types.js';
 import { validateUrl, validateTelegramHandle } from '../url-validator.js';
 import { fetchRssFeed } from '../fetchers/rss.js';
 import { fetchTelegramChannel } from '../fetchers/telegram.js';
 import { convertToNewsArticle } from '../topic-extractor.js';
+import { fetchTelegramGroup } from '../fetchers/telegram-group.js';
 
 /**
  * Schema definitions for error responses.
@@ -39,18 +42,28 @@ const SCHEMA_ADD_SOURCE = {
   type: {
     type: 'string',
     required: true,
-    enum: ['rss', 'telegram'],
-    description: 'Source type: RSS feed or Telegram channel',
+    enum: ['rss', 'telegram', 'telegram-group'],
+    description: 'Source type: RSS feed, Telegram channel, or private Telegram group',
   },
   url: {
     type: 'string',
     required: true,
-    description: 'RSS feed URL or Telegram @channel_handle',
+    description: 'RSS feed URL or Telegram @channel_handle (not used for telegram-group)',
   },
   name: {
     type: 'string',
     required: true,
     description: 'Human-readable name for this source',
+  },
+  profile: {
+    type: 'string',
+    required: false,
+    description: 'Browser profile name (required for telegram-group, created via browser:auth)',
+  },
+  group_url: {
+    type: 'string',
+    required: false,
+    description: 'Full Telegram Web URL for the group (required for telegram-group)',
   },
 };
 
@@ -159,23 +172,55 @@ async function addSource(
   storage: StoragePrimitive,
   logger: Logger,
   intentEmitter: IntentEmitterPrimitive,
-  type: 'rss' | 'telegram',
+  type: 'rss' | 'telegram' | 'telegram-group',
   url: string,
-  name: string
+  name: string,
+  options?: {
+    profile?: string | undefined;
+    groupUrl?: string | undefined;
+    scriptRunner?: ScriptRunnerPrimitive | undefined;
+  }
 ): Promise<NewsToolResult> {
-  // Validate URL based on type
-  const validation = type === 'rss' ? validateUrl(url) : validateTelegramHandle(url);
-
-  if (!validation.valid) {
-    return {
-      success: false,
-      action: 'add_source',
-      error: validation.error ?? 'Validation failed',
-    };
+  // For telegram-group, validate profile and groupUrl
+  if (type === 'telegram-group') {
+    if (!options?.profile || !options?.groupUrl) {
+      const missing: string[] = [];
+      if (!options?.profile) missing.push('profile');
+      if (!options?.groupUrl) missing.push('group_url');
+      return {
+        success: false,
+        action: 'add_source',
+        error: `Missing required parameters for telegram-group: ${missing.join(', ')}`,
+        schema: SCHEMA_ADD_SOURCE,
+      };
+    }
   }
 
-  // validation.url is defined when validation.valid is true
-  const normalizedUrl = validation.url ?? url;
+  // Validate URL based on type (telegram-group uses groupUrl, not url)
+  let normalizedUrl: string;
+  if (type === 'telegram-group') {
+    normalizedUrl = options?.groupUrl ?? url;
+    // Validate groupUrl format
+    try {
+      new URL(normalizedUrl);
+    } catch {
+      return {
+        success: false,
+        action: 'add_source',
+        error: `Invalid group URL: ${normalizedUrl}`,
+      };
+    }
+  } else {
+    const validation = type === 'rss' ? validateUrl(url) : validateTelegramHandle(url);
+    if (!validation.valid) {
+      return {
+        success: false,
+        action: 'add_source',
+        error: validation.error ?? 'Validation failed',
+      };
+    }
+    normalizedUrl = validation.url ?? url;
+  }
 
   // Check for duplicate URLs
   const sources = await loadSources(storage);
@@ -199,6 +244,10 @@ async function addSource(
     name: trimmedName,
     enabled: true,
     createdAt: new Date(),
+    ...(type === 'telegram-group' && {
+      profile: options?.profile,
+      groupUrl: options?.groupUrl,
+    }),
   };
 
   sources.set(sourceId, newSource);
@@ -210,6 +259,7 @@ async function addSource(
       type,
       url: normalizedUrl,
       name: trimmedName,
+      ...(type === 'telegram-group' && { profile: options?.profile }),
     },
     'News source added'
   );
@@ -221,26 +271,54 @@ async function addSource(
   try {
     logger.debug({ sourceId, type, url: normalizedUrl }, 'Fetching initial articles');
 
-    const fetchResult =
-      type === 'rss'
-        ? await fetchRssFeed(normalizedUrl, sourceId, trimmedName)
-        : await fetchTelegramChannel(normalizedUrl, trimmedName);
+    let fetchSuccess = false;
+    let fetchArticles: FetchedArticle[] = [];
+    let fetchErrorMsg: string | undefined;
+    let fetchLatestId: string | undefined;
 
-    if (fetchResult.success && fetchResult.articles.length > 0) {
-      initialArticleCount = fetchResult.articles.length;
+    if (type === 'telegram-group') {
+      if (!options?.scriptRunner || !options.profile || !options.groupUrl) {
+        fetchErrorMsg = 'Script runner not available — will retry on next poll';
+      } else {
+        const groupFetchResult = await fetchTelegramGroup(
+          options.profile,
+          options.groupUrl,
+          sourceId,
+          trimmedName,
+          undefined,
+          options.scriptRunner
+        );
+        fetchSuccess = groupFetchResult.success;
+        fetchArticles = groupFetchResult.articles;
+        fetchErrorMsg = groupFetchResult.error;
+        fetchLatestId = groupFetchResult.latestId;
+      }
+    } else {
+      const fetchResult =
+        type === 'rss'
+          ? await fetchRssFeed(normalizedUrl, sourceId, trimmedName)
+          : await fetchTelegramChannel(normalizedUrl, trimmedName);
+      fetchSuccess = fetchResult.success;
+      fetchArticles = fetchResult.articles;
+      fetchErrorMsg = fetchResult.error;
+      fetchLatestId = fetchResult.latestId ?? undefined;
+    }
+
+    if (fetchSuccess && fetchArticles.length > 0) {
+      initialArticleCount = fetchArticles.length;
 
       // Save source state with lastSeenId for future deduplication
       const state: SourceState = {
         sourceId,
         lastFetchedAt: new Date(),
         consecutiveFailures: 0,
-        lastSeenId: fetchResult.latestId,
+        lastSeenId: fetchLatestId,
       };
       await saveSourceState(storage, state);
 
       // Convert to NewsArticle format and emit as article_batch signal
       // NewsSignalFilter will score these articles (same flow as scheduled polls)
-      const newsArticles = fetchResult.articles.map(convertToNewsArticle);
+      const newsArticles = fetchArticles.map(convertToNewsArticle);
 
       const emitResult = intentEmitter.emitSignal({
         priority: 2, // Normal priority - autonomic layer will assess urgency
@@ -261,16 +339,16 @@ async function addSource(
           'Emitted article batch signal for initial fetch'
         );
       }
-    } else if (!fetchResult.success) {
-      fetchError = fetchResult.error;
-      logger.warn({ sourceId, error: fetchResult.error }, 'Initial fetch failed');
+    } else if (!fetchSuccess) {
+      fetchError = fetchErrorMsg;
+      logger.warn({ sourceId, error: fetchErrorMsg }, 'Initial fetch failed');
 
       // Save failed state
       const state: SourceState = {
         sourceId,
         lastFetchedAt: new Date(),
         consecutiveFailures: 1,
-        lastError: fetchResult.error,
+        lastError: fetchErrorMsg,
       };
       await saveSourceState(storage, state);
     } else {
@@ -491,7 +569,7 @@ Example: {"action": "get_news", "query": "technology"}
 **For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
 This searches articles from configured RSS feeds and Telegram channels.
 Only fall back to web search if get_news returns no relevant results.`,
-    tags: ['rss', 'telegram', 'news', 'feed', 'add', 'remove', 'list', 'get'],
+    tags: ['rss', 'telegram', 'telegram-group', 'news', 'feed', 'add', 'remove', 'list', 'get'],
     parameters: [
       {
         name: 'action',
@@ -504,14 +582,28 @@ Only fall back to web search if get_news returns no relevant results.`,
         name: 'type',
         type: 'string',
         description:
-          'Source type: "rss" for RSS/Atom feeds, "telegram" for channels (required for add_source)',
+          'Source type: "rss" for RSS/Atom feeds, "telegram" for public channels, "telegram-group" for private groups (required for add_source)',
         required: false,
-        enum: ['rss', 'telegram'],
+        enum: ['rss', 'telegram', 'telegram-group'],
       },
       {
         name: 'url',
         type: 'string',
-        description: 'RSS feed URL or Telegram @channel_handle (required for add_source)',
+        description:
+          'RSS feed URL or Telegram @channel_handle (required for add_source with rss/telegram)',
+        required: false,
+      },
+      {
+        name: 'profile',
+        type: 'string',
+        description: 'Browser profile name for telegram-group sources (created via browser:auth)',
+        required: false,
+      },
+      {
+        name: 'group_url',
+        type: 'string',
+        description:
+          'Full Telegram Web URL for telegram-group sources (e.g., https://web.telegram.org/a/#-1001234567890)',
         required: false,
       },
       {
@@ -585,16 +677,18 @@ Only fall back to web search if get_news returns no relevant results.`,
 
       switch (action) {
         case 'add_source': {
-          const type = args['type'] as 'rss' | 'telegram' | undefined;
+          const type = args['type'] as 'rss' | 'telegram' | 'telegram-group' | undefined;
           const url = args['url'] as string | undefined;
           const name = args['name'] as string | undefined;
+          const profile = args['profile'] as string | undefined;
+          const groupUrl = args['group_url'] as string | undefined;
 
           // Validate required params
-          if (!type || !url || !name) {
+          if (!type || !name) {
             const missing: string[] = [];
             if (!type) missing.push('type');
-            if (!url) missing.push('url');
             if (!name) missing.push('name');
+            if (!url && type !== 'telegram-group') missing.push('url');
 
             return {
               success: false,
@@ -605,17 +699,32 @@ Only fall back to web search if get_news returns no relevant results.`,
             };
           }
 
-          if (!['rss', 'telegram'].includes(type)) {
+          if (!['rss', 'telegram', 'telegram-group'].includes(type)) {
             return {
               success: false,
               action: 'add_source',
-              error: 'type must be "rss" or "telegram"',
+              error: 'type must be "rss", "telegram", or "telegram-group"',
               receivedParams: Object.keys(args),
               schema: SCHEMA_ADD_SOURCE,
             };
           }
 
-          return addSource(storage, logger, intentEmitter, type, url, name);
+          // For non-group types, url is required
+          if (type !== 'telegram-group' && !url) {
+            return {
+              success: false,
+              action: 'add_source',
+              error: 'Missing required parameter: url',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_ADD_SOURCE,
+            };
+          }
+
+          return addSource(storage, logger, intentEmitter, type, url ?? '', name, {
+            profile,
+            groupUrl,
+            scriptRunner: primitives.scriptRunner,
+          });
         }
 
         case 'remove_source': {

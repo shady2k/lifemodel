@@ -245,6 +245,9 @@ export const SCRIPT_CONTAINER_LABEL = 'com.lifemodel.component=script';
 /** Docker image name */
 export const CONTAINER_IMAGE = 'lifemodel-motor:latest';
 
+/** Browser Docker image name (Playwright + Chromium + VNC) */
+export const BROWSER_IMAGE = 'lifemodel-browser:latest';
+
 /** Default memory limit */
 export const DEFAULT_MEMORY_LIMIT = '512m';
 

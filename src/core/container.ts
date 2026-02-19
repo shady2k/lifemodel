@@ -57,6 +57,7 @@ import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
+import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { loadAllPlugins } from './plugin-discovery.js';
 import {
   createPersistentRecipientRegistry,
@@ -679,6 +680,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // 4c. Wire user model to AUTONOMIC for filter context
   // Filters can access user interests via context.userModel
   layers.autonomic.setUserModel(userModel);
+
+  // 4d. Wire script runner factory: PluginLoader → MotorCortex
+  // Allows plugins with allowedScripts to run Docker-based scripts
+  if (motorCortex) {
+    pluginLoader.setScriptRunnerFactory((pluginId) =>
+      createScopedScriptRunner(motorCortex, pluginId, {
+        getAllowedScripts: (pid) => pluginLoader.getPlugin(pid)?.manifest.allowedScripts ?? [],
+      })
+    );
+  }
 
   // 5. Set services provider for plugins
   // Note: registerEventSchema is added by PluginLoader per-plugin, not here

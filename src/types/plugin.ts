@@ -366,6 +366,9 @@ export interface PluginManifestV2 {
    * Core creates these on plugin load and cancels on unload.
    */
   schedules?: PluginScheduleDefinition[];
+
+  /** Script IDs this plugin is allowed to execute via ScriptRunnerPrimitive */
+  allowedScripts?: string[] | undefined;
 }
 
 /**
@@ -469,6 +472,33 @@ export interface PluginServices extends BasePluginServices {
 }
 
 /**
+ * Result of running a script via ScriptRunnerPrimitive.
+ *
+ * Structurally identical to ScriptRunResult but defined separately in plugin
+ * types to preserve plugin isolation (plugins don't import runtime types).
+ * TypeScript structural typing handles assignability at the wiring point.
+ */
+export interface PluginScriptRunResult {
+  ok: boolean;
+  runId: string;
+  output?: unknown;
+  error?: { code: string; message: string } | undefined;
+  stats: { durationMs: number; exitCode: number | undefined };
+}
+
+/**
+ * Script execution primitive for plugins.
+ * Scoped to the plugin's allowedScripts manifest list.
+ */
+export interface ScriptRunnerPrimitive {
+  runScript(request: {
+    scriptId: string;
+    inputs?: Record<string, unknown> | undefined;
+    timeoutMs?: number | undefined;
+  }): Promise<PluginScriptRunResult>;
+}
+
+/**
  * Primitives provided to plugins during activation.
  */
 export interface PluginPrimitives {
@@ -489,6 +519,9 @@ export interface PluginPrimitives {
 
   /** Read-only access to memory (plugin's own facts only) */
   memorySearch: MemorySearchPrimitive;
+
+  /** Script execution (scoped to manifest's allowedScripts) */
+  scriptRunner?: ScriptRunnerPrimitive | undefined;
 }
 
 /**

@@ -19,6 +19,8 @@ import type {
   FilterPluginV2,
   EventSchema,
   FireContext,
+  ScriptRunnerPrimitive,
+  IntentEmitterPrimitive,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
 import type { NewsArticle } from '../../types/news.js';
@@ -35,6 +37,7 @@ import { fetchRssFeed } from './fetchers/rss.js';
 import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
 import { convertToNewsArticle } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
+import { fetchTelegramGroup } from './fetchers/telegram-group.js';
 
 /**
  * Get the maximum publishedAt timestamp from articles.
@@ -143,6 +146,8 @@ const manifest: PluginManifestV2 = {
     maxSchedules: 10, // Max 10 scheduled poll events (one per source type batch)
     maxStorageMB: 50, // 50MB for source configs and state
   },
+  // Scripts this plugin can execute (for private group fetching)
+  allowedScripts: ['news.telegram_group.fetch'],
   // Declarative schedules - managed by core
   schedules: [
     {
@@ -602,22 +607,227 @@ async function fetchAllTelegramSources(
 }
 
 /**
+ * Fetch a single Telegram group source (used for parallel fetching).
+ */
+async function fetchSingleTelegramGroupSource(
+  source: NewsSource,
+  storage: StoragePrimitive,
+  logger: Logger,
+  scriptRunner: ScriptRunnerPrimitive,
+  intentEmitter: IntentEmitterPrimitive
+): Promise<FetchSourceResult> {
+  const state = await loadSourceState(storage, source.id);
+
+  // Check if source is temporarily disabled
+  if (isSourceDisabled(state)) {
+    logger.debug(
+      { sourceId: source.id, sourceName: source.name, disabledUntil: state?.disabledUntil },
+      'Skipping disabled Telegram group source'
+    );
+    return {
+      articles: [],
+      failed: false,
+      sourceName: source.name,
+      skipped: true,
+      shouldAlertUser: false,
+    };
+  }
+
+  if (!source.profile || !source.groupUrl) {
+    logger.warn({ sourceId: source.id }, 'Telegram group source missing profile or groupUrl');
+    return {
+      articles: [],
+      failed: true,
+      sourceName: source.name,
+      skipped: false,
+      shouldAlertUser: false,
+    };
+  }
+
+  logger.debug(
+    {
+      sourceId: source.id,
+      sourceName: source.name,
+      groupUrl: source.groupUrl,
+      lastSeenId: state?.lastSeenId,
+    },
+    'Fetching Telegram group'
+  );
+
+  const result = await fetchTelegramGroup(
+    source.profile,
+    source.groupUrl,
+    source.id,
+    source.name,
+    state?.lastSeenId,
+    scriptRunner
+  );
+
+  if (!result.success) {
+    // NOT_AUTHENTICATED: emit pending intention immediately, no backoff
+    if (result.errorCode === 'NOT_AUTHENTICATED') {
+      intentEmitter.emitPendingIntention(
+        `Telegram group "${source.name}" requires re-authentication. ` +
+          `Run: npm run browser:auth ${source.profile ?? 'telegram'} https://web.telegram.org`
+      );
+      return {
+        articles: [],
+        failed: true,
+        sourceName: source.name,
+        skipped: false,
+        shouldAlertUser: false, // Already emitted specific message
+      };
+    }
+
+    // Track failure and apply disable policy
+    const newFailures = (state?.consecutiveFailures ?? 0) + 1;
+    const disableUntil = calculateDisableUntil(newFailures);
+
+    const newState: SourceState = {
+      sourceId: source.id,
+      lastFetchedAt: state?.lastFetchedAt ?? new Date(),
+      consecutiveFailures: newFailures,
+      lastError: result.error,
+      lastSeenId: state?.lastSeenId,
+      lastSeenHash: state?.lastSeenHash,
+      disabledUntil: disableUntil ?? undefined,
+    };
+    await saveSourceState(storage, newState);
+
+    logger.warn(
+      {
+        sourceId: source.id,
+        sourceName: source.name,
+        error: result.error,
+        consecutiveFailures: newFailures,
+      },
+      'Failed to fetch Telegram group'
+    );
+
+    return {
+      articles: [],
+      failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
+      sourceName: source.name,
+      skipped: false,
+      shouldAlertUser: newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD,
+    };
+  }
+
+  // Filter to only new articles
+  const newArticles = filterNewArticles(result.articles, state);
+
+  const maxPublishedAt = getMaxPublishedAt(result.articles);
+
+  logger.debug(
+    {
+      sourceId: source.id,
+      sourceName: source.name,
+      total: result.articles.length,
+      new: newArticles.length,
+    },
+    'Fetched Telegram group'
+  );
+
+  const newState: SourceState = {
+    sourceId: source.id,
+    lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
+    consecutiveFailures: 0,
+    lastSeenId: result.latestId ?? state?.lastSeenId,
+    lastSeenHash: state?.lastSeenHash,
+    disabledUntil: undefined,
+  };
+  await saveSourceState(storage, newState);
+
+  return {
+    articles: newArticles,
+    failed: false,
+    sourceName: source.name,
+    skipped: false,
+    shouldAlertUser: false,
+  };
+}
+
+/**
+ * Fetch all enabled Telegram group sources in parallel.
+ * Requires scriptRunner to be available (no-ops if not).
+ */
+async function fetchAllTelegramGroupSources(
+  storage: StoragePrimitive,
+  logger: Logger,
+  scriptRunner: ScriptRunnerPrimitive | undefined,
+  intentEmitter: IntentEmitterPrimitive
+): Promise<FetchAllResult> {
+  if (!scriptRunner) {
+    return { newArticles: [], failedSources: [], sourcesToAlert: [] };
+  }
+
+  const sources = await loadSources(storage);
+  const enabledGroupSources = sources.filter((s) => s.enabled && s.type === 'telegram-group');
+
+  logger.info({ count: enabledGroupSources.length }, 'Fetching Telegram group sources in parallel');
+
+  if (enabledGroupSources.length === 0) {
+    return { newArticles: [], failedSources: [], sourcesToAlert: [] };
+  }
+
+  const results = await Promise.allSettled(
+    enabledGroupSources.map((source) =>
+      fetchSingleTelegramGroupSource(source, storage, logger, scriptRunner, intentEmitter)
+    )
+  );
+
+  const allNewArticles: FetchedArticle[] = [];
+  const failedSources: string[] = [];
+  const sourcesToAlert: string[] = [];
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      allNewArticles.push(...result.value.articles);
+      if (result.value.failed) {
+        failedSources.push(result.value.sourceName);
+      }
+      if (result.value.shouldAlertUser) {
+        sourcesToAlert.push(result.value.sourceName);
+      }
+    } else {
+      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      logger.error({ error: reason }, 'Unexpected error fetching Telegram group source');
+    }
+  }
+
+  return { newArticles: allNewArticles, failedSources, sourcesToAlert };
+}
+
+/**
  * Handle the poll_feeds event.
- * Fetches all sources (RSS and Telegram), filters new articles, and emits thoughts.
+ * Fetches all sources (RSS, Telegram, and Telegram groups), filters new articles, and emits thoughts.
  */
 async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
-  const { storage, logger, intentEmitter } = primitives;
+  const { storage, logger, intentEmitter, scriptRunner } = primitives;
 
-  // Fetch RSS and Telegram sources in parallel
-  const [rssResult, telegramResult] = await Promise.all([
+  // Fetch RSS, Telegram, and Telegram group sources in parallel
+  const [rssResult, telegramResult, groupResult] = await Promise.all([
     fetchAllRssSources(storage, logger),
     fetchAllTelegramSources(storage, logger),
+    fetchAllTelegramGroupSources(storage, logger, scriptRunner, intentEmitter),
   ]);
 
   // Combine results
-  const fetchedArticles = [...rssResult.newArticles, ...telegramResult.newArticles];
-  const failedSources = [...rssResult.failedSources, ...telegramResult.failedSources];
-  const sourcesToAlert = [...rssResult.sourcesToAlert, ...telegramResult.sourcesToAlert];
+  const fetchedArticles = [
+    ...rssResult.newArticles,
+    ...telegramResult.newArticles,
+    ...groupResult.newArticles,
+  ];
+  const failedSources = [
+    ...rssResult.failedSources,
+    ...telegramResult.failedSources,
+    ...groupResult.failedSources,
+  ];
+  const sourcesToAlert = [
+    ...rssResult.sourcesToAlert,
+    ...telegramResult.sourcesToAlert,
+    ...groupResult.sourcesToAlert,
+  ];
 
   logger.info(
     {

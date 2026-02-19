@@ -28,6 +28,7 @@ import {
   CONTAINER_LABEL,
   SCRIPT_CONTAINER_LABEL,
   CONTAINER_IMAGE,
+  BROWSER_IMAGE,
   DEFAULT_MEMORY_LIMIT,
   DEFAULT_CPU_LIMIT,
   DEFAULT_PIDS_LIMIT,
@@ -35,6 +36,7 @@ import {
   REQUEST_TIMEOUT_BUFFER_MS,
 } from './types.js';
 import { ensureImage } from './container-image.js';
+import { ensureBrowserImage } from './browser-image.js';
 import { ensureNetpolicyImage } from './netpolicy-image.js';
 import { type NetworkPolicy, resolveNetworkPolicy, applyNetworkPolicy } from './network-policy.js';
 
@@ -887,7 +889,14 @@ export function createContainerManager(logger: Logger): ContainerManager {
           throw new Error('Failed to build Motor Cortex container image');
         }
       }
-      // Future: ensureBrowserImage() for BROWSER_IMAGE
+      if (config.image === BROWSER_IMAGE) {
+        const built = await ensureBrowserImage((msg) => {
+          log.info(msg);
+        });
+        if (!built) {
+          throw new Error('Failed to build browser container image');
+        }
+      }
 
       const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
       let resolvedPolicy: NetworkPolicy | null = null;

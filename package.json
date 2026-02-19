@@ -18,7 +18,8 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "husky"
+    "prepare": "husky",
+    "browser:auth": "tsx cli/browser-auth.ts"
   },
   "keywords": [
     "ai",

@@ -37,6 +37,7 @@ import type {
   MemorySearchPrimitive,
   MemorySearchOptions,
   MemorySearchResult,
+  ScriptRunnerPrimitive,
   FireContext,
 } from '../types/plugin.js';
 import type { MemoryProvider } from '../layers/cognition/tools/core/memory.js';
@@ -151,6 +152,7 @@ export class PluginLoader {
   private neuronUnregisterCallback: NeuronUnregisterCallback | null = null;
   private filterRegisterCallback: FilterRegisterCallback | null = null;
   private filterUnregisterCallback: FilterUnregisterCallback | null = null;
+  private scriptRunnerFactory: ((pluginId: string) => ScriptRunnerPrimitive) | null = null;
 
   /** Buffer for signals emitted before callback is set (capped at 100) */
   private signalBuffer: Signal[] = [];
@@ -297,6 +299,14 @@ export class PluginLoader {
         'Filter registered from already-loaded plugin'
       );
     }
+  }
+
+  /**
+   * Set the factory that creates scoped script runners for plugins.
+   * Called from container.ts after MotorCortex is available.
+   */
+  setScriptRunnerFactory(factory: (pluginId: string) => ScriptRunnerPrimitive): void {
+    this.scriptRunnerFactory = factory;
   }
 
   /**
@@ -1353,6 +1363,12 @@ export class PluginLoader {
     // Create memory search primitive (scoped to plugin's own facts)
     const memorySearch = this.createMemorySearchPrimitive(manifest.id);
 
+    // Create script runner primitive (only if plugin declares allowedScripts and factory is set)
+    const scriptRunner =
+      this.scriptRunnerFactory && manifest.allowedScripts?.length
+        ? this.scriptRunnerFactory(manifest.id)
+        : undefined;
+
     return {
       logger: pluginLogger,
       scheduler,
@@ -1360,6 +1376,7 @@ export class PluginLoader {
       intentEmitter,
       services,
       memorySearch,
+      scriptRunner,
     };
   }
 

@@ -9,7 +9,7 @@
  */
 
 import { z } from 'zod';
-import { CONTAINER_IMAGE } from '../container/types.js';
+import { CONTAINER_IMAGE, BROWSER_IMAGE } from '../container/types.js';
 import type { ScriptRegistryEntry } from './script-types.js';
 
 // ─── Registry Entries ────────────────────────────────────────
@@ -32,6 +32,48 @@ entries.set('test.echo.run', {
   }),
   outputSchema: z.object({
     echo: z.string(),
+  }),
+});
+
+/**
+ * news.telegram_group.fetch — Fetch messages from a private Telegram group.
+ * Uses browser profile for authentication. Runs headless Playwright.
+ */
+entries.set('news.telegram_group.fetch', {
+  id: 'news.telegram_group.fetch',
+  image: BROWSER_IMAGE,
+  entrypoint: ['node', '/scripts/telegram-group-fetch.js'],
+  domains: ['web.telegram.org', 'telegram.org'],
+  maxTimeoutMs: 120_000,
+  lock: {
+    keyTemplate: 'browserProfile:${inputs.profile}',
+    exclusive: true,
+    waitPolicy: 'fail_fast',
+    waitTimeoutMs: 0,
+    leaseMs: 120_000,
+  },
+  profileVolume: {
+    volumeNamePrefix: 'lifemodel-browser-profile',
+    containerPath: '/profile',
+    mode: 'rw',
+  },
+  inputSchema: z.object({
+    profile: z.string(),
+    groupUrl: z.url(),
+    lastSeenId: z.string().optional(),
+    maxMessages: z.number().int().positive().optional(),
+  }),
+  outputSchema: z.object({
+    ok: z.boolean(),
+    messages: z.array(
+      z.object({
+        id: z.string(),
+        text: z.string(),
+        date: z.string(),
+        from: z.string(),
+      })
+    ),
+    latestId: z.string().nullable(),
   }),
 });
 

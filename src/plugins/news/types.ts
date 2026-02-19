@@ -33,7 +33,7 @@ export const NEWS_PLUGIN_ID = 'news';
 /**
  * Type of news source.
  */
-export type NewsSourceType = 'rss' | 'telegram';
+export type NewsSourceType = 'rss' | 'telegram' | 'telegram-group';
 
 /**
  * Configuration for a news source.
@@ -57,6 +57,12 @@ export interface NewsSource {
 
   /** When the source was added */
   createdAt: Date;
+
+  /** Browser profile name for telegram-group sources */
+  profile?: string | undefined;
+
+  /** Full group URL for telegram-group sources (e.g., https://web.telegram.org/a/#-1001234567890) */
+  groupUrl?: string | undefined;
 }
 
 /**
