@@ -2,7 +2,12 @@
  * Memory Provider
  *
  * Abstracts memory storage for the COGNITION layer.
- * Uses the unified Storage interface for persistence (DeferredStorage).
+ * Delegates storage/search to VectorStore, keeps domain-specific
+ * operations (getRecentByType, findByKind, getBehaviorRules) as
+ * orchestration with in-memory filtering over getAll().
+ *
+ * GraphStore is accepted but used only for graph-enhanced search
+ * (Step 4) and association retrieval.
  */
 
 import type { Storage } from './storage.js';
@@ -13,230 +18,108 @@ import type {
   MemorySearchOptions,
   RecentByTypeOptions,
   SearchResult,
+  AssociationResult,
   BehaviorRuleOptions,
   BehaviorRule,
 } from '../layers/cognition/tools/registry.js';
+import type { VectorStore } from './vector-store.js';
+import { JsonVectorStore } from './vector-store.js';
+import type { GraphStore } from './graph-store.js';
+import { JsonGraphStore } from './graph-store.js';
+
+// ─── Configuration ────────────────────────────────────────────────────────────
 
 /**
- * Configuration for JSON memory provider.
+ * Configuration for JSON memory provider (legacy factory signature).
  */
 export interface JsonMemoryProviderConfig {
   /** Storage interface for persistence (DeferredStorage recommended) */
   storage: Storage;
-
   /** Storage key for memory data */
   storageKey: string;
-
   /** Maximum entries to keep (older entries pruned) */
   maxEntries: number;
 }
 
 /**
- * Default configuration (storage must be provided).
+ * Dependencies for the new dual-store constructor.
  */
-const DEFAULT_CONFIG: Omit<JsonMemoryProviderConfig, 'storage'> = {
-  storageKey: 'memory',
-  maxEntries: 10000,
-};
-
-/**
- * Stored memory format.
- */
-interface MemoryStore {
-  version: number;
-  entries: StoredEntry[];
+export interface MemoryProviderDeps {
+  vectorStore: VectorStore;
+  graphStore?: GraphStore;
 }
 
-interface StoredEntry {
-  id: string;
-  type: 'message' | 'thought' | 'fact' | 'intention';
-  content: string;
-  timestamp: string;
-  recipientId?: string | undefined;
-  tags?: string[] | undefined;
-  confidence?: number | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  /** Tick ID for batch grouping */
-  tickId?: string | undefined;
-  /** Parent signal ID for causal chain */
-  parentSignalId?: string | undefined;
-  /** Trigger condition for intentions */
-  trigger?: { condition: string; keywords?: string[] | undefined } | undefined;
-  /** Status for intentions */
-  status?: 'pending' | 'completed' | undefined;
-  /** ISO string expiry time for intentions with per-entry TTL */
-  expiresAt?: string | undefined;
-}
+// ─── Implementation ───────────────────────────────────────────────────────────
 
 /**
  * JSON-based Memory Provider.
  *
- * Simple implementation using Storage interface for persistence.
- * Search is basic string matching (will be replaced with vector search later).
+ * Delegates storage CRUD and search to VectorStore.
+ * Domain methods (getRecentByType, findByKind, getBehaviorRules) use
+ * vectorStore.getAll() + in-memory filtering — these are orchestration
+ * that a LanceDB VectorStore wouldn't need to implement.
  */
 export class JsonMemoryProvider implements MemoryProvider {
-  private readonly config: JsonMemoryProviderConfig;
   private readonly logger: Logger;
-  private entries: MemoryEntry[] = [];
-  private loaded = false;
+  readonly vectorStore: VectorStore;
+  readonly graphStore: GraphStore | undefined;
 
-  constructor(logger: Logger, config: JsonMemoryProviderConfig) {
+  constructor(logger: Logger, deps: MemoryProviderDeps) {
     this.logger = logger.child({ component: 'memory-provider' });
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.vectorStore = deps.vectorStore;
+    this.graphStore = deps.graphStore;
   }
 
-  /**
-   * Search memory entries.
-   * Currently uses simple string matching. Will be replaced with vector search.
-   */
-  async search(query: string, options?: MemorySearchOptions): Promise<SearchResult> {
-    await this.ensureLoaded();
+  // ─── Search (delegates to VectorStore) ────────────────────────────────────
 
+  async search(query: string, options?: MemorySearchOptions): Promise<SearchResult> {
     const trimmedQuery = query.trim();
     const limit = options?.limit ?? 10;
     const offset = options?.offset ?? 0;
-    const types = options?.types;
-    const recipientId = options?.recipientId;
-    const status = options?.status;
-    const minConfidence = options?.minConfidence ?? 0;
-    const metadataFilter = options?.metadata;
-    const hasFilters =
-      types != null ||
-      recipientId != null ||
-      status != null ||
-      minConfidence > 0 ||
-      metadataFilter != null;
 
-    // Reject empty queries unless filters are provided (browse mode)
-    if (trimmedQuery.length < 2 && !hasFilters) {
-      this.logger.debug({ query }, 'Search query too short and no filters, returning empty');
-      return {
-        entries: [],
-        metadata: {
-          totalMatched: 0,
-          highConfidence: 0,
-          mediumConfidence: 0,
-          lowConfidence: 0,
-          hasMoreResults: false,
-          page: 1,
-          totalPages: 1,
-          offset,
-          limit,
-        },
-      };
-    }
+    const results = await this.vectorStore.search({
+      query: trimmedQuery,
+      limit,
+      offset,
+      types: options?.types,
+      recipientId: options?.recipientId,
+      status: options?.status,
+      minConfidence: options?.minConfidence,
+      metadata: options?.metadata,
+    });
 
-    const isTextSearch = trimmedQuery.length >= 2;
+    // To compute totalMatched, we need a full count of matching entries.
+    // VectorStore.search already returns paginated results, but we need metadata.
+    // Run an unbounded search to get total count for pagination metadata.
+    const allResults = await this.vectorStore.search({
+      query: trimmedQuery,
+      limit: 100000,
+      offset: 0,
+      types: options?.types,
+      recipientId: options?.recipientId,
+      status: options?.status,
+      minConfidence: options?.minConfidence,
+      metadata: options?.metadata,
+    });
 
-    // Normalize query for matching (only used in text search mode)
-    const queryLower = isTextSearch ? trimmedQuery.toLowerCase() : '';
-    const queryTerms = isTextSearch ? queryLower.split(/\s+/).filter((t) => t.length >= 2) : [];
+    const totalMatched = allResults.length;
+    const entries = results.map((r) => r.entry);
 
-    // Score and filter entries
-    const scored = this.entries
-      .filter((entry) => {
-        // Filter by type
-        if (types && !types.includes(entry.type)) {
-          return false;
-        }
-        // Filter by recipientId (entries without recipientId are global, always visible)
-        if (recipientId && entry.recipientId && entry.recipientId !== recipientId) {
-          return false;
-        }
-        // Filter by status (for intentions only - facts/thoughts don't have status)
-        if (status && entry.status !== undefined && entry.status !== status) {
-          return false;
-        }
-        // Filter by minimum confidence
-        if (minConfidence > 0 && (entry.confidence ?? 0.5) < minConfidence) {
-          return false;
-        }
-        // Filter by metadata key-value pairs
-        if (metadataFilter) {
-          for (const [key, value] of Object.entries(metadataFilter)) {
-            if (entry.metadata?.[key] !== value) {
-              return false;
-            }
-          }
-        }
-        return true;
-      })
-      .map((entry) => {
-        let score = 0;
-
-        if (isTextSearch) {
-          // Calculate relevance score from text matching
-          const contentLower = entry.content.toLowerCase();
-
-          // Exact phrase match (highest weight)
-          if (contentLower.includes(queryLower)) {
-            score += 10;
-          }
-
-          // Term matches (with word boundary for short terms to avoid false positives)
-          for (const term of queryTerms) {
-            if (term.length < 4) {
-              // Short terms require word boundaries (e.g., "ai" shouldn't match "Yo-Kai")
-              // Unicode-aware: \p{L} = letter, \p{N} = number
-              const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
-              if (pattern.test(contentLower)) {
-                score += 2;
-              }
-            } else if (contentLower.includes(term)) {
-              score += 2;
-            }
-          }
-
-          // Tag matches
-          if (entry.tags) {
-            for (const tag of entry.tags) {
-              if (queryTerms.includes(tag.toLowerCase())) {
-                score += 3;
-              }
-            }
-          }
-        }
-
-        // Recency boost (newer entries score slightly higher)
-        const ageHours = (Date.now() - entry.timestamp.getTime()) / (1000 * 60 * 60);
-        const recencyBoost = Math.max(0, 1 - ageHours / 168); // Decay over 1 week
-        score += recencyBoost;
-
-        // Confidence boost - additive to avoid over-penalizing low-confidence entries
-        // Real articles (0.4) get +1.2 boost vs filtered facts (0.2) get +0.6 boost
-        const confidence = entry.confidence ?? 0.5;
-        score += confidence * 3;
-
-        return { entry, score };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score);
-
-    // Calculate metadata before slicing
-    const totalMatched = scored.length;
-    // Thresholds matched to our data: articles are 0.4, filtered are 0.2
-    const highConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) >= 0.5).length;
-    const mediumConfidence = scored.filter((s) => {
+    const highConfidence = allResults.filter((s) => (s.entry.confidence ?? 0.5) >= 0.5).length;
+    const mediumConfidence = allResults.filter((s) => {
       const c = s.entry.confidence ?? 0.5;
       return c >= 0.3 && c < 0.5;
     }).length;
-    const lowConfidence = scored.filter((s) => (s.entry.confidence ?? 0.5) < 0.3).length;
+    const lowConfidence = allResults.filter((s) => (s.entry.confidence ?? 0.5) < 0.3).length;
 
-    // Apply pagination: slice with offset and limit
-    const limited = scored.slice(offset, offset + limit).map((item) => item.entry);
-
-    // Calculate pagination metadata
     const totalPages = Math.max(1, Math.ceil(totalMatched / limit));
     const page = Math.floor(offset / limit) + 1;
-    const hasMoreResults = offset + limited.length < totalMatched;
+    const hasMoreResults = offset + entries.length < totalMatched;
 
     this.logger.debug(
       {
         query: trimmedQuery || undefined,
-        filter: metadataFilter,
-        types,
-        results: limited.length,
+        results: entries.length,
         totalMatched,
         limit,
         offset,
@@ -247,7 +130,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     );
 
     return {
-      entries: limited,
+      entries,
       metadata: {
         totalMatched,
         highConfidence,
@@ -262,96 +145,60 @@ export class JsonMemoryProvider implements MemoryProvider {
     };
   }
 
-  /**
-   * Save an entry to memory.
-   */
+  // ─── Save / Delete / GetById (delegates to VectorStore) ───────────────────
+
   async save(entry: MemoryEntry): Promise<void> {
-    await this.ensureLoaded();
-
-    // Upsert for facts: same subject + attribute → update existing entry
-    const meta = entry.metadata;
-    if (entry.type === 'fact' && meta?.['subject'] && meta['attribute']) {
-      const subject = meta['subject'] as string;
-      const attribute = meta['attribute'] as string;
-      const existingFactIndex = this.entries.findIndex(
-        (e) =>
-          e.type === 'fact' &&
-          e.metadata?.['subject'] === subject &&
-          e.metadata['attribute'] === attribute
-      );
-      if (existingFactIndex >= 0) {
-        // Preserve original ID, update everything else
-        const existing = this.entries[existingFactIndex];
-        if (existing) {
-          entry.id = existing.id;
-        }
-        this.entries[existingFactIndex] = entry;
-        await this.persist();
-        this.logger.debug(
-          { entryId: entry.id, subject, attribute },
-          'Memory fact upserted (existing updated)'
-        );
-        return;
-      }
-    }
-
-    // Check for duplicate ID
-    const existingIndex = this.entries.findIndex((e) => e.id === entry.id);
-    if (existingIndex >= 0) {
-      this.entries[existingIndex] = entry;
-    } else {
-      this.entries.push(entry);
-    }
-
-    // Prune if over limit
-    if (this.entries.length > this.config.maxEntries) {
-      this.prune();
-    }
-
-    // Persist via Storage (DeferredStorage will batch writes)
-    await this.persist();
-
-    this.logger.debug({ entryId: entry.id, type: entry.type }, 'Memory entry saved');
+    await this.vectorStore.save(entry);
   }
 
-  /**
-   * Get recent entries for a chat.
-   */
-  async getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]> {
-    await this.ensureLoaded();
+  async delete(id: string): Promise<boolean> {
+    return this.vectorStore.delete(id);
+  }
 
-    return this.entries
+  async getById(id: string): Promise<MemoryEntry | undefined> {
+    return this.vectorStore.getById(id);
+  }
+
+  async getAll(): Promise<MemoryEntry[]> {
+    return this.vectorStore.getAll();
+  }
+
+  async clear(): Promise<void> {
+    await this.vectorStore.clear();
+  }
+
+  async persist(): Promise<void> {
+    await this.vectorStore.persist();
+  }
+
+  // ─── Domain methods (orchestration over getAll + in-memory filtering) ─────
+
+  async getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]> {
+    const all = await this.vectorStore.getAll();
+    return all
       .filter((e) => e.recipientId === recipientId)
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       .slice(0, limit);
   }
 
-  /**
-   * Get recent entries of a specific type within a time window.
-   * Used for context priming (recent thoughts) and neuron calculations.
-   */
   async getRecentByType(
     type: 'thought' | 'fact' | 'intention',
     options?: RecentByTypeOptions
   ): Promise<MemoryEntry[]> {
-    await this.ensureLoaded();
+    const all = await this.vectorStore.getAll();
 
-    const windowMs = options?.windowMs ?? 30 * 60 * 1000; // 30 min default
+    const windowMs = options?.windowMs ?? 30 * 60 * 1000;
     const limit = options?.limit ?? 10;
     const excludeIds = new Set(options?.excludeIds ?? []);
     const cutoff = new Date(Date.now() - windowMs);
 
-    return this.entries
+    return all
       .filter((e) => {
-        // Filter by type
         if (e.type !== type) return false;
-        // Filter by time window
         if (e.timestamp < cutoff) return false;
-        // Filter by recipientId if specified (otherwise include global entries)
         if (options?.recipientId && e.recipientId && e.recipientId !== options.recipientId) {
           return false;
         }
-        // Exclude specific IDs
         if (excludeIds.has(e.id)) return false;
         return true;
       })
@@ -359,10 +206,6 @@ export class JsonMemoryProvider implements MemoryProvider {
       .slice(0, limit);
   }
 
-  /**
-   * Find entries by metadata kind and optional state tag.
-   * Direct filtered scan — no scoring, no pagination overhead.
-   */
   async findByKind(
     kind: string,
     options?: {
@@ -371,14 +214,14 @@ export class JsonMemoryProvider implements MemoryProvider {
       limit?: number | undefined;
     }
   ): Promise<MemoryEntry[]> {
-    await this.ensureLoaded();
+    const all = await this.vectorStore.getAll();
 
     const state = options?.state;
     const recipientId = options?.recipientId;
     const limit = options?.limit ?? 50;
 
     const results: MemoryEntry[] = [];
-    for (const entry of this.entries) {
+    for (const entry of all) {
       if (entry.metadata?.['kind'] !== kind) continue;
       if (state && !entry.tags?.includes(`state:${state}`)) continue;
       if (recipientId && entry.recipientId && entry.recipientId !== recipientId) continue;
@@ -390,45 +233,23 @@ export class JsonMemoryProvider implements MemoryProvider {
     return results;
   }
 
-  /**
-   * Get a single entry by ID.
-   */
-  async getById(id: string): Promise<MemoryEntry | undefined> {
-    await this.ensureLoaded();
-    return this.entries.find((e) => e.id === id);
-  }
-
-  /**
-   * Get active behavioral rules with read-time decay.
-   *
-   * Tiered half-life:
-   *   - user_feedback: 60-day half-life
-   *   - pattern: 21-day half-life
-   *
-   * Filters out rules with effectiveWeight < 0.1.
-   * Cleans up fully-decayed rules (effectiveWeight < 0.05) as side effect.
-   */
   async getBehaviorRules(options?: BehaviorRuleOptions): Promise<BehaviorRule[]> {
-    await this.ensureLoaded();
+    const all = await this.vectorStore.getAll();
 
     const limit = options?.limit ?? 5;
     const recipientId = options?.recipientId;
     const now = Date.now();
 
-    // Half-life in milliseconds
     const HALF_LIFE_USER_FEEDBACK_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
     const HALF_LIFE_PATTERN_MS = 21 * 24 * 60 * 60 * 1000; // 21 days
 
-    // Filter behavior:rule facts
-    const ruleEntries = this.entries.filter((e) => {
+    const ruleEntries = all.filter((e) => {
       if (e.type !== 'fact') return false;
       if (!e.tags?.includes('behavior:rule') || !e.tags.includes('state:active')) return false;
-      // Scope by recipient if requested
       if (recipientId && e.recipientId && e.recipientId !== recipientId) return false;
       return true;
     });
 
-    // Calculate effective weights with decay
     const rulesWithWeight: { entry: MemoryEntry; effectiveWeight: number }[] = [];
     const toDelete: string[] = [];
 
@@ -438,7 +259,6 @@ export class JsonMemoryProvider implements MemoryProvider {
       const lastReinforcedAt = entry.metadata?.['lastReinforcedAt'] as string | undefined;
       const parsedTime = lastReinforcedAt ? new Date(lastReinforcedAt).getTime() : NaN;
       const referenceTime = Number.isFinite(parsedTime) ? parsedTime : entry.timestamp.getTime();
-      // Clamp elapsed to >= 0 to guard against future timestamps (clock skew)
       const elapsed = Math.max(0, now - referenceTime);
 
       const halfLife =
@@ -448,268 +268,165 @@ export class JsonMemoryProvider implements MemoryProvider {
       const effectiveWeight = baseWeight * Math.pow(0.5, elapsed / halfLife);
 
       if (effectiveWeight < 0.05) {
-        // Fully decayed — schedule for cleanup
         toDelete.push(entry.id);
       } else if (effectiveWeight >= 0.1) {
         rulesWithWeight.push({ entry, effectiveWeight });
       }
-      // 0.05 <= effectiveWeight < 0.1: skip (functionally dead but not cleaned up yet)
     }
 
     // Clean up fully-decayed rules as side effect
     if (toDelete.length > 0) {
       for (const id of toDelete) {
-        const index = this.entries.findIndex((e) => e.id === id);
-        if (index >= 0) {
-          this.entries.splice(index, 1);
-        }
+        await this.vectorStore.delete(id);
       }
-      await this.persist();
       this.logger.info({ count: toDelete.length }, 'Cleaned up fully-decayed behavior rules');
     }
 
-    // Sort by effective weight descending, return top N
     return rulesWithWeight.sort((a, b) => b.effectiveWeight - a.effectiveWeight).slice(0, limit);
   }
 
-  /**
-   * Get all entries (for debugging).
-   */
-  async getAll(): Promise<MemoryEntry[]> {
-    await this.ensureLoaded();
-    return [...this.entries];
-  }
+  // ─── Associations (graph-enhanced) ─────────────────────────────────────────
 
-  /**
-   * Delete an entry by ID.
-   */
-  async delete(id: string): Promise<boolean> {
-    await this.ensureLoaded();
+  async getAssociations(inputText: string, limit = 5): Promise<AssociationResult> {
+    const empty: AssociationResult = { directMatches: [], relatedContext: [], openCommitments: [] };
 
-    const index = this.entries.findIndex((e) => e.id === id);
-    if (index >= 0) {
-      this.entries.splice(index, 1);
-      await this.persist();
-      return true;
+    // Direct vector search (always available)
+    const directResults = await this.vectorStore.search({
+      query: inputText,
+      limit: Math.min(limit, 3), // Hard cap: max 3 direct
+    });
+    const directMatches = directResults.map((r) => r.entry);
+
+    if (!this.graphStore) {
+      return { ...empty, directMatches };
     }
 
-    return false;
-  }
+    // Extract key terms and find matching entities
+    const terms = inputText
+      .split(/\s+/)
+      .filter((t) => t.length >= 2)
+      .map((t) => t.replace(/[.,!?;:'"]/g, ''));
 
-  /**
-   * Clear all entries.
-   */
-  async clear(): Promise<void> {
-    this.entries = [];
-    await this.persist();
-    this.logger.info('Memory cleared');
-  }
+    const seedEntities: { entityId: string; activation: number }[] = [];
+    const seenEntityIds = new Set<string>();
 
-  /**
-   * Persist memory to storage.
-   * DeferredStorage will batch writes automatically.
-   */
-  async persist(): Promise<void> {
-    const store: MemoryStore = {
-      version: 1,
-      entries: this.entries.map((e) => ({
-        id: e.id,
-        type: e.type,
-        content: e.content,
-        timestamp: e.timestamp.toISOString(),
-        recipientId: e.recipientId,
-        tags: e.tags,
-        confidence: e.confidence,
-        metadata: e.metadata,
-        tickId: e.tickId,
-        parentSignalId: e.parentSignalId,
-        trigger: e.trigger,
-        status: e.status,
-        expiresAt: e.expiresAt?.toISOString(),
-      })),
-    };
-
-    await this.config.storage.save(this.config.storageKey, store);
-
-    this.logger.debug({ entries: this.entries.length }, 'Memory persisted');
-  }
-
-  /**
-   * Ensure memory is loaded from storage.
-   */
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
-
-    try {
-      const data = await this.config.storage.load(this.config.storageKey);
-
-      if (data) {
-        const store = data as MemoryStore;
-        this.entries = store.entries.map((e) => ({
-          id: e.id,
-          type: e.type,
-          content: e.content,
-          timestamp: new Date(e.timestamp),
-          recipientId: e.recipientId,
-          tags: e.tags,
-          confidence: e.confidence,
-          metadata: e.metadata,
-          tickId: e.tickId,
-          parentSignalId: e.parentSignalId,
-          trigger: e.trigger as MemoryEntry['trigger'],
-          status: e.status,
-          expiresAt: e.expiresAt ? new Date(e.expiresAt) : undefined,
-        }));
-        this.logger.info({ entries: this.entries.length }, 'Memory loaded from storage');
-      } else {
-        this.entries = [];
-        this.logger.info('No existing memory, starting fresh');
-      }
-
-      this.loaded = true;
-    } catch (error) {
-      this.logger.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to load memory'
-      );
-      this.entries = [];
-      this.loaded = true;
-    }
-  }
-
-  /**
-   * Prune old entries to stay under limit.
-   *
-   * Retention rule: Unresolved soul:reflection thoughts are protected from pruning.
-   * - Protects entries with type='thought', tags include 'soul:reflection' AND 'state:unresolved'
-   * - Max protected = min(10, floor(maxEntries/2)), at least 1
-   * - If protected exceeds limit, oldest expires with `state:expired`
-   * - maxEntries is always honored (protected entries count toward limit)
-   */
-  private prune(): void {
-    if (this.entries.length <= this.config.maxEntries) return;
-
-    // Max protected entries: min(10, half of maxEntries), but at least 1
-    const MAX_PROTECTED_SOUL_THOUGHTS = Math.max(
-      1,
-      Math.min(10, Math.floor(this.config.maxEntries / 2))
-    );
-
-    // Separate protected (unresolved soul:reflection thoughts) from pruneable entries
-    const protectedEntries: MemoryEntry[] = [];
-    const pruneableEntries: MemoryEntry[] = [];
-
-    for (const entry of this.entries) {
-      if (this.isProtectedSoulThought(entry)) {
-        protectedEntries.push(entry);
-      } else {
-        pruneableEntries.push(entry);
+    for (const term of terms) {
+      const entity = await this.graphStore.findEntity(term);
+      if (entity && !seenEntityIds.has(entity.id)) {
+        seedEntities.push({ entityId: entity.id, activation: 1.0 });
+        seenEntityIds.add(entity.id);
       }
     }
 
-    // Sort protected by timestamp (oldest first) for expiration
-    protectedEntries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    if (seedEntities.length === 0) {
+      return { ...empty, directMatches };
+    }
 
-    // Expire oldest protected entries if exceeding limit
-    while (protectedEntries.length > MAX_PROTECTED_SOUL_THOUGHTS) {
-      const entry = protectedEntries.shift();
-      if (entry?.tags) {
-        // Replace state:unresolved with state:expired
-        entry.tags = entry.tags.filter((t) => t !== 'state:unresolved');
-        entry.tags.push('state:expired');
-        this.logger.debug({ entryId: entry.id }, 'Soul thought expired due to limit');
+    // Spreading activation from found entities
+    const activationResults = await this.graphStore.spreadingActivation({
+      seeds: seedEntities,
+      decayFactor: 0.5,
+      limit: Math.min(limit, 5),
+    });
+
+    // Fetch source memory entries for activated entities
+    const directIds = new Set(directMatches.map((e) => e.id));
+    const relatedContext: { entry: MemoryEntry; via: string }[] = [];
+
+    for (const result of activationResults) {
+      if (relatedContext.length >= 2) break; // Hard cap: max 2 related
+
+      for (const memId of result.entity.sourceMemoryIds) {
+        if (directIds.has(memId)) continue; // Skip duplicates from direct search
+        const entry = await this.vectorStore.getById(memId);
+        if (entry) {
+          relatedContext.push({ entry, via: result.via });
+          directIds.add(memId); // Prevent further duplicates
+          break; // One entry per activated entity
+        }
       }
-      // Expired entries become pruneable
-      if (entry) pruneableEntries.push(entry);
     }
 
-    // Calculate how many pruneable entries to remove to honor maxEntries
-    const targetTotal = this.config.maxEntries;
-    const currentTotal = protectedEntries.length + pruneableEntries.length;
+    // Find open commitments linked to mentioned entities
+    const commitmentEntries = await this.findByKind('commitment', { state: 'active', limit: 10 });
+    const openCommitments: MemoryEntry[] = [];
+    for (const commitment of commitmentEntries) {
+      if (openCommitments.length >= 2) break; // Hard cap: max 2 commitments
+      if (directIds.has(commitment.id)) continue;
 
-    if (currentTotal <= targetTotal) {
-      // Reconstruct entries array
-      this.entries = [...protectedEntries, ...pruneableEntries];
-      return;
+      // Check if commitment content mentions any of the found entities
+      const contentLower = commitment.content.toLowerCase();
+      let relevant = false;
+      for (const seed of seedEntities) {
+        const entity = await this.graphStore.getEntity(seed.entityId);
+        if (entity && contentLower.includes(entity.name.toLowerCase())) {
+          relevant = true;
+          break;
+        }
+      }
+      if (relevant) {
+        openCommitments.push(commitment);
+        directIds.add(commitment.id);
+      }
     }
-
-    const toRemove = currentTotal - targetTotal;
-
-    // Sort pruneable by timestamp (oldest first) and remove oldest
-    pruneableEntries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-    const removed = pruneableEntries.splice(0, Math.min(toRemove, pruneableEntries.length));
-
-    // Reconstruct entries array - maxEntries is now honored
-    this.entries = [...protectedEntries, ...pruneableEntries];
 
     this.logger.debug(
-      { removed: removed.length, protected: protectedEntries.length },
-      'Pruned old memory entries'
+      {
+        direct: directMatches.length,
+        related: relatedContext.length,
+        commitments: openCommitments.length,
+        seeds: seedEntities.length,
+      },
+      'Associations retrieved'
     );
+
+    return { directMatches, relatedContext, openCommitments };
   }
 
-  /**
-   * Check if an entry is a protected unresolved soul:reflection thought.
-   *
-   * Only protects:
-   * - type: 'thought'
-   * - tags include 'soul:reflection'
-   * - tags include 'state:unresolved'
-   */
-  private isProtectedSoulThought(entry: MemoryEntry): boolean {
-    if (entry.type !== 'thought') return false;
-    if (!entry.tags || entry.tags.length === 0) return false;
+  // ─── Stats ────────────────────────────────────────────────────────────────
 
-    const hasUnresolved = entry.tags.includes('state:unresolved');
-    const hasSoulReflection = entry.tags.includes('soul:reflection');
-
-    return hasUnresolved && hasSoulReflection;
-  }
-
-  /**
-   * Get statistics about memory.
-   */
   async getStats(): Promise<{
     totalEntries: number;
     byType: Record<string, number>;
     oldestEntry: Date | null;
     newestEntry: Date | null;
   }> {
-    await this.ensureLoaded();
+    const entries = await this.vectorStore.getAll();
 
     const byType: Record<string, number> = {};
     let oldest: Date | null = null;
     let newest: Date | null = null;
 
-    for (const entry of this.entries) {
+    for (const entry of entries) {
       byType[entry.type] = (byType[entry.type] ?? 0) + 1;
-
-      if (!oldest || entry.timestamp < oldest) {
-        oldest = entry.timestamp;
-      }
-      if (!newest || entry.timestamp > newest) {
-        newest = entry.timestamp;
-      }
+      if (!oldest || entry.timestamp < oldest) oldest = entry.timestamp;
+      if (!newest || entry.timestamp > newest) newest = entry.timestamp;
     }
 
-    return {
-      totalEntries: this.entries.length,
-      byType,
-      oldestEntry: oldest,
-      newestEntry: newest,
-    };
+    return { totalEntries: entries.length, byType, oldestEntry: oldest, newestEntry: newest };
   }
 }
+
+// ─── Factory (backward-compatible) ──────────────────────────────────────────
 
 /**
  * Create a JSON memory provider.
  *
- * @param logger Logger instance
- * @param config Configuration (storage is required)
+ * Transitional factory that creates VectorStore + GraphStore internally.
+ * Existing callers pass the old { storage, storageKey, maxEntries } config.
  */
 export function createJsonMemoryProvider(
   logger: Logger,
   config: JsonMemoryProviderConfig
 ): JsonMemoryProvider {
-  return new JsonMemoryProvider(logger, config);
+  const vectorStore = new JsonVectorStore(logger, {
+    storage: config.storage,
+    storageKey: config.storageKey,
+    maxEntries: config.maxEntries,
+  });
+  const graphStore = new JsonGraphStore(logger, {
+    storage: config.storage,
+    storageKey: 'graph',
+  });
+  return new JsonMemoryProvider(logger, { vectorStore, graphStore });
 }

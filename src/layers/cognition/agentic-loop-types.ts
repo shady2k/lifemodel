@@ -13,7 +13,7 @@ import type { PersonalityTraits, AgentPreferences } from '../../types/agent/iden
 import type { Interests } from '../../types/user/interests.js';
 import type { ToolResult, LoopState, Terminal, ExecutedTool } from '../../types/cognition.js';
 import type { CompletedAction } from '../../storage/conversation-manager.js';
-import type { MemoryEntry } from './tools/registry.js';
+import type { MemoryEntry, AssociationResult } from './tools/registry.js';
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from '../../llm/tool-schema.js';
 import type { Message, ToolCall, ToolChoice, ResponseFormat } from '../../llm/provider.js';
 import type { DiscoveredSkill } from '../../runtime/skills/skill-types.js';
@@ -204,6 +204,9 @@ export interface LoopContext {
   /** Active opinions and pending predictions for perspective awareness */
   opinions?: OpinionSummary[] | undefined;
   predictions?: PredictionSummary[] | undefined;
+
+  /** Associated memories from graph expansion (direct + related + commitments) */
+  associations?: AssociationResult | undefined;
 }
 
 /**

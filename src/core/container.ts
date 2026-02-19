@@ -43,13 +43,16 @@ import {
 } from '../storage/index.js';
 import { type MergedConfig, loadConfig } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
-import { type JsonMemoryProvider, createJsonMemoryProvider } from '../storage/memory-provider.js';
+import { JsonMemoryProvider } from '../storage/memory-provider.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
 import {
   type MemoryConsolidator,
   createMemoryConsolidator,
 } from '../storage/memory-consolidator.js';
+import { LLMEntityExtractor } from '../storage/entity-extractor.js';
+import { JsonVectorStore } from '../storage/vector-store.js';
+import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
@@ -478,16 +481,24 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
-  // Create memory provider (uses unified storage)
-  const memoryProvider = createJsonMemoryProvider(logger, {
+  // Create dual-layer memory stores
+  const vectorStore = new JsonVectorStore(logger, {
     storage,
     storageKey: 'memory',
     maxEntries: 10000,
   });
-  logger.info('MemoryProvider configured');
+  const graphStore = new JsonGraphStore(logger, {
+    storage,
+    storageKey: 'graph',
+  });
+  const memoryProvider = new JsonMemoryProvider(logger, { vectorStore, graphStore });
+  logger.info('MemoryProvider configured (dual-layer: VectorStore + GraphStore)');
+
+  // Create entity extractor (LLM-based, for consolidation)
+  const entityExtractor = cognitionLLM ? new LLMEntityExtractor(logger, cognitionLLM) : undefined;
 
   // Create memory consolidator (for sleep-cycle consolidation)
-  const memoryConsolidator = createMemoryConsolidator(logger);
+  const memoryConsolidator = createMemoryConsolidator(logger, {}, { entityExtractor, graphStore });
   logger.info('MemoryConsolidator configured');
 
   // Create soul provider (for identity awareness in system prompt)

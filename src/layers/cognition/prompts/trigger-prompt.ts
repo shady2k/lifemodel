@@ -20,6 +20,7 @@ import {
   buildCommitmentsSection,
   buildActiveDesiresSection,
   buildPerspectivesSection,
+  buildAssociationsSection,
 } from './context-sections.js';
 import {
   buildProactiveContactSection,
@@ -65,6 +66,12 @@ export function buildTriggerPrompt(context: LoopContext, useSmart = false): stri
     const intentionsSection = buildPendingIntentionsSection(context);
     if (intentionsSection) {
       sections.push(intentionsSection);
+    }
+
+    // Associations (graph-expanded context) - only for user-facing triggers
+    const associationsSection = buildAssociationsSection(context);
+    if (associationsSection) {
+      sections.push(associationsSection);
     }
   }
 

@@ -33,6 +33,7 @@ export type {
   RecentByTypeOptions,
   BehaviorRuleOptions,
   BehaviorRule,
+  AssociationResult,
   MemoryToolDeps,
 } from './memory.js';
 export type { ConversationProvider, TimeToolDeps } from './time.js';

@@ -33,7 +33,12 @@ import {
 } from './agentic-loop.js';
 import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
-import { createToolRegistry, type MemoryProvider, type MemoryEntry } from './tools/registry.js';
+import {
+  createToolRegistry,
+  type MemoryProvider,
+  type MemoryEntry,
+  type AssociationResult,
+} from './tools/registry.js';
 import type { CommitmentSummary } from '../../types/agent/commitment.js';
 import type { DesireSummary } from '../../types/agent/desire.js';
 import type { OpinionSummary, PredictionSummary } from '../../types/agent/perspective.js';
@@ -399,6 +404,29 @@ export class CognitionProcessor implements CognitionLayer {
     // Load available skills for Motor Cortex
     const availableSkills = await discoverSkills(undefined, this.config.builtinSkillsDir);
 
+    // Get associations via graph expansion (only for user-facing triggers with text)
+    let associations: AssociationResult | undefined;
+    if (this.memoryProvider?.getAssociations && triggerSignal.type === 'user_message') {
+      const triggerText = (triggerSignal.data as Record<string, unknown> | undefined)?.['text'];
+      if (typeof triggerText === 'string' && triggerText.length >= 2) {
+        try {
+          associations = await this.memoryProvider.getAssociations(triggerText, 5);
+          // Check if associations have any content
+          const hasContent =
+            associations &&
+            (associations.directMatches.length > 0 ||
+              associations.relatedContext.length > 0 ||
+              associations.openCommitments.length > 0);
+          if (!hasContent) associations = undefined;
+        } catch (error) {
+          this.logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to get associations, skipping'
+          );
+        }
+      }
+    }
+
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:
     // - They're not conversation continuations
@@ -446,6 +474,8 @@ export class CognitionProcessor implements CognitionLayer {
       // Phase 7: Perspectives - surface opinions and predictions for inner life
       opinions: opinions.length > 0 ? opinions : undefined,
       predictions: predictions.length > 0 ? predictions : undefined,
+      // Dual-layer memory: graph-expanded associations for user-facing triggers
+      associations,
     };
 
     // Mark surfaced intentions as consumed (delete from memory)

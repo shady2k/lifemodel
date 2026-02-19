@@ -136,7 +136,7 @@ src/
 ├── plugins/        # Modular extensions
 ├── channels/       # Sensory organs (Telegram, etc.)
 ├── ports/          # External service adapters
-├── storage/        # Persistence, memory, conversations
+├── storage/        # Persistence, memory (VectorStore + GraphStore), conversations
 ├── types/          # Signal, Intent, Cognition, Commitment, Desire, Perspective types
 ├── models/         # UserModel for preferences
 └── config/         # Configuration loading

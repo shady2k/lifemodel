@@ -160,6 +160,29 @@ export interface MemoryProvider {
    * O(n) scan — avoids the overhead of search() for targeted lookups.
    */
   getById(id: string): Promise<MemoryEntry | undefined>;
+
+  /**
+   * Get associated memories via graph expansion.
+   * Returns direct vector matches + graph-expanded related context + open commitments.
+   * Only available when GraphStore is populated (after consolidation).
+   */
+  getAssociations?(inputText: string, limit?: number): Promise<AssociationResult>;
+}
+
+/**
+ * Result of associative memory retrieval.
+ */
+export interface AssociationResult {
+  /** Direct vector search hits */
+  directMatches: MemoryEntry[];
+  /** Graph-expanded related context */
+  relatedContext: {
+    entry: MemoryEntry;
+    /** Human-readable relation path, e.g. "John → married_to → Sarah" */
+    via: string;
+  }[];
+  /** Commitments linked to mentioned entities */
+  openCommitments: MemoryEntry[];
 }
 
 /**
@@ -177,7 +200,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
     {
       name: 'action',
       type: 'string',
-      description: 'Required. One of: search, save, saveFact',
+      description: 'Required. One of: search, save, saveFact, associate',
       required: true,
     },
     { name: 'query', type: 'string', description: 'Search query', required: false },
@@ -237,7 +260,7 @@ export function createMemoryTool(deps: MemoryToolDeps): Tool {
   return {
     name: 'core.memory',
     maxCallsPerTurn: 4,
-    description: `Long-term memory: search, save, or saveFact.
+    description: `Long-term memory: search, save, saveFact, or associate.
 Example: {"action": "search", "query": "user preferences"}
 
 Search returns paginated results (relevance + recency + confidence scoring).
@@ -245,6 +268,10 @@ Search returns paginated results (relevance + recency + confidence scoring).
 - Use minConfidence (0-1) to filter. Default: 0.3.
 - Response includes pagination info (page, totalPages, hasNext, hasPrev).
 - To get next page: use offset = previous_offset + limit.
+
+Associate returns graph-expanded context for a topic or person name.
+- {"action": "associate", "query": "John"} → direct matches + related context (via entity graph) + linked commitments.
+- Use when you need to recall everything related to a person, topic, or concept — not just keyword matches.
 
 Mention available results on other pages only if explicitly relevant or user asks for "more".`,
     tags: ['search', 'save', 'facts', 'history'],
@@ -432,11 +459,63 @@ Mention available results on other pages only if explicitly relevant or user ask
           return { success: true, action: 'saveFact', fact };
         }
 
+        case 'associate': {
+          const mp = deps.memoryProvider;
+          if (!mp) {
+            return {
+              success: false,
+              action: 'associate',
+              message: 'Memory provider not available',
+            };
+          }
+          if (!mp.getAssociations) {
+            return {
+              success: false,
+              action: 'associate',
+              message: 'Associations not available (no graph store)',
+            };
+          }
+
+          const query = args['query'] as string | undefined;
+          if (!query) {
+            return {
+              success: false,
+              action: 'associate',
+              error: 'Missing required parameter: query',
+            };
+          }
+
+          const limit = (args['limit'] as number | undefined) ?? 5;
+          const getAssoc = mp.getAssociations.bind(mp);
+          const result = await withCaller('tool:memory.associate', () => getAssoc(query, limit));
+
+          return {
+            success: true,
+            action: 'associate',
+            directMatches: result.directMatches.map((r) => ({
+              type: r.type,
+              content: r.content,
+              timestamp: r.timestamp.toISOString(),
+              tags: r.tags,
+              confidence: r.confidence,
+            })),
+            relatedContext: result.relatedContext.map((r) => ({
+              content: r.entry.content,
+              via: r.via,
+              confidence: r.entry.confidence,
+            })),
+            openCommitments: result.openCommitments.map((r) => ({
+              content: r.content,
+              timestamp: r.timestamp.toISOString(),
+            })),
+          };
+        }
+
         default:
           return {
             success: false,
             action,
-            error: `Unknown action: ${action}. Use "search", "save", or "saveFact".`,
+            error: `Unknown action: ${action}. Use "search", "save", "saveFact", or "associate".`,
           };
       }
     },

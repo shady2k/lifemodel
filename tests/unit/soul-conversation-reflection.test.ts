@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { createMockLogger } from '../helpers/factories.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/registry.js';
-import { JsonMemoryProvider } from '../../src/storage/memory-provider.js';
+import { createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
 import type { Storage } from '../../src/storage/storage.js';
 import {
   processBatchReflection,
@@ -139,7 +139,7 @@ function buildDeps(
 ): ReflectionDeps & { _soulProvider: ReturnType<typeof createMockSoulProvider>; _llm: ReturnType<typeof createMockLLM> } {
   const logger = createMockLogger();
   const soulProvider = opts.soulProvider ?? createMockSoulProvider(items);
-  const memoryProvider = opts.memoryProvider ?? new JsonMemoryProvider(logger, {
+  const memoryProvider = opts.memoryProvider ?? createJsonMemoryProvider(logger, {
     storage: createMockStorage(),
     storageKey: 'memory',
     maxEntries: 1000,
@@ -284,7 +284,7 @@ describe('conversation-aware batch reflection', () => {
     const llm = { complete: vi.fn().mockResolvedValue(JSON.stringify(llmResponse)) };
 
     const logger = createMockLogger();
-    const memoryProvider = new JsonMemoryProvider(logger, {
+    const memoryProvider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,
@@ -303,7 +303,7 @@ describe('conversation-aware batch reflection', () => {
 
   it('saves implicit corrections with weight 0.7', async () => {
     const logger = createMockLogger();
-    const memoryProvider = new JsonMemoryProvider(logger, {
+    const memoryProvider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,
@@ -326,7 +326,7 @@ describe('conversation-aware batch reflection', () => {
 
   it('implicit corrections get 21-day half-life in getBehaviorRules()', async () => {
     const logger = createMockLogger();
-    const memoryProvider = new JsonMemoryProvider(logger, {
+    const memoryProvider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,

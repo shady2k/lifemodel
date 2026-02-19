@@ -12,6 +12,8 @@
 import type { Logger } from '../types/logger.js';
 import type { MemoryEntry, MemoryProvider } from '../layers/cognition/tools/registry.js';
 import type { ThoughtData } from '../types/signal.js';
+import type { EntityExtractor } from './entity-extractor.js';
+import type { GraphStore } from './graph-store.js';
 
 /**
  * Configuration for memory consolidation.
@@ -41,6 +43,16 @@ const DEFAULT_CONFIG: MemoryConsolidatorConfig = {
 };
 
 /**
+ * Optional dependencies for entity extraction during consolidation.
+ */
+export interface ConsolidationDeps {
+  /** Entity extractor (LLM-based, optional) */
+  entityExtractor?: EntityExtractor | undefined;
+  /** Graph store for entity/relation persistence */
+  graphStore?: GraphStore | undefined;
+}
+
+/**
  * Result of consolidation.
  */
 export interface ConsolidationResult {
@@ -64,6 +76,12 @@ export interface ConsolidationResult {
 
   /** Thoughts generated from actionable memories (e.g., reminders) */
   thoughts: ThoughtData[];
+
+  /** Number of entities extracted (0 if extractor not available) */
+  entitiesExtracted: number;
+
+  /** Number of relations extracted (0 if extractor not available) */
+  relationsExtracted: number;
 }
 
 // FactKey interface removed - using string key for simplicity
@@ -74,10 +92,16 @@ export interface ConsolidationResult {
 export class MemoryConsolidator {
   private readonly logger: Logger;
   private readonly config: MemoryConsolidatorConfig;
+  private readonly deps: ConsolidationDeps;
 
-  constructor(logger: Logger, config: Partial<MemoryConsolidatorConfig> = {}) {
+  constructor(
+    logger: Logger,
+    config: Partial<MemoryConsolidatorConfig> = {},
+    deps: ConsolidationDeps = {}
+  ) {
     this.logger = logger.child({ component: 'memory-consolidator' });
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.deps = deps;
   }
 
   /**
@@ -117,6 +141,8 @@ export class MemoryConsolidator {
         decayed: 0,
         durationMs: Date.now() - startTime,
         thoughts: [],
+        entitiesExtracted: 0,
+        relationsExtracted: 0,
       };
     }
 
@@ -229,6 +255,23 @@ export class MemoryConsolidator {
       );
     }
 
+    // Entity extraction step (after merge/decay/forget)
+    let entitiesExtracted = 0;
+    let relationsExtracted = 0;
+
+    if (this.deps.entityExtractor && this.deps.graphStore) {
+      try {
+        const extractionResult = await this.extractEntities(consolidated, provider);
+        entitiesExtracted = extractionResult.entities;
+        relationsExtracted = extractionResult.relations;
+      } catch (error) {
+        this.logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Entity extraction failed during consolidation'
+        );
+      }
+    }
+
     return {
       totalBefore,
       totalAfter,
@@ -237,7 +280,116 @@ export class MemoryConsolidator {
       decayed,
       durationMs: Date.now() - startTime,
       thoughts,
+      entitiesExtracted,
+      relationsExtracted,
     };
+  }
+
+  /**
+   * Extract entities from unprocessed entries and populate graph store.
+   */
+  private async extractEntities(
+    allEntries: MemoryEntry[],
+    provider: MemoryProvider & { save(entry: MemoryEntry): Promise<void> }
+  ): Promise<{ entities: number; relations: number }> {
+    const extractor = this.deps.entityExtractor;
+    const graphStore = this.deps.graphStore;
+    if (!extractor || !graphStore) return { entities: 0, relations: 0 };
+
+    // Filter entries not yet extracted
+    const unextracted = allEntries.filter((e) => !e.metadata?.['graphExtracted']);
+
+    if (unextracted.length === 0) {
+      this.logger.debug('No unextracted entries for entity extraction');
+      return { entities: 0, relations: 0 };
+    }
+
+    // Get existing entity names for dedup
+    const existingEntities = await graphStore.getAllEntities();
+    const existingNames = existingEntities.map((e) => e.name);
+
+    // Run extraction
+    const result = await extractor.extract(unextracted, existingNames);
+
+    // Upsert entities
+    for (const extracted of result.entities) {
+      // Check if entity already exists by name
+      const existing = await graphStore.findEntity(extracted.name);
+      if (existing) {
+        // Merge: add new aliases, update source memory IDs
+        const mergedAliases = new Set([...existing.aliases, ...extracted.aliases]);
+        const mergedSourceIds = new Set([
+          ...existing.sourceMemoryIds,
+          ...extracted.sourceMemoryIds,
+        ]);
+        await graphStore.upsertEntity({
+          ...existing,
+          aliases: Array.from(mergedAliases),
+          sourceMemoryIds: Array.from(mergedSourceIds),
+          lastActivated: new Date().toISOString(),
+          description: extracted.description ?? existing.description,
+        });
+      } else {
+        // Create new entity
+        const id = `ent_${String(Date.now())}_${Math.random().toString(36).slice(2, 6)}`;
+        await graphStore.upsertEntity({
+          id,
+          name: extracted.name,
+          type: extracted.type,
+          aliases: extracted.aliases,
+          description: extracted.description,
+          metadata: {},
+          lastActivated: new Date().toISOString(),
+          sourceMemoryIds: extracted.sourceMemoryIds,
+        });
+      }
+    }
+
+    // Upsert relations (resolve names → IDs)
+    for (const rel of result.relations) {
+      const fromEntity = await graphStore.findEntity(rel.fromName);
+      const toEntity = await graphStore.findEntity(rel.toName);
+
+      if (!fromEntity || !toEntity) {
+        this.logger.debug(
+          { from: rel.fromName, to: rel.toName },
+          'Skipping relation: endpoint entity not found'
+        );
+        continue;
+      }
+
+      const relId = `rel_${String(Date.now())}_${Math.random().toString(36).slice(2, 6)}`;
+      await graphStore.upsertRelation({
+        id: relId,
+        fromId: fromEntity.id,
+        toId: toEntity.id,
+        type: rel.type,
+        strength: rel.strength,
+        confidence: rel.confidence,
+        lastActivated: new Date().toISOString(),
+        sourceMemoryIds: rel.sourceMemoryIds,
+      });
+    }
+
+    // Mark entries as extracted
+    for (const entry of unextracted) {
+      entry.metadata = { ...entry.metadata, graphExtracted: true };
+      await provider.save(entry);
+    }
+
+    // Persist graph
+    await graphStore.persist();
+
+    this.logger.info(
+      {
+        unextracted: unextracted.length,
+        entities: result.entities.length,
+        relations: result.relations.length,
+      },
+      'Entity extraction complete'
+    );
+
+    return { entities: result.entities.length, relations: result.relations.length };
   }
 
   /**
@@ -423,7 +575,8 @@ export class MemoryConsolidator {
  */
 export function createMemoryConsolidator(
   logger: Logger,
-  config?: Partial<MemoryConsolidatorConfig>
+  config?: Partial<MemoryConsolidatorConfig>,
+  deps?: ConsolidationDeps
 ): MemoryConsolidator {
-  return new MemoryConsolidator(logger, config);
+  return new MemoryConsolidator(logger, config, deps);
 }

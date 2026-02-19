@@ -571,3 +571,54 @@ Claims you made about the future. Resolve when outcome is known.
 
   return parts.length > 0 ? parts.join('\n\n') : null;
 }
+
+/**
+ * Build the associations section from graph-expanded context.
+ *
+ * Returns XML with direct matches, related context, and open commitments.
+ * Omitted entirely when graph is empty or no associations were found.
+ */
+export function buildAssociationsSection(context: LoopContext): string | null {
+  const assoc = context.associations;
+  if (!assoc) return null;
+
+  const hasContent =
+    assoc.directMatches.length > 0 ||
+    assoc.relatedContext.length > 0 ||
+    assoc.openCommitments.length > 0;
+  if (!hasContent) return null;
+
+  const parts: string[] = ['<associations>'];
+
+  if (assoc.directMatches.length > 0) {
+    parts.push('<direct_memories>');
+    for (const entry of assoc.directMatches) {
+      const age = formatAge(Date.now() - entry.timestamp.getTime());
+      const conf = entry.confidence != null ? ` (confidence: ${entry.confidence.toFixed(2)})` : '';
+      parts.push(`- [${age}] ${entry.content}${conf}`);
+    }
+    parts.push('</direct_memories>');
+  }
+
+  if (assoc.relatedContext.length > 0) {
+    parts.push('<related_context>');
+    for (const { entry, via } of assoc.relatedContext) {
+      parts.push(`- ${entry.content} (via: ${via})`);
+    }
+    parts.push('</related_context>');
+  }
+
+  if (assoc.openCommitments.length > 0) {
+    parts.push('<open_commitments>');
+    for (const entry of assoc.openCommitments) {
+      const age = formatAge(Date.now() - entry.timestamp.getTime());
+      parts.push(`- ${entry.content} (${age})`);
+    }
+    parts.push('</open_commitments>');
+  }
+
+  parts.push('Use naturally if relevant. Do not force.');
+  parts.push('</associations>');
+
+  return parts.join('\n');
+}

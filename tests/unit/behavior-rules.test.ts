@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createMockLogger } from '../helpers/factories.js';
 import type { MemoryEntry, MemoryProvider } from '../../src/layers/cognition/tools/registry.js';
 import type { BehaviorRule } from '../../src/layers/cognition/tools/core/memory.js';
-import { JsonMemoryProvider } from '../../src/storage/memory-provider.js';
+import { createJsonMemoryProvider, type JsonMemoryProvider } from '../../src/storage/memory-provider.js';
 import type { Storage } from '../../src/storage/storage.js';
 import { buildBehaviorRulesSection } from '../../src/layers/cognition/prompts/context-sections.js';
 import type { LoopContext } from '../../src/layers/cognition/agentic-loop-types.js';
@@ -97,7 +97,7 @@ describe('getBehaviorRules', () => {
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = new JsonMemoryProvider(logger, {
+    provider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,
@@ -281,7 +281,7 @@ describe('saveBehaviorRule', () => {
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = new JsonMemoryProvider(logger, {
+    provider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,
@@ -370,7 +370,7 @@ describe('pruneExcessBehaviorRules', () => {
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = new JsonMemoryProvider(logger, {
+    provider = createJsonMemoryProvider(logger, {
       storage: createMockStorage(),
       storageKey: 'memory',
       maxEntries: 1000,

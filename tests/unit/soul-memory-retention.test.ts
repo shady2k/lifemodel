@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { JsonMemoryProvider } from '../../src/storage/memory-provider.js';
+import { createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
 import type { Storage } from '../../src/storage/storage.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/registry.js';
 import { createMockLogger } from '../helpers/factories.js';
@@ -48,7 +48,7 @@ describe('Soul Memory Retention Rules', () => {
 
   describe('Protected soul thoughts', () => {
     it('protects unresolved soul:reflection thoughts from pruning', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 5, // Low limit to trigger pruning
@@ -82,7 +82,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('allows resolved soul thoughts to be pruned', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 5,
@@ -115,7 +115,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('expires oldest protected thoughts when exceeding max protected limit', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 20, // Higher limit to focus on protection logic
@@ -162,7 +162,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('only protects soul:reflection (not soul:question)', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 10, // Higher limit so max protected = min(10, 5) = 5
@@ -211,7 +211,7 @@ describe('Soul Memory Retention Rules', () => {
 
   describe('Pruning behavior', () => {
     it('prunes oldest non-protected entries first', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 3,
@@ -255,7 +255,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('honors maxEntries even with protected entries', async () => {
-      const provider = new JsonMemoryProvider(logger as any, {
+      const provider = createJsonMemoryProvider(logger as any, {
         storage,
         storageKey: 'memory-test',
         maxEntries: 20, // Higher limit so max protected = min(10, 10) = 10
