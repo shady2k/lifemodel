@@ -73,6 +73,63 @@ export class TelegramError extends Error {
   }
 }
 
+const TELEGRAM_MAX_LENGTH = 4096;
+
+/**
+ * Split a message into chunks that fit within Telegram's character limit.
+ * Prefers splitting at paragraph boundaries, then newlines, then mid-text.
+ */
+export function splitMessage(text: string, maxLength = TELEGRAM_MAX_LENGTH): string[] {
+  if (text.length <= maxLength) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Find best split point within maxLength
+    let splitAt = -1;
+
+    // 1. Try paragraph boundary (\n\n)
+    const paraIdx = remaining.lastIndexOf('\n\n', maxLength);
+    if (paraIdx > 0) {
+      splitAt = paraIdx;
+    }
+
+    // 2. Try newline
+    if (splitAt === -1) {
+      const nlIdx = remaining.lastIndexOf('\n', maxLength);
+      if (nlIdx > 0) {
+        splitAt = nlIdx;
+      }
+    }
+
+    // 3. Try space
+    if (splitAt === -1) {
+      const spIdx = remaining.lastIndexOf(' ', maxLength);
+      if (spIdx > 0) {
+        splitAt = spIdx;
+      }
+    }
+
+    // 4. Hard cut
+    if (splitAt === -1) {
+      splitAt = maxLength;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^[\n ]+/, '');
+  }
+
+  return chunks;
+}
+
 /**
  * Telegram channel using grammY.
  *
@@ -514,6 +571,24 @@ export class TelegramChannel implements Channel {
     const chatId = parseInt(target, 10);
     if (isNaN(chatId)) {
       throw new TelegramError(`Invalid chat ID: ${target}`, { retryable: false });
+    }
+
+    const chunks = splitMessage(text);
+    let lastMessageId = '';
+
+    for (const chunk of chunks) {
+      lastMessageId = await this.doSendChunk(chatId, chunk, options);
+    }
+
+    return lastMessageId;
+  }
+
+  /**
+   * Send a single chunk to Telegram.
+   */
+  private async doSendChunk(chatId: number, text: string, options?: SendOptions): Promise<string> {
+    if (!this.bot) {
+      throw new TelegramError('Bot not initialized');
     }
 
     const controller = new AbortController();

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TelegramChannel, type TelegramConfig } from '../../../src/plugins/channels/telegram.js';
+import { TelegramChannel, type TelegramConfig, splitMessage } from '../../../src/plugins/channels/telegram.js';
 import type { IRecipientRegistry } from '../../../src/core/recipient-registry.js';
 
 // Mock the grammy module with a proper class
@@ -197,5 +197,73 @@ describe('TelegramChannel', () => {
       const route = mockRegistry.resolve('rcpt_67890');
       expect(route).toEqual({ channel: 'telegram', destination: '67890' });
     });
+  });
+});
+
+describe('splitMessage', () => {
+  it('returns single chunk for short messages', () => {
+    expect(splitMessage('hello')).toEqual(['hello']);
+  });
+
+  it('returns single chunk at exact limit', () => {
+    const text = 'a'.repeat(4096);
+    expect(splitMessage(text)).toEqual([text]);
+  });
+
+  it('splits at paragraph boundary', () => {
+    const p1 = 'a'.repeat(3000);
+    const p2 = 'b'.repeat(3000);
+    const text = `${p1}\n\n${p2}`;
+    const chunks = splitMessage(text);
+    expect(chunks).toEqual([p1, p2]);
+  });
+
+  it('splits at newline when no paragraph boundary', () => {
+    const l1 = 'a'.repeat(3000);
+    const l2 = 'b'.repeat(3000);
+    const text = `${l1}\n${l2}`;
+    const chunks = splitMessage(text);
+    expect(chunks).toEqual([l1, l2]);
+  });
+
+  it('splits at space when no newline', () => {
+    const w1 = 'a'.repeat(3000);
+    const w2 = 'b'.repeat(3000);
+    const text = `${w1} ${w2}`;
+    const chunks = splitMessage(text);
+    expect(chunks).toEqual([w1, w2]);
+  });
+
+  it('hard cuts when no whitespace', () => {
+    const text = 'x'.repeat(5000);
+    const chunks = splitMessage(text);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toHaveLength(4096);
+    expect(chunks[1]).toHaveLength(904);
+  });
+
+  it('handles multiple chunks', () => {
+    const text = Array.from({ length: 5 }, (_, i) => String(i).repeat(2000)).join('\n\n');
+    const chunks = splitMessage(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it('respects custom maxLength', () => {
+    const text = 'a'.repeat(50);
+    const chunks = splitMessage(text, 20);
+    expect(chunks).toHaveLength(3);
+    expect(chunks[0]).toHaveLength(20);
+    expect(chunks[1]).toHaveLength(20);
+    expect(chunks[2]).toHaveLength(10);
+  });
+
+  it('strips leading whitespace from subsequent chunks', () => {
+    const text = 'a'.repeat(10) + '\n\n\n' + 'b'.repeat(10);
+    const chunks = splitMessage(text, 12);
+    expect(chunks[1]).toBe('b'.repeat(10));
+    expect(chunks[1][0]).not.toBe('\n');
   });
 });
