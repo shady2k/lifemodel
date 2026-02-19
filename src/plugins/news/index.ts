@@ -667,8 +667,9 @@ async function fetchSingleTelegramGroupSource(
     // NOT_AUTHENTICATED: emit pending intention immediately, no backoff
     if (result.errorCode === 'NOT_AUTHENTICATED') {
       intentEmitter.emitPendingIntention(
-        `Telegram group "${source.name}" requires re-authentication. ` +
-          `Run: npm run browser:auth ${source.profile ?? 'telegram'} https://web.telegram.org`
+        `Telegram group "${source.name}" requires authentication. ` +
+          `Call auth_profile with profile="${source.profile ?? 'telegram'}" to start ` +
+          `a browser session, then guide the user through login.`
       );
       return {
         articles: [],

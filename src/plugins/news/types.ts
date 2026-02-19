@@ -178,6 +178,8 @@ export interface NewsToolResult {
   filter?: 'urgent' | 'interesting' | 'all' | undefined;
   /** Pagination info for get_news */
   pagination?: NewsPagination | undefined;
+  /** Status for async operations (e.g. 'building_image', 'profile_exists') */
+  status?: string | undefined;
 }
 
 /**

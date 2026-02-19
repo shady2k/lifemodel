@@ -196,6 +196,9 @@ export class MotorCortex {
     { credentials?: Record<string, string>; credentialNames?: string[] }
   >();
 
+  /** Timestamp of last Docker prune (periodic cleanup every 30 min) */
+  private lastPruneAt = 0;
+
   constructor(deps: MotorCortexDeps) {
     this.llm = deps.llm;
     this.logger = deps.logger.child({ component: 'motor-cortex' });
@@ -1029,6 +1032,22 @@ export class MotorCortex {
           this.logger.info({ runId: run.id }, 'Container destroyed');
         } catch (destroyError) {
           this.logger.warn({ runId: run.id, error: destroyError }, 'Failed to destroy container');
+        }
+      }
+
+      // Periodic Docker prune (every 30 min) — catches orphaned containers from crashes
+      if (terminal && this.containerManager) {
+        const PRUNE_INTERVAL_MS = 30 * 60 * 1000;
+        if (Date.now() - this.lastPruneAt > PRUNE_INTERVAL_MS) {
+          this.lastPruneAt = Date.now();
+          this.containerManager
+            .prune(5 * 60 * 1000)
+            .then((n) => {
+              if (n > 0) this.logger.info({ pruned: n }, 'Periodic Docker cleanup');
+            })
+            .catch(() => {
+              /* best-effort */
+            });
         }
       }
 

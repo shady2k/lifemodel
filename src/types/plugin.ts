@@ -499,6 +499,56 @@ export interface ScriptRunnerPrimitive {
 }
 
 /**
+ * Result of starting a browser auth session.
+ */
+export interface BrowserAuthSession {
+  /** Container ID (for stopping later) */
+  containerId: string;
+  /** URL to open in browser for authentication */
+  authUrl: string;
+}
+
+/**
+ * Browser authentication primitive for plugins.
+ * Manages interactive browser sessions for login flows.
+ */
+export interface BrowserAuthPrimitive {
+  /**
+   * Start an interactive browser auth session.
+   * Launches a container with noVNC so the user can authenticate.
+   * @param profile - Profile name (used for volume naming)
+   * @param url - URL to navigate to for authentication
+   * @returns Session info with noVNC URL
+   */
+  startAuth(profile: string, url: string): Promise<BrowserAuthSession>;
+
+  /**
+   * Stop a running auth session.
+   * @param containerId - Container ID from startAuth
+   */
+  stopAuth(containerId: string): Promise<void>;
+
+  /**
+   * Check if a browser profile volume already exists.
+   * Fast Docker volume inspect — does not build anything.
+   */
+  volumeExists(profile: string): Promise<boolean>;
+
+  /**
+   * Check if the browser Docker image is built and ready.
+   * Fast Docker image inspect — does not build anything.
+   */
+  isImageReady(): Promise<boolean>;
+
+  /**
+   * Start building the browser image in the background (fire-and-forget).
+   * Returns immediately. Use isImageReady() to poll completion.
+   * Calls onReady when build completes (success or failure).
+   */
+  ensureImageInBackground(onReady?: (success: boolean) => void): void;
+}
+
+/**
  * Primitives provided to plugins during activation.
  */
 export interface PluginPrimitives {
@@ -522,6 +572,9 @@ export interface PluginPrimitives {
 
   /** Script execution (scoped to manifest's allowedScripts) */
   scriptRunner?: ScriptRunnerPrimitive | undefined;
+
+  /** Browser authentication for interactive login flows */
+  browserAuth?: BrowserAuthPrimitive | undefined;
 }
 
 /**

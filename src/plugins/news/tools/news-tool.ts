@@ -105,6 +105,34 @@ const SCHEMA_GET_NEWS = {
   },
 };
 
+const SCHEMA_AUTH_PROFILE = {
+  action: { type: 'string', required: true, enum: ['auth_profile'] },
+  profile: {
+    type: 'string',
+    required: true,
+    description: 'Profile name (alphanumeric + hyphens, e.g. "telegram")',
+  },
+  url: {
+    type: 'string',
+    required: false,
+    description: 'URL to navigate to (default: https://web.telegram.org)',
+  },
+  force: {
+    type: 'boolean',
+    required: false,
+    description: 'Force re-authentication even if profile already exists',
+  },
+};
+
+const SCHEMA_STOP_AUTH = {
+  action: { type: 'string', required: true, enum: ['stop_auth'] },
+  container_id: {
+    type: 'string',
+    required: true,
+    description: 'Container ID returned by auth_profile',
+  },
+};
+
 /**
  * Generate a unique source ID.
  */
@@ -563,20 +591,31 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
   const newsTool: PluginTool = {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
-Actions: add_source, remove_source, list_sources, get_news.
+Actions: add_source, remove_source, list_sources, get_news, auth_profile, stop_auth.
 Example: {"action": "get_news", "query": "technology"}
 
 **For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
 This searches articles from configured RSS feeds and Telegram channels.
-Only fall back to web search if get_news returns no relevant results.`,
+Only fall back to web search if get_news returns no relevant results.
+
+For private Telegram groups, first authenticate: {"action": "auth_profile", "profile": "telegram"}
+Then add source: {"action": "add_source", "type": "telegram-group", "name": "...", "profile": "telegram", "group_url": "https://web.telegram.org/a/#-..."}`,
     tags: ['rss', 'telegram', 'telegram-group', 'news', 'feed', 'add', 'remove', 'list', 'get'],
     parameters: [
       {
         name: 'action',
         type: 'string',
-        description: 'Required. One of: add_source, remove_source, list_sources, get_news',
+        description:
+          'Required. One of: add_source, remove_source, list_sources, get_news, auth_profile, stop_auth',
         required: true,
-        enum: ['add_source', 'remove_source', 'list_sources', 'get_news'],
+        enum: [
+          'add_source',
+          'remove_source',
+          'list_sources',
+          'get_news',
+          'auth_profile',
+          'stop_auth',
+        ],
       },
       {
         name: 'type',
@@ -638,6 +677,12 @@ Only fall back to web search if get_news returns no relevant results.`,
         description: 'Skip first N results for pagination. Used with get_news action.',
         required: false,
       },
+      {
+        name: 'container_id',
+        type: 'string',
+        description: 'Container ID to stop (required for stop_auth action)',
+        required: false,
+      },
     ],
     validate: (args) => {
       const a = args as Record<string, unknown>;
@@ -646,10 +691,20 @@ Only fall back to web search if get_news returns no relevant results.`,
         return { success: false, error: 'action: required' };
       }
 
-      if (!['add_source', 'remove_source', 'list_sources', 'get_news'].includes(a['action'])) {
+      if (
+        ![
+          'add_source',
+          'remove_source',
+          'list_sources',
+          'get_news',
+          'auth_profile',
+          'stop_auth',
+        ].includes(a['action'])
+      ) {
         return {
           success: false,
-          error: 'action: must be one of [add_source, remove_source, list_sources, get_news]',
+          error:
+            'action: must be one of [add_source, remove_source, list_sources, get_news, auth_profile, stop_auth]',
         };
       }
 
@@ -760,11 +815,146 @@ Only fall back to web search if get_news returns no relevant results.`,
           return getNews(memorySearch, query, newsType, limit, offset);
         }
 
+        case 'auth_profile': {
+          const authProfile = args['profile'] as string | undefined;
+          const authUrl = (args['url'] as string | undefined) ?? 'https://web.telegram.org';
+          const force = args['force'] === true;
+
+          if (!authProfile) {
+            return {
+              success: false,
+              action: 'auth_profile',
+              error: 'Missing required parameter: profile',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_AUTH_PROFILE,
+            };
+          }
+
+          if (!primitives.browserAuth) {
+            return {
+              success: false,
+              action: 'auth_profile',
+              error: 'Browser authentication is not available (Docker may not be running)',
+            };
+          }
+
+          // Fast check: is the browser image built?
+          const imageReady = await primitives.browserAuth.isImageReady();
+          if (!imageReady) {
+            // Start building in background — when done, auto-start auth and notify user
+            primitives.browserAuth.ensureImageInBackground((success) => {
+              if (!success) {
+                primitives.intentEmitter.emitPendingIntention(
+                  'Failed to build the browser image. Make sure Docker is running and try again.'
+                );
+                return;
+              }
+              // Image built! Now auto-start the auth session
+              // browserAuth is guaranteed non-null here — we checked it above
+              const browserAuth = primitives.browserAuth;
+              if (!browserAuth) return;
+              browserAuth
+                .startAuth(authProfile, authUrl)
+                .then((session) => {
+                  primitives.intentEmitter.emitPendingIntention(
+                    `Browser is ready for Telegram authentication! ` +
+                      `Tell the user to open ${session.authUrl} to log in. ` +
+                      `When they confirm they are done, call stop_auth with container_id "${session.containerId}".`
+                  );
+                })
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  primitives.intentEmitter.emitPendingIntention(
+                    `Browser image built, but failed to start auth session: ${msg}`
+                  );
+                });
+            });
+            return {
+              success: true,
+              action: 'auth_profile',
+              status: 'building_image',
+              hint:
+                'The browser image is being built for the first time (~5 minutes). ' +
+                'Tell the user you will notify them when the browser is ready for login. ' +
+                'No need to retry — the system will auto-start the auth session when done.',
+            };
+          }
+
+          // Fast check: does the profile volume already exist?
+          if (!force) {
+            const profileExists = await primitives.browserAuth.volumeExists(authProfile);
+            if (profileExists) {
+              return {
+                success: true,
+                action: 'auth_profile',
+                status: 'profile_exists',
+                hint:
+                  `Profile "${authProfile}" already exists and is ready to use. ` +
+                  'You can add a telegram-group source using this profile. ' +
+                  'To re-authenticate, call auth_profile with force=true.',
+              };
+            }
+          }
+
+          try {
+            const session = await primitives.browserAuth.startAuth(authProfile, authUrl);
+            return {
+              success: true,
+              action: 'auth_profile',
+              sourceId: session.containerId,
+              hint: `Authentication browser is ready. Tell the user to open ${session.authUrl} to log in. When they confirm they are done, call stop_auth with container_id "${session.containerId}".`,
+            };
+          } catch (error) {
+            return {
+              success: false,
+              action: 'auth_profile',
+              error: `Failed to start auth session: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+        }
+
+        case 'stop_auth': {
+          const containerId = args['container_id'] as string | undefined;
+
+          if (!containerId) {
+            return {
+              success: false,
+              action: 'stop_auth',
+              error: 'Missing required parameter: container_id',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_STOP_AUTH,
+            };
+          }
+
+          if (!primitives.browserAuth) {
+            return {
+              success: false,
+              action: 'stop_auth',
+              error: 'Browser authentication is not available',
+            };
+          }
+
+          try {
+            await primitives.browserAuth.stopAuth(containerId);
+            return {
+              success: true,
+              action: 'stop_auth',
+              hint: 'Authentication session saved. The profile can now be used for telegram-group sources.',
+            };
+          } catch (error) {
+            return {
+              success: false,
+              action: 'stop_auth',
+              error: `Failed to stop auth session: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+        }
+
         default:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", or "get_news".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "auth_profile", or "stop_auth".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {
@@ -772,6 +962,8 @@ Only fall back to web search if get_news returns no relevant results.`,
                 remove_source: SCHEMA_REMOVE_SOURCE,
                 list_sources: SCHEMA_LIST_SOURCES,
                 get_news: SCHEMA_GET_NEWS,
+                auth_profile: SCHEMA_AUTH_PROFILE,
+                stop_auth: SCHEMA_STOP_AUTH,
               },
             },
           };

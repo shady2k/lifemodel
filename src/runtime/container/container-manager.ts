@@ -27,6 +27,7 @@ import {
   encodeFrame,
   CONTAINER_LABEL,
   SCRIPT_CONTAINER_LABEL,
+  DETACHED_CONTAINER_LABEL,
   CONTAINER_IMAGE,
   BROWSER_IMAGE,
   DEFAULT_MEMORY_LIMIT,
@@ -34,9 +35,11 @@ import {
   DEFAULT_PIDS_LIMIT,
   DEFAULT_MAX_LIFETIME_MS,
   REQUEST_TIMEOUT_BUFFER_MS,
+  type DetachedContainerConfig,
+  type DetachedContainerHandle,
 } from './types.js';
 import { ensureImage } from './container-image.js';
-import { ensureBrowserImage } from './browser-image.js';
+import { ensureBrowserImage, browserImageExists } from './browser-image.js';
 import { ensureNetpolicyImage } from './netpolicy-image.js';
 import { type NetworkPolicy, resolveNetworkPolicy, applyNetworkPolicy } from './network-policy.js';
 
@@ -829,7 +832,38 @@ export function createContainerManager(logger: Logger): ContainerManager {
         log.warn({ error }, 'Failed to prune script containers');
       }
 
-      // Also prune orphaned workspace volumes (motor-ws-* prefix)
+      // Prune stopped detached containers (browser-auth)
+      try {
+        const { stdout: detachedOut } = await execFileAsync(
+          'docker',
+          [
+            'ps',
+            '-a',
+            '--filter',
+            `label=${DETACHED_CONTAINER_LABEL}`,
+            '--filter',
+            'status=exited',
+            '--format',
+            '{{.ID}}',
+          ],
+          { timeout: 10_000 }
+        );
+        if (detachedOut.trim()) {
+          for (const id of detachedOut.trim().split('\n')) {
+            try {
+              await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
+              pruned++;
+              log.info({ containerId: id }, 'Pruned stopped browser-auth container');
+            } catch {
+              // Ignore
+            }
+          }
+        }
+      } catch (error) {
+        log.warn({ error }, 'Failed to prune detached containers');
+      }
+
+      // Prune orphaned volumes: motor-ws-* and lifemodel-deps-*
       try {
         const { stdout: volumeList } = await execFileAsync(
           'docker',
@@ -839,32 +873,18 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
         if (volumeList.trim()) {
           const volumes = volumeList.trim().split('\n');
-          const motorVolumes = volumes.filter((v) => v.startsWith('motor-ws-'));
+          const orphanCandidates = volumes.filter(
+            (v) => v.startsWith('motor-ws-') || v.startsWith('lifemodel-deps-')
+          );
 
-          for (const vol of motorVolumes) {
-            // Check if volume is not in use by any container
+          for (const vol of orphanCandidates) {
             try {
-              // If we get here, the volume exists. Check if it's dangling (no containers using it).
-              // A dangling volume has no "UsageData" or RefCount of 0.
-              const { stdout: usageOut } = await execFileAsync(
-                'docker',
-                [
-                  'volume',
-                  'inspect',
-                  '--format',
-                  '{{if .UsageData}}{{.UsageData.RefCount}}{{else}}0{{end}}',
-                  vol,
-                ],
-                { timeout: 5_000 }
-              );
-              const refCount = parseInt(usageOut.trim(), 10);
-              if (refCount === 0 || isNaN(refCount)) {
-                await execFileAsync('docker', ['volume', 'rm', vol], { timeout: 10_000 });
-                pruned++;
-                log.info({ volumeName: vol }, 'Pruned orphaned workspace volume');
-              }
+              // docker volume rm fails if volume is in use — safe to attempt
+              await execFileAsync('docker', ['volume', 'rm', vol], { timeout: 10_000 });
+              pruned++;
+              log.info({ volumeName: vol }, 'Pruned orphaned volume');
             } catch {
-              // Volume may already be gone or in use — skip
+              // Volume is in use or already gone — skip
             }
           }
         }
@@ -1021,6 +1041,122 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
     },
 
+    async startDetached(config: DetachedContainerConfig): Promise<DetachedContainerHandle> {
+      // Fast check — don't build the image inline (it downloads ~1.5GB and blocks cognition).
+      // The browser image must be pre-built via `npm run browser:auth`.
+      if (config.image === BROWSER_IMAGE) {
+        const exists = await browserImageExists();
+        if (!exists) {
+          throw new Error(
+            'Browser container image not found. Build it first by running: npm run browser:auth <profile> <url>'
+          );
+        }
+      }
+
+      // Ensure volumes exist
+      if (config.volumes) {
+        for (const vol of config.volumes) {
+          if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(vol.name)) {
+            throw new Error(`Invalid volume name: ${vol.name}`);
+          }
+          await execFileAsync('docker', ['volume', 'create', vol.name], { timeout: 10_000 });
+        }
+      }
+
+      const args: string[] = ['run', '-d', '--label', DETACHED_CONTAINER_LABEL];
+
+      // Volume mounts
+      if (config.volumes) {
+        for (const vol of config.volumes) {
+          args.push('-v', `${vol.name}:${vol.containerPath}:${vol.mode}`);
+        }
+      }
+
+      // Port mappings (bind to localhost only)
+      // hostPort=0 means dynamic allocation — Docker picks a free port
+      const containerPorts: number[] = [];
+      if (config.ports) {
+        for (const [hostPort, containerPort] of Object.entries(config.ports)) {
+          args.push('-p', `127.0.0.1:${hostPort}:${String(containerPort)}`);
+          containerPorts.push(containerPort);
+        }
+      }
+
+      // Tmpfs mounts
+      if (config.tmpfs) {
+        for (const mount of config.tmpfs) {
+          args.push('--tmpfs', mount);
+        }
+      }
+
+      // Environment variables
+      if (config.env) {
+        for (const [key, value] of Object.entries(config.env)) {
+          args.push('-e', `${key}=${value}`);
+        }
+      }
+
+      // Entrypoint
+      const [entryBinary, ...entryArgs] = config.entrypoint;
+      if (entryBinary) {
+        args.push('--entrypoint', entryBinary);
+      }
+
+      // Image
+      args.push(config.image);
+
+      // Command args
+      args.push(...entryArgs);
+
+      log.info({ image: config.image, ports: config.ports }, 'Starting detached container');
+
+      const { stdout } = await execFileAsync('docker', args, { timeout: 30_000 });
+      const containerId = stdout.trim();
+
+      // Resolve actual port mappings (needed for dynamic allocation)
+      const portMap: Record<number, number> = {};
+      for (const containerPort of containerPorts) {
+        try {
+          const { stdout: portOut } = await execFileAsync(
+            'docker',
+            ['port', containerId, String(containerPort)],
+            { timeout: 5_000 }
+          );
+          // Output format: "0.0.0.0:XXXXX" or "127.0.0.1:XXXXX"
+          const match = /:(\d+)$/.exec(portOut.trim());
+          if (match) {
+            portMap[containerPort] = Number(match[1]);
+          }
+        } catch {
+          log.warn(
+            { containerId: containerId.slice(0, 12), containerPort },
+            'Failed to resolve mapped port'
+          );
+        }
+      }
+
+      log.info(
+        { containerId: containerId.slice(0, 12), ports: portMap },
+        'Detached container started'
+      );
+
+      return { containerId, ports: portMap };
+    },
+
+    async stopDetached(containerId: string): Promise<void> {
+      log.info({ containerId: containerId.slice(0, 12) }, 'Stopping detached container');
+      try {
+        await execFileAsync('docker', ['stop', containerId], { timeout: 30_000 });
+      } catch {
+        // Container may already be stopped
+      }
+      try {
+        await execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 });
+      } catch {
+        // Container may already be gone
+      }
+    },
+
     async destroyAll(): Promise<void> {
       // Destroy tracked containers
       for (const [runId, handle] of activeContainers) {
@@ -1053,6 +1189,29 @@ export function createContainerManager(logger: Logger): ContainerManager {
         }
       } catch {
         log.warn('Failed to list containers for cleanup');
+      }
+
+      // Also clean up detached containers (browser auth)
+      try {
+        const { stdout: detachedStdout } = await execFileAsync(
+          'docker',
+          ['ps', '-aq', '--filter', `label=${DETACHED_CONTAINER_LABEL}`],
+          { timeout: 10_000 }
+        );
+
+        if (detachedStdout.trim()) {
+          const ids = detachedStdout.trim().split('\n');
+          for (const id of ids) {
+            try {
+              await execFileAsync('docker', ['rm', '-f', id], { timeout: 10_000 });
+            } catch {
+              // Ignore
+            }
+          }
+          log.info({ count: ids.length }, 'Destroyed all detached containers');
+        }
+      } catch {
+        log.warn('Failed to list detached containers for cleanup');
       }
     },
   };

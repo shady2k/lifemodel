@@ -58,6 +58,7 @@ import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
+import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
 import {
   createPersistentRecipientRegistry,
@@ -517,11 +518,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create Motor Cortex service (for code execution)
   let motorCortex: MotorCortex | null = null;
+  let containerMgr: ReturnType<typeof createContainerManager> | null = null;
   const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
   const credentialStore = createEnvCredentialStore();
   const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
   if (llmProvider) {
-    const containerMgr = createContainerManager(logger);
+    containerMgr = createContainerManager(logger);
 
     // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape
     // For API-style requests (custom method/headers/body), use direct fetch()
@@ -689,6 +691,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         getAllowedScripts: (pid) => pluginLoader.getPlugin(pid)?.manifest.allowedScripts ?? [],
       })
     );
+  }
+
+  // 4e. Wire browser auth primitive: PluginLoader → ContainerManager
+  // Allows plugins to start interactive browser sessions for authentication
+  if (containerMgr) {
+    pluginLoader.setBrowserAuthPrimitive(createBrowserAuthPrimitive(containerMgr));
   }
 
   // 5. Set services provider for plugins

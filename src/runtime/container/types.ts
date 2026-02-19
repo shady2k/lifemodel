@@ -230,6 +230,52 @@ export interface ContainerManager {
     config: ScriptContainerConfig,
     timeoutMs: number
   ): Promise<ScriptContainerResult>;
+
+  /**
+   * Start a detached interactive container (e.g., browser auth with noVNC).
+   * Container stays running until explicitly stopped via stopDetached().
+   * Returns the container ID for later management.
+   */
+  startDetached(config: DetachedContainerConfig): Promise<DetachedContainerHandle>;
+
+  /**
+   * Stop a detached container by ID.
+   */
+  stopDetached(containerId: string): Promise<void>;
+}
+
+/**
+ * Config for a detached interactive container (browser auth).
+ */
+export interface DetachedContainerConfig {
+  /** Docker image name */
+  image: string;
+
+  /** Entrypoint override */
+  entrypoint: string[];
+
+  /** Environment variables */
+  env?: Record<string, string> | undefined;
+
+  /** Port mappings: { hostPort: containerPort }. Use hostPort=0 for dynamic allocation. */
+  ports?: Record<number, number> | undefined;
+
+  /** Volume mounts */
+  volumes?: { name: string; containerPath: string; mode: 'ro' | 'rw' }[] | undefined;
+
+  /** Writable tmpfs mounts (e.g., /tmp for Playwright) */
+  tmpfs?: string[] | undefined;
+}
+
+/**
+ * Handle to a running detached container.
+ */
+export interface DetachedContainerHandle {
+  /** Docker container ID */
+  containerId: string;
+
+  /** Resolved port mappings: { containerPort: actualHostPort } */
+  ports: Record<number, number>;
 }
 
 export type { ScriptContainerConfig, ScriptContainerResult };
@@ -241,6 +287,9 @@ export const CONTAINER_LABEL = 'com.lifemodel.component=motor-cortex';
 
 /** Docker label for identifying script containers */
 export const SCRIPT_CONTAINER_LABEL = 'com.lifemodel.component=script';
+
+/** Docker label for identifying detached interactive containers */
+export const DETACHED_CONTAINER_LABEL = 'com.lifemodel.component=browser-auth';
 
 /** Docker image name */
 export const CONTAINER_IMAGE = 'lifemodel-motor:latest';

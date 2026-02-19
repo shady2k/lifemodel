@@ -38,6 +38,7 @@ import type {
   MemorySearchOptions,
   MemorySearchResult,
   ScriptRunnerPrimitive,
+  BrowserAuthPrimitive,
   FireContext,
 } from '../types/plugin.js';
 import type { MemoryProvider } from '../layers/cognition/tools/core/memory.js';
@@ -153,6 +154,7 @@ export class PluginLoader {
   private filterRegisterCallback: FilterRegisterCallback | null = null;
   private filterUnregisterCallback: FilterUnregisterCallback | null = null;
   private scriptRunnerFactory: ((pluginId: string) => ScriptRunnerPrimitive) | null = null;
+  private browserAuthPrimitive: BrowserAuthPrimitive | null = null;
 
   /** Buffer for signals emitted before callback is set (capped at 100) */
   private signalBuffer: Signal[] = [];
@@ -307,6 +309,14 @@ export class PluginLoader {
    */
   setScriptRunnerFactory(factory: (pluginId: string) => ScriptRunnerPrimitive): void {
     this.scriptRunnerFactory = factory;
+  }
+
+  /**
+   * Set the browser auth primitive for plugins that need interactive browser sessions.
+   * Called from container.ts after ContainerManager is available.
+   */
+  setBrowserAuthPrimitive(primitive: BrowserAuthPrimitive): void {
+    this.browserAuthPrimitive = primitive;
   }
 
   /**
@@ -1369,6 +1379,12 @@ export class PluginLoader {
         ? this.scriptRunnerFactory(manifest.id)
         : undefined;
 
+    // Provide browser auth if plugin needs scripts (uses browser profiles)
+    const browserAuth =
+      this.browserAuthPrimitive && manifest.allowedScripts?.length
+        ? this.browserAuthPrimitive
+        : undefined;
+
     return {
       logger: pluginLogger,
       scheduler,
@@ -1377,6 +1393,7 @@ export class PluginLoader {
       services,
       memorySearch,
       scriptRunner,
+      browserAuth,
     };
   }
 

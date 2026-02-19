@@ -119,9 +119,9 @@ export async function assembleBrowserBuildContext(
 }
 
 /**
- * Check if the browser Docker image exists.
+ * Check if the browser Docker image exists (fast — no build).
  */
-async function browserImageExists(): Promise<boolean> {
+export async function browserImageExists(): Promise<boolean> {
   try {
     await execFileAsync('docker', ['image', 'inspect', BROWSER_IMAGE], {
       timeout: 10_000,
