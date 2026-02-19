@@ -59,5 +59,6 @@ Silence is NOT treated as negative feedback (too ambiguous).
 
 ## Sources
 
-- RSS feeds
-- Telegram public channels
+- **RSS feeds** — standard RSS/Atom feed polling
+- **Telegram public channels** — scrapes `t.me/s/<handle>` (no auth needed)
+- **Telegram private groups** — uses browser profile with Playwright in Docker (requires `npm run browser:auth` setup first, see `docs/features/motor-cortex/script-mode.md`)

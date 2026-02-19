@@ -76,38 +76,44 @@ interface ScriptRegistryEntry {
 }
 ```
 
-### First Registered Script
+### Registered Scripts
+
+**`test.echo.run`** — Phase 1 echo test (uses `lifemodel-motor` image, no browser).
+
+**`news.telegram_group.fetch`** — Fetch messages from private Telegram groups:
 
 ```typescript
-const TELEGRAM_GROUP_FETCH: ScriptRegistryEntry = {
-  id: 'telegram.group.fetch',
-  image: 'lifemodel-browser',
-  entrypoint: '/scripts/telegram-group-fetch.js',
-  domains: ['web.telegram.org'],      // empirically expanded during development
-  defaultTimeoutMs: 60_000,
+{
+  id: 'news.telegram_group.fetch',
+  image: BROWSER_IMAGE,                 // lifemodel-browser:latest
+  entrypoint: ['node', '/scripts/telegram-group-fetch.js'],
+  domains: ['web.telegram.org', 'telegram.org'],
   maxTimeoutMs: 120_000,
   lock: {
     keyTemplate: 'browserProfile:${inputs.profile}',
-    mode: 'exclusive',
-    waitPolicy: 'block',
-    waitTimeoutMs: 10_000,            // short wait then fail — prevents cron pileup
+    exclusive: true,
+    waitPolicy: 'fail_fast',
+    leaseMs: 120_000,
   },
   profileVolume: {
-    volumePrefix: 'lifemodel-browser-profile',
-    mountPath: '/profile',
-    mode: 'rw',                       // Chrome needs to update cookies
+    volumeNamePrefix: 'lifemodel-browser-profile',
+    containerPath: '/profile',
+    mode: 'rw',
   },
   inputSchema: z.object({
     profile: z.string(),
-    groupId: z.string().optional(),
-    chatTitle: z.string().optional(),
+    groupUrl: z.url(),
     lastSeenId: z.string().optional(),
+    maxMessages: z.number().int().positive().optional(),
   }),
   outputSchema: z.object({
-    messages: z.array(telegramParsedMessageSchema),
-    nextCursor: z.string().optional(),
+    ok: z.boolean(),
+    messages: z.array(z.object({
+      id: z.string(), text: z.string(), date: z.string(), from: z.string(),
+    })),
+    latestId: z.string().nullable(),
   }),
-};
+}
 ```
 
 ---
@@ -164,32 +170,44 @@ Key differences from `agentic`:
 Plugins access script mode via a new primitive, preserving plugin isolation.
 
 ```typescript
+// src/types/plugin.ts
 interface ScriptRunnerPrimitive {
   runScript(request: {
     scriptId: string;
-    inputs?: Record<string, unknown>;
-    timeoutMs?: number;
-  }): Promise<ScriptRunResult>;
+    inputs?: Record<string, unknown> | undefined;
+    timeoutMs?: number | undefined;
+  }): Promise<PluginScriptRunResult>;
 }
 
-// Added to PluginPrimitives
+// Added to PluginPrimitives (optional — only present when plugin declares allowedScripts)
 interface PluginPrimitives {
   // ...existing...
-  scriptRunner: ScriptRunnerPrimitive;
+  scriptRunner?: ScriptRunnerPrimitive | undefined;
+}
+
+// Added to PluginManifestV2
+interface PluginManifestV2 {
+  // ...existing...
+  allowedScripts?: string[] | undefined;
 }
 ```
 
 ### Security: Per-Plugin Script Allowlist
 
-Each plugin declares which scriptIds it may call. The `scriptRunner` wrapper enforces this.
+Each plugin declares which scriptIds it may call in its manifest's `allowedScripts` array. The `ScopedScriptRunner` (`src/core/scoped-script-runner.ts`) enforces this — returning `SCRIPT_NOT_FOUND` for unlisted scripts.
 
 ```typescript
-// Wiring in container.ts
-const newsScriptRunner = createScopedScriptRunner(motorCortex, ['telegram.group.fetch']);
-newsPlugin.activate({ ...primitives, scriptRunner: newsScriptRunner });
+// Wiring in container.ts (automatic via pluginLoader)
+if (motorCortex) {
+  pluginLoader.setScriptRunnerFactory((pluginId) =>
+    createScopedScriptRunner(motorCortex, pluginId, {
+      getAllowedScripts: (pid) => pluginLoader.getPlugin(pid)?.manifest.allowedScripts ?? [],
+    })
+  );
+}
 ```
 
-A plugin cannot call scripts outside its allowlist. The caller never controls domains, image, or lock policy — only `scriptId`, `inputs`, and `timeoutMs`.
+Plugins with no `allowedScripts` (or empty array) get `scriptRunner: undefined` in their primitives. A plugin cannot call scripts outside its allowlist.
 
 ---
 
@@ -226,46 +244,34 @@ interface LockHandle {
 
 ## Browser Auth CLI
 
-`lifemodel browser auth <profile> <url>`
+`npm run browser:auth <profile> <url>` (or `npx tsx cli/browser-auth.ts <profile> <url>`)
 
 ### Flow
 
 ```
-1. Resolve/create named Docker volume: lifemodel-browser-profile-<profile>
-2. Acquire exclusive lock: browserProfile:<profile> (fail_fast)
-3. Start container from lifemodel-browser image:
+1. Validate profile name (alphanumeric + hyphens) and URL
+2. Ensure browser Docker image exists (build if needed)
+3. Create/reuse named Docker volume: lifemodel-browser-profile-<profile>
+4. Start container:
    - Mount profile volume at /profile:rw
-   - Chromium with --user-data-dir=/profile
-   - Xvfb (virtual display) + noVNC (web-based VNC)
-   - Network: allowedDomains for the target site
-4. CLI prints: http://127.0.0.1:6080/?token=<one-time-token>
-   - Localhost-bound only
-   - One-time token, short TTL
-   - Auto-shutdown on 10 min inactivity
-5. User opens URL in their browser, sees Chromium via noVNC
-6. User navigates to <url> and logs in manually
-7. Auth detection (bounded 5 min timeout):
-   - Primary: auto-detect auth success (cookies, page state, group accessibility)
-   - Fallback: user presses Enter in CLI if auto-detect is ambiguous
-   - Differentiate: "not logged in" vs "logged in but group inaccessible" vs "auth confirmed"
-8. Persist profile metadata:
-   - lastAuthAt, chromiumMajor, domains used
-   - Stored in the named volume alongside the Chrome profile
-9. Graceful browser shutdown, container stop
-10. Release lock
+   - entrypoint-auth.sh → Xvfb + x11vnc + noVNC + Chromium
+   - Port 127.0.0.1:6080 → noVNC web interface
+   - AUTH_URL env var → browser navigates to target URL
+5. CLI prints: http://localhost:6080/vnc.html
+6. User opens URL in their browser, sees Chromium via noVNC
+7. User logs in manually
+8. User presses Enter in CLI when done
+9. Container stopped (--rm auto-removes), profile volume persisted
 ```
 
-### Profile Version Compatibility
+### Example
 
-Auth stores `chromiumMajor` in profile metadata. On fetch, the script compares with the current image's Chromium version:
-
-| Mismatch | Action |
-|----------|--------|
-| Same major | Proceed |
-| 1 major behind | Warn in logs |
-| 2+ majors behind | Block fetch, emit alert requesting re-auth |
-
-Chrome profile schema upgrades are one-way — a newer Chromium can read an older profile, but not vice versa. Always auth with the same or newer image version than fetch.
+```bash
+npm run browser:auth telegram https://web.telegram.org
+# Opens noVNC at http://localhost:6080/vnc.html
+# Log in to Telegram, press Enter when done
+# Profile "telegram" is now ready for telegram-group sources
+```
 
 ---
 
@@ -273,40 +279,20 @@ Chrome profile schema upgrades are one-way — a newer Chromium can read an olde
 
 | Image | Contents | Size (est.) | Used By |
 |-------|----------|-------------|---------|
-| `lifemodel-motor` | Node.js (existing) | ~150MB | oneshot, agentic |
-| `lifemodel-browser` | Chromium + Playwright + Xvfb + noVNC + Node.js | ~500MB | script (browser), auth CLI |
+| `lifemodel-motor:latest` | Node 24 Alpine (existing) | ~150MB | oneshot, agentic |
+| `lifemodel-browser:latest` | Playwright base + Chromium + Xvfb + x11vnc + noVNC | ~1.5GB | script (browser), auth CLI |
 
 ### `lifemodel-browser` Image
 
-```dockerfile
-FROM debian:bookworm-slim
+Built by `src/runtime/container/browser-image.ts` using an inline Dockerfile (same pattern as `container-image.ts`):
 
-# Chromium + display server + noVNC
-RUN apt-get update && apt-get install -y \
-    chromium \
-    xvfb \
-    x11vnc \
-    novnc \
-    websockify \
-    && rm -rf /var/lib/apt/lists/*
+- **Base:** `mcr.microsoft.com/playwright:v1.52.0-noble` — Node.js + Chromium + matching Playwright (avoids version mismatch)
+- **Added:** xvfb, x11vnc, python3-websockify, noVNC (from git)
+- **Scripts:** copied from `docker/browser/scripts/` into `/scripts/`
+- **Profile dir:** `/profile` owned by `pwuser` (Playwright's default non-root user)
+- **Source hash label:** `com.lifemodel.source-hash` for staleness detection
 
-# Node.js for script runner
-COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
-
-# Playwright (chromium path override to system chromium)
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-
-# Script runner + registered scripts
-COPY scripts/ /scripts/
-
-# Non-root user
-RUN useradd -m -u 1000 browser
-USER browser
-
-EXPOSE 6080
-```
-
-Pin Chromium + Playwright versions together. Shared base stage with `lifemodel-motor` where possible to reduce layer duplication.
+First build downloads ~1.5GB base image. Subsequent builds use Docker cache.
 
 ---
 
@@ -317,61 +303,60 @@ Pin Chromium + Playwright versions together. Shared base stage with `lifemodel-m
 `'telegram-group'` alongside existing `'rss'` and `'telegram'`.
 
 ```typescript
-// In NewsSource type
 type NewsSourceType = 'rss' | 'telegram' | 'telegram-group';
+
+interface NewsSource {
+  // ...existing fields...
+  profile?: string | undefined;    // browser profile name (telegram-group only)
+  groupUrl?: string | undefined;   // full Telegram Web URL (telegram-group only)
+}
+```
+
+### Manifest
+
+```typescript
+// News plugin manifest declares allowed scripts
+allowedScripts: ['news.telegram_group.fetch']
 ```
 
 ### Fetcher
 
+`src/plugins/news/fetchers/telegram-group.ts` — calls `scriptRunner.runScript()` with the script ID, profile, group URL, and last seen ID. Converts script output messages to `FetchedArticle[]`.
+
+### Polling Integration
+
+`handlePollFeeds()` in `index.ts` fetches all three source types in parallel:
+
 ```typescript
-// src/plugins/news/fetchers/telegram-group.ts
-
-import type { ScriptRunnerPrimitive } from '../../types/plugin.js';
-import { parseTelegramHtml } from '../../web-shared/telegram.js';
-
-export async function fetchTelegramGroup(
-  source: NewsSource,
-  lastSeenId: string | undefined,
-  scriptRunner: ScriptRunnerPrimitive,
-): Promise<TelegramFetchResult> {
-  const result = await scriptRunner.runScript({
-    scriptId: 'telegram.group.fetch',
-    inputs: {
-      profile: source.profile,       // e.g. 'telegram'
-      groupId: source.groupId,
-      chatTitle: source.name,
-      lastSeenId,
-    },
-    timeoutMs: 60_000,
-  });
-
-  if (!result.ok) {
-    throw new FetchError(result.error?.message ?? 'Script failed', {
-      retryable: result.error?.retryable ?? false,
-    });
-  }
-
-  // Output already validated by script registry's outputSchema
-  const { messages } = result.output as TelegramGroupFetchOutput;
-  return {
-    articles: messages.map(telegramMsgToArticle),
-    newLastSeenId: messages[0]?.id,
-  };
-}
+const [rssResult, telegramResult, groupResult] = await Promise.all([
+  fetchAllRssSources(storage, logger),
+  fetchAllTelegramSources(storage, logger),
+  fetchAllTelegramGroupSources(storage, logger, scriptRunner, intentEmitter),
+]);
 ```
 
-### Retry Policy
+### Error Handling
 
-Reuses existing news plugin source health infrastructure:
+Reuses existing source health infrastructure with one special case:
 
-| Consecutive Failures | Action |
-|---------------------|--------|
-| 1-2 | Retry next cycle (2h) |
-| 3 | Disable 1 hour |
-| 5 | Disable 6 hours |
-| 10 | Emit intention to alert user |
+| Error | Behavior |
+|-------|----------|
+| General failures | Standard backoff (3 fails → 1h disable, 5 → 6h, 10 → alert) |
+| `NOT_AUTHENTICATED` | Immediate pending intention with re-auth command, no backoff |
 
-Auth-specific failures ("session expired") skip the backoff and immediately emit an alert requesting re-auth.
+### Adding a Source
+
+Via the news tool's `add_source` action:
+
+```json
+{
+  "action": "add_source",
+  "type": "telegram-group",
+  "name": "My Private Group",
+  "profile": "telegram",
+  "group_url": "https://web.telegram.org/a/#-1001234567890"
+}
+```
 
 ---
 
@@ -401,22 +386,23 @@ The browser profile volume contains auth tokens for the target site. Mitigations
 
 ### noVNC Auth Surface
 
-During `lifemodel browser auth`:
+During `npm run browser:auth`:
 
-- noVNC bound to `127.0.0.1` only (not reachable from network)
-- One-time token required in URL query parameter
-- Short TTL — auto-shutdown on 10 min inactivity
-- Container destroyed after auth completes
+- noVNC bound to `127.0.0.1:6080` only (not reachable from network)
+- Container runs with `--rm` flag (auto-removed on stop)
+- User manually stops via Enter key in CLI
 
 ---
 
 ## Phasing
 
-| Phase | What | Gate |
-|-------|------|------|
-| **1 (this)** | `script` mode + `lifemodel-browser` image + auth CLI + telegram group fetcher + lock service + plugin primitive | Can we reliably fetch closed group messages on a schedule? |
-| **2** | Motor cortex agentic mode gains browser tool, reuses `lifemodel-browser` image + profile volumes | Converges browser infra between script and agentic |
-| **3** | Script registry becomes user-extensible (custom deterministic jobs via config) | Pattern proven across multiple script types |
+| Phase | What | Status |
+|-------|------|--------|
+| **1** | Script mode foundation: types, lock service, script runner, registry, container-manager `runScript()`, `core.act` script dispatch, echo test | Done |
+| **2** | Browser Docker image (`lifemodel-browser`), auth CLI (`browser:auth`), browser scripts | Done |
+| **3** | Telegram group fetcher, `ScriptRunnerPrimitive`, scoped runner, news plugin integration | Done |
+| **4** | Motor cortex agentic mode gains browser tool, reuses `lifemodel-browser` image + profile volumes | Future |
+| **5** | Script registry becomes user-extensible (custom deterministic jobs via config) | Future |
 
 ---
 
@@ -424,33 +410,41 @@ During `lifemodel browser auth`:
 
 ```
 src/
+  core/
+    scoped-script-runner.ts     # Per-plugin script gating (allowlist enforcement)
+    plugin-loader.ts            # Extended — setScriptRunnerFactory(), scriptRunner in primitives
+    container.ts                # Extended — wires scoped script runner factory
   runtime/
     motor-cortex/
-      motor-cortex.ts          # Existing — add script mode dispatch
-      script-runner.ts          # NEW — script mode lifecycle (validate, lock, container, collect)
-      script-registry.ts        # NEW — registered scripts with schemas
+      motor-cortex.ts           # Extended — executeScript() dispatch
+      script-runner.ts          # Script lifecycle (validate, lock, container, collect)
+      script-registry.ts        # Registered scripts with schemas
+      script-types.ts           # Script types (result, registry entry, lock, container config)
     container/
-      container-manager.ts      # Existing — add runScript() method (no IPC, stdout collection)
-      network-policy.ts         # Existing — reused for script containers
+      browser-image.ts          # Browser Docker image builder (source-hash pattern)
+      container-manager.ts      # Extended — runScript() with BROWSER_IMAGE support
+      types.ts                  # Extended — BROWSER_IMAGE constant
     lock/
-      lock-service.ts           # NEW — in-memory lease-based locks
+      lock-service.ts           # In-memory lease-based locks
+  types/
+    plugin.ts                   # Extended — ScriptRunnerPrimitive, allowedScripts
   plugins/
     news/
       fetchers/
-        telegram-group.ts       # NEW — uses scriptRunner primitive
-      index.ts                  # Extended — new source type 'telegram-group'
-    web-shared/
-      telegram.ts               # Existing — shared parser, reused by telegram-group script
+        telegram-group.ts       # Fetcher using scriptRunner primitive
+      index.ts                  # Extended — telegram-group polling, allowedScripts
+      tools/news-tool.ts        # Extended — telegram-group in add_source
+      types.ts                  # Extended — 'telegram-group' source type
 
 docker/
   browser/
-    Dockerfile                  # NEW — lifemodel-browser image
     scripts/
-      telegram-group-fetch.js   # NEW — Playwright script: navigate to group, extract HTML
-      entrypoint.sh             # NEW — Xvfb + noVNC + Chromium launcher (auth mode)
+      entrypoint-auth.sh        # Xvfb + x11vnc + noVNC + Chromium launcher
+      launch-browser.js          # Playwright persistent context (headful, for auth)
+      telegram-group-fetch.js    # Playwright headless group message extraction
 
 cli/
-  browser.ts                    # NEW — `lifemodel browser auth` command
+  browser-auth.ts               # npm run browser:auth <profile> <url>
 ```
 
 ---
