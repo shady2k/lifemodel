@@ -12,7 +12,7 @@ import { BROWSER_IMAGE } from '../../../src/runtime/container/types.js';
 describe('buildBrowserDockerfile', () => {
   it('should include the Playwright base image', () => {
     const dockerfile = buildBrowserDockerfile('abc123');
-    expect(dockerfile).toContain('mcr.microsoft.com/playwright:v1.52.0-noble');
+    expect(dockerfile).toContain('mcr.microsoft.com/playwright:v1.58.2-noble');
   });
 
   it('should include the source hash label', () => {

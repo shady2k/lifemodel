@@ -25,12 +25,12 @@ const SOURCE_HASH_LABEL = 'com.lifemodel.source-hash';
 /**
  * Build the browser Dockerfile string with embedded source hash.
  *
- * Base: mcr.microsoft.com/playwright:v1.52.0-noble
+ * Base: mcr.microsoft.com/playwright:v1.58.2-noble
  * Adds: Xvfb, x11vnc, noVNC/websockify, scripts
  */
 export function buildBrowserDockerfile(sourceHash: string): string {
   return `
-FROM mcr.microsoft.com/playwright:v1.52.0-noble
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
 
 # Install display and VNC tools
 RUN apt-get update && apt-get install -y --no-install-recommends \\
@@ -44,8 +44,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc \\
     && rm -rf /opt/novnc/.git
 
-# Copy browser scripts
+# Install Playwright npm package into /scripts so require('playwright') works
+# Browsers are already in base image at /ms-playwright — skip download
 COPY scripts/ /scripts/
+RUN cd /scripts && npm init -y && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install playwright@1.58.2
 RUN chmod +x /scripts/*.sh 2>/dev/null || true
 
 # Create profile directory for persistent browser data
@@ -159,7 +161,10 @@ async function getBrowserImageSourceHash(): Promise<string | null> {
  * @returns true if image is ready
  */
 export async function ensureBrowserImage(logger?: (msg: string) => void): Promise<boolean> {
-  if (browserImageBuilt) return true;
+  if (browserImageBuilt) {
+    logger?.('Browser image: cached (browserImageBuilt=true)');
+    return true;
+  }
 
   const log =
     logger ??
@@ -176,6 +181,7 @@ export async function ensureBrowserImage(logger?: (msg: string) => void): Promis
     // Check if image exists and is up-to-date
     if (await browserImageExists()) {
       const existingHash = await getBrowserImageSourceHash();
+      log(`Browser image hash check: existing=${existingHash ?? 'none'}, expected=${sourceHash}`);
       if (existingHash === sourceHash) {
         browserImageBuilt = true;
         return true;

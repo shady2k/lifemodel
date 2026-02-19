@@ -14,10 +14,24 @@
  */
 
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 
 const DEFAULT_MAX_MESSAGES = 50;
 const NAV_TIMEOUT_MS = 30_000;
 const EXTRACT_TIMEOUT_MS = 15_000;
+const PROFILE_DIR = '/profile';
+
+/**
+ * Remove stale Chromium lock files from a persistent profile.
+ * @see telegram-group-list.js for explanation
+ */
+function cleanStaleLocks() {
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    const p = path.join(PROFILE_DIR, name);
+    try { fs.unlinkSync(p); } catch { /* file may not exist */ }
+  }
+}
 
 async function main() {
   const rawInputs = process.env.SCRIPT_INPUTS;
@@ -41,9 +55,12 @@ async function main() {
     return;
   }
 
+  // Clean stale locks from previous container runs
+  cleanStaleLocks();
+
   let context;
   try {
-    context = await chromium.launchPersistentContext('/profile', {
+    context = await chromium.launchPersistentContext(PROFILE_DIR, {
       headless: true,
       args: [
         '--no-sandbox',
@@ -61,16 +78,26 @@ async function main() {
       timeout: NAV_TIMEOUT_MS,
     });
 
-    // Detect auth failure: if redirected to login page
+    // Wait for SPA to render
+    await page.waitForTimeout(3000);
+
+    // Detect auth failure: URL-based + UI element check
+    // Telegram Web A shows QR login at the root URL without redirect
     const currentUrl = page.url();
-    if (
+    const urlIndicatesLogin =
       currentUrl.includes('/auth') ||
       currentUrl.includes('login') ||
-      currentUrl.includes('#/login')
-    ) {
+      currentUrl.includes('#/login');
+
+    const hasLoginUI = await page.evaluate(() => {
+      const text = document.querySelector('#root')?.textContent ?? '';
+      return text.includes('Log in to Telegram') || text.includes('QR Code') || text.includes('Log in by phone');
+    });
+
+    if (urlIndicatesLogin || hasLoginUI) {
       outputError(
         'NOT_AUTHENTICATED',
-        `Redirected to login page: ${currentUrl}. Re-authenticate with browser:auth.`
+        'Not authenticated. Re-authenticate with auth_profile.'
       );
       return;
     }

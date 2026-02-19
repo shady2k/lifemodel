@@ -105,31 +105,21 @@ const SCHEMA_GET_NEWS = {
   },
 };
 
-const SCHEMA_AUTH_PROFILE = {
-  action: { type: 'string', required: true, enum: ['auth_profile'] },
+const SCHEMA_LIST_GROUPS = {
+  action: { type: 'string', required: true, enum: ['list_groups'] },
   profile: {
     type: 'string',
     required: true,
-    description: 'Profile name (alphanumeric + hyphens, e.g. "telegram")',
-  },
-  url: {
-    type: 'string',
-    required: false,
-    description: 'URL to navigate to (default: https://web.telegram.org)',
-  },
-  force: {
-    type: 'boolean',
-    required: false,
-    description: 'Force re-authentication even if profile already exists',
+    description: 'Browser profile name for telegram-group sources (e.g. "telegram")',
   },
 };
 
 const SCHEMA_STOP_AUTH = {
   action: { type: 'string', required: true, enum: ['stop_auth'] },
-  container_id: {
+  profile: {
     type: 'string',
     required: true,
-    description: 'Container ID returned by auth_profile',
+    description: 'Profile name to stop authentication for (e.g. "telegram")',
   },
 };
 
@@ -591,29 +581,31 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
   const newsTool: PluginTool = {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
-Actions: add_source, remove_source, list_sources, get_news, auth_profile, stop_auth.
+Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth.
 Example: {"action": "get_news", "query": "technology"}
 
 **For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
 This searches articles from configured RSS feeds and Telegram channels.
 Only fall back to web search if get_news returns no relevant results.
 
-For private Telegram groups, first authenticate: {"action": "auth_profile", "profile": "telegram"}
-Then add source: {"action": "add_source", "type": "telegram-group", "name": "...", "profile": "telegram", "group_url": "https://web.telegram.org/a/#-..."}`,
+For private Telegram groups:
+1. Call list_groups: {"action": "list_groups", "profile": "telegram"} — if auth is needed, it auto-starts a browser login and returns the URL
+2. After user logs in: {"action": "stop_auth", "profile": "telegram"}, then list_groups again
+3. Add source: {"action": "add_source", "type": "telegram-group", "name": "...", "profile": "telegram", "group_url": "https://web.telegram.org/a/#-..."}`,
     tags: ['rss', 'telegram', 'telegram-group', 'news', 'feed', 'add', 'remove', 'list', 'get'],
     parameters: [
       {
         name: 'action',
         type: 'string',
         description:
-          'Required. One of: add_source, remove_source, list_sources, get_news, auth_profile, stop_auth',
+          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth',
         required: true,
         enum: [
           'add_source',
           'remove_source',
           'list_sources',
           'get_news',
-          'auth_profile',
+          'list_groups',
           'stop_auth',
         ],
       },
@@ -677,12 +669,6 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
         description: 'Skip first N results for pagination. Used with get_news action.',
         required: false,
       },
-      {
-        name: 'container_id',
-        type: 'string',
-        description: 'Container ID to stop (required for stop_auth action)',
-        required: false,
-      },
     ],
     validate: (args) => {
       const a = args as Record<string, unknown>;
@@ -697,14 +683,14 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
           'remove_source',
           'list_sources',
           'get_news',
-          'auth_profile',
+          'list_groups',
           'stop_auth',
         ].includes(a['action'])
       ) {
         return {
           success: false,
           error:
-            'action: must be one of [add_source, remove_source, list_sources, get_news, auth_profile, stop_auth]',
+            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth]',
         };
       }
 
@@ -725,6 +711,8 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
               remove_source: SCHEMA_REMOVE_SOURCE,
               list_sources: SCHEMA_LIST_SOURCES,
               get_news: SCHEMA_GET_NEWS,
+              list_groups: SCHEMA_LIST_GROUPS,
+              stop_auth: SCHEMA_STOP_AUTH,
             },
           },
         };
@@ -815,112 +803,175 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
           return getNews(memorySearch, query, newsType, limit, offset);
         }
 
-        case 'auth_profile': {
-          const authProfile = args['profile'] as string | undefined;
-          const authUrl = (args['url'] as string | undefined) ?? 'https://web.telegram.org';
-          const force = args['force'] === true;
+        case 'list_groups': {
+          const listProfile = args['profile'] as string | undefined;
 
-          if (!authProfile) {
+          if (!listProfile) {
             return {
               success: false,
-              action: 'auth_profile',
+              action: 'list_groups',
               error: 'Missing required parameter: profile',
               receivedParams: Object.keys(args),
-              schema: SCHEMA_AUTH_PROFILE,
+              schema: SCHEMA_LIST_GROUPS,
             };
           }
 
-          if (!primitives.browserAuth) {
+          if (!primitives.scriptRunner) {
             return {
               success: false,
-              action: 'auth_profile',
-              error: 'Browser authentication is not available (Docker may not be running)',
+              action: 'list_groups',
+              error: 'Script runner not available (Docker may not be running)',
             };
-          }
-
-          // Fast check: is the browser image built?
-          const imageReady = await primitives.browserAuth.isImageReady();
-          if (!imageReady) {
-            // Start building in background — when done, auto-start auth and notify user
-            primitives.browserAuth.ensureImageInBackground((success) => {
-              if (!success) {
-                primitives.intentEmitter.emitPendingIntention(
-                  'Failed to build the browser image. Make sure Docker is running and try again.'
-                );
-                return;
-              }
-              // Image built! Now auto-start the auth session
-              // browserAuth is guaranteed non-null here — we checked it above
-              const browserAuth = primitives.browserAuth;
-              if (!browserAuth) return;
-              browserAuth
-                .startAuth(authProfile, authUrl)
-                .then((session) => {
-                  primitives.intentEmitter.emitPendingIntention(
-                    `Browser is ready for Telegram authentication! ` +
-                      `Tell the user to open ${session.authUrl} to log in. ` +
-                      `When they confirm they are done, call stop_auth with container_id "${session.containerId}".`
-                  );
-                })
-                .catch((err: unknown) => {
-                  const msg = err instanceof Error ? err.message : String(err);
-                  primitives.intentEmitter.emitPendingIntention(
-                    `Browser image built, but failed to start auth session: ${msg}`
-                  );
-                });
-            });
-            return {
-              success: true,
-              action: 'auth_profile',
-              status: 'building_image',
-              hint:
-                'The browser image is being built for the first time (~5 minutes). ' +
-                'Tell the user you will notify them when the browser is ready for login. ' +
-                'No need to retry — the system will auto-start the auth session when done.',
-            };
-          }
-
-          // Fast check: does the profile volume already exist?
-          if (!force) {
-            const profileExists = await primitives.browserAuth.volumeExists(authProfile);
-            if (profileExists) {
-              return {
-                success: true,
-                action: 'auth_profile',
-                status: 'profile_exists',
-                hint:
-                  `Profile "${authProfile}" already exists and is ready to use. ` +
-                  'You can add a telegram-group source using this profile. ' +
-                  'To re-authenticate, call auth_profile with force=true.',
-              };
-            }
           }
 
           try {
-            const session = await primitives.browserAuth.startAuth(authProfile, authUrl);
+            const scriptResult = await primitives.scriptRunner.runScript({
+              scriptId: 'news.telegram_group.list',
+              inputs: { profile: listProfile },
+              timeoutMs: 60_000,
+            });
+
+            // Merge script-level and output-level errors into a single code
+            const scriptError = !scriptResult.ok ? scriptResult.error : undefined;
+            const output = scriptResult.ok
+              ? (scriptResult.output as
+                  | {
+                      ok: boolean;
+                      groups: { id: string; name: string; url: string }[];
+                      error?: { code: string; message: string };
+                    }
+                  | undefined)
+              : undefined;
+            const outputError = output && !output.ok ? output.error : undefined;
+            const errorCode = scriptError?.code ?? outputError?.code;
+            const errorMsg = scriptError?.message ?? outputError?.message ?? 'Unknown error';
+
+            // NOT_AUTHENTICATED → auto-start auth session (no separate auth_profile needed)
+            if (errorCode === 'NOT_AUTHENTICATED') {
+              if (!primitives.browserAuth) {
+                return {
+                  success: false,
+                  action: 'list_groups',
+                  error:
+                    'Not authenticated and browser auth is not available (Docker may not be running)',
+                };
+              }
+
+              // Remove stale profile volume for a clean re-auth
+              try {
+                const volumeName = `lifemodel-browser-profile-${listProfile}`;
+                const { execFile: ef } = await import('node:child_process');
+                const { promisify: p } = await import('node:util');
+                await p(ef)('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+              } catch {
+                // Best effort
+              }
+
+              // Check if image is ready
+              const imageReady = await primitives.browserAuth.isImageReady();
+              if (!imageReady) {
+                const authRecipientId = _context?.recipientId;
+                primitives.browserAuth.ensureImageInBackground((success) => {
+                  if (!success) {
+                    if (authRecipientId) {
+                      primitives.intentEmitter.emitSendMessage(
+                        authRecipientId,
+                        'Failed to build the browser image. Make sure Docker is running and try again.'
+                      );
+                    }
+                    return;
+                  }
+                  const browserAuth = primitives.browserAuth;
+                  if (!browserAuth) return;
+                  browserAuth
+                    .startAuth(listProfile, 'https://web.telegram.org')
+                    .then((session) => {
+                      if (authRecipientId) {
+                        primitives.intentEmitter.emitSendMessage(
+                          authRecipientId,
+                          `Browser is ready! Open this link to log in to Telegram:\n${session.authUrl}\n\nLet me know when you're done.`
+                        );
+                      }
+                      primitives.intentEmitter.emitPendingIntention(
+                        `Browser auth session started for profile "${listProfile}". Auth URL: ${session.authUrl}. ` +
+                          `When the user confirms they are done, call stop_auth with profile "${listProfile}", then call list_groups again.`
+                      );
+                    })
+                    .catch((_e: unknown) => {
+                      /* best effort */
+                    });
+                });
+                return {
+                  success: false,
+                  action: 'list_groups',
+                  status: 'building_image',
+                  hint: 'The browser image is being built (~5 minutes). You will be notified when the browser is ready for login.',
+                };
+              }
+
+              // Start auth session immediately
+              try {
+                const session = await primitives.browserAuth.startAuth(
+                  listProfile,
+                  'https://web.telegram.org'
+                );
+                return {
+                  success: false,
+                  action: 'list_groups',
+                  status: 'auth_required',
+                  authUrl: session.authUrl,
+                  hint:
+                    `Not authenticated. A browser login session has been started. ` +
+                    `Tell the user to open ${session.authUrl} to log in to Telegram. ` +
+                    `When they confirm they are done, call stop_auth with profile "${listProfile}", then call list_groups again.`,
+                };
+              } catch (authErr) {
+                return {
+                  success: false,
+                  action: 'list_groups',
+                  error: `Not authenticated and failed to start auth: ${authErr instanceof Error ? authErr.message : String(authErr)}`,
+                };
+              }
+            }
+
+            // Other errors (infrastructure, no output, etc.)
+            if (scriptError || !output?.ok) {
+              return {
+                success: false,
+                action: 'list_groups',
+                error: errorMsg,
+                hint: 'This is an infrastructure error. Tell the user there is a temporary issue discovering groups and you will retry later. Do NOT ask the user for a URL — they cannot provide one.',
+              };
+            }
+
             return {
               success: true,
-              action: 'auth_profile',
-              sourceId: session.containerId,
-              hint: `Authentication browser is ready. Tell the user to open ${session.authUrl} to log in. When they confirm they are done, call stop_auth with container_id "${session.containerId}".`,
+              action: 'list_groups',
+              groups: output.groups,
+              total: output.groups.length,
+              hint:
+                output.groups.length > 0
+                  ? 'Use a group URL from this list with add_source action (type: "telegram-group") to start monitoring it.'
+                  : 'No groups found. The user may need to join groups in Telegram first.',
             };
           } catch (error) {
             return {
               success: false,
-              action: 'auth_profile',
-              error: `Failed to start auth session: ${error instanceof Error ? error.message : String(error)}`,
+              action: 'list_groups',
+              error: `Failed to list groups: ${error instanceof Error ? error.message : String(error)}`,
+              hint: 'This is an infrastructure error. Tell the user there is a temporary issue and you will retry later. Do NOT ask the user for a URL.',
             };
           }
         }
 
         case 'stop_auth': {
-          const containerId = args['container_id'] as string | undefined;
+          const stopProfile = args['profile'] as string | undefined;
 
-          if (!containerId) {
+          if (!stopProfile) {
             return {
               success: false,
               action: 'stop_auth',
-              error: 'Missing required parameter: container_id',
+              error: 'Missing required parameter: profile',
               receivedParams: Object.keys(args),
               schema: SCHEMA_STOP_AUTH,
             };
@@ -935,11 +986,11 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
           }
 
           try {
-            await primitives.browserAuth.stopAuth(containerId);
+            await primitives.browserAuth.stopAuth(stopProfile);
             return {
               success: true,
               action: 'stop_auth',
-              hint: 'Authentication session saved. The profile can now be used for telegram-group sources.',
+              hint: 'Authentication session saved. Now call list_groups to discover available groups.',
             };
           } catch (error) {
             return {
@@ -954,7 +1005,7 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "auth_profile", or "stop_auth".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", or "stop_auth".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {
@@ -962,7 +1013,7 @@ Then add source: {"action": "add_source", "type": "telegram-group", "name": "...
                 remove_source: SCHEMA_REMOVE_SOURCE,
                 list_sources: SCHEMA_LIST_SOURCES,
                 get_news: SCHEMA_GET_NEWS,
-                auth_profile: SCHEMA_AUTH_PROFILE,
+                list_groups: SCHEMA_LIST_GROUPS,
                 stop_auth: SCHEMA_STOP_AUTH,
               },
             },

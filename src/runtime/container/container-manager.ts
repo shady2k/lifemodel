@@ -405,7 +405,7 @@ function buildScriptCreateArgs(
 
     // Resource limits
     '--pids-limit',
-    '64',
+    String(config.pidsLimit ?? 64),
     '--memory',
     '512m',
     '--cpus',
@@ -431,6 +431,13 @@ function buildScriptCreateArgs(
     args.push('--network', 'none');
   }
 
+  // Extra tmpfs mounts (e.g., /dev/shm for Chromium)
+  if (config.tmpfs) {
+    for (const mount of config.tmpfs) {
+      args.push('--tmpfs', mount);
+    }
+  }
+
   // Profile volume mount (e.g., browser profile)
   if (config.profileMount) {
     const { volumeName, containerPath, mode } = config.profileMount;
@@ -440,8 +447,8 @@ function buildScriptCreateArgs(
     args.push('-v', `${volumeName}:${containerPath}:${mode}`);
   }
 
-  // Run as node user (UID 1000)
-  args.push('--user', '1000:1000');
+  // Run as unprivileged user (default UID 1000, configurable for images with different UIDs)
+  args.push('--user', config.user ?? '1000:1000');
 
   // Environment: SCRIPT_INPUTS
   args.push('-e', `SCRIPT_INPUTS=${config.inputsJson}`);
@@ -967,63 +974,81 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
       try {
         if (hasDomains && resolvedPolicy) {
-          // Start → pause → iptables → unpause flow (same as agentic)
+          // Start → pause → iptables → unpause, with attach before unpause to avoid race
           await execFileAsync('docker', ['start', containerId], { timeout: 10_000 });
           await execFileAsync('docker', ['pause', containerId], { timeout: 10_000 });
           await applyNetworkPolicy(containerId, resolvedPolicy, log);
-          await execFileAsync('docker', ['unpause', containerId], { timeout: 10_000 });
-        } else {
-          // No network: just start (detached)
-          await execFileAsync('docker', ['start', containerId], { timeout: 10_000 });
         }
 
-        // Race: docker wait vs timeout
-        const exitCode = await Promise.race([
-          // docker wait returns exit code when container stops
-          execFileAsync('docker', ['wait', containerId], {
-            timeout: timeoutMs + 5_000, // small buffer over script timeout
-          }).then(({ stdout: exitStr }) => parseInt(exitStr.trim(), 10)),
+        // Capture stdout/stderr live via stdio pipes (same pattern as agentic containers).
+        // For network-policy containers: attach while paused, then unpause so we don't miss output.
+        // For no-network containers: `docker start -a` attaches before starting.
+        const attachArgs = hasDomains
+          ? ['attach', '--no-stdin', containerId]
+          : ['start', '-a', containerId];
 
-          // Timeout: force-kill and return -1
-          new Promise<number>((resolve) => {
-            setTimeout(() => {
-              log.warn({ containerId: shortId, timeoutMs }, 'Script timed out');
-              execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 }).catch(() => {
-                /* best effort */
-              });
-              resolve(-1);
-            }, timeoutMs);
-          }),
-        ]);
+        const { exitCode, stdout } = await new Promise<{ exitCode: number; stdout: string }>(
+          (resolve) => {
+            const stdoutChunks: Buffer[] = [];
+            const stderrChunks: Buffer[] = [];
+            let settled = false;
 
-        // Capture stdout (1MB cap)
-        let stdout = '';
-        if (exitCode !== -1) {
-          try {
-            const { stdout: rawStdout } = await execFileAsync(
-              'docker',
-              ['logs', '--stdout', containerId],
-              { timeout: 10_000, maxBuffer: 1024 * 1024 }
-            );
-            stdout = rawStdout;
-          } catch {
-            log.warn({ containerId: shortId }, 'Failed to capture script stdout');
-          }
+            const proc = spawn('docker', attachArgs, {
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
 
-          // Log stderr for diagnostics
-          try {
-            const { stdout: rawStderr } = await execFileAsync(
-              'docker',
-              ['logs', '--stderr', containerId],
-              { timeout: 10_000, maxBuffer: 256 * 1024 }
-            );
-            if (rawStderr.trim()) {
-              log.debug({ containerId: shortId, stderr: rawStderr.trim() }, 'Script stderr');
+            proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+            proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+            // Unpause after attach is wired up (network-policy path only)
+            if (hasDomains) {
+              execFileAsync('docker', ['unpause', containerId], { timeout: 10_000 }).catch(
+                (err: unknown) => {
+                  if (settled) return;
+                  settled = true;
+                  log.warn({ containerId: shortId, error: String(err) }, 'Failed to unpause');
+                  proc.kill('SIGTERM');
+                  resolve({ exitCode: -1, stdout: '' });
+                }
+              );
             }
-          } catch {
-            // Ignore stderr capture failures
+
+            const timer = setTimeout(() => {
+              if (settled) return;
+              settled = true;
+              log.warn({ containerId: shortId, timeoutMs }, 'Script timed out');
+              proc.kill('SIGTERM');
+              execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 }).catch(
+                (_e: unknown) => {
+                  /* best effort */
+                }
+              );
+              resolve({ exitCode: -1, stdout: '' });
+            }, timeoutMs);
+
+            proc.on('close', (code) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              const rawStderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+              if (rawStderr) {
+                log.debug({ containerId: shortId, stderr: rawStderr }, 'Script stderr');
+              }
+              resolve({
+                exitCode: code ?? 0,
+                stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+              });
+            });
+
+            proc.on('error', (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              log.warn({ containerId: shortId, error: err.message }, 'Script attach failed');
+              resolve({ exitCode: -1, stdout: '' });
+            });
           }
-        }
+        );
 
         log.info(
           { containerId: shortId, exitCode, stdoutLength: stdout.length },

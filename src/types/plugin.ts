@@ -523,10 +523,10 @@ export interface BrowserAuthPrimitive {
   startAuth(profile: string, url: string): Promise<BrowserAuthSession>;
 
   /**
-   * Stop a running auth session.
-   * @param containerId - Container ID from startAuth
+   * Stop a running auth session and save the profile.
+   * @param profile - Profile name (matches the profile passed to startAuth)
    */
-  stopAuth(containerId: string): Promise<void>;
+  stopAuth(profile: string): Promise<void>;
 
   /**
    * Check if a browser profile volume already exists.

@@ -47,6 +47,8 @@ export function createBrowserAuthPrimitive(
 ): BrowserAuthPrimitive {
   // Track in-flight background build to avoid duplicate builds
   let backgroundBuildPromise: Promise<boolean> | null = null;
+  // Track active auth container per profile (so stop_auth doesn't need container_id)
+  const activeAuthContainers = new Map<string, string>();
 
   return {
     async startAuth(profile: string, url: string): Promise<BrowserAuthSession> {
@@ -76,6 +78,7 @@ export function createBrowserAuthPrimitive(
       };
 
       const handle = await containerManager.startDetached(config);
+      activeAuthContainers.set(profile, handle.containerId);
 
       // Determine actual host port (from dynamic allocation or fallback)
       const hostPort =
@@ -85,12 +88,17 @@ export function createBrowserAuthPrimitive(
 
       return {
         containerId: handle.containerId,
-        authUrl: `http://localhost:${String(hostPort)}/vnc.html`,
+        authUrl: `http://127.0.0.1:${String(hostPort)}/vnc.html`,
       };
     },
 
-    async stopAuth(containerId: string): Promise<void> {
+    async stopAuth(profile: string): Promise<void> {
+      const containerId = activeAuthContainers.get(profile);
+      if (!containerId) {
+        throw new Error(`No active auth session for profile "${profile}"`);
+      }
       await containerManager.stopDetached(containerId);
+      activeAuthContainers.delete(profile);
     },
 
     async volumeExists(profile: string): Promise<boolean> {

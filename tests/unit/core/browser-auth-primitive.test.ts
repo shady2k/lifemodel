@@ -51,7 +51,7 @@ describe('createBrowserAuthPrimitive', () => {
       const session = await auth.startAuth('telegram', 'https://web.telegram.org');
 
       expect(session.containerId).toBe('abc123def456');
-      expect(session.authUrl).toContain('localhost');
+      expect(session.authUrl).toContain('127.0.0.1');
       expect(session.authUrl).toContain('49152');
       expect(mgr.startDetached).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -114,13 +114,22 @@ describe('createBrowserAuthPrimitive', () => {
   });
 
   describe('stopAuth', () => {
-    it('should stop the container', async () => {
+    it('should stop the container by profile', async () => {
       const mgr = createMockContainerManager();
       const auth = createBrowserAuthPrimitive(mgr);
 
-      await auth.stopAuth('abc123def456');
+      // Must startAuth first to register the container
+      await auth.startAuth('telegram', 'https://web.telegram.org');
+      await auth.stopAuth('telegram');
 
       expect(mgr.stopDetached).toHaveBeenCalledWith('abc123def456');
+    });
+
+    it('should throw if no active auth session', async () => {
+      const mgr = createMockContainerManager();
+      const auth = createBrowserAuthPrimitive(mgr);
+
+      await expect(auth.stopAuth('nonexistent')).rejects.toThrow('No active auth session');
     });
   });
 

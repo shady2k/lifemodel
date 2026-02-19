@@ -147,7 +147,7 @@ const manifest: PluginManifestV2 = {
     maxStorageMB: 50, // 50MB for source configs and state
   },
   // Scripts this plugin can execute (for private group fetching)
-  allowedScripts: ['news.telegram_group.fetch'],
+  allowedScripts: ['news.telegram_group.fetch', 'news.telegram_group.list'],
   // Declarative schedules - managed by core
   schedules: [
     {

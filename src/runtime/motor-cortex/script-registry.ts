@@ -39,11 +39,23 @@ entries.set('test.echo.run', {
  * news.telegram_group.fetch — Fetch messages from a private Telegram group.
  * Uses browser profile for authentication. Runs headless Playwright.
  */
+// Telegram Web A DC subdomains — WebSocket MTProto endpoints.
+// Without these, the SPA loads but can't establish API connections.
+const TELEGRAM_DOMAINS = [
+  'web.telegram.org',
+  'telegram.org',
+  'pluto.web.telegram.org',
+  'venus.web.telegram.org',
+  'aurora.web.telegram.org',
+  'vesta.web.telegram.org',
+  'flora.web.telegram.org',
+];
+
 entries.set('news.telegram_group.fetch', {
   id: 'news.telegram_group.fetch',
   image: BROWSER_IMAGE,
   entrypoint: ['node', '/scripts/telegram-group-fetch.js'],
-  domains: ['web.telegram.org', 'telegram.org'],
+  domains: TELEGRAM_DOMAINS,
   maxTimeoutMs: 120_000,
   lock: {
     keyTemplate: 'browserProfile:${inputs.profile}',
@@ -74,6 +86,49 @@ entries.set('news.telegram_group.fetch', {
       })
     ),
     latestId: z.string().nullable(),
+  }),
+});
+
+/**
+ * news.telegram_group.list — Discover groups/channels from an authenticated Telegram session.
+ * Uses browser profile for authentication. Reads sidebar only (no writes).
+ */
+entries.set('news.telegram_group.list', {
+  id: 'news.telegram_group.list',
+  image: BROWSER_IMAGE,
+  entrypoint: ['node', '/scripts/telegram-group-list.js'],
+  domains: TELEGRAM_DOMAINS,
+  maxTimeoutMs: 60_000,
+  lock: {
+    keyTemplate: 'browserProfile:${inputs.profile}',
+    exclusive: true,
+    waitPolicy: 'fail_fast',
+    waitTimeoutMs: 0,
+    leaseMs: 60_000,
+  },
+  profileVolume: {
+    volumeNamePrefix: 'lifemodel-browser-profile',
+    containerPath: '/profile',
+    mode: 'rw', // Chromium needs write access for lock files and cache
+  },
+  inputSchema: z.object({
+    profile: z.string(),
+  }),
+  outputSchema: z.object({
+    ok: z.boolean(),
+    groups: z.array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        url: z.string(),
+      })
+    ),
+    error: z
+      .object({
+        code: z.string(),
+        message: z.string(),
+      })
+      .optional(),
   }),
 });
 

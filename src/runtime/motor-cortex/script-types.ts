@@ -122,6 +122,15 @@ export interface ScriptContainerConfig {
 
   /** Extra environment variables */
   extraEnv?: Record<string, string> | undefined;
+
+  /** Additional writable tmpfs mounts (e.g., /home/pwuser for Chromium cache) */
+  tmpfs?: string[] | undefined;
+
+  /** Process limit override (default: 64, Chromium needs ~256) */
+  pidsLimit?: number | undefined;
+
+  /** Container user override as "uid:gid" (default: "1000:1000") */
+  user?: string | undefined;
 }
 
 // ─── Script Container Result ─────────────────────────────────

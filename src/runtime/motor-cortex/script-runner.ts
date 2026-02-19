@@ -22,6 +22,7 @@ import type {
   LockService,
 } from './script-types.js';
 import { getScriptEntry } from './script-registry.js';
+import { BROWSER_IMAGE } from '../container/types.js';
 
 const MAX_CONCURRENT_SCRIPTS = 2;
 
@@ -260,6 +261,17 @@ export class ScriptRunner {
         containerPath: entry.profileVolume.containerPath,
         mode: entry.profileVolume.mode,
       };
+    }
+
+    // Browser image scripts need additional writable mounts and higher resource limits:
+    // - /home/pwuser tmpfs: Chromium needs writable cache/lock directories
+    // - pidsLimit 256: Chromium spawns renderer, GPU, network, utility processes (64 is too low)
+    if (entry.image === BROWSER_IMAGE) {
+      config.tmpfs = ['/home/pwuser:rw,nosuid,size=64m'];
+      config.pidsLimit = 256;
+      // Playwright v1.58+ image uses pwuser at UID 1001 (not 1000).
+      // Must match the auth container's user to access profile volume files.
+      config.user = '1001:1001';
     }
 
     return config;

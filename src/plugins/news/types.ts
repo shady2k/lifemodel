@@ -180,6 +180,10 @@ export interface NewsToolResult {
   pagination?: NewsPagination | undefined;
   /** Status for async operations (e.g. 'building_image', 'profile_exists') */
   status?: string | undefined;
+  /** Groups discovered by list_groups action */
+  groups?: { id: string; name: string; url: string }[] | undefined;
+  /** Auth URL when list_groups triggers browser authentication */
+  authUrl?: string | undefined;
 }
 
 /**
