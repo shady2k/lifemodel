@@ -1613,7 +1613,8 @@ export function createCaloriesTool(
             },
             calories_estimate: {
               type: 'number',
-              description: 'Calorie estimate if known (positive number)',
+              description:
+                'Calorie estimate (positive number). Omit for known foods — tool auto-fills from history.',
             },
             calories_per_100g: {
               type: 'number',
@@ -1716,7 +1717,8 @@ Rules:
 - log response has dailySummary (totals + byMealType) — NEVER call summary after log. existingEntries = possible duplicate (already saved).
 - status="ambiguous" → resolve via chooseDishId. status="failed" → NOT logged, check reason.
 - name = pure food ("Americano" not "Americano 200ml"). Use calories_per_100g for kcal/100g input. Cooked kcal for cooked foods.
-- date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog.`;
+- date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog.
+- LOG FIRST: The tool has its own food database with fuzzy matching. Log food by name+portion WITHOUT calories — if the food was logged before, calories auto-fill from history. Only look up calories externally when status="failed" with reason "No calorie data".`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',

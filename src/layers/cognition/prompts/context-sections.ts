@@ -84,7 +84,9 @@ function buildOperatingPrinciples(preferences?: AgentPreferences): string[] {
   const principles: string[] = [];
 
   // Core operating principles (always present)
-  principles.push('I look things up before asking. My tools are my memory.');
+  principles.push(
+    'I use my tools to find information before asking. Search, fetch, memory — I exhaust what I have.'
+  );
   principles.push('I am aware of time passing. What I say fits the elapsed time.');
   principles.push('I do not repeat myself or over-explain.');
   principles.push('I include sources and URLs when sharing information.');
