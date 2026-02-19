@@ -246,6 +246,20 @@ export class AgenticLoop {
         }
       }
 
+      // Inject diagnostic for malformed retry — show the model its failed response
+      // and explain what format is expected, so it can self-correct.
+      if (state.malformedContent) {
+        messages.push(
+          { role: 'assistant', content: state.malformedContent },
+          {
+            role: 'system',
+            content:
+              'Your previous response was invalid. You MUST respond with JSON: {"response": "your message"} — not plain text. Rewrite your response in the correct format.',
+          }
+        );
+        delete state.malformedContent;
+      }
+
       // Set tool budgets for autonomous triggers
       maybeSetProactiveToolBudget(state, context, this.logger);
 
@@ -504,7 +518,12 @@ export class AgenticLoop {
     // Allow plain text for user-facing triggers (user_message, motor_result).
     // Proactive triggers require JSON to prevent prompt leakage — weaker models
     // sometimes echo system instructions as plain text instead of responding.
-    const allowPlainText = shouldAllowPlainText(context.triggerSignal.type);
+    //
+    // Exception: if the model already made tool calls in this tick, plain text is
+    // almost certainly a legitimate response (the model did real work but forgot
+    // the JSON wrapper). Salvage it instead of discarding.
+    const didRealWork = state.toolCallCount > 0;
+    const allowPlainText = shouldAllowPlainText(context.triggerSignal.type) || didRealWork;
     const parseOpts: ParseOptions = { allowPlainText };
     const parsed = parseResponseContent(content, parseOpts);
     const messageText = parsed.text;
@@ -520,8 +539,11 @@ export class AgenticLoop {
         {
           contentLength: content.length,
           contentPreview: content.slice(0, 100),
+          ...(didRealWork && { salvaged: true, toolCallCount: state.toolCallCount }),
         },
-        'Accepted plain-text response (model skipped JSON format)'
+        didRealWork
+          ? 'Salvaged plain-text response from model that made tool calls'
+          : 'Accepted plain-text response (model skipped JSON format)'
       );
     }
 
@@ -537,6 +559,11 @@ export class AgenticLoop {
           },
           'Malformed LLM response detected — retrying with tools'
         );
+        // Inject the failed response + diagnostic so the model can self-correct.
+        // Without this, the model has no idea why it's being retried.
+        if (content) {
+          state.malformedContent = content;
+        }
         // Retry WITH tools (don't strip them via forceRespond).
         // The model may have intended a tool call (e.g. core.defer) but emitted
         // plain text instead. Stripping tools on retry forces a {"response":...}
