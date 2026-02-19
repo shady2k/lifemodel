@@ -14,13 +14,12 @@ description: Research a topic using web search and page fetching. Searches for i
 
 4. **Extract key facts** — From each fetched page, identify the most important facts, data points, and quotes relevant to the research topic.
 
-5. **Synthesize** — Combine findings into a structured summary:
+5. **Synthesize and respond** — Combine findings into a structured summary as your final response:
    - Start with a brief overview (2-3 sentences)
    - Organize findings by subtopic
    - Include specific data, quotes, and facts
    - Cite sources inline as [Source Title](URL)
-
-6. **Write output** — Save the research summary to `research-output.md` using the write tool.
+   - Return the full research as your final text response (do NOT save to a file)
 
 ## Important notes
 

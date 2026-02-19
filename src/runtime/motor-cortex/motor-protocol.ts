@@ -379,4 +379,7 @@ export interface MotorRun {
 
   /** Whether domains from websearch results should be auto-added to allowedDomains */
   autoAllowSearchDomains?: boolean;
+
+  /** Whether this run is for a built-in skill (skip extraction + domain persistence) */
+  isBuiltIn?: boolean;
 }

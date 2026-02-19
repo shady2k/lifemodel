@@ -524,8 +524,9 @@ export function createActTool(deps: ActToolDeps): Tool {
             ...(workspacePath && { workspacePath }),
             // Skill name (for extraction middleware)
             ...(skillName && { skillName }),
-            // Builtin skills get auto-allowed search domains
+            // Builtin skills get auto-allowed search domains and skip extraction
             ...(loadedSkill?.isBuiltIn && { autoAllowSearchDomains: true }),
+            ...(loadedSkill?.isBuiltIn && { isBuiltIn: true }),
           });
 
           // Note: Auto-discovery mode - no index.json to update

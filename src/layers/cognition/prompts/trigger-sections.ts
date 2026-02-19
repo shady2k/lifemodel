@@ -468,8 +468,19 @@ export function buildMotorResultSection(data: MotorResultData): string {
         context += ` ${createdStr} ${updatedStr} These are installed with status: "pending_review" and need user approval.`;
       }
 
+      // Build artifacts hint (if any files were produced)
+      const artifacts = result?.artifacts;
+      const hasArtifacts = artifacts && artifacts.length > 0;
+      if (hasArtifacts) {
+        context += ` Artifacts available: [${artifacts.join(', ')}].`;
+      }
+
       // Build task
       let task = `Report the result to the user. Include the run ID (${runId}) so the user can reference it.`;
+      if (hasArtifacts) {
+        task += `\nArtifacts produced: ${artifacts.join(', ')}. To read: core.task(action:"artifact", runId:"${runId}", path:"<filename>").`;
+        task += '\nIf the summary references a file, read it before responding to the user.';
+      }
       if (
         installedSkills &&
         (installedSkills.created.length > 0 || installedSkills.updated.length > 0)

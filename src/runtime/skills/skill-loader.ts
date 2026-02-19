@@ -588,6 +588,54 @@ export async function loadSkill(
 }
 
 /**
+ * Remove Motor-extracted built-in skill overrides from the user skills directory.
+ *
+ * When Motor Cortex runs a built-in skill, extractSkillsFromWorkspace used to
+ * copy workspace files into data/skills/, creating an override that shadows the
+ * built-in and loses the isBuiltIn flag. This function removes those overrides
+ * if their policy.provenance.source === "motor-cortex" (preserves intentional
+ * user overrides).
+ *
+ * @param skillsDir - User skills directory (data/skills/)
+ * @param builtinDir - Built-in skills directory (src/runtime/builtin-skills/)
+ * @param logger - Logger for diagnostics
+ */
+export async function cleanBuiltinOverrides(
+  skillsDir: string,
+  builtinDir: string,
+  logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
+): Promise<void> {
+  let builtinNames: string[];
+  try {
+    const entries = await readdir(builtinDir, { withFileTypes: true });
+    builtinNames = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return; // Builtin dir doesn't exist — nothing to clean
+  }
+
+  for (const name of builtinNames) {
+    try {
+      const userSkillDir = join(skillsDir, name);
+      const policy = await loadPolicy(userSkillDir);
+      if (!policy) continue;
+
+      // Only remove if provenance indicates Motor-extracted (not user-created)
+      const provenance = policy.provenance as { source?: string } | undefined;
+      if (provenance?.source !== 'motor-cortex') continue;
+
+      const { rm } = await import('node:fs/promises');
+      await rm(userSkillDir, { recursive: true, force: true });
+      logger.info({ skill: name }, 'Removed Motor-extracted override of built-in skill');
+    } catch (err) {
+      logger.warn(
+        { skill: name, error: err instanceof Error ? err.message : String(err) },
+        'Failed to clean built-in override (non-fatal)'
+      );
+    }
+  }
+}
+
+/**
  * Validate provided inputs against a skill's input schema.
  *
  * @param skill - Loaded skill with input definitions

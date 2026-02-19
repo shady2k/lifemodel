@@ -367,6 +367,9 @@ export class MotorCortex {
 
     /** Whether domains from websearch results should be auto-added to allowedDomains */
     autoAllowSearchDomains?: boolean;
+
+    /** Whether this run is for a built-in skill (skip extraction + domain persistence) */
+    isBuiltIn?: boolean;
   }): Promise<{ runId: string; status: 'created' }> {
     // Check mutex - only one agentic run at a time
     const activeRun = await this.stateManager.getActiveRun();
@@ -421,6 +424,7 @@ export class MotorCortex {
       ...(params.skillName && { skill: params.skillName }),
       ...(params.skillReview && { skillReview: true }),
       ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
+      ...(params.isBuiltIn && { isBuiltIn: true }),
     };
 
     // Create initial attempt (index 0, no recovery context)
@@ -702,7 +706,14 @@ export class MotorCortex {
       // Post-loop skill extraction (middleware logic)
       // Motor Cortex is now a pure runtime — extraction happens after loop completes
       // Uses output from copyWorkspaceOut, not the staging workspace
-      if (this.skillsDir && outputDir && (run.status as string) === 'completed' && run.result?.ok) {
+      // Built-in skills skip extraction — their files live in src/runtime/builtin-skills/
+      if (
+        this.skillsDir &&
+        outputDir &&
+        !run.isBuiltIn &&
+        (run.status as string) === 'completed' &&
+        run.result?.ok
+      ) {
         try {
           const extractionResult = await extractSkillsFromWorkspace(
             outputDir,
@@ -739,16 +750,27 @@ export class MotorCortex {
           const artifactsDir = join(this.artifactsBaseDir, run.id, 'artifacts');
           const { readdir, cp: cpFiles, mkdir: mkdirFiles } = await import('node:fs/promises');
           const outputFiles = await readdir(outputDir);
-          if (outputFiles.length > 0) {
+          // Filter out dotfiles from artifact list (e.g. .motor-baseline.json)
+          const visibleFiles = outputFiles.filter((f) => !f.startsWith('.'));
+          if (visibleFiles.length > 0) {
             await mkdirFiles(artifactsDir, { recursive: true });
-            // Filter out .motor-output/ from artifact copy (truncation spillover files)
+            // Filter out .motor-output/ and dotfiles/dotdirs from artifact copy
             const truncDirAbsolute = join(outputDir, TRUNCATION_DIR) + '/';
+            const { basename: pathBasename } = await import('node:path');
             await cpFiles(outputDir, artifactsDir, {
               recursive: true,
-              filter: (src: string) =>
-                src !== truncDirAbsolute.slice(0, -1) && !src.startsWith(truncDirAbsolute),
+              filter: (src: string) => {
+                const name = pathBasename(src);
+                // Allow the root outputDir itself
+                if (src === outputDir) return true;
+                // Skip dotfiles/dotdirs and truncation spillover
+                if (name.startsWith('.')) return false;
+                if (src === truncDirAbsolute.slice(0, -1) || src.startsWith(truncDirAbsolute))
+                  return false;
+                return true;
+              },
             });
-            run.result.artifacts = outputFiles;
+            run.result.artifacts = visibleFiles;
             this.logger.debug({ artifacts: outputFiles, artifactsDir }, 'Artifacts persisted');
           }
         } catch (error) {
@@ -781,6 +803,7 @@ export class MotorCortex {
                   ok: run.result.ok,
                   summary: run.result.summary,
                   stats: run.result.stats,
+                  ...(run.result.artifacts && { artifacts: run.result.artifacts }),
                   ...(run.result.installedSkills && {
                     installedSkills: run.result.installedSkills,
                   }),
@@ -1175,7 +1198,8 @@ export class MotorCortex {
       }
 
       // Persist approved domains to skill policy.json so future runs don't need re-approval.
-      if (run.skill && this.skillsDir && effectiveDomains.length > 0) {
+      // Built-in skills don't have user-dir policies — skip persistence.
+      if (run.skill && this.skillsDir && !run.isBuiltIn && effectiveDomains.length > 0) {
         try {
           const { loadPolicy, savePolicy } = await import('../skills/skill-loader.js');
           const { join } = await import('node:path');

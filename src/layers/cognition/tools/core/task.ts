@@ -10,8 +10,8 @@
 import type { Tool } from '../types.js';
 import { validateAgainstParameters } from '../validation.js';
 import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.js';
-import { readFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { join, resolve, sep, isAbsolute } from 'node:path';
 
 /**
  * Create the core.task tool.
@@ -22,9 +22,9 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
       name: 'action',
       type: 'string' as const,
       description:
-        'Action: list (all runs), status (one run), cancel, respond, approve, log (view run log), retry (retry failed run with guidance)',
+        'Action: list (all runs), status (one run), cancel, respond, approve, log (view run log), retry (retry failed run with guidance), artifact (read run artifacts)',
       required: true,
-      enum: ['list', 'status', 'cancel', 'respond', 'approve', 'log', 'retry'] as const,
+      enum: ['list', 'status', 'cancel', 'respond', 'approve', 'log', 'retry', 'artifact'] as const,
     },
     {
       name: 'runId',
@@ -85,12 +85,19 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
         'Optional additional network domains to allow (for respond or retry actions). Merged with existing run domains. Use when the sub-agent asked for network access via ask_user.',
       required: false,
     },
+    {
+      name: 'path',
+      type: 'string' as const,
+      description:
+        'File path within artifacts dir (for artifact action). Omit to list available artifacts.',
+      required: false,
+    },
   ];
 
   return {
     name: 'core.task',
     description:
-      'Manage Motor Cortex runs. list: show all runs (filterable by status). status: get details of one run. cancel: stop a running run. respond: answer a question from an awaiting_input run. log: view execution log for a run. retry: retry a failed run with corrective guidance.',
+      'Manage Motor Cortex runs. list: show all runs (filterable by status). status: get details of one run. cancel: stop a running run. respond: answer a question from an awaiting_input run. log: view execution log for a run. retry: retry a failed run with corrective guidance. artifact: list or read files produced by a run.',
     tags: ['motor', 'control'],
     hasSideEffects: true,
     parameters,
@@ -387,10 +394,140 @@ export function createTaskTool(motorCortex: MotorCortex, artifactsBaseDir?: stri
           }
         }
 
+        case 'artifact': {
+          const runId = args['runId'] as string;
+          const filePath = args['path'] as string | undefined;
+          if (!runId) {
+            return {
+              success: false,
+              error: 'Missing required parameter: runId (for artifact action)',
+            };
+          }
+          if (!artifactsBaseDir) {
+            return {
+              success: false,
+              error: 'Artifacts are not configured (no artifacts base dir)',
+            };
+          }
+
+          // Validate run exists (prevents path traversal via unknown runId)
+          const run = await motorCortex.getRunStatus(runId);
+          if (!run) {
+            return {
+              success: false,
+              error: `Run not found: ${runId}`,
+            };
+          }
+
+          const artifactRoot = resolve(artifactsBaseDir, runId, 'artifacts');
+
+          if (!filePath) {
+            // List mode: recursive scan of artifacts dir
+            try {
+              const files: string[] = [];
+              const walk = async (dir: string, rel: string): Promise<void> => {
+                const entries = await readdir(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                  // Skip dotfiles/dotdirs (e.g. .motor-baseline.json)
+                  if (entry.name.startsWith('.')) continue;
+                  const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+                  if (entry.isDirectory()) {
+                    await walk(join(dir, entry.name), relPath);
+                  } else {
+                    files.push(relPath);
+                  }
+                }
+              };
+              await walk(artifactRoot, '');
+              return {
+                success: true,
+                data: { runId, artifacts: files },
+              };
+            } catch {
+              return {
+                success: true,
+                data: { runId, artifacts: [] },
+              };
+            }
+          }
+
+          // Read mode: read a specific artifact file
+          // Reject absolute paths
+          if (isAbsolute(filePath)) {
+            return {
+              success: false,
+              error: 'Artifact path must be relative, not absolute',
+            };
+          }
+
+          const resolved = resolve(artifactRoot, filePath);
+          if (!resolved.startsWith(artifactRoot + sep)) {
+            return {
+              success: false,
+              error: 'Invalid artifact path (traversal rejected)',
+            };
+          }
+
+          try {
+            const fileStat = await stat(resolved);
+            const totalBytes = fileStat.size;
+            const MAX_ARTIFACT_SIZE = 32 * 1024;
+
+            const { createReadStream } = await import('node:fs');
+            const content = await new Promise<string>((res, rej) => {
+              const chunks: Buffer[] = [];
+              let bytesRead = 0;
+              const stream = createReadStream(resolved, {
+                start: 0,
+                end: MAX_ARTIFACT_SIZE - 1,
+              });
+              stream.on('data', (chunk: Buffer) => {
+                chunks.push(chunk);
+                bytesRead += chunk.length;
+              });
+              stream.on('end', () => {
+                const buf = Buffer.concat(chunks, bytesRead);
+                // Check for binary content (null bytes in first 512 bytes)
+                const sample = buf.subarray(0, Math.min(512, buf.length));
+                if (sample.includes(0)) {
+                  rej(new Error('not_text_artifact'));
+                  return;
+                }
+                res(buf.toString('utf-8'));
+              });
+              stream.on('error', rej);
+            });
+
+            const truncated = totalBytes > MAX_ARTIFACT_SIZE;
+            return {
+              success: true,
+              data: {
+                content,
+                path: filePath,
+                truncated,
+                bytesRead: Math.min(totalBytes, MAX_ARTIFACT_SIZE),
+                totalBytes,
+              },
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (message === 'not_text_artifact') {
+              return {
+                success: false,
+                error: 'Binary artifact — cannot display as text',
+              };
+            }
+            return {
+              success: false,
+              error: `Artifact not found: ${filePath}`,
+            };
+          }
+        }
+
         default:
           return {
             success: false,
-            error: `Unknown action: ${action}. Use list, status, cancel, respond, approve, retry, or log.`,
+            error: `Unknown action: ${action}. Use list, status, cancel, respond, approve, retry, artifact, or log.`,
           };
       }
     },
