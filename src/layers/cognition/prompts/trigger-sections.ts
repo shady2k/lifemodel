@@ -92,7 +92,7 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 IMPORTANT: The conversation above is FINISHED. You are NOT continuing it. You are starting fresh contact.
 Do NOT reference, summarize, or follow up on anything from the conversation history above (food, reminders, tasks, etc.). The user already received those responses.
-Check <msg_time> tags — if the last conversation was recent, strongly prefer deferring.
+Consider <msg_time> tags to be aware of conversation timing when deciding what to do.
 
 Choose ONE action:
 • Act on a desire: Check <active_desires> section. Pick one you genuinely want. If you have tools to pursue it (web search, memory, skills) — DO THE RESEARCH FIRST, then share what you found. Don't ask the user for permission to look things up. {"response": "what you found or learned"}
