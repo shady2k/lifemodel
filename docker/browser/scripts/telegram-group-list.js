@@ -157,7 +157,7 @@ async function main() {
     //   .Chat.group — group chats and channels
     //   .Chat.forum — forum-style supergroups
     //   .Chat.private — direct messages
-    // The peer ID is embedded in the <a> href (e.g., href="#-1002189921033").
+    // The peer ID is embedded in the <a> href (e.g., href="#-100XXXXXXXXXX").
     const groups = await page.evaluate(() => {
       const results = [];
       const seen = new Set();

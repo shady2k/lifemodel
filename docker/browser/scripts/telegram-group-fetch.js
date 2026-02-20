@@ -21,8 +21,8 @@ const path = require('path');
 const DEFAULT_MAX_MESSAGES = 50;
 const NAV_TIMEOUT_MS = 30_000;
 const EXTRACT_TIMEOUT_MS = 30_000;
-const SCROLL_SETTLE_MS = 2000;
-const SCROLL_MAX_RETRIES = 3;
+const SCROLL_SETTLE_MS = 3000;
+const SCROLL_MAX_RETRIES = 5;
 const PROFILE_DIR = '/profile';
 
 /**
@@ -53,14 +53,24 @@ async function getMaxVisibleId(page) {
 }
 
 /**
- * Scroll the chat to the latest messages so that virtual scrolling renders
- * posts beyond lastSeenId. Uses three strategies in order:
- * 1. Click the "scroll to bottom" FAB (Telegram shows this when scrolled up)
- * 2. Press End key (Telegram Web A handles this as "jump to latest")
- * 3. Raw scrollTop on the messages container
+ * Scroll the chat to the latest messages.
  *
- * After each attempt, checks whether new messages appeared. Retries up to
- * SCROLL_MAX_RETRIES times. Proceeds gracefully if scrolling fails.
+ * Telegram Web A does NOT load new messages on scroll — it loads messages
+ * around a "focused message ID". When a chat opens, it focuses on the
+ * last-read position. To get the truly latest messages, we must click the
+ * "Go to bottom" FAB button, which triggers:
+ *   focusLastMessage() → focusMessage() → loadViewportMessages() → API fetch
+ *
+ * The FAB is identified by its stable icon class `i.icon-arrow-down` inside
+ * a <button> with aria-label "Go to bottom". CSS-module classes on the button
+ * itself are obfuscated and change every build, so we avoid them.
+ *
+ * Strategies (in order):
+ * 1. Click the "Go to bottom" FAB (icon-arrow-down) — triggers server fetch
+ * 2. Click message area + press End key — fallback for keyboard navigation
+ * 3. Native mouse.wheel() events — last resort for scroll-based loading
+ *
+ * Retries up to SCROLL_MAX_RETRIES times. Proceeds gracefully if all fail.
  */
 async function scrollToLatest(page, lastSeenId) {
   const lastId = lastSeenId ? parseInt(lastSeenId, 10) : null;
@@ -74,109 +84,63 @@ async function scrollToLatest(page, lastSeenId) {
     return;
   }
 
-  // Dump DOM structure for diagnostics
-  const domInfo = await page.evaluate(() => {
-    const bubbles = document.querySelector('.bubbles');
-    const bubblesInner = document.querySelector('.bubbles-inner');
-    const scrollable = document.querySelector('.bubbles .scrollable');
-    const chatBubbles = document.querySelector('.chat .bubbles');
-    // Try to find the actual scroll container
-    const allScrollable = document.querySelectorAll('[class*="scrollable"]');
-    const scrollableInfo = Array.from(allScrollable).map(el => ({
-      tag: el.tagName,
-      classes: el.className.substring(0, 100),
-      scrollTop: el.scrollTop,
-      scrollHeight: el.scrollHeight,
-      clientHeight: el.clientHeight,
-    }));
-    // Look for go-down button with broader search
-    const allButtons = document.querySelectorAll('button');
-    const buttonClasses = Array.from(allButtons).map(b => b.className.substring(0, 60)).filter(c => c);
-    return {
-      hasBubbles: !!bubbles,
-      hasBubblesInner: !!bubblesInner,
-      hasScrollable: !!scrollable,
-      hasChatBubbles: !!chatBubbles,
-      scrollableElements: scrollableInfo,
-      buttonClasses: buttonClasses.slice(0, 20),
-      url: window.location.href,
-    };
-  });
-  dbg(`DOM info: ${JSON.stringify(domInfo)}`);
-
   for (let attempt = 0; attempt < SCROLL_MAX_RETRIES; attempt++) {
     dbg(`Attempt ${attempt + 1}/${SCROLL_MAX_RETRIES}`);
 
-    // Strategy 1: Click the scroll-to-bottom FAB button
-    const fabResult = await page.evaluate(() => {
-      // Telegram Web A uses various class names for this button
-      const selectors = [
-        '.bubbles-go-down',
-        'button.bubbles-go-down',
-        '[class*="go-down"]',
-        '[class*="GoDown"]',
-        '[class*="scroll-down"]',
-        '[class*="ScrollDown"]',
-        'button.scroll-down-button',
-        '.ScrollDownButton',
-        '.btn-circle.btn-corner.bubbles-corner-button',
-      ];
-      for (const sel of selectors) {
-        const btn = document.querySelector(sel);
+    // Strategy 1: Click the "Go to bottom" FAB button.
+    // Telegram Web A renders this inside FloatingActionButtons with a stable
+    // icon class (icon-arrow-down). The aria-label varies by locale, so we
+    // prefer the icon selector but try aria-label as fallback.
+    const fabClicked = await page.evaluate(() => {
+      // Primary: find button containing the arrow-down icon
+      const icon = document.querySelector('i.icon-arrow-down');
+      if (icon) {
+        const btn = icon.closest('button');
         if (btn) {
           btn.click();
-          return { clicked: true, selector: sel, classes: btn.className };
+          return { clicked: true, method: 'icon', ariaLabel: btn.getAttribute('aria-label') || '' };
         }
+        // Icon exists but no button parent — click the icon's parent directly
+        icon.parentElement?.click();
+        return { clicked: true, method: 'icon-parent' };
+      }
+      // Fallback: aria-label (may be localized)
+      const ariaBtn = document.querySelector(
+        'button[aria-label="Go to bottom"], button[aria-label="Перейти вниз"]'
+      );
+      if (ariaBtn) {
+        ariaBtn.click();
+        return { clicked: true, method: 'aria-label', ariaLabel: ariaBtn.getAttribute('aria-label') || '' };
       }
       return { clicked: false };
     });
-    dbg(`FAB result: ${JSON.stringify(fabResult)}`);
+    dbg(`FAB click: ${JSON.stringify(fabClicked)}`);
 
-    if (!fabResult.clicked) {
-      // Strategy 2: Press End key
-      dbg('Pressing End key');
+    if (!fabClicked.clicked) {
+      // Strategy 2: Click message area to focus it, then press End
+      const msgEl = await page.$('.Message[data-message-id]');
+      if (msgEl) {
+        try {
+          await msgEl.click({ force: true });
+        } catch { /* ok */ }
+      }
+      dbg('Pressing End key (after focusing message area)');
       await page.keyboard.press('End');
 
-      // Strategy 3: Raw scroll fallback — find scrollable containers and scroll them
-      const scrollResult = await page.evaluate(() => {
-        const results = [];
-        // Try specific known containers
-        const candidates = [
-          document.querySelector('.bubbles'),
-          document.querySelector('.bubbles-inner'),
-          document.querySelector('#column-center .scrollable'),
-          document.querySelector('.messages-container'),
-          document.querySelector('.chat .bubbles'),
-        ];
-        // Also try any scrollable element with significant scroll area
-        const allScrollable = document.querySelectorAll('[class*="scrollable"], [class*="bubbles"]');
-        for (const el of allScrollable) {
-          if (el && !candidates.includes(el)) candidates.push(el);
-        }
-        for (const c of candidates) {
-          if (c && c.scrollHeight > c.clientHeight) {
-            const before = c.scrollTop;
-            c.scrollTop = c.scrollHeight;
-            results.push({
-              classes: c.className.substring(0, 80),
-              before,
-              after: c.scrollTop,
-              scrollHeight: c.scrollHeight,
-              clientHeight: c.clientHeight,
-            });
-          }
-        }
-        return results;
-      });
-      dbg(`Scroll result: ${JSON.stringify(scrollResult)}`);
+      // Strategy 3: Native mouse.wheel() — real browser-level input events
+      dbg('Dispatching native wheel events');
+      for (let i = 0; i < 5; i++) {
+        await page.mouse.wheel(0, 3000);
+        await page.waitForTimeout(300);
+      }
     }
 
-    // Wait for Telegram to render new messages after scrolling
+    // Wait for Telegram to fetch and render new messages from the server
     await page.waitForTimeout(SCROLL_SETTLE_MS);
 
     // Check if we now have messages beyond lastSeenId
     const newMax = await getMaxVisibleId(page);
-    dbg(`After scroll: maxVisible=${newMax}`);
+    dbg(`After attempt: maxVisible=${newMax}`);
     if (lastId !== null && newMax !== null && newMax > lastId) {
       dbg('Success — new messages visible');
       return;
