@@ -1577,7 +1577,8 @@ export function createCaloriesTool(
       },
       entries: {
         type: 'array',
-        description: 'Array of food entries for log action',
+        description:
+          'REQUIRED for log action. Array of food items: [{name, portion: {quantity, unit}, calories_per_100g?, meal_type?}]',
         items: {
           type: 'object',
           properties: {
@@ -1689,15 +1690,15 @@ export function createCaloriesTool(
       },
       name: {
         type: 'string',
-        description: 'Name for fuzzy dish matching (update_dish action)',
+        description: 'update_dish only: fuzzy dish matching by name',
       },
       new_name: {
         type: 'string',
-        description: 'New name for update_dish action',
+        description: 'update_dish only: rename dish',
       },
       new_basis: {
         type: 'object',
-        description: 'New nutritional basis for update_dish action',
+        description: 'update_dish only: new nutritional basis',
         properties: {
           caloriesPer: { type: 'number' },
           perQuantity: { type: 'number' },
@@ -1749,7 +1750,7 @@ Rules:
         name: 'entries',
         type: 'array',
         description:
-          'Array of food entries for log action. Each: {name, portion?: {quantity, unit}, calories_estimate?, calories_per_100g?, meal_type?, chooseDishId?}',
+          'REQUIRED for log action. Array of food items: [{name, portion: {quantity, unit}, calories_per_100g?, meal_type?}]',
         required: false,
       },
       {
@@ -1825,20 +1826,20 @@ Rules:
       {
         name: 'name',
         type: 'string',
-        description: 'Name for fuzzy dish matching (update_dish action)',
+        description: 'update_dish only: fuzzy dish matching by name',
         required: false,
       },
       {
         name: 'new_name',
         type: 'string',
-        description: 'New name for update_dish action',
+        description: 'update_dish only: rename dish',
         required: false,
       },
       {
         name: 'new_basis',
         type: 'object',
         description:
-          'New nutritional basis for update_dish action: { caloriesPer, perQuantity, perUnit }',
+          'update_dish only: new nutritional basis { caloriesPer, perQuantity, perUnit }',
         required: false,
       },
     ],
@@ -1869,7 +1870,11 @@ Rules:
         const entriesRaw = a['entries'];
         // Allow null (strict mode) but not missing when action is log
         if (entriesRaw === null || entriesRaw === undefined) {
-          return { success: false, error: 'entries: required for log action' };
+          return {
+            success: false,
+            error:
+              'entries: required for log action. Example: entries: [{"name": "Pizza", "portion": {"quantity": 280, "unit": "g"}, "calories_per_100g": 300}]',
+          };
         }
         const parsed = parseLogEntries(entriesRaw);
         if (!parsed.success) {
