@@ -1290,13 +1290,16 @@ export class PluginLoader {
         const offset = Math.max(0, options?.offset ?? 0);
         const minConfidence = options?.minConfidence ?? 0.3;
 
+        // Merge plugin-provided metadata filters with core-enforced pluginId
+        const mergedMetadata: Record<string, string> = { pluginId, ...options?.metadata };
+
         const result = await withCaller(`plugin:${pluginId}:search`, () =>
           mp.search(query, {
             types: ['fact'], // Enforced: plugins can only search facts
             limit,
             offset,
             minConfidence,
-            metadata: { pluginId }, // Filter at search level, not post-pagination
+            metadata: mergedMetadata,
           })
         );
 

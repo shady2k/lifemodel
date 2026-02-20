@@ -525,19 +525,16 @@ async function getNews(
   // If query is provided or source filter is set, search all urgency levels
   const effectiveType: NewsType = newsType ?? (searchQuery || sourceId ? 'all' : 'interesting');
 
-  // When filtering by source, fetch more since most results will be filtered out
-  const fetchMultiplier = sourceId ? 10 : 2;
+  // Pass source filter to the store level so it's applied before scoring/pagination
+  const metadataFilter = sourceId ? { source: sourceId } : undefined;
   const result = await memorySearch.searchOwnFacts(searchQuery, {
-    limit: limit * fetchMultiplier,
+    limit: limit * 2, // Fetch extra since we'll filter by type
     offset,
     minConfidence: 0.1, // Lower threshold to include filtered noise if needed
+    metadata: metadataFilter,
   });
 
-  // Filter by source if specified
   let filtered = result.entries;
-  if (sourceId) {
-    filtered = filtered.filter((e) => e.metadata['source'] === sourceId);
-  }
 
   // Filter by news type based on metadata.eventKind
   if (effectiveType !== 'all') {
