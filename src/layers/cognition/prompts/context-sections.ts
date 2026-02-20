@@ -518,12 +518,12 @@ export function buildActiveDesiresSection(context: LoopContext): string | null {
   const lines = sorted.map((d) => {
     const intensityLabel = d.intensity > 0.7 ? ' (strong)' : d.intensity > 0.4 ? '' : ' (mild)';
     const sourceNote = d.source === 'user_signal' ? ' [from conversation]' : '';
-    return `- "${d.want}"${intensityLabel}${sourceNote}`;
+    return `- id=${d.id} | "${d.want}"${intensityLabel}${sourceNote}`;
   });
 
   return `<active_desires>
 ${lines.join('\n')}
-Things you genuinely want. Pick one to act on, or defer.
+Act on one naturally, or defer. Never expose internal concepts (desires, pressure) in messages — just act.
 </active_desires>`;
 }
 

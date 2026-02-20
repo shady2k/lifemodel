@@ -79,9 +79,7 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
   // Build desires hint (Phase 6: Lightweight Desires)
   const desires = context.activeDesires;
   const desireHint =
-    desires && desires.length > 0
-      ? '\nYou have active desires. Consider acting on one of them.'
-      : '';
+    desires && desires.length > 0 ? '\nYou have things you want to do. See <active_desires>.' : '';
 
   return `<trigger type="proactive_contact">
 <context>
@@ -95,7 +93,7 @@ Do NOT reference, summarize, or follow up on anything from the conversation hist
 Consider <msg_time> tags to be aware of conversation timing when deciding what to do.
 
 Choose ONE action:
-• Act on a desire: Check <active_desires> section. Pick one you genuinely want. If you have tools to pursue it (web search, memory, skills) — DO THE RESEARCH FIRST, then share what you found. Don't ask the user for permission to look things up. {"response": "what you found or learned"}
+• Act on a desire: Check <active_desires>. Before acting, use tools (core.memory search, core.state) to verify the desire isn't already fulfilled. If already done, resolve it with core.desire(action:"resolve", desireId:"<id>") and pick a different action. If not done, DO THE RESEARCH FIRST with your tools, then share what you found. {"response": "what you found or learned"}
 • Share something relevant: Use plugin_webSearch or core.memory({action:"search", types:["fact"], tags:["<interest_topic>"]}) to find related news/facts, then share what you find with {"response": "message with URL"}. Skip if nothing interesting found.
 • Ask a curious question: Something you genuinely want to know about them or their interests. {"response": "your question"}
 • Different topic: Check in about their day, share a thought, start fresh. {"response": "your message"}
