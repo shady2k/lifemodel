@@ -81,6 +81,7 @@ const articleBatchSchema = z.object({
     ),
     sourceId: z.string(),
     fetchedAt: z.date(),
+    sourceType: z.enum(['rss', 'telegram', 'telegram-group']).optional(),
   }),
 });
 
@@ -806,6 +807,13 @@ async function fetchAllTelegramGroupSources(
 async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   const { storage, logger, intentEmitter, scriptRunner } = primitives;
 
+  // Build sourceId → sourceType map for signal tagging
+  const allSources = await loadSources(storage);
+  const sourceTypeMap = new Map<string, 'rss' | 'telegram' | 'telegram-group'>();
+  for (const s of allSources) {
+    sourceTypeMap.set(s.id, s.type);
+  }
+
   // Fetch RSS, Telegram, and Telegram group sources in parallel
   const [rssResult, telegramResult, groupResult] = await Promise.all([
     fetchAllRssSources(storage, logger),
@@ -902,6 +910,7 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
         articles,
         sourceId,
         fetchedAt: new Date(),
+        sourceType: sourceTypeMap.get(sourceId),
       },
     });
 

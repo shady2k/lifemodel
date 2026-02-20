@@ -184,6 +184,8 @@ export interface NewsToolResult {
   groups?: { id: string; name: string; url: string }[] | undefined;
   /** Auth URL when list_groups triggers browser authentication */
   authUrl?: string | undefined;
+  /** Number of new articles found during refresh_source */
+  newArticleCount?: number | undefined;
 }
 
 /**

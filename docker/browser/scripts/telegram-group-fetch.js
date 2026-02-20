@@ -14,12 +14,13 @@
  */
 
 const { chromium } = require('playwright');
+const { waitForReady } = require('./wait-ready');
 const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_MAX_MESSAGES = 50;
 const NAV_TIMEOUT_MS = 30_000;
-const EXTRACT_TIMEOUT_MS = 15_000;
+const EXTRACT_TIMEOUT_MS = 30_000;
 const PROFILE_DIR = '/profile';
 
 /**
@@ -58,6 +59,9 @@ async function main() {
   // Clean stale locks from previous container runs
   cleanStaleLocks();
 
+  // Wait for host to apply network policy (iptables) before any network access
+  await waitForReady();
+
   let context;
   try {
     context = await chromium.launchPersistentContext(PROFILE_DIR, {
@@ -78,8 +82,8 @@ async function main() {
       timeout: NAV_TIMEOUT_MS,
     });
 
-    // Wait for SPA to render
-    await page.waitForTimeout(3000);
+    // Wait for SPA to render (Telegram Web A needs time for MTProto sync)
+    await page.waitForTimeout(8000);
 
     // Detect auth failure: URL-based + UI element check
     // Telegram Web A shows QR login at the root URL without redirect
@@ -103,8 +107,9 @@ async function main() {
     }
 
     // Wait for the message list to appear
+    // Telegram Web A uses .Message.message-list-item with data-message-id
     try {
-      await page.waitForSelector('.message, .Message, [class*="message"]', {
+      await page.waitForSelector('.Message[data-message-id]', {
         timeout: EXTRACT_TIMEOUT_MS,
       });
     } catch {
@@ -123,40 +128,41 @@ async function main() {
     }
 
     // Extract messages from the DOM
-    // Telegram Web A and Web K have different DOM structures — try multiple selectors
+    // Telegram Web A: .Message[data-message-id] with .text-content for text,
+    // .sender-title for author, .message-time for timestamp.
+    // Note: .MessageMeta (containing .message-time) is INSIDE .text-content,
+    // so we must strip it before reading text to avoid time contamination.
     const messages = await page.evaluate(({ maxMsgs, lastId }) => {
       const results = [];
 
-      // Try Telegram Web K selectors first, then Web A
-      const messageElements =
-        document.querySelectorAll('.message[data-mid]').length > 0
-          ? document.querySelectorAll('.message[data-mid]')
-          : document.querySelectorAll('[class*="Message"][data-message-id], .bubble[data-mid]');
-
+      const messageElements = document.querySelectorAll('.Message[data-message-id]');
       const elements = Array.from(messageElements).slice(-maxMsgs);
 
       for (const el of elements) {
-        const id = el.getAttribute('data-mid') || el.getAttribute('data-message-id') || '';
+        const id = el.getAttribute('data-message-id') || '';
         if (!id) continue;
 
         // Skip messages we've already seen
         if (lastId && parseInt(id, 10) <= parseInt(lastId, 10)) continue;
 
-        const textEl =
-          el.querySelector('.text-content, .message-text, [class*="text-content"]');
-        const text = textEl ? textEl.textContent.trim() : '';
+        // Extract text, stripping the embedded MessageMeta (time) span
+        const textEl = el.querySelector('.text-content');
+        let text = '';
+        if (textEl) {
+          const clone = textEl.cloneNode(true);
+          clone.querySelectorAll('.MessageMeta').forEach(m => m.remove());
+          text = clone.textContent.trim();
+        }
 
-        const dateEl = el.querySelector('.time, .message-time, time, [class*="time"]');
-        const dateAttr = dateEl
-          ? dateEl.getAttribute('datetime') || dateEl.getAttribute('title') || dateEl.textContent.trim()
+        const timeEl = el.querySelector('.message-time');
+        const date = timeEl
+          ? timeEl.getAttribute('datetime') || timeEl.getAttribute('title') || timeEl.textContent.trim()
           : '';
 
-        const fromEl = el.querySelector(
-          '.peer-title, .sender-title, .name, [class*="sender"]'
-        );
+        const fromEl = el.querySelector('.sender-title');
         const from = fromEl ? fromEl.textContent.trim() : '';
 
-        results.push({ id, text, date: dateAttr, from });
+        results.push({ id, text, date, from });
       }
 
       return results;

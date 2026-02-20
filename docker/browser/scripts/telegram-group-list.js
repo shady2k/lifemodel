@@ -14,6 +14,7 @@
  */
 
 const { chromium } = require('playwright');
+const { waitForReady } = require('./wait-ready');
 const fs = require('fs');
 const path = require('path');
 
@@ -56,6 +57,9 @@ async function main() {
   // Clean stale locks from previous container runs
   cleanStaleLocks();
 
+  // Wait for host to apply network policy (iptables) before any network access
+  await waitForReady();
+
   let context;
   try {
     context = await chromium.launchPersistentContext(PROFILE_DIR, {
@@ -76,8 +80,9 @@ async function main() {
       timeout: NAV_TIMEOUT_MS,
     });
 
-    // Wait for SPA to render and sync (Telegram Web A needs time to load chat list)
-    await page.waitForTimeout(5000);
+    // Wait for SPA to render and sync (Telegram Web A needs time after 'load'
+    // to establish MTProto WebSocket and populate the chat list from server)
+    await page.waitForTimeout(10000);
 
     // Detect auth failure: URL-based check + UI element check
     // Telegram Web A shows QR login at the root URL without redirect
@@ -110,9 +115,10 @@ async function main() {
     }
 
     // Wait for the chat list sidebar to populate
-    // Telegram Web A renders chat list items with ListItem class and data-peer-id
+    // Telegram Web A renders chat items as .ListItem.Chat inside a .chat-list container.
+    // Note: data-peer-id exists on Avatar sub-elements, NOT on the .Chat wrapper itself.
     try {
-      await page.waitForSelector('[data-peer-id]', {
+      await page.waitForSelector('.chat-list .Chat', {
         timeout: SIDEBAR_TIMEOUT_MS,
       });
     } catch {
@@ -146,38 +152,33 @@ async function main() {
     // Give the chat list a moment to fully render (groups load asynchronously)
     await page.waitForTimeout(2000);
 
-    // Extract groups and channels from the sidebar
-    // In Telegram Web A, groups/channels have negative peer IDs
+    // Extract groups and channels from the sidebar.
+    // Telegram Web A applies CSS classes to distinguish chat types:
+    //   .Chat.group — group chats and channels
+    //   .Chat.forum — forum-style supergroups
+    //   .Chat.private — direct messages
+    // The peer ID is embedded in the <a> href (e.g., href="#-1002189921033").
     const groups = await page.evaluate(() => {
       const results = [];
       const seen = new Set();
 
-      // Find all chat list items with peer IDs
       const items = document.querySelectorAll(
-        '[data-peer-id], [class*="ListItem"][data-peer-id], .chat-list .ListItem'
+        '.chat-list .Chat.group, .chat-list .Chat.forum'
       );
 
       for (const el of items) {
-        const peerId = el.getAttribute('data-peer-id');
-        if (!peerId) continue;
-
-        // Only include groups/channels (negative peer IDs)
-        // Private chats have positive IDs
-        const numericId = parseInt(peerId, 10);
-        if (numericId >= 0) continue;
-
-        // Deduplicate
-        if (seen.has(peerId)) continue;
+        // Extract peer ID from the link href
+        const link = el.querySelector('a.ListItem-button');
+        const href = link ? link.getAttribute('href') : null;
+        const peerId = href ? href.replace('#', '') : null;
+        if (!peerId || seen.has(peerId)) continue;
         seen.add(peerId);
 
-        // Extract the group/channel name from the title element
-        const titleEl = el.querySelector(
-          '[class*="title"] .fullName, [class*="info"] h3, [class*="ChatInfo"] .title, .peer-title, h3'
-        );
+        // Extract the group/channel name
+        const titleEl = el.querySelector('.fullName, h3');
         const name = titleEl ? titleEl.textContent.trim() : '';
         if (!name) continue;
 
-        // Construct the URL using the peer ID
         const url = `https://web.telegram.org/a/#${peerId}`;
 
         results.push({

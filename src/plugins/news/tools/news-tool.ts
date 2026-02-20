@@ -123,6 +123,15 @@ const SCHEMA_STOP_AUTH = {
   },
 };
 
+const SCHEMA_REFRESH_SOURCE = {
+  action: { type: 'string', required: true, enum: ['refresh_source'] },
+  source_id: {
+    type: 'string',
+    required: true,
+    description: 'Source ID to refresh (from list_sources)',
+  },
+};
+
 /**
  * Generate a unique source ID.
  */
@@ -346,6 +355,7 @@ async function addSource(
           articles: newsArticles,
           sourceId,
           fetchedAt: new Date(),
+          sourceType: type,
         },
       });
 
@@ -581,24 +591,38 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
   const newsTool: PluginTool = {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
-Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth.
+Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source.
 Example: {"action": "get_news", "query": "technology"}
 
 **For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
 This searches articles from configured RSS feeds and Telegram channels.
 Only fall back to web search if get_news returns no relevant results.
 
+Use refresh_source when the user explicitly asks to update/refresh a specific source:
+{"action": "refresh_source", "source_id": "src_xxx"}
+
 For private Telegram groups:
 1. Call list_groups: {"action": "list_groups", "profile": "telegram"} — if auth is needed, it auto-starts a browser login and returns the URL
 2. After user logs in: {"action": "stop_auth", "profile": "telegram"}, then list_groups again
 3. Add source: {"action": "add_source", "type": "telegram-group", "name": "...", "profile": "telegram", "group_url": "https://web.telegram.org/a/#-..."}`,
-    tags: ['rss', 'telegram', 'telegram-group', 'news', 'feed', 'add', 'remove', 'list', 'get'],
+    tags: [
+      'rss',
+      'telegram',
+      'telegram-group',
+      'news',
+      'feed',
+      'add',
+      'remove',
+      'list',
+      'get',
+      'refresh',
+    ],
     parameters: [
       {
         name: 'action',
         type: 'string',
         description:
-          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth',
+          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source',
         required: true,
         enum: [
           'add_source',
@@ -607,6 +631,7 @@ For private Telegram groups:
           'get_news',
           'list_groups',
           'stop_auth',
+          'refresh_source',
         ],
       },
       {
@@ -650,6 +675,13 @@ For private Telegram groups:
         required: false,
       },
       {
+        name: 'source_id',
+        type: 'string',
+        description:
+          'Source ID to refresh (required for refresh_source). Get IDs from list_sources.',
+        required: false,
+      },
+      {
         name: 'query',
         type: 'string',
         description: 'Search term for articles (default: all news). Used with get_news action.',
@@ -685,12 +717,13 @@ For private Telegram groups:
           'get_news',
           'list_groups',
           'stop_auth',
+          'refresh_source',
         ].includes(a['action'])
       ) {
         return {
           success: false,
           error:
-            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth]',
+            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source]',
         };
       }
 
@@ -713,6 +746,7 @@ For private Telegram groups:
               get_news: SCHEMA_GET_NEWS,
               list_groups: SCHEMA_LIST_GROUPS,
               stop_auth: SCHEMA_STOP_AUTH,
+              refresh_source: SCHEMA_REFRESH_SOURCE,
             },
           },
         };
@@ -1001,11 +1035,218 @@ For private Telegram groups:
           }
         }
 
+        case 'refresh_source': {
+          const refreshSourceId = (args['source_id'] ?? args['sourceId']) as string | undefined;
+
+          if (!refreshSourceId) {
+            return {
+              success: false,
+              action: 'refresh_source',
+              error: 'Missing required parameter: source_id',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_REFRESH_SOURCE,
+            };
+          }
+
+          // Load source by ID
+          const sources = await loadSources(storage);
+          const source = sources.get(refreshSourceId);
+
+          if (!source) {
+            return {
+              success: false,
+              action: 'refresh_source',
+              error: `Source not found: ${refreshSourceId}`,
+              hint: 'Use list_sources to see available source IDs.',
+            };
+          }
+
+          // Load existing state for deduplication
+          const state = await loadSourceState(storage, refreshSourceId);
+
+          logger.info(
+            { sourceId: refreshSourceId, type: source.type, name: source.name },
+            'Refreshing source on demand'
+          );
+
+          // Dispatch fetch by source type
+          let fetchSuccess = false;
+          let fetchArticles: FetchedArticle[] = [];
+          let fetchErrorMsg: string | undefined;
+          let fetchErrorCode: string | undefined;
+          let fetchLatestId: string | undefined;
+
+          try {
+            if (source.type === 'telegram-group') {
+              if (!primitives.scriptRunner) {
+                return {
+                  success: false,
+                  action: 'refresh_source',
+                  error: 'Script runner not available (Docker may not be running)',
+                };
+              }
+
+              if (!source.profile || !source.groupUrl) {
+                return {
+                  success: false,
+                  action: 'refresh_source',
+                  error: 'Source is missing profile or groupUrl configuration',
+                };
+              }
+
+              const groupResult = await fetchTelegramGroup(
+                source.profile,
+                source.groupUrl,
+                refreshSourceId,
+                source.name,
+                state?.lastSeenId,
+                primitives.scriptRunner
+              );
+              fetchSuccess = groupResult.success;
+              fetchArticles = groupResult.articles;
+              fetchErrorMsg = groupResult.error;
+              fetchErrorCode = groupResult.errorCode;
+              fetchLatestId = groupResult.latestId;
+            } else if (source.type === 'rss') {
+              const rssResult = await fetchRssFeed(source.url, refreshSourceId, source.name);
+              fetchSuccess = rssResult.success;
+              fetchArticles = rssResult.articles;
+              fetchErrorMsg = rssResult.error;
+              fetchLatestId = rssResult.latestId ?? undefined;
+            } else {
+              // telegram (public channel)
+              const { fetchTelegramChannelUntil } = await import('../fetchers/telegram.js');
+              const tgResult = await fetchTelegramChannelUntil(
+                source.url,
+                source.name,
+                state?.lastSeenId
+              );
+              fetchSuccess = tgResult.success;
+              fetchArticles = tgResult.articles;
+              fetchErrorMsg = tgResult.error;
+              fetchLatestId = tgResult.latestId ?? undefined;
+            }
+          } catch (error) {
+            return {
+              success: false,
+              action: 'refresh_source',
+              sourceId: refreshSourceId,
+              error: `Fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+
+          // Handle NOT_AUTHENTICATED for telegram-group
+          if (!fetchSuccess && fetchErrorCode === 'NOT_AUTHENTICATED') {
+            return {
+              success: false,
+              action: 'refresh_source',
+              sourceId: refreshSourceId,
+              error: 'Not authenticated. Run list_groups to start a browser login session first.',
+            };
+          }
+
+          if (!fetchSuccess) {
+            // Update state with failure
+            const newState: SourceState = {
+              sourceId: refreshSourceId,
+              lastFetchedAt: state?.lastFetchedAt ?? new Date(),
+              consecutiveFailures: (state?.consecutiveFailures ?? 0) + 1,
+              lastError: fetchErrorMsg,
+              lastSeenId: state?.lastSeenId,
+            };
+            await saveSourceState(storage, newState);
+
+            return {
+              success: false,
+              action: 'refresh_source',
+              sourceId: refreshSourceId,
+              error: fetchErrorMsg ?? 'Fetch failed',
+            };
+          }
+
+          // Filter new articles (inline — same logic as filterNewArticles in index.ts)
+          let newArticles: FetchedArticle[];
+          if (!state) {
+            newArticles = fetchArticles;
+          } else {
+            const seenIds = new Set<string>();
+            if (state.lastSeenId) seenIds.add(state.lastSeenId);
+            newArticles = fetchArticles.filter((a) => {
+              if (seenIds.has(a.id)) return false;
+              if (a.publishedAt && a.publishedAt <= state.lastFetchedAt) return false;
+              return true;
+            });
+          }
+
+          // Update source state
+          const newState: SourceState = {
+            sourceId: refreshSourceId,
+            lastFetchedAt: new Date(),
+            consecutiveFailures: 0,
+            lastSeenId: fetchLatestId ?? state?.lastSeenId,
+          };
+          await saveSourceState(storage, newState);
+
+          // Emit article_batch signal if we have new articles
+          if (newArticles.length > 0) {
+            const newsArticles = newArticles.map(convertToNewsArticle);
+
+            const emitResult = intentEmitter.emitSignal({
+              priority: 2,
+              data: {
+                kind: NEWS_EVENT_KINDS.ARTICLE_BATCH,
+                pluginId: NEWS_PLUGIN_ID,
+                articles: newsArticles,
+                sourceId: refreshSourceId,
+                fetchedAt: new Date(),
+                sourceType: source.type,
+              },
+            });
+
+            if (!emitResult.success) {
+              logger.warn({ error: emitResult.error }, 'Failed to emit article batch signal');
+            } else {
+              logger.info(
+                {
+                  sourceId: refreshSourceId,
+                  articleCount: newArticles.length,
+                  signalId: emitResult.signalId,
+                },
+                'Emitted article batch signal for refresh'
+              );
+            }
+          }
+
+          logger.info(
+            {
+              sourceId: refreshSourceId,
+              totalFetched: fetchArticles.length,
+              newArticles: newArticles.length,
+            },
+            'Source refresh complete'
+          );
+
+          return {
+            success: true,
+            action: 'refresh_source',
+            sourceId: refreshSourceId,
+            newArticleCount: newArticles.length,
+            count: fetchArticles.length,
+            ...(newArticles.length > 0 && {
+              articlesStatus:
+                'New articles have been scored and saved to memory. Use core.memory to search for them.',
+            }),
+            ...(newArticles.length === 0 && {
+              hint: 'No new articles since last fetch.',
+            }),
+          };
+        }
+
         default:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", or "stop_auth".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", "stop_auth", or "refresh_source".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {
@@ -1015,6 +1256,7 @@ For private Telegram groups:
                 get_news: SCHEMA_GET_NEWS,
                 list_groups: SCHEMA_LIST_GROUPS,
                 stop_auth: SCHEMA_STOP_AUTH,
+                refresh_source: SCHEMA_REFRESH_SOURCE,
               },
             },
           };

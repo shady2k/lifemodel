@@ -172,6 +172,29 @@ function containmentScore(articleTopic: string, interestTopic: string): number {
 /** Minimum similarity threshold for fuzzy topic matching */
 const FUZZY_MATCH_THRESHOLD = 0.7;
 
+/**
+ * Format a compact date range string for digest titles.
+ * Same day: "Feb 20 14:00–16:30"
+ * Different days: "Feb 19 23:00–Feb 20 01:30"
+ */
+function formatDigestDateRange(start: Date, end: Date): string {
+  const fmt = (d: Date) => {
+    const mon = d.toLocaleString('en-US', { month: 'short' });
+    const day = d.getDate();
+    const h = String(d.getHours()).padStart(2, '0');
+    const m = String(d.getMinutes()).padStart(2, '0');
+    return { mon, day, time: `${h}:${m}` };
+  };
+
+  const s = fmt(start);
+  const e = fmt(end);
+
+  if (s.mon === e.mon && s.day === e.day) {
+    return `${s.mon} ${String(s.day)} ${s.time}–${e.time}`;
+  }
+  return `${s.mon} ${String(s.day)} ${s.time}–${e.mon} ${String(e.day)} ${e.time}`;
+}
+
 // ============================================================
 // NewsSignalFilter
 // ============================================================
@@ -242,17 +265,31 @@ export class NewsSignalFilter implements SignalFilter {
       articles: NewsArticle[];
       sourceId: string;
       fetchedAt: Date;
+      sourceType?: 'rss' | 'telegram' | 'telegram-group' | undefined;
     };
 
-    const articles = payload.articles;
+    let articles = payload.articles;
     const sourceId = payload.sourceId;
+    const sourceType = payload.sourceType;
 
     if (articles.length === 0) {
       return [];
     }
 
+    // Telegram sources: consolidate individual messages into digest chunks
+    if (sourceType === 'telegram' || sourceType === 'telegram-group') {
+      articles = this.consolidateToDigests(articles, sourceId, payload.fetchedAt);
+      if (articles.length === 0) {
+        this.logger.debug(
+          { sourceId, sourceType },
+          'All digest chunks dropped (below min content)'
+        );
+        return [];
+      }
+    }
+
     this.logger.debug(
-      { articleCount: articles.length, sourceId, hasInterests: !!interests },
+      { articleCount: articles.length, sourceId, hasInterests: !!interests, sourceType },
       'Classifying article batch'
     );
 
@@ -417,6 +454,165 @@ export class NewsSignalFilter implements SignalFilter {
     }
 
     return outputSignals;
+  }
+
+  // ============================================================
+  // Telegram Digest Consolidation
+  // ============================================================
+
+  /** Max time gap between messages in the same digest chunk (15 minutes) */
+  private static readonly DIGEST_GAP_MS = 15 * 60 * 1000;
+  /** Max messages per digest chunk */
+  private static readonly DIGEST_MAX_MESSAGES = 25;
+  /** Max total characters per digest chunk */
+  private static readonly DIGEST_MAX_CHARS = 4000;
+  /** Min content chars for a chunk to survive quality guard */
+  private static readonly DIGEST_MIN_CONTENT_CHARS = 120;
+
+  /**
+   * Consolidate individual Telegram messages into time-sessionized digest chunks.
+   *
+   * Telegram messages are conversational and context-dependent — "Доброе!", "+1" —
+   * meaningless as individual facts. This method groups them into coherent digest
+   * windows, each becoming a single NewsArticle for scoring and memory storage.
+   */
+  private consolidateToDigests(
+    articles: NewsArticle[],
+    sourceId: string,
+    fetchedAt: Date
+  ): NewsArticle[] {
+    // 1. Preprocess: keep only messages with non-empty text
+    const withContent = articles.filter((a) => {
+      const text = [a.title, a.summary].join('\n').trim();
+      return text.length > 0;
+    });
+
+    if (withContent.length === 0) return [];
+
+    // 2. Sort by publishedAt oldest-first; missing timestamps preserve original order
+    const sorted = [...withContent].sort((a, b) => {
+      const ta = a.publishedAt?.getTime() ?? 0;
+      const tb = b.publishedAt?.getTime() ?? 0;
+      if (ta === 0 && tb === 0) return 0; // preserve original order
+      if (ta === 0) return -1; // no timestamp → keep at start
+      if (tb === 0) return 1;
+      return ta - tb;
+    });
+
+    // 3. Chunk by time gap, message count, and char limit
+    const chunks: NewsArticle[][] = [];
+    let currentChunk: NewsArticle[] = [];
+    let currentChars = 0;
+    let lastTimestamp: number | null = null;
+
+    for (const article of sorted) {
+      const text = [article.title, article.summary].join('\n').trim();
+      const articleTime = article.publishedAt?.getTime() ?? null;
+
+      // Break conditions
+      const timeGap =
+        lastTimestamp !== null &&
+        articleTime !== null &&
+        articleTime - lastTimestamp > NewsSignalFilter.DIGEST_GAP_MS;
+      const countLimit = currentChunk.length >= NewsSignalFilter.DIGEST_MAX_MESSAGES;
+      const charLimit =
+        currentChars + text.length > NewsSignalFilter.DIGEST_MAX_CHARS && currentChunk.length > 0;
+
+      if (timeGap || countLimit || charLimit) {
+        if (currentChunk.length > 0) {
+          chunks.push(currentChunk);
+        }
+        currentChunk = [];
+        currentChars = 0;
+      }
+
+      currentChunk.push(article);
+      currentChars += text.length;
+      if (articleTime !== null) {
+        lastTimestamp = articleTime;
+      }
+    }
+
+    // Flush remaining
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+    }
+
+    // 4. Build digest NewsArticle per chunk, applying quality guard
+    const digests: NewsArticle[] = [];
+    let droppedCount = 0;
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      if (!chunk || chunk.length === 0) continue;
+
+      // Build summary: newline-joined "[Author] text" lines
+      const lines: string[] = [];
+      let totalContentChars = 0;
+
+      for (const msg of chunk) {
+        // Use title as the author-prefixed line (telegram fetcher already formats "[Author] text")
+        const line = msg.summary ? `${msg.title}\n${msg.summary}` : msg.title;
+        lines.push(line);
+        totalContentChars += line.replace(/\s+/g, '').length; // normalize whitespace for char count
+      }
+
+      // Quality guard: drop chunks with too little normalized content
+      if (totalContentChars < NewsSignalFilter.DIGEST_MIN_CONTENT_CHARS) {
+        droppedCount++;
+        continue;
+      }
+
+      // Date range for title
+      const firstMsg = chunk[0];
+      const lastMsg = chunk[chunk.length - 1];
+      if (!firstMsg || !lastMsg) continue;
+      const firstTime = firstMsg.publishedAt ?? fetchedAt;
+      const lastTime = lastMsg.publishedAt ?? fetchedAt;
+      const dateRange = formatDigestDateRange(firstTime, lastTime);
+
+      // Source name from first article
+      const sourceName = firstMsg.source || sourceId;
+
+      // Union of all topics (dedup, lowercase)
+      const allTopics = new Set<string>();
+      for (const msg of chunk) {
+        for (const t of msg.topics) {
+          allTopics.add(t.toLowerCase());
+        }
+      }
+
+      // Breaking pattern: true if ANY message in chunk had it
+      const hasBreaking = chunk.some((msg) => msg.hasBreakingPattern);
+
+      // First available URL
+      const firstUrl = chunk.find((msg) => msg.url)?.url;
+
+      const digest: NewsArticle = {
+        id: `digest:${sourceId}:${String(i)}:${fetchedAt.toISOString()}`,
+        title: `${sourceName} (${dateRange}, ${String(chunk.length)} msgs)`,
+        source: sourceId,
+        topics: Array.from(allTopics),
+        url: firstUrl,
+        summary: lines.join('\n'),
+        publishedAt: lastTime,
+        hasBreakingPattern: hasBreaking,
+      };
+
+      digests.push(digest);
+    }
+
+    this.logger.info(
+      {
+        sourceId,
+        inputMessages: articles.length,
+        outputDigests: digests.length,
+        droppedChunks: droppedCount,
+      },
+      'Consolidated Telegram messages into digests'
+    );
+
+    return digests;
   }
 
   /**

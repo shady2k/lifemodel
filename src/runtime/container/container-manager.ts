@@ -427,6 +427,10 @@ function buildScriptCreateArgs(
         args.push('--add-host', `${domain}:${ip}`);
       }
     }
+
+    // Tell the script to block on stdin until we send "ready" after iptables are applied.
+    // This replaces the fragile pause/unpause dance that Docker can reject.
+    args.push('-e', 'WAIT_FOR_READY=1');
   } else {
     args.push('--network', 'none');
   }
@@ -973,18 +977,15 @@ export function createContainerManager(logger: Logger): ContainerManager {
       const shortId = containerId.slice(0, 12);
 
       try {
-        if (hasDomains && resolvedPolicy) {
-          // Start → pause → iptables → unpause, with attach before unpause to avoid race
-          await execFileAsync('docker', ['start', containerId], { timeout: 10_000 });
-          await execFileAsync('docker', ['pause', containerId], { timeout: 10_000 });
-          await applyNetworkPolicy(containerId, resolvedPolicy, log);
-        }
-
-        // Capture stdout/stderr live via stdio pipes (same pattern as agentic containers).
-        // For network-policy containers: attach while paused, then unpause so we don't miss output.
-        // For no-network containers: `docker start -a` attaches before starting.
-        const attachArgs = hasDomains
-          ? ['attach', '--no-stdin', containerId]
+        // Stdin-gate flow for network-policy containers:
+        //   1. `docker start -ai` attaches stdin+stdout before the process starts
+        //   2. Script blocks reading stdin (WAIT_FOR_READY=1 env var)
+        //   3. We apply iptables while the script is blocked
+        //   4. Write "ready\n" to stdin → script proceeds with network locked down
+        // For no-network containers: `docker start -a` (no stdin needed).
+        const needsStdinGate = hasDomains && resolvedPolicy;
+        const attachArgs = needsStdinGate
+          ? ['start', '-ai', containerId]
           : ['start', '-a', containerId];
 
         const { exitCode, stdout } = await new Promise<{ exitCode: number; stdout: string }>(
@@ -994,23 +995,27 @@ export function createContainerManager(logger: Logger): ContainerManager {
             let settled = false;
 
             const proc = spawn('docker', attachArgs, {
-              stdio: ['ignore', 'pipe', 'pipe'],
+              stdio: [needsStdinGate ? 'pipe' : 'ignore', 'pipe', 'pipe'],
             });
 
             proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
             proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
-            // Unpause after attach is wired up (network-policy path only)
-            if (hasDomains) {
-              execFileAsync('docker', ['unpause', containerId], { timeout: 10_000 }).catch(
-                (err: unknown) => {
+            // Apply iptables then ungate the script
+            if (needsStdinGate && resolvedPolicy) {
+              applyNetworkPolicy(containerId, resolvedPolicy, log)
+                .then(() => {
+                  proc.stdin?.write('ready\n');
+                  proc.stdin?.end();
+                })
+                .catch((err: unknown) => {
                   if (settled) return;
                   settled = true;
-                  log.warn({ containerId: shortId, error: String(err) }, 'Failed to unpause');
+                  const message = err instanceof Error ? err.message : String(err);
+                  log.error({ containerId: shortId, error: message }, 'Network policy failed');
                   proc.kill('SIGTERM');
                   resolve({ exitCode: -1, stdout: '' });
-                }
-              );
+                });
             }
 
             const timer = setTimeout(() => {
@@ -1051,7 +1056,12 @@ export function createContainerManager(logger: Logger): ContainerManager {
         );
 
         log.info(
-          { containerId: shortId, exitCode, stdoutLength: stdout.length },
+          {
+            containerId: shortId,
+            exitCode,
+            stdoutLength: stdout.length,
+            stdout: stdout.slice(0, 2000),
+          },
           'Script container finished'
         );
 

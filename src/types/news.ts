@@ -54,4 +54,7 @@ export interface NewsArticleBatchPayload {
 
   /** When the fetch occurred */
   fetchedAt: Date;
+
+  /** Origin type — enables source-specific processing (e.g. Telegram digest consolidation) */
+  sourceType?: 'rss' | 'telegram' | 'telegram-group' | undefined;
 }
