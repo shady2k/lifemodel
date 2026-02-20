@@ -32,6 +32,7 @@ import type {
   StatsResult,
   StatsDay,
   UpdateItemResult,
+  UpdateEntryResult,
   ExistingEntryInfo,
   NutrientBasis,
 } from './calories-types.js';
@@ -176,6 +177,15 @@ function getFoodDateForTimestamp(
   }
 
   return { date: entryDate };
+}
+
+/**
+ * Convert a UTC ISO timestamp to a local "HH:mm" string in the given timezone.
+ */
+function toLocalTime(isoTimestamp: string, timezone: string): string | undefined {
+  const dt = DateTime.fromISO(isoTimestamp, { zone: 'utc' }).setZone(timezone);
+  if (!dt.isValid) return undefined;
+  return dt.toFormat('HH:mm');
 }
 
 /**
@@ -762,6 +772,8 @@ export function createCaloriesTool(
                   portion: e.portion,
                   timestamp: e.timestamp,
                 };
+                const elt = toLocalTime(e.timestamp, timezone);
+                if (elt) info.localTime = elt;
                 if (e.mealType) info.mealType = e.mealType;
                 return info;
               })
@@ -819,6 +831,8 @@ export function createCaloriesTool(
                   portion: e.portion,
                   timestamp: e.timestamp,
                 };
+                const dlt = toLocalTime(e.timestamp, timezone);
+                if (dlt) info.localTime = dlt;
                 if (e.mealType) info.mealType = e.mealType;
                 return info;
               })
@@ -995,6 +1009,7 @@ export function createCaloriesTool(
   async function listFood(
     recipientId: string,
     date: string,
+    timezone: string,
     mealType?: MealType,
     limit?: number
   ): Promise<ListResult> {
@@ -1028,6 +1043,8 @@ export function createCaloriesTool(
         portion: e.portion,
         timestamp: e.timestamp,
       };
+      const lt = toLocalTime(e.timestamp, timezone);
+      if (lt) info.localTime = lt;
       if (e.mealType) info.mealType = e.mealType;
       if (item && (item.basis.perUnit === 'g' || item.basis.perUnit === 'kg')) {
         const normalized = normalizeBasis(item.basis);
@@ -1207,6 +1224,84 @@ export function createCaloriesTool(
     }
 
     return { success: false, error: 'Entry not found' };
+  }
+
+  // ============================================================================
+  // Update Entry (mealType / portion reclassification)
+  // ============================================================================
+
+  /**
+   * Update one or more food entries in-place (e.g., change mealType for reclassification).
+   * Supports bulk: pass multiple entryIds to reclassify several entries at once.
+   */
+  async function updateEntries(
+    recipientId: string,
+    entryIds: string[],
+    newMealType?: MealType,
+    newPortion?: Portion
+  ): Promise<UpdateEntryResult> {
+    if (entryIds.length === 0) {
+      return { success: false, error: 'No entry IDs provided' };
+    }
+
+    const remaining = new Set(entryIds);
+    const keys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+    let affectedDate: string | undefined;
+
+    for (const key of keys) {
+      if (remaining.size === 0) break;
+
+      const entries = await storage.get<FoodEntry[]>(key);
+      if (!entries) continue;
+
+      let modified = false;
+      for (const entry of entries) {
+        if (!remaining.has(entry.id) || entry.recipientId !== recipientId) continue;
+
+        if (newMealType !== undefined) {
+          entry.mealType = newMealType;
+        }
+        if (newPortion !== undefined) {
+          entry.portion = newPortion;
+        }
+
+        remaining.delete(entry.id);
+        modified = true;
+      }
+
+      if (modified) {
+        await storage.set(key, entries);
+        affectedDate = key.replace(CALORIES_STORAGE_KEYS.foodPrefix, '');
+      }
+    }
+
+    if (remaining.size === entryIds.length) {
+      return { success: false, error: 'No matching entries found' };
+    }
+
+    if (remaining.size > 0) {
+      logger.warn({ notFound: [...remaining] }, 'Some entry IDs not found during update');
+    }
+
+    const firstId = entryIds[0];
+    const dailySummary = affectedDate
+      ? await computeDailySummary(recipientId, affectedDate)
+      : undefined;
+
+    logger.info(
+      { entryIds, newMealType, updatedCount: entryIds.length - remaining.size },
+      'Food entries updated'
+    );
+
+    return {
+      success: true,
+      entryId: firstId,
+      updated: {
+        mealType: newMealType,
+        portion: newPortion,
+      },
+      dailySummary,
+    };
   }
 
   // ============================================================================
@@ -1572,6 +1667,7 @@ export function createCaloriesTool(
           'stats',
           'update_dish',
           'delete_dish',
+          'update_entry',
         ],
         description: 'Action to perform',
       },
@@ -1706,19 +1802,31 @@ export function createCaloriesTool(
         },
         required: ['caloriesPer', 'perQuantity', 'perUnit'],
       },
+      entry_ids: {
+        type: 'array',
+        description:
+          'update_entry: array of entry IDs (food_*) to update. Use instead of entry_id for bulk reclassification.',
+        items: { type: 'string' },
+      },
+      new_meal_type: {
+        type: 'string',
+        enum: ['breakfast', 'lunch', 'dinner', 'snack'],
+        description: 'update_entry: new meal type to assign',
+      },
     },
     required: ['action'],
     additionalProperties: false,
   };
 
-  const TOOL_DESCRIPTION = `Food and calorie tracking. Actions: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish.
+  const TOOL_DESCRIPTION = `Food and calorie tracking. Actions: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry.
 
 Rules:
 - ALWAYS set meal_type when user groups by meal. Batch multiple items in entries array (distinct items only).
 - log response has dailySummary (totals + byMealType) — NEVER call summary after log. existingEntries = possible duplicate (already saved).
 - status="ambiguous" → resolve via chooseDishId. status="failed" → NOT logged, check reason.
 - name = pure food ("Americano" not "Americano 200ml"). Use calories_per_100g for kcal/100g input. Cooked kcal for cooked foods.
-- date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog.
+- date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog/update_entry.
+- update_entry: change meal_type on existing entries. Use entry_ids (array) for bulk. Prefer over unlog+log when only reclassifying.
 - LOG FIRST: The tool has its own food database with fuzzy matching. Log food by name+portion WITHOUT calories — if the food was logged before, calories auto-fill from history. Only look up calories externally when status="failed" with reason "No calorie data".`;
 
   const caloriesTool: PluginTool = {
@@ -1731,7 +1839,7 @@ Rules:
         name: 'action',
         type: 'string',
         description:
-          'Action: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish',
+          'Action: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry',
         required: true,
         enum: [
           'log',
@@ -1744,6 +1852,7 @@ Rules:
           'stats',
           'update_dish',
           'delete_dish',
+          'update_entry',
         ],
       },
       {
@@ -1795,8 +1904,21 @@ Rules:
         name: 'entry_id',
         type: 'string',
         description:
-          'Entry ID for unlog action (starts with "food_", from list response entryId field)',
+          'Entry ID (food_*) for unlog or update_entry action (from list response entryId field)',
         required: false,
+      },
+      {
+        name: 'entry_ids',
+        type: 'array',
+        description: 'update_entry: array of entry IDs (food_*) for bulk reclassification',
+        required: false,
+      },
+      {
+        name: 'new_meal_type',
+        type: 'string',
+        description: 'update_entry: new meal type to assign',
+        required: false,
+        enum: ['breakfast', 'lunch', 'dinner', 'snack'],
       },
       {
         name: 'queries',
@@ -1859,6 +1981,7 @@ Rules:
         'stats',
         'update_dish',
         'delete_dish',
+        'update_entry',
       ];
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
@@ -1984,6 +2107,44 @@ Rules:
         }
       }
 
+      if (a['action'] === 'update_entry') {
+        // Accept entry_ids (array) or fall back to single entry_id
+        const entryIds = a['entry_ids'];
+        const entryId = a['entry_id'];
+        if (!entryIds && !entryId) {
+          return {
+            success: false,
+            error:
+              'entry_id or entry_ids required for update_entry action (food_* IDs from list response)',
+          };
+        }
+        if (entryIds !== undefined && !Array.isArray(entryIds)) {
+          return { success: false, error: 'entry_ids: must be an array of strings' };
+        }
+        if (Array.isArray(entryIds)) {
+          if (entryIds.length === 0 || entryIds.some((id: unknown) => typeof id !== 'string')) {
+            return { success: false, error: 'entry_ids: must be a non-empty array of strings' };
+          }
+        }
+        const newMealType = a['new_meal_type'];
+        if (
+          newMealType !== undefined &&
+          newMealType !== null &&
+          (typeof newMealType !== 'string' || !VALID_MEAL_TYPES.includes(newMealType as MealType))
+        ) {
+          return {
+            success: false,
+            error: `new_meal_type: must be one of [${VALID_MEAL_TYPES.join(', ')}]`,
+          };
+        }
+        if (!newMealType) {
+          return {
+            success: false,
+            error: 'new_meal_type is required for update_entry action',
+          };
+        }
+      }
+
       return { success: true, data: a };
     },
     execute: async (
@@ -1999,6 +2160,7 @@ Rules:
       | StatsResult
       | UpdateItemResult
       | DeleteItemResult
+      | UpdateEntryResult
     > => {
       // Run migration on first execute (lazy, not in activate which is sync)
       await ensureMigrated(storage, logger);
@@ -2050,6 +2212,7 @@ Rules:
           return listFood(
             recipientId,
             effectiveDate,
+            timezone,
             args['meal_type'] as MealType | undefined,
             typeof limitArg === 'number' ? limitArg : 20
           );
@@ -2120,6 +2283,13 @@ Rules:
           return deleteItem(recipientId, dishId);
         }
 
+        case 'update_entry': {
+          const rawIds = args['entry_ids'] as string[] | undefined;
+          const singleId = args['entry_id'] as string | undefined;
+          const ids = rawIds ?? (singleId ? [singleId] : []);
+          return updateEntries(recipientId, ids, args['new_meal_type'] as MealType | undefined);
+        }
+
         default:
           return { success: false, error: `Unknown action: ${action}` } as DeleteResult;
       }
@@ -2155,6 +2325,12 @@ Rules:
         const rawId = args['entry_id'];
         const id = typeof rawId === 'string' ? rawId : '?';
         return `calories.unlog: entry ${id}`;
+      }
+
+      if (action === 'update_entry') {
+        const newMealType = args['new_meal_type'];
+        const mt = typeof newMealType === 'string' ? ` → ${newMealType}` : '';
+        return `calories.update_entry${mt}`;
       }
 
       return `calories.${action || 'unknown'}`;

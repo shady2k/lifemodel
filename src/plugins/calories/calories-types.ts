@@ -151,6 +151,7 @@ export interface ExistingEntryInfo {
   portion: Portion;
   mealType?: MealType;
   timestamp: string;
+  localTime?: string | undefined;
 }
 
 export type LogResultItem =
@@ -234,6 +235,7 @@ export interface ListEntryInfo {
   mealType?: MealType;
   caloriesPer100g?: number;
   timestamp: string;
+  localTime?: string | undefined;
 }
 
 export interface ListResult {
@@ -378,6 +380,18 @@ export interface DeleteItemResult {
       to: string;
     };
   };
+}
+
+// ============================================================================
+// Tool API: Update Entry Action
+// ============================================================================
+
+export interface UpdateEntryResult {
+  success: boolean;
+  error?: string | undefined;
+  entryId?: string | undefined;
+  updated?: { mealType?: MealType | undefined; portion?: Portion | undefined } | undefined;
+  dailySummary?: DailySummary | undefined;
 }
 
 // ============================================================================
