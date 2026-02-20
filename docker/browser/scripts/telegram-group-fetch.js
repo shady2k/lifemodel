@@ -253,6 +253,10 @@ async function main() {
       return;
     }
 
+    // Log memory before heavy operations (helps diagnose Target crashed / OOM)
+    const mem = process.memoryUsage();
+    console.error(`[mem] rss=${Math.round(mem.rss / 1024 / 1024)}MB heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB`);
+
     // Scroll to latest messages so virtual scrolling renders new posts
     await scrollToLatest(page, lastSeenId);
 
@@ -324,7 +328,12 @@ async function main() {
 
     outputResult(messages, latestId);
   } catch (err) {
-    outputError('FETCH_FAILED', err.message || String(err));
+    const errMsg = err.message || String(err);
+    // Include stack trace for crash diagnosis (goes to stderr via outputError's console.error)
+    const stack = err.stack ? err.stack.split('\n').slice(0, 5).join(' | ') : '';
+    const detail = stack ? `${errMsg} [stack: ${stack}]` : errMsg;
+    console.error(`[CRASH] ${detail}`);
+    outputError('FETCH_FAILED', errMsg);
   } finally {
     if (context) {
       await context.close().catch(() => {});

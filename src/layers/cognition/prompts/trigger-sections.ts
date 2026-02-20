@@ -90,13 +90,14 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 Look at the conversation history, <msg_time> tags, <completed_actions>, and <active_desires>. Understand what happened recently and what matters right now.
 
+If after checking you have nothing NEW or meaningful to share, you MUST defer. Do not contact just to "check in." Do not present old information as if it were new. Silence is better than empty contact.
+
 Then decide what to do. You might:
 - finish something that was left incomplete or failed
 - follow up on something the user cared about
 - act on a desire (verify it's not already done first — if done, resolve it with core.desire)
-- share something you found interesting about their interests (search first, share with URL)
+- share something you found interesting about their interests (search first, share with URL — must be fresh, not old news)
 - ask something you genuinely want to know
-- just check in naturally
 - do nothing: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
 Use tools to research before messaging. Do not repeat completed actions. Max 7 tool calls.
@@ -144,7 +145,7 @@ ${factSections}
 
 <task>
 You are initiating contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
-Deliver this news with URLs inline.
+Deliver this news with URLs inline in your response. Do not send teasers or previews — include the full news content directly.
 </task>
 </trigger>`;
   }

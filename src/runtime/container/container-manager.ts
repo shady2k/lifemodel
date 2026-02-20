@@ -407,7 +407,7 @@ function buildScriptCreateArgs(
     '--pids-limit',
     String(config.pidsLimit ?? 64),
     '--memory',
-    '512m',
+    config.memoryLimit ?? '512m',
     '--cpus',
     '1.0',
 
@@ -1037,7 +1037,12 @@ export function createContainerManager(logger: Logger): ContainerManager {
               clearTimeout(timer);
               const rawStderr = Buffer.concat(stderrChunks).toString('utf8').trim();
               if (rawStderr) {
-                log.debug({ containerId: shortId, stderr: rawStderr }, 'Script stderr');
+                // Log at warn if script failed, debug if succeeded — crash diagnostics need visibility
+                const level = (code ?? 0) !== 0 || rawStderr.includes('[CRASH]') ? 'warn' : 'debug';
+                log[level](
+                  { containerId: shortId, stderr: rawStderr.slice(0, 2000) },
+                  'Script stderr'
+                );
               }
               resolve({
                 exitCode: code ?? 0,

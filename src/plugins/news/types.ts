@@ -190,6 +190,12 @@ export interface NewsToolResult {
   skipped?: boolean | undefined;
   /** Human-readable reason for skipping */
   reason?: string | undefined;
+  /** Number of consecutive fetch failures (refresh_source failure) */
+  consecutiveFailures?: number | undefined;
+  /** ISO timestamp of last successful fetch (refresh_source failure) */
+  lastSuccessfulFetch?: string | undefined;
+  /** Warning about source health (e.g. stale data) */
+  warning?: string | undefined;
 }
 
 /**

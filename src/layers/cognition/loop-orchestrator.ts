@@ -118,9 +118,16 @@ export function filterToolsForContext(
     }
 
     // Proactive contact: no housekeeping tools (prevents endless preparation)
+    // core.say blocked: no user waiting, teasers risk orphaned messages if final response fails
     if (isProactive) {
       if (name === 'core.thought' || name === 'core_thought') return false;
       if (name === 'core.agent' || name === 'core_agent') return false;
+      if (name === 'core.say' || name === 'core_say') return false;
+    }
+
+    // Plugin events (news delivery, etc.): no teasers — compose full message as final response
+    if (context.triggerSignal.type === 'plugin_event') {
+      if (name === 'core.say' || name === 'core_say') return false;
     }
 
     // Motor result awaiting input/approval: remove core.task to prevent auto-response

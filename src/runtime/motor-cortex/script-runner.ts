@@ -266,9 +266,11 @@ export class ScriptRunner {
     // Browser image scripts need additional writable mounts and higher resource limits:
     // - /home/pwuser tmpfs: Chromium needs writable cache/lock directories
     // - pidsLimit 256: Chromium spawns renderer, GPU, network, utility processes (64 is too low)
+    // - memoryLimit 1g: Chromium + Telegram Web A SPA needs >512m (causes "Target crashed" OOM)
     if (entry.image === BROWSER_IMAGE) {
       config.tmpfs = ['/home/pwuser:rw,nosuid,size=64m'];
       config.pidsLimit = 256;
+      config.memoryLimit = '1g';
       // Playwright v1.58+ image uses pwuser at UID 1001 (not 1000).
       // Must match the auth container's user to access profile volume files.
       config.user = '1001:1001';

@@ -129,6 +129,9 @@ export interface ScriptContainerConfig {
   /** Process limit override (default: 64, Chromium needs ~256) */
   pidsLimit?: number | undefined;
 
+  /** Memory limit override (default: '512m', Chromium needs ~1g) */
+  memoryLimit?: string | undefined;
+
   /** Container user override as "uid:gid" (default: "1000:1000") */
   user?: string | undefined;
 }

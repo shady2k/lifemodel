@@ -520,10 +520,13 @@ async function getNews(
   // Empty query with tag-based storage will return all plugin facts
   const searchQuery = query ?? '';
 
-  // Smart default: if no urgency filter specified and no query,
-  // show interesting news (curated content, not noise)
-  // If query is provided or source filter is set, search all urgency levels
+  // Smart defaults for news type filtering:
+  // - No query, no source: show 'interesting' (curated, not noise)
+  // - Query or source filter: show 'all' but exclude 'filtered' topic stubs
+  //   (filtered entries are bare keywords like "data", "память" that pollute TF-IDF results)
+  // - Explicit newsType: respect it exactly
   const effectiveType: NewsType = newsType ?? (searchQuery || sourceId ? 'all' : 'interesting');
+  const excludeFiltered = !newsType && effectiveType === 'all';
 
   // Pass source filter to the store level so it's applied before scoring/pagination
   const metadataFilter = sourceId ? { source: sourceId } : undefined;
@@ -540,6 +543,10 @@ async function getNews(
   if (effectiveType !== 'all') {
     const targetEventKind = `news:${effectiveType}`;
     filtered = filtered.filter((e) => e.metadata['eventKind'] === targetEventKind);
+  } else if (excludeFiltered) {
+    // Exclude bare topic stubs (news:filtered) — they are single keywords stored for
+    // mention detection, not real articles. They pollute search results with false matches.
+    filtered = filtered.filter((e) => e.metadata['eventKind'] !== 'news:filtered');
   }
 
   // Apply limit after type filtering
@@ -1176,10 +1183,11 @@ For private Telegram groups:
 
           if (!fetchSuccess) {
             // Update state with failure
+            const updatedFailures = (state?.consecutiveFailures ?? 0) + 1;
             const newState: SourceState = {
               sourceId: refreshSourceId,
               lastFetchedAt: state?.lastFetchedAt ?? new Date(),
-              consecutiveFailures: (state?.consecutiveFailures ?? 0) + 1,
+              consecutiveFailures: updatedFailures,
               lastError: fetchErrorMsg,
               lastSeenId: state?.lastSeenId,
             };
@@ -1190,6 +1198,9 @@ For private Telegram groups:
               action: 'refresh_source',
               sourceId: refreshSourceId,
               error: fetchErrorMsg ?? 'Fetch failed',
+              consecutiveFailures: updatedFailures,
+              lastSuccessfulFetch: state?.lastFetchedAt?.toISOString(),
+              warning: `Source has failed ${String(updatedFailures)} consecutive time${updatedFailures > 1 ? 's' : ''}. Data may be stale.`,
             };
           }
 
