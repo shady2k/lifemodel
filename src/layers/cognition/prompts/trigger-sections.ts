@@ -302,25 +302,10 @@ export function buildThoughtTriggerSection(
 
   if (isReaction && content) {
     return `<trigger type="user_reaction">
-<context>
 ${content}
-
-This is feedback, not a question. Interpret based on context:
-- Reaction on closing/check-in ("How are you?", "Talk soon") = acknowledgment, no action
-- Reaction on suggestion/recommendation ("Try this...") = user likes it, call core.setInterest
-- Reaction on factual statement = acknowledgment, no action
-- Reaction on question asking opinion ("Don't you think...?") = user agrees, call core.remember
-</context>
-
-<task>
-If reaction shows genuine interest: one core.setInterest call.
-If it reveals a preference worth remembering: one core.remember call.
-If simple acknowledgment (most cases): no response needed.
-Never repeat your previous message. If responding, say something new.
-
-To end without sending a message: output {"response": ""}
-To respond: output {"response": "your new message"}
-</task>
+A reaction is nonverbal feedback — like a nod or thumbs up in real life.
+Use conversation context to understand what the reaction means and decide what, if anything, to do.
+An empty response {"response": ""} is fine when no reply is needed.
 </trigger>`;
   }
 
@@ -368,19 +353,10 @@ export function buildReactionTriggerSection(data: Record<string, unknown>): stri
     : 'Message preview not available';
 
   return `<trigger type="user_reaction">
-<context>
 The user reacted ${emoji ?? '(thumbs up)'} to: ${messageContext}
-This is feedback, not a conversation turn.
-</context>
-
-<task>
-Default action: output {"response": ""} (no message).
-Only act if the reaction reveals something worth saving:
-- Genuine topic interest: one core.setInterest call
-- Clear preference: one core.remember call
-- Simple acknowledgment (most cases): no tools, no response
-Never repeat your previous message. Max 1 tool call total.
-</task>
+A reaction is nonverbal feedback — like a nod or thumbs up in real life.
+Use conversation context to understand what the reaction means and decide what, if anything, to do.
+An empty response {"response": ""} is fine when no reply is needed.
 </trigger>`;
 }
 

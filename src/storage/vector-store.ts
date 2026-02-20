@@ -211,9 +211,10 @@ export class JsonVectorStore implements VectorStore {
 
           if (tf === 0) continue;
 
-          // IDF: log(totalDocs / (1 + docsContainingTerm))
+          // IDF: log(totalDocs / (1 + docsContainingTerm)), floored so TF still
+          // matters when every document contains the term (IDF would otherwise be 0)
           const docsWithTerm = this.invertedIndex.get(term)?.size ?? 0;
-          const idf = Math.log((totalDocs + 1) / (1 + docsWithTerm));
+          const idf = Math.max(0.1, Math.log((totalDocs + 1) / (1 + docsWithTerm)));
 
           score += tf * idf * 10; // Scale factor to keep comparable to old scoring
         }

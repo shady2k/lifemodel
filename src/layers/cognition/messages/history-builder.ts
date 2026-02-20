@@ -74,17 +74,20 @@ export function buildInitialMessages(
   }
 
   // Add current trigger - role depends on trigger type
-  // User messages → 'user' role (natural conversation)
+  // User messages & reactions → 'user' role (natural user interaction)
   // Proactive/system triggers → 'system' role (instructions to the model)
   const triggerPrompt = promptBuilders.buildTriggerPrompt(context, useSmart);
-  const isUserMessage = context.triggerSignal.type === 'user_message';
+  const isUserInteraction =
+    context.triggerSignal.type === 'user_message' ||
+    context.triggerSignal.type === 'message_reaction';
 
   // For non-user triggers (proactive, motor_result, etc.), inject a boundary marker
   // between conversation history and the trigger. Weak models (glm-4.7-flash) treat
   // the last assistant message as "what I just said" and continue from there,
   // echoing <msg_time> tags and ignoring the trigger. A user-role boundary breaks
   // this continuation pattern.
-  if (!isUserMessage && context.conversationHistory.length > 0) {
+  // Reactions are user interactions (feedback on a message), so they skip the boundary.
+  if (!isUserInteraction && context.conversationHistory.length > 0) {
     messages.push({
       role: 'user',
       content:
@@ -92,7 +95,7 @@ export function buildInitialMessages(
     });
   }
 
-  messages.push({ role: isUserMessage ? 'user' : 'system', content: triggerPrompt });
+  messages.push({ role: isUserInteraction ? 'user' : 'system', content: triggerPrompt });
 
   return messages;
 }

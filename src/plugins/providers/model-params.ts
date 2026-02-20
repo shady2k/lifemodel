@@ -102,12 +102,13 @@ const BUILTIN_RULES: ModelParamRule[] = [
     provider: { order: ['Google AI Studio'], allow_fallbacks: true },
   },
   // DeepSeek: temp 1.0, top_p 0.95 per official docs; pin to DeepInfra — AtlasCloud/Google mangle tool calls
-  // DeepSeek doesn't support prompt caching or strict schemas
+  // DeepSeek doesn't support prompt caching or strict schemas; V3.2+ supports optional reasoning
   {
     match: 'deepseek',
     params: {
       temperature: 1.0,
       topP: 0.95,
+      reasoning: 'enable',
       supportsCacheControl: false,
       supportsStrictToolSchema: false,
     },
