@@ -99,7 +99,7 @@ Choose ONE action:
 • Different topic: Check in about their day, share a thought, start fresh. {"response": "your message"}
 • Skip messaging: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
-You may call tools to research and prepare before messaging. Do not repeat completed actions. Max 5 tool calls total.
+You may call tools to research and prepare before messaging. Do not repeat completed actions. Max 7 tool calls total.
 </task>
 </trigger>`;
 }

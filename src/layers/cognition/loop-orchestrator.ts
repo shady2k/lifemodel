@@ -167,8 +167,8 @@ export function maybeSetProactiveToolBudget(
     context.triggerSignal.type === 'contact_urge' || isProactiveTrigger(context.triggerSignal);
 
   if (isProactive) {
-    state.proactiveToolBudget = 6;
-    logger.debug({ budget: 6 }, 'Proactive contact: tool budget set');
+    state.proactiveToolBudget = 8;
+    logger.debug({ budget: 8 }, 'Proactive contact: tool budget set');
   } else if (isThoughtTrigger) {
     state.proactiveToolBudget = 2;
     logger.debug({ budget: 2 }, 'Thought processing: tool budget set');
