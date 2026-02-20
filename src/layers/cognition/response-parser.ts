@@ -139,7 +139,37 @@ export function parseResponseContent(
 
       return { text: finalText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
     } catch {
-      // 3a: Starts with '{' but JSON.parse failed → truncated/malformed JSON
+      // 3a: JSON.parse failed — try escaping literal control characters.
+      // Gemini models emit raw newlines/tabs inside JSON string values instead of \n/\t.
+      // Control chars (U+0000–U+001F) are never valid unescaped in JSON, so safe to escape globally.
+      const escaped = escapeJsonControlChars(jsonCandidate);
+      if (escaped !== jsonCandidate) {
+        try {
+          const parsed = JSON.parse(escaped) as {
+            response?: unknown;
+            status?: string;
+            urgent?: boolean;
+          };
+          if (typeof parsed.response === 'string') {
+            const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
+            const status =
+              parsed.status && validStatuses.includes(parsed.status)
+                ? (parsed.status as ConversationStatus)
+                : undefined;
+            const responseText = parsed.response.trim();
+            const cleanedText = stripLeadingTimestamp(responseText).trim();
+            const finalText = cleanedText || null;
+            const urgent = parsed.urgent === true;
+            return {
+              text: finalText,
+              ...(status ? { status } : {}),
+              ...(urgent ? { urgent } : {}),
+            };
+          }
+        } catch {
+          // Escape attempt also failed — fall through
+        }
+      }
       return { text: null, malformed: true };
     }
   }
@@ -162,4 +192,15 @@ export function parseResponseContent(
   }
 
   return { text: stripLeadingTimestamp(trimmed) };
+}
+
+const CONTROL_CHAR_MAP: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/** Escape literal control characters (U+0000–U+001F) that are invalid unescaped in JSON. */
+function escapeJsonControlChars(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(
+    /[\x00-\x1f]/g,
+    (ch) => CONTROL_CHAR_MAP[ch] ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  );
 }

@@ -96,9 +96,19 @@ const BUILTIN_RULES: ModelParamRule[] = [
   },
   // Gemini: temp 1.0, top_p 0.95 per docs; pin to Google AI Studio — Vertex returns null/failures
   // Gemini doesn't support strict tool schemas (uses different format)
+  // Reasoning enabled but NOTE: Gemini silently disables thinking when prompt + tools > ~5k tokens.
+  // With large system prompts (>1k chars) + many tools, reasoning_tokens will be 0 despite the flag.
+  // Still useful for shorter prompts. Google returns encrypted thought signatures (not readable text).
+  // Cache control disabled: Gemini uses context caching differently from Anthropic's cache_control.
   {
     match: 'google/',
-    params: { temperature: 1.0, topP: 0.95, supportsStrictToolSchema: false },
+    params: {
+      temperature: 1.0,
+      topP: 0.95,
+      reasoning: 'enable',
+      supportsCacheControl: false,
+      supportsStrictToolSchema: false,
+    },
     provider: { order: ['Google AI Studio'], allow_fallbacks: true },
   },
   // DeepSeek: temp 1.0, top_p 0.95 per official docs; pin to DeepInfra — AtlasCloud/Google mangle tool calls

@@ -29,6 +29,13 @@ describe('parseResponseContent', () => {
     expect(result).toEqual({ text: null, malformed: true });
   });
 
+  it('recovers JSON with literal newlines in string values (Gemini)', () => {
+    // Gemini models emit raw newlines instead of \n inside JSON strings
+    const content = '{"response": "line one\n\nline two", "status": "closed"}';
+    const result = parseResponseContent(content);
+    expect(result).toEqual({ text: 'line one\n\nline two', status: 'closed' });
+  });
+
   it('marks JSON with wrong response type as malformed', () => {
     const result = parseResponseContent('{"response":123}');
     expect(result).toEqual({ text: null, malformed: true });
