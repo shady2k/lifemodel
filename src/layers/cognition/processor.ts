@@ -1234,12 +1234,14 @@ export class CognitionProcessor implements CognitionLayer {
     if (!this.soulProvider || !this.cognitionLLM || !this.memoryProvider) {
       return null;
     }
+    const identity = this.agent?.getIdentity();
     return {
       logger: this.logger,
       soulProvider: this.soulProvider,
       memoryProvider: this.memoryProvider,
       llm: this.cognitionLLM,
       conversationManager: this.conversationManager,
+      agentIdentity: identity ? { name: identity.name, gender: identity.gender } : undefined,
     };
   }
 

@@ -131,6 +131,8 @@ export interface ReflectionDeps {
   memoryProvider: MemoryProvider;
   llm: CognitionLLM;
   conversationManager?: ConversationManager | undefined;
+  /** Agent identity for gender-aware reflection (prevents contradicting identity config) */
+  agentIdentity?: { name: string; gender: string } | undefined;
 }
 
 /**
@@ -184,7 +186,7 @@ export async function performReflection(
     const soulState = await soulProvider.getState();
 
     // Perform the reflection
-    const result = await callReflectionLLM(llm, soulState, context, log);
+    const result = await callReflectionLLM(llm, soulState, context, log, deps.agentIdentity);
 
     // Only consume budget/cooldown on successful LLM call
     // This prevents lockout from transient failures
@@ -228,10 +230,11 @@ async function callReflectionLLM(
   llm: CognitionLLM,
   soulState: FullSoulState,
   context: ReflectionContext,
-  logger: Logger
+  logger: Logger,
+  agentIdentity?: { name: string; gender: string }
 ): Promise<ReflectionResult> {
   // Build compact self-model summary for the prompt
-  const selfModelSummary = buildSelfModelSummary(soulState);
+  const selfModelSummary = buildSelfModelSummary(soulState, agentIdentity);
 
   const systemPrompt = `You are performing a quick self-reflection check.
 Your task: Assess whether a response aligns with the agent's identity and values.
@@ -309,8 +312,18 @@ function parseReflectionResponse(response: string, logger: Logger): ReflectionRe
 /**
  * Build a compact summary of the self-model for the prompt.
  */
-function buildSelfModelSummary(soulState: FullSoulState): string {
+function buildSelfModelSummary(
+  soulState: FullSoulState,
+  agentIdentity?: { name: string; gender: string }
+): string {
   const lines: string[] = [];
+
+  // Gender from identity config (immutable — reflection must not override)
+  if (agentIdentity?.gender) {
+    lines.push(
+      `Gender: ${agentIdentity.gender} (identity config — do not create rules that contradict this)`
+    );
+  }
 
   // Current narrative
   const narrative = soulState.selfModel.narrative.currentStory;
@@ -796,7 +809,8 @@ export async function processBatchReflection(
       items,
       existingRules,
       conversationContext,
-      log
+      log,
+      deps.agentIdentity
     );
 
     log.debug({ success: result.success, resultCount: result.results.size }, 'LLM call completed');
@@ -885,10 +899,11 @@ async function callBatchReflectionLLM(
   items: PendingReflection[],
   existingRules: { id: string; rule: string }[],
   conversationContext: ConversationMessage[],
-  logger: Logger
+  logger: Logger,
+  agentIdentity?: { name: string; gender: string }
 ): Promise<BatchReflectionResult> {
   // Build compact self-model summary (truncated to 500 chars)
-  const selfModelSummary = buildSelfModelSummary(soulState).slice(0, 500);
+  const selfModelSummary = buildSelfModelSummary(soulState, agentIdentity).slice(0, 500);
 
   // Build numbered list of responses with timestamps
   const responseList = items
@@ -948,7 +963,8 @@ In "patterns", note any trends you see across multiple responses (optional).
 Do not use evidence that occurred before a response's timestamp for scoring that response.
 
 behaviorRules: Extract on both explicit AND implicit corrections. Explicit: user directly corrects behavior ("stop doing X", "don't mention Y"). Implicit: user's reply reveals the agent made a contextual mistake, wrong assumption, or tone mismatch (e.g., asking "how was your day?" in the morning). Set source to "user_feedback" for explicit, "implicit_correction" for implicit. Most batches will have 0 rules. Max 2 rules per batch.
-If user's correction relates to an existing rule, use action "update" with its ruleId. If it's new, use "create".`;
+If user's correction relates to an existing rule, use action "update" with its ruleId. If it's new, use "create".
+IMPORTANT: The agent's grammatical gender is part of identity configuration and MUST NOT be overridden by behavioral rules. Never create or update rules about grammatical gender.`;
 
   const userPrompt = `Review these responses for alignment with self-model:
 
