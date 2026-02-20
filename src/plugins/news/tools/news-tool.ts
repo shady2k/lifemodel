@@ -513,7 +513,8 @@ async function getNews(
   query?: string,
   newsType?: NewsType,
   limit = 10,
-  offset = 0
+  offset = 0,
+  sourceId?: string
 ): Promise<NewsToolResult> {
   // Use empty string for "all news" - searching 'news' would limit to content matching that word
   // Empty query with tag-based storage will return all plugin facts
@@ -521,20 +522,27 @@ async function getNews(
 
   // Smart default: if no urgency filter specified and no query,
   // show interesting news (curated content, not noise)
-  // If query is provided, search all urgency levels by default
-  const effectiveType: NewsType = newsType ?? (searchQuery ? 'all' : 'interesting');
+  // If query is provided or source filter is set, search all urgency levels
+  const effectiveType: NewsType = newsType ?? (searchQuery || sourceId ? 'all' : 'interesting');
 
+  // When filtering by source, fetch more since most results will be filtered out
+  const fetchMultiplier = sourceId ? 10 : 2;
   const result = await memorySearch.searchOwnFacts(searchQuery, {
-    limit: limit * 2, // Fetch extra since we'll filter by type
+    limit: limit * fetchMultiplier,
     offset,
     minConfidence: 0.1, // Lower threshold to include filtered noise if needed
   });
 
-  // Filter by news type based on metadata.eventKind
+  // Filter by source if specified
   let filtered = result.entries;
+  if (sourceId) {
+    filtered = filtered.filter((e) => e.metadata['source'] === sourceId);
+  }
+
+  // Filter by news type based on metadata.eventKind
   if (effectiveType !== 'all') {
     const targetEventKind = `news:${effectiveType}`;
-    filtered = result.entries.filter((e) => e.metadata['eventKind'] === targetEventKind);
+    filtered = filtered.filter((e) => e.metadata['eventKind'] === targetEventKind);
   }
 
   // Apply limit after type filtering
@@ -596,10 +604,11 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
     description: `Manage news sources and retrieve polled articles.
 Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source.
 
-**get_news** — instant local search across ALL stored articles (no network, no container). Sources are auto-polled periodically so stored articles are usually current. Always try this first.
+**get_news** — instant local search across stored articles (no network, no container). Sources are auto-polled periodically so stored articles are usually current. Always try this first. Use source_id to filter articles from a specific source.
 Example: {"action": "get_news", "query": "technology"}
+Example: {"action": "get_news", "source_id": "src_xxx"} — latest from one source
 
-**refresh_source** — launches a browser container to fetch fresh content from the source (~15 seconds, expensive). Only use when the user explicitly asks to update/refresh a specific source.
+**refresh_source** — launches a browser container to fetch fresh content from the source (~15 seconds, expensive). Only use when the user explicitly asks to update/refresh a specific source. After refreshing, use get_news with the same source_id to see new articles.
 Example: {"action": "refresh_source", "source_id": "src_xxx"}
 
 **For any question about what a source writes or recent news, use get_news FIRST** with a relevant query (location, topic, person name, keyword).
@@ -682,7 +691,7 @@ For private Telegram groups:
         name: 'source_id',
         type: 'string',
         description:
-          'Source ID to refresh (required for refresh_source). Get IDs from list_sources.',
+          'Source ID. Required for refresh_source. Optional for get_news (filters articles to this source only). Get IDs from list_sources.',
         required: false,
       },
       {
@@ -837,8 +846,9 @@ For private Telegram groups:
           const rawOffset = (args['offset'] as number | undefined) ?? 0;
           const limit = Math.max(0, Math.min(rawLimit, 50));
           const offset = Math.max(0, rawOffset);
+          const getNewsSourceId = args['source_id'] as string | undefined;
 
-          return getNews(memorySearch, query, newsType, limit, offset);
+          return getNews(memorySearch, query, newsType, limit, offset, getNewsSourceId);
         }
 
         case 'list_groups': {
