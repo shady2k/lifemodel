@@ -33,6 +33,9 @@ import { fetchTelegramChannel } from '../fetchers/telegram.js';
 import { convertToNewsArticle } from '../topic-extractor.js';
 import { fetchTelegramGroup } from '../fetchers/telegram-group.js';
 
+/** Minimum interval between refresh_source calls for the same source (5 minutes). */
+const REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+
 /**
  * Schema definitions for error responses.
  * Helps LLM self-correct when sending invalid parameters.
@@ -592,14 +595,15 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
 Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source.
+
+**get_news** — instant local search across ALL stored articles (no network, no container). Sources are auto-polled periodically so stored articles are usually current. Always try this first.
 Example: {"action": "get_news", "query": "technology"}
 
-**For any news request, try get_news FIRST** with a relevant query (location, topic, keyword).
-This searches articles from configured RSS feeds and Telegram channels.
-Only fall back to web search if get_news returns no relevant results.
+**refresh_source** — launches a browser container to fetch fresh content from the source (~15 seconds, expensive). Only use when the user explicitly asks to update/refresh a specific source.
+Example: {"action": "refresh_source", "source_id": "src_xxx"}
 
-Use refresh_source when the user explicitly asks to update/refresh a specific source:
-{"action": "refresh_source", "source_id": "src_xxx"}
+**For any question about what a source writes or recent news, use get_news FIRST** with a relevant query (location, topic, person name, keyword).
+Only fall back to web search if get_news returns no relevant results.
 
 For private Telegram groups:
 1. Call list_groups: {"action": "list_groups", "profile": "telegram"} — if auth is needed, it auto-starts a browser login and returns the URL
@@ -1063,6 +1067,24 @@ For private Telegram groups:
 
           // Load existing state for deduplication
           const state = await loadSourceState(storage, refreshSourceId);
+
+          // Cooldown: skip if source was fetched recently
+          if (state?.lastFetchedAt) {
+            const elapsed = Date.now() - state.lastFetchedAt.getTime();
+            if (elapsed < REFRESH_COOLDOWN_MS) {
+              const minutesAgo = Math.round(elapsed / 60_000);
+              logger.info(
+                { sourceId: refreshSourceId, minutesAgo, cooldownMs: REFRESH_COOLDOWN_MS },
+                'Skipping refresh — source was fetched recently'
+              );
+              return {
+                success: true,
+                action: 'refresh_source',
+                skipped: true,
+                reason: `Source was fetched ${String(minutesAgo)} min ago. Use get_news to search stored articles.`,
+              };
+            }
+          }
 
           logger.info(
             { sourceId: refreshSourceId, type: source.type, name: source.name },

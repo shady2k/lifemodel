@@ -186,6 +186,10 @@ export interface NewsToolResult {
   authUrl?: string | undefined;
   /** Number of new articles found during refresh_source */
   newArticleCount?: number | undefined;
+  /** Whether the action was skipped (e.g. cooldown) */
+  skipped?: boolean | undefined;
+  /** Human-readable reason for skipping */
+  reason?: string | undefined;
 }
 
 /**

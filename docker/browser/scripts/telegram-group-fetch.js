@@ -21,6 +21,8 @@ const path = require('path');
 const DEFAULT_MAX_MESSAGES = 50;
 const NAV_TIMEOUT_MS = 30_000;
 const EXTRACT_TIMEOUT_MS = 30_000;
+const SCROLL_SETTLE_MS = 2000;
+const SCROLL_MAX_RETRIES = 3;
 const PROFILE_DIR = '/profile';
 
 /**
@@ -32,6 +34,178 @@ function cleanStaleLocks() {
     const p = path.join(PROFILE_DIR, name);
     try { fs.unlinkSync(p); } catch { /* file may not exist */ }
   }
+}
+
+/**
+ * Get the highest data-message-id currently rendered in the DOM.
+ * Returns null if no messages are visible.
+ */
+async function getMaxVisibleId(page) {
+  return page.evaluate(() => {
+    const els = document.querySelectorAll('.Message[data-message-id]');
+    let max = null;
+    for (const el of els) {
+      const id = parseInt(el.getAttribute('data-message-id'), 10);
+      if (!isNaN(id) && (max === null || id > max)) max = id;
+    }
+    return max;
+  });
+}
+
+/**
+ * Scroll the chat to the latest messages so that virtual scrolling renders
+ * posts beyond lastSeenId. Uses three strategies in order:
+ * 1. Click the "scroll to bottom" FAB (Telegram shows this when scrolled up)
+ * 2. Press End key (Telegram Web A handles this as "jump to latest")
+ * 3. Raw scrollTop on the messages container
+ *
+ * After each attempt, checks whether new messages appeared. Retries up to
+ * SCROLL_MAX_RETRIES times. Proceeds gracefully if scrolling fails.
+ */
+async function scrollToLatest(page, lastSeenId) {
+  const lastId = lastSeenId ? parseInt(lastSeenId, 10) : null;
+  const dbg = (msg) => console.error(`[scrollToLatest] ${msg}`);
+
+  // Check if we already have new messages visible
+  const currentMax = await getMaxVisibleId(page);
+  dbg(`lastSeenId=${lastId}, currentMaxVisible=${currentMax}`);
+  if (lastId !== null && currentMax !== null && currentMax > lastId) {
+    dbg('Already showing new messages, skipping scroll');
+    return;
+  }
+
+  // Dump DOM structure for diagnostics
+  const domInfo = await page.evaluate(() => {
+    const bubbles = document.querySelector('.bubbles');
+    const bubblesInner = document.querySelector('.bubbles-inner');
+    const scrollable = document.querySelector('.bubbles .scrollable');
+    const chatBubbles = document.querySelector('.chat .bubbles');
+    // Try to find the actual scroll container
+    const allScrollable = document.querySelectorAll('[class*="scrollable"]');
+    const scrollableInfo = Array.from(allScrollable).map(el => ({
+      tag: el.tagName,
+      classes: el.className.substring(0, 100),
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    }));
+    // Look for go-down button with broader search
+    const allButtons = document.querySelectorAll('button');
+    const buttonClasses = Array.from(allButtons).map(b => b.className.substring(0, 60)).filter(c => c);
+    return {
+      hasBubbles: !!bubbles,
+      hasBubblesInner: !!bubblesInner,
+      hasScrollable: !!scrollable,
+      hasChatBubbles: !!chatBubbles,
+      scrollableElements: scrollableInfo,
+      buttonClasses: buttonClasses.slice(0, 20),
+      url: window.location.href,
+    };
+  });
+  dbg(`DOM info: ${JSON.stringify(domInfo)}`);
+
+  for (let attempt = 0; attempt < SCROLL_MAX_RETRIES; attempt++) {
+    dbg(`Attempt ${attempt + 1}/${SCROLL_MAX_RETRIES}`);
+
+    // Strategy 1: Click the scroll-to-bottom FAB button
+    const fabResult = await page.evaluate(() => {
+      // Telegram Web A uses various class names for this button
+      const selectors = [
+        '.bubbles-go-down',
+        'button.bubbles-go-down',
+        '[class*="go-down"]',
+        '[class*="GoDown"]',
+        '[class*="scroll-down"]',
+        '[class*="ScrollDown"]',
+        'button.scroll-down-button',
+        '.ScrollDownButton',
+        '.btn-circle.btn-corner.bubbles-corner-button',
+      ];
+      for (const sel of selectors) {
+        const btn = document.querySelector(sel);
+        if (btn) {
+          btn.click();
+          return { clicked: true, selector: sel, classes: btn.className };
+        }
+      }
+      return { clicked: false };
+    });
+    dbg(`FAB result: ${JSON.stringify(fabResult)}`);
+
+    if (!fabResult.clicked) {
+      // Strategy 2: Press End key
+      dbg('Pressing End key');
+      await page.keyboard.press('End');
+
+      // Strategy 3: Raw scroll fallback — find scrollable containers and scroll them
+      const scrollResult = await page.evaluate(() => {
+        const results = [];
+        // Try specific known containers
+        const candidates = [
+          document.querySelector('.bubbles'),
+          document.querySelector('.bubbles-inner'),
+          document.querySelector('#column-center .scrollable'),
+          document.querySelector('.messages-container'),
+          document.querySelector('.chat .bubbles'),
+        ];
+        // Also try any scrollable element with significant scroll area
+        const allScrollable = document.querySelectorAll('[class*="scrollable"], [class*="bubbles"]');
+        for (const el of allScrollable) {
+          if (el && !candidates.includes(el)) candidates.push(el);
+        }
+        for (const c of candidates) {
+          if (c && c.scrollHeight > c.clientHeight) {
+            const before = c.scrollTop;
+            c.scrollTop = c.scrollHeight;
+            results.push({
+              classes: c.className.substring(0, 80),
+              before,
+              after: c.scrollTop,
+              scrollHeight: c.scrollHeight,
+              clientHeight: c.clientHeight,
+            });
+          }
+        }
+        return results;
+      });
+      dbg(`Scroll result: ${JSON.stringify(scrollResult)}`);
+    }
+
+    // Wait for Telegram to render new messages after scrolling
+    await page.waitForTimeout(SCROLL_SETTLE_MS);
+
+    // Check if we now have messages beyond lastSeenId
+    const newMax = await getMaxVisibleId(page);
+    dbg(`After scroll: maxVisible=${newMax}`);
+    if (lastId !== null && newMax !== null && newMax > lastId) {
+      dbg('Success — new messages visible');
+      return;
+    }
+
+    // If we have no lastSeenId reference, one attempt is enough
+    if (lastId === null) return;
+  }
+  dbg('All retries exhausted, proceeding with what we have');
+}
+
+/**
+ * Verify the page is still showing the expected chat after navigation.
+ * Telegram Web A uses hash-based routing like #-1001234567890.
+ */
+function verifyChatUrl(currentUrl, expectedUrl) {
+  // Extract the peer/channel identifier from both URLs
+  // Telegram Web A format: https://web.telegram.org/a/#-1001234567890
+  const extractHash = (url) => {
+    try {
+      const hash = new URL(url).hash; // e.g. #-1001234567890
+      return hash.replace('#', '');
+    } catch {
+      return '';
+    }
+  };
+  const expectedPeer = extractHash(expectedUrl);
+  if (!expectedPeer) return true; // Can't verify, allow it
+  return currentUrl.includes(expectedPeer);
 }
 
 async function main() {
@@ -105,6 +279,18 @@ async function main() {
       );
       return;
     }
+
+    // Verify we're in the right chat (catches redirects to other dialogs)
+    if (!verifyChatUrl(page.url(), groupUrl)) {
+      outputError(
+        'FETCH_FAILED',
+        `Chat mismatch: expected ${groupUrl}, got ${page.url()}`
+      );
+      return;
+    }
+
+    // Scroll to latest messages so virtual scrolling renders new posts
+    await scrollToLatest(page, lastSeenId);
 
     // Wait for the message list to appear
     // Telegram Web A uses .Message.message-list-item with data-message-id
