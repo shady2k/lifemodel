@@ -206,6 +206,29 @@ Some description
     });
   });
 
+  describe('doubled-quote JSON recovery (Gemini)', () => {
+    it('recovers JSON with doubled quote on response key', () => {
+      const result = parseResponseContent('{""response": "hello"}');
+      expect(result).toEqual({ text: 'hello' });
+    });
+
+    it('recovers JSON with doubled quotes on multiple keys', () => {
+      const result = parseResponseContent('{""response": "hi", ""status": "active"}');
+      expect(result).toEqual({ text: 'hi', status: 'active' });
+    });
+
+    it('does not mangle escaped quotes inside string values', () => {
+      // Valid JSON with escaped quotes in values — should parse normally (no recovery needed)
+      const result = parseResponseContent('{"response": "she said \\"hello\\""}');
+      expect(result).toEqual({ text: 'she said "hello"' });
+    });
+
+    it('recovers triple-quoted keys', () => {
+      const result = parseResponseContent('{"""response": "hello"}');
+      expect(result).toEqual({ text: 'hello' });
+    });
+  });
+
   describe('XML tool-call detection', () => {
     it('detects <core.say> tag pair as malformed', () => {
       const result = parseResponseContent('<core.say>Hello there!</core.say>');

@@ -213,6 +213,87 @@ describe('AgenticLoop hard provider error failover', () => {
     expect(llm.completeWithTools).toHaveBeenCalledTimes(2);
   });
 
+  it('escalates to smart model when fast model produces persistent malformed JSON', async () => {
+    const llm: CognitionLLM = {
+      complete: vi.fn(),
+      completeWithTools: vi.fn()
+        // First call: fast model returns truncated JSON
+        .mockResolvedValueOnce({
+          content: '{"',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse)
+        // Second call (retry on fast): still malformed (truncated)
+        .mockResolvedValueOnce({
+          content: '{"respon',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse)
+        // Third call (smart model): succeeds
+        .mockResolvedValueOnce(makeSuccessResponse('hello')),
+    };
+
+    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
+    const result = await loop.run(makeContext());
+
+    // Should have called LLM 3 times: fast, fast retry, smart
+    expect(llm.completeWithTools).toHaveBeenCalledTimes(3);
+
+    const calls = vi.mocked(llm.completeWithTools).mock.calls;
+    expect(calls[0][1]?.useSmart).toBe(false); // fast
+    expect(calls[1][1]?.useSmart).toBe(false); // fast retry
+    expect(calls[2][1]?.useSmart).toBe(true); // smart escalation
+
+    expect(result.success).toBe(true);
+    expect(result.terminal.type).toBe('respond');
+  });
+
+  it('returns error when smart model also produces persistent malformed JSON', async () => {
+    const llm: CognitionLLM = {
+      complete: vi.fn(),
+      completeWithTools: vi.fn()
+        // Fast model: malformed twice
+        .mockResolvedValueOnce({
+          content: '{"',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse)
+        .mockResolvedValueOnce({
+          content: '{"',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse)
+        // Smart model: also malformed twice
+        .mockResolvedValueOnce({
+          content: '{"resp',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse)
+        .mockResolvedValueOnce({
+          content: '{"resp',
+          toolCalls: [],
+          finishReason: 'stop',
+        } as ToolCompletionResponse),
+    };
+
+    const loop = new AgenticLoop(makeLogger(), llm, makeToolRegistry());
+    const result = await loop.run(makeContext());
+
+    // 4 calls: fast×2, smart×2
+    expect(llm.completeWithTools).toHaveBeenCalledTimes(4);
+
+    const calls = vi.mocked(llm.completeWithTools).mock.calls;
+    expect(calls[0][1]?.useSmart).toBe(false);
+    expect(calls[1][1]?.useSmart).toBe(false);
+    expect(calls[2][1]?.useSmart).toBe(true);
+    expect(calls[3][1]?.useSmart).toBe(true);
+
+    // Should return error response to user
+    expect(result.success).toBe(true);
+    expect(result.terminal.type).toBe('respond');
+    expect(result.terminal.text).toContain('ошибка');
+  });
+
   it('re-throws non-LLMError exceptions without escalation', async () => {
     const llm: CognitionLLM = {
       complete: vi.fn(),

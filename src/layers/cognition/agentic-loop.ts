@@ -397,7 +397,49 @@ export class AgenticLoop {
       if (response.toolCalls.length === 0) {
         const result = this.handleNaturalCompletion(response.content, state, context);
         if (result === null) {
-          // forceRespond was set — continue loop
+          // Check if handleNaturalCompletion is requesting smart model escalation
+          if (state.malformedEscalationRequested && !useSmart) {
+            // Escalate to smart model — keep existing messages (they contain
+            // in-loop tool calls/results that would be lost if we rebuilt).
+            state.malformedEscalationRequested = false;
+            state.malformedRetried = false; // Allow retry on smart model
+            delete state.malformedContent;
+            state.iteration = 0; // Reset budget for smart model
+            useSmart = true;
+            this.logger.warn(
+              { triggerType: context.triggerSignal.type, toolCallCount: state.toolCallCount },
+              'Malformed response persists — escalating to smart model'
+            );
+          } else if (state.malformedEscalationRequested && useSmart) {
+            // Smart model also can't produce valid JSON — give up
+            state.malformedEscalationRequested = false;
+            this.logger.error(
+              { triggerType: context.triggerSignal.type },
+              'Malformed response persists after smart model escalation'
+            );
+
+            if (context.triggerSignal.type !== 'user_message') {
+              const terminal: Terminal = {
+                type: 'noAction',
+                reason: 'Malformed LLM response after smart escalation',
+              };
+              const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+              return { success: true, terminal, intents, state };
+            }
+
+            const trace = getTraceContext();
+            const traceRef = trace
+              ? `${trace.traceId.slice(0, 8)}:${trace.spanId ?? 'unknown'}`
+              : 'unknown';
+            const terminal: Terminal = {
+              type: 'respond',
+              text: `Извини, произошла ошибка. Давай повторим? (trace: ${traceRef})`,
+              conversationStatus: 'active',
+              confidence: 0.3,
+            };
+            const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+            return { success: true, terminal, intents, state };
+          }
           continue;
         }
 
@@ -571,39 +613,17 @@ export class AgenticLoop {
         return null;
       }
 
-      // Already retried — give up
-      this.logger.error(
+      // Already retried with same model — request smart escalation via runInternal
+      this.logger.warn(
         {
           contentLength: content?.length ?? 0,
-          rawContent: content,
+          contentPreview: content?.slice(0, 100),
           triggerType: context.triggerSignal.type,
         },
-        'Malformed LLM response persists after retry'
+        'Malformed LLM response persists after retry — requesting smart escalation'
       );
-
-      if (context.triggerSignal.type !== 'user_message') {
-        // Proactive trigger — silent abort
-        const terminal: Terminal = {
-          type: 'noAction',
-          reason: 'Malformed LLM response after retry',
-        };
-        const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
-        return { success: true, terminal, intents, state };
-      }
-
-      // User message — return error with trace context for log lookup
-      const trace = getTraceContext();
-      const traceRef = trace
-        ? `${trace.traceId.slice(0, 8)}:${trace.spanId ?? 'unknown'}`
-        : 'unknown';
-      const terminal: Terminal = {
-        type: 'respond',
-        text: `Sorry, I had trouble processing that. Could you try again? (trace: ${traceRef})`,
-        conversationStatus: 'active',
-        confidence: 0.3,
-      };
-      const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
-      return { success: true, terminal, intents, state };
+      state.malformedEscalationRequested = true;
+      return null;
     }
 
     // Store conversation status from response if provided

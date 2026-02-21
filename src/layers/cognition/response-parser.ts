@@ -139,6 +139,38 @@ export function parseResponseContent(
 
       return { text: finalText, ...(status ? { status } : {}), ...(urgent ? { urgent } : {}) };
     } catch {
+      // 3a-pre: Collapse doubled quotes at JSON key positions.
+      // Gemini sometimes emits {""response": "val"} — doubled quote on keys.
+      // Scoped to positions after { or , to avoid mangling escaped quotes in string values.
+      const deduped = deduplicateJsonQuotes(jsonCandidate);
+      if (deduped !== jsonCandidate) {
+        try {
+          const parsed = JSON.parse(deduped) as {
+            response?: unknown;
+            status?: string;
+            urgent?: boolean;
+          };
+          if (typeof parsed.response === 'string') {
+            const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
+            const status =
+              parsed.status && validStatuses.includes(parsed.status)
+                ? (parsed.status as ConversationStatus)
+                : undefined;
+            const responseText = parsed.response.trim();
+            const cleanedText = stripLeadingTimestamp(responseText).trim();
+            const finalText = cleanedText || null;
+            const urgent = parsed.urgent === true;
+            return {
+              text: finalText,
+              ...(status ? { status } : {}),
+              ...(urgent ? { urgent } : {}),
+            };
+          }
+        } catch {
+          // Dedupe attempt didn't fix it — fall through to control char escape
+        }
+      }
+
       // 3a: JSON.parse failed — try escaping literal control characters.
       // Gemini models emit raw newlines/tabs inside JSON string values instead of \n/\t.
       // Control chars (U+0000–U+001F) are never valid unescaped in JSON, so safe to escape globally.
@@ -196,10 +228,19 @@ export function parseResponseContent(
 
 const CONTROL_CHAR_MAP: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
 
+/**
+ * Collapse doubled quotes at JSON key positions.
+ * Gemini sometimes emits {""response": "val"} — extra quote before keys.
+ * Only targets positions after { or , (key start), not inside string values.
+ */
+function deduplicateJsonQuotes(s: string): string {
+  return s.replace(/([{,]\s*)""+/g, '$1"');
+}
+
 /** Escape literal control characters (U+0000–U+001F) that are invalid unescaped in JSON. */
 function escapeJsonControlChars(s: string): string {
-  // eslint-disable-next-line no-control-regex
   return s.replace(
+    // eslint-disable-next-line no-control-regex
     /[\x00-\x1f]/g,
     (ch) => CONTROL_CHAR_MAP[ch] ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
   );

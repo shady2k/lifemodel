@@ -596,6 +596,9 @@ export interface LoopState {
   /** Content from malformed response, injected as diagnostic on retry */
   malformedContent?: string;
 
+  /** Whether handleNaturalCompletion is requesting smart model escalation for persistent malformed responses */
+  malformedEscalationRequested: boolean;
+
   /** Whether a provider-error retry has already been attempted (prevents stripping tools on provider failures) */
   providerErrorRetried: boolean;
 
@@ -624,6 +627,7 @@ export function createLoopState(): LoopState {
     limitViolationCount: 0,
     collectedThoughts: [],
     malformedRetried: false,
+    malformedEscalationRequested: false,
     providerErrorRetried: false,
     nonRetryableErrorRetried: false,
   };
