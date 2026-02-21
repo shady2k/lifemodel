@@ -946,6 +946,25 @@ describe('apt prep container commands', () => {
     expect(shellCmd).toContain('ffmpeg');
   });
 
+  it('adds Debian unstable repo before apt-get update', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'yt-dlp', version: 'latest' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('deb http://deb.debian.org/debian unstable main');
+    // unstable source must be added BEFORE apt-get update
+    const unstableIdx = shellCmd.indexOf('unstable.list');
+    const updateIdx = shellCmd.indexOf('apt-get update');
+    expect(unstableIdx).toBeLessThan(updateIdx);
+  });
+
   it('mounts a named Docker volume for apt', async () => {
     await installSkillDependencies(
       { apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] } },

@@ -291,7 +291,7 @@ async function installApt(
       `${volumeName}:/workspace`,
       CONTAINER_IMAGE,
       '-c',
-      `apt-get update -o APT::Sandbox::User=root && apt-get install -y --download-only --no-install-recommends ${pkgSpecs} && mkdir -p /workspace/sysroot && find /var/cache/apt/archives -name '*.deb' -exec dpkg -x {} /workspace/sysroot \\; && test -n "$(find /workspace/sysroot -type f -print -quit)"`,
+      `echo 'deb http://deb.debian.org/debian unstable main' > /etc/apt/sources.list.d/unstable.list && apt-get update -o APT::Sandbox::User=root && apt-get install -y --download-only --no-install-recommends ${pkgSpecs} && mkdir -p /workspace/sysroot && find /var/cache/apt/archives -name '*.deb' -exec dpkg -x {} /workspace/sysroot \\; && test -n "$(find /workspace/sysroot -type f -print -quit)"`,
     ];
 
     logger.info(
