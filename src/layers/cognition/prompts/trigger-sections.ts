@@ -115,14 +115,20 @@ export function buildPluginEventSection(data: Record<string, unknown> | undefine
     return `<trigger type="plugin_event">\n<task>No event data available.</task>\n</trigger>`;
   }
 
-  const kind = data['kind'] as string | undefined;
-  const pluginId = data['pluginId'] as string | undefined;
-  const eventKind = data['eventKind'] as string | undefined;
-  const urgent = data['urgent'] as boolean | undefined;
+  // Flatten nested payload into top-level for consistent access.
+  // PluginEventData stores event-specific fields in `payload`, but handlers
+  // read from the top level. Spreading payload last lets it override.
+  const payload = data['payload'] as Record<string, unknown> | undefined;
+  const d = payload ? { ...data, ...payload } : data;
+
+  const kind = d['kind'] as string | undefined;
+  const pluginId = d['pluginId'] as string | undefined;
+  const eventKind = d['eventKind'] as string | undefined;
+  const urgent = d['urgent'] as boolean | undefined;
 
   // Handle fact_batch events (news, interesting facts)
-  if (kind === 'fact_batch' && Array.isArray(data['facts'])) {
-    const facts = data['facts'] as { content: string; provenance?: { url?: string } }[];
+  if (kind === 'fact_batch' && Array.isArray(d['facts'])) {
+    const facts = d['facts'] as { content: string; provenance?: { url?: string } }[];
 
     if (facts.length === 0) {
       return `<trigger type="plugin_event">\n<task>Empty fact batch received.</task>\n</trigger>`;
@@ -152,7 +158,7 @@ Deliver this news with URLs inline in your response. Do not send teasers or prev
 
   // Handle daily agenda events — pre-filtered agenda items from plugin
   if (eventKind === 'reminder:daily_agenda') {
-    const agendaItems = data['agendaItems'] as string[] | undefined;
+    const agendaItems = d['agendaItems'] as string[] | undefined;
     const hasItems = agendaItems && agendaItems.length > 0;
 
     const itemsList = hasItems
@@ -173,8 +179,8 @@ ${hasItems ? 'Execute any actionable daily reminders listed above (e.g., check n
 
   // Handle self-scheduled reminder events (agent's own commitments)
   if (eventKind === 'reminder:self_scheduled') {
-    const content = (data['content'] as string | undefined) ?? 'Unknown task';
-    const isRecurring = data['isRecurring'] === true;
+    const content = (d['content'] as string | undefined) ?? 'Unknown task';
+    const isRecurring = d['isRecurring'] === true;
 
     return `<trigger type="self_scheduled">
 <context>
@@ -183,16 +189,16 @@ You scheduled this for yourself: "${content}"${isRecurring ? ' (recurring)' : ''
 
 <task>
 Act on your own reminder. You set this because it mattered.
-If the task is complete, you can cancel it with plugin.reminder(action:"cancel", reminderId:"${(data['reminderId'] as string | undefined) ?? ''}").
+If the task is complete, you can cancel it with plugin.reminder(action:"cancel", reminderId:"${(d['reminderId'] as string | undefined) ?? ''}").
 </task>
 </trigger>`;
   }
 
   // Handle commitment due events (Phase 5: Commitment Tracking)
   if (eventKind === 'commitment:due') {
-    const commitmentId = (data['commitmentId'] as string | undefined) ?? '';
-    const text = (data['text'] as string | undefined) ?? 'Unknown commitment';
-    const dueAt = data['dueAt'] as string | undefined;
+    const commitmentId = (d['commitmentId'] as string | undefined) ?? '';
+    const text = (d['text'] as string | undefined) ?? 'Unknown commitment';
+    const dueAt = d['dueAt'] as string | undefined;
 
     return `<trigger type="commitment_due">
 <context>
@@ -212,9 +218,9 @@ Act on your commitment now.
 
   // Handle commitment overdue events (Phase 5: Commitment Tracking)
   if (eventKind === 'commitment:overdue') {
-    const commitmentId = (data['commitmentId'] as string | undefined) ?? '';
-    const text = (data['text'] as string | undefined) ?? 'Unknown commitment';
-    const dueAt = data['dueAt'] as string | undefined;
+    const commitmentId = (d['commitmentId'] as string | undefined) ?? '';
+    const text = (d['text'] as string | undefined) ?? 'Unknown commitment';
+    const dueAt = d['dueAt'] as string | undefined;
 
     return `<trigger type="commitment_overdue">
 <context>
@@ -236,9 +242,9 @@ Never ignore a broken promise. Always acknowledge and repair.
 
   // Handle prediction due events (Phase 7: Opinions + Predictions)
   if (eventKind === 'perspective:prediction_due') {
-    const predictionId = (data['predictionId'] as string | undefined) ?? '';
-    const claim = (data['claim'] as string | undefined) ?? 'Unknown prediction';
-    const confidence = (data['confidence'] as number | undefined) ?? 0.5;
+    const predictionId = (d['predictionId'] as string | undefined) ?? '';
+    const claim = (d['claim'] as string | undefined) ?? 'Unknown prediction';
+    const confidence = (d['confidence'] as number | undefined) ?? 0.5;
 
     return `<trigger type="prediction_due">
 <context>
@@ -257,7 +263,7 @@ Check if the prediction outcome is now known.
 
   // Handle prediction missed events (Phase 7: Opinions + Predictions)
   if (eventKind === 'perspective:prediction_missed') {
-    const claim = (data['claim'] as string | undefined) ?? 'Unknown prediction';
+    const claim = (d['claim'] as string | undefined) ?? 'Unknown prediction';
 
     return `<trigger type="prediction_missed">
 <context>
@@ -278,7 +284,7 @@ Acknowledge being wrong. Learning from mistakes is valuable.
 <context>
 Event: ${eventKind ?? 'unknown'}
 Plugin: ${pluginId ?? 'unknown'}
-${urgent ? 'URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(data)}
+${urgent ? 'URGENT: This event requires immediate attention.\n' : ''}Data: ${JSON.stringify(d)}
 </context>
 
 <task>Process this event and respond appropriately.</task>

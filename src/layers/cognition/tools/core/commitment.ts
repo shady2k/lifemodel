@@ -76,7 +76,7 @@ export function createCommitmentTool(): Tool {
 
   return {
     name: 'core.commitment',
-    maxCallsPerTurn: 3,
+    maxCallsPerTurn: 6,
     description: `Track commitments (promises) you make to the user.
 Call create when you explicitly promise something: "I'll check in tomorrow", "I'll remember that".
 Call mark_kept when you fulfill a commitment.
