@@ -18,11 +18,9 @@ const { waitForReady } = require('./wait-ready');
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULT_MAX_MESSAGES = 50;
+const DEFAULT_MAX_MESSAGES = 1000;
 const NAV_TIMEOUT_MS = 30_000;
 const EXTRACT_TIMEOUT_MS = 30_000;
-const SCROLL_SETTLE_MS = 3000;
-const SCROLL_MAX_RETRIES = 5;
 const PROFILE_DIR = '/profile';
 
 /**
@@ -53,103 +51,243 @@ async function getMaxVisibleId(page) {
 }
 
 /**
- * Scroll the chat to the latest messages.
- *
- * Telegram Web A does NOT load new messages on scroll — it loads messages
- * around a "focused message ID". When a chat opens, it focuses on the
- * last-read position. To get the truly latest messages, we must click the
- * "Go to bottom" FAB button, which triggers:
- *   focusLastMessage() → focusMessage() → loadViewportMessages() → API fetch
- *
- * The FAB is identified by its stable icon class `i.icon-arrow-down` inside
- * a <button> with aria-label "Go to bottom". CSS-module classes on the button
- * itself are obfuscated and change every build, so we avoid them.
- *
- * Strategies (in order):
- * 1. Click the "Go to bottom" FAB (icon-arrow-down) — triggers server fetch
- * 2. Click message area + press End key — fallback for keyboard navigation
- * 3. Native mouse.wheel() events — last resort for scroll-based loading
- *
- * Retries up to SCROLL_MAX_RETRIES times. Proceeds gracefully if all fail.
+ * Extract messages currently rendered in the DOM.
+ * Returns array of { id (int), text, date, from } sorted by id ascending.
  */
-async function scrollToLatest(page, lastSeenId) {
+async function extractVisibleMessages(page) {
+  return page.evaluate(() => {
+    const results = [];
+    for (const el of document.querySelectorAll('.Message[data-message-id]')) {
+      const rawId = el.getAttribute('data-message-id') || '';
+      const id = parseInt(rawId, 10);
+      if (isNaN(id)) continue;
+
+      const textEl = el.querySelector('.text-content');
+      let text = '';
+      if (textEl) {
+        const clone = textEl.cloneNode(true);
+        clone.querySelectorAll('.MessageMeta').forEach(m => m.remove());
+        text = clone.textContent.trim();
+      }
+
+      const timeEl = el.querySelector('.message-time');
+      const date = timeEl
+        ? timeEl.getAttribute('datetime') || timeEl.getAttribute('title') || timeEl.textContent.trim()
+        : '';
+
+      const fromEl = el.querySelector('.sender-title');
+      const from = fromEl ? fromEl.textContent.trim() : '';
+
+      results.push({ id, text, date, from });
+    }
+    return results;
+  });
+}
+
+/**
+ * Collect all new messages since lastSeenId.
+ *
+ * Telegram Web A uses virtual scrolling — only ~40 messages are in the DOM
+ * at once. The chat opens at the last-read position (near lastSeenId).
+ * Scrolling does NOT load messages beyond what Telegram has in memory.
+ *
+ * Strategy:
+ * 1. Collect visible messages at opening position
+ * 2. Click "Go to bottom" FAB to trigger focusLastMessage() → server fetch
+ *    (uses Playwright real clicks + dispatchEvent fallback)
+ * 3. Scroll UP from the bottom to fill the gap back to lastSeenId
+ * 4. Filter, sort, return
+ */
+async function collectMessages(page, groupUrl, lastSeenId, maxMessages) {
   const lastId = lastSeenId ? parseInt(lastSeenId, 10) : null;
-  const dbg = (msg) => console.error(`[scrollToLatest] ${msg}`);
+  const t0 = Date.now();
+  const dbg = (msg) => console.error(`[collect +${((Date.now() - t0) / 1000).toFixed(1)}s] ${msg}`);
+  const collected = new Map(); // id → { id, text, date, from }
+  const MAX_SCROLL_PAGES = 50; // enough for ~2000 messages
+  const SCROLL_PAGE_SETTLE_MS = 1500;
 
-  // Check if we already have new messages visible
-  const currentMax = await getMaxVisibleId(page);
-  dbg(`lastSeenId=${lastId}, currentMaxVisible=${currentMax}`);
-  if (lastId !== null && currentMax !== null && currentMax > lastId) {
-    dbg('Already showing new messages, skipping scroll');
-    return;
+  dbg(`Config: maxMessages=${maxMessages}, MAX_SCROLL_PAGES=${MAX_SCROLL_PAGES}`);
+
+  // Log viewport and scroll container info for debugging
+  const viewportInfo = await page.evaluate(() => {
+    const msgCount = document.querySelectorAll('.Message[data-message-id]').length;
+    const scrollEl = document.querySelector('.MessageList') ||
+                     document.querySelector('[class*="MessageList"]') ||
+                     document.querySelector('.messages-container');
+    const scrollInfo = scrollEl ? {
+      scrollHeight: scrollEl.scrollHeight,
+      clientHeight: scrollEl.clientHeight,
+      scrollTop: scrollEl.scrollTop,
+    } : null;
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      msgCount,
+      scrollInfo,
+    };
+  });
+  dbg(`Viewport: ${viewportInfo.innerWidth}x${viewportInfo.innerHeight}, DOM messages: ${viewportInfo.msgCount}, scroll: ${JSON.stringify(viewportInfo.scrollInfo)}`);
+
+  // --- Phase 1: Collect at opening position ---
+  let msgs = await extractVisibleMessages(page);
+  for (const m of msgs) collected.set(m.id, m);
+  dbg(`Phase 1 — Initial: ${msgs.length} visible, range ${msgs[0]?.id}-${msgs[msgs.length-1]?.id} (lastSeenId=${lastId})`);
+
+  // If nothing visible, wait for SPA sync then try reload
+  if (msgs.length === 0) {
+    dbg('No messages visible, waiting for sync...');
+    for (let i = 0; i < 3; i++) {
+      await page.waitForTimeout(3000);
+      msgs = await extractVisibleMessages(page);
+      if (msgs.length > 0) break;
+    }
+    if (msgs.length === 0) {
+      dbg('Still no messages after sync, reloading page...');
+      await page.goto(groupUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: NAV_TIMEOUT_MS,
+      });
+      await page.waitForTimeout(8000);
+      await page.waitForSelector('.Message[data-message-id]', {
+        timeout: EXTRACT_TIMEOUT_MS,
+      }).catch(() => {});
+      msgs = await extractVisibleMessages(page);
+    }
+    for (const m of msgs) collected.set(m.id, m);
+    dbg(`After recovery: ${msgs.length} visible`);
   }
 
-  for (let attempt = 0; attempt < SCROLL_MAX_RETRIES; attempt++) {
-    dbg(`Attempt ${attempt + 1}/${SCROLL_MAX_RETRIES}`);
+  // --- Phase 2: Jump to bottom via FAB, then scroll to collect ---
+  // Telegram Web A only keeps ~40 messages in memory around the "focus point".
+  // Scrolling past that boundary does NOT load new messages from the server.
+  // We MUST click the "Go to bottom" FAB to trigger focusLastMessage() → API fetch.
+  // Use Playwright's real click (not DOM .click()) to trigger React handlers.
+  dbg(`Phase 2 — Jump to bottom via FAB (collected so far: ${collected.size})`);
 
-    // Strategy 1: Click the "Go to bottom" FAB button.
-    // Telegram Web A renders this inside FloatingActionButtons with a stable
-    // icon class (icon-arrow-down). The aria-label varies by locale, so we
-    // prefer the icon selector but try aria-label as fallback.
-    const fabClicked = await page.evaluate(() => {
-      // Primary: find button containing the arrow-down icon
-      const icon = document.querySelector('i.icon-arrow-down');
-      if (icon) {
-        const btn = icon.closest('button');
-        if (btn) {
-          btn.click();
-          return { clicked: true, method: 'icon', ariaLabel: btn.getAttribute('aria-label') || '' };
+  const prevMaxBeforeFab = await getMaxVisibleId(page) || 0;
+  let fabWorked = false;
+
+  // Click FAB using the exact locator pattern proven to work in debug-scroll.js:
+  // page.locator('button').filter({ has: page.locator('i[class*="arrow-down"]') })
+  const fabBtn = page.locator('button').filter({
+    has: page.locator('i[class*="arrow-down"]'),
+  }).first();
+
+  for (let fabAttempt = 0; fabAttempt < 5; fabAttempt++) {
+    if (await fabBtn.count() === 0) {
+      dbg(`  FAB click ${fabAttempt + 1}: no FAB found (already at bottom?)`);
+      fabWorked = true;
+      break;
+    }
+    try {
+      await fabBtn.click({ force: true, timeout: 3000 });
+      dbg(`  FAB click ${fabAttempt + 1}: clicked`);
+    } catch (e) {
+      dbg(`  FAB click ${fabAttempt + 1}: failed: ${e.message}`);
+    }
+
+    // Wait for Telegram to fetch and render new messages
+    await page.waitForTimeout(3000);
+    const curMax = await getMaxVisibleId(page) || 0;
+    dbg(`  after FAB click: maxId ${prevMaxBeforeFab} → ${curMax}`);
+
+    if (curMax > prevMaxBeforeFab + 5) {
+      fabWorked = true;
+      dbg(`  FAB worked! Jumped from ${prevMaxBeforeFab} to ${curMax}`);
+      break;
+    }
+  }
+
+  // Now collect what's visible after jumping to bottom
+  const bottomMsgs = await extractVisibleMessages(page);
+  for (const m of bottomMsgs) collected.set(m.id, m);
+  const bottomMax = await getMaxVisibleId(page) || 0;
+  dbg(`  after jump: ${bottomMsgs.length} visible, maxId=${bottomMax}, total collected=${collected.size}`);
+
+  // Scroll UP from the bottom all the way back to lastSeenId.
+  // The page could have opened at ANY position, so we can't assume Phase 1
+  // collected anything near lastSeenId. Scroll until minVisible <= lastSeenId.
+  // For first fetch (no lastSeenId), skip — just use what's at the bottom.
+  if (lastId !== null) {
+    dbg(`Phase 2b — Scrolling up from bottom to lastSeenId=${lastId}`);
+    let noProgressCount = 0;
+
+    for (let pg = 0; pg < MAX_SCROLL_PAGES; pg++) {
+      const minVisible = await page.evaluate(() => {
+        const els = document.querySelectorAll('.Message[data-message-id]');
+        let min = null;
+        for (const el of els) {
+          const id = parseInt(el.getAttribute('data-message-id'), 10);
+          if (!isNaN(id) && (min === null || id < min)) min = id;
         }
-        // Icon exists but no button parent — click the icon's parent directly
-        icon.parentElement?.click();
-        return { clicked: true, method: 'icon-parent' };
-      }
-      // Fallback: aria-label (may be localized)
-      const ariaBtn = document.querySelector(
-        'button[aria-label="Go to bottom"], button[aria-label="Перейти вниз"]'
-      );
-      if (ariaBtn) {
-        ariaBtn.click();
-        return { clicked: true, method: 'aria-label', ariaLabel: ariaBtn.getAttribute('aria-label') || '' };
-      }
-      return { clicked: false };
-    });
-    dbg(`FAB click: ${JSON.stringify(fabClicked)}`);
+        return min;
+      });
 
-    if (!fabClicked.clicked) {
-      // Strategy 2: Click message area to focus it, then press End
-      const msgEl = await page.$('.Message[data-message-id]');
-      if (msgEl) {
-        try {
-          await msgEl.click({ force: true });
-        } catch { /* ok */ }
+      // Stop when we can see messages at or before lastSeenId
+      if (minVisible !== null && minVisible <= lastId) {
+        dbg(`  reached lastSeenId zone (minVisible=${minVisible})`);
+        const zoneMsgs = await extractVisibleMessages(page);
+        for (const m of zoneMsgs) {
+          if (!collected.has(m.id)) collected.set(m.id, m);
+        }
+        break;
       }
-      dbg('Pressing End key (after focusing message area)');
-      await page.keyboard.press('End');
 
-      // Strategy 3: Native mouse.wheel() — real browser-level input events
-      dbg('Dispatching native wheel events');
-      for (let i = 0; i < 5; i++) {
-        await page.mouse.wheel(0, 3000);
-        await page.waitForTimeout(300);
+      await page.keyboard.press('PageUp');
+      await page.waitForTimeout(300);
+      await page.mouse.wheel(0, -3000);
+      await page.waitForTimeout(SCROLL_PAGE_SETTLE_MS);
+
+      const pgMsgs = await extractVisibleMessages(page);
+      let added = 0;
+      for (const m of pgMsgs) {
+        if (!collected.has(m.id)) { collected.set(m.id, m); added++; }
+      }
+
+      dbg(`  up ${pg + 1}: minVisible=${minVisible}, added=${added}, total=${collected.size}`);
+
+      if (added === 0) {
+        noProgressCount++;
+        if (noProgressCount >= 2) {
+          dbg('  no progress scrolling up, stopping');
+          break;
+        }
+      } else {
+        noProgressCount = 0;
+      }
+
+      if (collected.size >= maxMessages) {
+        dbg(`  hit maxMessages cap (${maxMessages})`);
+        break;
       }
     }
-
-    // Wait for Telegram to fetch and render new messages from the server
-    await page.waitForTimeout(SCROLL_SETTLE_MS);
-
-    // Check if we now have messages beyond lastSeenId
-    const newMax = await getMaxVisibleId(page);
-    dbg(`After attempt: maxVisible=${newMax}`);
-    if (lastId !== null && newMax !== null && newMax > lastId) {
-      dbg('Success — new messages visible');
-      return;
-    }
-
-    // If we have no lastSeenId reference, one attempt is enough
-    if (lastId === null) return;
   }
-  dbg('All retries exhausted, proceeding with what we have');
+
+  // --- Phase 3: Filter and sort ---
+  let results = Array.from(collected.values())
+    .filter(m => lastId === null || m.id > lastId)
+    .sort((a, b) => a.id - b.id)
+    .slice(0, maxMessages);
+
+  // Detect gaps in the collected message IDs
+  if (results.length > 1) {
+    const gaps = [];
+    for (let i = 1; i < results.length; i++) {
+      const diff = results[i].id - results[i - 1].id;
+      if (diff > 5) { // Allow small gaps from deleted messages
+        gaps.push(`${results[i - 1].id}..${results[i].id} (${diff - 1} missing)`);
+      }
+    }
+    if (gaps.length > 0) {
+      dbg(`WARNING: ${gaps.length} gap(s) detected: ${gaps.join(', ')}`);
+    }
+  }
+
+  results = results.map(m => ({ ...m, id: String(m.id) }));
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  dbg(`Final: ${results.length} messages (${results[0]?.id}-${results[results.length-1]?.id}), collected ${collected.size} total in ${elapsed}s`);
+  return results;
 }
 
 /**
@@ -202,15 +340,26 @@ async function main() {
 
   let context;
   try {
-    context = await chromium.launchPersistentContext(PROFILE_DIR, {
+    // Chromium ignores HTTP_PROXY/HTTPS_PROXY env vars.
+    // Use Playwright's proxy API + --proxy-server flag (belt and suspenders).
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+    const chromiumArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+    ];
+    const launchOptions = {
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    });
+      args: chromiumArgs,
+    };
+    if (proxyUrl) {
+      chromiumArgs.push(`--proxy-server=${proxyUrl}`);
+      launchOptions.proxy = { server: proxyUrl };
+      console.error(`[proxy] Using proxy: ${proxyUrl}`);
+    }
+
+    context = await chromium.launchPersistentContext(PROFILE_DIR, launchOptions);
 
     const page = context.pages()[0] || await context.newPage();
 
@@ -257,23 +406,17 @@ async function main() {
     const mem = process.memoryUsage();
     console.error(`[mem] rss=${Math.round(mem.rss / 1024 / 1024)}MB heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB`);
 
-    // Scroll to latest messages so virtual scrolling renders new posts
-    await scrollToLatest(page, lastSeenId);
-
     // Wait for the message list to appear
-    // Telegram Web A uses .Message.message-list-item with data-message-id
     try {
       await page.waitForSelector('.Message[data-message-id]', {
         timeout: EXTRACT_TIMEOUT_MS,
       });
     } catch {
-      // Check if we're on a valid page but with no messages
       const bodyText = await page.textContent('body').catch(() => '');
       if (bodyText && (bodyText.includes('no messages') || bodyText.includes('empty'))) {
         outputResult([], null);
         return;
       }
-      // Could be auth issue or page structure change
       outputError(
         'FETCH_FAILED',
         `Could not find message elements on page. URL: ${page.url()}`
@@ -281,46 +424,9 @@ async function main() {
       return;
     }
 
-    // Extract messages from the DOM
-    // Telegram Web A: .Message[data-message-id] with .text-content for text,
-    // .sender-title for author, .message-time for timestamp.
-    // Note: .MessageMeta (containing .message-time) is INSIDE .text-content,
-    // so we must strip it before reading text to avoid time contamination.
-    const messages = await page.evaluate(({ maxMsgs, lastId }) => {
-      const results = [];
-
-      const messageElements = document.querySelectorAll('.Message[data-message-id]');
-      const elements = Array.from(messageElements).slice(-maxMsgs);
-
-      for (const el of elements) {
-        const id = el.getAttribute('data-message-id') || '';
-        if (!id) continue;
-
-        // Skip messages we've already seen
-        if (lastId && parseInt(id, 10) <= parseInt(lastId, 10)) continue;
-
-        // Extract text, stripping the embedded MessageMeta (time) span
-        const textEl = el.querySelector('.text-content');
-        let text = '';
-        if (textEl) {
-          const clone = textEl.cloneNode(true);
-          clone.querySelectorAll('.MessageMeta').forEach(m => m.remove());
-          text = clone.textContent.trim();
-        }
-
-        const timeEl = el.querySelector('.message-time');
-        const date = timeEl
-          ? timeEl.getAttribute('datetime') || timeEl.getAttribute('title') || timeEl.textContent.trim()
-          : '';
-
-        const fromEl = el.querySelector('.sender-title');
-        const from = fromEl ? fromEl.textContent.trim() : '';
-
-        results.push({ id, text, date, from });
-      }
-
-      return results;
-    }, { maxMsgs: maxMessages, lastId: lastSeenId || null });
+    // Collect all messages from lastSeenId to the newest.
+    // Handles virtual scrolling by scrolling through the chat with PageDown/PageUp.
+    const messages = await collectMessages(page, groupUrl, lastSeenId, maxMessages);
 
     const latestId = messages.length > 0
       ? messages[messages.length - 1].id

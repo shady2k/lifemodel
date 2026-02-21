@@ -92,7 +92,7 @@ export async function fetchTelegramGroup(
         profile,
         groupUrl,
         lastSeenId,
-        maxMessages: 50,
+        maxMessages: 500,
       },
       timeoutMs: 120_000,
     });

@@ -19,6 +19,7 @@ import type { Duplex } from 'node:stream';
 import { resolve4 } from 'node:dns/promises';
 import type { Server } from 'node:http';
 import { matchesDomainPattern, isPrivateIP } from './network-policy.js';
+import type { Logger } from '../../types/index.js';
 
 /**
  * Per-run proxy allocation.
@@ -38,6 +39,14 @@ interface ProxyAllocation {
  */
 class EgressProxyManager {
   private readonly allocations = new Map<string, ProxyAllocation>();
+  private logger: Logger | undefined;
+
+  /**
+   * Set a logger for proxy request diagnostics.
+   */
+  setLogger(logger: Logger): void {
+    this.logger = logger.child({ component: 'egress-proxy' });
+  }
 
   /**
    * Allocate a proxy for a run.
@@ -164,7 +173,12 @@ class EgressProxyManager {
     }
 
     // Check domain
-    if (!this.isDomainAllowed(hostname, domains)) {
+    const domainAllowed = this.isDomainAllowed(hostname, domains);
+    if (!domainAllowed) {
+      this.logger?.warn(
+        { domain: hostname, port, allowlist: [...domains] },
+        'CONNECT blocked: domain not in allowlist'
+      );
       clientSocket.end(
         'HTTP/1.1 403 Forbidden\r\n' +
           'Content-Type: text/plain\r\n' +
@@ -176,6 +190,7 @@ class EgressProxyManager {
 
     // Check port
     if (!allowedPorts.has(port)) {
+      this.logger?.warn({ domain: hostname, port }, 'CONNECT blocked: port not allowed');
       clientSocket.end(
         'HTTP/1.1 403 Forbidden\r\n' +
           'Content-Type: text/plain\r\n' +
@@ -185,17 +200,21 @@ class EgressProxyManager {
       return;
     }
 
+    this.logger?.debug({ domain: hostname, port }, 'CONNECT allowed');
+
     // Resolve DNS on host side
     let resolvedIp: string;
     try {
       const ips = await resolve4(hostname);
       if (ips.length === 0) {
+        this.logger?.warn({ domain: hostname }, 'CONNECT failed: no DNS records');
         clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\nNo DNS records');
         return;
       }
       // Use first IP
       resolvedIp = ips[0] as string;
     } catch {
+      this.logger?.warn({ domain: hostname }, 'CONNECT failed: DNS resolution failed');
       clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\nDNS resolution failed');
       return;
     }

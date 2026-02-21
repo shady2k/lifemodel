@@ -39,17 +39,9 @@ entries.set('test.echo.run', {
  * news.telegram_group.fetch — Fetch messages from a private Telegram group.
  * Uses browser profile for authentication. Runs headless Playwright.
  */
-// Telegram Web A DC subdomains — WebSocket MTProto endpoints.
-// Without these, the SPA loads but can't establish API connections.
-const TELEGRAM_DOMAINS = [
-  'web.telegram.org',
-  'telegram.org',
-  'pluto.web.telegram.org',
-  'venus.web.telegram.org',
-  'aurora.web.telegram.org',
-  'vesta.web.telegram.org',
-  'flora.web.telegram.org',
-];
+// Telegram Web A domains — wildcard covers all DC subdomains (pluto, venus, zws2, etc.)
+// and WebSocket MTProto endpoints that the SPA discovers at runtime.
+const TELEGRAM_DOMAINS = ['web.telegram.org', '*.web.telegram.org', 'telegram.org'];
 
 entries.set('news.telegram_group.fetch', {
   id: 'news.telegram_group.fetch',

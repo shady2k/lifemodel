@@ -16,7 +16,7 @@ if [ -z "${AUTH_URL:-}" ]; then
 fi
 
 echo "Starting Xvfb on :99..."
-Xvfb :99 -screen 0 1280x720x24 -ac &
+Xvfb :99 -screen 0 1920x1080x24 -ac &
 XVFB_PID=$!
 sleep 1
 

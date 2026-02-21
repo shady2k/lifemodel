@@ -47,6 +47,71 @@ import { egressProxyManager } from './egress-proxy.js';
 const execFileAsync = promisify(execFile);
 
 /**
+ * Cached host-gateway IP (resolved once per process lifetime).
+ * On Docker Desktop / OrbStack this is a special IP (e.g. 0.250.250.254) that
+ * routes from containers to the macOS host. On Linux Docker, it equals the
+ * bridge gateway. Used for iptables ACCEPT rules on the egress proxy port.
+ */
+let cachedHostGatewayIp: string | null = null;
+
+/**
+ * Resolve the host-gateway IP that containers use to reach the host process.
+ *
+ * Uses a short-lived container with `--add-host host.docker.internal:host-gateway`
+ * to let Docker/OrbStack resolve the platform-specific IP. Cached after first call
+ * (~1-2s overhead only on first script run per process).
+ *
+ * - OrbStack on macOS: 0.250.250.254
+ * - Docker Desktop on macOS: 192.168.65.254 (varies)
+ * - Linux Docker: bridge gateway (e.g. 172.17.0.1)
+ */
+async function resolveHostGatewayIp(log: Logger): Promise<string> {
+  if (cachedHostGatewayIp) return cachedHostGatewayIp;
+
+  const { stdout } = await execFileAsync(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '--add-host',
+      'host.docker.internal:host-gateway',
+      'node:24-slim',
+      'cat',
+      '/etc/hosts',
+    ],
+    { timeout: 15_000 }
+  );
+
+  // Parse: "0.250.250.254\thost.docker.internal"
+  let ip: string | null = null;
+  for (const line of stdout.split('\n')) {
+    if (line.includes('host.docker.internal')) {
+      ip = line.split(/\s+/)[0]?.trim() || null;
+      break;
+    }
+  }
+
+  // Fallback: bridge network gateway (Linux Docker where bridge gateway = host)
+  if (!ip) {
+    const { stdout: networkInspect } = await execFileAsync(
+      'docker',
+      ['network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}'],
+      { timeout: 10_000 }
+    );
+    ip = networkInspect.trim() || null;
+    log.debug({ ip, source: 'bridge-fallback' }, 'Host-gateway IP (bridge fallback)');
+  }
+
+  if (!ip) {
+    throw new Error('Could not determine host-gateway IP for egress proxy');
+  }
+
+  log.info({ hostGatewayIp: ip }, 'Host-gateway IP resolved');
+  cachedHostGatewayIp = ip;
+  return ip;
+}
+
+/**
  * Active container handles keyed by runId.
  */
 const activeContainers = new Map<string, DockerContainerHandle>();
@@ -437,7 +502,9 @@ function buildScriptCreateArgs(
     // Enable host.docker.internal (proxy runs on host)
     args.push('--add-host', 'host.docker.internal:host-gateway');
 
-    // Proxy environment variables
+    // Proxy environment variables — host.docker.internal is the only address that routes
+    // to the macOS host from Docker Desktop containers. The bridge gateway (192.168.x.1)
+    // stays inside the Linux VM and can't reach host processes.
     const proxyUrl = `http://host.docker.internal:${String(proxyPort)}`;
     args.push('-e', `HTTP_PROXY=${proxyUrl}`);
     args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
@@ -503,6 +570,9 @@ function buildScriptCreateArgs(
  */
 export function createContainerManager(logger: Logger): ContainerManager {
   const log = logger.child({ component: 'container-manager' });
+
+  // Wire logger to egress proxy singleton for request-level diagnostics
+  egressProxyManager.setLogger(logger);
 
   return {
     async isAvailable(): Promise<boolean> {
@@ -721,21 +791,9 @@ export function createContainerManager(logger: Logger): ContainerManager {
           log.debug({ containerId: trimmedId.slice(0, 12) }, 'Pausing container');
           await execFileAsync('docker', ['pause', trimmedId], { timeout: 10_000 });
 
-          // 3. Get gateway IP from container network settings
-          const { stdout: inspectOut } = await execFileAsync(
-            'docker',
-            [
-              'inspect',
-              '--format',
-              '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}',
-              trimmedId,
-            ],
-            { timeout: 10_000 }
-          );
-          const gatewayIp = inspectOut.trim();
-          if (!gatewayIp) {
-            throw new Error('Could not determine container gateway IP');
-          }
+          // 3. Get host-gateway IP (ephemeral container, cached) — works on
+          //    Docker Desktop, OrbStack (macOS), and native Linux Docker.
+          const gatewayIp = await resolveHostGatewayIp(log);
 
           // 4. Apply proxy iptables rules via helper container
           await applyProxyNetworkPolicy(trimmedId, { gatewayIp, proxyPort }, log);
@@ -1013,7 +1071,6 @@ export function createContainerManager(logger: Logger): ContainerManager {
       const random = randomBytes(4).toString('hex');
       const containerName = `script-${runId.slice(0, 8)}-${random}`;
 
-      // Build create args
       const createArgs = buildScriptCreateArgs(containerName, config, proxyPort);
       log.info(
         { containerName, runId, image: config.image, hasDomains, proxyPort },
@@ -1056,24 +1113,13 @@ export function createContainerManager(logger: Logger): ContainerManager {
             proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
             proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
-            // Apply proxy iptables then ungate the script
+            // Resolve host-gateway IP (ephemeral container, cached), apply iptables, then ungate.
+            // Container is running but blocked on stdin (WAIT_FOR_READY=1).
             if (needsStdinGate && proxyPort !== null) {
-              (async () => {
-                // Get gateway IP from container
-                const { stdout: inspectOut } = await execFileAsync(
-                  'docker',
-                  [
-                    'inspect',
-                    '--format',
-                    '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}',
-                    containerId,
-                  ],
-                  { timeout: 10_000 }
-                );
-                const gatewayIp = inspectOut.trim();
-                if (!gatewayIp) throw new Error('Could not determine container gateway IP');
-                await applyProxyNetworkPolicy(containerId, { gatewayIp, proxyPort }, log);
-              })()
+              resolveHostGatewayIp(log)
+                .then((gatewayIp) =>
+                  applyProxyNetworkPolicy(containerId, { gatewayIp, proxyPort }, log)
+                )
                 .then(() => {
                   proc.stdin?.write('ready\n');
                   proc.stdin?.end();

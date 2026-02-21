@@ -62,15 +62,25 @@ async function main() {
 
   let context;
   try {
-    context = await chromium.launchPersistentContext(PROFILE_DIR, {
+    // Chromium ignores HTTP_PROXY/HTTPS_PROXY env vars.
+    // Use Playwright's proxy API + --proxy-server flag (belt and suspenders).
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+    const chromiumArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+    ];
+    const launchOptions = {
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    });
+      args: chromiumArgs,
+    };
+    if (proxyUrl) {
+      chromiumArgs.push(`--proxy-server=${proxyUrl}`);
+      launchOptions.proxy = { server: proxyUrl };
+    }
+
+    context = await chromium.launchPersistentContext(PROFILE_DIR, launchOptions);
 
     const page = context.pages()[0] || await context.newPage();
 

@@ -71,7 +71,7 @@ describe('fetchTelegramGroup', () => {
           profile: 'telegram',
           groupUrl,
           lastSeenId: 'last-99',
-          maxMessages: 50,
+          maxMessages: 500,
         },
         timeoutMs: 120_000,
       });
