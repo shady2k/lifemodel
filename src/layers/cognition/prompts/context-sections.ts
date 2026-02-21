@@ -487,7 +487,7 @@ export function buildCommitmentsSection(context: LoopContext): string | null {
     const isOverdue = dueAt.getTime() < now;
     const overdueFlag = isOverdue ? ' [OVERDUE]' : '';
     const sourceNote = c.source === 'implicit' ? ' (implied)' : '';
-    return `- "${c.text}"${overdueFlag}${sourceNote}`;
+    return `- [${c.id}] "${c.text}"${overdueFlag}${sourceNote}`;
   });
 
   const hasOverdue = commitments.some((c) => new Date(c.dueAt).getTime() < now);
@@ -497,7 +497,7 @@ export function buildCommitmentsSection(context: LoopContext): string | null {
 
   return `<commitments>
 ${lines.join('\n')}
-You made these promises.${overdueNote}
+You made these promises. Use the bracketed ID to cancel or mark_kept.${overdueNote}
 </commitments>`;
 }
 

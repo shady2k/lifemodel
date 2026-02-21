@@ -208,10 +208,11 @@ This commitment is due now.
 </context>
 
 <task>
-Act on your commitment now.
-1. If you can fulfill it: do so, then call core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
-2. If you need more time: let the user know and follow up soon.
-3. If circumstances changed: call core.commitment(action:"cancel", commitmentId:"${commitmentId}") and explain.
+FIRST: Check conversation history. If the user recently asked you to stop this activity or cancel related work, call core.commitment(action:"cancel", commitmentId:"${commitmentId}") immediately. User instructions override commitments.
+Then decide:
+1. Fulfill now: do it, then core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
+2. Bad timing (user busy, active conversation, late hour): defer with {"response": ""}. The commitment stays active — you will be reminded again.
+3. Circumstances changed: core.commitment(action:"cancel", commitmentId:"${commitmentId}").
 </task>
 </trigger>`;
   }
@@ -230,12 +231,12 @@ You missed this commitment.
 </context>
 
 <task>
-Acknowledge the breach and repair it.
-1. If you can still fulfill it: do so now, then call core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
-2. If not: acknowledge to the user, explain, then call core.commitment(action:"mark_repaired", commitmentId:"${commitmentId}", repairNote:"how you made it right").
-3. If circumstances changed: call core.commitment(action:"cancel", commitmentId:"${commitmentId}").
-
-Never ignore a broken promise. Always acknowledge and repair.
+FIRST: Check conversation history. If the user recently asked you to stop this activity or cancel related work, call core.commitment(action:"cancel", commitmentId:"${commitmentId}") immediately. User instructions override commitments.
+Then decide:
+1. Fulfill now: do it, then core.commitment(action:"mark_kept", commitmentId:"${commitmentId}").
+2. Repair: acknowledge to user, then core.commitment(action:"mark_repaired", commitmentId:"${commitmentId}", repairNote:"...").
+3. Bad timing (user busy, active conversation, late hour): defer with {"response": ""}. The commitment stays active — you will be reminded again.
+4. Circumstances changed: core.commitment(action:"cancel", commitmentId:"${commitmentId}").
 </task>
 </trigger>`;
   }

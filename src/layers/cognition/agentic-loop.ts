@@ -625,7 +625,8 @@ export class AgenticLoop {
     if (!messageText && context.triggerSignal.type !== 'user_message') {
       const isExpectedNoAction =
         context.triggerSignal.type === 'thought' ||
-        context.triggerSignal.type === 'message_reaction';
+        context.triggerSignal.type === 'message_reaction' ||
+        context.triggerSignal.type === 'plugin_event';
       if (isExpectedNoAction) {
         this.logger.debug(
           { triggerType: context.triggerSignal.type },
