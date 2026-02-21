@@ -280,11 +280,28 @@ describe('News Plugin Integration', () => {
 
   describe('Tool Operations', () => {
     beforeEach(async () => {
+      // Mock fetch for fetch-on-add (RSS and Telegram initial fetch)
+      const mockFetch = vi.fn(async (url: string | URL | Request) => {
+        const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (urlStr.includes('t.me/s/')) {
+          // Minimal Telegram channel HTML that passes validation
+          return createMockResponse(
+            '<div class="tgme_channel_info"><div class="tgme_page_title">Test</div></div><div class="tme_no_messages_found"></div>'
+          );
+        }
+        // RSS feeds
+        return createMockResponse(SAMPLE_RSS_FEED, {
+          headers: { 'content-type': 'application/xml' },
+        });
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
       await newsPlugin.lifecycle.activate(primitives);
     });
 
     afterEach(async () => {
       await newsPlugin.lifecycle.deactivate?.();
+      vi.unstubAllGlobals();
     });
 
     it('should add an RSS source', async () => {
