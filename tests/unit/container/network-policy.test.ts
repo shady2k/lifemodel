@@ -534,6 +534,10 @@ describe('isValidDomainPattern()', () => {
     expect(isValidDomainPattern('*.googlevideo.com')).toBe(true);
   });
 
+  it('accepts unrestricted wildcard *', () => {
+    expect(isValidDomainPattern('*')).toBe(true);
+  });
+
   it('rejects invalid patterns', () => {
     expect(isValidDomainPattern('')).toBe(false);
     expect(isValidDomainPattern('1.2.3.4')).toBe(false);
@@ -571,6 +575,12 @@ describe('matchesDomainPattern()', () => {
   it('does not match partial suffixes', () => {
     // "notexample.com" should NOT match "*.example.com"
     expect(matchesDomainPattern('notexample.com', '*.example.com')).toBe(false);
+  });
+
+  it('matches any domain with unrestricted wildcard *', () => {
+    expect(matchesDomainPattern('anything.com', '*')).toBe(true);
+    expect(matchesDomainPattern('sub.domain.example.org', '*')).toBe(true);
+    expect(matchesDomainPattern('localhost', '*')).toBe(true);
   });
 });
 

@@ -38,6 +38,7 @@ import type { LockService, ScriptRunRequest, ScriptRunResult } from './script-ty
 import { ScriptRunner } from './script-runner.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
 import { egressProxyManager } from '../container/egress-proxy.js';
+import { matchesDomainPattern } from '../container/network-policy.js';
 
 /**
  * Max file count in workspace output.
@@ -197,6 +198,9 @@ export class MotorCortex {
     { credentials?: Record<string, string>; credentialNames?: string[] }
   >();
 
+  /** Session-scoped domain allowlist — domains approved by user persist across runs until restart */
+  private readonly sessionAllowedDomains = new Set<string>();
+
   /** Timestamp of last Docker prune (periodic cleanup every 30 min) */
   private lastPruneAt = 0;
 
@@ -221,6 +225,35 @@ export class MotorCortex {
     }
 
     this.logger.info('Motor Cortex service initialized');
+  }
+
+  /**
+   * Add domains to the session-scoped allowlist.
+   * Approved domains auto-approve in future runs until process restart.
+   */
+  private addSessionDomains(domains: string[]): void {
+    for (const d of domains) {
+      this.sessionAllowedDomains.add(d.toLowerCase());
+    }
+    this.logger.info(
+      { added: domains, total: this.sessionAllowedDomains.size },
+      'Session domain allowlist updated'
+    );
+  }
+
+  /**
+   * Check if a domain is allowed by the session-scoped allowlist.
+   * Supports exact match, wildcard patterns (*.example.com), and unrestricted `*`.
+   */
+  private isSessionAllowed(domain: string): boolean {
+    const d = domain.toLowerCase();
+    if (this.sessionAllowedDomains.has('*')) return true;
+    if (this.sessionAllowedDomains.has(d)) return true;
+    // Check wildcard patterns in the session set
+    for (const pattern of this.sessionAllowedDomains) {
+      if (pattern.startsWith('*.') && matchesDomainPattern(d, pattern)) return true;
+    }
+    return false;
   }
 
   /**
@@ -760,6 +793,7 @@ export class MotorCortex {
             egressProxyManager.addDomain(run.id, domain);
           },
         }),
+        isSessionAllowedDomain: (d: string) => this.isSessionAllowed(d),
         ...(runCreds?.credentials && { credentials: runCreds.credentials }),
         ...(runCreds?.credentialNames && { credentialNames: runCreds.credentialNames }),
         ...(preparedDeps && { preparedDeps }),
@@ -1246,7 +1280,7 @@ export class MotorCortex {
       const dns = await import('node:dns/promises');
       const validated: string[] = [];
       for (const d of effectiveDomains) {
-        if (d.startsWith('*.')) {
+        if (d === '*' || d.startsWith('*.')) {
           // Wildcard domains skip DNS validation
           validated.push(d);
           continue;
@@ -1262,6 +1296,17 @@ export class MotorCortex {
         }
       }
       effectiveDomains = validated;
+    }
+
+    // Consent gate: detect refusal signals in user answer.
+    // If user denied access, skip domain merging, session persistence, and policy.json persistence.
+    const refusalPattern = /\b(no|deny|denied|reject|don't|do not|block)\b/i;
+    if (refusalPattern.test(answer)) {
+      this.logger.info(
+        { runId, answer: answer.slice(0, 100) },
+        'User refused domain access — skipping domain merging'
+      );
+      effectiveDomains = [];
     }
 
     // Merge validated domains with existing run domains (union, deduped)
@@ -1339,6 +1384,9 @@ export class MotorCortex {
           );
         }
       }
+
+      // Persist approved domains to session allowlist — auto-approved in future runs until restart
+      this.addSessionDomains(effectiveDomains);
     }
 
     // Inject tool result for the ask_user call (Lesson Learned #2: tool_call/result atomicity)

@@ -96,6 +96,9 @@ export interface MotorLoopParams {
   /** Callback when a domain is dynamically added to the proxy (for egress proxy sync) */
   onProxyDomainAdded?: (domain: string) => void;
 
+  /** Session-scoped domain check — returns true if domain was approved in a prior run this session */
+  isSessionAllowedDomain?: (domain: string) => boolean;
+
   /** Abort signal for cancellation (optional) */
   abortSignal?: AbortSignal;
 
@@ -224,6 +227,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     ...(params.searchFn && { searchFn: params.searchFn }),
     ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
     ...(params.onProxyDomainAdded && { onDomainAdded: params.onProxyDomainAdded }),
+    ...(params.isSessionAllowedDomain && { isSessionAllowedDomain: params.isSessionAllowedDomain }),
   };
 
   // Get tool definitions

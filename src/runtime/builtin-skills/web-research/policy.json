@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "status": "approved",
   "tools": ["websearch", "fetch", "read", "write", "bash"],
-  "domains": [],
+  "domains": ["*"],
   "approvedBy": "builtin",
   "provenance": {
     "source": "builtin"

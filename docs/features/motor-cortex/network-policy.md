@@ -66,16 +66,19 @@ Same domain/port/SSRF checks, then forwards request with resolved IP and origina
 
 ## Domain Patterns
 
-Two types of domain patterns are supported:
+Three types of domain patterns are supported:
 
 | Pattern | Example | Matches |
 |---------|---------|---------|
 | Exact | `api.example.com` | Only `api.example.com` |
 | Wildcard | `*.googlevideo.com` | `rr3---sn-abc.googlevideo.com`, `any.googlevideo.com` — NOT `googlevideo.com` itself |
+| Unrestricted | `*` | Any public domain (SSRF protection still applies — private IPs are rejected) |
 
 Wildcards match any subdomain suffix via `.endsWith()`. The base domain does NOT match a wildcard pattern — `*.x.com` does not match `x.com`.
 
-Validation: `isValidDomainPattern()` accepts both exact domains and `*.domain` wildcards. Used in `core.act`, `core.skill`, and the proxy itself.
+The unrestricted `*` wildcard is used by builtin skills like `web-research` that need to fetch arbitrary URLs discovered during web searches. SSRF protection (private IP rejection) runs after the domain check, so `*` means "allow any public domain", not "allow everything".
+
+Validation: `isValidDomainPattern()` accepts exact domains, `*.domain` wildcards, and the `*` wildcard. Used in `core.act`, `core.skill`, and the proxy itself.
 
 ## Container Creation Flow
 
@@ -148,6 +151,25 @@ policy.domains         core.act({ domains })    core.task({ action:'retry', doma
 ```
 
 On retry, new domains are unioned with existing `run.domains` — the set only grows, never shrinks within a run.
+
+### Tiered Domain Permissions
+
+Domain approvals are remembered at three levels:
+
+| Level | Scope | Storage | Lifetime |
+|-------|-------|---------|----------|
+| Run | Single Motor Cortex run | `run.domains` (in-memory) | Until run completes |
+| Session | All runs in the process | `MotorCortex.sessionAllowedDomains` (in-memory Set) | Until process restart |
+| Permanent | All future runs of a skill | `policy.json` `domains` array (on disk) | Until manually removed |
+
+**Flow:** When a user approves a domain via `ask_user` (auto-pause):
+1. Domain is added to `run.domains` (run-scoped, immediate)
+2. Domain is added to `sessionAllowedDomains` (session-scoped, future runs auto-approve)
+3. For skill runs: domain is persisted to `policy.json` (permanent, future sessions)
+
+Session-scoped check happens in the fetch executor (`motor-tools.ts`). When a domain is blocked but found in `sessionAllowedDomains`, it's auto-approved without user prompt and added to the run's allowlist + egress proxy. This avoids corrupting the consecutive-failure counter that the motor loop uses for auto-fail detection.
+
+Refusal detection: if the user's answer contains refusal signals (`no`, `deny`, `block`, etc.), domain merging and persistence are skipped.
 
 ### Domain Persistence
 

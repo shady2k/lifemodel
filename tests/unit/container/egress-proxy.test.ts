@@ -225,6 +225,26 @@ describe('EgressProxyManager', () => {
     });
   });
 
+  describe('unrestricted wildcard *', () => {
+    it('CONNECT succeeds for any domain when * in allowlist', async () => {
+      allowLocalUpstream();
+
+      const { port } = await manager.allocate('run-star', ['*'], [echoPort]);
+      const result = await connectViaProxy(port, `any-domain.example.com:${String(echoPort)}`);
+      expect(result.statusLine).toContain('200');
+    });
+
+    it('SSRF protection still blocks private IPs even with *', async () => {
+      vi.mocked(dns.resolve4).mockResolvedValue(['10.0.0.1']);
+      // Don't bypass isPrivateIP — let it reject
+
+      const { port } = await manager.allocate('run-star-ssrf', ['*']);
+      const result = await connectViaProxy(port, 'ssrf-target.com:443');
+      expect(result.statusLine).toContain('403');
+      expect(result.body).toContain('private IP');
+    });
+  });
+
   describe('plain HTTP handler', () => {
     it('rejects plain HTTP to disallowed domain', async () => {
       const { port } = await manager.allocate('run-1', ['example.com']);

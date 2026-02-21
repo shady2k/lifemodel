@@ -459,7 +459,7 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
           const dns = await import('node:dns/promises');
           const validAddDomains: string[] = [];
           for (const d of formatValid) {
-            if (isValidWildcardDomain(d)) {
+            if (d === '*' || isValidWildcardDomain(d)) {
               // Wildcard domains skip DNS validation
               validAddDomains.push(d);
               continue;

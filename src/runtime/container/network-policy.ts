@@ -370,6 +370,7 @@ export function isValidWildcardDomain(domain: string): boolean {
  * Validate a domain pattern — either exact domain or wildcard.
  */
 export function isValidDomainPattern(domain: string): boolean {
+  if (domain === '*') return true;
   return isValidDomain(domain) || isValidWildcardDomain(domain);
 }
 
@@ -383,6 +384,9 @@ export function isValidDomainPattern(domain: string): boolean {
 export function matchesDomainPattern(hostname: string, pattern: string): boolean {
   const h = hostname.toLowerCase();
   const p = pattern.toLowerCase();
+
+  // Unrestricted wildcard: matches any domain
+  if (p === '*') return true;
 
   if (p.startsWith('*.')) {
     // Wildcard: *.example.com → match anything.example.com

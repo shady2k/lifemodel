@@ -79,6 +79,9 @@ export interface ToolContext {
 
   /** Callback when a domain is dynamically added (for egress proxy sync) */
   onDomainAdded?: (domain: string) => void;
+
+  /** Session-scoped domain check — returns true if domain was approved in a prior run this session */
+  isSessionAllowedDomain?: (domain: string) => boolean;
 }
 
 /**
@@ -1171,7 +1174,8 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       }
 
       // Auto-add result domains to allowedDomains (for builtin skills)
-      if (ctx.autoAllowSearchDomains && ctx.allowedDomains) {
+      // Skip when unrestricted wildcard `*` is present — all domains are already allowed
+      if (ctx.autoAllowSearchDomains && ctx.allowedDomains && !ctx.allowedDomains.includes('*')) {
         for (const r of result.results) {
           try {
             const hostname = new URL(r.url).hostname.toLowerCase();
@@ -1234,14 +1238,24 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       // Check domain against allowlist using pattern matching (supports wildcards like *.example.com).
       // Consistent with the egress proxy's domain check — both use matchesDomainPattern().
       if (!allowed.some((p) => matchesDomainPattern(hostname, p))) {
-        return {
-          ok: false,
-          output: `BLOCKED: Domain ${hostname} is not in the allowed list. You MUST call ask_user now to request access to this domain. Do not try alternative URLs or workarounds. Allowed domains: ${allowed.join(', ')}.`,
-          errorCode: 'permission_denied',
-          retryable: false,
-          provenance: 'internal',
-          durationMs: Date.now() - startTime,
-        };
+        // Check session allowlist — auto-approve domains approved in prior runs this session
+        if (ctx.isSessionAllowedDomain?.(hostname)) {
+          // Add to run's allowedDomains so subsequent fetches don't re-check
+          if (!allowed.some((p) => matchesDomainPattern(hostname, p))) {
+            ctx.allowedDomains?.push(hostname);
+            ctx.onDomainAdded?.(hostname);
+          }
+          // Fall through to proceed with fetch
+        } else {
+          return {
+            ok: false,
+            output: `BLOCKED: Domain ${hostname} is not in the allowed list. You MUST call ask_user now to request access to this domain. Do not try alternative URLs or workarounds. Allowed domains: ${allowed.join(', ')}.`,
+            errorCode: 'permission_denied',
+            retryable: false,
+            provenance: 'internal',
+            durationMs: Date.now() - startTime,
+          };
+        }
       }
     } catch {
       return {

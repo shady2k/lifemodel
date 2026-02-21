@@ -502,6 +502,29 @@ describe('fetch tool', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
+  it('auto-approves session-allowed domain without BLOCKED error', async () => {
+    ctx.allowedDomains = ['example.com'];
+    ctx.fetchFn = mockFetchFn;
+    ctx.isSessionAllowedDomain = vi.fn().mockReturnValue(true);
+    ctx.onDomainAdded = vi.fn();
+
+    const result = await executeTool('fetch', { url: 'https://other.com/data' }, ctx);
+    expect(result.ok).toBe(true);
+    // Domain should have been added to allowedDomains
+    expect(ctx.allowedDomains).toContain('other.com');
+    expect(ctx.onDomainAdded).toHaveBeenCalledWith('other.com');
+  });
+
+  it('still blocks domain when session check returns false', async () => {
+    ctx.allowedDomains = ['example.com'];
+    ctx.fetchFn = mockFetchFn;
+    ctx.isSessionAllowedDomain = vi.fn().mockReturnValue(false);
+
+    const result = await executeTool('fetch', { url: 'https://other.com/data' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('permission_denied');
+  });
+
   it('rejects missing url', async () => {
     const result = await executeTool('fetch', {}, ctx);
     expect(result.ok).toBe(false);
@@ -581,6 +604,38 @@ describe('fetch tool', () => {
     expect(result.ok).toBe(false);
     expect(result.errorCode).toBe('execution_error');
     expect(result.output).toContain('Network timeout');
+  });
+});
+
+describe('websearch tool', () => {
+  let workspace: string;
+  let ctx: ToolContext;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'motor-test-'));
+    ctx = { workspace, allowedRoots: [workspace], writeRoots: [workspace] };
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('skips auto-add when * in allowedDomains', async () => {
+    ctx.allowedDomains = ['*'];
+    ctx.autoAllowSearchDomains = true;
+    ctx.onDomainAdded = vi.fn();
+    ctx.searchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      results: [
+        { title: 'Test', url: 'https://new-domain.com/page', snippet: 'test' },
+      ],
+    });
+
+    const result = await executeTool('websearch', { query: 'test' }, ctx);
+    expect(result.ok).toBe(true);
+    // Should NOT have added new-domain.com since * is already present
+    expect(ctx.onDomainAdded).not.toHaveBeenCalled();
+    expect(ctx.allowedDomains).toEqual(['*']);
   });
 });
 

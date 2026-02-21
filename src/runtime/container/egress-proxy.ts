@@ -329,6 +329,9 @@ class EgressProxyManager {
    * Supports exact match and wildcard patterns (*.example.com).
    */
   private isDomainAllowed(hostname: string, domains: Set<string>): boolean {
+    // Unrestricted wildcard: allow any public domain (SSRF check still runs after this)
+    if (domains.has('*')) return true;
+
     // Fast path: exact match
     if (domains.has(hostname)) return true;
 
