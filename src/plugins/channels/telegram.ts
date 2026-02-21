@@ -152,7 +152,6 @@ export class TelegramChannel implements Channel {
   private readonly recipientRegistry: IRecipientRegistry;
   private bot: Bot | null = null;
   private running = false;
-  private wakeUpCallback: (() => void) | null = null;
   private signalCallback: ((signal: Signal) => void) | null = null;
 
   constructor(
@@ -181,14 +180,6 @@ export class TelegramChannel implements Channel {
    */
   isAvailable(): boolean {
     return Boolean(this.config.botToken);
-  }
-
-  /**
-   * Set callback to wake up the event loop when messages arrive.
-   * This allows immediate processing instead of waiting for next tick.
-   */
-  setWakeUpCallback(callback: () => void): void {
-    this.wakeUpCallback = callback;
   }
 
   /**
@@ -390,10 +381,6 @@ export class TelegramChannel implements Channel {
             'Message received as Signal'
           );
         }
-
-        if (this.wakeUpCallback) {
-          this.wakeUpCallback();
-        }
       }
     );
   }
@@ -469,7 +456,6 @@ export class TelegramChannel implements Channel {
       }),
       () => {
         this.signalCallback?.(signal);
-        this.wakeUpCallback?.();
 
         this.logger?.debug(
           {

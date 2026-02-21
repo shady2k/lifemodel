@@ -397,11 +397,6 @@ export class CoreLoop {
       signal,
       timestamp: new Date(),
     });
-
-    // If it's a high-priority signal, wake up immediately
-    if (signal.priority <= Priority.HIGH) {
-      this.wakeUp();
-    }
   }
 
   /**
@@ -2756,25 +2751,6 @@ export class CoreLoop {
       default:
         return 0;
     }
-  }
-
-  /**
-   * Wake up the loop immediately.
-   */
-  wakeUp(): void {
-    if (!this.running) return;
-
-    if (this.tickTimeout) {
-      clearTimeout(this.tickTimeout);
-      this.tickTimeout = null;
-    }
-
-    // Schedule immediate tick
-    this.tickTimeout = setTimeout(() => {
-      void this.tick();
-    }, 0);
-
-    this.logger.debug('Core loop woken up');
   }
 
   /**

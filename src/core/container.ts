@@ -939,10 +939,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       coreLoop.pushSignal(signal);
     });
 
-    // Wake up core loop immediately when messages arrive
-    telegramChannel.setWakeUpCallback(() => {
-      coreLoop.wakeUp();
-    });
     logger.info('Telegram channel configured');
   }
 
