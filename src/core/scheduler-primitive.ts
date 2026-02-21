@@ -114,6 +114,7 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   async initialize(): Promise<void> {
     const stored = await this.storage.get<ScheduleEntry[]>(STORAGE_KEYS.schedules);
     if (stored) {
+      let needsPersist = false;
       for (const entry of stored) {
         // Convert date strings back to Date objects
         entry.nextFireAt = new Date(entry.nextFireAt);
@@ -121,7 +122,16 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
         if (entry.recurrence?.endDate) {
           entry.recurrence.endDate = new Date(entry.recurrence.endDate);
         }
+        // Lazy fix: default missing interval (LLM sometimes omits it)
+        if (entry.recurrence && !entry.recurrence.interval) {
+          entry.recurrence.interval = 1;
+          needsPersist = true;
+        }
         this.schedules.set(entry.id, entry);
+      }
+      if (needsPersist) {
+        await this.persistSchedules();
+        this.logger.info('Repaired schedules with missing interval');
       }
       this.logger.debug({ count: this.schedules.size }, 'Loaded schedules from storage');
     }
@@ -266,6 +276,48 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   }
 
   /**
+   * Skip past the entire day-range window for a monthly range reminder.
+   * Jumps to the start day of the next interval month.
+   */
+  async skipToNextWindow(scheduleId: string): Promise<Date | null> {
+    const entry = this.schedules.get(scheduleId);
+    if (!entry?.recurrence?.dayOfMonth || !entry.recurrence.dayOfMonthEnd) return null;
+
+    const tz = entry.timezone ?? 'utc';
+    const dt = DateTime.fromJSDate(entry.nextFireAt, { zone: tz });
+    const nowDt = DateTime.now().setZone(tz);
+
+    // Clamp to actual days in nextFireAt's month
+    const daysInMonth = dt.daysInMonth ?? 28;
+    const effectiveStart = Math.min(entry.recurrence.dayOfMonth, daysInMonth);
+    const effectiveEnd = Math.min(entry.recurrence.dayOfMonthEnd, daysInMonth);
+
+    // Guard: if nextFireAt is already in a future month relative to now, don't skip
+    const isCurrentMonth = dt.year === nowDt.year && dt.month === nowDt.month;
+    if (!isCurrentMonth) return null;
+
+    // Guard: if day is outside the effective window, already past it
+    if (dt.day > effectiveEnd || dt.day < effectiveStart) return null;
+
+    // Jump directly to next interval month's start day
+    const nextMonth = dt.plus({ months: entry.recurrence.interval || 1 });
+    const [hour, minute] = (entry.localTime ?? '09:00').split(':').map(Number);
+    const targetDay = Math.min(entry.recurrence.dayOfMonth, nextMonth.daysInMonth ?? 28);
+    entry.nextFireAt = nextMonth
+      .set({ day: targetDay, hour, minute, second: 0, millisecond: 0 })
+      .toJSDate();
+
+    await this.persistSchedules();
+
+    this.logger.debug(
+      { scheduleId, nextFireAt: entry.nextFireAt.toISOString() },
+      'Skipped to next window'
+    );
+
+    return entry.nextFireAt;
+  }
+
+  /**
    * Check for due schedules and return those that should fire.
    * Called by SchedulerService on each tick.
    *
@@ -404,7 +456,18 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
           }
           break;
         case 'monthly':
-          if (recurrence.anchorDay !== undefined && recurrence.constraint) {
+          if (recurrence.dayOfMonth && recurrence.dayOfMonthEnd) {
+            // Day range: check if we're within the window
+            const currentDay = dt.day;
+            const endDay = Math.min(recurrence.dayOfMonthEnd, dt.daysInMonth ?? 28);
+            if (currentDay >= recurrence.dayOfMonth && currentDay < endDay) {
+              // Within window → advance 1 day
+              dt = dt.plus({ days: 1 });
+            } else {
+              // Past window or on last day → jump to next interval month's start day
+              dt = this.findNextMonthDay(dt, recurrence.dayOfMonth, recurrence.interval || 1);
+            }
+          } else if (recurrence.anchorDay !== undefined && recurrence.constraint) {
             // Constraint-based: "weekend after 10th", etc.
             dt = this.findNextConstrainedMonthDay(
               dt,

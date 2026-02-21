@@ -137,6 +137,12 @@ const SCHEMA_CREATE = {
             description: 'For weekly',
           },
           dayOfMonth: { type: 'number', required: false, description: 'For monthly, fixed day' },
+          dayOfMonthEnd: {
+            type: 'number',
+            required: false,
+            description:
+              'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
+          },
           anchorDay: {
             type: 'number',
             required: false,
@@ -286,6 +292,11 @@ const REMINDER_RAW_SCHEMA = {
             dayOfMonth: {
               type: 'number',
               description: 'For monthly: fixed day (1-31)',
+            },
+            dayOfMonthEnd: {
+              type: 'number',
+              description:
+                'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
             },
             anchorDay: {
               type: 'number',
@@ -877,8 +888,17 @@ export function createReminderTools(
         // Only skip if completing BEFORE fire. If the current cycle already fired
         // (tracked by occurrence ledger or fireCount), the scheduler already advanced
         // nextFireAt to the NEXT cycle — skipping would jump an extra cycle.
+        // For range reminders, use skipToNextWindow which works regardless of fire state.
         let newNextFireAt: Date | null = null;
-        if (!currentCycleAlreadyFired && reminder.scheduleId && nextFireAt > now) {
+        const isRangeRecurrence =
+          reminder.recurrence?.dayOfMonth != null && reminder.recurrence?.dayOfMonthEnd != null;
+        if (isRangeRecurrence && reminder.scheduleId) {
+          // Range: jump past entire window (works regardless of fire state)
+          newNextFireAt = await scheduler.skipToNextWindow(reminder.scheduleId);
+          if (newNextFireAt && reminder.advanceNoticeScheduleId) {
+            await scheduler.skipToNextWindow(reminder.advanceNoticeScheduleId);
+          }
+        } else if (!currentCycleAlreadyFired && reminder.scheduleId && nextFireAt > now) {
           newNextFireAt = await scheduler.skipCurrentOccurrence(reminder.scheduleId);
           if (newNextFireAt) {
             // Also advance advance notice schedule if exists
@@ -999,6 +1019,8 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
 - Relative: { type: "relative", relative: { unit: "minute"|"hour"|"day"|"week"|"month", amount: number }, confidence: 0.9, originalPhrase: "..." }
 - Absolute: { type: "absolute", absolute: { special?: "tomorrow"|"next_week"|"next_month"|"this_evening"|"tonight"|"this_afternoon", year?: number, month?: number, day?: number, hour?: number, minute?: number, dayOfWeek?: 0-6 }, confidence: 0.9, originalPhrase: "..." }
 - Recurring (fixed day): { type: "recurring", recurring: { frequency: "daily"|"weekly"|"monthly", interval: number, hour?: number, minute?: number, daysOfWeek?: number[], dayOfMonth?: number }, confidence: 0.9, originalPhrase: "..." }
+- Recurring (day range): { type: "recurring", recurring: { frequency: "monthly", interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 }, confidence: 0.9, originalPhrase: "..." }
+  Example: "с 20 по 25 каждого месяца" -> dayOfMonth: 20, dayOfMonthEnd: 25. Fires daily within the range until completed, then jumps to next month.
 - Recurring (constrained): { type: "recurring", recurring: { frequency: "monthly", interval: 1, anchorDay: 10, constraint: "next-weekend"|"next-weekday"|"next-saturday"|"next-sunday", hour?: number, minute?: number }, confidence: 0.9, originalPhrase: "..." }
   Example: "weekend after 10th each month" -> anchorDay: 10, constraint: "next-weekend"`,
         required: false,
@@ -1042,6 +1064,36 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
       }
       if (!['create', 'list', 'cancel', 'complete'].includes(a['action'])) {
         return { success: false, error: 'action: must be one of [create, list, cancel, complete]' };
+      }
+      // Validate dayOfMonthEnd range constraints
+      const anchor = a['anchor'] as Record<string, unknown> | undefined;
+      if (anchor?.['type'] === 'recurring') {
+        const recurring = anchor['recurring'] as Record<string, unknown> | undefined;
+        if (recurring?.['dayOfMonthEnd'] != null) {
+          const dayOfMonthEnd = Number(recurring['dayOfMonthEnd']);
+          const dayOfMonth = Number(recurring['dayOfMonth']);
+          if (recurring['dayOfMonth'] == null) {
+            return { success: false, error: 'dayOfMonthEnd requires dayOfMonth to be set' };
+          }
+          if (dayOfMonthEnd < 1 || dayOfMonthEnd > 31) {
+            return { success: false, error: 'dayOfMonthEnd must be between 1 and 31' };
+          }
+          if (dayOfMonthEnd < dayOfMonth) {
+            return { success: false, error: 'dayOfMonthEnd must be >= dayOfMonth' };
+          }
+          if (recurring['frequency'] !== 'monthly') {
+            return {
+              success: false,
+              error: 'dayOfMonthEnd is only supported with monthly frequency',
+            };
+          }
+          if (recurring['anchorDay'] != null || recurring['constraint'] != null) {
+            return {
+              success: false,
+              error: 'dayOfMonthEnd cannot be used with anchorDay/constraint',
+            };
+          }
+        }
       }
       return { success: true, data: a };
     },

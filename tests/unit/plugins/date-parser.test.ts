@@ -184,6 +184,114 @@ describe('Date Parser', () => {
     });
   });
 
+  describe('resolveSemanticAnchor - recurring monthly range (dayOfMonthEnd)', () => {
+    it('should resolve within window, time not passed → today', () => {
+      // baseTime is March 15 10:00 UTC → March 15 06:00 EDT
+      // dayOfMonth=13, dayOfMonthEnd=18, hour=10 (EDT) → 10:00 EDT hasn't passed (it's 06:00)
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 13, dayOfMonthEnd: 18, hour: 10, minute: 0 },
+        confidence: 0.9,
+        originalPhrase: 'с 13 по 18 каждого месяца',
+      };
+
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
+
+      expect(result.recurrence?.dayOfMonth).toBe(13);
+      expect(result.recurrence?.dayOfMonthEnd).toBe(18);
+      // Should fire today (15th) since within window and time hasn't passed
+      const triggerDt = new Date(result.triggerAt);
+      expect(triggerDt.getDate()).toBe(15);
+      expect(triggerDt.getMonth()).toBe(2); // March
+    });
+
+    it('should resolve within window, time already passed, not last day → tomorrow', () => {
+      // baseTime March 15 10:00 UTC → 06:00 EDT
+      // Set hour=5 so 05:00 EDT has already passed at 06:00 EDT
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 13, dayOfMonthEnd: 18, hour: 5, minute: 0 },
+        confidence: 0.9,
+        originalPhrase: 'с 13 по 18 каждого месяца в 5 утра',
+      };
+
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
+
+      // Time passed today (15th), still within window → tomorrow (16th)
+      const triggerDt = new Date(result.triggerAt);
+      expect(triggerDt.getDate()).toBe(16);
+      expect(triggerDt.getMonth()).toBe(2); // March
+    });
+
+    it('should resolve past window → next month start day', () => {
+      // baseTime March 15 10:00 UTC
+      // dayOfMonth=10, dayOfMonthEnd=13 → window is 10-13, we're on 15 → past window
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 10, dayOfMonthEnd: 13, hour: 10, minute: 0 },
+        confidence: 0.9,
+        originalPhrase: 'с 10 по 13 каждого месяца',
+      };
+
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
+
+      // Past window → next month's start day (April 10)
+      const triggerDt = new Date(result.triggerAt);
+      expect(triggerDt.getMonth()).toBe(3); // April
+      expect(triggerDt.getDate()).toBe(10);
+    });
+
+    it('should resolve before window → start day this month', () => {
+      // baseTime March 15 10:00 UTC
+      // dayOfMonth=20, dayOfMonthEnd=25 → window is 20-25, we're on 15 → before window
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10, minute: 0 },
+        confidence: 0.9,
+        originalPhrase: 'с 20 по 25 каждого месяца',
+      };
+
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
+
+      // Before window → start day this month (March 20)
+      const triggerDt = new Date(result.triggerAt);
+      expect(triggerDt.getMonth()).toBe(2); // March
+      expect(triggerDt.getDate()).toBe(20);
+    });
+
+    it('should clamp to short month (Feb)', () => {
+      // Feb 2024 has 29 days (leap year)
+      const febBase = new Date('2024-02-20T10:00:00Z');
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 29, dayOfMonthEnd: 31, hour: 10, minute: 0 },
+        confidence: 0.9,
+        originalPhrase: 'с 29 по 31 каждого месяца',
+      };
+
+      const result = resolveSemanticAnchor(anchor, febBase, timezone, wakeHour);
+
+      // Feb has 29 days → clamped to 29..29 → fires on 29th
+      const triggerDt = new Date(result.triggerAt);
+      expect(triggerDt.getMonth()).toBe(1); // February
+      expect(triggerDt.getDate()).toBe(29);
+    });
+
+    it('should pass dayOfMonthEnd through to recurrence spec', () => {
+      const anchor: SemanticDateAnchor = {
+        type: 'recurring',
+        recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 },
+        confidence: 0.9,
+        originalPhrase: 'с 20 по 25',
+      };
+
+      const result = resolveSemanticAnchor(anchor, baseTime, timezone, wakeHour);
+
+      expect(result.recurrence?.dayOfMonthEnd).toBe(25);
+      expect(result.recurrence?.dayOfMonth).toBe(20);
+    });
+  });
+
   describe('formatRecurrence', () => {
     it('should format daily recurrence', () => {
       const result = formatRecurrence({
@@ -225,6 +333,28 @@ describe('Date Parser', () => {
         maxOccurrences: null,
       });
       expect(result).toBe('monthly on the 15th');
+    });
+
+    it('should format monthly with day range', () => {
+      const result = formatRecurrence({
+        frequency: 'monthly',
+        interval: 1,
+        dayOfMonth: 20,
+        dayOfMonthEnd: 25,
+        endDate: null,
+        maxOccurrences: null,
+      });
+      expect(result).toBe('monthly, 20th–25th');
+    });
+
+    it('should default missing interval to 1', () => {
+      const result = formatRecurrence({
+        frequency: 'monthly',
+        dayOfMonth: 26,
+        endDate: null,
+        maxOccurrences: null,
+      } as import('../../../src/types/plugin.js').RecurrenceSpec);
+      expect(result).toBe('monthly on the 26th');
     });
   });
 });

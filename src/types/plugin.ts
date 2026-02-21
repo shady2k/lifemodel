@@ -222,6 +222,9 @@ export interface RecurrenceSpec {
   /** Day of month for monthly recurrence (fixed day approach) */
   dayOfMonth?: number;
 
+  /** End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd. */
+  dayOfMonthEnd?: number | undefined;
+
   /**
    * Anchor day for constraint-based scheduling (1-31).
    * Used with 'constraint' for patterns like "weekend after 10th".
@@ -607,6 +610,17 @@ export interface SchedulerPrimitive {
    *   - recurrence ended after advancing
    */
   skipCurrentOccurrence(scheduleId: string): Promise<Date | null>;
+
+  /**
+   * Skip past the entire day-range window for a monthly range reminder.
+   * Jumps to the start day of the next interval month.
+   *
+   * Returns null if:
+   * - Schedule doesn't exist or isn't a range recurrence
+   * - Already in a future month (prevents over-skipping)
+   * - Already outside the effective window
+   */
+  skipToNextWindow(scheduleId: string): Promise<Date | null>;
 }
 
 /**

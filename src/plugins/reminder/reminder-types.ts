@@ -195,6 +195,9 @@ export interface RecurringTime {
   /** Day of month for monthly (1-31) - fixed day approach */
   dayOfMonth?: number;
 
+  /** End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd. */
+  dayOfMonthEnd?: number | undefined;
+
   /**
    * Anchor day for constraint-based scheduling (1-31).
    * Used with 'constraint' for patterns like "weekend after 10th".

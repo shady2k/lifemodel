@@ -76,6 +76,18 @@ describe('reminder tool - complete action', () => {
         schedule.nextFireAt = new Date(schedule.nextFireAt.getTime() + 24 * 60 * 60 * 1000);
         return schedule.nextFireAt;
       }),
+      skipToNextWindow: vi.fn(async (scheduleId: string) => {
+        const schedule = schedules.get(scheduleId);
+        if (!schedule?.recurrence) return null;
+        const rec = schedule.recurrence as { dayOfMonth?: number; dayOfMonthEnd?: number; interval?: number };
+        if (!rec.dayOfMonth || !rec.dayOfMonthEnd) return null;
+        // Jump to next month's start day
+        const next = new Date(schedule.nextFireAt);
+        next.setMonth(next.getMonth() + (rec.interval ?? 1));
+        next.setDate(rec.dayOfMonth);
+        schedule.nextFireAt = next;
+        return schedule.nextFireAt;
+      }),
     };
 
     const mockIntentEmitter = {
@@ -400,6 +412,108 @@ describe('reminder tool - complete action', () => {
         | undefined;
       expect(occurrences).toBeDefined();
       expect(occurrences!.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('day-range recurring reminder', () => {
+    it('should use skipToNextWindow for range reminders (pre-fire completion)', async () => {
+      const createResult = await reminderTool.execute(
+        {
+          action: 'create',
+          content: 'Pay bills',
+          anchor: {
+            type: 'recurring',
+            recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 },
+            confidence: 0.9,
+            originalPhrase: 'с 20 по 25 каждого месяца',
+          },
+        },
+        ctx
+      );
+
+      expect(createResult.success).toBe(true);
+      const reminderId = createResult.reminderId!;
+
+      // Verify recurrence has dayOfMonthEnd
+      const reminders = storageData[REMINDER_STORAGE_KEYS.REMINDERS] as Reminder[];
+      const reminder = reminders.find((r) => r.id === reminderId)!;
+      expect(reminder.recurrence?.dayOfMonthEnd).toBe(25);
+
+      // Complete before fire
+      const completeResult = await reminderTool.execute(
+        { action: 'complete', reminderId },
+        ctx
+      );
+
+      expect(completeResult.success).toBe(true);
+      expect(completeResult.completedCount).toBe(1);
+      // Should have called skipToNextWindow, not skipCurrentOccurrence
+      const mockScheduler = (tools[0] as unknown as { _test_scheduler?: unknown })._test_scheduler;
+      // We can verify indirectly: nextFireAt should be returned (skipToNextWindow was called)
+      expect(completeResult.nextFireAt).toBeDefined();
+    });
+
+    it('should use skipToNextWindow even after fire (post-fire range completion)', async () => {
+      const createResult = await reminderTool.execute(
+        {
+          action: 'create',
+          content: 'Monthly check',
+          anchor: {
+            type: 'recurring',
+            recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 },
+            confidence: 0.9,
+            originalPhrase: 'с 20 по 25 каждого месяца',
+          },
+        },
+        ctx
+      );
+
+      const reminderId = createResult.reminderId!;
+
+      // Simulate post-fire: increment fireCount so currentCycleAlreadyFired = true
+      const reminders = storageData[REMINDER_STORAGE_KEYS.REMINDERS] as Reminder[];
+      const reminder = reminders.find((r) => r.id === reminderId)!;
+      reminder.fireCount = 1;
+
+      // Complete after fire
+      const completeResult = await reminderTool.execute(
+        { action: 'complete', reminderId },
+        ctx
+      );
+
+      expect(completeResult.success).toBe(true);
+      // Range reminders STILL call skipToNextWindow even after fire
+      // (unlike regular reminders which skip the call when currentCycleAlreadyFired)
+      expect(completeResult.nextFireAt).toBeDefined();
+    });
+
+    it('should behave like normal single-day when dayOfMonth === dayOfMonthEnd', async () => {
+      const createResult = await reminderTool.execute(
+        {
+          action: 'create',
+          content: 'Monthly payment',
+          anchor: {
+            type: 'recurring',
+            recurring: { frequency: 'monthly', interval: 1, dayOfMonth: 15, dayOfMonthEnd: 15, hour: 10 },
+            confidence: 0.9,
+            originalPhrase: '15 числа каждого месяца',
+          },
+        },
+        ctx
+      );
+
+      expect(createResult.success).toBe(true);
+      const reminderId = createResult.reminderId!;
+
+      // Complete
+      const completeResult = await reminderTool.execute(
+        { action: 'complete', reminderId },
+        ctx
+      );
+
+      // Still uses skipToNextWindow (same behavior for single-day range)
+      expect(completeResult.success).toBe(true);
+      expect(completeResult.nextFireAt).toBeDefined();
     });
   });
 

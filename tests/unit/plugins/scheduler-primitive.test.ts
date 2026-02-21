@@ -322,4 +322,185 @@ describe('SchedulerPrimitive', () => {
       expect(result!.getTime()).toBeGreaterThan(futureTime.getTime());
     });
   });
+
+  describe('calculateNextOccurrence - monthly range (dayOfMonthEnd)', () => {
+    it('should advance 1 day within window', async () => {
+      // Schedule on March 20 at 10:00 EST, window 20-25
+      const fireAt = new Date('2024-03-20T15:00:00Z'); // 10:00 EST
+
+      await scheduler.schedule({
+        id: 'range-within',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 20,
+          dayOfMonthEnd: 25,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: { action: 'range-test' },
+      });
+
+      // Fire and advance
+      const due = await scheduler.checkDueSchedules(fireAt);
+      expect(due).toHaveLength(1);
+      await scheduler.markFired('range-within', due[0]!.fireId, fireAt);
+
+      const schedules = scheduler.getSchedules();
+      expect(schedules).toHaveLength(1);
+      // Should advance to March 21 (within window, +1 day)
+      const nextFire = schedules[0]!.nextFireAt;
+      const nextDt = new Date(nextFire);
+      expect(nextDt.getDate()).toBe(21);
+      expect(nextDt.getMonth()).toBe(2); // March
+    });
+
+    it('should jump to next month when on last day of window', async () => {
+      // Schedule on March 25 at 10:00 EST, window 20-25 (last day)
+      const fireAt = new Date('2024-03-25T15:00:00Z'); // 10:00 EST
+
+      await scheduler.schedule({
+        id: 'range-end',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 20,
+          dayOfMonthEnd: 25,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: { action: 'range-test' },
+      });
+
+      const due = await scheduler.checkDueSchedules(fireAt);
+      await scheduler.markFired('range-end', due[0]!.fireId, fireAt);
+
+      const schedules = scheduler.getSchedules();
+      const nextFire = schedules[0]!.nextFireAt;
+      const nextDt = new Date(nextFire);
+      // On day 25 (== endDay), should jump to next month's day 20
+      expect(nextDt.getMonth()).toBe(3); // April
+      expect(nextDt.getDate()).toBe(20);
+    });
+
+    it('should handle short month clamping', async () => {
+      // Schedule on Feb 28 (2024 leap year), window 28-31
+      // endDay clamped to 29 in Feb, currentDay=28, 28 < 29 → advance 1 day
+      const fireAt = new Date('2024-02-28T15:00:00Z');
+
+      await scheduler.schedule({
+        id: 'range-feb',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 28,
+          dayOfMonthEnd: 31,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: { action: 'range-test' },
+      });
+
+      const due = await scheduler.checkDueSchedules(fireAt);
+      await scheduler.markFired('range-feb', due[0]!.fireId, fireAt);
+
+      const schedules = scheduler.getSchedules();
+      const nextFire = schedules[0]!.nextFireAt;
+      const nextDt = new Date(nextFire);
+      // Feb 29 (leap year) — within clamped window (28..29), advance 1 day
+      expect(nextDt.getDate()).toBe(29);
+      expect(nextDt.getMonth()).toBe(1); // February
+    });
+  });
+
+  describe('skipToNextWindow', () => {
+    it('should return null for non-range schedule', async () => {
+      const fireAt = new Date(Date.now() + 60000);
+      await scheduler.schedule({
+        id: 'non-range',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 15,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: {},
+      });
+
+      const result = await scheduler.skipToNextWindow('non-range');
+      expect(result).toBeNull();
+    });
+
+    it('should jump to next month start day when within window', async () => {
+      // Now is March 22, window 20-25, should jump to April 20
+      const now = new Date('2024-03-22T15:00:00Z');
+      vi.setSystemTime(now);
+
+      const fireAt = new Date('2024-03-22T15:00:00Z'); // same day
+      await scheduler.schedule({
+        id: 'range-skip',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 20,
+          dayOfMonthEnd: 25,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: {},
+      });
+
+      const result = await scheduler.skipToNextWindow('range-skip');
+      expect(result).not.toBeNull();
+      const nextDt = new Date(result!);
+      expect(nextDt.getMonth()).toBe(3); // April
+      expect(nextDt.getDate()).toBe(20);
+
+      vi.useRealTimers();
+    });
+
+    it('should return null when already in future month', async () => {
+      // Now is March 22, but nextFireAt is April 20 (already advanced)
+      const now = new Date('2024-03-22T15:00:00Z');
+      vi.setSystemTime(now);
+
+      const fireAt = new Date('2024-04-20T14:00:00Z');
+      await scheduler.schedule({
+        id: 'range-future',
+        fireAt,
+        recurrence: {
+          frequency: 'monthly',
+          interval: 1,
+          dayOfMonth: 20,
+          dayOfMonthEnd: 25,
+          endDate: null,
+          maxOccurrences: null,
+        },
+        timezone: 'America/New_York',
+        localTime: '10:00',
+        data: {},
+      });
+
+      const result = await scheduler.skipToNextWindow('range-future');
+      expect(result).toBeNull(); // Already in future month
+
+      vi.useRealTimers();
+    });
+  });
 });

@@ -281,6 +281,41 @@ function resolveRecurring(
           hour,
           minute
         );
+      } else if (recurring.dayOfMonth !== undefined && recurring.dayOfMonthEnd !== undefined) {
+        // Day range: fires daily from dayOfMonth to dayOfMonthEnd each month
+        const daysInMonth = firstOccurrence.daysInMonth ?? 28;
+        const startDay = Math.min(recurring.dayOfMonth, daysInMonth);
+        const endDay = Math.min(recurring.dayOfMonthEnd, daysInMonth);
+        const today = baseDt.day;
+
+        if (today >= startDay && today <= endDay) {
+          // Within window
+          firstOccurrence = firstOccurrence.set({ day: today });
+          if (firstOccurrence <= baseDt) {
+            // Time already passed today
+            if (today < endDay) {
+              // Still days left in window → tomorrow
+              firstOccurrence = baseDt
+                .plus({ days: 1 })
+                .set({ hour, minute, second: 0, millisecond: 0 });
+            } else {
+              // Last day of window, time passed → next interval month's start day
+              firstOccurrence = firstOccurrence.plus({ months: recurring.interval || 1 });
+              firstOccurrence = firstOccurrence.set({
+                day: Math.min(recurring.dayOfMonth, firstOccurrence.daysInMonth ?? 28),
+              });
+            }
+          }
+        } else if (today > endDay) {
+          // Past window → next interval month's start day
+          firstOccurrence = firstOccurrence.plus({ months: recurring.interval || 1 });
+          firstOccurrence = firstOccurrence.set({
+            day: Math.min(recurring.dayOfMonth, firstOccurrence.daysInMonth ?? 28),
+          });
+        } else {
+          // Before window → start day this month
+          firstOccurrence = firstOccurrence.set({ day: startDay });
+        }
       } else if (recurring.dayOfMonth !== undefined) {
         // Fixed day of month
         firstOccurrence = firstOccurrence.set({
@@ -300,7 +335,7 @@ function resolveRecurring(
   // Build recurrence spec
   const recurrence: RecurrenceSpec = {
     frequency: recurring.frequency,
-    interval: recurring.interval,
+    interval: recurring.interval || 1,
     endDate: null,
     maxOccurrences: null,
   };
@@ -309,6 +344,9 @@ function resolveRecurring(
   }
   if (recurring.dayOfMonth !== undefined) {
     recurrence.dayOfMonth = recurring.dayOfMonth;
+  }
+  if (recurring.dayOfMonthEnd !== undefined) {
+    recurrence.dayOfMonthEnd = recurring.dayOfMonthEnd;
   }
   if (recurring.anchorDay !== undefined) {
     recurrence.anchorDay = recurring.anchorDay;
@@ -475,7 +513,7 @@ function applyConstraint(anchor: DateTime, constraint: DateConstraint): DateTime
  * Format a recurrence spec for human display.
  */
 export function formatRecurrence(recurrence: RecurrenceSpec): string {
-  const interval = recurrence.interval;
+  const interval = recurrence.interval || 1;
   const intervalStr = interval > 1 ? `every ${String(interval)} ` : 'every ';
 
   switch (recurrence.frequency) {
@@ -497,6 +535,17 @@ export function formatRecurrence(recurrence: RecurrenceSpec): string {
         return interval === 1
           ? `monthly, ${constraintStr} after the ${anchorStr}`
           : `every ${String(interval)} months, ${constraintStr} after the ${anchorStr}`;
+      }
+      if (
+        recurrence.dayOfMonth !== undefined &&
+        recurrence.dayOfMonthEnd !== undefined &&
+        recurrence.dayOfMonthEnd !== recurrence.dayOfMonth
+      ) {
+        const startStr = getOrdinal(recurrence.dayOfMonth);
+        const endStr = getOrdinal(recurrence.dayOfMonthEnd);
+        return interval === 1
+          ? `monthly, ${startStr}–${endStr}`
+          : `every ${String(interval)} months, ${startStr}–${endStr}`;
       }
       if (recurrence.dayOfMonth !== undefined) {
         const dayStr = getOrdinal(recurrence.dayOfMonth);

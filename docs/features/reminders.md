@@ -105,6 +105,26 @@ When a recurring reminder is completed:
 
 The `complete` action returns `nextFireAt` for recurring reminders, allowing the agent to tell the user when the next occurrence will fire.
 
+### Day-Range Recurring Reminders
+
+Monthly reminders can specify a **day range** using `dayOfMonth` + `dayOfMonthEnd`:
+
+```typescript
+// "Remind me from 20th to 25th each month at 10am"
+{ frequency: "monthly", interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 }
+```
+
+Behavior:
+- First fire on the `dayOfMonth` at specified time
+- After firing (not completed): next fire = **tomorrow same time** (daily within window)
+- On completion within window: next fire = start day of **next interval month** (skip remaining window)
+- After window closes (day > `dayOfMonthEnd`): next fire = start day of next interval month
+- `dayOfMonth === dayOfMonthEnd`: behaves identically to plain `dayOfMonth` (single day)
+
+Short month handling: both `dayOfMonth` and `dayOfMonthEnd` are clamped to the actual number of days in the month (e.g., `dayOfMonth: 29, dayOfMonthEnd: 31` in Feb of a non-leap year → both clamped to 28, fires once).
+
+The scheduler uses `skipToNextWindow()` for range reminders instead of `skipCurrentOccurrence()`, which works regardless of fire state.
+
 ## Occurrence Ledger
 
 Each reminder has an append-only occurrence ledger that tracks the history of fires and completions:
