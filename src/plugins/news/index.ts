@@ -760,6 +760,7 @@ async function fetchAllTelegramGroupSources(
   intentEmitter: IntentEmitterPrimitive
 ): Promise<FetchAllResult> {
   if (!scriptRunner) {
+    logger.warn('scriptRunner unavailable (Docker not running?), skipping Telegram group sources');
     return { newArticles: [], failedSources: [], sourcesToAlert: [] };
   }
 
