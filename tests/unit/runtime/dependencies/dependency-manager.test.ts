@@ -49,6 +49,15 @@ describe('computeDepsHash', () => {
     expect(npmHash).not.toBe(pipHash);
   });
 
+  it('apt ecosystem differs from npm and pip', () => {
+    const pkgs = [{ name: 'foo', version: '1.0.0' }];
+    const npmHash = computeDepsHash('npm', pkgs, 'sha256:abc');
+    const pipHash = computeDepsHash('pip', pkgs, 'sha256:abc');
+    const aptHash = computeDepsHash('apt', pkgs, 'sha256:abc');
+    expect(aptHash).not.toBe(npmHash);
+    expect(aptHash).not.toBe(pipHash);
+  });
+
   it('differs for different image IDs', () => {
     const pkgs = [{ name: 'foo', version: '1.0.0' }];
     const h1 = computeDepsHash('npm', pkgs, 'sha256:aaa');
@@ -107,6 +116,7 @@ describe('validateDependencies', () => {
     });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('Unknown dependency ecosystem');
+    expect(errors[0]).toContain('apt');
   });
 
   it('rejects caret ranges', () => {
@@ -198,6 +208,46 @@ describe('validateDependencies', () => {
     expect(errors).toHaveLength(0);
   });
 
+  // ─── apt-specific validation ────────────────────────────────────
+
+  it('accepts valid apt packages', () => {
+    const errors = validateDependencies({
+      apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] },
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts apt version with epoch', () => {
+    const errors = validateDependencies({
+      apt: { packages: [{ name: 'ffmpeg', version: '2:1.0.0-1' }] },
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts apt "latest" version', () => {
+    const errors = validateDependencies({
+      apt: { packages: [{ name: 'pandoc', version: 'latest' }] },
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects scoped names for apt', () => {
+    const errors = validateDependencies({
+      apt: { packages: [{ name: '@scope/pkg', version: '1.0.0' }] },
+    });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toContain('invalid package name');
+  });
+
+  it('accepts mixed npm + pip + apt', () => {
+    const errors = validateDependencies({
+      npm: { packages: [{ name: 'agentmail', version: '0.2.13' }] },
+      pip: { packages: [{ name: 'requests', version: '2.32.3' }] },
+      apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] },
+    });
+    expect(errors).toHaveLength(0);
+  });
+
   it('rejects missing packages array', () => {
     const errors = validateDependencies({
       npm: { notPackages: [] },
@@ -255,7 +305,7 @@ describe('installSkillDependencies — null paths', () => {
 
   it('returns null for empty package arrays', async () => {
     const result = await installSkillDependencies(
-      { npm: { packages: [] }, pip: { packages: [] } },
+      { npm: { packages: [] }, pip: { packages: [] }, apt: { packages: [] } },
       '/tmp/cache',
       'test',
       logger
@@ -376,6 +426,50 @@ describe('verifyPipInstall', () => {
     await writeFile(join(tmpDir, 'site-packages', 'requests', '__init__.py'), '');
 
     await expect(verifyPipInstall(tmpDir)).resolves.toBeUndefined();
+  });
+});
+
+describe('verifyAptInstall', () => {
+  let verifyAptInstall: typeof import('../../../../src/runtime/dependencies/dependency-manager.js').verifyAptInstall;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    const mod = await import('../../../../src/runtime/dependencies/dependency-manager.js');
+    verifyAptInstall = mod.verifyAptInstall;
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    tmpDir = await mkdtemp(join(tmpdir(), 'verify-apt-'));
+  });
+
+  afterEach(async () => {
+    const { rm } = await import('node:fs/promises');
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('throws when sysroot directory is missing', () => {
+    expect(() => verifyAptInstall(tmpDir)).toThrow(
+      'apt install did not produce sysroot directory'
+    );
+  });
+
+  it('throws when sysroot is empty', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    await mkdir(join(tmpDir, 'sysroot'), { recursive: true });
+
+    expect(() => verifyAptInstall(tmpDir)).toThrow(
+      'apt install produced empty sysroot directory'
+    );
+  });
+
+  it('passes when sysroot has content', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    await mkdir(join(tmpDir, 'sysroot', 'usr', 'bin'), { recursive: true });
+    await writeFile(join(tmpDir, 'sysroot', 'usr', 'bin', 'ffmpeg'), '');
+
+    expect(() => verifyAptInstall(tmpDir)).not.toThrow();
   });
 });
 
@@ -704,6 +798,170 @@ describe('pip prep container commands', () => {
     expect(result).toBeDefined();
     expect(result!.pipDir).toMatch(/^lifemodel-deps-pip-[0-9a-f]{16}$/);
     expect(result!.pipPythonPath).toContain('/opt/skill-deps/pip/site-packages');
+  });
+});
+
+// ─── apt prep container commands (mocked execFile) ────────────────
+
+describe('apt prep container commands', () => {
+  let execCalls: Array<{ cmd: string; args: string[] }>;
+  let installSkillDependencies: typeof import('../../../../src/runtime/dependencies/dependency-manager.js').installSkillDependencies;
+  let logger: any;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    execCalls = [];
+    setupInstallMocks(execCalls);
+    const mod = await import('../../../../src/runtime/dependencies/dependency-manager.js');
+    installSkillDependencies = mod.installSkillDependencies;
+    logger = createMockLogger();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses apt-get install --download-only in shell command', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    expect(runCall).toBeDefined();
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('apt-get install -y --download-only');
+  });
+
+  it('uses dpkg -x for extraction', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('dpkg -x');
+  });
+
+  it('uses --user 0:0 and APT::Sandbox::User=root', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    expect(runCall!.args).toContain('--user');
+    const userIdx = runCall!.args.indexOf('--user');
+    expect(runCall!.args[userIdx + 1]).toBe('0:0');
+
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('APT::Sandbox::User=root');
+  });
+
+  it('returns volume name matching lifemodel-deps-apt-*', async () => {
+    const result = await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    expect(result).toBeDefined();
+    expect(result!.aptDir).toMatch(/^lifemodel-deps-apt-[0-9a-f]{16}$/);
+  });
+
+  it('includes verification in shell command', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('test -n');
+    expect(shellCmd).toContain('/workspace/sysroot');
+  });
+
+  it('removes named container in finally block', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const rmCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'rm'
+    );
+    expect(rmCall).toBeDefined();
+    expect(rmCall!.args).toContain('-f');
+  });
+
+  it('uses name=version for pinned apt packages', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    expect(shellCmd).toContain('ffmpeg=6.1.1-1');
+  });
+
+  it('omits version for "latest" apt packages', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    const shellCmd = runCall!.args[runCall!.args.length - 1];
+    // Should have plain "ffmpeg" not "ffmpeg=latest"
+    expect(shellCmd).not.toContain('ffmpeg=');
+    expect(shellCmd).toContain('ffmpeg');
+  });
+
+  it('mounts a named Docker volume for apt', async () => {
+    await installSkillDependencies(
+      { apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] } },
+      '/tmp/cache',
+      'test-skill',
+      logger
+    );
+
+    const runCall = execCalls.find(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run'
+    );
+    expect(runCall).toBeDefined();
+    const vIdx = runCall!.args.indexOf('-v');
+    expect(vIdx).toBeGreaterThan(-1);
+    const mountArg = runCall!.args[vIdx + 1];
+    expect(mountArg).toMatch(/^lifemodel-deps-apt-[0-9a-f]+:\/workspace$/);
   });
 });
 

@@ -685,16 +685,19 @@ Skills are discovered via directory scanning (auto-discovery mode). Each subdire
 | `tools` | Optional array of motor tool names or `"ALL"` — controls which tools the skill can use |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
 | `credentialValues` | Skill-acquired credentials (e.g. API keys from signup). Persisted for restart survival. Redacted via `sanitizePolicyForDisplay()` in all read paths |
-| `dependencies` | npm/pip packages pre-installed before container starts (Phase 4) |
+| `dependencies` | npm/pip/apt packages pre-installed before container starts |
 | `inputs` | Typed parameters — validated before starting the LLM loop |
 | `provenance` | Source URL, fetch time, content hash for integrity verification |
 | `approvedBy` | `'user'` — records that this policy was explicitly approved |
 
 ### Skill Dependencies
 
-Skills can declare npm/pip packages in `policy.json` under the `dependencies` field. These are pre-installed via a short-lived prep container and mounted read-only into the runtime container. The agent can `require()` or `import` packages directly without running `npm install` or `pip install` (which would fail due to `--network none`).
+Skills can declare npm, pip, and apt packages in `policy.json` under the `dependencies` field. These are pre-installed via short-lived prep containers into Docker named volumes, then mounted read-only into the runtime container.
 
-See [phase-4-plan.md](phase-4-plan.md) for details on the cache-first architecture, security model, and hash strategy.
+- **npm/pip:** The agent can `require()` or `import` packages directly without running `npm install` or `pip install` (which would fail due to `--network none`).
+- **apt:** System binaries (e.g., `ffmpeg`, `yt-dlp`, `pandoc`) are extracted from .deb archives via `dpkg -x` into a sysroot. The runtime container's `PATH` and `LD_LIBRARY_PATH` are extended to include the sysroot's bin/lib directories.
+
+See [ADR-002](../../adr/002-skill-dependency-packs.md) for details on the cache-first architecture, security model, and hash strategy.
 
 ### Skill Discovery and Loading
 
@@ -1194,7 +1197,7 @@ Every irreversible action gets an idempotency key. Before executing, Motor Corte
 - **No autonomous 24/7 operation** — Motor Cortex runs when Cognition delegates, not as a daemon
 - **No self-replication** — Motor Cortex cannot spawn other Motor Cortex instances
 - **No runtime self-modification** — Motor Cortex cannot modify the agent's own running code, config files, or layer state at runtime (this constrains the sub-agent's actions, not development-time changes)
-- **No package installation** — tools work with what's available in the runtime
+- **No runtime package installation** — skills declare dependencies (npm/pip/apt) in policy.json; these are pre-installed via prep containers and mounted read-only. The agent cannot install packages at runtime.
 - **No unbounded execution** — hard iteration cap + energy budget prevent runaway tasks
 - **No concurrent runs** — one agentic task at a time, enforced by mutex (oneshot always allowed)
 

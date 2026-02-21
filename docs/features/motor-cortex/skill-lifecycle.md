@@ -11,7 +11,7 @@ Extraction (install)  — copies validated skill dirs from workspace → data/sk
 User (authority)      — approves skills before they become executable
 ```
 
-**Key constraint:** Motor Cortex is a pure runtime — it has zero skill/policy knowledge. Everything is passed explicitly by the caller (core.act). Workspace is prepared by core.act before startRun. If the skill declares dependencies in `policy.json`, they are pre-installed by core.act before startRun. Credentials are resolved by core.act before startRun. Motor reads and modifies skill files in place. Post-run extraction (in motor-cortex.ts middleware) compares against the baseline, extracts only changed files to `data/skills/`, and forces `pending_review` status.
+**Key constraint:** Motor Cortex is a pure runtime — it has zero skill/policy knowledge. Everything is passed explicitly by the caller (core.act). Workspace is prepared by core.act before startRun. If the skill declares dependencies (npm/pip/apt) in `policy.json`, they are pre-installed by core.act before startRun. Credentials are resolved by core.act before startRun. Motor reads and modifies skill files in place. Post-run extraction (in motor-cortex.ts middleware) compares against the baseline, extracts only changed files to `data/skills/`, and forces `pending_review` status.
 
 ## Security Model
 

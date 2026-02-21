@@ -2,9 +2,9 @@
  * Container Image Builder
  *
  * Builds the Motor Cortex Docker image lazily on first use.
- * Image contains Alpine + Node 24 + shell tools + tool-server.
+ * Image contains Debian slim + Node 24 + shell tools + tool-server.
  *
- * ~50MB image with non-root user 'motor' (UID 1000).
+ * ~80MB image with non-root user 'node' (UID 1000).
  */
 
 import { execFile } from 'node:child_process';
@@ -33,24 +33,24 @@ const execFileAsync = promisify(execFile);
  */
 export function buildDockerfile(sourceHash: string): string {
   return `
-FROM node:24-alpine
+FROM node:24-slim
 
 # Install shell tools needed by motor skills
-RUN apk add --no-cache \\
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    ca-certificates \\
     curl \\
     jq \\
     grep \\
-    coreutils \\
     git \\
     unzip \\
     zip \\
     tar \\
     python3 \\
-    py3-pip \\
-    && rm -rf /var/cache/apk/*
+    python3-pip \\
+    && rm -rf /var/lib/apt/lists/*
 
 # Create tool-server directory
-# Use the built-in 'node' user (uid 1000) from node:24-alpine
+# Use the built-in 'node' user (uid 1000) from node:24-slim
 RUN mkdir -p /opt/motor && chown node:node /opt/motor
 
 # Copy all runtime files (tool-server, sandbox-worker, scripts/)

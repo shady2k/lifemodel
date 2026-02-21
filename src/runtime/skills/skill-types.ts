@@ -120,11 +120,12 @@ export interface SkillPolicy {
    *  Stored in policy.json for persistence across restarts. Redacted in display. */
   credentialValues?: Record<string, string> | undefined;
 
-  /** Pre-installed dependency packages (npm/pip) */
+  /** Pre-installed dependency packages (npm/pip/apt) */
   dependencies?:
     | {
         npm?: { packages: { name: string; version: string }[] } | undefined;
         pip?: { packages: { name: string; version: string }[] } | undefined;
+        apt?: { packages: { name: string; version: string }[] } | undefined;
       }
     | undefined;
 

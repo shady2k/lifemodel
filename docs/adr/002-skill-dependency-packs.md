@@ -1,12 +1,12 @@
 # ADR-002: Persistent Skill Dependency Packs
 
-**Date:** 2026-02-13
-**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented)
+**Date:** 2026-02-13 (updated 2026-02-21: apt ecosystem support added)
+**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented; Phase 2 — apt system packages — implemented)
 **Affects:** `src/runtime/container/`, `src/runtime/motor-cortex/`, `src/runtime/skills/`
 
 ## Problem
 
-Motor Cortex runs are ephemeral — each agentic run gets a fresh container and temp workspace. When a skill needs npm/pip packages (e.g., Stripe SDK for payment skills, cheerio for scraping), the agent tries `npm install` at runtime, but:
+Motor Cortex runs are ephemeral — each agentic run gets a fresh container and temp workspace. When a skill needs npm/pip packages (e.g., Stripe SDK for payment skills, cheerio for scraping) or system binaries (e.g., ffmpeg, yt-dlp, pandoc), the agent tries `npm install` or `apt-get install` at runtime, but:
 
 1. **Registries are unreachable** — containers run with `--network none` and only declared domains are accessible. npm/pip registries are not in the allowlist.
 2. **Nothing persists** — even if registries were reachable, installed packages would be lost after the run completes.
@@ -76,6 +76,12 @@ Use **persistent skill dependency packs** with a two-tier cache and short-lived 
       "packages": [
         { "name": "requests", "version": "2.32.3", "hashes": ["sha256:..."] }
       ]
+    },
+    "apt": {
+      "packages": [
+        { "name": "ffmpeg", "version": "7:6.1.1-1" },
+        { "name": "pandoc", "version": "latest" }
+      ]
     }
   }
 }
@@ -85,69 +91,72 @@ Rules:
 - Versions must be **exact pins** — no `^`, `~`, `*`, ranges
 - npm: `integrity` field (subresource integrity hash) — optional initially, required once tooling matures
 - pip: `hashes` field for `--require-hashes` — optional initially
+- apt: version format allows Debian conventions (epochs like `2:`, tildes, hyphens); `latest` is allowed
 - Unknown ecosystems rejected at load time
-- Package names validated against allowlist pattern (no URLs, git refs, or local paths)
+- Package names validated against ecosystem-specific patterns (npm: scoped `@org/pkg` or plain; apt: `[a-z0-9][a-z0-9.+-]+`; no URLs, git refs, or local paths)
 
 ### Host Cache Layout
 
 ```
 data/dependency-cache/
-  npm/                          # Tier A: shared tarball cache (npm cache dir)
-  pip/                          # Tier A: shared wheel cache (pip cache dir)
-data/dependency-packs/
-  <skill-name>/
-    <packHash>/                 # Tier B: skill-scoped installed pack
-      node_modules/             # Ready to mount
-      site-packages/            # Ready to mount
-      manifest.json             # Pack metadata (policy hash, versions, timestamps)
+  npm-<hash>.lock               # Lock files for concurrency control
+  npm-<hash>.ready              # Ready markers (install completed)
+  pip-<hash>.lock
+  pip-<hash>.ready
+  apt-<hash>.lock
+  apt-<hash>.ready
 ```
 
-- **Tier A** (shared artifact cache): Downloaded tarballs/wheels reused across skills. Deduplicates when multiple skills need the same package.
-- **Tier B** (skill-scoped packs): Fully installed `node_modules`/`site-packages` keyed by deterministic hash of `dependencies + base image + runtime ABI`. Isolated per skill to avoid version conflicts.
+Docker named volumes hold the actual package data:
+- `lifemodel-deps-npm-<hash>` — node_modules (mounted at `/opt/skill-deps/npm`)
+- `lifemodel-deps-pip-<hash>` — site-packages (mounted at `/opt/skill-deps/pip`)
+- `lifemodel-deps-apt-<hash>` — sysroot with extracted .deb contents (mounted at `/opt/skill-deps/apt`)
 
-### Pack Hash
+Host-side `data/dependency-cache/` holds only lock files and ready markers — no package data on host (avoids macOS `com.apple.provenance` xattr issues).
+
+Two skills with identical dependencies share the same cache entry (content-addressed by sorted package specs + image ID + platform).
+
+### Dependency Hash
 
 ```
 SHA256(canonical_json({
-  skill: skill.name,
-  npm: sorted_packages,
-  pip: sorted_packages,
-  baseImage: image_hash,
-  nodeVersion: "22.x",
-  pythonVersion: "3.x"
+  schemaVersion: 1,
+  ecosystem: "npm" | "pip" | "apt",
+  packages: sorted_packages,
+  imageId: docker_image_id,
+  platform: "darwin-arm64" | "linux-x64" | ...
 }))
 ```
 
-Deterministic — same deps always produce the same hash, enabling cache hits across container recreations.
+Computed per-ecosystem (not per-skill). Two skills with the same npm packages share one volume. The hash is truncated to 16 hex chars for volume naming.
 
 ### Install Workflow
 
-1. `motor-cortex.ts` calls `dependencyManager.prepareForRun(skill, policy)` before `containerManager.create()`
-2. Compute pack hash from policy dependencies
-3. If pack exists and manifest verifies → return mounts immediately (cache hit)
-4. If missing → spawn short-lived prep container:
-   - Same base image as runtime
-   - Network restricted to registry domains only (`registry.npmjs.org`, `pypi.org`)
-   - Run `npm install --ignore-scripts --no-audit --no-fund` with shared cache mount
-   - Run `pip install --only-binary :all:` with shared cache mount
-   - No post-install scripts, no source builds
-5. Atomically publish pack (`tmp-<random>` → `rename` to `<packHash>`)
-6. Write `manifest.json` with provenance (policy hash, resolved versions, timestamps)
-7. Runtime container mounts pack read-only:
-   - `data/dependency-packs/<skill>/<hash>/node_modules → /workspace/node_modules:ro`
-   - `data/dependency-packs/<skill>/<hash>/site-packages → /opt/skill-python:ro`
-   - `NODE_PATH=/workspace/node_modules`
-   - `PYTHONPATH=/opt/skill-python`
+1. `core.act` calls `installSkillDependencies(deps, cacheDir, skillName, logger)` before `startRun()`
+2. For each ecosystem with packages, compute content-addressed hash
+3. Cache check: host-side `.ready` marker + `docker volume inspect` — prevents empty volume false cache hits
+4. On cache miss → spawn short-lived prep container:
+   - Same base image as runtime (node:24-slim)
+   - Network: bridge (needs to reach registries / Debian repos)
+   - Security: `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`
+   - **npm:** `npm install --ignore-scripts --no-audit --no-fund` into named volume
+   - **pip:** `pip install --no-user --target /workspace/site-packages` into named volume
+   - **apt:** `apt-get install --download-only` → `dpkg -x` each .deb into `/workspace/sysroot` (runs as `--user 0:0` with `-o APT::Sandbox::User=root`)
+   - Prep container is named (`prep-{ecosystem}-{random}`) and removed in finally block
+5. Mark volume ready (host-side `.ready` file)
+6. Runtime container mounts volumes read-only:
+   - npm: `lifemodel-deps-npm-<hash>` → `/opt/skill-deps/npm:ro` + `NODE_PATH=/opt/skill-deps/npm/node_modules`
+   - pip: `lifemodel-deps-pip-<hash>` → `/opt/skill-deps/pip:ro` + `PYTHONPATH=/opt/skill-deps/pip/site-packages`
+   - apt: `lifemodel-deps-apt-<hash>` → `/opt/skill-deps/apt:ro` + `PATH=/opt/skill-deps/apt/usr/bin:...` + `LD_LIBRARY_PATH=/opt/skill-deps/apt/usr/lib/...`
 
-### New Modules
+### Modules
 
 ```
 src/runtime/dependencies/
-  dependency-types.ts       # Policy dependency schema, pack manifest types
-  dependency-hash.ts        # Canonical hash computation
-  dependency-cache.ts       # Host cache layout, lockfiles, atomic publish, prune
-  dependency-installer.ts   # Prep container: install with restricted egress
-  dependency-manager.ts     # Public API: prepareForRun(skill, policy) → PreparedDeps
+  dependency-manager.ts     # Public API: installSkillDependencies() → PreparedDeps
+                            # Contains: computeDepsHash(), installNpm(), installPip(),
+                            # installApt(), verifyNpmInstall(), verifyPipInstall(),
+                            # verifyAptInstall(), volume management, lock files
 ```
 
 ### Integration Points
@@ -208,23 +217,25 @@ Our approach is closest to **Lambda Layers** — pre-built dependency packs moun
 
 ## Security Controls
 
-1. **Exact version pins** — no ranges, no `latest`, no git refs
+1. **Exact version pins** — no ranges, no git refs (npm/pip: digits+dots only; apt: Debian version format; `latest` allowed for all)
 2. **npm `--ignore-scripts`** — blocks `postinstall` code execution
-3. **pip `--only-binary :all:`** — blocks source builds (no arbitrary compilation)
-4. **pip `--require-hashes`** — verifies package integrity (when hashes provided)
-5. **Prep container egress** — only registry domains, not skill domains
+3. **pip `--target`** — installs to a specific directory, no system modification
+4. **apt `--download-only` + `dpkg -x`** — downloads .deb archives then extracts without running postinst scripts. Best-effort: packages needing postinst (alternatives registration etc.) may not work. Primary targets (ffmpeg, yt-dlp, pandoc, imagemagick) are self-contained binaries.
+5. **Prep container security** — `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`, `--pids-limit 64`; apt prep runs as `--user 0:0` with `-o APT::Sandbox::User=root`
 6. **Runtime mounts read-only** — agent can't modify installed packages
-7. **No symlink escapes** — validate pack contents before publishing
-8. **Provenance recording** — manifest tracks policy hash, registry URLs, timestamps
-9. **Pack size limits** — cap total dependency size (e.g., 256MB per pack)
-10. **Pruning** — remove packs for deleted skills or stale hashes
+7. **No symlink escapes** — validate workspace contents before extraction
+8. **Content-addressed cache** — deterministic hash of packages + image + platform ensures reproducibility
+9. **Ecosystem-specific name validation** — npm: `(@scope/)?[a-z0-9._-]+`; apt: `[a-z0-9][a-z0-9.+-]+` — rejects URLs, paths, git refs
+10. **Pruning** — stale volumes without ready markers are removed before re-install
 
 ## Consequences
 
-- Skills can declare dependencies that are automatically available at runtime
+- Skills can declare npm, pip, and apt dependencies that are automatically available at runtime
 - No changes to the ephemeral container model — runs remain reproducible
 - First run of a new dependency set incurs a prep step (5-30s); subsequent runs are instant
-- Shared artifact cache reduces download time across skills
-- Policy schema version bump (v1→v2) requires migration handling in skill-loader
-- New `data/dependency-packs/` directory needs disk space management
+- Content-addressed Docker named volumes avoid macOS xattr issues and enable cross-skill sharing
+- Base image switched from Alpine (node:24-alpine) to Debian slim (node:24-slim) for glibc compatibility and apt support
+- apt packages are "best-effort isolated binaries" — self-contained tools work well, packages needing postinst scripts may not
+- Both x86_64 and aarch64 library paths included in LD_LIBRARY_PATH (harmless if one doesn't exist)
+- PYTHONPATH is merged when both pip and apt provide Python packages (pip takes priority)
 - Prep containers need temporary network access — a new container creation path

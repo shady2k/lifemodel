@@ -15,7 +15,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, rm, writeFile, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger } from '../../types/index.js';
 import { CONTAINER_IMAGE } from '../container/types.js';
@@ -27,6 +27,7 @@ const execFileAsync = promisify(execFile);
 export interface SkillDependencies {
   npm?: { packages: { name: string; version: string }[] } | undefined;
   pip?: { packages: { name: string; version: string }[] } | undefined;
+  apt?: { packages: { name: string; version: string }[] } | undefined;
 }
 
 export interface PreparedDeps {
@@ -36,6 +37,8 @@ export interface PreparedDeps {
   pipDir?: string;
   /** Container-side path for PYTHONPATH */
   pipPythonPath?: string;
+  /** Docker volume name containing extracted sysroot (apt packages) */
+  aptDir?: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────
@@ -61,7 +64,7 @@ const PREP_CONTAINER_TIMEOUT_MS = 5 * 60 * 1000;
  * Two skills with identical deps share the same cache entry.
  */
 export function computeDepsHash(
-  ecosystem: 'npm' | 'pip',
+  ecosystem: 'npm' | 'pip' | 'apt',
   packages: { name: string; version: string }[],
   imageId: string
 ): string {
@@ -197,6 +200,131 @@ export async function verifyPipInstall(tmpDir: string): Promise<void> {
   const entries = await readdir(sitePackagesPath);
   if (entries.length === 0) {
     throw new Error('pip install produced empty site-packages directory');
+  }
+}
+
+/**
+ * Verify that apt install produced a non-empty sysroot directory.
+ */
+export function verifyAptInstall(tmpDir: string): void {
+  const sysrootPath = join(tmpDir, 'sysroot');
+  if (!existsSync(sysrootPath)) {
+    throw new Error('apt install did not produce sysroot directory');
+  }
+  const entries = readdirSync(sysrootPath);
+  if (entries.length === 0) {
+    throw new Error('apt install produced empty sysroot directory');
+  }
+}
+
+// ─── Install: apt ────────────────────────────────────────────────
+
+async function installApt(
+  packages: { name: string; version: string }[],
+  lockDir: string,
+  hash: string,
+  _imageId: string,
+  logger: Logger
+): Promise<string> {
+  const volumeName = `${VOLUME_PREFIX}-apt-${hash}`;
+
+  // Cache check: volume exists AND was fully installed
+  if (isVolumeReady(lockDir, 'apt', hash) && (await volumeExists(volumeName))) {
+    logger.info({ hash, volumeName, ecosystem: 'apt' }, 'Dependency cache hit (volume exists)');
+    return volumeName;
+  }
+
+  // Stale volume without ready marker — remove and re-install
+  if (await volumeExists(volumeName)) {
+    logger.warn({ hash, volumeName }, 'Removing stale apt volume (no ready marker)');
+    try {
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+    } catch {
+      // Best-effort
+    }
+  }
+
+  // Acquire lock
+  const lockPath = join(lockDir, `apt-${hash}.lock`);
+  const locked = await acquireLock(lockPath);
+  if (!locked) {
+    logger.info({ hash }, 'Waiting for concurrent apt install');
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    if (isVolumeReady(lockDir, 'apt', hash) && (await volumeExists(volumeName))) {
+      return volumeName;
+    }
+    throw new Error('Concurrent apt install did not complete');
+  }
+
+  const containerName = `prep-apt-${randomBytes(4).toString('hex')}`;
+
+  try {
+    // Build package spec: name=version for pinned, plain name for latest
+    const pkgSpecs = packages
+      .map((p) => (p.version === 'latest' ? p.name : `${p.name}=${p.version}`))
+      .join(' ');
+
+    // Install into named volume (mount at /workspace for correct ownership).
+    // apt needs root (--user 0:0) and network access (bridge).
+    // We download .deb files then extract via dpkg -x into a sysroot.
+    const args = [
+      'run',
+      '--name',
+      containerName,
+      '--entrypoint',
+      'sh',
+      '--user',
+      '0:0',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      '--memory',
+      '512m',
+      '--pids-limit',
+      '64',
+      '--network',
+      'bridge',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,size=64m',
+      '-v',
+      `${volumeName}:/workspace`,
+      CONTAINER_IMAGE,
+      '-c',
+      `apt-get update -o APT::Sandbox::User=root && apt-get install -y --download-only --no-install-recommends ${pkgSpecs} && mkdir -p /workspace/sysroot && find /var/cache/apt/archives -name '*.deb' -exec dpkg -x {} /workspace/sysroot \\; && test -n "$(find /workspace/sysroot -type f -print -quit)"`,
+    ];
+
+    logger.info(
+      { hash, packageCount: packages.length, ecosystem: 'apt', containerName, volumeName },
+      'Installing apt dependencies via prep container'
+    );
+
+    const { stdout, stderr } = await execFileAsync('docker', args, {
+      timeout: PREP_CONTAINER_TIMEOUT_MS,
+    });
+
+    if (stdout) logger.debug({ output: stdout.slice(0, 500) }, 'apt install stdout');
+    if (stderr) logger.debug({ output: stderr.slice(0, 500) }, 'apt install stderr');
+
+    await markVolumeReady(lockDir, 'apt', hash);
+    logger.info({ hash, volumeName, ecosystem: 'apt' }, 'apt dependencies cached in volume');
+    return volumeName;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error(
+      { hash, volumeName, ecosystem: 'apt', containerName, error: msg },
+      'apt dependency install failed'
+    );
+    await clearVolumeReady(lockDir, 'apt', hash);
+    try {
+      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
+    } catch {
+      // Best-effort
+    }
+    throw error;
+  } finally {
+    await removeContainer(containerName);
+    await releaseLock(lockPath);
   }
 }
 
@@ -451,8 +579,9 @@ export async function installSkillDependencies(
 
   const hasNpm = deps.npm && deps.npm.packages.length > 0;
   const hasPip = deps.pip && deps.pip.packages.length > 0;
+  const hasApt = deps.apt && deps.apt.packages.length > 0;
 
-  if (!hasNpm && !hasPip) {
+  if (!hasNpm && !hasPip && !hasApt) {
     return null;
   }
 
@@ -473,6 +602,12 @@ export async function installSkillDependencies(
     const pipResult = await installPip(deps.pip.packages, cacheBaseDir, hash, imageId, log);
     result.pipDir = pipResult.volumeName;
     result.pipPythonPath = pipResult.pythonPath;
+  }
+
+  if (hasApt && deps.apt) {
+    const hash = computeDepsHash('apt', deps.apt.packages, imageId);
+    log.info({ hash, packages: deps.apt.packages }, 'Preparing apt dependencies');
+    result.aptDir = await installApt(deps.apt.packages, cacheBaseDir, hash, imageId, log);
   }
 
   return result;

@@ -263,6 +263,12 @@ export function parseSkillInputs(raw: unknown[]): SkillInput[] {
 const PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
 
 /**
+ * Valid apt (Debian) package name pattern.
+ * Must start with alphanumeric, allows dots, plus, hyphens.
+ */
+const APT_PACKAGE_NAME_REGEX = /^[a-z0-9][a-z0-9.+-]+$/;
+
+/**
  * Exact version pin pattern (digits and dots only, e.g. "1.0.0", "2.3").
  * Also allows "latest" — npm treats it as a dist-tag, pip omits the pin.
  * Rejects ranges (^, ~, >=, *), URLs, git refs, and local paths.
@@ -270,9 +276,16 @@ const PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
 const EXACT_VERSION_REGEX = /^(\d+(\.\d+)*|latest)$/;
 
 /**
+ * Apt version pattern — more permissive than npm/pip.
+ * Allows epoch prefix (2:), tildes, plus signs, and hyphens (Debian version conventions).
+ * Also allows "latest" to skip version pinning.
+ */
+const APT_VERSION_REGEX = /^([0-9A-Za-z.+:~-]+|latest)$/;
+
+/**
  * Known dependency ecosystems.
  */
-const KNOWN_ECOSYSTEMS = new Set(['npm', 'pip']);
+const KNOWN_ECOSYSTEMS = new Set(['npm', 'pip', 'apt']);
 
 /**
  * Validate the `dependencies` field of a skill policy.
@@ -289,7 +302,7 @@ export function validateDependencies(dependencies: Record<string, unknown>): str
 
   for (const [ecosystem, value] of Object.entries(dependencies)) {
     if (!KNOWN_ECOSYSTEMS.has(ecosystem)) {
-      errors.push(`Unknown dependency ecosystem: "${ecosystem}" (allowed: npm, pip)`);
+      errors.push(`Unknown dependency ecosystem: "${ecosystem}" (allowed: npm, pip, apt)`);
       continue;
     }
 
@@ -311,12 +324,16 @@ export function validateDependencies(dependencies: Record<string, unknown>): str
       }
       const p = pkg as Record<string, unknown>;
 
+      // Select regex by ecosystem (apt has different naming/versioning conventions)
+      const nameRegex = ecosystem === 'apt' ? APT_PACKAGE_NAME_REGEX : PACKAGE_NAME_REGEX;
+      const versionRegex = ecosystem === 'apt' ? APT_VERSION_REGEX : EXACT_VERSION_REGEX;
+
       // Validate name
       if (typeof p['name'] !== 'string') {
         errors.push(`${ecosystem}: package missing "name"`);
-      } else if (!PACKAGE_NAME_REGEX.test(p['name'])) {
+      } else if (!nameRegex.test(p['name'])) {
         errors.push(
-          `${ecosystem}: invalid package name "${p['name']}" (must match ${String(PACKAGE_NAME_REGEX)})`
+          `${ecosystem}: invalid package name "${p['name']}" (must match ${String(nameRegex)})`
         );
       }
 
@@ -324,7 +341,7 @@ export function validateDependencies(dependencies: Record<string, unknown>): str
       if (typeof p['version'] !== 'string') {
         const pkgName = typeof p['name'] === 'string' ? p['name'] : '?';
         errors.push(`${ecosystem}: package "${pkgName}" missing "version"`);
-      } else if (!EXACT_VERSION_REGEX.test(p['version'])) {
+      } else if (!versionRegex.test(p['version'])) {
         errors.push(
           `${ecosystem}: package "${String(p['name'])}" version "${p['version']}" must be an exact pin (e.g. "1.0.0"). Ranges (^, ~, *, >=), URLs, and git refs are not allowed.`
         );

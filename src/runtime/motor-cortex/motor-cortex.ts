@@ -657,6 +657,16 @@ export class MotorCortex {
         // Generate volume name for workspace isolation
         const volumeName = `motor-ws-${run.id}`;
 
+        // Container's default PATH (used as base when prepending apt bin dirs)
+        const CONTAINER_BASE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+
+        // Build PYTHONPATH from both pip and apt (pip first for override priority)
+        const pythonPaths: string[] = [];
+        if (preparedDeps?.pipDir && preparedDeps.pipPythonPath)
+          pythonPaths.push(preparedDeps.pipPythonPath);
+        if (preparedDeps?.aptDir)
+          pythonPaths.push('/opt/skill-deps/apt/usr/lib/python3/dist-packages');
+
         // Build container config with optional dependency mounts
         const containerConfig: ContainerConfig = {
           workspacePath: workspace,
@@ -682,13 +692,32 @@ export class MotorCortex {
                     },
                   ]
                 : []),
+              ...(preparedDeps.aptDir
+                ? [
+                    {
+                      hostPath: preparedDeps.aptDir,
+                      containerPath: '/opt/skill-deps/apt',
+                      mode: 'ro' as const,
+                    },
+                  ]
+                : []),
             ],
             extraEnv: {
               ...(preparedDeps.npmDir && {
                 NODE_PATH: '/opt/skill-deps/npm/node_modules',
               }),
-              ...(preparedDeps.pipDir &&
-                preparedDeps.pipPythonPath && { PYTHONPATH: preparedDeps.pipPythonPath }),
+              ...(pythonPaths.length > 0 && { PYTHONPATH: pythonPaths.join(':') }),
+              ...(preparedDeps.aptDir && {
+                PATH: `/opt/skill-deps/apt/usr/bin:/opt/skill-deps/apt/usr/sbin:${CONTAINER_BASE_PATH}`,
+                LD_LIBRARY_PATH: [
+                  '/opt/skill-deps/apt/usr/lib/x86_64-linux-gnu',
+                  '/opt/skill-deps/apt/usr/lib/aarch64-linux-gnu',
+                  '/opt/skill-deps/apt/lib/x86_64-linux-gnu',
+                  '/opt/skill-deps/apt/lib/aarch64-linux-gnu',
+                  '/opt/skill-deps/apt/usr/lib',
+                  '/opt/skill-deps/apt/lib',
+                ].join(':'),
+              }),
             },
           }),
         };

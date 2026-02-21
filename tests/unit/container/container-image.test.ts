@@ -10,13 +10,13 @@ describe('buildDockerfile', () => {
   const dockerfile = buildDockerfile('testhash123');
 
   describe('packages', () => {
-    it('includes python3 and py3-pip in apk install', () => {
+    it('includes python3 and python3-pip in apt install', () => {
       expect(dockerfile).toContain('python3');
-      expect(dockerfile).toContain('py3-pip');
+      expect(dockerfile).toContain('python3-pip');
     });
 
     it('includes standard shell tools', () => {
-      for (const pkg of ['curl', 'jq', 'grep', 'coreutils', 'git']) {
+      for (const pkg of ['curl', 'jq', 'grep', 'ca-certificates', 'git']) {
         expect(dockerfile).toContain(pkg);
       }
     });
@@ -72,7 +72,7 @@ describe('Dockerfile hash invalidation', () => {
   it('different Dockerfile content produces different hashes', () => {
     const df1 = buildDockerfile('');
     // Simulate a future change by appending extra content
-    const df2 = df1 + '\nRUN apk add --no-cache some-new-package';
+    const df2 = df1 + '\nRUN apt-get install -y some-new-package';
 
     const hash1 = createHash('sha256').update(df1).digest('hex');
     const hash2 = createHash('sha256').update(df2).digest('hex');
