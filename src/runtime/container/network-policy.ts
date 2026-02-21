@@ -345,3 +345,164 @@ export function mergeDomains(
   const all = [...(skillDomains ?? []), ...(explicitDomains ?? [])].map((d) => d.toLowerCase());
   return Array.from(new Set(all));
 }
+
+// === Wildcard domain support (for egress proxy) ===
+
+/**
+ * Wildcard domain regex: *.example.com format.
+ * Must start with "*.", followed by a valid domain name.
+ */
+const WILDCARD_DOMAIN_REGEX =
+  /^\*\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+/**
+ * Validate a wildcard domain pattern (e.g., *.googlevideo.com).
+ *
+ * Only supports prefix wildcards: *.example.com
+ * Rejects: *.*, *example.com, foo.*.com, etc.
+ */
+export function isValidWildcardDomain(domain: string): boolean {
+  if (!domain || domain.length > 255) return false;
+  return WILDCARD_DOMAIN_REGEX.test(domain);
+}
+
+/**
+ * Validate a domain pattern — either exact domain or wildcard.
+ */
+export function isValidDomainPattern(domain: string): boolean {
+  return isValidDomain(domain) || isValidWildcardDomain(domain);
+}
+
+/**
+ * Check if a hostname matches a domain pattern.
+ *
+ * - Exact pattern: "api.example.com" matches only "api.example.com"
+ * - Wildcard pattern: "*.example.com" matches "sub.example.com", "a.b.example.com"
+ *   but NOT "example.com" itself
+ */
+export function matchesDomainPattern(hostname: string, pattern: string): boolean {
+  const h = hostname.toLowerCase();
+  const p = pattern.toLowerCase();
+
+  if (p.startsWith('*.')) {
+    // Wildcard: *.example.com → match anything.example.com
+    const suffix = p.slice(1); // ".example.com"
+    return h.endsWith(suffix) && h.length > suffix.length;
+  }
+
+  // Exact match
+  return h === p;
+}
+
+/**
+ * Generate iptables-restore rules for proxy-based network policy.
+ *
+ * Much simpler than the legacy per-IP rules: only allow traffic to the
+ * Docker gateway on the proxy port. Everything else is DROP.
+ *
+ * @param opts - Gateway IP and proxy port
+ * @returns iptables-restore compatible ruleset
+ */
+export function buildProxyIptablesRules(opts: { gatewayIp: string; proxyPort: number }): string {
+  const { gatewayIp, proxyPort } = opts;
+
+  const lines: string[] = [
+    '*filter',
+    ':INPUT DROP [0:0]',
+    ':FORWARD DROP [0:0]',
+    ':OUTPUT DROP [0:0]',
+
+    // INPUT: allow established + loopback (for tool-server IPC)
+    '-A INPUT -i lo -j ACCEPT',
+    '-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+
+    // OUTPUT: allow loopback
+    '-A OUTPUT -o lo -j ACCEPT',
+
+    // OUTPUT: allow established/related connections
+    '-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+
+    // Block DNS (defense-in-depth — container already has --dns 127.0.0.1)
+    '-A OUTPUT -p tcp --dport 53 -j DROP',
+    '-A OUTPUT -p udp --dport 53 -j DROP',
+    '-A OUTPUT -p tcp --dport 853 -j DROP',
+
+    // ACCEPT: only the proxy on the gateway
+    `-A OUTPUT -d ${gatewayIp} -p tcp --dport ${String(proxyPort)} -j ACCEPT`,
+
+    // Everything else is DROP (default policy)
+    'COMMIT',
+  ];
+
+  return lines.join('\n');
+}
+
+/**
+ * Apply proxy-based network policy via privileged helper container.
+ *
+ * Same helper container approach as applyNetworkPolicy(), but with
+ * simplified rules that only allow proxy traffic.
+ *
+ * @param containerId - Target container ID
+ * @param opts - Gateway IP and proxy port
+ * @param logger - Logger instance
+ */
+export async function applyProxyNetworkPolicy(
+  containerId: string,
+  opts: { gatewayIp: string; proxyPort: number },
+  logger: Logger
+): Promise<void> {
+  const log = logger.child({ component: 'network-policy', containerId: containerId.slice(0, 12) });
+
+  const ipv4Rules = buildProxyIptablesRules(opts);
+  const ipv6Rules = buildIp6tablesRules();
+
+  const helperName = `netpolicy-${randomBytes(4).toString('hex')}`;
+
+  log.info(
+    { gatewayIp: opts.gatewayIp, proxyPort: opts.proxyPort },
+    'Applying proxy network policy'
+  );
+
+  try {
+    const script = [
+      'set -e',
+      `iptables-restore <<'RULES4'`,
+      ipv4Rules,
+      'RULES4',
+      `ip6tables-restore <<'RULES6' 2>/dev/null || true`,
+      ipv6Rules,
+      'RULES6',
+    ].join('\n');
+
+    const { stderr } = await execFileAsync(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '--name',
+        helperName,
+        '--cap-add',
+        'NET_ADMIN',
+        '--network',
+        `container:${containerId}`,
+        'lifemodel-netpolicy:latest',
+        '-c',
+        script,
+      ],
+      {
+        timeout: 10_000,
+      }
+    );
+
+    if (stderr.trim()) {
+      log.debug({ output: stderr.trim() }, 'Helper container stderr');
+    }
+
+    log.info('Proxy network policy applied successfully');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.error({ error: message }, 'Failed to apply proxy network policy');
+    throw new Error(`Proxy network policy application failed: ${message}`);
+  }
+}

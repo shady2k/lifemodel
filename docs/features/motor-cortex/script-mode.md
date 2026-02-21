@@ -57,7 +57,7 @@ interface ScriptRegistryEntry {
   id: string;                         // e.g. 'telegram.group.fetch'
   image: string;                      // e.g. 'lifemodel-browser'
   entrypoint: string;                 // script path inside the image
-  domains: string[];                  // iptables allowlist — vetted, not caller-overridable
+  domains: string[];                  // proxy allowlist — vetted, not caller-overridable
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
   lock?: {
@@ -141,7 +141,7 @@ An agentic run and a script run can execute simultaneously. Two script runs with
 4. Acquire lock (if script defines one)
 5. Create container:
    - Image: from registry entry
-   - Network: registry domains → iptables (existing network-policy.ts)
+   - Network: registry domains → egress proxy (network-policy.ts + egress-proxy.ts)
    - Mounts: profile volume (named Docker volume, rw or ro per registry)
    - Hardening: --cap-drop ALL, no-new-privileges, read-only rootfs,
      writable /tmp + profile mount only, non-root user
@@ -368,7 +368,7 @@ Via the news tool's `add_source` action:
 |-------|-----------|
 | Script registry | Domains, image, lock — hardcoded, not caller-controlled |
 | Plugin allowlist | Each plugin can only call approved scriptIds |
-| Docker network | iptables DROP all except allowed domains (kernel-level) |
+| Docker network | Egress proxy allowlist + iptables DROP all except proxy (kernel-level) |
 | Docker filesystem | Read-only rootfs, minimal writable mounts |
 | Docker process | `--cap-drop ALL`, `no-new-privileges`, non-root, `--pids-limit` |
 | Output validation | Zod schema on stdout JSON — reject unexpected shapes |

@@ -434,7 +434,8 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
         }
 
         // Import validators
-        const { isValidDomain } = await import('../../../../runtime/container/network-policy.js');
+        const { isValidDomainPattern, isValidWildcardDomain } =
+          await import('../../../../runtime/container/network-policy.js');
 
         // Apply updates to policy, collecting warnings for invalid fields.
         // Valid fields are applied even if other fields fail validation —
@@ -448,16 +449,21 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
           const invalidDomains: string[] = [];
           const unresolvableDomains: string[] = [];
           const formatValid = (addDomains ?? []).filter((d) => {
-            if (!isValidDomain(d)) {
+            if (!isValidDomainPattern(d)) {
               invalidDomains.push(d);
               return false;
             }
             return true;
           });
-          // DNS-validate: reject domains that don't resolve (likely hallucinated by LLM)
+          // DNS-validate exact domains (skip wildcards — can't resolve *.example.com)
           const dns = await import('node:dns/promises');
           const validAddDomains: string[] = [];
           for (const d of formatValid) {
+            if (isValidWildcardDomain(d)) {
+              // Wildcard domains skip DNS validation
+              validAddDomains.push(d);
+              continue;
+            }
             try {
               await dns.resolve4(d);
               validAddDomains.push(d);
@@ -467,7 +473,7 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
           }
           if (invalidDomains.length > 0) {
             warnings.push(
-              `Invalid domains skipped: ${invalidDomains.join(', ')}. Wildcards (*.example.com) are not supported — enumerate specific subdomains.`
+              `Invalid domains skipped: ${invalidDomains.join(', ')}. Use exact domains or wildcard patterns (e.g., "*.example.com").`
             );
           }
           if (unresolvableDomains.length > 0) {

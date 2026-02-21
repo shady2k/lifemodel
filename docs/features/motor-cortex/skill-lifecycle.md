@@ -17,9 +17,9 @@ User (authority)      — approves skills before they become executable
 
 The safety boundary for Motor Cortex is **infrastructure-level, not honor-system**.
 
-**Network enforcement:** When Cognition starts a Motor run, it provides a list of allowed domains. In Docker mode, these are enforced via iptables rules on the container's network. Motor cannot reach any domain not in the allowlist — regardless of what a skill or fetched document says.
+**Network enforcement:** When Cognition starts a Motor run, it provides a list of allowed domains (exact or wildcard like `*.example.com`). In Docker mode, these are enforced via a host-side egress proxy — the container routes all traffic through the proxy, which checks each request against the domain allowlist. Motor cannot reach any domain not in the allowlist — regardless of what a skill or fetched document says.
 
-**Implications for self-healing (Scenario 4):** If Motor fixes a broken skill and the fix requires a NEW domain (e.g., API moved from `api.agentmail.to` to `api-v2.agentmail.to`), the iptables rules block the request. Motor must use the `ask_user` tool to request the new domain. Cognition relays this to the user for approval, then retries the run with the expanded domain list.
+**Implications for self-healing (Scenario 4):** If Motor fixes a broken skill and the fix requires a NEW domain (e.g., API moved from `api.agentmail.to` to `api-v2.agentmail.to`), the proxy blocks the request. Motor must use the `ask_user` tool to request the new domain. Cognition relays this to the user for approval, then retries the run with the expanded domain list.
 
 **Write isolation:** Motor writes to workspace only (`/workspace`). The live `data/skills/` directory is never directly writable by Motor. Skill files are copied INTO the workspace at run start; extraction is the only path from workspace back to live skills, and it forces `pending_review` status.
 
@@ -242,7 +242,7 @@ User: "Send an email via AgentMail"
 ```
 1. MOTOR CORTEX executes skill → API returns 301 redirect to api-v2.agentmail.to
    - Motor tries to follow redirect
-   - iptables BLOCKS the request (api-v2.agentmail.to not in allowed domains)
+   - Proxy BLOCKS the request (api-v2.agentmail.to not in allowed domains)
    - Motor uses ask_user tool: "The API moved to api-v2.agentmail.to.
      I need access to this domain to continue."
 
@@ -660,7 +660,7 @@ core.act({
 
 3. **Skill versioning**: Should we keep the previous version when overwriting? (Proposed: not now — artifacts archive has a copy of every run's workspace. Add explicit versioning in Phase 3 harvesting.)
 
-4. **Auto-approval for self-fixes**: When Motor fixes a skill during execution (Scenario 4), should Cognition auto-approve if the fix is minor (same tools, same domains, just endpoint change)? Or always require user approval? (Proposed: always require — safer. The iptables enforcement is the real-time safety net; status approval is for persistent policy.)
+4. **Auto-approval for self-fixes**: When Motor fixes a skill during execution (Scenario 4), should Cognition auto-approve if the fix is minor (same tools, same domains, just endpoint change)? Or always require user approval? (Proposed: always require — safer. The proxy enforcement is the real-time safety net; status approval is for persistent policy.)
 
 5. **Credential handling during creation**: Two credential sources:
    - **User credentials**: Stored in `.env` as `VAULT_*` env vars, managed via `core.credential` tool

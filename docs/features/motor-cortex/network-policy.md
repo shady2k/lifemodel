@@ -1,6 +1,6 @@
 # Motor Cortex Network Policy
 
-Per-skill network access with kernel-level enforcement. Containers that need external APIs get tightly scoped egress — everything else stays on `--network none`.
+Per-skill network access via a host-side forward proxy. Containers that need external APIs get tightly scoped egress through the proxy — everything else stays on `--network none`.
 
 ## User Flow
 
@@ -10,57 +10,98 @@ User: "Sure"
   → core.act({ domains: ['api.example.com'], task: "..." })
   → Container: curl api.example.com ✅ | curl evil.com ❌ | curl 1.2.3.4 ❌
 
+Wildcard domains for CDN subdomains:
+  → core.act({ domains: ['*.googlevideo.com'], task: "..." })
+  → Container: curl rr3---sn-abc.googlevideo.com ✅ | curl evil.com ❌
+
 Mid-run discovery: motor cortex needs cdn.example.com too
   → Fails → Cognition asks user → retry with expanded domains
 ```
 
-## Three Layers of Defense
+## Architecture: Egress Proxy
+
+Replaces the previous DNS/IP/iptables-per-IP approach with a **host-side HTTP forward proxy**. This is the same pattern Anthropic uses in their sandbox-runtime.
+
+**Why proxy over DNS/iptables?** The old approach pre-resolved domains to IPs and built per-IP iptables ACCEPT rules. This fundamentally could not support wildcard domains (`*.googlevideo.com`) because CDN subdomains are dynamic and resolve to rotating IPs. The proxy operates at the right abstraction level — domain names — and sees hostnames natively via HTTP CONNECT.
+
+### How It Works
+
+1. **Host-side proxy** (`EgressProxyManager`) — each Motor Cortex run gets its own HTTP proxy on an ephemeral port
+2. **Container uses `HTTP_PROXY`/`HTTPS_PROXY`** env vars pointing to `host.docker.internal:<port>`
+3. **iptables simplified** — container can ONLY reach the Docker gateway IP on the proxy port. Everything else DROP.
+4. **DNS blocked** — `--dns 127.0.0.1` stays (defense-in-depth against tools bypassing proxy)
+
+### Security Layers
 
 | Layer | Mechanism | What it blocks |
 |-------|-----------|----------------|
-| 1. DNS | `--dns 127.0.0.1` | Normal DNS resolution for undeclared domains |
-| 2. Resolution | `--add-host domain:IP` (all A records) | Ensures only declared domains can be resolved |
-| 3. Kernel | iptables + ip6tables DROP + per-IP ACCEPT | Raw IP access, DNS bypass (DoH/DoT), internal networks, metadata endpoints, IPv6 |
+| 1. Proxy domain check | Allowlist (exact + wildcard suffix) | Any domain not in the allowlist |
+| 2. Proxy SSRF check | DNS resolution + private IP rejection | SSRF via DNS rebinding to internal networks, cloud metadata |
+| 3. Proxy port check | Restrict to 80/443 by default | Port scanning, non-HTTP services |
+| 4. Kernel iptables | DROP all except gateway:proxyPort | Raw IP access, DNS bypass (DoH/DoT), tools ignoring proxy |
+| 5. DNS block | `--dns 127.0.0.1` | Defense-in-depth against external DNS resolution |
 
 No single layer is sufficient alone. Together they cover the attack surface:
-- Layer 1 alone: bypassed by hardcoded IPs or DoH
-- Layer 2 alone: container could still reach any IP directly
-- Layer 3 alone: sufficient but layers 1+2 provide defense-in-depth
+- Proxy alone: bypassed by tools that ignore `HTTP_PROXY` env vars
+- iptables alone: operates at L3/L4, can't distinguish domains on shared IPs
+- DNS block alone: bypassed by hardcoded IPs or DoH
 
-## Additional Security Measures
+### CONNECT Handler (HTTPS)
 
-**Private IP rejection:** DNS results are validated against RFC1918, loopback, and link-local ranges at resolution time. A domain resolving to `127.0.0.1`, `10.x.x.x`, or `169.254.169.254` (cloud metadata) is rejected before the container is created. This prevents SSRF via DNS rebinding.
+```
+Client sends: CONNECT api.example.com:443 HTTP/1.1
+  → Parse hostname:port
+  → Check domain against allowlist (exact match or wildcard suffix)
+  → Check port against allowed ports (default: 80, 443)
+  → Resolve DNS on host side via dns.resolve4()
+  → Reject if ANY resolved IP is private (RFC1918, loopback, link-local, metadata)
+  → Connect by resolved IP (not hostname — prevents TOCTOU DNS rebinding)
+  → Pipe bidirectional tunnel (200 Connection Established)
+  → Or reject with 403 Forbidden
+```
 
-**IPv6 lockdown:** Both `--sysctl net.ipv6.conf.all.disable_ipv6=1` AND `ip6tables-restore` DROP-all rules are applied. If the sysctl is ignored or unsupported, ip6tables blocks IPv6 at the kernel level.
+### Plain HTTP Handler
 
-**Domain normalization:** All domains are lowercased before deduplication and resolution. `API.Example.Com` and `api.example.com` are treated as the same domain.
+Same domain/port/SSRF checks, then forwards request with resolved IP and original Host header.
 
-**Cleanup on failure:** If iptables application fails after the container is started and paused, the container is force-removed. A paused container with no iptables rules is never left running.
+## Domain Patterns
+
+Two types of domain patterns are supported:
+
+| Pattern | Example | Matches |
+|---------|---------|---------|
+| Exact | `api.example.com` | Only `api.example.com` |
+| Wildcard | `*.googlevideo.com` | `rr3---sn-abc.googlevideo.com`, `any.googlevideo.com` — NOT `googlevideo.com` itself |
+
+Wildcards match any subdomain suffix via `.endsWith()`. The base domain does NOT match a wildcard pattern — `*.x.com` does not match `x.com`.
+
+Validation: `isValidDomainPattern()` accepts both exact domains and `*.domain` wildcards. Used in `core.act`, `core.skill`, and the proxy itself.
 
 ## Container Creation Flow
 
 ```
-1. resolveNetworkPolicy()                ← DNS resolution ONCE, reused throughout
+1. egressProxyManager.allocate(runId, domains, ports)  ← start proxy, get ephemeral port
 2. docker create motor-container --network bridge --dns 127.0.0.1 \
-     --add-host domain:IP ... --sysctl net.ipv6.conf.all.disable_ipv6=1 ...
-3. docker start motor-container          ← starts, tool-server blocks on stdin
-4. docker pause motor-container           ← freeze (defense-in-depth)
-5. docker run --rm --cap-add NET_ADMIN \
-     --network container:motor-container \
-     lifemodel-netpolicy:latest           ← applies iptables + ip6tables atomically
-6. docker unpause motor-container         ← resume with network locked down
-7. docker attach for IPC                  ← tool-server processes requests
+     --add-host host.docker.internal:host-gateway \
+     -e HTTP_PROXY=http://host.docker.internal:<port> \
+     -e HTTPS_PROXY=http://host.docker.internal:<port> \
+     --sysctl net.ipv6.conf.all.disable_ipv6=1 ...
+3. Copy workspace to container
+4. docker start motor-container
+5. docker pause motor-container           ← freeze before network activity
+6. docker inspect → get gateway IP
+7. Apply iptables: DROP all, ACCEPT only gateway:proxyPort
+8. docker unpause motor-container         ← resume with network locked down
+9. docker attach for IPC
 ```
 
-DNS resolution happens exactly once (step 1). The same `NetworkPolicy` object is used for both `--add-host` entries (step 2) and iptables rules (step 5) — no possibility of divergence.
+On failure at any step: `egressProxyManager.release(runId)` + container cleanup.
 
-The pause/unpause sequence is defense-in-depth. The tool-server entrypoint blocks on stdin before doing any network work, so the start→pause window has no network activity in practice. The pause ensures this property survives future entrypoint changes.
+Without domains, containers still use `--network none` (no proxy allocated).
 
-Without domains, containers still use `--network none` (unchanged from Phase 3).
+## iptables Rules (Proxy Mode)
 
-## iptables Rules
-
-Applied atomically via `iptables-restore` (not sequential `iptables -A` calls). All three chains (INPUT, FORWARD, OUTPUT) are defined with DROP policy:
+Applied atomically via `iptables-restore`. All traffic is blocked except to the proxy:
 
 ```
 *filter
@@ -71,32 +112,24 @@ Applied atomically via `iptables-restore` (not sequential `iptables -A` calls). 
 -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-# Block internal networks
--A OUTPUT -d 10.0.0.0/8 -j DROP
--A OUTPUT -d 172.16.0.0/12 -j DROP
--A OUTPUT -d 192.168.0.0/16 -j DROP
--A OUTPUT -d 169.254.0.0/16 -j DROP
-# Block alternative DNS (prevents DoH/DoT bypass)
+# Block DNS (defense-in-depth)
 -A OUTPUT -p tcp --dport 53 -j DROP
 -A OUTPUT -p udp --dport 53 -j DROP
 -A OUTPUT -p tcp --dport 853 -j DROP
-# Allow specific IPs on allowed ports
--A OUTPUT -d 93.184.216.34 -p tcp --dport 443 -j ACCEPT
--A OUTPUT -d 93.184.216.34 -p tcp --dport 80 -j ACCEPT
+# Allow ONLY the proxy
+-A OUTPUT -d <gateway-ip> -p tcp --dport <proxy-port> -j ACCEPT
 COMMIT
 ```
 
-IPv6 rules (`ip6tables-restore`) drop everything except loopback. Applied with `|| true` to handle hosts without IPv6 support gracefully.
+IPv6 rules (`ip6tables-restore`) drop everything except loopback.
 
 ## Helper Container
 
-A minimal Alpine + iptables image (`lifemodel-netpolicy:latest`) runs with `--cap-add NET_ADMIN` in the target container's network namespace. Built lazily on first use (same pattern as the motor cortex image).
+A minimal Debian + iptables image (`lifemodel-netpolicy:latest`) runs with `--cap-add NET_ADMIN` in the target container's network namespace. Built lazily on first use.
 
-```dockerfile
-FROM alpine:3.21
-RUN apk add --no-cache iptables-legacy
-ENTRYPOINT ["sh"]
-```
+## Dynamic Domain Addition
+
+For builtin skills with `autoAllowSearchDomains`, the Motor Cortex can dynamically expand the proxy allowlist mid-run via `egressProxyManager.addDomain(runId, domain)`. This is wired through `motor-tools.ts → motor-loop.ts → motor-cortex.ts`. No container restart needed — the proxy's domain set is mutable.
 
 ## Domain Threading
 
@@ -109,10 +142,9 @@ policy.domains         core.act({ domains })    core.task({ action:'retry', doma
                                           |
                             ContainerConfig.allowedDomains
                                           |
-                              resolveNetworkPolicy()  ← single call, reused
+                          egressProxyManager.allocate()
                                           |
-                         ┌────────────────┼────────────────┐
-                   --add-host        buildIptablesRules  buildIp6tablesRules
+                              proxy allowlist per run
 ```
 
 On retry, new domains are unioned with existing `run.domains` — the set only grows, never shrinks within a run.
@@ -124,33 +156,41 @@ Creation domains and usage domains are **separate concerns**:
 - **Creation domains** (`run.domains`): Domains needed to build the skill (docs sites, skills.sh, etc.). These are NOT persisted to `policy.domains` — they would over-grant runtime permissions.
 - **Usage domains** (`policy.domains`): Runtime execution permissions. Set by the user during approval (via `core.skill(action:"update")`), preserved on skill updates.
 
-Cognition owns all policy persistence. Motor Cortex middleware handles post-run extraction only. The `core.skill(action:"update")` action allows modifying domains, credentials, tools, and dependencies.
-
-For new skills, `domains` starts as `undefined` — the user specifies runtime domains during approval. For updated skills, existing `domains` are preserved (previously user-approved). On first real usage, if the skill needs domains not in policy, Motor requests them via `ask_user` (just-in-time flow).
+Cognition owns all policy persistence. Motor Cortex middleware handles post-run extraction only.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `src/runtime/container/network-policy.ts` | `resolveNetworkPolicy()`, `buildIptablesRules()`, `buildIp6tablesRules()`, `applyNetworkPolicy()`, `mergeDomains()`, `isPrivateIP()` |
+| `src/runtime/container/egress-proxy.ts` | `EgressProxyManager` — per-run proxy lifecycle, CONNECT handler, plain HTTP handler, SSRF protection |
+| `src/runtime/container/network-policy.ts` | `isValidDomainPattern()`, `isValidWildcardDomain()`, `matchesDomainPattern()`, `buildProxyIptablesRules()`, `applyProxyNetworkPolicy()`, `isPrivateIP()`, `mergeDomains()` |
 | `src/runtime/container/netpolicy-image.ts` | Lazy build of `lifemodel-netpolicy:latest` helper image |
-| `src/runtime/container/container-manager.ts` | `buildCreateArgs()` network mode selection, pause/unpause flow with cleanup in `create()` |
+| `src/runtime/container/container-manager.ts` | Proxy lifecycle in `create()`, `destroy()`, `runScript()`, `destroyAll()` |
 | `src/runtime/container/types.ts` | `ContainerConfig.allowedDomains`, `ContainerConfig.allowedPorts` |
-| `src/runtime/motor-cortex/motor-cortex.ts` | Post-run extraction + pendingCredentials reconciliation. Domain merging handled by core.act caller |
-| `src/runtime/motor-cortex/motor-protocol.ts` | `MotorRun.domains` field |
-| `src/layers/cognition/tools/core/act.ts` | `domains` parameter on `core.act` |
-| `src/layers/cognition/tools/core/task.ts` | `domains` parameter on retry action |
-| `tests/unit/container/network-policy.test.ts` | 75 unit tests |
+| `src/runtime/motor-cortex/motor-cortex.ts` | Wires `egressProxyManager.addDomain` callback |
+| `src/runtime/motor-cortex/motor-tools.ts` | Wildcard-aware fetch domain matching via `matchesDomainPattern()` |
+| `src/runtime/motor-cortex/motor-loop.ts` | Passes through `onProxyDomainAdded` callback |
+| `src/layers/cognition/tools/core/act.ts` | `domains` parameter validation with `isValidDomainPattern()` |
+| `src/layers/cognition/tools/core/skill.ts` | Policy domain validation with `isValidDomainPattern()` |
+| `tests/unit/container/network-policy.test.ts` | Wildcard validation, proxy iptables, domain matching tests |
+| `tests/unit/container/egress-proxy.test.ts` | Proxy lifecycle, CONNECT tunneling, SSRF rejection tests |
 
-## Known Limitations (v1)
+## Legacy Functions (Deprecated)
 
-**Shared CDN IPs:** If a domain resolves to a shared CDN IP (e.g., Cloudflare), the container can technically reach other domains on that IP via Host header manipulation. The iptables rules operate at L3/L4 — they allow the IP, not the domain.
+The old DNS/IP-based approach functions are kept but deprecated:
+- `resolveNetworkPolicy()` — was: resolve domains to IPs for `--add-host` and iptables
+- `buildIptablesRules()` — was: per-IP ACCEPT rules
+- `buildIp6tablesRules()` — was: IPv6 DROP-all rules
+- `applyNetworkPolicy()` — was: run helper container with old iptables rules
 
-**IP rotation:** Resolved IPs are frozen at container creation time. Long-running containers may encounter stale IPs if the upstream DNS changes.
+These are superseded by the proxy-based approach (`applyProxyNetworkPolicy()`, `buildProxyIptablesRules()`).
 
-**No port-per-domain:** Allowed ports are global to the policy (default: 80, 443), not per-domain. All allowed IPs can be reached on all allowed ports.
+## Advantages Over Previous Approach
 
-## Future Architecture Path
-
-- **v2:** Egress proxy (Envoy/HAProxy) with SNI enforcement for domain-level security on shared IPs
-- **v3:** Cilium/eBPF or microVM (Firecracker) for defense-in-depth
+| Concern | Old (DNS/IP) | New (Proxy) |
+|---------|-------------|-------------|
+| Wildcard domains | Not supported (IPs are static) | Native (hostname matching) |
+| CDN IP rotation | Stale IPs after creation | Resolved per-request |
+| Shared CDN IPs | Could reach other domains on same IP | Proxy sees actual hostname |
+| DNS rebinding | Resolved once at creation | Resolved per-request + private IP check |
+| Implementation | DNS sidecar + iptables per-IP | Single proxy process per run |

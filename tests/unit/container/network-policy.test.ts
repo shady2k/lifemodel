@@ -10,6 +10,10 @@ import {
   buildIptablesRules,
   buildIp6tablesRules,
   mergeDomains,
+  isValidWildcardDomain,
+  isValidDomainPattern,
+  matchesDomainPattern,
+  buildProxyIptablesRules,
 } from '../../../src/runtime/container/network-policy.js';
 
 // Mock dns.promises module
@@ -487,5 +491,127 @@ describe('mergeDomains()', () => {
     const result = mergeDomains(['API.SKILL.COM'], undefined);
 
     expect(result).toEqual(['api.skill.com']);
+  });
+});
+
+describe('isValidWildcardDomain()', () => {
+  const validCases = [
+    '*.example.com',
+    '*.sub.example.com',
+    '*.googlevideo.com',
+    '*.a.b.c.d.com',
+  ];
+
+  const invalidCases = [
+    '', // empty
+    '*', // bare wildcard
+    '*.', // wildcard with trailing dot only
+    '*.*', // double wildcard
+    '*example.com', // missing dot after wildcard
+    'foo.*.com', // wildcard not at start
+    '*.', // too short
+    '**. example.com', // double asterisk
+    '*.example com', // space
+  ];
+
+  it.each(validCases)('accepts valid wildcard domain: %s', (domain) => {
+    expect(isValidWildcardDomain(domain)).toBe(true);
+  });
+
+  it.each(invalidCases)('rejects invalid wildcard domain: %s', (domain) => {
+    expect(isValidWildcardDomain(domain)).toBe(false);
+  });
+});
+
+describe('isValidDomainPattern()', () => {
+  it('accepts exact domains', () => {
+    expect(isValidDomainPattern('example.com')).toBe(true);
+    expect(isValidDomainPattern('api.example.com')).toBe(true);
+  });
+
+  it('accepts wildcard domains', () => {
+    expect(isValidDomainPattern('*.example.com')).toBe(true);
+    expect(isValidDomainPattern('*.googlevideo.com')).toBe(true);
+  });
+
+  it('rejects invalid patterns', () => {
+    expect(isValidDomainPattern('')).toBe(false);
+    expect(isValidDomainPattern('1.2.3.4')).toBe(false);
+    expect(isValidDomainPattern('*.*')).toBe(false);
+  });
+});
+
+describe('matchesDomainPattern()', () => {
+  it('matches exact domains', () => {
+    expect(matchesDomainPattern('example.com', 'example.com')).toBe(true);
+    expect(matchesDomainPattern('api.example.com', 'api.example.com')).toBe(true);
+  });
+
+  it('rejects non-matching exact domains', () => {
+    expect(matchesDomainPattern('other.com', 'example.com')).toBe(false);
+    expect(matchesDomainPattern('sub.example.com', 'example.com')).toBe(false);
+  });
+
+  it('matches wildcard patterns', () => {
+    expect(matchesDomainPattern('sub.example.com', '*.example.com')).toBe(true);
+    expect(matchesDomainPattern('rr3---sn-abc.googlevideo.com', '*.googlevideo.com')).toBe(true);
+    expect(matchesDomainPattern('a.b.example.com', '*.example.com')).toBe(true);
+  });
+
+  it('does not match the base domain for wildcard', () => {
+    // *.example.com should NOT match example.com itself
+    expect(matchesDomainPattern('example.com', '*.example.com')).toBe(false);
+  });
+
+  it('is case-insensitive', () => {
+    expect(matchesDomainPattern('API.Example.COM', 'api.example.com')).toBe(true);
+    expect(matchesDomainPattern('Sub.Example.Com', '*.example.com')).toBe(true);
+  });
+
+  it('does not match partial suffixes', () => {
+    // "notexample.com" should NOT match "*.example.com"
+    expect(matchesDomainPattern('notexample.com', '*.example.com')).toBe(false);
+  });
+});
+
+describe('buildProxyIptablesRules()', () => {
+  it('generates valid iptables-restore format', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 8080 });
+    const lines = rules.split('\n');
+    expect(lines[0]).toBe('*filter');
+    expect(lines.at(-1)).toBe('COMMIT');
+  });
+
+  it('allows only the gateway:proxyPort', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 12345 });
+    expect(rules).toContain('-A OUTPUT -d 172.17.0.1 -p tcp --dport 12345 -j ACCEPT');
+  });
+
+  it('has default DROP policy', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 8080 });
+    expect(rules).toContain(':OUTPUT DROP [0:0]');
+    expect(rules).toContain(':INPUT DROP [0:0]');
+    expect(rules).toContain(':FORWARD DROP [0:0]');
+  });
+
+  it('blocks DNS ports', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 8080 });
+    expect(rules).toContain('-A OUTPUT -p tcp --dport 53 -j DROP');
+    expect(rules).toContain('-A OUTPUT -p udp --dport 53 -j DROP');
+    expect(rules).toContain('-A OUTPUT -p tcp --dport 853 -j DROP');
+  });
+
+  it('allows loopback and established connections', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 8080 });
+    expect(rules).toContain('-A OUTPUT -o lo -j ACCEPT');
+    expect(rules).toContain('-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
+    expect(rules).toContain('-A INPUT -i lo -j ACCEPT');
+  });
+
+  it('does NOT have per-IP ACCEPT rules (no internal network blocks)', () => {
+    const rules = buildProxyIptablesRules({ gatewayIp: '172.17.0.1', proxyPort: 8080 });
+    // The proxy rules should not have -d 10.0.0.0/8 etc. — only the gateway rule
+    expect(rules).not.toContain('-A OUTPUT -d 10.0.0.0/8 -j DROP');
+    expect(rules).not.toContain('-A OUTPUT -d 192.168.0.0/16 -j DROP');
   });
 });

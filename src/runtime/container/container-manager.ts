@@ -41,7 +41,8 @@ import {
 import { ensureImage } from './container-image.js';
 import { ensureBrowserImage, browserImageExists } from './browser-image.js';
 import { ensureNetpolicyImage } from './netpolicy-image.js';
-import { type NetworkPolicy, resolveNetworkPolicy, applyNetworkPolicy } from './network-policy.js';
+import { applyProxyNetworkPolicy } from './network-policy.js';
+import { egressProxyManager } from './egress-proxy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -264,18 +265,22 @@ class DockerContainerHandle implements ContainerHandle {
  *
  * Network mode selection:
  * - No allowedDomains → --network none (default, most secure)
- * - Has allowedDomains → --network bridge with DNS intercept + iptables
+ * - Has allowedDomains → --network bridge with egress proxy
+ *
+ * @param containerName - Container name
+ * @param config - Container configuration
+ * @param proxyPort - Egress proxy port (null if no network)
  */
 function buildCreateArgs(
   containerName: string,
   config: ContainerConfig,
-  resolvedHosts: Map<string, string[]>
+  proxyPort: number | null
 ): string[] {
   const memoryLimit = config.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
   const cpuLimit = config.cpuLimit ?? DEFAULT_CPU_LIMIT;
   const pidsLimit = config.pidsLimit ?? DEFAULT_PIDS_LIMIT;
 
-  const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+  const hasDomains = proxyPort !== null;
 
   const args: string[] = [
     'create',
@@ -311,23 +316,26 @@ function buildCreateArgs(
 
   // Network configuration
   if (hasDomains) {
-    // Bridge mode with DNS intercept
+    // Bridge mode with egress proxy
     args.push('--network', 'bridge');
 
-    // Block normal DNS (use local resolver that will fail)
+    // Block normal DNS (defense-in-depth against tools bypassing proxy)
     args.push('--dns', '127.0.0.1');
 
     // Disable IPv6 (simplifies iptables rules)
     args.push('--sysctl', 'net.ipv6.conf.all.disable_ipv6=1');
 
-    // Add --add-host entries for each resolved domain (all A records)
-    // This ensures declared domains work even with DNS disabled.
-    // Docker supports multiple --add-host for the same domain (appends to /etc/hosts).
-    for (const [domain, ips] of resolvedHosts.entries()) {
-      for (const ip of ips) {
-        args.push('--add-host', `${domain}:${ip}`);
-      }
-    }
+    // Enable host.docker.internal (proxy runs on host)
+    args.push('--add-host', 'host.docker.internal:host-gateway');
+
+    // Proxy environment variables — tools using standard HTTP libraries will route through proxy
+    const proxyUrl = `http://host.docker.internal:${String(proxyPort)}`;
+    args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+    args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+    args.push('-e', `http_proxy=${proxyUrl}`);
+    args.push('-e', `https_proxy=${proxyUrl}`);
+    args.push('-e', 'NO_PROXY=localhost,127.0.0.1');
+    args.push('-e', 'no_proxy=localhost,127.0.0.1');
   } else {
     // No network access (default, most secure)
     args.push('--network', 'none');
@@ -381,13 +389,17 @@ function buildCreateArgs(
  * - SCRIPT_INPUTS env var with JSON inputs
  * - Uses SCRIPT_CONTAINER_LABEL for identification
  * - Optional profile volume mount
+ *
+ * @param containerName - Container name
+ * @param config - Script container configuration
+ * @param proxyPort - Egress proxy port (null if no network)
  */
 function buildScriptCreateArgs(
   containerName: string,
   config: ScriptContainerConfig,
-  resolvedHosts: Map<string, string[]>
+  proxyPort: number | null
 ): string[] {
-  const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+  const hasDomains = proxyPort !== null;
 
   const args: string[] = [
     'create',
@@ -422,14 +434,19 @@ function buildScriptCreateArgs(
     args.push('--dns', '127.0.0.1');
     args.push('--sysctl', 'net.ipv6.conf.all.disable_ipv6=1');
 
-    for (const [domain, ips] of resolvedHosts.entries()) {
-      for (const ip of ips) {
-        args.push('--add-host', `${domain}:${ip}`);
-      }
-    }
+    // Enable host.docker.internal (proxy runs on host)
+    args.push('--add-host', 'host.docker.internal:host-gateway');
+
+    // Proxy environment variables
+    const proxyUrl = `http://host.docker.internal:${String(proxyPort)}`;
+    args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+    args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+    args.push('-e', `http_proxy=${proxyUrl}`);
+    args.push('-e', `https_proxy=${proxyUrl}`);
+    args.push('-e', 'NO_PROXY=localhost,127.0.0.1');
+    args.push('-e', 'no_proxy=localhost,127.0.0.1');
 
     // Tell the script to block on stdin until we send "ready" after iptables are applied.
-    // This replaces the fragile pause/unpause dance that Docker can reject.
     args.push('-e', 'WAIT_FOR_READY=1');
   } else {
     args.push('--network', 'none');
@@ -514,10 +531,10 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
 
       let hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
-      let resolvedPolicy: NetworkPolicy | null = null;
+      let proxyPort: number | null = null;
 
       if (hasDomains) {
-        // Ensure netpolicy helper image exists
+        // Ensure netpolicy helper image exists (still needed for iptables)
         const netpolicyBuilt = await ensureNetpolicyImage((msg) => {
           log.info(msg);
         });
@@ -529,26 +546,29 @@ export function createContainerManager(logger: Logger): ContainerManager {
             'Network policy helper image failed to build — falling back to --network none (no network access)'
           );
           hasDomains = false;
-          resolvedPolicy = null;
         }
 
-        // Resolve domains to IPs ONCE — reused for both --add-host and iptables
-        try {
-          resolvedPolicy = await resolveNetworkPolicy(
-            config.allowedDomains ?? [],
-            config.allowedPorts
-          );
-          log.info(
-            {
-              domains: resolvedPolicy.domains,
-              resolvedCount: resolvedPolicy.resolvedHosts.size,
-              ports: resolvedPolicy.ports,
-            },
-            'Network policy resolved'
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          throw new Error(`Failed to resolve network policy: ${message}`);
+        if (hasDomains) {
+          // Allocate egress proxy for this run
+          try {
+            const alloc = await egressProxyManager.allocate(
+              runId,
+              config.allowedDomains ?? [],
+              config.allowedPorts
+            );
+            proxyPort = alloc.port;
+            log.info(
+              {
+                runId,
+                proxyPort,
+                domains: config.allowedDomains,
+              },
+              'Egress proxy allocated'
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to allocate egress proxy: ${message}`);
+          }
         }
       }
 
@@ -562,19 +582,25 @@ export function createContainerManager(logger: Logger): ContainerManager {
       try {
         await execFileAsync('docker', ['volume', 'create', volumeName], { timeout: 10_000 });
       } catch (error) {
+        // Clean up proxy on volume creation failure
+        if (proxyPort !== null) {
+          await egressProxyManager.release(runId).catch(() => {
+            /* best-effort cleanup */
+          });
+        }
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Failed to create workspace volume: ${message}`);
       }
 
-      // Create container (uses resolvedPolicy.resolvedHosts for --add-host entries)
-      const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
-      const createArgs = buildCreateArgs(containerName, config, resolvedHosts);
+      // Create container with proxy env vars (no more --add-host per domain)
+      const createArgs = buildCreateArgs(containerName, config, proxyPort);
       log.info(
         {
           containerName,
           runId,
           volumeName,
           hasDomains,
+          proxyPort,
           extraMounts: config.extraMounts,
           extraEnv: config.extraEnv,
         },
@@ -588,7 +614,12 @@ export function createContainerManager(logger: Logger): ContainerManager {
         });
         trimmedId = containerId.trim();
       } catch (error) {
-        // Clean up volume on docker create failure
+        // Clean up volume and proxy on docker create failure
+        if (proxyPort !== null) {
+          await egressProxyManager.release(runId).catch(() => {
+            /* best-effort cleanup */
+          });
+        }
         try {
           await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 10_000 });
         } catch {
@@ -664,6 +695,11 @@ export function createContainerManager(logger: Logger): ContainerManager {
           { containerId: trimmedId.slice(0, 12), error: message },
           'Failed to copy workspace into container'
         );
+        if (proxyPort !== null) {
+          await egressProxyManager.release(runId).catch(() => {
+            /* best-effort cleanup */
+          });
+        }
         try {
           await execFileAsync('docker', ['rm', '-f', trimmedId], { timeout: 10_000 });
           await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 10_000 });
@@ -673,13 +709,9 @@ export function createContainerManager(logger: Logger): ContainerManager {
         throw new Error(`Failed to copy workspace into container: ${message}`);
       }
 
-      if (hasDomains && resolvedPolicy) {
-        // Pause/unpause flow for network policy application.
-        // This ensures iptables are applied before any user code runs.
-        //
-        // Note: The tool-server entrypoint blocks on stdin before doing any work,
-        // so the start→pause window has no network activity in practice.
-        // The pause is defense-in-depth against future entrypoint changes.
+      if (hasDomains && proxyPort !== null) {
+        // Pause/unpause flow for proxy-based network policy application.
+        // iptables ensure the container can ONLY reach the proxy (not the internet directly).
         try {
           // 1. Start container (detached, not -ai)
           log.debug({ containerId: trimmedId.slice(0, 12) }, 'Starting container (detached)');
@@ -689,19 +721,37 @@ export function createContainerManager(logger: Logger): ContainerManager {
           log.debug({ containerId: trimmedId.slice(0, 12) }, 'Pausing container');
           await execFileAsync('docker', ['pause', trimmedId], { timeout: 10_000 });
 
-          // 3. Apply iptables rules via helper container (reuse already-resolved policy)
-          await applyNetworkPolicy(trimmedId, resolvedPolicy, log);
+          // 3. Get gateway IP from container network settings
+          const { stdout: inspectOut } = await execFileAsync(
+            'docker',
+            [
+              'inspect',
+              '--format',
+              '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}',
+              trimmedId,
+            ],
+            { timeout: 10_000 }
+          );
+          const gatewayIp = inspectOut.trim();
+          if (!gatewayIp) {
+            throw new Error('Could not determine container gateway IP');
+          }
 
-          // 4. Unpause container (resume with network locked down)
+          // 4. Apply proxy iptables rules via helper container
+          await applyProxyNetworkPolicy(trimmedId, { gatewayIp, proxyPort }, log);
+
+          // 5. Unpause container (resume with network locked down to proxy only)
           log.debug({ containerId: trimmedId.slice(0, 12) }, 'Unpausing container');
           await execFileAsync('docker', ['unpause', trimmedId], { timeout: 10_000 });
         } catch (error) {
-          // Cleanup: destroy the container if policy application fails.
-          // A paused container with no iptables is a security risk.
+          // Cleanup: destroy the container and proxy if policy application fails.
           log.error(
             { containerId: trimmedId.slice(0, 12), error },
             'Network policy setup failed, destroying container'
           );
+          await egressProxyManager.release(runId).catch(() => {
+            /* best-effort cleanup */
+          });
           try {
             await execFileAsync('docker', ['rm', '-f', trimmedId], { timeout: 10_000 });
           } catch {
@@ -716,7 +766,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
           throw new Error(`Failed to set up network policy: ${message}`);
         }
 
-        // 5. Attach stdin/stdout via docker attach for IPC
+        // 6. Attach stdin/stdout via docker attach for IPC
         log.debug({ containerId: trimmedId.slice(0, 12) }, 'Attaching to container');
         const proc = spawn('docker', ['attach', trimmedId], {
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -730,9 +780,10 @@ export function createContainerManager(logger: Logger): ContainerManager {
           {
             containerId: trimmedId.slice(0, 12),
             containerName,
-            domains: resolvedPolicy.domains,
+            domains: config.allowedDomains,
+            proxyPort,
           },
-          'Container created with network policy'
+          'Container created with egress proxy'
         );
 
         return handle;
@@ -762,6 +813,8 @@ export function createContainerManager(logger: Logger): ContainerManager {
         await handle.destroy();
         log.info({ runId }, 'Container destroyed');
       }
+      // Release egress proxy (no-op if not allocated)
+      await egressProxyManager.release(runId);
     },
 
     async prune(maxAgeMs: number): Promise<number> {
@@ -929,8 +982,8 @@ export function createContainerManager(logger: Logger): ContainerManager {
         }
       }
 
-      const hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
-      let resolvedPolicy: NetworkPolicy | null = null;
+      let hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
+      let proxyPort: number | null = null;
 
       if (hasDomains) {
         const netpolicyBuilt = await ensureNetpolicyImage((msg) => {
@@ -943,12 +996,15 @@ export function createContainerManager(logger: Logger): ContainerManager {
           );
           // Clear domains so buildScriptCreateArgs uses --network none
           config = { ...config, allowedDomains: undefined };
+          hasDomains = false;
         } else {
           try {
-            resolvedPolicy = await resolveNetworkPolicy(config.allowedDomains ?? []);
+            const alloc = await egressProxyManager.allocate(runId, config.allowedDomains ?? []);
+            proxyPort = alloc.port;
+            log.info({ runId, proxyPort }, 'Egress proxy allocated for script');
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to resolve network policy for script: ${message}`);
+            throw new Error(`Failed to allocate egress proxy for script: ${message}`);
           }
         }
       }
@@ -958,10 +1014,9 @@ export function createContainerManager(logger: Logger): ContainerManager {
       const containerName = `script-${runId.slice(0, 8)}-${random}`;
 
       // Build create args
-      const resolvedHosts = resolvedPolicy?.resolvedHosts ?? new Map<string, string[]>();
-      const createArgs = buildScriptCreateArgs(containerName, config, resolvedHosts);
+      const createArgs = buildScriptCreateArgs(containerName, config, proxyPort);
       log.info(
-        { containerName, runId, image: config.image, hasDomains },
+        { containerName, runId, image: config.image, hasDomains, proxyPort },
         'Creating script container'
       );
 
@@ -980,10 +1035,10 @@ export function createContainerManager(logger: Logger): ContainerManager {
         // Stdin-gate flow for network-policy containers:
         //   1. `docker start -ai` attaches stdin+stdout before the process starts
         //   2. Script blocks reading stdin (WAIT_FOR_READY=1 env var)
-        //   3. We apply iptables while the script is blocked
-        //   4. Write "ready\n" to stdin → script proceeds with network locked down
+        //   3. We apply proxy iptables while the script is blocked
+        //   4. Write "ready\n" to stdin → script proceeds with network locked down to proxy
         // For no-network containers: `docker start -a` (no stdin needed).
-        const needsStdinGate = hasDomains && resolvedPolicy;
+        const needsStdinGate = hasDomains && proxyPort !== null;
         const attachArgs = needsStdinGate
           ? ['start', '-ai', containerId]
           : ['start', '-a', containerId];
@@ -1001,9 +1056,24 @@ export function createContainerManager(logger: Logger): ContainerManager {
             proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
             proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
-            // Apply iptables then ungate the script
-            if (needsStdinGate && resolvedPolicy) {
-              applyNetworkPolicy(containerId, resolvedPolicy, log)
+            // Apply proxy iptables then ungate the script
+            if (needsStdinGate && proxyPort !== null) {
+              (async () => {
+                // Get gateway IP from container
+                const { stdout: inspectOut } = await execFileAsync(
+                  'docker',
+                  [
+                    'inspect',
+                    '--format',
+                    '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}',
+                    containerId,
+                  ],
+                  { timeout: 10_000 }
+                );
+                const gatewayIp = inspectOut.trim();
+                if (!gatewayIp) throw new Error('Could not determine container gateway IP');
+                await applyProxyNetworkPolicy(containerId, { gatewayIp, proxyPort }, log);
+              })()
                 .then(() => {
                   proc.stdin?.write('ready\n');
                   proc.stdin?.end();
@@ -1072,12 +1142,13 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
         return { exitCode, stdout };
       } finally {
-        // Always clean up the container
+        // Always clean up the container and proxy
         try {
           await execFileAsync('docker', ['rm', '-f', containerId], { timeout: 10_000 });
         } catch {
           // Container may already be gone (timeout path)
         }
+        await egressProxyManager.release(runId);
       }
     },
 
@@ -1207,6 +1278,9 @@ export function createContainerManager(logger: Logger): ContainerManager {
         }
       }
       activeContainers.clear();
+
+      // Release all egress proxies
+      await egressProxyManager.releaseAll();
 
       // Also clean up any orphaned containers
       try {

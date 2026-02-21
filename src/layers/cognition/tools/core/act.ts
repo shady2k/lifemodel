@@ -15,7 +15,7 @@ import type { MotorCortex } from '../../../../runtime/motor-cortex/motor-cortex.
 import type { MotorTool, SyntheticTool } from '../../../../runtime/motor-cortex/motor-protocol.js';
 import type { MotorToolName } from '../../../../runtime/skills/skill-types.js';
 import { loadSkill, validateSkillInputs } from '../../../../runtime/skills/skill-loader.js';
-import { isValidDomain } from '../../../../runtime/container/network-policy.js';
+import { isValidDomainPattern } from '../../../../runtime/container/network-policy.js';
 import type { LoadedSkill } from '../../../../runtime/skills/skill-types.js';
 import type { CredentialStore } from '../../../../runtime/vault/credential-store.js';
 import { installSkillDependencies } from '../../../../runtime/dependencies/dependency-manager.js';
@@ -449,15 +449,14 @@ export function createActTool(deps: ActToolDeps): Tool {
             }
           }
 
-          // Validate domains before starting — catch wildcards, IPs, etc.
-          const invalidDomains = domains.filter((d) => !isValidDomain(d));
+          // Validate domains before starting — catch IPs, malformed patterns, etc.
+          const invalidDomains = domains.filter((d) => !isValidDomainPattern(d));
           if (invalidDomains.length > 0) {
             return {
               success: false,
               error:
                 `Invalid domain names: ${invalidDomains.join(', ')}. ` +
-                `Wildcards (*.example.com) are not supported — enumerate specific subdomains ` +
-                `(e.g., "github.com", "api.github.com", "raw.githubusercontent.com").`,
+                `Use exact domains (e.g., "api.example.com") or wildcard patterns (e.g., "*.example.com").`,
             };
           }
 

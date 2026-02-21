@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "status": "approved",
   "tools": ["bash", "read", "write", "list"],
-  "domains": ["youtube.com", "www.youtube.com", "youtu.be", "googlevideo.com"],
+  "domains": ["youtube.com", "www.youtube.com", "youtu.be", "*.googlevideo.com"],
   "approvedBy": "builtin",
   "provenance": {
     "source": "builtin"

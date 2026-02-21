@@ -27,7 +27,7 @@ vi.mock('../../../../../../src/runtime/motor-cortex/motor-prompt.js', () => ({
   buildMotorSystemPrompt: vi.fn().mockReturnValue('mock system prompt'),
 }));
 vi.mock('../../../../../../src/runtime/container/network-policy.js', () => ({
-  isValidDomain: vi.fn().mockReturnValue(true),
+  isValidDomainPattern: vi.fn().mockReturnValue(true),
 }));
 
 // Import the mocked functions

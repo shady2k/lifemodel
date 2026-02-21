@@ -14,6 +14,7 @@ import type {
 } from '../container/types.js';
 import { runShell } from '../shell/shell-runner.js';
 import { fuzzyFindUnique, matchesGlobPattern } from '../container/tool-server-utils.js';
+import { matchesDomainPattern } from '../container/network-policy.js';
 import {
   readFile,
   writeFile,
@@ -75,6 +76,9 @@ export interface ToolContext {
 
   /** Whether to auto-add domains from search results to allowedDomains */
   autoAllowSearchDomains?: boolean;
+
+  /** Callback when a domain is dynamically added (for egress proxy sync) */
+  onDomainAdded?: (domain: string) => void;
 }
 
 /**
@@ -1171,8 +1175,10 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
         for (const r of result.results) {
           try {
             const hostname = new URL(r.url).hostname.toLowerCase();
-            if (!ctx.allowedDomains.includes(hostname)) {
+            if (!ctx.allowedDomains.some((p) => matchesDomainPattern(hostname, p))) {
               ctx.allowedDomains.push(hostname);
+              // Notify proxy manager so the domain is also allowed at the network level
+              ctx.onDomainAdded?.(hostname);
             }
           } catch {
             // Invalid URL — skip
@@ -1225,10 +1231,9 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
       const hostname = parsed.hostname.toLowerCase();
       const allowed = ctx.allowedDomains ?? [];
 
-      // Exact match only — must be consistent with container network policy (--add-host).
-      // Subdomain matching (e.g. api.example.com matching example.com) would let the fetch tool
-      // reach domains that the container's DNS/iptables blocks, creating confusing mixed signals.
-      if (!allowed.includes(hostname)) {
+      // Check domain against allowlist using pattern matching (supports wildcards like *.example.com).
+      // Consistent with the egress proxy's domain check — both use matchesDomainPattern().
+      if (!allowed.some((p) => matchesDomainPattern(hostname, p))) {
         return {
           ok: false,
           output: `BLOCKED: Domain ${hostname} is not in the allowed list. You MUST call ask_user now to request access to this domain. Do not try alternative URLs or workarounds. Allowed domains: ${allowed.join(', ')}.`,

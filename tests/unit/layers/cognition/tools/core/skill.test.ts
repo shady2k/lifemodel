@@ -19,7 +19,8 @@ import { createTestPolicy, TEST_SKILL_MD } from '../../../../../helpers/factorie
 
 // Mock network-policy for update action validation
 vi.mock('../../../../../../src/runtime/container/network-policy.js', () => ({
-  isValidDomain: vi.fn().mockReturnValue(true),
+  isValidDomainPattern: vi.fn().mockReturnValue(true),
+  isValidWildcardDomain: vi.fn().mockReturnValue(false),
 }));
 
 describe('core.skill tool', () => {

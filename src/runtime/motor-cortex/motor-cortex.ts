@@ -37,6 +37,7 @@ import type { PreparedDeps } from '../dependencies/dependency-manager.js';
 import type { LockService, ScriptRunRequest, ScriptRunResult } from './script-types.js';
 import { ScriptRunner } from './script-runner.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
+import { egressProxyManager } from '../container/egress-proxy.js';
 
 /**
  * Max file count in workspace output.
@@ -754,6 +755,11 @@ export class MotorCortex {
         ...(this.fetchFn && { fetchFn: this.fetchFn }),
         ...(this.searchFn && { searchFn: this.searchFn }),
         ...(run.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
+        ...(run.autoAllowSearchDomains && {
+          onProxyDomainAdded: (domain: string) => {
+            egressProxyManager.addDomain(run.id, domain);
+          },
+        }),
         ...(runCreds?.credentials && { credentials: runCreds.credentials }),
         ...(runCreds?.credentialNames && { credentialNames: runCreds.credentialNames }),
         ...(preparedDeps && { preparedDeps }),
@@ -1235,10 +1241,16 @@ export class MotorCortex {
     }
 
     // DNS-validate domains before merging (reject hallucinated/typo domains)
+    // Skip DNS validation for wildcard patterns (can't resolve *.example.com)
     if (effectiveDomains && effectiveDomains.length > 0) {
       const dns = await import('node:dns/promises');
       const validated: string[] = [];
       for (const d of effectiveDomains) {
+        if (d.startsWith('*.')) {
+          // Wildcard domains skip DNS validation
+          validated.push(d);
+          continue;
+        }
         try {
           await dns.resolve4(d);
           validated.push(d);

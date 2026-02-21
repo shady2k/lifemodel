@@ -681,7 +681,7 @@ Skills are discovered via directory scanning (auto-discovery mode). Each subdire
 | Field | Purpose |
 |-------|---------|
 | `status` | `'pending_review'`, `'reviewed'`, `'approved'`, or `'needs_reapproval'` — controls whether policy defaults are used |
-| `domains` | Network domains for iptables enforcement |
+| `domains` | Network domains for proxy-based enforcement (exact or wildcard like `*.example.com`) |
 | `tools` | Optional array of motor tool names or `"ALL"` — controls which tools the skill can use |
 | `requiredCredentials` | Credential names resolved from CredentialStore |
 | `credentialValues` | Skill-acquired credentials (e.g. API keys from signup). Persisted for restart survival. Redacted via `sanitizePolicyForDisplay()` in all read paths |

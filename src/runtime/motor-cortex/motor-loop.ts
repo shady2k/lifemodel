@@ -93,6 +93,9 @@ export interface MotorLoopParams {
   /** Whether to auto-add domains from search results to allowedDomains */
   autoAllowSearchDomains?: boolean;
 
+  /** Callback when a domain is dynamically added to the proxy (for egress proxy sync) */
+  onProxyDomainAdded?: (domain: string) => void;
+
   /** Abort signal for cancellation (optional) */
   abortSignal?: AbortSignal;
 
@@ -220,6 +223,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
     ...(params.fetchFn && { fetchFn: params.fetchFn }),
     ...(params.searchFn && { searchFn: params.searchFn }),
     ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
+    ...(params.onProxyDomainAdded && { onDomainAdded: params.onProxyDomainAdded }),
   };
 
   // Get tool definitions
