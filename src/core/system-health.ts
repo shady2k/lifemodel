@@ -80,9 +80,9 @@ const DEFAULT_CONFIG: SystemHealthConfig = {
     critical: 500, // 500ms lag → critical
   },
   cpuUsage: {
-    elevated: 70, // 70% CPU → elevated
-    high: 85, // 85% CPU → high
-    critical: 95, // 95% CPU → critical
+    elevated: 85, // 85% CPU → elevated (embedding bursts hit ~100% briefly)
+    high: 95, // 95% CPU → high
+    critical: 99, // 99% sustained → critical
   },
   recoveryDelayMs: 5000, // Stay recovered for 5s before dropping level
   monitorResolutionMs: 20,
