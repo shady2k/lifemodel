@@ -53,8 +53,11 @@
   "dependencies": {
     "@ai-sdk/openai": "^3.0.27",
     "@grammyjs/runner": "^2.0.3",
+    "@huggingface/transformers": "^3.8.1",
+    "@lancedb/lancedb": "^0.26.2",
     "@openrouter/ai-sdk-provider": "^2.2.3",
     "ai": "^6.0.82",
+    "apache-arrow": "^21.1.0",
     "cron-parser": "^5.5.0",
     "dotenv": "^17.2.3",
     "fast-xml-parser": "^5.3.4",

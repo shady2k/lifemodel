@@ -52,7 +52,8 @@ import {
   createMemoryConsolidator,
 } from '../storage/memory-consolidator.js';
 import { LLMEntityExtractor } from '../storage/entity-extractor.js';
-import { JsonVectorStore } from '../storage/vector-store.js';
+import { createEmbedder } from '../storage/embedder.js';
+import { LanceVectorStore } from '../storage/lance-vector-store.js';
 import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
@@ -70,6 +71,7 @@ import { createLockService } from '../runtime/lock/lock-service.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve, dirname } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
@@ -489,10 +491,22 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
+  // Guard: fail fast if memory.json exists but hasn't been migrated to LanceDB
+  const legacyMemoryPath = resolve(storagePath, 'memory.json');
+  if (existsSync(legacyMemoryPath)) {
+    throw new Error(
+      `Unmigrated memory.json found at ${legacyMemoryPath}. ` +
+        'Run "npx tsx src/scripts/migrate-memory-to-lance.ts" before starting the agent.'
+    );
+  }
+
   // Create dual-layer memory stores
-  const vectorStore = new JsonVectorStore(logger, {
-    storage,
-    storageKey: 'memory',
+  const embedder = createEmbedder({
+    cacheDir: resolve(mergedConfig.paths.data, 'models'),
+  });
+  const vectorStore = new LanceVectorStore(logger, {
+    dbPath: resolve(storagePath, 'memory', 'vector'),
+    embedder,
     maxEntries: 10000,
   });
   const graphStore = new JsonGraphStore(logger, {

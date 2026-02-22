@@ -23,22 +23,22 @@ Memory is split into two abstract stores:
 
 ### VectorStore (Retrieval/Index CRUD)
 
-`src/storage/vector-store.ts` — handles storage, search, scoring, persistence.
+`src/storage/lance-vector-store.ts` — LanceDB-backed store with local embeddings for semantic search.
 
 Responsible for:
 - Save/delete/getById/getAll — standard CRUD
-- **Search with TF-IDF scoring**: term frequency normalized by document length, IDF via ephemeral inverted index
-- Exact phrase match (+10), tag match (+3), recency boost (1-week decay), confidence boost, salience boost
+- **Semantic vector search**: queries and entries embedded via `paraphrase-multilingual-MiniLM-L12-v2` (384-dim, multilingual ONNX model), cosine similarity via LanceDB
+- Two-phase search: vector retrieval from LanceDB → re-ranking in JS with recency/confidence/salience boosts
 
-The inverted index (`Map<term, Set<entryId>>`) is rebuilt on load, updated on save/delete. Never persisted — no corruption path.
+**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). Model cached at `data/models/` (~50MB).
 
-**Scoring components:**
-- Exact phrase: +10 if query appears verbatim in content
-- TF-IDF: `tf(term, doc) * idf(term) * 10` per query term (normalized by doc length)
-- Tag match: +3 per matching tag
-- Recency: 0-1 decaying linearly over 168 hours (1 week)
-- Confidence: `confidence * 3`
-- Salience: `salience * 2` (when present)
+**Storage:** LanceDB manages its own files at `data/state/memory/vector/`. This is a second persistence path — NOT routed through DeferredStorage. LanceDB is immediately durable (no explicit persist needed).
+
+**Scoring components (two-phase):**
+1. **Vector similarity**: cosine distance → similarity (`1 - distance/2`), scaled ×10
+2. **Recency**: 0-1 decaying linearly over 168 hours (1 week)
+3. **Confidence**: `confidence * 3`
+4. **Salience**: `salience * 2` (when present)
 
 **Salience vs Confidence:**
 - `confidence` = truth-likelihood (stable). "How sure are we this fact is correct?"
@@ -70,14 +70,15 @@ Memories have:
 - `salience` - Retrieval priority (0-1), decays over time
 - `tags` - For retrieval
 - `provenance` - Where it came from
-- `embedding` - Reserved for future vector search (never populated now)
+- `embedding` - 384-dim vector from `paraphrase-multilingual-MiniLM-L12-v2` (stored in LanceDB, not on the MemoryEntry object)
 
 ## Retrieval Pipeline
 
 ### 1. Vector Search (default)
 
 COGNITION searches memory via VectorStore:
-- **TF-IDF scoring** (term frequency normalized by doc length, IDF via inverted index)
+- **Semantic vector search** (query embedded → cosine similarity via LanceDB → overfetch candidates)
+- **Re-ranking** in JS: similarity ×10 + recency boost + confidence boost + salience boost
 - **Recency boost** (recent memories get a boost, decaying over 1 week)
 - **Confidence boost** (additive: `score += confidence * 3`)
 - **Salience boost** (when present: `score += salience * 2`)
@@ -116,7 +117,7 @@ Use naturally if relevant. Do not force.
 
 The `core.memory` tool supports:
 
-- **`search`** action — paginated TF-IDF search with filters
+- **`search`** action — paginated semantic vector search with filters
 - **`associate`** action — graph-expanded context for a topic or person name. Returns direct matches + related context (via entity graph) + linked commitments.
 - **`minConfidence`** parameter (default: 0.3) - Filters out low-confidence matches
 - **Search metadata** returned with results:
@@ -179,7 +180,16 @@ After merge/decay/forget, the consolidator runs entity extraction on entries not
 
 ## Data Migration
 
-No breaking migration needed:
-- **`memory.json`** — Format unchanged. New optional fields (`salience`, `embedding`) default to `undefined` when absent.
+### VectorStore: JSON → LanceDB migration
+
+Run the one-time migration script before first launch with LanceDB:
+```bash
+npx tsx src/scripts/migrate-memory-to-lance.ts
+```
+
+This embeds all entries from `memory.json` into LanceDB at `data/state/memory/vector/` and removes `memory.json`. See [ADR 005](../adr/005-lancedb-vector-store.md) for the decision record.
+
+### GraphStore
+
 - **`graph.json`** — Brand new file, starts empty. Created on first `graphStore.persist()`.
 - **Rollback:** Delete `graph.json` and revert code. Memory data is untouched.
