@@ -20,7 +20,10 @@ import type {
   AdvanceNotice,
   ReminderAdvanceNoticeData,
   RelativeTime,
+  AbsoluteTime,
+  RecurringTime,
   ReminderOccurrence,
+  DateConstraint,
 } from './reminder-types.js';
 import { REMINDER_EVENT_KINDS, REMINDER_STORAGE_KEYS } from './reminder-types.js';
 import { resolveSemanticAnchor, formatRecurrence } from './date-parser.js';
@@ -79,81 +82,65 @@ const SCHEMA_CREATE = {
         required: true,
         description: 'Original time expression from user',
       },
-      relative: {
-        type: 'object',
+      // relative fields
+      unit: {
+        type: 'string',
         required: false,
-        description: 'Required when anchor.type="relative"',
-        properties: {
-          unit: {
-            type: 'string',
-            required: true,
-            enum: ['minute', 'hour', 'day', 'week', 'month'],
-          },
-          amount: { type: 'number', required: true },
-        },
+        enum: ['minute', 'hour', 'day', 'week', 'month'],
+        description: 'For type="relative": time unit',
       },
-      absolute: {
-        type: 'object',
+      amount: {
+        type: 'number',
         required: false,
-        description: 'Required when anchor.type="absolute"',
-        properties: {
-          special: {
-            type: 'string',
-            required: false,
-            enum: [
-              'tomorrow',
-              'next_week',
-              'next_month',
-              'this_evening',
-              'tonight',
-              'this_afternoon',
-            ],
-          },
-          year: { type: 'number', required: false },
-          month: { type: 'number', required: false },
-          day: { type: 'number', required: false },
-          hour: { type: 'number', required: false },
-          minute: { type: 'number', required: false },
-          dayOfWeek: {
-            type: 'number',
-            required: false,
-            description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
-          },
-        },
+        description: 'For type="relative": number of units',
       },
-      recurring: {
-        type: 'object',
+      // absolute fields
+      special: {
+        type: 'string',
         required: false,
-        description: 'Required when anchor.type="recurring"',
-        properties: {
-          frequency: { type: 'string', required: true, enum: ['daily', 'weekly', 'monthly'] },
-          interval: { type: 'number', required: true, default: 1 },
-          hour: { type: 'number', required: false },
-          minute: { type: 'number', required: false },
-          daysOfWeek: {
-            type: 'array',
-            items: 'number (0-6)',
-            required: false,
-            description: 'For weekly',
-          },
-          dayOfMonth: { type: 'number', required: false, description: 'For monthly, fixed day' },
-          dayOfMonthEnd: {
-            type: 'number',
-            required: false,
-            description:
-              'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
-          },
-          anchorDay: {
-            type: 'number',
-            required: false,
-            description: 'For monthly with constraint',
-          },
-          constraint: {
-            type: 'string',
-            required: false,
-            enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
-          },
-        },
+        enum: ['tomorrow', 'next_week', 'next_month', 'this_evening', 'tonight', 'this_afternoon'],
+        description: 'For type="absolute": named time shortcut',
+      },
+      year: { type: 'number', required: false },
+      month: { type: 'number', required: false, description: '1-12' },
+      day: { type: 'number', required: false, description: '1-31' },
+      hour: { type: 'number', required: false, description: '0-23' },
+      minute: { type: 'number', required: false, description: '0-59' },
+      dayOfWeek: {
+        type: 'number',
+        required: false,
+        description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
+      },
+      // recurring fields
+      frequency: {
+        type: 'string',
+        required: false,
+        enum: ['daily', 'weekly', 'monthly'],
+        description: 'For type="recurring": recurrence frequency',
+      },
+      interval: { type: 'number', required: false, description: 'Every N periods (default: 1)' },
+      daysOfWeek: {
+        type: 'array',
+        items: 'number (0-6)',
+        required: false,
+        description: 'For weekly recurrence',
+      },
+      dayOfMonth: { type: 'number', required: false, description: 'For monthly, fixed day (1-31)' },
+      dayOfMonthEnd: {
+        type: 'number',
+        required: false,
+        description:
+          'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
+      },
+      anchorDay: {
+        type: 'number',
+        required: false,
+        description: 'For monthly with constraint (1-31)',
+      },
+      constraint: {
+        type: 'string',
+        required: false,
+        enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
       },
     },
   },
@@ -226,94 +213,73 @@ const REMINDER_RAW_SCHEMA = {
           type: 'string',
           description: 'Original time expression from user (e.g., "завтра", "in 2 hours")',
         },
-        relative: {
-          type: 'object',
-          description: 'For type="relative" (e.g., "in 30 minutes")',
-          properties: {
-            unit: {
-              type: 'string',
-              enum: ['minute', 'hour', 'day', 'week', 'month'],
-            },
-            amount: {
-              type: 'number',
-              description: 'Number of units',
-            },
-          },
-          required: ['unit', 'amount'],
-          additionalProperties: false,
+        // relative fields (flat)
+        unit: {
+          type: 'string',
+          enum: ['minute', 'hour', 'day', 'week', 'month'],
+          description: 'For type="relative": time unit',
         },
-        absolute: {
-          type: 'object',
-          description: 'For type="absolute" (e.g., "tomorrow", "next Monday at 3pm")',
-          properties: {
-            special: {
-              type: 'string',
-              enum: [
-                'tomorrow',
-                'next_week',
-                'next_month',
-                'this_evening',
-                'tonight',
-                'this_afternoon',
-              ],
-              description: 'Named time shortcut',
-            },
-            year: { type: 'number' },
-            month: { type: 'number', description: '1-12' },
-            day: { type: 'number', description: '1-31' },
-            hour: { type: 'number', description: '0-23' },
-            minute: { type: 'number', description: '0-59' },
-            dayOfWeek: {
-              type: 'number',
-              description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
-            },
-          },
-          additionalProperties: false,
+        amount: {
+          type: 'number',
+          description: 'For type="relative": number of units',
         },
-        recurring: {
-          type: 'object',
-          description: 'For type="recurring" (e.g., "every day at 9am")',
-          properties: {
-            frequency: {
-              type: 'string',
-              enum: ['daily', 'weekly', 'monthly'],
-            },
-            interval: {
-              type: 'number',
-              description: 'Every N periods (default: 1)',
-            },
-            hour: { type: 'number', description: '0-23' },
-            minute: { type: 'number', description: '0-59' },
-            daysOfWeek: {
-              type: 'array',
-              items: { type: 'number' },
-              description: 'For weekly: days of week (0=Sun, 6=Sat)',
-            },
-            dayOfMonth: {
-              type: 'number',
-              description: 'For monthly: fixed day (1-31)',
-            },
-            dayOfMonthEnd: {
-              type: 'number',
-              description:
-                'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
-            },
-            anchorDay: {
-              type: 'number',
-              description: 'For monthly with constraint: anchor day (1-31)',
-            },
-            constraint: {
-              type: 'string',
-              enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
-              description: 'Constraint to apply after anchorDay',
-            },
-          },
-          required: ['frequency'],
-          additionalProperties: false,
+        // absolute fields (flat)
+        special: {
+          type: 'string',
+          enum: [
+            'tomorrow',
+            'next_week',
+            'next_month',
+            'this_evening',
+            'tonight',
+            'this_afternoon',
+          ],
+          description: 'For type="absolute": named time shortcut',
+        },
+        year: { type: 'number' },
+        month: { type: 'number', description: '1-12' },
+        day: { type: 'number', description: '1-31' },
+        hour: { type: 'number', description: '0-23' },
+        minute: { type: 'number', description: '0-59' },
+        dayOfWeek: {
+          type: 'number',
+          description: '0=Sunday, 6=Saturday (for "next Monday" etc.)',
+        },
+        // recurring fields (flat)
+        frequency: {
+          type: 'string',
+          enum: ['daily', 'weekly', 'monthly'],
+          description: 'For type="recurring": recurrence frequency',
+        },
+        interval: {
+          type: 'number',
+          description: 'Every N periods (default: 1)',
+        },
+        daysOfWeek: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'For weekly: days of week (0=Sun, 6=Sat)',
+        },
+        dayOfMonth: {
+          type: 'number',
+          description: 'For monthly: fixed day (1-31)',
+        },
+        dayOfMonthEnd: {
+          type: 'number',
+          description:
+            'End day for monthly range (1-31). Fires daily from dayOfMonth to dayOfMonthEnd.',
+        },
+        anchorDay: {
+          type: 'number',
+          description: 'For monthly with constraint: anchor day (1-31)',
+        },
+        constraint: {
+          type: 'string',
+          enum: ['next-weekend', 'next-weekday', 'next-saturday', 'next-sunday'],
+          description: 'Constraint to apply after anchorDay',
         },
       },
       required: ['type', 'confidence', 'originalPhrase'],
-      additionalProperties: false,
     },
     advanceNotice: {
       type: 'object',
@@ -358,6 +324,129 @@ const REMINDER_RAW_SCHEMA = {
   required: ['action'],
   additionalProperties: false,
 };
+
+/**
+ * Normalize a flat anchor (LLM-facing format) into nested SemanticDateAnchor (internal format).
+ * Validates that required sub-fields are present for each anchor type.
+ */
+function normalizeAnchor(
+  flat: Record<string, unknown>
+): { success: true; anchor: SemanticDateAnchor } | { success: false; error: string } {
+  const type = flat['type'] as string;
+  const confidence = flat['confidence'] as number;
+  const originalPhrase = flat['originalPhrase'] as string;
+
+  const anchorType = type as SemanticDateAnchor['type'];
+
+  switch (type) {
+    case 'relative': {
+      const unit = flat['unit'] as string | undefined;
+      const amount = flat['amount'] as number | undefined;
+      if (!unit || amount == null) {
+        return {
+          success: false,
+          error:
+            'anchor.type is "relative" but missing "unit" and/or "amount". ' +
+            'Example: { type: "relative", unit: "hour", amount: 2, confidence: 0.9, originalPhrase: "in 2 hours" }',
+        };
+      }
+      const anchor: SemanticDateAnchor = {
+        type: anchorType,
+        confidence,
+        originalPhrase,
+        relative: { unit: unit as RelativeTime['unit'], amount },
+      };
+      return { success: true, anchor };
+    }
+
+    case 'absolute': {
+      const special = flat['special'] as string | undefined;
+      const year = flat['year'] as number | undefined;
+      const month = flat['month'] as number | undefined;
+      const day = flat['day'] as number | undefined;
+      const hour = flat['hour'] as number | undefined;
+      const minute = flat['minute'] as number | undefined;
+      const dayOfWeek = flat['dayOfWeek'] as number | undefined;
+
+      if (
+        special == null &&
+        year == null &&
+        month == null &&
+        day == null &&
+        hour == null &&
+        minute == null &&
+        dayOfWeek == null
+      ) {
+        return {
+          success: false,
+          error:
+            'anchor.type is "absolute" but no time fields provided. ' +
+            'Example: { type: "absolute", special: "tomorrow", confidence: 0.9, originalPhrase: "завтра" }',
+        };
+      }
+
+      const absolute: Record<string, unknown> = {};
+      if (special != null) absolute['special'] = special;
+      if (year != null) absolute['year'] = year;
+      if (month != null) absolute['month'] = month;
+      if (day != null) absolute['day'] = day;
+      if (hour != null) absolute['hour'] = hour;
+      if (minute != null) absolute['minute'] = minute;
+      if (dayOfWeek != null) absolute['dayOfWeek'] = dayOfWeek;
+
+      const anchor: SemanticDateAnchor = {
+        type: anchorType,
+        confidence,
+        originalPhrase,
+        absolute: absolute as unknown as AbsoluteTime,
+      };
+      return { success: true, anchor };
+    }
+
+    case 'recurring': {
+      const frequency = flat['frequency'] as string | undefined;
+      if (!frequency) {
+        return {
+          success: false,
+          error:
+            'anchor.type is "recurring" but missing "frequency". ' +
+            'Example: { type: "recurring", frequency: "daily", interval: 1, hour: 9, confidence: 0.9, originalPhrase: "every day at 9am" }',
+        };
+      }
+
+      const recurring: Record<string, unknown> = {
+        frequency,
+        interval: (flat['interval'] as number | undefined) ?? 1,
+      };
+      const hour = flat['hour'] as number | undefined;
+      const minute = flat['minute'] as number | undefined;
+      const daysOfWeek = flat['daysOfWeek'] as number[] | undefined;
+      const dayOfMonth = flat['dayOfMonth'] as number | undefined;
+      const dayOfMonthEnd = flat['dayOfMonthEnd'] as number | undefined;
+      const anchorDay = flat['anchorDay'] as number | undefined;
+      const constraint = flat['constraint'] as string | undefined;
+
+      if (hour != null) recurring['hour'] = hour;
+      if (minute != null) recurring['minute'] = minute;
+      if (daysOfWeek != null) recurring['daysOfWeek'] = daysOfWeek;
+      if (dayOfMonth != null) recurring['dayOfMonth'] = dayOfMonth;
+      if (dayOfMonthEnd != null) recurring['dayOfMonthEnd'] = dayOfMonthEnd;
+      if (anchorDay != null) recurring['anchorDay'] = anchorDay;
+      if (constraint != null) recurring['constraint'] = constraint as DateConstraint;
+
+      const anchor: SemanticDateAnchor = {
+        type: anchorType,
+        confidence,
+        originalPhrase,
+        recurring: recurring as unknown as RecurringTime,
+      };
+      return { success: true, anchor };
+    }
+
+    default:
+      return { success: false, error: `Unknown anchor type: ${type}` };
+  }
+}
 
 /**
  * Create the unified reminder tool.
@@ -659,7 +748,7 @@ export function createReminderTools(
 
       return result;
     } catch (error) {
-      logger.error(
+      logger.warn(
         { error: error instanceof Error ? error.message : String(error) },
         'Failed to create reminder'
       );
@@ -1015,14 +1104,14 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
       {
         name: 'anchor',
         type: 'object',
-        description: `Semantic date anchor for create action. Extract the time expression:
-- Relative: { type: "relative", relative: { unit: "minute"|"hour"|"day"|"week"|"month", amount: number }, confidence: 0.9, originalPhrase: "..." }
-- Absolute: { type: "absolute", absolute: { special?: "tomorrow"|"next_week"|"next_month"|"this_evening"|"tonight"|"this_afternoon", year?: number, month?: number, day?: number, hour?: number, minute?: number, dayOfWeek?: 0-6 }, confidence: 0.9, originalPhrase: "..." }
-- Recurring (fixed day): { type: "recurring", recurring: { frequency: "daily"|"weekly"|"monthly", interval: number, hour?: number, minute?: number, daysOfWeek?: number[], dayOfMonth?: number }, confidence: 0.9, originalPhrase: "..." }
-- Recurring (day range): { type: "recurring", recurring: { frequency: "monthly", interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10 }, confidence: 0.9, originalPhrase: "..." }
-  Example: "с 20 по 25 каждого месяца" -> dayOfMonth: 20, dayOfMonthEnd: 25. Fires daily within the range until completed, then jumps to next month.
-- Recurring (constrained): { type: "recurring", recurring: { frequency: "monthly", interval: 1, anchorDay: 10, constraint: "next-weekend"|"next-weekday"|"next-saturday"|"next-sunday", hour?: number, minute?: number }, confidence: 0.9, originalPhrase: "..." }
-  Example: "weekend after 10th each month" -> anchorDay: 10, constraint: "next-weekend"`,
+        description: `Semantic date anchor for create action. All fields flat on anchor object — NO nesting.
+- Relative: { type: "relative", unit: "hour", amount: 2, confidence: 0.9, originalPhrase: "in 2 hours" }
+- Absolute: { type: "absolute", special: "tomorrow", confidence: 0.9, originalPhrase: "завтра" }
+- Absolute (date): { type: "absolute", day: 15, month: 1, hour: 15, confidence: 0.9, originalPhrase: "January 15 at 3pm" }
+- Recurring (fixed day): { type: "recurring", frequency: "daily", interval: 1, hour: 9, confidence: 0.9, originalPhrase: "every day at 9am" }
+- Recurring (day range): { type: "recurring", frequency: "monthly", interval: 1, dayOfMonth: 20, dayOfMonthEnd: 25, hour: 10, confidence: 0.9, originalPhrase: "с 20 по 25 каждого месяца" }
+  Fires daily within the range until completed, then jumps to next month.
+- Recurring (constrained): { type: "recurring", frequency: "monthly", interval: 1, anchorDay: 10, constraint: "next-weekend", confidence: 0.9, originalPhrase: "weekend after 10th each month" }`,
         required: false,
       },
       {
@@ -1065,34 +1154,31 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
       if (!['create', 'list', 'cancel', 'complete'].includes(a['action'])) {
         return { success: false, error: 'action: must be one of [create, list, cancel, complete]' };
       }
-      // Validate dayOfMonthEnd range constraints
+      // Validate dayOfMonthEnd range constraints (flat anchor fields)
       const anchor = a['anchor'] as Record<string, unknown> | undefined;
-      if (anchor?.['type'] === 'recurring') {
-        const recurring = anchor['recurring'] as Record<string, unknown> | undefined;
-        if (recurring?.['dayOfMonthEnd'] != null) {
-          const dayOfMonthEnd = Number(recurring['dayOfMonthEnd']);
-          const dayOfMonth = Number(recurring['dayOfMonth']);
-          if (recurring['dayOfMonth'] == null) {
-            return { success: false, error: 'dayOfMonthEnd requires dayOfMonth to be set' };
-          }
-          if (dayOfMonthEnd < 1 || dayOfMonthEnd > 31) {
-            return { success: false, error: 'dayOfMonthEnd must be between 1 and 31' };
-          }
-          if (dayOfMonthEnd < dayOfMonth) {
-            return { success: false, error: 'dayOfMonthEnd must be >= dayOfMonth' };
-          }
-          if (recurring['frequency'] !== 'monthly') {
-            return {
-              success: false,
-              error: 'dayOfMonthEnd is only supported with monthly frequency',
-            };
-          }
-          if (recurring['anchorDay'] != null || recurring['constraint'] != null) {
-            return {
-              success: false,
-              error: 'dayOfMonthEnd cannot be used with anchorDay/constraint',
-            };
-          }
+      if (anchor?.['type'] === 'recurring' && anchor['dayOfMonthEnd'] != null) {
+        const dayOfMonthEnd = Number(anchor['dayOfMonthEnd']);
+        const dayOfMonth = Number(anchor['dayOfMonth']);
+        if (anchor['dayOfMonth'] == null) {
+          return { success: false, error: 'dayOfMonthEnd requires dayOfMonth to be set' };
+        }
+        if (dayOfMonthEnd < 1 || dayOfMonthEnd > 31) {
+          return { success: false, error: 'dayOfMonthEnd must be between 1 and 31' };
+        }
+        if (dayOfMonthEnd < dayOfMonth) {
+          return { success: false, error: 'dayOfMonthEnd must be >= dayOfMonth' };
+        }
+        if (anchor['frequency'] !== 'monthly') {
+          return {
+            success: false,
+            error: 'dayOfMonthEnd is only supported with monthly frequency',
+          };
+        }
+        if (anchor['anchorDay'] != null || anchor['constraint'] != null) {
+          return {
+            success: false,
+            error: 'dayOfMonthEnd cannot be used with anchorDay/constraint',
+          };
         }
       }
       return { success: true, data: a };
@@ -1151,7 +1237,19 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
             return {
               success: false,
               action: 'create',
-              error: `Invalid anchor: missing or invalid "type" field. Must be one of: ${validAnchorTypes.join(', ')}. For "tomorrow", use: { type: "absolute", absolute: { special: "tomorrow" }, confidence: 0.9, originalPhrase: "завтра" }`,
+              error: `Invalid anchor: missing or invalid "type" field. Must be one of: ${validAnchorTypes.join(', ')}. Example: { type: "absolute", special: "tomorrow", confidence: 0.9, originalPhrase: "завтра" }`,
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_CREATE,
+            };
+          }
+
+          // Normalize flat anchor into nested SemanticDateAnchor
+          const normalized = normalizeAnchor(anchorArg);
+          if (!normalized.success) {
+            return {
+              success: false,
+              action: 'create',
+              error: normalized.error,
               receivedParams: Object.keys(args),
               schema: SCHEMA_CREATE,
             };
@@ -1191,7 +1289,7 @@ Set 'internal:true' for self-scheduled reminders (your own commitments, not user
 
           return createReminder(
             content,
-            anchorArg as unknown as SemanticDateAnchor,
+            normalized.anchor,
             recipientId,
             tags,
             normalizedAdvanceNotice,

@@ -18,7 +18,7 @@ The LLM doesn't calculate timestamps directly. Instead, it extracts time express
 // "Remind me tomorrow" →
 {
   type: "absolute",
-  absolute: { special: "tomorrow" },
+  special: "tomorrow",
   confidence: 0.9,
   originalPhrase: "tomorrow"
 }
@@ -26,7 +26,8 @@ The LLM doesn't calculate timestamps directly. Instead, it extracts time express
 // "Remind me in 2 hours" →
 {
   type: "relative",
-  relative: { unit: "hour", amount: 2 },
+  unit: "hour",
+  amount: 2,
   confidence: 0.9,
   originalPhrase: "in 2 hours"
 }
@@ -34,7 +35,9 @@ The LLM doesn't calculate timestamps directly. Instead, it extracts time express
 // "Remind me every Monday at 9am" →
 {
   type: "recurring",
-  recurring: { frequency: "weekly", daysOfWeek: [1], hour: 9 },
+  frequency: "weekly",
+  daysOfWeek: [1],
+  hour: 9,
   confidence: 0.9,
   originalPhrase: "every Monday at 9am"
 }
@@ -174,7 +177,7 @@ The agent can schedule reminders for itself using the `internal: true` flag:
 ```typescript
 core.schedule({
   content: "Follow up on their job interview",
-  anchor: { type: "relative", relative: { unit: "hour", amount: 24 } },
+  anchor: { type: "relative", unit: "hour", amount: 24, confidence: 0.9, originalPhrase: "in 24 hours" },
   internal: true
 })
 ```
