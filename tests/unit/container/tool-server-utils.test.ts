@@ -20,7 +20,7 @@ import {
   SHELL_ALLOWLIST,
   NETWORK_COMMANDS,
   CONTROL_OPERATORS_RE,
-  DANGEROUS_METACHAR_RE,
+  hasDangerousUnquotedMetachars,
   CREDENTIAL_PLACEHOLDER,
   type FindUniqueSubstringResult,
 } from '../../../src/runtime/container/tool-server-utils.js';
@@ -83,10 +83,10 @@ describe('validatePipeline', () => {
       expect(result.hasNetwork).toBe(false);
     });
 
-    it('validates allowlist in && and || chains', () => {
+    it('validates blocklist in && and || chains', () => {
       const result = validatePipeline('echo test || bash bad.sh && echo done');
       expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
+      expect(result.error).toContain('Shell interpreter not allowed');
       expect(result.error).toContain('bash');
     });
   });
@@ -141,6 +141,37 @@ describe('validatePipeline', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('metacharacters');
     });
+
+    it('allows semicolons inside double quotes (e.g. python -c)', () => {
+      const result = validatePipeline('python3 -c "import yt_dlp; print(1)"');
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows semicolons inside single quotes', () => {
+      const result = validatePipeline("python3 -c 'import x; print(1)'");
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows backticks inside quotes', () => {
+      const result = validatePipeline('echo "use `backticks` here"');
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows $() inside quotes', () => {
+      const result = validatePipeline('echo "value is $(cmd)"');
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects semicolons outside quotes even with quoted content', () => {
+      const result = validatePipeline('echo "safe"; rm -rf /');
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('metacharacters');
+    });
+
+    it('rejects unquoted backtick even after quoted text', () => {
+      const result = validatePipeline('echo "safe" `id`');
+      expect(result.ok).toBe(false);
+    });
   });
 
   describe('allowed: container-isolated runtimes', () => {
@@ -161,25 +192,29 @@ describe('validatePipeline', () => {
     });
   });
 
-  describe('rejected: not in allowlist', () => {
+  describe('rejected: blocklisted shell interpreters', () => {
     it('rejects bash command', () => {
       const result = validatePipeline('bash -c "echo test"');
       expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
+      expect(result.error).toContain('Shell interpreter not allowed');
       expect(result.error).toContain('bash');
     });
 
     it('rejects sh command', () => {
       const result = validatePipeline('sh -c "echo test"');
       expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
+      expect(result.error).toContain('Shell interpreter not allowed');
       expect(result.error).toContain('sh');
     });
 
-    it('rejects arbitrary binary', () => {
-      const result = validatePipeline('malware');
-      expect(result.ok).toBe(false);
-      expect(result.error).toContain('Command not allowed');
+    it('allows arbitrary binaries (container is the security boundary)', () => {
+      const result = validatePipeline('yt-dlp --list-subs "https://youtube.com"');
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows ffmpeg (apt-installed dependency)', () => {
+      const result = validatePipeline('ffmpeg -version');
+      expect(result.ok).toBe(true);
     });
   });
 
@@ -395,12 +430,15 @@ describe('findUniqueSubstring', () => {
 });
 
 describe('exported constants', () => {
-  it('exports SHELL_ALLOWLIST as a Set', () => {
+  it('exports SHELL_ALLOWLIST (blocklist) as a Set', () => {
     expect(SHELL_ALLOWLIST).toBeInstanceOf(Set);
-    expect(SHELL_ALLOWLIST.has('echo')).toBe(true);
-    expect(SHELL_ALLOWLIST.has('git')).toBe(true);
-    expect(SHELL_ALLOWLIST.has('python3')).toBe(true);
-    expect(SHELL_ALLOWLIST.has('bash')).toBe(false);
+    // SHELL_ALLOWLIST is now a blocklist — it contains shell interpreters to reject
+    expect(SHELL_ALLOWLIST.has('bash')).toBe(true);
+    expect(SHELL_ALLOWLIST.has('sh')).toBe(true);
+    expect(SHELL_ALLOWLIST.has('perl')).toBe(true);
+    // Regular commands are NOT in the blocklist (they're allowed)
+    expect(SHELL_ALLOWLIST.has('echo')).toBe(false);
+    expect(SHELL_ALLOWLIST.has('git')).toBe(false);
   });
 
   it('exports NETWORK_COMMANDS as a Set', () => {
@@ -417,15 +455,20 @@ describe('exported constants', () => {
     expect(CONTROL_OPERATORS_RE.test('|')).toBe(false);
   });
 
-  it('exports DANGEROUS_METACHAR_RE as RegExp', () => {
-    expect(DANGEROUS_METACHAR_RE).toBeInstanceOf(RegExp);
-    expect(DANGEROUS_METACHAR_RE.test(';')).toBe(true);
-    expect(DANGEROUS_METACHAR_RE.test('`')).toBe(true);
-    expect(DANGEROUS_METACHAR_RE.test('$(')).toBe(true);
+  it('hasDangerousUnquotedMetachars detects unquoted metacharacters', () => {
+    // Unquoted dangerous chars
+    expect(hasDangerousUnquotedMetachars(';')).toBe(true);
+    expect(hasDangerousUnquotedMetachars('`')).toBe(true);
+    expect(hasDangerousUnquotedMetachars('$(')).toBe(true);
     // $ alone is NOT dangerous (only $( is)
-    expect(DANGEROUS_METACHAR_RE.test('$')).toBe(false);
-    // Single pipe is NOT in this regex (allowed)
-    expect(DANGEROUS_METACHAR_RE.test('|')).toBe(false);
+    expect(hasDangerousUnquotedMetachars('$')).toBe(false);
+    // Single pipe is NOT dangerous
+    expect(hasDangerousUnquotedMetachars('|')).toBe(false);
+    // Quoted semicolons are safe
+    expect(hasDangerousUnquotedMetachars('"a;b"')).toBe(false);
+    expect(hasDangerousUnquotedMetachars("'a;b'")).toBe(false);
+    // Escaped characters are safe
+    expect(hasDangerousUnquotedMetachars('\\;')).toBe(false);
   });
 
   it('exports CREDENTIAL_PLACEHOLDER as RegExp', () => {

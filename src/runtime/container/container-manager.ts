@@ -12,8 +12,13 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { Logger } from '../../types/index.js';
+import { APT_PACKAGE_NAME_REGEX, APT_VERSION_REGEX } from '../skills/skill-loader.js';
 import {
   type ContainerConfig,
   type ContainerHandle,
@@ -45,6 +50,300 @@ import { applyProxyNetworkPolicy } from './network-policy.js';
 import { egressProxyManager } from './egress-proxy.js';
 
 const execFileAsync = promisify(execFile);
+
+// ─── Derived Apt Image ──────────────────────────────────────────
+
+/** Schema version for derived apt images — bump to invalidate all cached images */
+const APT_IMAGE_SCHEMA_VERSION = 1;
+
+/** Docker label prefix for derived apt images */
+const APT_IMAGE_LABEL = 'com.lifemodel.component=apt-deps';
+
+/** Stale lock threshold for apt image builds (15 minutes) */
+const APT_IMAGE_LOCK_STALE_MS = 15 * 60 * 1000;
+
+/** Build timeout (10 minutes) */
+const APT_IMAGE_BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Ensure a derived Docker image with apt packages baked in.
+ *
+ * Uses a content-addressed hash to cache images: same packages + same base image
+ * = same derived image. The image is built via `docker build` with a Dockerfile
+ * that runs `apt-get install` inside the build context — packages are installed
+ * normally by the package manager, avoiding the glibc conflicts that `dpkg -x`
+ * extraction caused (two different glibc versions in one process).
+ *
+ * Security note: this runs full `apt-get install` (with postinst scripts) inside
+ * the Docker build. We trust Debian's official repos — same trust boundary as
+ * the `node:24-slim` base image.
+ *
+ * @returns The derived image name (e.g., `lifemodel-motor-apt-<hash>:latest`)
+ */
+export async function ensureAptImage(
+  packages: { name: string; version: string }[],
+  baseImage: string,
+  cacheDir: string,
+  logger: Logger
+): Promise<string> {
+  // ── Validate packages ──────────────────────────────────────────
+  const seen = new Set<string>();
+  for (const pkg of packages) {
+    if (!APT_PACKAGE_NAME_REGEX.test(pkg.name)) {
+      throw new Error(`Invalid apt package name: ${pkg.name}`);
+    }
+    if (!APT_VERSION_REGEX.test(pkg.version)) {
+      throw new Error(`Invalid apt package version: ${pkg.version}`);
+    }
+    if (seen.has(pkg.name)) {
+      throw new Error(`Duplicate apt package: ${pkg.name}`);
+    }
+    seen.add(pkg.name);
+  }
+
+  // ── Compute deterministic hash ─────────────────────────────────
+  let baseImageId: string;
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['inspect', '--format', '{{.Id}}', baseImage],
+      { timeout: 10_000 }
+    );
+    baseImageId = stdout.trim();
+  } catch {
+    baseImageId = 'unknown';
+  }
+
+  const sorted = [...packages].sort((a, b) => a.name.localeCompare(b.name));
+  const canonical = JSON.stringify({
+    schemaVersion: APT_IMAGE_SCHEMA_VERSION,
+    packages: sorted.map((p) => ({ name: p.name, version: p.version })),
+    baseImageId,
+    platform: `${process.platform}-${process.arch}`,
+  });
+  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+  const derivedImage = `lifemodel-motor-apt-${hash}:latest`;
+
+  // ── Cache check ────────────────────────────────────────────────
+  const expectedLabels: Record<string, string> = {
+    'com.lifemodel.component': 'apt-deps',
+    'com.lifemodel.apt-hash': hash,
+    'com.lifemodel.base-image-id': baseImageId,
+    'com.lifemodel.schema-version': String(APT_IMAGE_SCHEMA_VERSION),
+  };
+
+  if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+    logger.info({ hash, derivedImage }, 'Apt image cache hit');
+    return derivedImage;
+  }
+
+  // ── Acquire lock ───────────────────────────────────────────────
+  await mkdir(cacheDir, { recursive: true });
+  const lockPath = join(cacheDir, `apt-image-${hash}.lock`);
+  const locked = await acquireAptImageLock(lockPath);
+  if (!locked) {
+    // Poll until the image appears or we timeout (builds can take 30-120s)
+    logger.info({ hash }, 'Waiting for concurrent apt image build');
+    const pollInterval = 5_000;
+    const maxWait = APT_IMAGE_BUILD_TIMEOUT_MS;
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+        logger.info({ hash, derivedImage }, 'Apt image ready (built by concurrent process)');
+        return derivedImage;
+      }
+      // If lock file is gone, the other build finished (or failed)
+      if (!existsSync(lockPath)) break;
+    }
+    // Final check
+    if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+      return derivedImage;
+    }
+    throw new Error('Concurrent apt image build did not complete');
+  }
+
+  try {
+    // Double-check after acquiring lock
+    if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+      logger.info({ hash, derivedImage }, 'Apt image cache hit (after lock)');
+      return derivedImage;
+    }
+
+    // ── Build the image ────────────────────────────────────────────
+    const pkgSpecs = sorted
+      .map((p) => (p.version === 'latest' ? p.name : `${p.name}=${p.version}`))
+      .join(' ');
+
+    const dockerfile = [
+      `FROM ${baseImage}`,
+      'ARG DEBIAN_FRONTEND=noninteractive',
+      'USER root',
+      `RUN echo 'Package: *\\nPin: release a=unstable\\nPin-Priority: 100' > /etc/apt/preferences.d/unstable \\`,
+      `    && echo 'deb http://deb.debian.org/debian unstable main' > /etc/apt/sources.list.d/unstable.list \\`,
+      `    && apt-get update \\`,
+      `    && apt-get install -y --no-install-recommends -t unstable ${pkgSpecs} \\`,
+      `    && rm -rf /var/lib/apt/lists/*`,
+      'USER node',
+    ].join('\n');
+
+    // Use empty temp dir as build context (not `.` which could send gigabytes)
+    const contextDir = join(tmpdir(), `apt-build-${hash}`);
+    await mkdir(contextDir, { recursive: true });
+
+    logger.info(
+      { hash, packageCount: packages.length, derivedImage },
+      'Building derived apt image'
+    );
+
+    try {
+      const buildArgs = [
+        'build',
+        '-t',
+        derivedImage,
+        '--label',
+        APT_IMAGE_LABEL,
+        '--label',
+        `com.lifemodel.apt-hash=${hash}`,
+        '--label',
+        `com.lifemodel.base-image-id=${baseImageId}`,
+        '--label',
+        `com.lifemodel.schema-version=${String(APT_IMAGE_SCHEMA_VERSION)}`,
+        '-f',
+        '-', // Read Dockerfile from stdin
+        contextDir,
+      ];
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('docker', buildArgs, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        let stderr = '';
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+
+        let stdout = '';
+        proc.stdout?.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+
+        const timer = setTimeout(() => {
+          proc.kill('SIGTERM');
+          reject(
+            new Error(
+              `Apt image build timed out after ${String(APT_IMAGE_BUILD_TIMEOUT_MS / 1000)}s`
+            )
+          );
+        }, APT_IMAGE_BUILD_TIMEOUT_MS);
+
+        proc.on('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0) {
+            if (stdout) logger.debug({ output: stdout.slice(0, 1000) }, 'Apt image build stdout');
+            resolve();
+          } else {
+            // Surface apt error from stderr for debugging
+            const aptError = extractAptError(stderr);
+            reject(
+              new Error(
+                `Apt image build failed (exit ${String(code)}): ${aptError || stderr.slice(-500)}`
+              )
+            );
+          }
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+
+        // Write Dockerfile to stdin
+        proc.stdin?.write(dockerfile);
+        proc.stdin?.end();
+      });
+
+      logger.info({ hash, derivedImage }, 'Derived apt image built successfully');
+      return derivedImage;
+    } finally {
+      // Clean up context dir
+      await rm(contextDir, { recursive: true, force: true }).catch(() => {
+        /* best-effort */
+      });
+    }
+  } finally {
+    await releaseAptImageLock(lockPath);
+  }
+}
+
+/**
+ * Check if a Docker image exists and its labels match expected values.
+ */
+async function imageMatchesLabels(
+  imageName: string,
+  expected: Record<string, string>
+): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['inspect', '--format', '{{json .Config.Labels}}', imageName],
+      { timeout: 10_000 }
+    );
+    const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
+    if (!labels) return false;
+    for (const [key, value] of Object.entries(expected)) {
+      if (labels[key] !== value) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract the most useful apt error message from stderr.
+ */
+function extractAptError(stderr: string): string {
+  // Look for apt-get error lines (E:) which are the most informative
+  const lines = stderr.split('\n');
+  const errorLines = lines.filter((l) => /^\s*E:\s/.test(l));
+  if (errorLines.length > 0) {
+    return errorLines.join('\n').trim();
+  }
+  return '';
+}
+
+/**
+ * Acquire a file lock for apt image builds.
+ */
+async function acquireAptImageLock(lockPath: string): Promise<boolean> {
+  try {
+    if (existsSync(lockPath)) {
+      const s = await stat(lockPath);
+      if (Date.now() - s.mtimeMs > APT_IMAGE_LOCK_STALE_MS) {
+        await rm(lockPath, { force: true });
+      } else {
+        return false;
+      }
+    }
+    await writeFile(lockPath, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Release an apt image build lock.
+ */
+async function releaseAptImageLock(lockPath: string): Promise<void> {
+  try {
+    await rm(lockPath, { force: true });
+  } catch {
+    // Best-effort
+  }
+}
 
 /**
  * Cached host-gateway IP (resolved once per process lifetime).
@@ -339,7 +638,8 @@ class DockerContainerHandle implements ContainerHandle {
 function buildCreateArgs(
   containerName: string,
   config: ContainerConfig,
-  proxyPort: number | null
+  proxyPort: number | null,
+  image?: string
 ): string[] {
   const memoryLimit = config.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
   const cpuLimit = config.cpuLimit ?? DEFAULT_CPU_LIMIT;
@@ -440,7 +740,7 @@ function buildCreateArgs(
   }
 
   // Image
-  args.push(CONTAINER_IMAGE);
+  args.push(image ?? CONTAINER_IMAGE);
 
   return args;
 }
@@ -600,6 +900,14 @@ export function createContainerManager(logger: Logger): ContainerManager {
         throw new Error('Failed to build Motor Cortex container image');
       }
 
+      // Build derived apt image if packages declared (before proxy/volume so failure is cheap)
+      let derivedImage: string | undefined;
+      if (config.aptPackages && config.aptPackages.length > 0) {
+        const aptCacheDir = join('data', 'dependency-cache');
+        derivedImage = await ensureAptImage(config.aptPackages, CONTAINER_IMAGE, aptCacheDir, log);
+        log.info({ runId, derivedImage }, 'Using derived apt image');
+      }
+
       let hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
       let proxyPort: number | null = null;
 
@@ -663,7 +971,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
 
       // Create container with proxy env vars (no more --add-host per domain)
-      const createArgs = buildCreateArgs(containerName, config, proxyPort);
+      const createArgs = buildCreateArgs(containerName, config, proxyPort, derivedImage);
       log.info(
         {
           containerName,
@@ -780,33 +1088,90 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
 
       if (hasDomains && proxyPort !== null) {
-        // Pause/unpause flow for proxy-based network policy application.
-        // iptables ensure the container can ONLY reach the proxy (not the internet directly).
+        // Stdin-gated flow for proxy-based network policy application.
+        //
+        // Previously this used detached start → pause → iptables → unpause → attach,
+        // which had a race condition: the container could exit before pause if
+        // Docker closed stdin in detached mode, causing "container is not running".
+        //
+        // New flow (matches runScript()):
+        //   1. `docker start -ai` — attach stdin+stdout immediately (no race)
+        //   2. Tool-server blocks on WAIT_FOR_READY stdin gate
+        //   3. Apply iptables while tool-server is blocked
+        //   4. Write "ready\n" → tool-server starts processing IPC frames
+        const shortId = trimmedId.slice(0, 12);
+        log.debug(
+          { containerId: shortId },
+          'Starting container with stdin gate (docker start -ai)'
+        );
+
+        const proc = spawn('docker', ['start', '-ai', trimmedId], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        // Listen for early exit (container crash before we finish setup)
+        let earlyExit = false;
+        let earlyExitCode: number | null = null;
+        let earlyExitSignal: string | null = null;
+        const earlyExitPromise = new Promise<void>((resolve) => {
+          proc.on('exit', (code, signal) => {
+            earlyExit = true;
+            earlyExitCode = code;
+            earlyExitSignal = signal;
+            log.warn(
+              { containerId: shortId, code, signal },
+              'Container exited during network policy setup'
+            );
+            resolve();
+          });
+        });
+
+        // Collect stderr for diagnostics
+        let stderrOutput = '';
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          stderrOutput += chunk.toString();
+        });
+
         try {
-          // 1. Start container (detached, not -ai)
-          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Starting container (detached)');
-          await execFileAsync('docker', ['start', trimmedId], { timeout: 10_000 });
+          // Wait briefly for the container to start (or crash)
+          await Promise.race([
+            new Promise((resolve) => setTimeout(resolve, 500)),
+            earlyExitPromise,
+          ]);
 
-          // 2. Pause container (freeze before any code runs)
-          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Pausing container');
-          await execFileAsync('docker', ['pause', trimmedId], { timeout: 10_000 });
+          if (earlyExit) {
+            throw new Error(
+              `Container exited immediately (code: ${String(earlyExitCode)}, signal: ${String(earlyExitSignal)})` +
+                (stderrOutput ? `. stderr: ${stderrOutput.slice(0, 500)}` : '')
+            );
+          }
 
-          // 3. Get host-gateway IP (ephemeral container, cached) — works on
-          //    Docker Desktop, OrbStack (macOS), and native Linux Docker.
+          // Container is running, tool-server is blocked on WAIT_FOR_READY.
+          // Apply network policy while it's gated.
+          log.debug({ containerId: shortId }, 'Container started, applying network policy');
+
           const gatewayIp = await resolveHostGatewayIp(log);
-
-          // 4. Apply proxy iptables rules via helper container
           await applyProxyNetworkPolicy(trimmedId, { gatewayIp, proxyPort }, log);
 
-          // 5. Unpause container (resume with network locked down to proxy only)
-          log.debug({ containerId: trimmedId.slice(0, 12) }, 'Unpausing container');
-          await execFileAsync('docker', ['unpause', trimmedId], { timeout: 10_000 });
+          if (earlyExit) {
+            throw new Error('Container exited during network policy application');
+          }
+
+          // Ungate: write "ready\n" so tool-server starts IPC
+          log.debug({ containerId: shortId }, 'Network policy applied, sending ready signal');
+          proc.stdin?.write('ready\n');
         } catch (error) {
-          // Cleanup: destroy the container and proxy if policy application fails.
+          // Cleanup on failure
+          const message = error instanceof Error ? error.message : String(error);
           log.error(
-            { containerId: trimmedId.slice(0, 12), error },
+            { containerId: shortId, error: message, stderr: stderrOutput.slice(0, 500) },
             'Network policy setup failed, destroying container'
           );
+          // Kill the process if still running
+          if (!earlyExit) {
+            proc.stdin?.end();
+            proc.kill('SIGKILL');
+          }
           await egressProxyManager.release(runId).catch(() => {
             /* best-effort cleanup */
           });
@@ -820,15 +1185,8 @@ export function createContainerManager(logger: Logger): ContainerManager {
           } catch {
             // Best-effort cleanup
           }
-          const message = error instanceof Error ? error.message : String(error);
           throw new Error(`Failed to set up network policy: ${message}`);
         }
-
-        // 6. Attach stdin/stdout via docker attach for IPC
-        log.debug({ containerId: trimmedId.slice(0, 12) }, 'Attaching to container');
-        const proc = spawn('docker', ['attach', trimmedId], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
 
         const maxLifetimeMs = config.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS;
         const handle = new DockerContainerHandle(trimmedId, volumeName, proc, log, maxLifetimeMs);
@@ -836,7 +1194,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
         activeContainers.set(runId, handle);
         log.info(
           {
-            containerId: trimmedId.slice(0, 12),
+            containerId: shortId,
             containerName,
             domains: config.allowedDomains,
             proxyPort,
@@ -846,7 +1204,11 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
         return handle;
       } else {
-        // No domains: use original flow (docker start -ai)
+        // No domains: use original flow (docker start -ai, no network policy needed)
+        log.debug(
+          { containerId: trimmedId.slice(0, 12) },
+          'Starting container (docker start -ai, no network)'
+        );
         const proc = spawn('docker', ['start', '-ai', trimmedId], {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -983,6 +1345,38 @@ export function createContainerManager(logger: Logger): ContainerManager {
         }
       } catch (error) {
         log.warn({ error }, 'Failed to prune detached containers');
+      }
+
+      // Prune dangling derived apt images (only those not referenced by any container).
+      // docker rmi without --force fails if the image is in use — safe to attempt.
+      // We don't prune by age here to preserve the cache. Manual cleanup: `docker rmi $(docker images --filter label=com.lifemodel.component=apt-deps -q)`.
+      try {
+        const { stdout: aptImages } = await execFileAsync(
+          'docker',
+          [
+            'images',
+            '--filter',
+            `label=${APT_IMAGE_LABEL}`,
+            '--filter',
+            'dangling=true',
+            '--format',
+            '{{.ID}}',
+          ],
+          { timeout: 10_000 }
+        );
+        if (aptImages.trim()) {
+          for (const imgId of aptImages.trim().split('\n')) {
+            try {
+              await execFileAsync('docker', ['rmi', imgId], { timeout: 10_000 });
+              pruned++;
+              log.info({ imageId: imgId }, 'Pruned dangling apt image');
+            } catch {
+              // Image is in use or already gone — skip
+            }
+          }
+        }
+      } catch (error) {
+        log.warn({ error }, 'Failed to prune apt images');
       }
 
       // Prune orphaned volumes: motor-ws-* and lifemodel-deps-*

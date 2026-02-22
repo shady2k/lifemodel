@@ -429,49 +429,7 @@ describe('verifyPipInstall', () => {
   });
 });
 
-describe('verifyAptInstall', () => {
-  let verifyAptInstall: typeof import('../../../../src/runtime/dependencies/dependency-manager.js').verifyAptInstall;
-  let tmpDir: string;
-
-  beforeEach(async () => {
-    const mod = await import('../../../../src/runtime/dependencies/dependency-manager.js');
-    verifyAptInstall = mod.verifyAptInstall;
-    const { mkdtemp } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    tmpDir = await mkdtemp(join(tmpdir(), 'verify-apt-'));
-  });
-
-  afterEach(async () => {
-    const { rm } = await import('node:fs/promises');
-    await rm(tmpDir, { recursive: true, force: true });
-  });
-
-  it('throws when sysroot directory is missing', () => {
-    expect(() => verifyAptInstall(tmpDir)).toThrow(
-      'apt install did not produce sysroot directory'
-    );
-  });
-
-  it('throws when sysroot is empty', async () => {
-    const { mkdir } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    await mkdir(join(tmpDir, 'sysroot'), { recursive: true });
-
-    expect(() => verifyAptInstall(tmpDir)).toThrow(
-      'apt install produced empty sysroot directory'
-    );
-  });
-
-  it('passes when sysroot has content', async () => {
-    const { mkdir, writeFile } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    await mkdir(join(tmpDir, 'sysroot', 'usr', 'bin'), { recursive: true });
-    await writeFile(join(tmpDir, 'sysroot', 'usr', 'bin', 'ffmpeg'), '');
-
-    expect(() => verifyAptInstall(tmpDir)).not.toThrow();
-  });
-});
+// verifyAptInstall removed — apt packages are now baked into derived Docker images
 
 // ─── Docker command construction (mocked execFile) ───────────────
 
@@ -801,11 +759,11 @@ describe('pip prep container commands', () => {
   });
 });
 
-// ─── apt prep container commands (mocked execFile) ────────────────
+// ─── apt packages passthrough (no Docker commands) ────────────────
 
-describe('apt prep container commands', () => {
-  let execCalls: Array<{ cmd: string; args: string[] }>;
+describe('apt packages passthrough', () => {
   let installSkillDependencies: typeof import('../../../../src/runtime/dependencies/dependency-manager.js').installSkillDependencies;
+  let execCalls: Array<{ cmd: string; args: string[] }>;
   let logger: any;
 
   beforeEach(async () => {
@@ -821,57 +779,7 @@ describe('apt prep container commands', () => {
     vi.restoreAllMocks();
   });
 
-  it('uses apt-get install --download-only in shell command', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    expect(runCall).toBeDefined();
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('apt-get install -y --download-only');
-  });
-
-  it('uses dpkg -x for extraction', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('dpkg -x');
-  });
-
-  it('uses --user 0:0 and APT::Sandbox::User=root', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    expect(runCall!.args).toContain('--user');
-    const userIdx = runCall!.args.indexOf('--user');
-    expect(runCall!.args[userIdx + 1]).toBe('0:0');
-
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('APT::Sandbox::User=root');
-  });
-
-  it('returns volume name matching lifemodel-deps-apt-*', async () => {
+  it('returns aptPackages instead of aptDir (no Docker commands for apt)', async () => {
     const result = await installSkillDependencies(
       { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
       '/tmp/cache',
@@ -880,107 +788,34 @@ describe('apt prep container commands', () => {
     );
 
     expect(result).toBeDefined();
-    expect(result!.aptDir).toMatch(/^lifemodel-deps-apt-[0-9a-f]{16}$/);
-  });
-
-  it('includes verification in shell command', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
+    expect(result!.aptPackages).toEqual([{ name: 'ffmpeg', version: '6.1.1-1' }]);
+    // No docker run for apt — packages are passed through to container manager
+    const dockerRun = execCalls.find(
       (c) => c.cmd === 'docker' && c.args[0] === 'run'
     );
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('test -n');
-    expect(shellCmd).toContain('/workspace/sysroot');
+    expect(dockerRun).toBeUndefined();
   });
 
-  it('removes named container in finally block', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
+  it('pip hash changes when apt packages change (ABI coupling)', async () => {
+    const { computeDepsHash } = await import('../../../../src/runtime/dependencies/dependency-manager.js');
 
-    const rmCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'rm'
-    );
-    expect(rmCall).toBeDefined();
-    expect(rmCall!.args).toContain('-f');
-  });
+    // Simulate: pip hash with apt deps vs without
+    const pipPkgs = [{ name: 'numpy', version: '1.26.0' }];
+    const imageId = 'sha256:abc123';
 
-  it('uses name=version for pinned apt packages', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
+    const hashWithoutApt = computeDepsHash('pip', pipPkgs, imageId);
 
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('ffmpeg=6.1.1-1');
-  });
+    // When apt packages are present, the imageId is augmented with apt hash
+    const aptPkgs = [{ name: 'libopenblas-dev', version: '0.3.27' }];
+    const aptHash = computeDepsHash('apt', aptPkgs, imageId);
+    const augmentedImageId = `${imageId}+apt:${aptHash}`;
+    const hashWithApt = computeDepsHash('pip', pipPkgs, augmentedImageId);
 
-  it('omits version for "latest" apt packages', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
+    expect(hashWithApt).not.toBe(hashWithoutApt);
 
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    // Should have plain "ffmpeg" not "ffmpeg=latest"
-    expect(shellCmd).not.toContain('ffmpeg=');
-    expect(shellCmd).toContain('ffmpeg');
-  });
-
-  it('adds Debian unstable repo before apt-get update', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'yt-dlp', version: 'latest' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    const shellCmd = runCall!.args[runCall!.args.length - 1];
-    expect(shellCmd).toContain('deb http://deb.debian.org/debian unstable main');
-    // unstable source must be added BEFORE apt-get update
-    const unstableIdx = shellCmd.indexOf('unstable.list');
-    const updateIdx = shellCmd.indexOf('apt-get update');
-    expect(unstableIdx).toBeLessThan(updateIdx);
-  });
-
-  it('mounts a named Docker volume for apt', async () => {
-    await installSkillDependencies(
-      { apt: { packages: [{ name: 'ffmpeg', version: 'latest' }] } },
-      '/tmp/cache',
-      'test-skill',
-      logger
-    );
-
-    const runCall = execCalls.find(
-      (c) => c.cmd === 'docker' && c.args[0] === 'run'
-    );
-    expect(runCall).toBeDefined();
-    const vIdx = runCall!.args.indexOf('-v');
-    expect(vIdx).toBeGreaterThan(-1);
-    const mountArg = runCall!.args[vIdx + 1];
-    expect(mountArg).toMatch(/^lifemodel-deps-apt-[0-9a-f]+:\/workspace$/);
+    // Same apt packages → same pip hash
+    const hashWithApt2 = computeDepsHash('pip', pipPkgs, augmentedImageId);
+    expect(hashWithApt2).toBe(hashWithApt);
   });
 });
 

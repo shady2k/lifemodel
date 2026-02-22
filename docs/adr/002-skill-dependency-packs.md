@@ -1,7 +1,7 @@
 # ADR-002: Persistent Skill Dependency Packs
 
-**Date:** 2026-02-13 (updated 2026-02-21: apt ecosystem support added)
-**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented; Phase 2 — apt system packages — implemented)
+**Date:** 2026-02-13 (updated 2026-02-22: apt migrated from dpkg -x volumes to derived Docker images)
+**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented; Phase 2 — apt system packages — implemented via derived Docker images)
 **Affects:** `src/runtime/container/`, `src/runtime/motor-cortex/`, `src/runtime/skills/`
 
 ## Problem
@@ -16,7 +16,7 @@ Opening registry access permanently is a security risk (supply chain attacks, po
 
 ## Decision
 
-Use **persistent skill dependency packs** with a two-tier cache and short-lived prep containers.
+Use **persistent skill dependency packs** with a two-tier cache and short-lived prep containers (npm/pip) or derived Docker images (apt).
 
 ### Architecture Overview
 
@@ -35,7 +35,7 @@ Use **persistent skill dependency packs** with a two-tier cache and short-lived 
     (pack exists)           │
                 │           ▼
                 │  ┌────────────────────┐
-                │  │ Prep container     │
+                │  │ Prep container     │  ← npm/pip only
                 │  │ (short-lived)      │
                 │  │ Network: registries│
                 │  │ --ignore-scripts   │
@@ -52,7 +52,8 @@ Use **persistent skill dependency packs** with a two-tier cache and short-lived 
          ┌──────────────────────────┐
          │ Runtime container        │
          │ --network none           │
-         │ Pack mounted :ro         │
+         │ Pack mounted :ro         │  ← npm/pip volumes
+         │ Derived apt image        │  ← apt packages baked in
          │ NODE_PATH / PYTHONPATH   │
          │ Agent loop runs normally │
          └──────────────────────────┘
@@ -103,14 +104,16 @@ data/dependency-cache/
   npm-<hash>.ready              # Ready markers (install completed)
   pip-<hash>.lock
   pip-<hash>.ready
-  apt-<hash>.lock
-  apt-<hash>.ready
+  apt-image-<hash>.lock         # Lock files for apt image builds
 ```
 
-Docker named volumes hold the actual package data:
+Docker named volumes hold npm/pip package data:
 - `lifemodel-deps-npm-<hash>` — node_modules (mounted at `/opt/skill-deps/npm`)
 - `lifemodel-deps-pip-<hash>` — site-packages (mounted at `/opt/skill-deps/pip`)
-- `lifemodel-deps-apt-<hash>` — sysroot with extracted .deb contents (mounted at `/opt/skill-deps/apt`)
+
+Apt packages are baked into derived Docker images:
+- `lifemodel-motor-apt-<hash>:latest` — derived from base image with `apt-get install`
+- Labels: `com.lifemodel.component=apt-deps`, `com.lifemodel.apt-hash=<hash>`, `com.lifemodel.schema-version=<N>`
 
 Host-side `data/dependency-cache/` holds only lock files and ready markers — no package data on host (avoids macOS `com.apple.provenance` xattr issues).
 
@@ -128,26 +131,34 @@ SHA256(canonical_json({
 }))
 ```
 
-Computed per-ecosystem (not per-skill). Two skills with the same npm packages share one volume. The hash is truncated to 16 hex chars for volume naming.
+Computed per-ecosystem (not per-skill). Two skills with the same npm packages share one volume. The hash is truncated to 16 hex chars for volume/image naming.
+
+**ABI coupling:** When both apt and pip dependencies are present, the pip hash includes a deterministic apt hash in its `imageId` parameter. This ensures pip caches invalidate when apt deps change (e.g., apt upgrades the Python version).
 
 ### Install Workflow
 
 1. `core.act` calls `installSkillDependencies(deps, cacheDir, skillName, logger)` before `startRun()`
 2. For each ecosystem with packages, compute content-addressed hash
-3. Cache check: host-side `.ready` marker + `docker volume inspect` — prevents empty volume false cache hits
+3. **npm/pip:** Cache check via host-side `.ready` marker + `docker volume inspect`
 4. On cache miss → spawn short-lived prep container:
    - Same base image as runtime (node:24-slim)
-   - Network: bridge (needs to reach registries / Debian repos)
+   - Network: bridge (needs to reach registries)
    - Security: `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`
    - **npm:** `npm install --ignore-scripts --no-audit --no-fund` into named volume
    - **pip:** `pip install --no-user --target /workspace/site-packages` into named volume
-   - **apt:** `apt-get install --download-only` → `dpkg -x` each .deb into `/workspace/sysroot` (runs as `--user 0:0` with `-o APT::Sandbox::User=root`)
    - Prep container is named (`prep-{ecosystem}-{random}`) and removed in finally block
 5. Mark volume ready (host-side `.ready` file)
-6. Runtime container mounts volumes read-only:
-   - npm: `lifemodel-deps-npm-<hash>` → `/opt/skill-deps/npm:ro` + `NODE_PATH=/opt/skill-deps/npm/node_modules`
-   - pip: `lifemodel-deps-pip-<hash>` → `/opt/skill-deps/pip:ro` + `PYTHONPATH=/opt/skill-deps/pip/site-packages`
-   - apt: `lifemodel-deps-apt-<hash>` → `/opt/skill-deps/apt:ro` + `PATH=/opt/skill-deps/apt/usr/bin:...` + `LD_LIBRARY_PATH=/opt/skill-deps/apt/usr/lib/...`
+6. **apt:** Packages are passed through as `aptPackages` to the container manager, which builds a derived Docker image:
+   - `ensureAptImage()` in container-manager.ts
+   - Cache check: `docker image inspect` + label verification
+   - On miss: `docker build` with Dockerfile that runs `apt-get install -y --no-install-recommends -t unstable`
+   - Pin priority 100 prevents unstable from upgrading base system packages
+   - `ARG DEBIAN_FRONTEND=noninteractive` (not `ENV`) avoids persisting into runtime
+   - Timeout: 10 minutes; lock file prevents concurrent builds
+7. Runtime container:
+   - npm: volume mounted at `/opt/skill-deps/npm:ro` + `NODE_PATH=/opt/skill-deps/npm/node_modules`
+   - pip: volume mounted at `/opt/skill-deps/pip:ro` + `PYTHONPATH=/opt/skill-deps/pip/site-packages`
+   - apt: derived image used instead of base image — packages in standard OS paths, no `LD_LIBRARY_PATH` needed
 
 ### Modules
 
@@ -155,8 +166,12 @@ Computed per-ecosystem (not per-skill). Two skills with the same npm packages sh
 src/runtime/dependencies/
   dependency-manager.ts     # Public API: installSkillDependencies() → PreparedDeps
                             # Contains: computeDepsHash(), installNpm(), installPip(),
-                            # installApt(), verifyNpmInstall(), verifyPipInstall(),
-                            # verifyAptInstall(), volume management, lock files
+                            # verifyNpmInstall(), verifyPipInstall(), volume management, lock files
+                            # apt packages returned as aptPackages (no Docker commands)
+
+src/runtime/container/
+  container-manager.ts      # ensureAptImage(): builds derived Docker images for apt packages
+                            # Uses content-addressed hashing and label-based cache checks
 ```
 
 ### Integration Points
@@ -164,11 +179,11 @@ src/runtime/dependencies/
 | File | Change |
 |------|--------|
 | `src/runtime/skills/skill-types.ts` | Add `SkillDependencies` type to `SkillPolicy` |
-| `src/runtime/skills/skill-loader.ts` | Validate dependency pins/hashes; schema v1→v2 migration |
+| `src/runtime/skills/skill-loader.ts` | Validate dependency pins/hashes; schema v1→v2 migration; export `APT_PACKAGE_NAME_REGEX`, `APT_VERSION_REGEX` |
 | `src/runtime/motor-cortex/motor-protocol.ts` | Add `dependencyPackId?`, `dependencyPackStatus?` to `MotorRun` |
-| `src/runtime/motor-cortex/motor-cortex.ts` | Call dependency manager before container creation |
-| `src/runtime/container/types.ts` | Add `extraMounts`, `env` to `ContainerConfig` |
-| `src/runtime/container/container-manager.ts` | Apply extra mounts and env in `docker create` args |
+| `src/runtime/motor-cortex/motor-cortex.ts` | Call dependency manager before container creation; pass `aptPackages` to container config |
+| `src/runtime/container/types.ts` | Add `extraMounts`, `env`, `aptPackages` to `ContainerConfig` |
+| `src/runtime/container/container-manager.ts` | Apply extra mounts and env in `docker create` args; `ensureAptImage()` for derived images |
 | `src/runtime/motor-cortex/skill-extraction.ts` | Preserve `dependencies` when updating policy.json |
 | `src/runtime/motor-cortex/motor-loop.ts` | Update system prompt: "packages are pre-installed" |
 
@@ -189,13 +204,20 @@ Rejected because:
 ### C. Bake packages into Docker image
 Build custom images per skill with dependencies pre-installed.
 
-Rejected because:
-- Requires Docker image rebuild for each skill's dependencies
-- Slow iteration (image builds take minutes)
-- Image proliferation (one per skill × version combo)
-- Users can't add packages without Docker build tooling
+Originally rejected (slow builds, image proliferation), but **reversed for apt packages only** due to a glibc showstopper:
 
-### D. System prompt warning only
+The `dpkg -x` approach (Alternative D, previously implemented) extracts ALL transitive .deb dependencies including `libc6` from Debian unstable into a sysroot. When `LD_LIBRARY_PATH` points to these extracted libraries, Node.js crashes with `symbol lookup error: __tunable_is_initialization, version GLIBC_PRIVATE` — two different glibc versions in the same process. This is a fundamental flaw in the extraction approach.
+
+**Now adopted for apt packages:** `ensureAptImage()` builds a derived Docker image with `apt-get install` which handles dependency resolution correctly. Libraries are placed in standard OS paths where the system linker finds them naturally — no `LD_LIBRARY_PATH` needed. Build time is comparable to the prep container approach, and caching uses the same content-hash strategy. Image proliferation is manageable because apt dependency sets have low cardinality (skills rarely have more than 2-3 unique apt sets).
+
+npm/pip continue to use prep containers + volumes (no glibc issues).
+
+### D. dpkg -x extraction into volume (previously implemented, replaced)
+Download .deb packages, extract via `dpkg -x` into a Docker named volume, mount at `/opt/skill-deps/apt:ro` with `LD_LIBRARY_PATH`.
+
+Replaced because of the glibc conflict described in Alternative C above. Self-contained single-binary tools (like statically-linked builds) worked, but packages with shared library dependencies (like yt-dlp pulling in Python + SSL) triggered the glibc version conflict.
+
+### E. System prompt warning only
 Tell the model "don't use npm install" in the system prompt.
 
 Accepted as **interim measure** (shipped separately). Not sufficient long-term:
@@ -213,29 +235,31 @@ Accepted as **interim measure** (shipped separately). Not sufficient long-term:
 | Docker | Multi-stage builds: install in builder stage, copy artifacts to runtime |
 | AWS Lambda Layers | Pre-packaged dependency archives mounted read-only at runtime |
 
-Our approach is closest to **Lambda Layers** — pre-built dependency packs mounted read-only into ephemeral execution environments.
+Our approach is closest to **Lambda Layers** (npm/pip volumes) combined with **Docker multi-stage builds** (apt derived images).
 
 ## Security Controls
 
 1. **Exact version pins** — no ranges, no git refs (npm/pip: digits+dots only; apt: Debian version format; `latest` allowed for all)
 2. **npm `--ignore-scripts`** — blocks `postinstall` code execution
 3. **pip `--target`** — installs to a specific directory, no system modification
-4. **apt `--download-only` + `dpkg -x`** — downloads .deb archives then extracts without running postinst scripts. Best-effort: packages needing postinst (alternatives registration etc.) may not work. Primary targets (ffmpeg, yt-dlp, pandoc, imagemagick) are self-contained binaries.
-5. **Prep container security** — `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`, `--pids-limit 64`; apt prep runs as `--user 0:0` with `-o APT::Sandbox::User=root`
-6. **Runtime mounts read-only** — agent can't modify installed packages
+4. **apt `apt-get install` in Docker build** — full package installation (including postinst scripts) runs in the Docker build context with network access. We trust Debian's official repos — same trust boundary as the `node:24-slim` base image itself. Pin priority 100 prevents unstable from upgrading base system packages (libc, openssl, etc.).
+5. **Prep container security** — `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory 512m`, `--pids-limit 64`
+6. **Runtime mounts read-only** — agent can't modify installed packages (npm/pip volumes mounted `:ro`; apt packages in read-only rootfs)
 7. **No symlink escapes** — validate workspace contents before extraction
 8. **Content-addressed cache** — deterministic hash of packages + image + platform ensures reproducibility
-9. **Ecosystem-specific name validation** — npm: `(@scope/)?[a-z0-9._-]+`; apt: `[a-z0-9][a-z0-9.+-]+` — rejects URLs, paths, git refs
-10. **Pruning** — stale volumes without ready markers are removed before re-install
+9. **Ecosystem-specific name validation** — npm: `(@scope/)?[a-z0-9._-]+`; apt: `[a-z0-9][a-z0-9.+-]+` — rejects URLs, paths, git refs. Validation regexes shared between skill-loader (policy validation) and container-manager (build-time re-validation).
+10. **Pruning** — stale volumes without ready markers are removed before re-install; only dangling (untagged) derived apt images are pruned during periodic cleanup (tagged cached images are retained for performance)
 
 ## Consequences
 
 - Skills can declare npm, pip, and apt dependencies that are automatically available at runtime
 - No changes to the ephemeral container model — runs remain reproducible
-- First run of a new dependency set incurs a prep step (5-30s); subsequent runs are instant
-- Content-addressed Docker named volumes avoid macOS xattr issues and enable cross-skill sharing
+- First run of a new dependency set incurs a prep step (5-30s for npm/pip, 30-120s for apt image build); subsequent runs are instant
+- Content-addressed Docker named volumes (npm/pip) avoid macOS xattr issues and enable cross-skill sharing
+- Content-addressed Docker images (apt) avoid glibc conflicts and enable natural library resolution
 - Base image switched from Alpine (node:24-alpine) to Debian slim (node:24-slim) for glibc compatibility and apt support
-- apt packages are "best-effort isolated binaries" — self-contained tools work well, packages needing postinst scripts may not
-- Both x86_64 and aarch64 library paths included in LD_LIBRARY_PATH (harmless if one doesn't exist)
-- PYTHONPATH is merged when both pip and apt provide Python packages (pip takes priority)
-- Prep containers need temporary network access — a new container creation path
+- apt packages are fully installed via `apt-get install` — all packages work correctly (including those needing postinst scripts)
+- No `LD_LIBRARY_PATH` needed for apt packages — libraries in standard OS paths
+- pip cache key includes apt hash when both are present (ABI coupling: apt Python version change invalidates pip cache)
+- Prep containers (npm/pip) need temporary network access — a new container creation path
+- Script containers are out of scope — they don't currently use apt deps

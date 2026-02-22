@@ -266,7 +266,7 @@ const PACKAGE_NAME_REGEX = /^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
  * Valid apt (Debian) package name pattern.
  * Must start with alphanumeric, allows dots, plus, hyphens.
  */
-const APT_PACKAGE_NAME_REGEX = /^[a-z0-9][a-z0-9.+-]+$/;
+export const APT_PACKAGE_NAME_REGEX = /^[a-z0-9][a-z0-9.+-]+$/;
 
 /**
  * Exact version pin pattern (digits and dots only, e.g. "1.0.0", "2.3").
@@ -280,7 +280,7 @@ const EXACT_VERSION_REGEX = /^(\d+(\.\d+)*|latest)$/;
  * Allows epoch prefix (2:), tildes, plus signs, and hyphens (Debian version conventions).
  * Also allows "latest" to skip version pinning.
  */
-const APT_VERSION_REGEX = /^([0-9A-Za-z.+:~-]+|latest)$/;
+export const APT_VERSION_REGEX = /^([0-9A-Za-z.+:~-]+|latest)$/;
 
 /**
  * Known dependency ecosystems.

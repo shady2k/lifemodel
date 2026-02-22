@@ -1,8 +1,9 @@
 /**
  * Shell Runner - Controlled shell command execution.
  *
- * Uses allowlist-based security and child_process.execFile to prevent
- * shell injection attacks.
+ * Uses blocklist-based security (shell interpreters blocked) and
+ * child_process.execFile to prevent shell injection attacks.
+ * Container isolation is the primary security boundary.
  */
 
 import { execFile, exec } from 'node:child_process';
@@ -11,7 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { MotorToolResult } from '../motor-cortex/motor-protocol.js';
-import { validatePipeline, isNetworkCommand, DEFAULT_ALLOWLIST } from './shell-allowlist.js';
+import { validatePipeline, isNetworkCommand, SHELL_BLOCKLIST } from './shell-allowlist.js';
 import { tokenize, hasDangerousMetachars } from './shell-tokenizer.js';
 
 const execFileAsync = promisify(execFile);
@@ -27,8 +28,8 @@ export interface ShellOptions {
   /** Working directory (default: temp workspace) */
   cwd?: string;
 
-  /** Custom allowlist (default: DEFAULT_ALLOWLIST) */
-  allowlist?: Set<string>;
+  /** Custom blocklist (default: SHELL_BLOCKLIST) */
+  blocklist?: Set<string>;
 
   /** Maximum output size in bytes (default: 10KB) */
   maxOutputSize?: number;
@@ -37,7 +38,7 @@ export interface ShellOptions {
 /**
  * Default options.
  */
-const DEFAULT_OPTIONS: Required<Omit<ShellOptions, 'cwd' | 'allowlist'>> = {
+const DEFAULT_OPTIONS: Required<Omit<ShellOptions, 'cwd' | 'blocklist'>> = {
   timeout: 60_000, // 60 seconds
   maxOutputSize: 10 * 1024, // 10KB
 };
@@ -99,8 +100,8 @@ export async function runShell(
   const startTime = Date.now();
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
-  // Validate command against allowlist
-  const validation = validatePipeline(command, opts.allowlist ?? DEFAULT_ALLOWLIST);
+  // Validate command against blocklist
+  const validation = validatePipeline(command, opts.blocklist ?? SHELL_BLOCKLIST);
   if (!validation.valid) {
     return {
       ok: false,

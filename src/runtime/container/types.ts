@@ -174,6 +174,9 @@ export interface ContainerConfig {
 
   /** Extra environment variables (e.g. NODE_PATH, PYTHONPATH for dependency mounts) */
   extraEnv?: Record<string, string>;
+
+  /** Apt packages to bake into a derived Docker image (replaces dpkg -x volumes) */
+  aptPackages?: { name: string; version: string }[];
 }
 
 /**
