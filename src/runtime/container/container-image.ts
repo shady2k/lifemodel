@@ -47,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     tar \\
     python3 \\
     python3-pip \\
+    dnsutils \\
     && rm -rf /var/lib/apt/lists/*
 
 # Create tool-server directory
@@ -59,12 +60,13 @@ COPY . /opt/motor/
 # Create workspace dir (Docker volume mounted at runtime)
 RUN mkdir -p /workspace && chown node:node /workspace
 
-# Redirect npm/pip to writable workspace (root fs is read-only)
+# Redirect npm/pip/general caches to writable workspace (root fs is read-only)
 ENV NPM_CONFIG_CACHE=/workspace/.cache/npm
 ENV PIP_USER=1
 ENV PYTHONUSERBASE=/workspace/.local
 ENV PIP_CACHE_DIR=/workspace/.cache/pip
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV XDG_CACHE_HOME=/workspace/.cache
 ENV PATH="/workspace/.local/bin:$PATH"
 
 LABEL com.lifemodel.source-hash="${sourceHash}"

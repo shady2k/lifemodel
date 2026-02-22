@@ -33,7 +33,8 @@ import { rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ContainerManager, ContainerHandle, ContainerConfig } from '../container/types.js';
-import type { PreparedDeps } from '../dependencies/dependency-manager.js';
+import type { PreparedDeps } from './motor-protocol.js';
+import { isCurrentPreparedDeps } from './motor-protocol.js';
 import type { LockService, ScriptRunRequest, ScriptRunResult } from './script-types.js';
 import { ScriptRunner } from './script-runner.js';
 import { TRUNCATION_DIR } from './tool-truncation.js';
@@ -517,6 +518,7 @@ export class MotorCortex {
       ...(params.skillReview && { skillReview: true }),
       ...(params.autoAllowSearchDomains && { autoAllowSearchDomains: true }),
       ...(params.isBuiltIn && { isBuiltIn: true }),
+      ...(params.preparedDeps && { preparedDeps: params.preparedDeps }),
     };
 
     // Create initial attempt (index 0, no recovery context)
@@ -676,9 +678,18 @@ export class MotorCortex {
         await this.stateManager.updateRun(run);
       }
 
-      // Retrieve caller-provided deps and credentials (stored in startRun)
-      const preparedDeps = this.runPreparedDeps.get(run.id);
+      // Retrieve caller-provided deps and credentials (stored in startRun).
+      // Fall back to persisted run.preparedDeps after process restart (in-memory Map is empty).
+      const preparedDeps = this.runPreparedDeps.get(run.id) ?? run.preparedDeps;
       const runCreds = this.runCredentials.get(run.id);
+
+      // Resume guard: reject legacy PreparedDeps shape from pre-unified-image runs
+      if (preparedDeps && !isCurrentPreparedDeps(preparedDeps)) {
+        throw new Error(
+          'Run has legacy PreparedDeps shape (pre-unified-image migration). ' +
+            'Cannot resume — please re-trigger the skill.'
+        );
+      }
 
       // Reuse existing container (kept alive during pause) or create a new one
       containerHandle = this.activeContainers.get(run.id);
@@ -691,43 +702,12 @@ export class MotorCortex {
         // Generate volume name for workspace isolation
         const volumeName = `motor-ws-${run.id}`;
 
-        // Build container config with optional dependency mounts
+        // Build container config — deps image (if any) is the only customization
         const containerConfig: ContainerConfig = {
           workspacePath: workspace,
           volumeName,
           ...(run.domains && run.domains.length > 0 && { allowedDomains: run.domains }),
-          ...(preparedDeps?.aptPackages && { aptPackages: preparedDeps.aptPackages }),
-          ...(preparedDeps && {
-            extraMounts: [
-              ...(preparedDeps.npmDir
-                ? [
-                    {
-                      hostPath: preparedDeps.npmDir,
-                      containerPath: '/opt/skill-deps/npm',
-                      mode: 'ro' as const,
-                    },
-                  ]
-                : []),
-              ...(preparedDeps.pipDir
-                ? [
-                    {
-                      hostPath: preparedDeps.pipDir,
-                      containerPath: '/opt/skill-deps/pip',
-                      mode: 'ro' as const,
-                    },
-                  ]
-                : []),
-            ],
-            extraEnv: {
-              ...(preparedDeps.npmDir && {
-                NODE_PATH: '/opt/skill-deps/npm/node_modules',
-              }),
-              ...(preparedDeps.pipDir &&
-                preparedDeps.pipPythonPath && {
-                  PYTHONPATH: preparedDeps.pipPythonPath,
-                }),
-            },
-          }),
+          ...(preparedDeps && { image: preparedDeps.skillImage }),
         };
 
         containerHandle = await this.containerManager.create(run.id, containerConfig);
@@ -1284,9 +1264,12 @@ export class MotorCortex {
     }
 
     // Merge validated domains with existing run domains (union, deduped)
+    // Only trigger container recreation if domains actually changed.
     if (effectiveDomains && effectiveDomains.length > 0) {
       const existingDomains = run.domains ?? [];
+      const existingSet = new Set(existingDomains);
       run.domains = Array.from(new Set([...existingDomains, ...effectiveDomains]));
+      const domainsActuallyChanged = run.domains.length > existingSet.size;
 
       // Reset iteration budget: domain approval shouldn't cost iterations.
       // The model paused at stepCursor — give it a full budget from there.
@@ -1317,8 +1300,9 @@ export class MotorCortex {
       // Destroy the existing container so runLoopInBackground creates a fresh one
       // with updated --add-host and iptables rules for the new domains.
       // The container's network policy is frozen at creation time (see network-policy.md).
+      // Only recreate if domains actually changed (not just re-extracted the same ones).
       const existingContainer = this.activeContainers.get(runId);
-      if (existingContainer && this.containerManager) {
+      if (existingContainer && this.containerManager && domainsActuallyChanged) {
         this.activeContainers.delete(runId);
         try {
           await this.containerManager.destroy(runId);

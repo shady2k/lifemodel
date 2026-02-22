@@ -12,13 +12,8 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import type { Logger } from '../../types/index.js';
-import { APT_PACKAGE_NAME_REGEX, APT_VERSION_REGEX } from '../skills/skill-loader.js';
 import {
   type ContainerConfig,
   type ContainerHandle,
@@ -51,299 +46,8 @@ import { egressProxyManager } from './egress-proxy.js';
 
 const execFileAsync = promisify(execFile);
 
-// ─── Derived Apt Image ──────────────────────────────────────────
-
-/** Schema version for derived apt images — bump to invalidate all cached images */
-const APT_IMAGE_SCHEMA_VERSION = 1;
-
-/** Docker label prefix for derived apt images */
-const APT_IMAGE_LABEL = 'com.lifemodel.component=apt-deps';
-
-/** Stale lock threshold for apt image builds (15 minutes) */
-const APT_IMAGE_LOCK_STALE_MS = 15 * 60 * 1000;
-
-/** Build timeout (10 minutes) */
-const APT_IMAGE_BUILD_TIMEOUT_MS = 10 * 60 * 1000;
-
-/**
- * Ensure a derived Docker image with apt packages baked in.
- *
- * Uses a content-addressed hash to cache images: same packages + same base image
- * = same derived image. The image is built via `docker build` with a Dockerfile
- * that runs `apt-get install` inside the build context — packages are installed
- * normally by the package manager, avoiding the glibc conflicts that `dpkg -x`
- * extraction caused (two different glibc versions in one process).
- *
- * Security note: this runs full `apt-get install` (with postinst scripts) inside
- * the Docker build. We trust Debian's official repos — same trust boundary as
- * the `node:24-slim` base image.
- *
- * @returns The derived image name (e.g., `lifemodel-motor-apt-<hash>:latest`)
- */
-export async function ensureAptImage(
-  packages: { name: string; version: string }[],
-  baseImage: string,
-  cacheDir: string,
-  logger: Logger
-): Promise<string> {
-  // ── Validate packages ──────────────────────────────────────────
-  const seen = new Set<string>();
-  for (const pkg of packages) {
-    if (!APT_PACKAGE_NAME_REGEX.test(pkg.name)) {
-      throw new Error(`Invalid apt package name: ${pkg.name}`);
-    }
-    if (!APT_VERSION_REGEX.test(pkg.version)) {
-      throw new Error(`Invalid apt package version: ${pkg.version}`);
-    }
-    if (seen.has(pkg.name)) {
-      throw new Error(`Duplicate apt package: ${pkg.name}`);
-    }
-    seen.add(pkg.name);
-  }
-
-  // ── Compute deterministic hash ─────────────────────────────────
-  let baseImageId: string;
-  try {
-    const { stdout } = await execFileAsync(
-      'docker',
-      ['inspect', '--format', '{{.Id}}', baseImage],
-      { timeout: 10_000 }
-    );
-    baseImageId = stdout.trim();
-  } catch {
-    baseImageId = 'unknown';
-  }
-
-  const sorted = [...packages].sort((a, b) => a.name.localeCompare(b.name));
-  const canonical = JSON.stringify({
-    schemaVersion: APT_IMAGE_SCHEMA_VERSION,
-    packages: sorted.map((p) => ({ name: p.name, version: p.version })),
-    baseImageId,
-    platform: `${process.platform}-${process.arch}`,
-  });
-  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 16);
-  const derivedImage = `lifemodel-motor-apt-${hash}:latest`;
-
-  // ── Cache check ────────────────────────────────────────────────
-  const expectedLabels: Record<string, string> = {
-    'com.lifemodel.component': 'apt-deps',
-    'com.lifemodel.apt-hash': hash,
-    'com.lifemodel.base-image-id': baseImageId,
-    'com.lifemodel.schema-version': String(APT_IMAGE_SCHEMA_VERSION),
-  };
-
-  if (await imageMatchesLabels(derivedImage, expectedLabels)) {
-    logger.info({ hash, derivedImage }, 'Apt image cache hit');
-    return derivedImage;
-  }
-
-  // ── Acquire lock ───────────────────────────────────────────────
-  await mkdir(cacheDir, { recursive: true });
-  const lockPath = join(cacheDir, `apt-image-${hash}.lock`);
-  const locked = await acquireAptImageLock(lockPath);
-  if (!locked) {
-    // Poll until the image appears or we timeout (builds can take 30-120s)
-    logger.info({ hash }, 'Waiting for concurrent apt image build');
-    const pollInterval = 5_000;
-    const maxWait = APT_IMAGE_BUILD_TIMEOUT_MS;
-    const start = Date.now();
-    while (Date.now() - start < maxWait) {
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
-      if (await imageMatchesLabels(derivedImage, expectedLabels)) {
-        logger.info({ hash, derivedImage }, 'Apt image ready (built by concurrent process)');
-        return derivedImage;
-      }
-      // If lock file is gone, the other build finished (or failed)
-      if (!existsSync(lockPath)) break;
-    }
-    // Final check
-    if (await imageMatchesLabels(derivedImage, expectedLabels)) {
-      return derivedImage;
-    }
-    throw new Error('Concurrent apt image build did not complete');
-  }
-
-  try {
-    // Double-check after acquiring lock
-    if (await imageMatchesLabels(derivedImage, expectedLabels)) {
-      logger.info({ hash, derivedImage }, 'Apt image cache hit (after lock)');
-      return derivedImage;
-    }
-
-    // ── Build the image ────────────────────────────────────────────
-    const pkgSpecs = sorted
-      .map((p) => (p.version === 'latest' ? p.name : `${p.name}=${p.version}`))
-      .join(' ');
-
-    const dockerfile = [
-      `FROM ${baseImage}`,
-      'ARG DEBIAN_FRONTEND=noninteractive',
-      'USER root',
-      `RUN echo 'Package: *\\nPin: release a=unstable\\nPin-Priority: 100' > /etc/apt/preferences.d/unstable \\`,
-      `    && echo 'deb http://deb.debian.org/debian unstable main' > /etc/apt/sources.list.d/unstable.list \\`,
-      `    && apt-get update \\`,
-      `    && apt-get install -y --no-install-recommends -t unstable ${pkgSpecs} \\`,
-      `    && rm -rf /var/lib/apt/lists/*`,
-      'USER node',
-    ].join('\n');
-
-    // Use empty temp dir as build context (not `.` which could send gigabytes)
-    const contextDir = join(tmpdir(), `apt-build-${hash}`);
-    await mkdir(contextDir, { recursive: true });
-
-    logger.info(
-      { hash, packageCount: packages.length, derivedImage },
-      'Building derived apt image'
-    );
-
-    try {
-      const buildArgs = [
-        'build',
-        '-t',
-        derivedImage,
-        '--label',
-        APT_IMAGE_LABEL,
-        '--label',
-        `com.lifemodel.apt-hash=${hash}`,
-        '--label',
-        `com.lifemodel.base-image-id=${baseImageId}`,
-        '--label',
-        `com.lifemodel.schema-version=${String(APT_IMAGE_SCHEMA_VERSION)}`,
-        '-f',
-        '-', // Read Dockerfile from stdin
-        contextDir,
-      ];
-
-      await new Promise<void>((resolve, reject) => {
-        const proc = spawn('docker', buildArgs, {
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-
-        let stderr = '';
-        proc.stderr?.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString();
-        });
-
-        let stdout = '';
-        proc.stdout?.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString();
-        });
-
-        const timer = setTimeout(() => {
-          proc.kill('SIGTERM');
-          reject(
-            new Error(
-              `Apt image build timed out after ${String(APT_IMAGE_BUILD_TIMEOUT_MS / 1000)}s`
-            )
-          );
-        }, APT_IMAGE_BUILD_TIMEOUT_MS);
-
-        proc.on('close', (code) => {
-          clearTimeout(timer);
-          if (code === 0) {
-            if (stdout) logger.debug({ output: stdout.slice(0, 1000) }, 'Apt image build stdout');
-            resolve();
-          } else {
-            // Surface apt error from stderr for debugging
-            const aptError = extractAptError(stderr);
-            reject(
-              new Error(
-                `Apt image build failed (exit ${String(code)}): ${aptError || stderr.slice(-500)}`
-              )
-            );
-          }
-        });
-
-        proc.on('error', (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-
-        // Write Dockerfile to stdin
-        proc.stdin?.write(dockerfile);
-        proc.stdin?.end();
-      });
-
-      logger.info({ hash, derivedImage }, 'Derived apt image built successfully');
-      return derivedImage;
-    } finally {
-      // Clean up context dir
-      await rm(contextDir, { recursive: true, force: true }).catch(() => {
-        /* best-effort */
-      });
-    }
-  } finally {
-    await releaseAptImageLock(lockPath);
-  }
-}
-
-/**
- * Check if a Docker image exists and its labels match expected values.
- */
-async function imageMatchesLabels(
-  imageName: string,
-  expected: Record<string, string>
-): Promise<boolean> {
-  try {
-    const { stdout } = await execFileAsync(
-      'docker',
-      ['inspect', '--format', '{{json .Config.Labels}}', imageName],
-      { timeout: 10_000 }
-    );
-    const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
-    if (!labels) return false;
-    for (const [key, value] of Object.entries(expected)) {
-      if (labels[key] !== value) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Extract the most useful apt error message from stderr.
- */
-function extractAptError(stderr: string): string {
-  // Look for apt-get error lines (E:) which are the most informative
-  const lines = stderr.split('\n');
-  const errorLines = lines.filter((l) => /^\s*E:\s/.test(l));
-  if (errorLines.length > 0) {
-    return errorLines.join('\n').trim();
-  }
-  return '';
-}
-
-/**
- * Acquire a file lock for apt image builds.
- */
-async function acquireAptImageLock(lockPath: string): Promise<boolean> {
-  try {
-    if (existsSync(lockPath)) {
-      const s = await stat(lockPath);
-      if (Date.now() - s.mtimeMs > APT_IMAGE_LOCK_STALE_MS) {
-        await rm(lockPath, { force: true });
-      } else {
-        return false;
-      }
-    }
-    await writeFile(lockPath, String(process.pid), { flag: 'wx' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Release an apt image build lock.
- */
-async function releaseAptImageLock(lockPath: string): Promise<void> {
-  try {
-    await rm(lockPath, { force: true });
-  } catch {
-    // Best-effort
-  }
-}
+/** Docker label for identifying skill deps images (for prune) */
+const SKILL_DEPS_IMAGE_LABEL = 'com.lifemodel.component=skill-deps';
 
 /**
  * Cached host-gateway IP (resolved once per process lifetime).
@@ -638,8 +342,7 @@ class DockerContainerHandle implements ContainerHandle {
 function buildCreateArgs(
   containerName: string,
   config: ContainerConfig,
-  proxyPort: number | null,
-  image?: string
+  proxyPort: number | null
 ): string[] {
   const memoryLimit = config.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
   const cpuLimit = config.cpuLimit ?? DEFAULT_CPU_LIMIT;
@@ -671,9 +374,9 @@ function buildCreateArgs(
     '--cpus',
     cpuLimit,
 
-    // Writable temp (no exec, no suid)
+    // Writable temp (no suid, no dev; exec allowed for tools like yt-dlp JS runtime)
     '--tmpfs',
-    '/tmp:rw,noexec,nosuid,size=64m',
+    '/tmp:rw,nosuid,nodev,size=256m',
 
     // Interactive mode for stdin/stdout IPC
     '-i',
@@ -701,6 +404,10 @@ function buildCreateArgs(
     args.push('-e', `https_proxy=${proxyUrl}`);
     args.push('-e', 'NO_PROXY=localhost,127.0.0.1');
     args.push('-e', 'no_proxy=localhost,127.0.0.1');
+
+    // Block tool-server until host sends "ready\n" after iptables are applied.
+    // Without this, tool-server starts IPC immediately and interprets "ready\n" as a frame header.
+    args.push('-e', 'WAIT_FOR_READY=1');
   } else {
     // No network access (default, most secure)
     args.push('--network', 'none');
@@ -717,30 +424,8 @@ function buildCreateArgs(
   // Run as node user (UID/GID 1000) for deterministic ownership
   args.push('--user', '1000:1000');
 
-  // Extra named volume mounts (e.g. pre-installed dependency packs)
-  // Defense-in-depth: validate hostPath is a Docker volume name (not a host path).
-  // Docker volume names: alphanumeric, hyphens, underscores, dots. No slashes, dots-only, or tildes.
-  // Any path-like value (absolute, relative, ~) would create a host bind mount.
-  if (config.extraMounts) {
-    for (const mount of config.extraMounts) {
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(mount.hostPath)) {
-        throw new Error(
-          `extraMounts.hostPath must be a Docker volume name, not a path: ${mount.hostPath}`
-        );
-      }
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}:${mount.mode}`);
-    }
-  }
-
-  // Extra environment variables (e.g. NODE_PATH, PYTHONPATH)
-  if (config.extraEnv) {
-    for (const [key, value] of Object.entries(config.extraEnv)) {
-      args.push('-e', `${key}=${value}`);
-    }
-  }
-
-  // Image
-  args.push(image ?? CONTAINER_IMAGE);
+  // Image (custom skill deps image or default motor image)
+  args.push(config.image ?? CONTAINER_IMAGE);
 
   return args;
 }
@@ -892,20 +577,13 @@ export function createContainerManager(logger: Logger): ContainerManager {
     },
 
     async create(runId: string, config: ContainerConfig): Promise<ContainerHandle> {
-      // Ensure images exist
+      // Ensure base image exists (needed even for custom skill deps images,
+      // since they are built FROM the base image)
       const built = await ensureImage((msg) => {
         log.info(msg);
       });
       if (!built) {
         throw new Error('Failed to build Motor Cortex container image');
-      }
-
-      // Build derived apt image if packages declared (before proxy/volume so failure is cheap)
-      let derivedImage: string | undefined;
-      if (config.aptPackages && config.aptPackages.length > 0) {
-        const aptCacheDir = join('data', 'dependency-cache');
-        derivedImage = await ensureAptImage(config.aptPackages, CONTAINER_IMAGE, aptCacheDir, log);
-        log.info({ runId, derivedImage }, 'Using derived apt image');
       }
 
       let hasDomains = config.allowedDomains && config.allowedDomains.length > 0;
@@ -971,7 +649,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
       }
 
       // Create container with proxy env vars (no more --add-host per domain)
-      const createArgs = buildCreateArgs(containerName, config, proxyPort, derivedImage);
+      const createArgs = buildCreateArgs(containerName, config, proxyPort);
       log.info(
         {
           containerName,
@@ -979,8 +657,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
           volumeName,
           hasDomains,
           proxyPort,
-          extraMounts: config.extraMounts,
-          extraEnv: config.extraEnv,
+          image: config.image,
         },
         'Creating container'
       );
@@ -1347,16 +1024,15 @@ export function createContainerManager(logger: Logger): ContainerManager {
         log.warn({ error }, 'Failed to prune detached containers');
       }
 
-      // Prune dangling derived apt images (only those not referenced by any container).
+      // Prune dangling skill deps images (only those not referenced by any container).
       // docker rmi without --force fails if the image is in use — safe to attempt.
-      // We don't prune by age here to preserve the cache. Manual cleanup: `docker rmi $(docker images --filter label=com.lifemodel.component=apt-deps -q)`.
       try {
-        const { stdout: aptImages } = await execFileAsync(
+        const { stdout: depsImages } = await execFileAsync(
           'docker',
           [
             'images',
             '--filter',
-            `label=${APT_IMAGE_LABEL}`,
+            `label=${SKILL_DEPS_IMAGE_LABEL}`,
             '--filter',
             'dangling=true',
             '--format',
@@ -1364,22 +1040,22 @@ export function createContainerManager(logger: Logger): ContainerManager {
           ],
           { timeout: 10_000 }
         );
-        if (aptImages.trim()) {
-          for (const imgId of aptImages.trim().split('\n')) {
+        if (depsImages.trim()) {
+          for (const imgId of depsImages.trim().split('\n')) {
             try {
               await execFileAsync('docker', ['rmi', imgId], { timeout: 10_000 });
               pruned++;
-              log.info({ imageId: imgId }, 'Pruned dangling apt image');
+              log.info({ imageId: imgId }, 'Pruned dangling skill deps image');
             } catch {
               // Image is in use or already gone — skip
             }
           }
         }
       } catch (error) {
-        log.warn({ error }, 'Failed to prune apt images');
+        log.warn({ error }, 'Failed to prune skill deps images');
       }
 
-      // Prune orphaned volumes: motor-ws-* and lifemodel-deps-*
+      // Prune orphaned workspace volumes (motor-ws-*).
       try {
         const { stdout: volumeList } = await execFileAsync(
           'docker',
@@ -1389,9 +1065,7 @@ export function createContainerManager(logger: Logger): ContainerManager {
 
         if (volumeList.trim()) {
           const volumes = volumeList.trim().split('\n');
-          const orphanCandidates = volumes.filter(
-            (v) => v.startsWith('motor-ws-') || v.startsWith('lifemodel-deps-')
-          );
+          const orphanCandidates = volumes.filter((v) => v.startsWith('motor-ws-'));
 
           for (const vol of orphanCandidates) {
             try {

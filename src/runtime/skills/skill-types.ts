@@ -201,6 +201,9 @@ export interface SkillIndexEntry {
 
   /** Whether this skill is a built-in skill (shipped with the system) */
   isBuiltIn?: boolean | undefined;
+
+  /** Input parameters the skill accepts (from frontmatter) */
+  inputs?: SkillInput[] | undefined;
 }
 
 /**

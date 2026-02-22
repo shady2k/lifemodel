@@ -1,24 +1,26 @@
 /**
- * Dependency Manager — Pre-installs skill dependencies via prep containers.
+ * Dependency Manager — Unified skill dependency image builder.
  *
- * Skills declare npm/pip packages in policy.json. This module:
- * 1. Computes a content-addressed cache key (hash of packages + image + platform)
- * 2. On cache hit: returns the Docker volume name (instant)
- * 3. On cache miss: runs a prep container that installs into a named Docker volume
- * 4. Returns volume names for the runtime container to mount
+ * Skills declare npm/pip/apt packages in policy.json. This module:
+ * 1. Computes a single content-addressed hash across all ecosystems
+ * 2. Checks Docker image labels for cache hit (zero host FS state)
+ * 3. On cache miss: generates a Dockerfile in-memory and pipes via stdin to `docker build`
+ * 4. Returns the derived image name for the runtime container
  *
- * Uses Docker named volumes (not bind mounts) to avoid macOS com.apple.provenance
- * xattr issues entirely — files never touch the host filesystem.
+ * No prep containers. No volume mounts for deps. No persistent host state
+ * (no lock files, no ready markers). Only Docker CLI calls + ephemeral temp dir for build context.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm, writeFile, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { Logger } from '../../types/index.js';
 import { CONTAINER_IMAGE } from '../container/types.js';
+import type { PreparedDeps } from '../motor-cortex/motor-protocol.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,423 +32,374 @@ export interface SkillDependencies {
   apt?: { packages: { name: string; version: string }[] } | undefined;
 }
 
-export interface PreparedDeps {
-  /** Docker volume name containing node_modules */
-  npmDir?: string;
-  /** Docker volume name containing site-packages */
-  pipDir?: string;
-  /** Container-side path for PYTHONPATH */
-  pipPythonPath?: string;
-  /** Apt packages to bake into a derived Docker image */
-  aptPackages?: { name: string; version: string }[];
-}
-
 // ─── Constants ───────────────────────────────────────────────────
 
-/** Schema version — bump when install flags change to invalidate cache */
-const CACHE_SCHEMA_VERSION = 2;
+/** Schema version — bump to invalidate all cached skill deps images */
+const SKILL_DEPS_SCHEMA_VERSION = 1;
 
-/** Volume name prefix */
-const VOLUME_PREFIX = 'lifemodel-deps';
+/** Docker label for identifying skill deps images */
+const SKILL_DEPS_LABEL = 'com.lifemodel.component=skill-deps';
 
-/** Stale lock threshold (10 minutes) */
-const STALE_LOCK_THRESHOLD_MS = 10 * 60 * 1000;
-
-/** Prep container timeout (5 minutes) */
-const PREP_CONTAINER_TIMEOUT_MS = 5 * 60 * 1000;
+/** Build timeout (10 minutes) */
+const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
 // ─── Cache Hash ──────────────────────────────────────────────────
 
 /**
  * Compute a deterministic, content-addressed hash for a set of dependencies.
  *
- * Includes: sorted package specs, ecosystem, image digest, platform, schema version.
- * Two skills with identical deps share the same cache entry.
+ * Single hash across all ecosystems: sorted packages per ecosystem, base image ID,
+ * platform, schema version. Two skills with identical deps share the same cached image.
  */
 export function computeDepsHash(
-  ecosystem: 'npm' | 'pip' | 'apt',
-  packages: { name: string; version: string }[],
-  imageId: string
+  deps: {
+    apt?: { name: string; version: string }[];
+    pip?: { name: string; version: string }[];
+    npm?: { name: string; version: string }[];
+  },
+  baseImageId: string
 ): string {
-  const sorted = [...packages].sort((a, b) => a.name.localeCompare(b.name));
+  const sortPkgs = (pkgs: { name: string; version: string }[]) =>
+    [...pkgs]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((p) => ({ name: p.name, version: p.version }));
+
   const canonical = JSON.stringify({
-    schemaVersion: CACHE_SCHEMA_VERSION,
-    ecosystem,
-    packages: sorted.map((p) => ({ name: p.name, version: p.version })),
-    imageId,
+    schemaVersion: SKILL_DEPS_SCHEMA_VERSION,
+    apt: deps.apt ? sortPkgs(deps.apt) : [],
+    pip: deps.pip ? sortPkgs(deps.pip) : [],
+    npm: deps.npm ? sortPkgs(deps.npm) : [],
+    baseImageId,
     platform: `${process.platform}-${process.arch}`,
   });
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
-// ─── Image ID ────────────────────────────────────────────────────
+// ─── Image Inspection Helpers ────────────────────────────────────
 
-async function getImageId(): Promise<string> {
+/**
+ * Get the Docker image ID (content digest) for an image.
+ * Fails hard — caller should not proceed with 'unknown' fallback.
+ */
+async function getImageId(image: string): Promise<string> {
+  const { stdout } = await execFileAsync('docker', ['inspect', '--format', '{{.Id}}', image], {
+    timeout: 10_000,
+  });
+  return stdout.trim();
+}
+
+/**
+ * Check if a Docker image exists and its labels match expected values.
+ */
+async function imageMatchesLabels(
+  imageName: string,
+  expected: Record<string, string>
+): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync(
       'docker',
-      ['inspect', '--format', '{{.Id}}', CONTAINER_IMAGE],
+      ['inspect', '--format', '{{json .Config.Labels}}', imageName],
       { timeout: 10_000 }
     );
-    return stdout.trim();
-  } catch {
-    return 'unknown';
-  }
-}
-
-// ─── Docker Volume ───────────────────────────────────────────────
-
-async function volumeExists(volumeName: string): Promise<boolean> {
-  try {
-    await execFileAsync('docker', ['volume', 'inspect', volumeName], {
-      timeout: 10_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check that a dependency volume is fully installed (not just created).
- *
- * Docker auto-creates named volumes when a container starts, even if the
- * install command fails. A host-side `.ready` marker (written only after
- * successful install) distinguishes "volume exists" from "install complete."
- */
-function isVolumeReady(lockDir: string, ecosystem: string, hash: string): boolean {
-  return existsSync(join(lockDir, `${ecosystem}-${hash}.ready`));
-}
-
-async function markVolumeReady(lockDir: string, ecosystem: string, hash: string): Promise<void> {
-  await writeFile(join(lockDir, `${ecosystem}-${hash}.ready`), '', { flag: 'w' });
-}
-
-async function clearVolumeReady(lockDir: string, ecosystem: string, hash: string): Promise<void> {
-  try {
-    await rm(join(lockDir, `${ecosystem}-${hash}.ready`), { force: true });
-  } catch {
-    // Best-effort
-  }
-}
-
-// ─── Lock File ───────────────────────────────────────────────────
-
-async function acquireLock(lockPath: string): Promise<boolean> {
-  try {
-    if (existsSync(lockPath)) {
-      const s = await stat(lockPath);
-      if (Date.now() - s.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
-        await rm(lockPath, { force: true });
-      } else {
-        return false;
-      }
+    const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
+    if (!labels) return false;
+    for (const [key, value] of Object.entries(expected)) {
+      if (labels[key] !== value) return false;
     }
-    await writeFile(lockPath, String(process.pid), { flag: 'wx' });
     return true;
   } catch {
     return false;
   }
 }
 
-async function releaseLock(lockPath: string): Promise<void> {
-  try {
-    await rm(lockPath, { force: true });
-  } catch {
-    // Best-effort
-  }
+/**
+ * Extract the most useful build error from stderr.
+ * Looks for apt-get E: lines, npm ERR!, and pip error patterns.
+ */
+function extractBuildError(stderr: string): string {
+  const lines = stderr.split('\n');
+  // apt-get errors
+  const aptErrors = lines.filter((l) => /^\s*E:\s/.test(l));
+  if (aptErrors.length > 0) return aptErrors.join('\n').trim();
+  // npm errors
+  const npmErrors = lines.filter((l) => /npm ERR!/i.test(l));
+  if (npmErrors.length > 0) return npmErrors.join('\n').trim();
+  // pip errors
+  const pipErrors = lines.filter((l) => /ERROR:/i.test(l));
+  if (pipErrors.length > 0) return pipErrors.join('\n').trim();
+  return '';
 }
 
-// ─── Container Cleanup ───────────────────────────────────────────
-
-async function removeContainer(name: string): Promise<void> {
-  try {
-    await execFileAsync('docker', ['rm', '-f', name], { timeout: 10_000 });
-  } catch {
-    // Best-effort
-  }
-}
-
-// ─── Verification (exported for unit tests) ──────────────────────
+// ─── Dockerfile Generation ───────────────────────────────────────
 
 /**
- * Verify that npm install produced the expected packages.
- * Checks: node_modules exists + each declared package has a subdirectory.
+ * Generate a Dockerfile string for the unified skill deps image.
+ *
+ * Conditional layers: only ecosystems with packages get RUN instructions.
+ * Shell heredocs (`cat <<'DELIM'`) for manifest content to avoid escaping.
+ * Package names/versions already validated by `validateDependencies()` in skill-loader.
  */
-export function verifyNpmInstall(
-  tmpDir: string,
-  packages: { name: string; version: string }[]
-): void {
-  const nodeModulesPath = join(tmpDir, 'node_modules');
-  if (!existsSync(nodeModulesPath)) {
-    throw new Error('npm install did not produce node_modules directory');
+function generateDockerfile(
+  baseImage: string,
+  deps: {
+    apt?: { name: string; version: string }[];
+    pip?: { name: string; version: string }[];
+    npm?: { name: string; version: string }[];
   }
-  const missingPkgs = packages.filter((p) => !existsSync(join(nodeModulesPath, p.name)));
-  if (missingPkgs.length > 0) {
-    const names = missingPkgs.map((p) => `${p.name}@${p.version}`).join(', ');
-    throw new Error(`npm install completed but missing packages: ${names}`);
+): string {
+  const lines: string[] = [`FROM ${baseImage}`];
+
+  const hasApt = deps.apt && deps.apt.length > 0;
+  const hasPip = deps.pip && deps.pip.length > 0;
+  const hasNpm = deps.npm && deps.npm.length > 0;
+
+  // Need root for any install step
+  if (hasApt || hasPip || hasNpm) {
+    lines.push('USER root');
   }
+
+  // ── Layer 1: apt ──
+  if (hasApt && deps.apt) {
+    const sorted = [...deps.apt].sort((a, b) => a.name.localeCompare(b.name));
+    const pkgSpecs = sorted
+      .map((p) => (p.version === 'latest' ? p.name : `${p.name}=${p.version}`))
+      .join(' ');
+
+    lines.push(
+      `RUN printf 'Package: *\\nPin: release a=unstable\\nPin-Priority: 100\\n' \\`,
+      `      > /etc/apt/preferences.d/unstable \\`,
+      `    && echo 'deb http://deb.debian.org/debian unstable main' \\`,
+      `      > /etc/apt/sources.list.d/unstable.list \\`,
+      `    && apt-get update \\`,
+      `    && apt-get install -y --no-install-recommends -t unstable ${pkgSpecs} \\`,
+      `    && rm -rf /var/lib/apt/lists/*`
+    );
+  }
+
+  // ── Layer 2: pip ──
+  if (hasPip && deps.pip) {
+    const sorted = [...deps.pip].sort((a, b) => a.name.localeCompare(b.name));
+    const reqLines = sorted
+      .map((p) => (p.version === 'latest' ? p.name : `${p.name}==${p.version}`))
+      .join('\n');
+
+    lines.push(
+      `RUN cat <<'REQUIREMENTS' > /tmp/requirements.txt`,
+      reqLines,
+      `REQUIREMENTS`,
+      `RUN python3 -m pip install --no-cache-dir --no-user --break-system-packages \\`,
+      `    --target /opt/skill-deps/pip/site-packages \\`,
+      `    -r /tmp/requirements.txt \\`,
+      `    && rm /tmp/requirements.txt`
+    );
+  }
+
+  // ── Layer 3: npm ──
+  if (hasNpm && deps.npm) {
+    const sorted = [...deps.npm].sort((a, b) => a.name.localeCompare(b.name));
+    const depsObj: Record<string, string> = {};
+    for (const p of sorted) {
+      depsObj[p.name] = p.version;
+    }
+    const packageJson = JSON.stringify({ dependencies: depsObj });
+
+    lines.push(
+      `RUN mkdir -p /opt/skill-deps/npm && cat <<'PACKAGEJSON' > /opt/skill-deps/npm/package.json`,
+      packageJson,
+      `PACKAGEJSON`,
+      `RUN cd /opt/skill-deps/npm \\`,
+      `    && npm install --ignore-scripts --no-audit --no-fund --omit=optional`
+    );
+  }
+
+  // ── Environment ──
+  if (hasNpm) {
+    lines.push('ENV NODE_PATH=/opt/skill-deps/npm/node_modules');
+  }
+  if (hasPip) {
+    lines.push('ENV PYTHONPATH=/opt/skill-deps/pip/site-packages');
+  }
+
+  // Back to non-root user
+  if (hasApt || hasPip || hasNpm) {
+    lines.push('USER node');
+  }
+
+  return lines.join('\n');
 }
+
+// ─── Build ───────────────────────────────────────────────────────
 
 /**
- * Verify that pip install produced a non-empty site-packages directory.
+ * Ensure a derived Docker image with all skill dependencies baked in.
+ *
+ * Content-addressed: hash = sorted packages + base image ID + platform.
+ * Two skills with identical deps share the same cached image.
+ * No host FS state: Docker image labels ARE the cache.
+ * Concurrent-safe without locks: identical builds produce identical images.
+ *
+ * @returns The derived image name (e.g., `lifemodel-skill-deps-<hash>:latest`)
  */
-export async function verifyPipInstall(tmpDir: string): Promise<void> {
-  const { readdir } = await import('node:fs/promises');
-  const sitePackagesPath = join(tmpDir, 'site-packages');
-  if (!existsSync(sitePackagesPath)) {
-    throw new Error('pip install did not produce site-packages directory');
-  }
-  const entries = await readdir(sitePackagesPath);
-  if (entries.length === 0) {
-    throw new Error('pip install produced empty site-packages directory');
-  }
-}
-
-// ─── Install: npm ────────────────────────────────────────────────
-
-async function installNpm(
-  packages: { name: string; version: string }[],
-  lockDir: string,
-  hash: string,
-  _imageId: string,
+async function ensureSkillDepsImage(
+  deps: {
+    apt?: { name: string; version: string }[];
+    pip?: { name: string; version: string }[];
+    npm?: { name: string; version: string }[];
+  },
+  baseImage: string,
   logger: Logger
 ): Promise<string> {
-  const volumeName = `${VOLUME_PREFIX}-npm-${hash}`;
-
-  // Cache check: volume exists AND was fully installed
-  if (isVolumeReady(lockDir, 'npm', hash) && (await volumeExists(volumeName))) {
-    logger.info({ hash, volumeName, ecosystem: 'npm' }, 'Dependency cache hit (volume exists)');
-    return volumeName;
-  }
-
-  // Stale volume without ready marker — remove and re-install
-  if (await volumeExists(volumeName)) {
-    logger.warn({ hash, volumeName }, 'Removing stale npm volume (no ready marker)');
-    try {
-      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
-    } catch {
-      // Best-effort
-    }
-  }
-
-  // Acquire lock (lock files are tiny, no bind-mount issue)
-  const lockPath = join(lockDir, `npm-${hash}.lock`);
-  const locked = await acquireLock(lockPath);
-  if (!locked) {
-    logger.info({ hash }, 'Waiting for concurrent npm install');
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    if (isVolumeReady(lockDir, 'npm', hash) && (await volumeExists(volumeName))) {
-      return volumeName;
-    }
-    throw new Error('Concurrent npm install did not complete');
-  }
-
-  const containerName = `prep-npm-${randomBytes(4).toString('hex')}`;
-
+  // ── Get base image ID (fail hard — no 'unknown' fallback) ──
+  let baseImageId: string;
   try {
-    // Build package.json content inline
-    const deps: Record<string, string> = {};
-    for (const pkg of packages) {
-      deps[pkg.name] = pkg.version;
-    }
-    const packageJson = JSON.stringify({
-      name: 'skill-deps',
-      version: '1.0.0',
-      dependencies: deps,
-    });
-    const escapedJson = packageJson.replace(/'/g, "'\\''");
-
-    // Build verification: test -d for each declared package
-    const verifyChecks = packages
-      .map((p) => `test -d /workspace/node_modules/${p.name}`)
-      .join(' && ');
-
-    // Install into a named Docker volume — no host filesystem involvement.
-    // Mount at /workspace (not a subdirectory) because Docker initializes new
-    // named volumes with the image directory's ownership. The Dockerfile has
-    // `RUN mkdir -p /workspace && chown node:node /workspace`, so the volume
-    // starts writable by the non-root 'node' user.
-    const args = [
-      'run',
-      '--name',
-      containerName,
-      '--entrypoint',
-      'sh',
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges',
-      '--memory',
-      '512m',
-      '--pids-limit',
-      '64',
-      '--network',
-      'bridge',
-      '--tmpfs',
-      '/tmp:rw,noexec,nosuid,size=64m',
-      '-v',
-      `${volumeName}:/workspace`,
-      CONTAINER_IMAGE,
-      '-c',
-      `printf '%s' '${escapedJson}' > /workspace/package.json && cd /workspace && npm install --ignore-scripts --no-audit --no-fund --omit=optional 2>&1 && ${verifyChecks}`,
-    ];
-
-    logger.info(
-      { hash, packageCount: packages.length, ecosystem: 'npm', containerName, volumeName },
-      'Installing npm dependencies via prep container'
-    );
-
-    const { stdout, stderr } = await execFileAsync('docker', args, {
-      timeout: PREP_CONTAINER_TIMEOUT_MS,
-    });
-
-    if (stdout) logger.debug({ output: stdout.slice(0, 500) }, 'npm install stdout');
-    if (stderr) logger.debug({ output: stderr.slice(0, 500) }, 'npm install stderr');
-
-    await markVolumeReady(lockDir, 'npm', hash);
-    logger.info({ hash, volumeName, ecosystem: 'npm' }, 'npm dependencies cached in volume');
-    return volumeName;
+    baseImageId = await getImageId(baseImage);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    logger.error(
-      { hash, volumeName, ecosystem: 'npm', containerName, error: msg },
-      'npm dependency install failed'
-    );
-    // Clean up the volume and ready marker on failure
-    await clearVolumeReady(lockDir, 'npm', hash);
-    try {
-      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
-    } catch {
-      // Best-effort
-    }
-    throw error;
-  } finally {
-    await removeContainer(containerName);
-    await releaseLock(lockPath);
-  }
-}
-
-// ─── Install: pip ────────────────────────────────────────────────
-
-async function installPip(
-  packages: { name: string; version: string }[],
-  lockDir: string,
-  hash: string,
-  _imageId: string,
-  logger: Logger
-): Promise<{ volumeName: string; pythonPath: string }> {
-  const volumeName = `${VOLUME_PREFIX}-pip-${hash}`;
-
-  // Cache check: volume exists AND was fully installed
-  if (isVolumeReady(lockDir, 'pip', hash) && (await volumeExists(volumeName))) {
-    logger.info({ hash, volumeName, ecosystem: 'pip' }, 'Dependency cache hit (volume exists)');
-    return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
+    throw new Error(`Cannot inspect base image "${baseImage}": ${msg}`);
   }
 
-  // Stale volume without ready marker — remove and re-install
-  if (await volumeExists(volumeName)) {
-    logger.warn({ hash, volumeName }, 'Removing stale pip volume (no ready marker)');
-    try {
-      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
-    } catch {
-      // Best-effort
-    }
+  // ── Compute unified hash ──
+  const hash = computeDepsHash(deps, baseImageId);
+  const derivedImage = `lifemodel-skill-deps-${hash}:latest`;
+
+  // ── Cache check ──
+  const expectedLabels: Record<string, string> = {
+    'com.lifemodel.component': 'skill-deps',
+    'com.lifemodel.skill-deps-hash': hash,
+    'com.lifemodel.base-image-id': baseImageId,
+    'com.lifemodel.schema-version': String(SKILL_DEPS_SCHEMA_VERSION),
+  };
+
+  if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+    logger.info({ hash, derivedImage }, 'Skill deps image cache hit');
+    return derivedImage;
   }
 
-  // Acquire lock
-  const lockPath = join(lockDir, `pip-${hash}.lock`);
-  const locked = await acquireLock(lockPath);
-  if (!locked) {
-    logger.info({ hash }, 'Waiting for concurrent pip install');
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    if (isVolumeReady(lockDir, 'pip', hash) && (await volumeExists(volumeName))) {
-      return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
-    }
-    throw new Error('Concurrent pip install did not complete');
-  }
+  // ── Build ──
+  const dockerfile = generateDockerfile(baseImage, deps);
 
-  const containerName = `prep-pip-${randomBytes(4).toString('hex')}`;
+  // Docker build with Dockerfile piped via stdin (-f -) and an empty temp dir as context.
+  // We don't COPY/ADD anything, so the context is unused — but Docker requires a valid dir.
+  const contextDir = join(tmpdir(), `skill-deps-build-${hash}`);
+  await mkdir(contextDir, { recursive: true });
+
+  const buildArgs = [
+    'build',
+    '-t',
+    derivedImage,
+    '--label',
+    SKILL_DEPS_LABEL,
+    '--label',
+    `com.lifemodel.skill-deps-hash=${hash}`,
+    '--label',
+    `com.lifemodel.base-image-id=${baseImageId}`,
+    '--label',
+    `com.lifemodel.schema-version=${String(SKILL_DEPS_SCHEMA_VERSION)}`,
+    '-f',
+    '-', // Read Dockerfile from stdin
+    contextDir, // Empty build context (no files needed, but Docker requires a dir)
+  ];
+
+  logger.info(
+    {
+      hash,
+      derivedImage,
+      aptCount: deps.apt?.length ?? 0,
+      pipCount: deps.pip?.length ?? 0,
+      npmCount: deps.npm?.length ?? 0,
+    },
+    'Building unified skill deps image'
+  );
 
   try {
-    // Install into named volume (mount at /workspace for correct ownership)
-    const args = [
-      'run',
-      '--name',
-      containerName,
-      '--entrypoint',
-      'sh',
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges',
-      '--memory',
-      '512m',
-      '--pids-limit',
-      '64',
-      '--network',
-      'bridge',
-      '--tmpfs',
-      '/tmp:rw,noexec,nosuid,size=64m',
-      '-v',
-      `${volumeName}:/workspace`,
-      CONTAINER_IMAGE,
-      '-c',
-      `printf '%s\\n' ${packages.map((p) => `'${p.version === 'latest' ? p.name : `${p.name}==${p.version}`}'`).join(' ')} > /workspace/requirements.txt && pip install --no-user --target /workspace/site-packages -r /workspace/requirements.txt 2>&1 && test -d /workspace/site-packages && test $(ls /workspace/site-packages | wc -l) -gt 0`,
-    ];
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('docker', buildArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
 
-    logger.info(
-      { hash, packageCount: packages.length, ecosystem: 'pip', containerName, volumeName },
-      'Installing pip dependencies via prep container'
-    );
+      let stderr = '';
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
 
-    const { stdout, stderr } = await execFileAsync('docker', args, {
-      timeout: PREP_CONTAINER_TIMEOUT_MS,
+      let stdout = '';
+      proc.stdout?.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+
+      const timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        reject(
+          new Error(`Skill deps image build timed out after ${String(BUILD_TIMEOUT_MS / 1000)}s`)
+        );
+      }, BUILD_TIMEOUT_MS);
+
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          if (stdout) logger.debug({ output: stdout.slice(0, 1000) }, 'Build stdout');
+          resolve();
+        } else {
+          const buildError = extractBuildError(stderr);
+          reject(
+            new Error(
+              `Skill deps image build failed (exit ${String(code)}): ${buildError || stderr.slice(-500)}`
+            )
+          );
+        }
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+
+      // Write Dockerfile to stdin
+      proc.stdin?.write(dockerfile);
+      proc.stdin?.end();
     });
 
-    if (stdout) logger.debug({ output: stdout.slice(0, 500) }, 'pip install stdout');
-    if (stderr) logger.debug({ output: stderr.slice(0, 500) }, 'pip install stderr');
+    logger.info({ hash, derivedImage }, 'Skill deps image built successfully');
 
-    await markVolumeReady(lockDir, 'pip', hash);
-    logger.info({ hash, volumeName, ecosystem: 'pip' }, 'pip dependencies cached in volume');
-    return { volumeName, pythonPath: '/opt/skill-deps/pip/site-packages' };
+    // Clean up context dir
+    await rm(contextDir, { recursive: true, force: true }).catch(() => {
+      /* best-effort */
+    });
+
+    return derivedImage;
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    logger.error(
-      { hash, volumeName, ecosystem: 'pip', containerName, error: msg },
-      'pip dependency install failed'
-    );
-    await clearVolumeReady(lockDir, 'pip', hash);
-    try {
-      await execFileAsync('docker', ['volume', 'rm', '-f', volumeName], { timeout: 10_000 });
-    } catch {
-      // Best-effort
+    // Clean up context dir on failure too
+    await rm(contextDir, { recursive: true, force: true }).catch(() => {
+      /* best-effort */
+    });
+    // On build failure, re-check image inspect once — absorbs concurrent-success race.
+    // If another process built the same image while we were building, use theirs.
+    if (await imageMatchesLabels(derivedImage, expectedLabels)) {
+      logger.info({ hash, derivedImage }, 'Skill deps image available (concurrent build)');
+      return derivedImage;
     }
     throw error;
-  } finally {
-    await removeContainer(containerName);
-    await releaseLock(lockPath);
   }
 }
 
 // ─── Public API ──────────────────────────────────────────────────
 
 /**
- * Install skill dependencies (cache-first, prep container on miss).
+ * Install skill dependencies by building a unified Docker image.
  *
- * Returns PreparedDeps with Docker volume names. The runtime container
- * mounts these volumes (Docker treats non-absolute -v sources as named volumes).
+ * All ecosystems (apt + pip + npm) are baked into a single derived image.
+ * Cache-first: if an image with matching labels exists, returns immediately.
  *
  * @param deps - Declared dependencies from policy.json
- * @param cacheBaseDir - Base directory for lock files
+ * @param _cacheBaseDir - Unused (kept for call-site compat, will remove in follow-up)
  * @param skillName - Skill name (for logging)
  * @param logger - Logger instance
- * @returns PreparedDeps with volume names, or null if no dependencies
+ * @returns PreparedDeps with derived image name, or null if no dependencies
  * @throws Error if installation fails (skill cannot run without its deps)
  */
 export async function installSkillDependencies(
   deps: SkillDependencies,
-  cacheBaseDir: string,
+  _cacheBaseDir: string,
   skillName: string,
   logger: Logger
 ): Promise<PreparedDeps | null> {
@@ -460,38 +413,15 @@ export async function installSkillDependencies(
     return null;
   }
 
-  // Lock dir for concurrency control (tiny files, no bind-mount issue)
-  await mkdir(cacheBaseDir, { recursive: true });
-  const imageId = await getImageId();
-  const result: PreparedDeps = {};
+  const skillImage = await ensureSkillDepsImage(
+    {
+      ...(hasApt && deps.apt && { apt: deps.apt.packages }),
+      ...(hasPip && deps.pip && { pip: deps.pip.packages }),
+      ...(hasNpm && deps.npm && { npm: deps.npm.packages }),
+    },
+    CONTAINER_IMAGE,
+    log
+  );
 
-  if (hasNpm && deps.npm) {
-    const hash = computeDepsHash('npm', deps.npm.packages, imageId);
-    log.info({ hash, packages: deps.npm.packages }, 'Preparing npm dependencies');
-    result.npmDir = await installNpm(deps.npm.packages, cacheBaseDir, hash, imageId, log);
-  }
-
-  if (hasPip && deps.pip) {
-    // When apt packages are present, include a deterministic apt hash in pip's imageId
-    // to invalidate pip cache when apt deps change (e.g., apt upgrades Python version).
-    let pipImageId = imageId;
-    if (hasApt && deps.apt) {
-      const aptHash = computeDepsHash('apt', deps.apt.packages, imageId);
-      pipImageId = `${imageId}+apt:${aptHash}`;
-    }
-    const hash = computeDepsHash('pip', deps.pip.packages, pipImageId);
-    log.info({ hash, packages: deps.pip.packages }, 'Preparing pip dependencies');
-    const pipResult = await installPip(deps.pip.packages, cacheBaseDir, hash, imageId, log);
-    result.pipDir = pipResult.volumeName;
-    result.pipPythonPath = pipResult.pythonPath;
-  }
-
-  if (hasApt && deps.apt) {
-    // Apt packages are passed through to the container manager, which builds
-    // a derived Docker image with them baked in (no volume or LD_LIBRARY_PATH needed).
-    log.info({ packages: deps.apt.packages }, 'Apt dependencies will be baked into derived image');
-    result.aptPackages = deps.apt.packages;
-  }
-
-  return result;
+  return { version: 2, skillImage };
 }

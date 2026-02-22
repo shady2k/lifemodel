@@ -169,14 +169,8 @@ export interface ContainerConfig {
   /** Allowed ports for network access (default: [80, 443]) */
   allowedPorts?: number[];
 
-  /** Extra bind mounts (e.g. pre-installed dependency packs) */
-  extraMounts?: { hostPath: string; containerPath: string; mode: 'ro' | 'rw' }[];
-
-  /** Extra environment variables (e.g. NODE_PATH, PYTHONPATH for dependency mounts) */
-  extraEnv?: Record<string, string>;
-
-  /** Apt packages to bake into a derived Docker image (replaces dpkg -x volumes) */
-  aptPackages?: { name: string; version: string }[];
+  /** Custom Docker image (e.g. skill deps image). Falls back to base motor image. */
+  image?: string;
 }
 
 /**

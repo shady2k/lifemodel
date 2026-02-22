@@ -79,12 +79,15 @@ export async function truncateToolOutput(
     return { content: output, truncated: false };
   }
 
-  // Save full output to workspace file
+  // Save full output to workspace file.
+  // For `read` tool: strip line number prefixes (e.g. "  42| content") so that
+  // `cp .motor-output/read-xxx.txt target.txt` produces a clean file.
   const truncDir = join(workspace, TRUNCATION_DIR);
   await mkdir(truncDir, { recursive: true });
   const filename = `${toolName}-${callId.slice(-8)}.txt`;
   const filepath = `${TRUNCATION_DIR}/${filename}`;
-  await writeFile(join(truncDir, filename), output, 'utf-8');
+  const contentToSave = toolName === 'read' ? output.replace(/^ *\d+\| /gm, '') : output;
+  await writeFile(join(truncDir, filename), contentToSave, 'utf-8');
 
   // No content preview — only metadata + pointer.
   const content = [

@@ -254,6 +254,15 @@ function buildShellEnv(): Record<string, string> {
     'NODE_PATH',
     // Python (for pre-installed dependency mounts)
     'PYTHONPATH',
+    // XDG cache (yt-dlp, etc. — redirected to writable /workspace/.cache)
+    'XDG_CACHE_HOME',
+    // Egress proxy (set by container-manager for domain-restricted runs)
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'NO_PROXY',
+    'no_proxy',
   ];
 
   for (const key of INHERITED_KEYS) {

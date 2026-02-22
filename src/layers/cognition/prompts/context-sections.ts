@@ -461,12 +461,20 @@ export function buildAvailableSkillsSection(context: LoopContext): string | null
       }
     }
 
-    return `- ${skill.name}: ${skill.description}${lastUsedStr}`;
+    let inputsStr = '';
+    if (skill.inputs && skill.inputs.length > 0) {
+      const inputParts = skill.inputs.map(
+        (i) => `${i.name} (${i.type}${i.required ? ', required' : ', optional'})`
+      );
+      inputsStr = ` Inputs: ${inputParts.join(', ')}.`;
+    }
+
+    return `- ${skill.name}: ${skill.description}${inputsStr}${lastUsedStr}`;
   });
 
   return `<available_skills>
 ${lines.join('\n')}
-Invoke via core.act with skill parameter.
+Invoke via core.act with skill parameter. Pass inputs via the inputs field.
 </available_skills>`;
 }
 

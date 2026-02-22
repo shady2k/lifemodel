@@ -65,6 +65,9 @@ export interface SkillToolDeps {
   /** Base directory for skills (e.g., data/skills) */
   skillsDir: string;
 
+  /** Optional directory for built-in skills (fallback for loadSkill) */
+  builtinSkillsDir?: string;
+
   /** Motor Cortex service (for dispatching deep review runs) */
   motorCortex?: MotorCortex;
 
@@ -84,7 +87,7 @@ export interface SkillToolDeps {
  * Create core.skill tool.
  */
 export function createSkillTool(deps: SkillToolDeps): Tool {
-  const { skillsDir, motorCortex, workspacesDir, logger: skillLogger } = deps;
+  const { skillsDir, builtinSkillsDir, motorCortex, workspacesDir, logger: skillLogger } = deps;
 
   const parameters: ToolParameter[] = [
     {
@@ -180,8 +183,8 @@ export function createSkillTool(deps: SkillToolDeps): Tool {
         return { success: false, error: 'Missing required parameter: name' };
       }
 
-      // Load the skill
-      const loaded = await loadSkill(skillName, skillsDir);
+      // Load the skill (check user dir first, then builtin dir)
+      const loaded = await loadSkill(skillName, skillsDir, builtinSkillsDir);
       if ('error' in loaded) {
         return { success: false, error: loaded.error };
       }

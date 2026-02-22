@@ -1,9 +1,8 @@
 /**
  * Motor Cortex Protocol Types
  *
- * All types shared between Motor Cortex components.
- * Pure type definitions - no runtime code, no imports from the project
- * (except Message from src/llm/provider.ts for conversation compatibility).
+ * Types shared between Motor Cortex components, plus type guards
+ * for persisted state migration (PreparedDeps versioning).
  */
 
 import type { Message } from '../../llm/provider.js';
@@ -307,6 +306,31 @@ export interface MotorAttempt {
 }
 
 /**
+ * Pre-installed dependency info persisted on MotorRun for resume/retry.
+ *
+ * Version 2: All deps (apt + pip + npm) baked into a single derived Docker image.
+ * No prep containers, no volume mounts — one `docker build` per unique deps set.
+ */
+export interface PreparedDeps {
+  /** Schema version for migration detection */
+  version: 2;
+  /** Derived Docker image name with all deps baked in */
+  skillImage: string;
+}
+
+/**
+ * Type guard for current PreparedDeps shape (vs legacy persisted runs).
+ *
+ * Legacy shape had {npmDir, pipDir, pipPythonPath, aptPackages} — runs persisted
+ * with that shape cannot be resumed after this migration.
+ */
+export function isCurrentPreparedDeps(pd: unknown): pd is PreparedDeps {
+  if (typeof pd !== 'object' || pd === null) return false;
+  const rec = pd as Record<string, unknown>;
+  return rec['version'] === 2 && typeof rec['skillImage'] === 'string';
+}
+
+/**
  * Default maximum attempts per run.
  */
 export const DEFAULT_MAX_ATTEMPTS = 3;
@@ -382,4 +406,7 @@ export interface MotorRun {
 
   /** Whether this run is for a built-in skill (skip extraction + domain persistence) */
   isBuiltIn?: boolean;
+
+  /** Pre-installed dependency info (persisted for resume/retry after restart) */
+  preparedDeps?: PreparedDeps | undefined;
 }

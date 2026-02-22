@@ -2,7 +2,14 @@
   "schemaVersion": 2,
   "status": "approved",
   "tools": ["bash", "read", "write", "list"],
-  "domains": ["youtube.com", "www.youtube.com", "youtu.be", "*.googlevideo.com"],
+  "domains": [
+    "youtube.com",
+    "www.youtube.com",
+    "youtu.be",
+    "*.googlevideo.com",
+    "github.com",
+    "*.githubusercontent.com"
+  ],
   "approvedBy": "builtin",
   "provenance": {
     "source": "builtin"
@@ -10,6 +17,9 @@
   "dependencies": {
     "apt": {
       "packages": [{ "name": "yt-dlp", "version": "latest" }]
+    },
+    "pip": {
+      "packages": [{ "name": "curl-cffi", "version": "0.14.0" }]
     }
   }
 }

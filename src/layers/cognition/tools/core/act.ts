@@ -442,9 +442,21 @@ export function createActTool(deps: ActToolDeps): Tool {
             // Validate inputs against skill schema
             const inputErrors = validateSkillInputs(loadedSkill, inputs);
             if (inputErrors.length > 0) {
+              const expectedInputs = (loadedSkill.frontmatter.inputs ?? [])
+                .map((d) => `${d.name}: ${d.type}${d.required ? ' (required)' : ''}`)
+                .join(', ');
+              const providedKeys = Object.keys(inputs).join(', ') || '(none)';
+              actLogger.warn(
+                { skill: skillName, inputErrors, providedKeys, expectedInputs },
+                'Skill input validation failed'
+              );
               return {
                 success: false,
-                error: `Skill input validation failed: ${inputErrors.join('; ')}`,
+                error:
+                  `Skill input validation failed: ${inputErrors.join('; ')}. ` +
+                  `Expected inputs: [${expectedInputs}]. ` +
+                  `You provided: [${providedKeys}]. ` +
+                  `Retry core.act with skill="${skillName}" and correct input names.`,
               };
             }
           }

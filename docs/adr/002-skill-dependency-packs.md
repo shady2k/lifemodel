@@ -1,8 +1,8 @@
 # ADR-002: Persistent Skill Dependency Packs
 
-**Date:** 2026-02-13 (updated 2026-02-22: apt migrated from dpkg -x volumes to derived Docker images)
-**Status:** Accepted (Phase 1 — prep container + content-addressed cache — implemented; Phase 2 — apt system packages — implemented via derived Docker images)
-**Affects:** `src/runtime/container/`, `src/runtime/motor-cortex/`, `src/runtime/skills/`
+**Date:** 2026-02-13 (updated 2026-02-23: unified single Dockerfile per skill deps set)
+**Status:** Superseded — unified image approach replaces prep containers + volumes
+**Affects:** `src/runtime/dependencies/`, `src/runtime/container/`, `src/runtime/motor-cortex/`
 
 ## Problem
 
@@ -263,3 +263,46 @@ Our approach is closest to **Lambda Layers** (npm/pip volumes) combined with **D
 - pip cache key includes apt hash when both are present (ABI coupling: apt Python version change invalidates pip cache)
 - Prep containers (npm/pip) need temporary network access — a new container creation path
 - Script containers are out of scope — they don't currently use apt deps
+
+## Superseded: Unified Skill Dependency Image (2026-02-23)
+
+The three-mechanism approach above (prep container→volume for npm/pip, docker build for apt) has been replaced with a **single `docker build` per skill deps set**.
+
+### Motivation
+
+The original architecture had recurring issues:
+- **ABI mismatch**: pip C extensions compiled in prep containers against different Python than the apt-derived runtime image
+- **Volume mount fragility**: Docker volume mounts appearing as FILE instead of DIR in edge cases
+- **Read-only FS + noexec tmpfs**: blocked tools that execute from /tmp
+- **Complex caching**: 3 hashes, `.ready` markers, lock files, ABI coupling hash — hard to debug
+- **Host OS dependency**: lock files, temp dirs, ready markers on host FS
+
+### New Architecture
+
+All three ecosystems are baked into a single Dockerfile with conditional layers:
+
+```dockerfile
+FROM <baseImage>
+USER root
+RUN apt-get install ...      # Layer 1: apt (conditional)
+RUN pip install --target ...  # Layer 2: pip (conditional)
+RUN npm install ...           # Layer 3: npm (conditional)
+ENV NODE_PATH=... PYTHONPATH=...
+USER node
+```
+
+Key properties:
+- **One hash**: `SHA256({schemaVersion, apt[], pip[], npm[], baseImageId, platform})` — all ecosystems in one content-addressed key
+- **No host FS state**: No lock files, no ready markers, no temp dirs. Docker image labels = cache. `docker image inspect` = cache check.
+- **Concurrent-safe without locks**: Identical builds produce identical content. Docker image tagging is atomic. Worst case = redundant build.
+- **No ABI mismatch**: pip install runs in the same image as apt, so C extensions compile against the correct Python ABI
+- **Dockerfile piped via stdin**: `docker build -f - -` — zero host filesystem operations
+
+### Migration
+
+- `PreparedDeps` type changed from `{npmDir, pipDir, pipPythonPath, aptPackages}` to `{version: 2, skillImage}`
+- `ContainerConfig` simplified: removed `extraMounts`, `extraEnv`, `aptPackages`; added `image`
+- `ensureAptImage()` removed from container-manager.ts
+- `installNpm()`, `installPip()`, volume/lock management removed from dependency-manager.ts
+- Runtime guard detects old persisted `PreparedDeps` shape and fails with clear error
+- Old artifacts to clean up: `docker volume ls --filter name=lifemodel-deps -q`, `docker image ls --filter reference='lifemodel-motor-apt-*' -q`, `rm -rf data/dependency-cache/`

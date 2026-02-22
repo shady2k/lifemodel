@@ -34,7 +34,7 @@ import { createTaskLogger, redactCredentials } from './task-logger.js';
 import { validateToolArgs } from '../../utils/tool-validation.js';
 import { truncateToolOutput } from './tool-truncation.js';
 import { join } from 'node:path';
-import type { PreparedDeps } from '../dependencies/dependency-manager.js';
+import type { PreparedDeps } from './motor-protocol.js';
 
 /**
  * Parameters for running the motor loop.
@@ -326,6 +326,7 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           maxTokens: 16384,
           role: 'motor',
           parallelToolCalls: false,
+          timeoutMs: 300_000, // 5 min — large transcripts/docs can produce 100KB+ context
         });
         break; // Success
       } catch (llmError) {

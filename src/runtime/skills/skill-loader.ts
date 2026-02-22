@@ -458,6 +458,8 @@ async function scanSkillsDir(dir: string, isBuiltIn: boolean): Promise<Discovere
           status: policy?.status ?? 'needs_reapproval',
           lastUsed: extractedFrom?.timestamp,
           ...(isBuiltIn && { isBuiltIn: true }),
+          ...(frontmatter.inputs &&
+            frontmatter.inputs.length > 0 && { inputs: frontmatter.inputs }),
         };
 
         skills.push({ name: entry.name, ...indexEntry });
@@ -661,7 +663,8 @@ export async function cleanBuiltinOverrides(
  */
 export function validateSkillInputs(skill: LoadedSkill, inputs: Record<string, unknown>): string[] {
   const errors: string[] = [];
-  const inputDefs = skill.policy?.inputs ?? [];
+  // Frontmatter is the source of truth for input definitions (not policy.json)
+  const inputDefs = skill.frontmatter.inputs ?? [];
 
   // Check required inputs
   for (const def of inputDefs) {
@@ -693,13 +696,7 @@ export function validateSkillInputs(skill: LoadedSkill, inputs: Record<string, u
     }
   }
 
-  // Warn about unknown inputs
-  const knownNames = new Set(inputDefs.map((d) => d.name));
-  for (const key of Object.keys(inputs)) {
-    if (!knownNames.has(key)) {
-      errors.push(`Unknown input: "${key}"`);
-    }
-  }
+  // Unknown inputs are allowed — they pass through to the task description
 
   return errors;
 }
