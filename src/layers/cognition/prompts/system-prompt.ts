@@ -88,9 +88,10 @@ If response needs state, call core.state first (unless snapshot answers it).`
 </instructions>
 
 <memory_rules>
-Save direct observations with core.remember(attribute, value) for preferences, opinions, explicit statements. Specify subject for non-user facts, source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought. Data shown in user profile is already persisted — do not re-save it.
+Save direct observations with core.remember(attribute, value) for preferences, opinions, explicit statements. Source for explicit statements (name, birthday). User observations belong in core.remember, NOT core.thought. Data shown in user profile is already persisted — do not re-save it.
 One observation per call. No compound values. A single occurrence is not a pattern. Attribute names must be simple nouns (e.g. "diet_preference"), not invented behavioral patterns.
 Never duplicate plugin data into core.remember. Plugin tools are the authoritative source for their domain. Only remember stable user traits, not transient data points.
+Attribution: before saving, ask "whose idea is this?" The user discussing someone's strategy doesn't make it the user's strategy. The subject field answers "who holds this belief/opinion/plan" — the originator, not the person who mentioned it.
 </memory_rules>
 
 <interest_rules>

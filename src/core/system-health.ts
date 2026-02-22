@@ -10,6 +10,10 @@
  * - elevated: Disable SMART layer (no expensive LLM)
  * - high: Disable COGNITION too (no LLM at all)
  * - critical: Only AUTONOMIC runs (vital signs only)
+ *
+ * CPU usage is smoothed with an exponential moving average (EMA) so brief
+ * spikes (e.g. ONNX embedding inference ~100ms) don't trigger stress, while
+ * sustained CPU pressure over multiple ticks still escalates correctly.
  */
 
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
@@ -134,6 +138,12 @@ export class SystemHealthMonitor {
   private lastHealthyAt: number = Date.now();
   private startedAt = 0;
 
+  /** Exponential moving average of CPU usage.
+   *  Smooths out brief spikes (embedding inference) so only sustained
+   *  CPU pressure contributes to stress. Alpha 0.3 ≈ ~3-tick half-life. */
+  private cpuEma = 0;
+  private static readonly CPU_EMA_ALPHA = 0.3;
+
   /** Warmup period after start() during which all readings return 'normal'.
    *  Prevents startup CPU burst from triggering false stress alerts. */
   private static readonly WARMUP_MS = 3000;
@@ -200,8 +210,13 @@ export class SystemHealthMonitor {
     const eventLoopLagMs = this.getEventLoopLag();
     const cpuPercent = this.getCpuPercent();
 
-    // Calculate stress level from metrics
-    const measuredLevel = this.calculateStressLevel(eventLoopLagMs, cpuPercent);
+    // Update CPU EMA — smooths brief spikes, surfaces sustained load
+    this.cpuEma =
+      SystemHealthMonitor.CPU_EMA_ALPHA * cpuPercent +
+      (1 - SystemHealthMonitor.CPU_EMA_ALPHA) * this.cpuEma;
+
+    // Calculate stress level from metrics (uses smoothed CPU)
+    const measuredLevel = this.calculateStressLevel(eventLoopLagMs, this.cpuEma);
 
     // Apply hysteresis - don't drop stress level immediately
     const newStressLevel = this.applyHysteresis(measuredLevel);
@@ -267,19 +282,19 @@ export class SystemHealthMonitor {
   /**
    * Calculate stress level from metrics.
    */
-  private calculateStressLevel(eventLoopLagMs: number, cpuPercent: number): StressLevel {
+  private calculateStressLevel(eventLoopLagMs: number, smoothedCpu: number): StressLevel {
     const { eventLoopLag, cpuUsage } = this.config;
 
-    // Use the higher stress level from either metric
-    if (eventLoopLagMs >= eventLoopLag.critical || cpuPercent >= cpuUsage.critical) {
+    // Both metrics contribute, but smoothedCpu is an EMA so brief spikes
+    // (ONNX embedding ~100ms) barely move it. Only sustained CPU load
+    // (multiple consecutive ticks) builds enough EMA to cross thresholds.
+    if (eventLoopLagMs >= eventLoopLag.critical || smoothedCpu >= cpuUsage.critical) {
       return 'critical';
     }
-
-    if (eventLoopLagMs >= eventLoopLag.high || cpuPercent >= cpuUsage.high) {
+    if (eventLoopLagMs >= eventLoopLag.high || smoothedCpu >= cpuUsage.high) {
       return 'high';
     }
-
-    if (eventLoopLagMs >= eventLoopLag.elevated || cpuPercent >= cpuUsage.elevated) {
+    if (eventLoopLagMs >= eventLoopLag.elevated || smoothedCpu >= cpuUsage.elevated) {
       return 'elevated';
     }
 
@@ -357,6 +372,7 @@ export class SystemHealthMonitor {
     this.currentStressLevel = 'normal';
     this.stressLevelChangedAt = Date.now();
     this.lastHealthyAt = Date.now();
+    this.cpuEma = 0;
 
     if (this.eventLoopMonitor) {
       this.eventLoopMonitor.reset();
