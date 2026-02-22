@@ -110,6 +110,9 @@ export class LanceVectorStore implements VectorStore {
   private db: Connection | null = null;
   private table: Table | null = null;
 
+  /** Cached result of getAll() — invalidated on any write operation. */
+  private allCache: MemoryEntry[] | null = null;
+
   constructor(logger: Logger, config: LanceVectorStoreConfig) {
     this.logger = logger.child({ component: 'lance-vector-store' });
     this.config = {
@@ -351,6 +354,7 @@ export class LanceVectorStore implements VectorStore {
           { entryId: entry.id, subject: meta['subject'], attribute: meta['attribute'] },
           'Memory fact upserted (existing updated)'
         );
+        this.allCache = null;
         await this.pruneIfNeeded();
         return;
       }
@@ -369,6 +373,7 @@ export class LanceVectorStore implements VectorStore {
 
     const vector = await this.config.embedder.embed(entry.content);
     await table.add([toRow(entry, vector)]);
+    this.allCache = null;
     this.logger.debug({ entryId: entry.id, type: entry.type }, 'Memory entry saved');
 
     await this.pruneIfNeeded();
@@ -388,6 +393,7 @@ export class LanceVectorStore implements VectorStore {
     if (existing.length === 0) return false;
 
     await table.delete(`id = '${escapeSqlString(id)}'`);
+    this.allCache = null;
     return true;
   }
 
@@ -412,12 +418,15 @@ export class LanceVectorStore implements VectorStore {
   async getAll(): Promise<MemoryEntry[]> {
     const table = await this.ensureTable();
 
+    if (this.allCache) return [...this.allCache];
+
     const rows = (await table.query().toArray()) as unknown as LanceRow[];
     const entries = rows.map(fromRow);
 
     // Sort by timestamp desc (newest first) — matches JsonVectorStore behavior
     entries.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-    return entries;
+    this.allCache = entries;
+    return [...entries];
   }
 
   // ─── Clear ──────────────────────────────────────────────────────────────────
@@ -431,6 +440,7 @@ export class LanceVectorStore implements VectorStore {
       // Table may not exist
     }
     this.table = null;
+    this.allCache = null;
     // Recreate empty table
     await this.ensureTable();
     this.logger.info('LanceVectorStore cleared');
@@ -456,6 +466,7 @@ export class LanceVectorStore implements VectorStore {
       }
     }
     await table.add(rows);
+    this.allCache = null;
     this.logger.debug({ count: rows.length }, 'Bulk imported entries');
   }
 
@@ -517,6 +528,7 @@ export class LanceVectorStore implements VectorStore {
       await table.delete(`id = '${escapeSqlString(entry.id)}'`);
     }
 
+    this.allCache = null;
     this.logger.debug(
       { removed: removed.length, protected: protectedEntries.length },
       'Pruned old memory entries'
