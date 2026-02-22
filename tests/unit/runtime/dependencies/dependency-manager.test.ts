@@ -369,14 +369,13 @@ describe('installSkillDependencies — null paths', () => {
   });
 
   it('returns null when no dependencies declared', async () => {
-    const result = await installSkillDependencies({}, '/tmp/cache', 'test', logger);
+    const result = await installSkillDependencies({}, 'test', logger);
     expect(result).toBeNull();
   });
 
   it('returns null for empty package arrays', async () => {
     const result = await installSkillDependencies(
       { npm: { packages: [] }, pip: { packages: [] }, apt: { packages: [] } },
-      '/tmp/cache',
       'test',
       logger
     );
@@ -497,7 +496,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('returns PreparedDeps v2 with skillImage', async () => {
     const result = await installSkillDependencies(
       { npm: { packages: [{ name: 'agentmail', version: '0.2.13' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -510,7 +508,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('generates Dockerfile with npm layer', async () => {
     await installSkillDependencies(
       { npm: { packages: [{ name: 'agentmail', version: '0.2.13' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -531,7 +528,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('generates Dockerfile with pip layer', async () => {
     await installSkillDependencies(
       { pip: { packages: [{ name: 'requests', version: '2.32.3' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -549,7 +545,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('generates Dockerfile with apt layer', async () => {
     await installSkillDependencies(
       { apt: { packages: [{ name: 'ffmpeg', version: '6.1.1-1' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -570,7 +565,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
         pip: { packages: [{ name: 'requests', version: '2.32.3' }] },
         npm: { packages: [{ name: 'agentmail', version: '0.2.13' }] },
       },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -589,7 +583,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('omits version pin for "latest" in pip', async () => {
     await installSkillDependencies(
       { pip: { packages: [{ name: 'agentmail', version: 'latest' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -602,7 +595,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('omits version pin for "latest" in apt', async () => {
     await installSkillDependencies(
       { apt: { packages: [{ name: 'pandoc', version: 'latest' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -616,7 +608,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('pipes Dockerfile via stdin with empty context dir', async () => {
     await installSkillDependencies(
       { npm: { packages: [{ name: 'foo', version: '1.0.0' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -636,7 +627,6 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
   it('applies correct labels', async () => {
     await installSkillDependencies(
       { npm: { packages: [{ name: 'foo', version: '1.0.0' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
@@ -658,12 +648,10 @@ describe('ensureSkillDepsImage via installSkillDependencies', () => {
     // but no persistent state like lock files or ready markers on the host.
     await installSkillDependencies(
       { npm: { packages: [{ name: 'foo', version: '1.0.0' }] } },
-      '/tmp/cache',
       'test-skill',
       logger
     );
 
-    // The cacheBaseDir param is unused (kept for call-site compat)
     // Docker build uses an ephemeral temp dir as context, cleaned up after build
   });
 });

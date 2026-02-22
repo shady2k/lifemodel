@@ -391,7 +391,6 @@ async function ensureSkillDepsImage(
  * Cache-first: if an image with matching labels exists, returns immediately.
  *
  * @param deps - Declared dependencies from policy.json
- * @param _cacheBaseDir - Unused (kept for call-site compat, will remove in follow-up)
  * @param skillName - Skill name (for logging)
  * @param logger - Logger instance
  * @returns PreparedDeps with derived image name, or null if no dependencies
@@ -399,7 +398,6 @@ async function ensureSkillDepsImage(
  */
 export async function installSkillDependencies(
   deps: SkillDependencies,
-  _cacheBaseDir: string,
   skillName: string,
   logger: Logger
 ): Promise<PreparedDeps | null> {

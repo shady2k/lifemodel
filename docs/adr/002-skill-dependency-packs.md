@@ -137,7 +137,7 @@ Computed per-ecosystem (not per-skill). Two skills with the same npm packages sh
 
 ### Install Workflow
 
-1. `core.act` calls `installSkillDependencies(deps, cacheDir, skillName, logger)` before `startRun()`
+1. `core.act` calls `installSkillDependencies(deps, skillName, logger)` before `startRun()`
 2. For each ecosystem with packages, compute content-addressed hash
 3. **npm/pip:** Cache check via host-side `.ready` marker + `docker volume inspect`
 4. On cache miss → spawn short-lived prep container:

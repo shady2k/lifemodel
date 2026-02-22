@@ -1074,16 +1074,14 @@ export class MotorCortex {
         }
       }
 
-      // Clean up truncation spillover files on terminal states only
+      // Clean up workspace directory on terminal states (artifacts already persisted)
       if (terminal && run.workspacePath) {
-        rm(join(run.workspacePath, TRUNCATION_DIR), { recursive: true, force: true }).catch(
-          (err: unknown) => {
-            this.logger.debug(
-              { runId: run.id, error: err instanceof Error ? err.message : String(err) },
-              'Failed to clean up truncation spillover'
-            );
-          }
-        );
+        rm(run.workspacePath, { recursive: true, force: true }).catch((err: unknown) => {
+          this.logger.debug(
+            { runId: run.id, error: err instanceof Error ? err.message : String(err) },
+            'Failed to clean up workspace'
+          );
+        });
       }
     }
   }

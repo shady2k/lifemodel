@@ -423,13 +423,10 @@ export function createActTool(deps: ActToolDeps): Tool {
             // Pre-install dependencies if present
             if (policy.dependencies) {
               try {
-                const { join: pathJoin, dirname: pathDirname } = await import('node:path');
-                const cacheDir = pathJoin(pathDirname(skillsDir), 'dependency-cache');
                 preparedDeps = await installSkillDependencies(
                   policy.dependencies,
-                  cacheDir,
                   skillName,
-                  actLogger as Parameters<typeof installSkillDependencies>[3]
+                  actLogger as Parameters<typeof installSkillDependencies>[2]
                 );
               } catch (err) {
                 return {
