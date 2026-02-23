@@ -360,6 +360,25 @@ describe('conversation-aware batch reflection', () => {
     expect(rules[0]!.effectiveWeight).toBeLessThan(0.55);
   });
 
+  it('salvages truncated LLM response and extracts partial results', async () => {
+    const items = [
+      createPendingItem({ tickId: 'tick_aaa' }),
+      createPendingItem({ tickId: 'tick_bbb' }),
+      createPendingItem({ tickId: 'tick_ccc' }),
+    ];
+
+    // Simulate a response truncated mid-JSON (Gemini finishReason: "length")
+    const truncatedResponse = `{"results": [{"tickId": "tick_aaa", "dissonance": 1, "reasoning": "Aligned", "aspect": "user_asks_question"},{"tickId": "tick_bbb", "dissonance": 1, "reasoning": "Responsive engagement", "aspect": "user_autonomy"},{"ti`;
+
+    const llm = { complete: vi.fn().mockResolvedValue(truncatedResponse) };
+    const deps = buildDeps(items, { llm: llm as any });
+
+    await processBatchReflection(deps);
+
+    // Should still succeed — the first 2 items should be salvaged
+    expect(deps._soulProvider.commitPendingBatch).toHaveBeenCalled();
+  });
+
   it('dynamic budget check returns batch to pending when over budget', async () => {
     const longResponse = 'x'.repeat(10_000);
     const items = [createPendingItem({ responseText: longResponse })];

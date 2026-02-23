@@ -973,7 +973,7 @@ ${responseList}
 Score each response's dissonance.`;
 
   try {
-    const response = await llm.complete({ systemPrompt, userPrompt });
+    const response = await llm.complete({ systemPrompt, userPrompt }, { maxTokens: 8192 });
     return parseBatchReflectionResponse(response, items, existingRules, logger);
   } catch (error) {
     logger.warn(
@@ -1001,7 +1001,19 @@ function parseBatchReflectionResponse(
       throw new Error('No JSON found in response');
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    } catch {
+      // Truncation recovery: try to salvage partial JSON by closing open structures
+      const salvaged = salvageTruncatedJson(jsonMatch[0]);
+      if (salvaged) {
+        logger.warn('Batch reflection response was truncated — salvaged partial results');
+        parsed = salvaged;
+      } else {
+        throw new Error('No JSON found in response');
+      }
+    }
 
     // Extract results array
     const resultsArray = Array.isArray(parsed['results']) ? parsed['results'] : [];
@@ -1061,6 +1073,59 @@ function parseBatchReflectionResponse(
       'Failed to parse batch reflection response'
     );
     return { success: false, results: new Map(), patterns: [], behaviorRules: [] };
+  }
+}
+
+/**
+ * Attempt to salvage a truncated JSON object by closing open structures.
+ *
+ * Strategy: walk backwards from the truncation point, find the last complete
+ * value boundary, trim to there, then close any open arrays/objects.
+ * Returns null if salvage fails.
+ */
+function salvageTruncatedJson(json: string): Record<string, unknown> | null {
+  // Find the last complete JSON object in the results array
+  // by trimming back to the last closing brace of an array element
+  const lastCompleteObject = json.lastIndexOf('},');
+  const lastCompleteObjectAlt = json.lastIndexOf('}\n');
+
+  const cutPoint = Math.max(lastCompleteObject, lastCompleteObjectAlt);
+  if (cutPoint === -1) return null;
+
+  // Take everything up to and including that closing brace
+  let trimmed = json.slice(0, cutPoint + 1);
+
+  // Close any open structures by tracking what's open
+  const openStack: string[] = [];
+  let inString = false;
+  let escape = false;
+  for (const ch of trimmed) {
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') openStack.push(ch);
+    else if (ch === '}' || ch === ']') openStack.pop();
+  }
+
+  // Close in reverse order
+  for (let i = openStack.length - 1; i >= 0; i--) {
+    trimmed += openStack[i] === '{' ? '}' : ']';
+  }
+
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
   }
 }
 
