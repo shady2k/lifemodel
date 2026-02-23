@@ -1371,6 +1371,8 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           runId: run.id,
           status: 'failed',
           attemptIndex: attempt.index,
+          maxAttempts: run.maxAttempts,
+          attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
           failure,
           error: {
             message: `Max iterations (${String(attempt.maxIterations)}) reached without completion`,

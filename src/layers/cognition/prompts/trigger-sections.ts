@@ -510,10 +510,45 @@ SECURITY REVIEW REQUIRED — Motor Cortex is untrusted.
           ? `\nThis was a skill review run for "${data.skill}". To retry, call: core.skill(action:"review", name:"${data.skill}").`
           : '';
 
+      // Determine terminal vs retryable using explicit retry budget metadata
+      const attemptsRemaining =
+        typeof data.attemptsRemaining === 'number' ? data.attemptsRemaining : undefined;
+      const maxAttempts = typeof data.maxAttempts === 'number' ? data.maxAttempts : undefined;
+      const terminalByBudget = attemptsRemaining === 0;
+      const isTerminal = !failure.retryable || terminalByBudget;
+
+      // Include attempt budget in context when available
+      const budgetLabel =
+        attemptIndex !== undefined && maxAttempts !== undefined && attemptsRemaining !== undefined
+          ? `\nAttempt budget: ${String(attemptIndex + 1)}/${String(maxAttempts)} (remaining retries: ${String(attemptsRemaining)})`
+          : '';
+
+      if (isTerminal) {
+        // Terminal failure — mandatory reporting, no retry option
+        return `<trigger type="motor_result_failed">
+<context>
+Task run ${runId}${attemptLabel}${skillLabel} FAILED (terminal — no more retries).
+Category: ${failure.category} | Retryable: ${String(failure.retryable)}${budgetLabel}
+${failure.lastErrorCode ? `Last error: ${failure.lastErrorCode}\n` : ''}Last tool results:
+${toolResultsStr || '  (none)'}${failure.hint ? `\nAnalysis: ${failure.hint}` : ''}
+</context>
+<task>
+A background task FAILED and cannot be retried. You MUST report this to the user:
+1. Tell the user the task failed. Be explicit — do NOT present partial results as if the task succeeded.
+2. Include what the task was trying to do${data.skill ? ` (skill: "${data.skill}")` : ''}.
+3. Explain why it failed (category: ${failure.category}).
+4. Include the run ID (${runId}).
+5. If you need more detail first, call core.task(action:"log", runId:"${runId}").
+Do NOT create a new core.act run for the same task.${skillRetryHint}
+</task>
+</trigger>`;
+      }
+
+      // Retryable failure — offer retry/log/report protocol
       return `<trigger type="motor_result_failed">
 <context>
 Task run ${runId}${attemptLabel}${skillLabel} failed.
-Category: ${failure.category} | Retryable: ${String(failure.retryable)}
+Category: ${failure.category} | Retryable: ${String(failure.retryable)}${budgetLabel}
 ${failure.lastErrorCode ? `Last error: ${failure.lastErrorCode}\n` : ''}Last tool results:
 ${toolResultsStr || '  (none)'}${failure.hint ? `\nAnalysis: ${failure.hint}` : ''}
 </context>
@@ -522,7 +557,7 @@ A background task failed. Follow this protocol:
 1. Review the failure summary above.
 2. If retryable and you can provide useful guidance, call core.task(action:"retry", runId:"${runId}", guidance:"your corrective instructions").
 3. If you need more detail, call core.task(action:"log", runId:"${runId}") first.
-4. If not retryable or after 2 failed attempts, report the failure to the user clearly. Include the run ID (${runId}).
+4. If retries are exhausted, report the failure to the user clearly. Include the run ID (${runId}).
 Do NOT create a new core.act run for the same task — use retry instead.
 Exception: skill review runs (read-only security analysis) can be re-dispatched via core.skill(action:"review") since they have maxAttempts=1.${skillRetryHint}
 </task>

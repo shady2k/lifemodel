@@ -494,7 +494,13 @@ export interface MotorResultData {
   status: 'completed' | 'failed' | 'awaiting_input' | 'awaiting_approval';
 
   /** Which attempt this result is about (0-based) */
-  attemptIndex?: number;
+  attemptIndex?: number | undefined;
+
+  /** Maximum attempts configured for the run */
+  maxAttempts?: number | undefined;
+
+  /** Remaining retries after this attempt (0 = terminal by budget) */
+  attemptsRemaining?: number | undefined;
 
   /** Structured failure summary (present when status=failed) */
   failure?: FailureSummary;

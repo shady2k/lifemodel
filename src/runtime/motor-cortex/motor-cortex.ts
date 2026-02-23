@@ -20,6 +20,7 @@ import type {
   RunStatus,
   MotorAttempt,
   SyntheticTool,
+  FailureSummary,
 } from './motor-protocol.js';
 import { DEFAULT_MAX_ATTEMPTS } from './motor-protocol.js';
 import type { MotorFetchFn, MotorSearchFn } from './motor-tools.js';
@@ -671,8 +672,56 @@ export class MotorCortex {
       if (run.workspacePath && existsSync(run.workspacePath)) {
         workspace = run.workspacePath;
         this.logger.info({ runId: run.id, workspace }, 'Reusing existing workspace (resume)');
+      } else if (attempt.recoveryContext) {
+        // Retry attempt but workspace is missing — fail fast.
+        // An empty workspace would lose skill files and context, producing garbage results.
+        const hintMsg =
+          'Retry workspace missing (previous workspace was cleaned up or lost). ' +
+          'Cannot safely retry without original workspace context.';
+        this.logger.error(
+          { runId: run.id, attemptIndex: attempt.index, workspacePath: run.workspacePath },
+          hintMsg
+        );
+
+        const failure: FailureSummary = {
+          category: 'infra_failure',
+          retryable: false,
+          suggestedAction: 'stop',
+          lastToolResults: [],
+          hint: hintMsg,
+        };
+
+        attempt.status = 'failed';
+        attempt.completedAt = new Date().toISOString();
+        attempt.failure = failure;
+        run.status = 'failed';
+        run.completedAt = new Date().toISOString();
+        await this.stateManager.updateRun(run);
+
+        this.pushSignal(
+          createSignal(
+            'motor_result',
+            'motor.cortex',
+            { value: 1, confidence: 1 },
+            {
+              data: {
+                kind: 'motor_result',
+                runId: run.id,
+                status: 'failed',
+                attemptIndex: attempt.index,
+                failure,
+                maxAttempts: run.maxAttempts,
+                attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
+                error: { message: hintMsg, lastStep: 'workspace_setup' },
+                ...(run.skill && { skill: run.skill }),
+                ...(run.skillReview && { skillReview: true }),
+              },
+            }
+          )
+        );
+        return;
       } else {
-        // No pre-prepared workspace — create an empty one
+        // No pre-prepared workspace — create an empty one (first attempt only)
         workspace = await createWorkspace();
         run.workspacePath = workspace;
         await this.stateManager.updateRun(run);
@@ -963,6 +1012,8 @@ export class MotorCortex {
                 runId: run.id,
                 status: 'failed',
                 attemptIndex: attempt.index,
+                maxAttempts: run.maxAttempts,
+                attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
                 ...(attempt.failure && { failure: attempt.failure }),
                 error: {
                   message: attempt.failure?.hint ?? 'Model execution failed',
@@ -1025,6 +1076,8 @@ export class MotorCortex {
               runId: run.id,
               status: 'failed',
               attemptIndex: attempt.index,
+              maxAttempts: run.maxAttempts,
+              attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
               failure: attempt.failure,
               error: { message },
               ...(run.skill && { skill: run.skill }),
@@ -1036,10 +1089,14 @@ export class MotorCortex {
     } finally {
       this.runAbortControllers.delete(run.id);
 
-      // Clean up per-run state on terminal status
+      // Clean up per-run state on terminal status.
+      // Failed runs that can still be retried by Cognition must preserve their
+      // workspace, credentials, and prepared deps until retries are exhausted.
       const terminal =
         run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
-      if (terminal) {
+      const canStillRetry = run.status === 'failed' && run.attempts.length < run.maxAttempts;
+      const terminalFinal = terminal && !canStillRetry;
+      if (terminalFinal) {
         this.runPreparedDeps.delete(run.id);
         this.runCredentials.delete(run.id);
       }
@@ -1047,6 +1104,8 @@ export class MotorCortex {
       // Keep container alive when paused (awaiting_input / awaiting_approval) —
       // respondToRun / respondToApproval will call runLoopInBackground again,
       // which reuses the container. Only destroy on terminal states.
+      // Note: containers ARE destroyed for retryable failures — they are re-created on retry.
+      // Only workspace/credentials/deps need to persist across retries.
       const paused = run.status === 'awaiting_input' || run.status === 'awaiting_approval';
       if (containerHandle && this.containerManager && !paused) {
         this.activeContainers.delete(run.id);
@@ -1059,7 +1118,7 @@ export class MotorCortex {
       }
 
       // Periodic Docker prune (every 30 min) — catches orphaned containers from crashes
-      if (terminal && this.containerManager) {
+      if (terminalFinal && this.containerManager) {
         const PRUNE_INTERVAL_MS = 30 * 60 * 1000;
         if (Date.now() - this.lastPruneAt > PRUNE_INTERVAL_MS) {
           this.lastPruneAt = Date.now();
@@ -1074,8 +1133,8 @@ export class MotorCortex {
         }
       }
 
-      // Clean up workspace directory on terminal states (artifacts already persisted)
-      if (terminal && run.workspacePath) {
+      // Clean up workspace directory only when run is truly done (no more retries possible)
+      if (terminalFinal && run.workspacePath) {
         rm(run.workspacePath, { recursive: true, force: true }).catch((err: unknown) => {
           this.logger.debug(
             { runId: run.id, error: err instanceof Error ? err.message : String(err) },
@@ -1461,6 +1520,8 @@ export class MotorCortex {
               runId,
               status: 'failed',
               attemptIndex: attempt.index,
+              maxAttempts: run.maxAttempts,
+              attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
               error: { message: 'Approval denied by user' },
               ...(run.skill && { skill: run.skill }),
               ...(run.skillReview && { skillReview: true }),
@@ -1531,6 +1592,8 @@ export class MotorCortex {
                     runId: run.id,
                     status: 'failed',
                     attemptIndex: attempt.index,
+                    maxAttempts: run.maxAttempts,
+                    attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
                     error: { message: 'Run stale on restart (no progress before crash)' },
                   },
                 }
@@ -1599,6 +1662,8 @@ export class MotorCortex {
                       runId: run.id,
                       status: 'failed',
                       attemptIndex: attempt.index,
+                      maxAttempts: run.maxAttempts,
+                      attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
                       error: { message: 'Approval timed out (15 min)' },
                     },
                   }

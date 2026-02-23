@@ -581,8 +581,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         }
       }
 
-      // Web page fetch: HTML→markdown conversion, redirect following, robots.txt
-      const response = await fetchPage({ url, timeoutMs: opts?.timeoutMs }, logger);
+      // Web page fetch: HTML→markdown conversion, redirect following
+      // Motor runs are one-off research tasks in sandboxed containers with domain-level
+      // egress control — bypass robots.txt (meant for persistent crawlers, not agents).
+      const response = await fetchPage(
+        { url, timeoutMs: opts?.timeoutMs, respectRobots: false },
+        logger
+      );
       if (response.ok) {
         return {
           ok: true,
