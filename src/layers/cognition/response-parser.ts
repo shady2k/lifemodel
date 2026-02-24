@@ -206,6 +206,26 @@ export function parseResponseContent(
     }
   }
 
+  // Step 3a-repair: Try to salvage truncated JSON where the model dropped leading chars.
+  // e.g. model returns `response": "text"}` instead of `{"response": "text"}`.
+  // This happens when the smart model "continues" a truncated fast-model response.
+  if (!looksLikeJson && jsonStr.endsWith('}') && /response"\s*:/.test(jsonStr)) {
+    for (const prefix of ['{"', '{']) {
+      const repaired = prefix + jsonStr;
+      const salvaged = tryParseResponse(repaired);
+      if (salvaged) {
+        const responseText = salvaged.response.trim();
+        const cleanedText = stripLeadingTimestamp(responseText).trim();
+        const finalText = cleanedText || null;
+        return {
+          text: finalText,
+          ...(salvaged.status ? { status: salvaged.status } : {}),
+          ...(salvaged.urgent ? { urgent: salvaged.urgent } : {}),
+        };
+      }
+    }
+  }
+
   // Step 3b: Not JSON — plain text fallback
   // Only allowed for user_message triggers; proactive triggers require JSON
   // to prevent prompt leakage (model echoing instructions as plain text).
@@ -224,6 +244,37 @@ export function parseResponseContent(
   }
 
   return { text: stripLeadingTimestamp(trimmed) };
+}
+
+/** Try to parse a string as our expected JSON schema. Returns null if it fails. */
+function tryParseResponse(
+  s: string
+): { response: string; status?: ConversationStatus; urgent?: boolean } | null {
+  const validStatuses = ['active', 'awaiting_answer', 'closed', 'idle'];
+  // Try raw, then with control-char escaping
+  for (const candidate of [s, escapeJsonControlChars(s)]) {
+    try {
+      const parsed = JSON.parse(candidate) as {
+        response?: unknown;
+        status?: string;
+        urgent?: boolean;
+      };
+      if (typeof parsed.response === 'string') {
+        const status =
+          parsed.status && validStatuses.includes(parsed.status)
+            ? (parsed.status as ConversationStatus)
+            : undefined;
+        return {
+          response: parsed.response,
+          ...(status ? { status } : {}),
+          ...(parsed.urgent === true ? { urgent: true } : {}),
+        };
+      }
+    } catch {
+      // continue to next candidate
+    }
+  }
+  return null;
 }
 
 const CONTROL_CHAR_MAP: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };

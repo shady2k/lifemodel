@@ -25,6 +25,7 @@ import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, jsonSchema } from 'ai';
 import type { LanguageModel } from 'ai';
+import { resolve4 } from 'node:dns/promises';
 
 /**
  * JSON object type for tool arguments.
@@ -977,6 +978,22 @@ export class VercelAIProvider extends BaseLLMProvider {
     } catch (error) {
       const duration = Date.now() - startTime;
 
+      // Extract response body from AI SDK APICallError for debugging
+      const responseBody =
+        error instanceof Error && 'responseBody' in error
+          ? (error as { responseBody: string }).responseBody
+          : undefined;
+
+      // Extract response headers for debugging
+      const responseHeaders =
+        error instanceof Error && 'responseHeaders' in error
+          ? (error as { responseHeaders: Record<string, string> }).responseHeaders
+          : undefined;
+
+      // Extract URL from APICallError
+      const requestUrl =
+        error instanceof Error && 'url' in error ? (error as { url: string }).url : undefined;
+
       // Log detailed information about the failed request
       this.providerLogger?.error(
         {
@@ -984,6 +1001,13 @@ export class VercelAIProvider extends BaseLLMProvider {
           model: modelId,
           error: error instanceof Error ? error.message : String(error),
           errorName: error instanceof Error ? error.name : 'Unknown',
+          statusCode:
+            error instanceof Error && 'statusCode' in error
+              ? (error as { statusCode: number }).statusCode
+              : undefined,
+          responseBody: responseBody ? responseBody.slice(0, 1000) : undefined,
+          responseHeaders,
+          requestUrl,
           // Log message count and structure to help debug schema issues
           messageCount: coreMessages.length,
           messages: coreMessages.map((m) => ({
@@ -1002,6 +1026,25 @@ export class VercelAIProvider extends BaseLLMProvider {
         },
         'AI SDK generateText failed'
       );
+
+      // Log resolved IPs on failure to help diagnose VPN/geo-routing issues
+      if (requestUrl) {
+        try {
+          const hostname = new URL(requestUrl).hostname;
+          resolve4(hostname).then(
+            (ips) =>
+              this.providerLogger?.warn(
+                { hostname, resolvedIPs: ips },
+                'DNS resolution at error time'
+              ),
+            () => {
+              /* ignore DNS failures */
+            }
+          );
+        } catch {
+          // ignore URL parsing failures
+        }
+      }
 
       // Map AI SDK errors to LLMError
       this.pendingRawTools = null;
@@ -1141,7 +1184,61 @@ export class VercelAIProvider extends BaseLLMProvider {
    * Map AI SDK error to LLMError.
    */
   private mapAIErrorToLLMError(error: unknown): LLMError {
-    const message = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+
+    // Enrich error message with response body details when available
+    // AI SDK's APICallError.message is often just "Provider returned error" — useless without body
+    let message = rawMessage;
+    if (error instanceof Error && 'responseBody' in error) {
+      const body = (error as { responseBody: string }).responseBody;
+      if (typeof body === 'string' && body.length > 0) {
+        // Extract meaningful error detail from response body
+        // OpenRouter nests the real error in error.metadata.raw (JSON string from upstream provider)
+        try {
+          const parsed = JSON.parse(body) as Record<string, unknown>;
+          const errorObj = parsed['error'] as Record<string, unknown> | undefined;
+          const metadata = errorObj?.['metadata'] as Record<string, unknown> | undefined;
+
+          // Try to extract the upstream provider's actual error message
+          let detail: string | undefined;
+          if (metadata?.['raw'] && typeof metadata['raw'] === 'string') {
+            try {
+              const rawParsed = JSON.parse(metadata['raw']) as Record<string, unknown>;
+              const rawError = rawParsed['error'] as Record<string, unknown> | undefined;
+              const rawProviderName = metadata['provider_name'];
+              const providerName =
+                typeof rawProviderName === 'string' ? rawProviderName : 'unknown';
+              const rawMessage = rawError?.['message'];
+              detail =
+                typeof rawMessage === 'string' ? `[${providerName}] ${rawMessage}` : undefined;
+            } catch {
+              // raw wasn't JSON, use it directly
+              detail = metadata['raw'].slice(0, 300);
+            }
+          }
+
+          // Fall back to outer error message, then generic fields
+          if (!detail) {
+            detail =
+              typeof errorObj?.['message'] === 'string' && errorObj['message'] !== rawMessage
+                ? errorObj['message']
+                : typeof parsed['message'] === 'string'
+                  ? parsed['message']
+                  : typeof parsed['detail'] === 'string'
+                    ? parsed['detail']
+                    : undefined;
+          }
+
+          if (detail) {
+            message = `${rawMessage}: ${detail}`;
+          } else {
+            message = `${rawMessage}: ${body.slice(0, 500)}`;
+          }
+        } catch {
+          message = `${rawMessage}: ${body.slice(0, 500)}`;
+        }
+      }
+    }
 
     // AI SDK throws APICallError with structured statusCode — check it first
     const statusCode =

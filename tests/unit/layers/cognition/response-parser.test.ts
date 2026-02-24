@@ -263,4 +263,36 @@ Some description
       expect(result).toEqual({ text: null, malformed: true });
     });
   });
+
+  describe('truncated JSON repair (missing leading brace)', () => {
+    it('salvages response when model drops leading {"', () => {
+      // Smart model returned partial JSON without opening {"
+      const result = parseResponseContent(
+        'response": "Записала: конфета (28 г) — 157 ккал."}'
+      );
+      expect(result).toEqual({ text: 'Записала: конфета (28 г) — 157 ккал.' });
+    });
+
+    it('salvages response with status field', () => {
+      const result = parseResponseContent(
+        'response": "hello", "status": "active"}'
+      );
+      expect(result).toEqual({ text: 'hello', status: 'active' });
+    });
+
+    it('salvages response when only { is missing (not {")', () => {
+      const result = parseResponseContent(
+        '"response": "text here"}'
+      );
+      expect(result).toEqual({ text: 'text here' });
+    });
+
+    it('does not false-positive on normal text containing response":', () => {
+      const result = parseResponseContent(
+        'The response": value was unexpected'
+      );
+      // Doesn't end with }, so should not trigger repair
+      expect(result).toEqual({ text: 'The response": value was unexpected' });
+    });
+  });
 });
