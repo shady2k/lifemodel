@@ -137,20 +137,20 @@ export function getEffectiveTimezone(
 }
 
 /**
- * Format a timestamp as a human-readable prefix for conversation messages.
+ * Format a timestamp as human-readable relative time.
  *
- * Today's messages use relative time so the LLM doesn't need arithmetic:
- * - < 1 min: `[just now]`
- * - < 60 min: `[6 min ago]`
- * - Same day: `[3 hours ago]`
- * - Yesterday: `[yesterday 23:55]`
- * - Older: `[Feb 4, 14:30]`
+ * Today: relative ("just now", "6 min ago", "3h ago")
+ * Yesterday: "yesterday 23:55"
+ * Older: "Feb 4, 14:30"
  *
- * @param ts Message timestamp
+ * Used by conversation history, news results, and anywhere the LLM
+ * needs to understand when something happened without date arithmetic.
+ *
+ * @param ts Timestamp to format
  * @param now Reference "now" timestamp
  * @param timezone IANA timezone for formatting
  */
-export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): string {
+export function formatRelativeTime(ts: Date, now: Date, timezone: string): string {
   const msgDate = ts.toLocaleDateString('en-GB', { timeZone: timezone });
   const todayDate = now.toLocaleDateString('en-GB', { timeZone: timezone });
   const yesterdayDate = new Date(now.getTime() - 86400000).toLocaleDateString('en-GB', {
@@ -164,18 +164,15 @@ export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): st
     const diffHours = Math.floor(diffMin / 60);
     const remainMin = diffMin % 60;
 
-    let relative: string;
     if (diffMin < 1) {
-      relative = 'just now';
+      return 'just now';
     } else if (diffMin < 60) {
-      relative = `${String(diffMin)} min ago`;
+      return `${String(diffMin)} min ago`;
     } else if (remainMin > 0) {
-      relative = `${String(diffHours)}h ${String(remainMin)}m ago`;
+      return `${String(diffHours)}h ${String(remainMin)}m ago`;
     } else {
-      relative = `${String(diffHours)}h ago`;
+      return `${String(diffHours)}h ago`;
     }
-
-    return `<msg_time>${relative}</msg_time>`;
   } else if (msgDate === yesterdayDate) {
     const timeStr = ts.toLocaleTimeString('en-GB', {
       hour: '2-digit',
@@ -183,7 +180,7 @@ export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): st
       hour12: false,
       timeZone: timezone,
     });
-    return `<msg_time>yesterday ${timeStr}</msg_time>`;
+    return `yesterday ${timeStr}`;
   } else {
     const timeStr = ts.toLocaleTimeString('en-GB', {
       hour: '2-digit',
@@ -196,6 +193,19 @@ export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): st
       day: 'numeric',
       timeZone: timezone,
     });
-    return `<msg_time>${dateStr}, ${timeStr}</msg_time>`;
+    return `${dateStr}, ${timeStr}`;
   }
+}
+
+/**
+ * Format a timestamp as a conversation message prefix with XML tags.
+ *
+ * Wraps formatRelativeTime in `<msg_time>` tags for conversation history.
+ *
+ * @param ts Message timestamp
+ * @param now Reference "now" timestamp
+ * @param timezone IANA timezone for formatting
+ */
+export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): string {
+  return `<msg_time>${formatRelativeTime(ts, now, timezone)}</msg_time>`;
 }

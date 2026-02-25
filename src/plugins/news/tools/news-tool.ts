@@ -32,6 +32,7 @@ import { fetchRssFeed } from '../fetchers/rss.js';
 import { fetchTelegramChannel } from '../fetchers/telegram.js';
 import { convertToNewsArticle } from '../topic-extractor.js';
 import { fetchTelegramGroup } from '../fetchers/telegram-group.js';
+import { formatRelativeTime } from '../../../utils/date.js';
 
 /** Minimum interval between refresh_source calls for the same source (5 minutes). */
 const REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
@@ -553,6 +554,7 @@ async function getNews(
   const limitedEntries = filtered.slice(0, limit);
 
   // Transform memory entries to article format
+  const now = new Date();
   const articles: NewsArticleEntry[] = limitedEntries.map((e) => {
     // Parse the content (format: "Title\n\nSummary" or just "Title")
     const lines = e.content.split('\n');
@@ -568,7 +570,8 @@ async function getNews(
     return {
       title,
       summary,
-      timestamp: e.timestamp,
+      // Relative time so the model sees age without date arithmetic
+      timestamp: formatRelativeTime(e.timestamp, now, 'UTC'),
       topics: e.tags.filter((t) => t !== 'news'),
       confidence: e.confidence,
       type,

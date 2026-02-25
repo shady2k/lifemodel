@@ -131,7 +131,8 @@ export interface FetchedArticle {
 export interface NewsArticleEntry {
   title: string;
   summary?: string | undefined;
-  timestamp: Date;
+  /** Human-readable relative time (e.g., "9 days ago", "3 hr ago", "just now") */
+  timestamp: string;
   topics: string[];
   confidence?: number | undefined;
   type: 'urgent' | 'interesting' | 'filtered';
