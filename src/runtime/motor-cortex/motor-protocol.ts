@@ -59,6 +59,9 @@ export interface MotorToolResult {
   /** Output text (JSON.stringify for structured data) */
   output: string;
 
+  /** Ephemeral text (pagination, truncation hints) shown to LLM but excluded from .motor-output/ saves. */
+  llmHint?: string | undefined;
+
   /** Error code if ok=false (for retry logic) */
   errorCode?:
     | 'timeout'

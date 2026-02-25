@@ -1091,7 +1091,9 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
         toolArgs['path'].startsWith('.motor-output/');
 
       if (readingMotorOutput) {
-        toolResult.output = redactedOutput;
+        const hint = toolResult.llmHint ? redactValues(toolResult.llmHint) : undefined;
+        toolResult.output = hint ? `${redactedOutput}\n\n${hint}` : redactedOutput;
+        toolResult.llmHint = undefined;
         childLogger.debug(
           { tool: toolName, outputBytes },
           'Skipped re-truncation for .motor-output/ read'
@@ -1102,9 +1104,13 @@ export async function runMotorLoop(params: MotorLoopParams): Promise<void> {
           toolName,
           toolCall.id,
           workspace,
-          { toolOk: toolResult.ok }
+          {
+            toolOk: toolResult.ok,
+            ...(toolResult.llmHint ? { llmHint: redactValues(toolResult.llmHint) } : {}),
+          }
         );
         toolResult.output = truncation.content; // Mutate before trace and message storage
+        toolResult.llmHint = undefined; // Merged into output — avoid double-storage in step traces
 
         if (truncation.truncated) {
           childLogger.info(

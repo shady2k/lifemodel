@@ -65,7 +65,7 @@ export async function truncateToolOutput(
   toolName: string,
   callId: string,
   workspace: string,
-  options?: { toolOk?: boolean }
+  options?: { toolOk?: boolean; llmHint?: string }
 ): Promise<TruncationResult> {
   const lines = output.split('\n');
   const totalBytes = Buffer.byteLength(output, 'utf-8');
@@ -76,12 +76,14 @@ export async function truncateToolOutput(
 
   // Inline path: output fits within limits AND tool allows inline
   if (!forceSave && lines.length <= TRUNCATION_MAX_LINES && totalBytes <= TRUNCATION_MAX_BYTES) {
-    return { content: output, truncated: false };
+    const content = options?.llmHint ? `${output}\n${options.llmHint}` : output;
+    return { content, truncated: false };
   }
 
   // Save full output to workspace file.
   // For `read` tool: strip line number prefixes (e.g. "  42| content") so that
   // `cp .motor-output/read-xxx.txt target.txt` produces a clean file.
+  // IMPORTANT: Only `output` is saved — `llmHint` is ephemeral and excluded.
   const truncDir = join(workspace, TRUNCATION_DIR);
   await mkdir(truncDir, { recursive: true });
   const filename = `${toolName}-${callId.slice(-8)}.txt`;
@@ -90,11 +92,13 @@ export async function truncateToolOutput(
   await writeFile(join(truncDir, filename), contentToSave, 'utf-8');
 
   // No content preview — only metadata + pointer.
-  const content = [
+  const parts = [
     `Output saved (${String(totalBytes)} bytes, ${String(lines.length)} lines) to: ${filepath}`,
     `To copy to a file: bash({"command":"cp ${filepath} <target-path>"})`,
     `To read sections: read({"path":"${filepath}", "offset": 1, "limit": 100})`,
-  ].join('\n');
+  ];
+  if (options?.llmHint) parts.push('', options.llmHint);
+  const content = parts.join('\n');
 
   return { content, truncated: true, originalBytes: totalBytes, savedPath: filepath };
 }

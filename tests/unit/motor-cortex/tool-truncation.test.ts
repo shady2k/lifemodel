@@ -234,4 +234,73 @@ describe('truncateToolOutput', () => {
       expect(existsSync(spilloverDir)).toBe(true);
     });
   });
+
+  describe('llmHint handling', () => {
+    it('appends llmHint to inline content', async () => {
+      const output = 'Small read output';
+      const hint = '(Showing lines 1-10 of 5000. Use offset=11 to continue.)';
+      const result = await truncateToolOutput(output, 'read', 'call_hint1', workspace, {
+        llmHint: hint,
+      });
+
+      expect(result.truncated).toBe(false);
+      expect(result.content).toBe(`${output}\n${hint}`);
+    });
+
+    it('excludes llmHint from saved file', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 1000);
+      const hint = '(Showing lines 1-2000 of 25961. Use offset=2001 to continue.)';
+      const result = await truncateToolOutput(output, 'read', 'call_hint2', workspace, {
+        llmHint: hint,
+      });
+
+      expect(result.truncated).toBe(true);
+      const savedPath = join(workspace, result.savedPath!);
+      const savedContent = await readFile(savedPath, 'utf-8');
+      expect(savedContent).not.toContain('Showing lines');
+      expect(savedContent).not.toContain('offset=');
+      expect(savedContent).not.toContain('25961');
+    });
+
+    it('includes llmHint in pointer text for saved output', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 1000);
+      const hint = '(Showing lines 1-2000 of 25961. Use offset=2001 to continue.)';
+      const result = await truncateToolOutput(output, 'read', 'call_hint3', workspace, {
+        llmHint: hint,
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(result.content).toContain('Output saved');
+      expect(result.content).toContain(hint);
+    });
+
+    it('works without llmHint (backward compat)', async () => {
+      const output = 'x'.repeat(TRUNCATION_MAX_BYTES + 500);
+      const result = await truncateToolOutput(output, 'bash', 'call_nohint', workspace);
+
+      expect(result.truncated).toBe(true);
+      expect(result.content).toContain('Output saved');
+      expect(result.content).not.toContain('Showing lines');
+    });
+
+    it('does not include hint in saved file for read tool with line-number stripping', async () => {
+      // Simulate read output with line numbers that exceeds byte limit
+      const lines = Array.from({ length: 2500 }, (_, i) => `${String(i + 1).padStart(4)}| line content here`);
+      const output = lines.join('\n');
+      const hint = '(Showing lines 1-2500 of 10000. Use offset=2501 to continue.)';
+
+      const result = await truncateToolOutput(output, 'read', 'call_readhint', workspace, {
+        llmHint: hint,
+      });
+
+      expect(result.truncated).toBe(true);
+      const savedPath = join(workspace, result.savedPath!);
+      const savedContent = await readFile(savedPath, 'utf-8');
+      // Line-number prefixes should be stripped
+      expect(savedContent).not.toMatch(/^ *\d+\| /m);
+      // Hint must NOT leak into saved file
+      expect(savedContent).not.toContain('Showing lines');
+      expect(savedContent).not.toContain('offset=2501');
+    });
+  });
 });

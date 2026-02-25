@@ -661,23 +661,27 @@ const TOOL_EXECUTORS: Record<MotorTool, ToolExecutor> = {
           .join('\n');
       }
 
-      // Apply 50KB character cap
+      // Apply 50KB character cap — always trim to a complete line boundary
+      let displayedLines = sliced.length;
       if (output.length > MAX_READ_CHARS) {
         output = output.slice(0, MAX_READ_CHARS);
-        // Find last complete line
         const lastNewline = output.lastIndexOf('\n');
         if (lastNewline > 0) output = output.slice(0, lastNewline);
+        displayedLines = output.split('\n').length;
       }
 
-      // Truncation notice
-      const endLine = offset - 1 + sliced.length;
-      if (endLine < totalLines) {
-        output += `\n[... truncated: ${String(totalLines)} total lines. Use offset=${String(endLine + 1)} to continue.]`;
-      }
+      const endLine = offset - 1 + displayedLines;
+
+      // Pagination hint — ephemeral, excluded from .motor-output/ saves
+      const llmHint =
+        endLine < totalLines
+          ? `(Showing lines ${String(offset)}-${String(endLine)} of ${String(totalLines)}. Use offset=${String(endLine + 1)} to continue.)`
+          : `(End of file — ${String(totalLines)} lines total)`;
 
       return {
         ok: true,
         output,
+        llmHint,
         retryable: false,
         provenance: 'internal',
         durationMs: Date.now() - startTime,
