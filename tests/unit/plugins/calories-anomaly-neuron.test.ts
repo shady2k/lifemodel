@@ -473,4 +473,108 @@ describe('CaloriesAnomalyNeuron', () => {
       expect(signal).toBeDefined();
     });
   });
+
+  describe('food-day boundary (sleep midpoint)', () => {
+    it('should use food-day (yesterday) at midnight, not calendar date', async () => {
+      // User: sleepHour=23, wakeHour=8 → cutoff = floor((23 + 32) / 2 % 24) = 3
+      // At 00:22, hour 0 < cutoff 3, so food-day = yesterday (2025-06-14)
+      const patterns = { wakeHour: 8, sleepHour: 23 };
+      const YESTERDAY = '2025-06-14';
+
+      const store: Record<string, unknown> = {};
+      const items: FoodItem[] = [];
+      for (let i = 1; i <= 5; i++) {
+        items.push(createFoodItem(`item-${i}`, `Food ${i}`, 300));
+      }
+      store[CALORIES_STORAGE_KEYS.items] = items;
+
+      // Past 7 days of history before yesterday
+      const yesterdayDate = DateTime.fromISO(YESTERDAY);
+      for (let i = 1; i <= 7; i++) {
+        const date = yesterdayDate.minus({ days: i }).toISODate();
+        if (!date) continue;
+        store[`${CALORIES_STORAGE_KEYS.foodPrefix}${date}`] = [
+          createFoodEntry(`entry-${date}-b`, 'item-1', 9, date, 'breakfast'),
+          createFoodEntry(`entry-${date}-l`, 'item-2', 13, date, 'lunch'),
+          createFoodEntry(`entry-${date}-d`, 'item-3', 19, date, 'dinner'),
+        ];
+      }
+
+      // Yesterday (the food-day) has full meals
+      store[`${CALORIES_STORAGE_KEYS.foodPrefix}${YESTERDAY}`] = [
+        createFoodEntry('yest-b', 'item-1', 9, YESTERDAY, 'breakfast'),
+        createFoodEntry('yest-l', 'item-2', 13, YESTERDAY, 'lunch'),
+        createFoodEntry('yest-d', 'item-3', 19, YESTERDAY, 'dinner'),
+      ];
+
+      // Calendar today has nothing — user is sleeping
+      store[`${CALORIES_STORAGE_KEYS.foodPrefix}${TODAY}`] = [];
+
+      const storage = createMockStorage(store);
+
+      setFakeNow(`${TODAY}T00:22:00.000Z`);
+      const neuron = createNeuron(storage, 2000, patterns);
+
+      neuron.check(createAgentState(), 0.5, 'test-1');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Verify the neuron resolved "today" as the food-day (yesterday), not calendar date.
+      // The baseline cache stores {date: today, ...} — check it used the food-day.
+      const setCalls = storage.set.mock.calls;
+      const baselineCache = setCalls.find(
+        (c: unknown[]) => c[0] === 'calories_anomaly_baseline'
+      );
+      expect(baselineCache).toBeDefined();
+      // The cached date should be yesterday (food-day), not calendar today
+      const cachedDate = (baselineCache![1] as { date: string }).date;
+      expect(cachedDate).toBe(YESTERDAY);
+      expect(cachedDate).not.toBe(TODAY);
+    });
+  });
+
+  describe('wakeHour=0 falsy bug', () => {
+    it('should respect wakeHour=0 as valid midnight wake time', async () => {
+      // User wakes at midnight (wakeHour=0), sleeps at 16 (4 PM)
+      // cutoff = floor((16 + 24) / 2 % 24) = 20
+      // At 10 AM, hour 10 < cutoff 20, so food-day = yesterday (2025-06-14)
+      // wakeRelativeHour = 10 - 0 = 10, wakingHours = 16, dayProgress = 0.625
+      const patterns = { wakeHour: 0, sleepHour: 16 };
+      const YESTERDAY = '2025-06-14';
+
+      const store: Record<string, unknown> = {};
+      const items: FoodItem[] = [
+        createFoodItem('item-1', 'Food 1', 500),
+      ];
+      store[CALORIES_STORAGE_KEYS.items] = items;
+
+      // Build baseline: 7 days of history before yesterday
+      const yesterdayDate = DateTime.fromISO(YESTERDAY);
+      for (let i = 1; i <= 7; i++) {
+        const date = yesterdayDate.minus({ days: i }).toISODate();
+        if (!date) continue;
+        store[`${CALORIES_STORAGE_KEYS.foodPrefix}${date}`] = [
+          createFoodEntry(`entry-${date}-1`, 'item-1', 1, date, 'breakfast'),
+          createFoodEntry(`entry-${date}-2`, 'item-1', 6, date, 'lunch'),
+          createFoodEntry(`entry-${date}-3`, 'item-1', 12, date, 'dinner'),
+        ];
+      }
+
+      // Yesterday (the current food-day at 10 AM): no food logged
+      store[`${CALORIES_STORAGE_KEYS.foodPrefix}${YESTERDAY}`] = [];
+
+      const storage = createMockStorage(store);
+
+      // 10 AM — well into the day for someone who wakes at midnight
+      setFakeNow(`${TODAY}T10:00:00.000Z`);
+      const neuron = createNeuron(storage, 2000, patterns);
+
+      neuron.check(createAgentState(), 0.8, 'test-1');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const signal = neuron.check(createAgentState(), 0.8, 'test-2');
+      // Should fire — wakeHour=0 is valid (not treated as falsy/missing),
+      // food-day is yesterday which has no entries
+      expect(signal).toBeDefined();
+    });
+  });
 });

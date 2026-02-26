@@ -24,6 +24,7 @@ import { Priority } from '../../types/priority.js';
 import { DateTime } from 'luxon';
 import type { FoodEntry, FoodItem } from './calories-types.js';
 import { CALORIES_STORAGE_KEYS, resolveEntryCalories } from './calories-types.js';
+import { getCurrentFoodDate } from './calories-date.js';
 
 const NEURON_STATE_KEY = 'calories_anomaly_neuron_state';
 const BASELINE_CACHE_KEY = 'calories_anomaly_baseline';
@@ -144,7 +145,7 @@ function percentile(values: number[], p: number): number {
  * Falls back to wall clock hour if no wake pattern available.
  */
 function getWakeRelativeHour(wallClockHour: number, patterns: UserPatterns | null): number {
-  if (!patterns?.wakeHour) {
+  if (patterns?.wakeHour == null) {
     return wallClockHour;
   }
   const wakeHour = patterns.wakeHour;
@@ -160,7 +161,7 @@ function getWakeRelativeHour(wallClockHour: number, patterns: UserPatterns | nul
  * Defaults to 16 hours if no pattern available.
  */
 function getWakingHours(patterns: UserPatterns | null): number {
-  if (!patterns?.wakeHour || !patterns.sleepHour) {
+  if (patterns?.wakeHour == null || patterns.sleepHour == null) {
     return 16;
   }
   let duration = patterns.sleepHour - patterns.wakeHour;
@@ -333,7 +334,7 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
 
       // Check once-per-day guard
       const state = await this.loadPersistedState();
-      const today = DateTime.now().setZone(tz).toISODate();
+      const today = getCurrentFoodDate(tz, patterns);
       if (!today) return;
 
       if (state?.lastEmittedDate === today) {
@@ -731,6 +732,7 @@ export class CaloriesAnomalyNeuron extends BaseNeuron {
           mealCount,
           expectedMeals,
           goal,
+          goalDirection: 'ceiling' as const,
           hourOfDay,
           baselineDays,
         },

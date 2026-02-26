@@ -17,11 +17,15 @@ import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../type
 import { createSignal } from '../../types/signal.js';
 import type { AgentState, AlertnessMode } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
-import type { NeuronPluginV2 } from '../../types/plugin.js';
+import type { NeuronPluginV2, PluginPrimitives } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
 import { detectTransition } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
 import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
+import { DateTime } from 'luxon';
+
+/** Module-level reference captured during activation (same pattern as calories plugin). */
+let pluginPrimitives: PluginPrimitives | null = null;
 
 /**
  * Configuration for alertness neuron.
@@ -72,14 +76,20 @@ export class AlertnessNeuron extends BaseNeuron {
   readonly description = 'Calculates agent alertness level';
 
   private readonly config: AlertnessNeuronConfig;
+  private readonly getTimezone: () => string;
   private lastMode: AlertnessMode | undefined;
   private lastModeChangeAt: Date | undefined;
   private _lastNeuronResult: NeuronResult | undefined;
   private recentActivityLevel = 0.5;
 
-  constructor(logger: Logger, config: Partial<AlertnessNeuronConfig> = {}) {
+  constructor(
+    logger: Logger,
+    config: Partial<AlertnessNeuronConfig> = {},
+    getTimezone?: () => string
+  ) {
     super(logger);
     this.config = { ...DEFAULT_ALERTNESS_CONFIG, ...config };
+    this.getTimezone = getTimezone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   }
 
   check(state: AgentState, _alertness: number, correlationId: string): Signal | undefined {
@@ -124,7 +134,7 @@ export class AlertnessNeuron extends BaseNeuron {
   }
 
   private calculateAlertness(state: AgentState): NeuronResult {
-    const hour = new Date().getHours();
+    const hour = DateTime.now().setZone(this.getTimezone()).hour;
     const timeOfDayFactor = this.getTimeOfDayFactor(hour);
 
     return neuron([
@@ -228,9 +238,10 @@ export class AlertnessNeuron extends BaseNeuron {
  */
 export function createAlertnessNeuron(
   logger: Logger,
-  config?: Partial<AlertnessNeuronConfig>
+  config?: Partial<AlertnessNeuronConfig>,
+  getTimezone?: () => string
 ): AlertnessNeuron {
-  return new AlertnessNeuron(logger, config);
+  return new AlertnessNeuron(logger, config, getTimezone);
 }
 
 /**
@@ -247,13 +258,16 @@ const plugin: NeuronPluginV2 = {
     requires: [],
   },
   lifecycle: {
-    activate: () => {
-      // Neuron plugins don't need activation - neuron is created via factory
+    activate: (primitives: PluginPrimitives) => {
+      pluginPrimitives = primitives;
     },
   },
   neuron: {
-    create: (logger: Logger, config?: unknown) =>
-      new AlertnessNeuron(logger, config as Partial<AlertnessNeuronConfig>),
+    create: (logger: Logger, config?: unknown) => {
+      const primitives = pluginPrimitives;
+      const getTimezone = primitives ? () => primitives.services.getTimezone() : undefined;
+      return new AlertnessNeuron(logger, config as Partial<AlertnessNeuronConfig>, getTimezone);
+    },
     defaultConfig: DEFAULT_ALERTNESS_CONFIG,
   },
 };

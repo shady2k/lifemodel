@@ -282,6 +282,32 @@ Acknowledge being wrong. Learning from mistakes is valuable.
 </trigger>`;
   }
 
+  // Calories anomaly: structured prompt with goal framing
+  if (eventKind === 'calories:anomaly') {
+    const consumed = (d['consumed'] as number | undefined) ?? 0;
+    const mealCount = (d['mealCount'] as number | undefined) ?? 0;
+    const baselineDays = (d['baselineDays'] as number | undefined) ?? 0;
+    const expectedByNow = (d['expectedByNow'] as number | undefined) ?? 0;
+    const expectedMeals = (d['expectedMeals'] as number | undefined) ?? 0;
+    const goal = (d['goal'] as number | undefined) ?? 0;
+    const anomalyType = (d['anomalyType'] as string | undefined) ?? 'unknown';
+    const normalRange = d['normalRange'] as { low?: number; high?: number } | undefined;
+    const rangeLow = normalRange?.low ?? 0;
+    const rangeHigh = normalRange?.high ?? 0;
+    return `<trigger type="plugin_event">
+<context>
+Calorie tracking anomaly detected.
+Today's intake: ${String(consumed)} kcal (${String(mealCount)} meals)
+Expected by now (based on ${String(baselineDays)}-day history): ${String(expectedByNow)} kcal (${String(expectedMeals)} meals)
+Normal range: ${String(rangeLow)}–${String(rangeHigh)} kcal
+Daily limit: ${String(goal)} kcal (this is a CEILING — staying under is good)
+Anomaly type: ${anomalyType}
+</context>
+
+<task>The user's intake today is unusually low compared to their own pattern. Check in gently — they may be fasting intentionally, busy, or simply haven't started eating yet. The calorie goal is a MAXIMUM (ceiling), not a target to reach.</task>
+</trigger>`;
+  }
+
   // Generic plugin event format
   return `<trigger type="plugin_event">
 <context>

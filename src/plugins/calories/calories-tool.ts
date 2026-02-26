@@ -50,20 +50,8 @@ import {
 } from './calories-types.js';
 import { extractCanonicalName, decideMatch, matchCandidates } from './calories-matching.js';
 import { ensureMigrated, normalizeBasis } from './calories-migration.js';
+import { calculateCutoffHour, getCurrentFoodDate } from './calories-date.js';
 import { DateTime } from 'luxon';
-
-/**
- * Calculate the cutoff hour for food day boundary from sleep/wake patterns.
- * Hours before the cutoff belong to the previous food day.
- */
-function calculateCutoffHour(sleepHour: number, wakeHour: number): number {
-  if (sleepHour < wakeHour) {
-    return Math.floor((sleepHour + wakeHour) / 2);
-  }
-  const wakeNormalized = wakeHour + 24;
-  const midpoint = (sleepHour + wakeNormalized) / 2;
-  return Math.floor(midpoint % 24);
-}
 
 type GetTimezoneFunc = (recipientId: string) => string;
 type GetUserPatternsFunc = (
@@ -115,28 +103,6 @@ function parseRelativeDate(
       // Unknown keyword — return base date as fallback
       return baseDate;
   }
-}
-
-/**
- * Get the current "food day" based on user's sleep patterns.
- */
-function getCurrentFoodDate(
-  timezone: string,
-  userPatterns: { wakeHour?: number; sleepHour?: number } | null
-): string {
-  const now = DateTime.now().setZone(timezone);
-  const hour = now.hour;
-
-  const sleepHour = userPatterns?.sleepHour ?? 23;
-  const wakeHour = userPatterns?.wakeHour ?? 7;
-
-  const cutoff = calculateCutoffHour(sleepHour, wakeHour);
-
-  if (hour < cutoff) {
-    return now.minus({ days: 1 }).toFormat('yyyy-MM-dd');
-  }
-
-  return now.toFormat('yyyy-MM-dd');
 }
 
 /**

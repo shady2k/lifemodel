@@ -12,7 +12,7 @@ Track food intake, calories, and body weight with catalog-based matching and pro
 - **Statistics**: 7-day calorie trends with weight tracking
 - **Duplicate Detection**: Meal-type-aware — alerts only when same item logged in same meal
 - **Weight Tracking**: Record weight measurements with weekly check-in reminders
-- **Calorie Goal**: Manual target or TDEE-based calculation
+- **Calorie Goal**: Manual ceiling or TDEE-based calculation
 - **Anomaly Detection**: Neuron signals only when intake is anomalously low vs user's historical pattern
 
 ## Architecture
@@ -411,7 +411,7 @@ User: "измени калорийность бекона на 450 ккал/100�
 | `weight_kg` | number | Current weight (20-500 kg) |
 | `height_cm` | number | Height (50-300 cm) |
 | `activity_level` | string | sedentary, light, moderate, active, very_active |
-| `calorie_goal` | number | Daily target (manual or calculated) |
+| `calorie_goal` | number | Daily ceiling — maximum kcal (manual or calculated) |
 | `target_weight_kg` | number | Goal weight for TDEE adjustment |
 | `sleep_hour` | number | Typical bedtime hour (0-23) |
 | `wake_hour` | number | Typical wake hour (0-23) |
