@@ -77,20 +77,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     const limit = options?.limit ?? 10;
     const offset = options?.offset ?? 0;
 
-    const results = await this.vectorStore.search({
-      query: trimmedQuery,
-      limit,
-      offset,
-      types: options?.types,
-      recipientId: options?.recipientId,
-      status: options?.status,
-      minConfidence: options?.minConfidence,
-      metadata: options?.metadata,
-    });
-
-    // To compute totalMatched, we need a full count of matching entries.
-    // VectorStore.search already returns paginated results, but we need metadata.
-    // Run an unbounded search to get total count for pagination metadata.
+    // Single unbounded search — slice for pagination, use full results for metadata.
     const allResults = await this.vectorStore.search({
       query: trimmedQuery,
       limit: 100000,
@@ -103,14 +90,17 @@ export class JsonMemoryProvider implements MemoryProvider {
     });
 
     const totalMatched = allResults.length;
-    const entries = results.map((r) => r.entry);
+    const entries = allResults.slice(offset, offset + limit).map((r) => r.entry);
 
-    const highConfidence = allResults.filter((s) => (s.entry.confidence ?? 0.5) >= 0.5).length;
-    const mediumConfidence = allResults.filter((s) => {
+    let highConfidence = 0;
+    let mediumConfidence = 0;
+    let lowConfidence = 0;
+    for (const s of allResults) {
       const c = s.entry.confidence ?? 0.5;
-      return c >= 0.3 && c < 0.5;
-    }).length;
-    const lowConfidence = allResults.filter((s) => (s.entry.confidence ?? 0.5) < 0.3).length;
+      if (c >= 0.5) highConfidence++;
+      else if (c >= 0.3) mediumConfidence++;
+      else lowConfidence++;
+    }
 
     const totalPages = Math.max(1, Math.ceil(totalMatched / limit));
     const page = Math.floor(offset / limit) + 1;

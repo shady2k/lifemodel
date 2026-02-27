@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { z } from 'zod';
 import { ScriptRunner } from '../../../../src/runtime/motor-cortex/script-runner.js';
+import { registerScriptEntry } from '../../../../src/runtime/motor-cortex/script-registry.js';
 import type { ContainerManager } from '../../../../src/runtime/container/types.js';
 import type { LockService, LockHandle } from '../../../../src/runtime/motor-cortex/script-types.js';
 
@@ -54,6 +56,17 @@ describe('ScriptRunner', () => {
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
+    // Register the test script (moved out of production registry)
+    registerScriptEntry({
+      id: 'test.echo.run',
+      image: 'lifemodel-motor:latest',
+      entrypoint: ['node', '/opt/motor/scripts/echo-test.js'],
+      domains: [],
+      maxTimeoutMs: 10_000,
+      inputSchema: z.object({ message: z.string() }),
+      outputSchema: z.object({ echo: z.string() }),
+    });
+
     containerManager = createMockContainerManager();
     lockService = createMockLockService();
     logger = createMockLogger();
@@ -220,12 +233,6 @@ describe('ScriptRunner', () => {
 
   describe('lock contention', () => {
     it('should return LOCK_UNAVAILABLE when lock cannot be acquired', async () => {
-      // Register a script entry with lock config for this test
-      const { registerScriptEntry } = await import(
-        '../../../../src/runtime/motor-cortex/script-registry.js'
-      );
-      const { z } = await import('zod');
-
       registerScriptEntry({
         id: 'test.locked.run',
         image: 'lifemodel-motor:latest',

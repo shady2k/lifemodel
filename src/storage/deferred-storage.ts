@@ -51,6 +51,9 @@ export class DeferredStorage implements Storage {
   /** Flush in progress (prevents concurrent flushes) */
   private flushing = false;
 
+  /** Set when a flush is requested while another is in progress */
+  private reflushNeeded = false;
+
   constructor(underlying: Storage, logger: Logger, config: Partial<DeferredStorageConfig> = {}) {
     this.underlying = underlying;
     this.logger = logger.child({ component: 'deferred-storage' });
@@ -188,18 +191,21 @@ export class DeferredStorage implements Storage {
 
   /**
    * Flush all dirty entries to underlying storage.
-   * Safe to call concurrently - will skip if flush already in progress.
+   * If called while a flush is in progress, schedules a re-flush after completion
+   * to ensure writes that arrived during the flush are not lost.
    */
   async flush(): Promise<void> {
     if (this.flushing) {
-      this.logger.trace('Flush already in progress, skipping');
+      this.reflushNeeded = true;
+      this.logger.trace('Flush already in progress, will re-flush after completion');
       return;
     }
 
     this.flushing = true;
 
     try {
-      // Collect dirty entries
+      // Snapshot dirty entries — capture the data reference so we can detect
+      // writes that arrive during the flush (write-during-flush safety).
       const dirtyEntries: { key: string; data: unknown }[] = [];
       for (const [key, entry] of this.cache) {
         if (entry.dirty) {
@@ -207,7 +213,7 @@ export class DeferredStorage implements Storage {
         }
       }
 
-      // Collect deleted keys
+      // Snapshot deleted keys
       const keysToDelete = Array.from(this.deletedKeys);
 
       if (dirtyEntries.length === 0 && keysToDelete.length === 0) {
@@ -217,9 +223,11 @@ export class DeferredStorage implements Storage {
       // Write dirty entries (sequentially to avoid overwhelming disk)
       for (const { key, data } of dirtyEntries) {
         await this.underlying.save(key, data);
-        // Mark as clean after successful write
+        // Only mark clean if the cache entry still holds the same data reference.
+        // If save() was called during the flush with new data, the reference will
+        // differ, so we leave it dirty for the next flush.
         const entry = this.cache.get(key);
-        if (entry) {
+        if (entry && entry.data === data) {
           entry.dirty = false;
         }
       }
@@ -243,6 +251,13 @@ export class DeferredStorage implements Storage {
       }
     } finally {
       this.flushing = false;
+
+      // If a flush was requested while we were flushing, run another pass
+      // to pick up writes that arrived during the flush.
+      if (this.reflushNeeded) {
+        this.reflushNeeded = false;
+        await this.flush();
+      }
     }
   }
 

@@ -31,6 +31,7 @@ import type { NewsArticle } from '../../types/news.js';
 import type { Interests } from '../../types/user/interests.js';
 import type { Logger } from '../../types/logger.js';
 import { NEWS_PLUGIN_ID, NEWS_EVENT_KINDS } from './types.js';
+import { levenshtein } from '../../utils/levenshtein.js';
 
 // ============================================================
 // Types
@@ -69,43 +70,6 @@ const DEFAULT_CONFIG: NewsFilterConfig = {
 // ============================================================
 
 /**
- * Calculate Levenshtein distance between two strings.
- * Returns the minimum number of single-character edits (insertions,
- * deletions, substitutions) required to change one string into another.
- */
-function levenshteinDistance(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-
-  // Optimization: use single row instead of full matrix
-  // We only need the previous row to compute the current row
-  let prevRow: number[] = Array.from({ length: n + 1 }, (_, j) => j);
-  let currRow: number[] = new Array<number>(n + 1).fill(0);
-
-  // Fill in the rest
-  for (let i = 1; i <= m; i++) {
-    currRow[0] = i; // Empty string to a[0..i]
-
-    for (let j = 1; j <= n; j++) {
-      const prevDiag = prevRow[j - 1] ?? 0;
-      const prevUp = prevRow[j] ?? 0;
-      const prevLeft = currRow[j - 1] ?? 0;
-
-      if (a[i - 1] === b[j - 1]) {
-        currRow[j] = prevDiag;
-      } else {
-        currRow[j] = 1 + Math.min(prevUp, prevLeft, prevDiag);
-      }
-    }
-
-    // Swap rows
-    [prevRow, currRow] = [currRow, prevRow];
-  }
-
-  return prevRow[n] ?? 0;
-}
-
-/**
  * Calculate similarity score between two strings (0-1).
  * Uses normalized Levenshtein distance.
  */
@@ -113,7 +77,7 @@ function stringSimilarity(a: string, b: string): number {
   if (a === b) return 1;
   if (a.length === 0 || b.length === 0) return 0;
 
-  const distance = levenshteinDistance(a, b);
+  const distance = levenshtein(a, b);
   const maxLength = Math.max(a.length, b.length);
 
   return 1 - distance / maxLength;

@@ -664,6 +664,11 @@ export class CoreLoop {
             }
           });
 
+          // Prune dedup sets to prevent unbounded growth
+          void this.pruneSignaledSets().catch((err: unknown) => {
+            this.logger.warn({ error: err }, 'Failed to prune dedup sets during sleep');
+          });
+
           // Soul sleep maintenance
           if (this.soulProvider) {
             void runSleepMaintenance({
@@ -1069,9 +1074,9 @@ export class CoreLoop {
     }
   }
 
-  /** IDs of commitments already signaled as due (dedup) */
+  /** IDs of commitments already signaled as due (dedup — pruned on sleep) */
   private readonly signaledDueCommitments = new Set<string>();
-  /** IDs of commitments already signaled as overdue (dedup) */
+  /** IDs of commitments already signaled as overdue (dedup — pruned on sleep) */
   private readonly signaledOverdueCommitments = new Set<string>();
   /** Grace period before a due commitment becomes overdue (1 hour) */
   private static readonly COMMITMENT_GRACE_PERIOD_MS = 60 * 60 * 1000;
@@ -1127,18 +1132,17 @@ export class CoreLoop {
             },
           };
 
-          const signal: Signal = {
-            id: randomUUID(),
-            type: 'plugin_event',
-            source: 'plugin.commitment' as SignalSource,
-            timestamp: nowDate,
-            priority: Priority.HIGH,
-            metrics: { value: 1, confidence: 1 },
-            data: signalData,
-            expiresAt: new Date(now + 60_000),
-          };
-
-          this.pushSignal(signal);
+          this.pushSignal(
+            createSignal(
+              'plugin_event',
+              'plugin.commitment' as SignalSource,
+              { value: 1, confidence: 1 },
+              {
+                priority: Priority.HIGH,
+                data: signalData,
+              }
+            )
+          );
           this.signaledDueCommitments.add(entry.id);
 
           this.logger.info(
@@ -1167,18 +1171,17 @@ export class CoreLoop {
             },
           };
 
-          const signal: Signal = {
-            id: randomUUID(),
-            type: 'plugin_event',
-            source: 'plugin.commitment' as SignalSource,
-            timestamp: nowDate,
-            priority: Priority.HIGH,
-            metrics: { value: 1, confidence: 1 },
-            data: signalData,
-            expiresAt: new Date(now + 60_000),
-          };
-
-          this.pushSignal(signal);
+          this.pushSignal(
+            createSignal(
+              'plugin_event',
+              'plugin.commitment' as SignalSource,
+              { value: 1, confidence: 1 },
+              {
+                priority: Priority.HIGH,
+                data: signalData,
+              }
+            )
+          );
           this.signaledOverdueCommitments.add(entry.id);
 
           this.logger.info(
@@ -1195,7 +1198,7 @@ export class CoreLoop {
     }
   }
 
-  /** IDs of predictions already signaled as due (dedup) */
+  /** IDs of predictions already signaled as due (dedup — pruned on sleep) */
   private readonly signaledDuePredictions = new Set<string>();
   /** Throttle: last time overdue predictions were checked */
   private lastPredictionCheckAt = 0;
@@ -1246,18 +1249,16 @@ export class CoreLoop {
           },
         };
 
-        const signal: Signal = {
-          id: randomUUID(),
-          type: 'plugin_event',
-          source: 'plugin.perspective' as SignalSource,
-          timestamp: nowDate,
-          priority: Priority.NORMAL,
-          metrics: { value: 1, confidence: 1 },
-          data: signalData,
-          expiresAt: new Date(now + 60_000),
-        };
-
-        this.pushSignal(signal);
+        this.pushSignal(
+          createSignal(
+            'plugin_event',
+            'plugin.perspective' as SignalSource,
+            { value: 1, confidence: 1 },
+            {
+              data: signalData,
+            }
+          )
+        );
         this.signaledDuePredictions.add(entry.id);
 
         this.logger.info(
@@ -1269,6 +1270,52 @@ export class CoreLoop {
       this.logger.trace(
         { error: error instanceof Error ? error.message : String(error) },
         'Failed to check overdue predictions'
+      );
+    }
+  }
+
+  /**
+   * Prune dedup sets by removing IDs that no longer exist in memory.
+   * Called on sleep transition to prevent unbounded growth.
+   */
+  private async pruneSignaledSets(): Promise<void> {
+    const mp = this.memoryProvider;
+    if (!mp) return;
+
+    let pruned = 0;
+
+    for (const id of this.signaledDueCommitments) {
+      const entry = await mp.getById(id);
+      if (!entry) {
+        this.signaledDueCommitments.delete(id);
+        pruned++;
+      }
+    }
+    for (const id of this.signaledOverdueCommitments) {
+      const entry = await mp.getById(id);
+      if (!entry) {
+        this.signaledOverdueCommitments.delete(id);
+        pruned++;
+      }
+    }
+    for (const id of this.signaledDuePredictions) {
+      const entry = await mp.getById(id);
+      if (!entry) {
+        this.signaledDuePredictions.delete(id);
+        pruned++;
+      }
+    }
+
+    if (pruned > 0) {
+      this.logger.info(
+        {
+          pruned,
+          remaining:
+            this.signaledDueCommitments.size +
+            this.signaledOverdueCommitments.size +
+            this.signaledDuePredictions.size,
+        },
+        'Pruned stale entries from dedup sets'
       );
     }
   }

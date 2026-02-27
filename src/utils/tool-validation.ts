@@ -3,9 +3,9 @@
  *
  * Shared validation logic for tool arguments against raw JSON Schema.
  * Used by both Cognition (via prevalidateToolArgs) and Motor Cortex.
- *
- * Zero project imports - pure validation logic.
  */
+
+import { levenshtein } from './levenshtein.js';
 
 /**
  * Patterns that indicate placeholder values from LLM output.
@@ -86,33 +86,6 @@ export function getTypeListFromSchema(
     return out;
   }
   return [];
-}
-
-function levenshtein(a: string, b: string): number {
-  const aLen = a.length;
-  const bLen = b.length;
-  if (aLen === 0) return bLen;
-  if (bLen === 0) return aLen;
-
-  const prev: number[] = [];
-  const curr: number[] = [];
-
-  for (let j = 0; j <= bLen; j++) prev[j] = j;
-
-  for (let i = 1; i <= aLen; i++) {
-    curr[0] = i;
-    const aChar = a.charCodeAt(i - 1);
-    for (let j = 1; j <= bLen; j++) {
-      const cost = aChar === b.charCodeAt(j - 1) ? 0 : 1;
-      const prevVal = prev[j] ?? 0;
-      const currPrev = curr[j - 1] ?? 0;
-      const prevPrev = prev[j - 1] ?? 0;
-      curr[j] = Math.min(prevVal + 1, currPrev + 1, prevPrev + cost);
-    }
-    for (let j = 0; j <= bLen; j++) prev[j] = curr[j] ?? 0;
-  }
-
-  return prev[bLen] ?? 0;
 }
 
 function suggestClosestKey(key: string, candidates: string[]): string | null {

@@ -10,7 +10,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { copyFile, readFile, readdir, cp } from 'node:fs/promises';
+import { copyFile, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -170,20 +170,6 @@ async function assembleBuildContext(
     // Copy sandbox-worker.js (needed by tool-server for code execution)
     await copyFile(sandboxWorkerFile, join(contextDir, 'sandbox-worker.js'));
 
-    // Copy scripts/ directory (echo-test.js, etc.)
-    // Scripts are always .js (no compilation needed) — live in src/ even in dev
-    const srcContainerDirForScripts = getRuntimeDir('container');
-    const scriptsSourceDir = join(srcContainerDirForScripts, 'scripts');
-    const scriptsDestDir = join(contextDir, 'scripts');
-    try {
-      const scriptFiles = await readdir(scriptsSourceDir);
-      if (scriptFiles.length > 0) {
-        await cp(scriptsSourceDir, scriptsDestDir, { recursive: true });
-      }
-    } catch {
-      // No scripts directory yet — that's fine for dev
-    }
-
     // Compute content hash for staleness detection.
     // In dev mode: hash the SOURCE .ts files so any src change triggers a rebuild.
     // In prod mode: hash the compiled .js files (they ARE the source of truth).
@@ -196,15 +182,6 @@ async function assembleBuildContext(
       hash.update(await readFile(toolServerFile));
       hash.update(await readFile(toolServerUtilsFile));
       hash.update(await readFile(sandboxWorkerFile));
-    }
-    // Include scripts in hash (they're always .js, no dev/prod distinction)
-    try {
-      const scriptFilesForHash = await readdir(scriptsDestDir);
-      for (const sf of scriptFilesForHash.sort()) {
-        hash.update(await readFile(join(scriptsDestDir, sf)));
-      }
-    } catch {
-      // No scripts yet
     }
     // Include Dockerfile template so package/env-var changes trigger a rebuild
     hash.update(buildDockerfile(''));

@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, GrammyError } from 'grammy';
 import type { Context } from 'grammy';
 import type { MessageReactionUpdated } from 'grammy/types';
 import type { Logger, Signal } from '../../types/index.js';
@@ -610,11 +610,10 @@ export class TelegramChannel implements Channel {
         throw new TelegramError('Request timed out', { retryable: true });
       }
 
-      // Check if it's a Telegram API error
+      // Determine if error is retryable (5xx server errors, rate limits)
+      const retryable =
+        error instanceof GrammyError && (error.error_code >= 500 || error.error_code === 429);
       const errorMessage = error instanceof Error ? error.message : String(error);
-
-      // Determine if error is retryable (5xx errors, rate limits)
-      const retryable = errorMessage.includes('5') || errorMessage.includes('429');
 
       throw new TelegramError(`Telegram API error: ${errorMessage}`, { retryable });
     }

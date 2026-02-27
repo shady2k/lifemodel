@@ -5,35 +5,16 @@
  * entrypoint, domains, lock config, and I/O schemas for a script.
  *
  * Script ID namespace: <domain>.<resource>.<action>
- * Examples: test.echo.run, news.telegram_group.fetch
+ * Examples: news.telegram_group.fetch, news.telegram_group.list
  */
 
 import { z } from 'zod';
-import { CONTAINER_IMAGE, BROWSER_IMAGE } from '../container/types.js';
+import { BROWSER_IMAGE } from '../container/types.js';
 import type { ScriptRegistryEntry } from './script-types.js';
 
 // ─── Registry Entries ────────────────────────────────────────
 
 const entries = new Map<string, ScriptRegistryEntry>();
-
-/**
- * test.echo.run — Phase 1 test script.
- * Reads SCRIPT_INPUTS, echoes { echo: inputs.message }.
- * Uses the existing motor image (no browser needed).
- */
-entries.set('test.echo.run', {
-  id: 'test.echo.run',
-  image: CONTAINER_IMAGE,
-  entrypoint: ['node', '/opt/motor/scripts/echo-test.js'],
-  domains: [],
-  maxTimeoutMs: 10_000,
-  inputSchema: z.object({
-    message: z.string(),
-  }),
-  outputSchema: z.object({
-    echo: z.string(),
-  }),
-});
 
 /**
  * news.telegram_group.fetch — Fetch messages from a private Telegram group.

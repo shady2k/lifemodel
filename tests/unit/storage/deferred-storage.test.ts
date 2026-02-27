@@ -180,6 +180,67 @@ describe('DeferredStorage', () => {
     });
   });
 
+  describe('write-during-flush safety', () => {
+    it('should not lose writes that arrive during a flush', async () => {
+      // Make underlying.save slow so we can write during the flush
+      let saveCallCount = 0;
+      mockStorage.save = vi.fn(async (key: string, value: unknown) => {
+        saveCallCount++;
+        if (saveCallCount === 1) {
+          // During the first underlying write, simulate a new save arriving
+          await deferredStorage.save('key1', { value: 'updated-during-flush' });
+        }
+        mockStorage.data.set(key, value);
+      });
+
+      await deferredStorage.save('key1', { value: 'original' });
+      await deferredStorage.flush();
+
+      // The write-during-flush data should still be dirty
+      expect(deferredStorage.getDirtyCount()).toBe(1);
+
+      // Second flush should persist the updated value
+      await deferredStorage.flush();
+      expect(mockStorage.save).toHaveBeenLastCalledWith('key1', { value: 'updated-during-flush' });
+    });
+
+    it('should schedule re-flush when flush is requested during in-progress flush', async () => {
+      let resolveFirstSave: (() => void) | undefined;
+      const firstSavePromise = new Promise<void>((r) => {
+        resolveFirstSave = r;
+      });
+
+      let saveCount = 0;
+      mockStorage.save = vi.fn(async (key: string, value: unknown) => {
+        saveCount++;
+        if (saveCount === 1) {
+          // Block the first save to simulate slow I/O
+          await firstSavePromise;
+        }
+        mockStorage.data.set(key, value);
+      });
+
+      await deferredStorage.save('key1', { value: 'first' });
+
+      // Start flush (will block on first save)
+      const flushPromise = deferredStorage.flush();
+
+      // While flush is blocked, save new data and request another flush
+      await deferredStorage.save('key2', { value: 'second' });
+      const secondFlush = deferredStorage.flush(); // should set reflushNeeded
+
+      // Unblock the first save
+      resolveFirstSave!();
+      await flushPromise;
+      await secondFlush;
+
+      // Both keys should be persisted
+      expect(mockStorage.data.get('key1')).toEqual({ value: 'first' });
+      expect(mockStorage.data.get('key2')).toEqual({ value: 'second' });
+      expect(deferredStorage.getDirtyCount()).toBe(0);
+    });
+  });
+
   describe('getDirtyCount', () => {
     it('should track dirty entries', async () => {
       expect(deferredStorage.getDirtyCount()).toBe(0);
