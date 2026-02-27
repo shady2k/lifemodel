@@ -99,9 +99,9 @@ export interface SystemHealthConfig {
  */
 const DEFAULT_CONFIG: SystemHealthConfig = {
   eventLoopLag: {
-    elevated: 100, // 100ms lag → elevated
-    high: 250, // 250ms lag → high
-    critical: 500, // 500ms lag → critical
+    elevated: 300, // 300ms lag → elevated (normal LLM call setup ~200-300ms)
+    high: 500, // 500ms lag → high
+    critical: 1000, // 1s lag → critical
   },
   cpuUsage: {
     elevated: 90, // 90% CPU → elevated (ELU now handles JS thread busy)

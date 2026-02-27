@@ -846,9 +846,20 @@ export class VercelAIProvider extends BaseLLMProvider {
       );
     }
 
-    // Debug: log provider options if present
+    // Debug: log provider options if present (exclude tools — already logged separately,
+    // and serializing 23 full tool schemas blocks the event loop for ~200ms)
     if (providerOptions) {
-      this.providerLogger?.debug({ providerOptions }, 'Provider options added');
+      const providerKey = Object.keys(providerOptions)[0] as
+        | keyof typeof providerOptions
+        | undefined;
+      const opts = providerKey ? providerOptions[providerKey] : undefined;
+      const toolCount =
+        opts && Array.isArray(opts['tools']) ? (opts['tools'] as unknown[]).length : 0;
+      const { tools: _tools, ...loggableOpts } = opts ?? {};
+      this.providerLogger?.debug(
+        { providerOptions: { [providerKey ?? 'unknown']: loggableOpts }, toolCount },
+        'Provider options added'
+      );
     }
 
     // Prepare generateText options with proper typing

@@ -355,7 +355,7 @@ export class CognitionProcessor implements CognitionLayer {
     // Get agent identity
     const identity = this.agent?.getIdentity();
 
-    // Fetch conversation status once (used for completedActions, timeSince, and loop context)
+    // Fetch conversation status (needed by completedActions — must resolve first)
     let conversationStatus: string | undefined;
     let timeSinceLastMessageMs: number | undefined;
     if (recipientId && this.conversationManager) {
@@ -373,67 +373,65 @@ export class CognitionProcessor implements CognitionLayer {
       }
     }
 
-    // Get completed actions (for autonomous triggers and active follow-up messages)
-    const completedActions = await this.getCompletedActions(
-      recipientId,
-      triggerSignal.type,
-      conversationStatus
-    );
+    // Parallel context fetch — all reads are independent (no shared mutable state).
+    // Memory reads share getAllCached() so the first populates the cache for the rest.
+    const triggerType = triggerSignal.type;
+    const isAutonomousTrigger = triggerType === 'thought' || triggerType === 'plugin_event';
 
-    // Get recent thoughts for context priming
-    const recentThoughts = await this.getRecentThoughts(recipientId);
-
-    // Get pending intentions from thought processing (insights to surface)
-    const pendingIntentions = await this.getPendingIntentions(recipientId);
-
-    // Get soul state for identity awareness
-    const soulState = await this.getSoulState();
-
-    // Get behavioral rules learned from user feedback
-    const behaviorRules = await this.getBehaviorRules(recipientId);
-
-    // Get active commitments (promises the agent has made)
-    const activeCommitments = await this.getActiveCommitments(recipientId);
-
-    // Get active desires (wants the agent has)
-    const activeDesires = await this.getActiveDesires(recipientId);
-
-    // Get perspectives (opinions and predictions)
-    const { opinions, predictions } = await this.getPerspectives(recipientId);
-
-    // Load available skills for Motor Cortex
-    const availableSkills = await discoverSkills(undefined, this.config.builtinSkillsDir);
-
-    // Get associations via graph expansion (only for user-facing triggers with text)
-    let associations: AssociationResult | undefined;
-    if (this.memoryProvider?.getAssociations && triggerSignal.type === 'user_message') {
-      const triggerText = (triggerSignal.data as Record<string, unknown> | undefined)?.['text'];
-      if (typeof triggerText === 'string' && triggerText.length >= 2) {
-        try {
-          associations = await this.memoryProvider.getAssociations(triggerText, 5);
-          // Check if associations have any content
-          const hasContent =
-            associations &&
-            (associations.directMatches.length > 0 ||
-              associations.relatedContext.length > 0 ||
-              associations.openCommitments.length > 0);
-          if (!hasContent) associations = undefined;
-        } catch (error) {
-          this.logger.warn(
-            { error: error instanceof Error ? error.message : String(error) },
-            'Failed to get associations, skipping'
-          );
+    const associationPromise = (async (): Promise<AssociationResult | undefined> => {
+      if (this.memoryProvider?.getAssociations && triggerSignal.type === 'user_message') {
+        const triggerText = (triggerSignal.data as Record<string, unknown> | undefined)?.['text'];
+        if (typeof triggerText === 'string' && triggerText.length >= 2) {
+          try {
+            const result = await this.memoryProvider.getAssociations(triggerText, 5);
+            const hasContent =
+              result &&
+              (result.directMatches.length > 0 ||
+                result.relatedContext.length > 0 ||
+                result.openCommitments.length > 0);
+            return hasContent ? result : undefined;
+          } catch (error) {
+            this.logger.warn(
+              { error: error instanceof Error ? error.message : String(error) },
+              'Failed to get associations, skipping'
+            );
+          }
         }
       }
-    }
+      return undefined;
+    })();
+
+    const [
+      completedActions,
+      recentThoughts,
+      pendingIntentions,
+      soulState,
+      behaviorRules,
+      activeCommitments,
+      activeDesires,
+      { opinions, predictions },
+      availableSkills,
+      associations,
+      conversationHistory,
+    ] = await Promise.all([
+      this.getCompletedActions(recipientId, triggerSignal.type, conversationStatus),
+      this.getRecentThoughts(recipientId),
+      this.getPendingIntentions(recipientId),
+      this.getSoulState(),
+      this.getBehaviorRules(recipientId),
+      this.getActiveCommitments(recipientId),
+      this.getActiveDesires(recipientId),
+      this.getPerspectives(recipientId),
+      discoverSkills(undefined, this.config.builtinSkillsDir),
+      associationPromise,
+      isAutonomousTrigger ? Promise.resolve([]) : this.getConversationHistory(recipientId),
+    ]);
 
     // Build loop context with runtime config
     // Autonomous triggers (thoughts, plugin events) don't get history:
     // - They're not conversation continuations
     // - They can use core.memory if they need context
     // - This follows Design Principle #1 (Energy Conservation) and prevents context confusion
-    const triggerType = triggerSignal.type;
-    const isAutonomousTrigger = triggerType === 'thought' || triggerType === 'plugin_event';
     const loopContext: LoopContext = {
       triggerSignal,
       agentState: context.agentState,
@@ -446,9 +444,7 @@ export class CognitionProcessor implements CognitionLayer {
             preferences: identity.preferences,
           }
         : undefined,
-      conversationHistory: isAutonomousTrigger
-        ? [] // Autonomous triggers: use core.memory if context needed
-        : await this.getConversationHistory(recipientId),
+      conversationHistory,
       userModel: this.userModel?.getBeliefs() ?? {},
       tickId: context.tickId,
       recipientId, // Still propagate for routing if thought decides to respond
