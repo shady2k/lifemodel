@@ -893,3 +893,254 @@ describe('Calories Tool - Auto-Update Dish Basis', () => {
     expect(logResult.dailySummary.totalCalories).toBe(221); // 170g × 130/100
   });
 });
+
+describe('Calories Tool - Correct Action', () => {
+  beforeEach(() => {
+    resetMigrationState();
+    vi.clearAllMocks();
+  });
+
+  function seedPizzaData(storage: ReturnType<typeof createMockStorage>) {
+    const item: FoodItem = {
+      id: 'item_pizza',
+      canonicalName: 'Римская пицца',
+      measurementKind: 'weight',
+      basis: { caloriesPer: 75, perQuantity: 1, perUnit: 'slice' },
+      createdAt: '2026-02-27T10:00:00Z',
+      updatedAt: '2026-02-27T10:00:00Z',
+      recipientId: 'user_test',
+    };
+    const entry: FoodEntry = {
+      id: 'food_pizza1',
+      dishId: 'item_pizza',
+      portion: { quantity: 4, unit: 'slice' },
+      mealType: 'dinner',
+      timestamp: '2026-02-27T18:00:00Z',
+      recipientId: 'user_test',
+    };
+    storage._store[CALORIES_STORAGE_KEYS.items] = [item];
+    storage._store['food:2026-02-27'] = [entry];
+    storage._store['schema_version'] = 4;
+    return { item, entry };
+  }
+
+  it('should correct portion by food name', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        new_portion: { quantity: 280, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; entryId: string; updated: { portion: { quantity: number; unit: string } }; dailySummary: { totalCalories: number } };
+
+    expect(result.success).toBe(true);
+    expect(result.entryId).toBe('food_pizza1');
+    expect(result.updated.portion).toEqual({ quantity: 280, unit: 'g' });
+
+    // Verify entry was actually updated in storage
+    const entries = storage._store['food:2026-02-27'] as FoodEntry[];
+    expect(entries[0].portion).toEqual({ quantity: 280, unit: 'g' });
+  });
+
+  it('should update dish basis globally', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        new_basis: { caloriesPer: 300, perQuantity: 100, perUnit: 'g' },
+      },
+      context
+    ) as { success: boolean; updated: { basis: { caloriesPer: number } }; affectedEntryCount: number };
+
+    expect(result.success).toBe(true);
+    expect(result.updated.basis).toBeDefined();
+    expect(result.updated.basis!.caloriesPer).toBe(300);
+
+    // Verify dish was updated in storage
+    const items = storage._store[CALORIES_STORAGE_KEYS.items] as FoodItem[];
+    expect(items[0].basis.caloriesPer).toBe(300);
+    expect(items[0].basis.perQuantity).toBe(100);
+    expect(items[0].basis.perUnit).toBe('g');
+  });
+
+  it('should update both portion and basis in one call', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        new_portion: { quantity: 280, unit: 'g' },
+        new_basis: { caloriesPer: 300, perQuantity: 100, perUnit: 'g' },
+      },
+      context
+    ) as { success: boolean; updated: { portion: object; basis: object }; dailySummary: { totalCalories: number } };
+
+    expect(result.success).toBe(true);
+    expect(result.updated.portion).toEqual({ quantity: 280, unit: 'g' });
+    expect(result.updated.basis).toBeDefined();
+
+    // Daily summary should reflect 280g × 300/100 = 840 kcal
+    expect(result.dailySummary.totalCalories).toBe(840);
+  });
+
+  it('should return error when no dish matches', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Несуществующее блюдо',
+        date: '2026-02-27',
+        new_portion: { quantity: 100, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No matching dish');
+  });
+
+  it('should return error when no entry found on date', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-26', // wrong date
+        new_portion: { quantity: 100, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No entry');
+  });
+
+  it('should return ambiguous entries when multiple match', async () => {
+    const { tool, storage, context } = setupTool();
+    const { item } = seedPizzaData(storage);
+
+    // Add a second pizza entry on the same date, different meal
+    const entries = storage._store['food:2026-02-27'] as FoodEntry[];
+    entries.push({
+      id: 'food_pizza2',
+      dishId: 'item_pizza',
+      portion: { quantity: 2, unit: 'slice' },
+      mealType: 'lunch',
+      timestamp: '2026-02-27T12:00:00Z',
+      recipientId: 'user_test',
+    });
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        new_portion: { quantity: 280, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; ambiguousEntries: Array<{ entryId: string; mealType: string }> };
+
+    expect(result.success).toBe(false);
+    expect(result.ambiguousEntries).toBeDefined();
+    expect(result.ambiguousEntries).toHaveLength(2);
+    expect(result.ambiguousEntries[0].entryId).toBe('food_pizza1');
+    expect(result.ambiguousEntries[1].entryId).toBe('food_pizza2');
+  });
+
+  it('should disambiguate by meal_type', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    // Add second entry
+    const entries = storage._store['food:2026-02-27'] as FoodEntry[];
+    entries.push({
+      id: 'food_pizza2',
+      dishId: 'item_pizza',
+      portion: { quantity: 2, unit: 'slice' },
+      mealType: 'lunch',
+      timestamp: '2026-02-27T12:00:00Z',
+      recipientId: 'user_test',
+    });
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        meal_type: 'dinner',
+        new_portion: { quantity: 280, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; entryId: string };
+
+    expect(result.success).toBe(true);
+    expect(result.entryId).toBe('food_pizza1');
+  });
+
+  it('should not affect other recipients entries', async () => {
+    const { tool, storage, context } = setupTool();
+    seedPizzaData(storage);
+
+    // Add entry for different user
+    const entries = storage._store['food:2026-02-27'] as FoodEntry[];
+    entries.push({
+      id: 'food_pizza_other',
+      dishId: 'item_pizza',
+      portion: { quantity: 1, unit: 'slice' },
+      mealType: 'dinner',
+      timestamp: '2026-02-27T18:00:00Z',
+      recipientId: 'user_other',
+    });
+
+    const result = await tool.execute(
+      {
+        action: 'correct',
+        name: 'Римская пицца',
+        date: '2026-02-27',
+        new_portion: { quantity: 280, unit: 'g' },
+      },
+      context
+    ) as { success: boolean; entryId: string };
+
+    // Should only find user_test's entry
+    expect(result.success).toBe(true);
+    expect(result.entryId).toBe('food_pizza1');
+
+    // Other user's entry should be untouched
+    const updatedEntries = storage._store['food:2026-02-27'] as FoodEntry[];
+    const otherEntry = updatedEntries.find((e) => e.id === 'food_pizza_other');
+    expect(otherEntry!.portion).toEqual({ quantity: 1, unit: 'slice' });
+  });
+
+  it('should validate that name is required', async () => {
+    const { tool, context } = setupTool();
+
+    const result = tool.validate({ action: 'correct', new_portion: { quantity: 100, unit: 'g' } });
+    expect(result.success).toBe(false);
+    expect((result as { error: string }).error).toContain('name');
+  });
+
+  it('should validate that at least one of new_portion or new_basis is required', async () => {
+    const { tool, context } = setupTool();
+
+    const result = tool.validate({ action: 'correct', name: 'Pizza' });
+    expect(result.success).toBe(false);
+    expect((result as { error: string }).error).toContain('new_portion or new_basis');
+  });
+});

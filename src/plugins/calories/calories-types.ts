@@ -395,6 +395,36 @@ export interface UpdateEntryResult {
 }
 
 // ============================================================================
+// Tool API: Correct Entry Action
+// ============================================================================
+
+export interface CorrectEntryResult {
+  success: boolean;
+  error?: string | undefined;
+  partial?: boolean | undefined;
+  entryId?: string | undefined;
+  dishId?: string | undefined;
+  updated?: {
+    portion?: Portion | undefined;
+    basis?: NutrientBasis | undefined;
+  };
+  affectedEntryCount?: number | undefined;
+  candidates?: {
+    dishId: string;
+    canonicalName: string;
+    score: number;
+  }[];
+  ambiguousEntries?: Array<{
+    entryId: string;
+    mealType?: MealType | undefined;
+    portion: Portion;
+    timestamp: string;
+    localTime?: string | undefined;
+  }>;
+  dailySummary?: DailySummary | undefined;
+}
+
+// ============================================================================
 // Matching Types
 // ============================================================================
 

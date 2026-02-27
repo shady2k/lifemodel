@@ -33,6 +33,7 @@ import type {
   StatsDay,
   UpdateItemResult,
   UpdateEntryResult,
+  CorrectEntryResult,
   ExistingEntryInfo,
   NutrientBasis,
 } from './calories-types.js';
@@ -1271,6 +1272,147 @@ export function createCaloriesTool(
   }
 
   // ============================================================================
+  // Correct Entry (name-based entry correction with optional basis update)
+  // ============================================================================
+
+  /**
+   * Find a logged entry by food name (fuzzy) and correct its portion and/or
+   * the underlying dish basis in a single call.  Designed for user corrections
+   * like "the pizza was 70 g per piece, 300 kcal / 100 g".
+   */
+  async function correctEntry(
+    recipientId: string,
+    effectiveDate: string,
+    timezone: string,
+    name: string,
+    mealType?: MealType,
+    newPortion?: Portion,
+    newBasis?: NutrientBasis
+  ): Promise<CorrectEntryResult> {
+    // --- 1. Fuzzy-match dish by canonical name ---
+    const { canonicalName } = extractCanonicalName(name);
+    const allItems = (await storage.get<FoodItem[]>(CALORIES_STORAGE_KEYS.items)) ?? [];
+    const userItems = allItems.filter((i) => i.recipientId === recipientId);
+    const candidates = matchCandidates(canonicalName, userItems);
+    const top = candidates[0];
+
+    if (!top || top.score < 0.5) {
+      return { success: false, error: `No matching dish found for "${name}"` };
+    }
+
+    if (candidates.length > 1 && candidates[1] && top.score - candidates[1].score < 0.1) {
+      return {
+        success: false,
+        error: `Ambiguous match for "${name}" — specify dish_id with update_dish + update_entry instead`,
+        candidates: candidates.slice(0, 3).map((c) => ({
+          dishId: c.item.id,
+          canonicalName: c.item.canonicalName,
+          score: c.score,
+        })),
+      };
+    }
+
+    const targetItem = top.item;
+
+    // --- 2. Find matching entry on the effective date ---
+    const dateKey = `${CALORIES_STORAGE_KEYS.foodPrefix}${effectiveDate}`;
+    const entries = (await storage.get<FoodEntry[]>(dateKey)) ?? [];
+    const matching = entries.filter(
+      (e) =>
+        e.dishId === targetItem.id &&
+        e.recipientId === recipientId &&
+        (mealType === undefined || e.mealType === mealType)
+    );
+
+    if (matching.length === 0) {
+      return {
+        success: false,
+        error: `No entry for "${targetItem.canonicalName}" on ${effectiveDate}${mealType ? ` (${mealType})` : ''}`,
+      };
+    }
+
+    if (matching.length > 1) {
+      return {
+        success: false,
+        ambiguousEntries: matching.map((e) => {
+          const info: CorrectEntryResult['ambiguousEntries'] extends (infer T)[] | undefined
+            ? T
+            : never = {
+            entryId: e.id,
+            portion: e.portion,
+            timestamp: e.timestamp,
+          };
+          const lt = toLocalTime(e.timestamp, timezone);
+          if (lt) info.localTime = lt;
+          if (e.mealType) info.mealType = e.mealType;
+          return info;
+        }),
+        error: 'Multiple entries match — specify meal_type or use entry_id with update_entry',
+      };
+    }
+
+    const entry = matching[0]!;
+    const result: CorrectEntryResult = {
+      success: true,
+      entryId: entry.id,
+      dishId: targetItem.id,
+      updated: {},
+    };
+
+    // --- 3. Update entry portion (first — most important for user) ---
+    if (newPortion) {
+      entry.portion = newPortion;
+      await storage.set(dateKey, entries);
+      result.updated!.portion = newPortion;
+    }
+
+    // --- 4. Update dish basis (global — affects all entries) ---
+    if (newBasis) {
+      try {
+        targetItem.basis = normalizeBasis(newBasis);
+        targetItem.updatedAt = new Date().toISOString();
+        await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
+        result.updated!.basis = targetItem.basis;
+
+        // Count other entries affected by the basis change
+        const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
+        let affectedCount = 0;
+        for (const key of dateKeys) {
+          const dateEntries = await storage.get<FoodEntry[]>(key);
+          if (dateEntries) {
+            affectedCount += dateEntries.filter((e) => e.dishId === targetItem.id && e.recipientId === recipientId).length;
+          }
+        }
+        // Subtract the corrected entry itself
+        result.affectedEntryCount = Math.max(0, affectedCount - 1);
+      } catch (err) {
+        // Entry portion was already saved — report partial success
+        if (newPortion) {
+          result.partial = true;
+          result.error = `Entry portion updated, but basis update failed: ${err instanceof Error ? err.message : String(err)}`;
+        } else {
+          return { success: false, error: `Basis update failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+    }
+
+    result.dailySummary = await computeDailySummary(recipientId, effectiveDate);
+
+    logger.info(
+      {
+        entryId: entry.id,
+        dishId: targetItem.id,
+        newPortion,
+        newBasis: newBasis ? targetItem.basis : undefined,
+        partial: result.partial,
+      },
+      'Food entry corrected'
+    );
+
+    return result;
+  }
+
+  // ============================================================================
   // New Actions: Search, Stats, Update Item, Delete Item
   // ============================================================================
 
@@ -1634,6 +1776,7 @@ export function createCaloriesTool(
           'update_dish',
           'delete_dish',
           'update_entry',
+          'correct',
         ],
         description: 'Action to perform',
       },
@@ -1752,7 +1895,7 @@ export function createCaloriesTool(
       },
       name: {
         type: 'string',
-        description: 'update_dish only: fuzzy dish matching by name',
+        description: 'update_dish / correct: fuzzy dish matching by name',
       },
       new_name: {
         type: 'string',
@@ -1760,7 +1903,7 @@ export function createCaloriesTool(
       },
       new_basis: {
         type: 'object',
-        description: 'update_dish only: new nutritional basis',
+        description: 'update_dish / correct: new nutritional basis (updates dish globally — all entries reflect new calorie density)',
         properties: {
           caloriesPer: { type: 'number' },
           perQuantity: { type: 'number' },
@@ -1779,12 +1922,38 @@ export function createCaloriesTool(
         enum: ['breakfast', 'lunch', 'dinner', 'snack'],
         description: 'update_entry: new meal type to assign',
       },
+      new_portion: {
+        type: 'object',
+        description: 'correct: new portion to replace existing entry portion',
+        properties: {
+          quantity: { type: 'number', description: 'Amount (e.g., 280)' },
+          unit: {
+            type: 'string',
+            enum: [
+              'g',
+              'kg',
+              'ml',
+              'l',
+              'item',
+              'slice',
+              'cup',
+              'tbsp',
+              'tsp',
+              'serving',
+              'custom',
+            ],
+            description: 'Unit of measurement',
+          },
+        },
+        required: ['quantity', 'unit'],
+        additionalProperties: false,
+      },
     },
     required: ['action'],
     additionalProperties: false,
   };
 
-  const TOOL_DESCRIPTION = `Food and calorie tracking. Actions: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry.
+  const TOOL_DESCRIPTION = `Food and calorie tracking. Actions: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry, correct.
 
 Rules:
 - ALWAYS set meal_type when user groups by meal. Batch multiple items in entries array (distinct items only).
@@ -1793,6 +1962,7 @@ Rules:
 - name = pure food ("Americano" not "Americano 200ml"). Use calories_per_100g for kcal/100g input. Cooked kcal for cooked foods.
 - date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog/update_entry.
 - update_entry: change meal_type on existing entries. Use entry_ids (array) for bulk. Prefer over unlog+log when only reclassifying.
+- correct: fix a previously logged entry by food name. Updates portion (new_portion) and/or calorie basis (new_basis) in one call. No entry_id needed — finds by name+date+meal_type. new_basis updates the dish globally (all past/future entries reflect new calorie density). Use when user corrects weight, quantity, or calorie density.
 - LOG FIRST: The tool has its own food database with fuzzy matching. Log food by name+portion WITHOUT calories — if the food was logged before, calories auto-fill from history. Only look up calories externally when status="failed" with reason "No calorie data".`;
 
   const caloriesTool: PluginTool = {
@@ -1805,7 +1975,7 @@ Rules:
         name: 'action',
         type: 'string',
         description:
-          'Action: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry',
+          'Action: log, list, summary, goal, log_weight, unlog, search, stats, update_dish, delete_dish, update_entry, correct',
         required: true,
         enum: [
           'log',
@@ -1819,6 +1989,7 @@ Rules:
           'update_dish',
           'delete_dish',
           'update_entry',
+          'correct',
         ],
       },
       {
@@ -1838,7 +2009,7 @@ Rules:
       {
         name: 'meal_type',
         type: 'string',
-        description: 'Filter by meal type for list action',
+        description: 'Filter by meal type (list) or disambiguate entries (correct)',
         required: false,
         enum: ['breakfast', 'lunch', 'dinner', 'snack'],
       },
@@ -1914,7 +2085,7 @@ Rules:
       {
         name: 'name',
         type: 'string',
-        description: 'update_dish only: fuzzy dish matching by name',
+        description: 'update_dish / correct: fuzzy dish matching by name',
         required: false,
       },
       {
@@ -1927,7 +2098,13 @@ Rules:
         name: 'new_basis',
         type: 'object',
         description:
-          'update_dish only: new nutritional basis { caloriesPer, perQuantity, perUnit }',
+          'update_dish / correct: new nutritional basis { caloriesPer, perQuantity, perUnit }',
+        required: false,
+      },
+      {
+        name: 'new_portion',
+        type: 'object',
+        description: 'correct: new portion { quantity, unit } to replace existing entry portion',
         required: false,
       },
     ],
@@ -1948,6 +2125,7 @@ Rules:
         'update_dish',
         'delete_dish',
         'update_entry',
+        'correct',
       ];
       if (!validActions.includes(a['action'])) {
         return { success: false, error: `action: must be one of [${validActions.join(', ')}]` };
@@ -2111,6 +2289,72 @@ Rules:
         }
       }
 
+      if (a['action'] === 'correct') {
+        const name = a['name'];
+        if (!name || typeof name !== 'string' || name.trim().length === 0) {
+          return { success: false, error: 'name: required for correct action (food name to find)' };
+        }
+
+        const newPortion = a['new_portion'];
+        const newBasis = a['new_basis'];
+        if (!newPortion && !newBasis) {
+          return {
+            success: false,
+            error: 'At least one of new_portion or new_basis is required for correct action',
+          };
+        }
+
+        if (newPortion !== undefined && (typeof newPortion !== 'object' || newPortion === null || Array.isArray(newPortion))) {
+          return { success: false, error: 'new_portion: must be an object { quantity, unit }' };
+        }
+
+        if (newBasis !== undefined && (typeof newBasis !== 'object' || newBasis === null || Array.isArray(newBasis))) {
+          return { success: false, error: 'new_basis: must be an object { caloriesPer, perQuantity, perUnit }' };
+        }
+
+        if (newPortion && typeof newPortion === 'object') {
+          const p = newPortion as Record<string, unknown>;
+          if (typeof p['quantity'] !== 'number' || !Number.isFinite(p['quantity']) || p['quantity'] <= 0) {
+            return { success: false, error: 'new_portion.quantity: must be a positive number' };
+          }
+          if (typeof p['unit'] !== 'string' || !VALID_UNITS.includes(p['unit'] as Unit)) {
+            return {
+              success: false,
+              error: `new_portion.unit: must be one of [${VALID_UNITS.join(', ')}]`,
+            };
+          }
+        }
+
+        if (newBasis && typeof newBasis === 'object') {
+          const basis = newBasis as Record<string, unknown>;
+          if (
+            typeof basis['caloriesPer'] !== 'number' ||
+            !Number.isFinite(basis['caloriesPer']) ||
+            typeof basis['perQuantity'] !== 'number' ||
+            !Number.isFinite(basis['perQuantity']) ||
+            typeof basis['perUnit'] !== 'string'
+          ) {
+            return {
+              success: false,
+              error:
+                'new_basis: must have caloriesPer (number), perQuantity (number), perUnit (string)',
+            };
+          }
+          if (basis['caloriesPer'] < 0) {
+            return { success: false, error: 'new_basis.caloriesPer: must be >= 0' };
+          }
+          if (basis['perQuantity'] <= 0) {
+            return { success: false, error: 'new_basis.perQuantity: must be > 0' };
+          }
+          if (!VALID_UNITS.includes(basis['perUnit'] as Unit)) {
+            return {
+              success: false,
+              error: `new_basis.perUnit: must be one of [${VALID_UNITS.join(', ')}]`,
+            };
+          }
+        }
+      }
+
       return { success: true, data: a };
     },
     execute: async (
@@ -2127,6 +2371,7 @@ Rules:
       | UpdateItemResult
       | DeleteItemResult
       | UpdateEntryResult
+      | CorrectEntryResult
     > => {
       // Run migration on first execute (lazy, not in activate which is sync)
       await ensureMigrated(storage, logger);
@@ -2256,6 +2501,18 @@ Rules:
           return updateEntries(recipientId, ids, args['new_meal_type'] as MealType | undefined);
         }
 
+        case 'correct': {
+          return correctEntry(
+            recipientId,
+            effectiveDate,
+            timezone,
+            args['name'] as string,
+            args['meal_type'] as MealType | undefined,
+            args['new_portion'] as Portion | undefined,
+            args['new_basis'] as NutrientBasis | undefined
+          );
+        }
+
         default:
           return { success: false, error: `Unknown action: ${action}` } as DeleteResult;
       }
@@ -2297,6 +2554,16 @@ Rules:
         const newMealType = args['new_meal_type'];
         const mt = typeof newMealType === 'string' ? ` → ${newMealType}` : '';
         return `calories.update_entry${mt}`;
+      }
+
+      if (action === 'correct') {
+        const rawName = args['name'];
+        const dishName = typeof rawName === 'string' ? `"${rawName}"` : '?';
+        const rawPortion = args['new_portion'] as Record<string, unknown> | undefined;
+        const portionStr = rawPortion
+          ? ` → ${String(rawPortion['quantity'])}${String(rawPortion['unit'])}`
+          : '';
+        return `calories.correct: ${dishName}${portionStr}`;
       }
 
       return `calories.${action || 'unknown'}`;
