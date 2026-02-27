@@ -88,14 +88,13 @@ Validation: `isValidDomainPattern()` accepts exact domains, `*.domain` wildcards
      --add-host host.docker.internal:host-gateway \
      -e HTTP_PROXY=http://host.docker.internal:<port> \
      -e HTTPS_PROXY=http://host.docker.internal:<port> \
+     -e WAIT_FOR_READY=1 \
      --sysctl net.ipv6.conf.all.disable_ipv6=1 ...
 3. Copy workspace to container
-4. docker start motor-container
-5. docker pause motor-container           ← freeze before network activity
-6. docker inspect → get gateway IP
-7. Apply iptables: DROP all, ACCEPT only gateway:proxyPort
-8. docker unpause motor-container         ← resume with network locked down
-9. docker attach for IPC
+4. docker start -ai motor-container       ← tool-server blocks on stdin waiting for "ready\n"
+5. Resolve host gateway IP
+6. Apply iptables: DROP all, ACCEPT only gateway:proxyPort
+7. Write "ready\n" to stdin               ← tool-server starts IPC processing
 ```
 
 On failure at any step: `egressProxyManager.release(runId)` + container cleanup.

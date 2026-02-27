@@ -1288,7 +1288,20 @@ export function createContainerManager(logger: Logger): ContainerManager {
         }
       }
 
-      const args: string[] = ['run', '-d', '--label', DETACHED_CONTAINER_LABEL];
+      const args: string[] = [
+        'run',
+        '-d',
+        '--label',
+        DETACHED_CONTAINER_LABEL,
+
+        // Resource limits — prevent runaway processes from consuming host resources.
+        // Detached containers (e.g., browser-auth) can't use --cap-drop ALL or --read-only
+        // because Chromium needs capabilities and writable rootfs, but resource caps are safe.
+        '--pids-limit',
+        '512', // Chromium spawns many subprocesses (renderer, GPU, utility, extensions)
+        '--memory',
+        '1g', // Chromium + noVNC needs more than the default 512m
+      ];
 
       // Volume mounts
       if (config.volumes) {
