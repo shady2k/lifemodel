@@ -293,6 +293,7 @@ export class JsonMemoryProvider implements MemoryProvider {
       for (const id of toDelete) {
         await this.vectorStore.delete(id);
       }
+      this.invalidateCache();
       this.logger.info({ count: toDelete.length }, 'Cleaned up fully-decayed behavior rules');
     }
 

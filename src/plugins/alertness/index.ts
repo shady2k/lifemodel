@@ -23,6 +23,7 @@ import { detectTransition } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
 import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
 import { DateTime } from 'luxon';
+import type { IAlertness } from '../../ports/alertness.js';
 
 /** Module-level reference captured during activation (same pattern as calories plugin). */
 let pluginPrimitives: PluginPrimitives | null = null;
@@ -69,7 +70,7 @@ export const DEFAULT_ALERTNESS_CONFIG: AlertnessNeuronConfig = {
 /**
  * Alertness Neuron implementation.
  */
-export class AlertnessNeuron extends BaseNeuron {
+export class AlertnessNeuron extends BaseNeuron implements IAlertness {
   readonly id = 'alertness';
   readonly signalType: SignalType = 'alertness';
   readonly source: SignalSource = 'neuron.alertness';

@@ -6,10 +6,10 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeRu,
   extractCanonicalName,
-  levenshtein,
   matchCandidates,
   decideMatch,
 } from '../../../../src/plugins/calories/calories-matching.js';
+import { levenshtein } from '../../../../src/utils/levenshtein.js';
 import type { FoodItem } from '../../../../src/plugins/calories/calories-types.js';
 
 describe('normalizeRu', () => {

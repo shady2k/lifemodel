@@ -75,7 +75,6 @@ export function extractCanonicalName(raw: string): NormalizedNameResult {
 }
 
 import { levenshtein } from '../../utils/levenshtein.js';
-export { levenshtein };
 
 function normalizeForMatch(s: string): string {
   return normalizeRu(s)

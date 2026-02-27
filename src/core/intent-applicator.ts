@@ -747,10 +747,10 @@ export class IntentApplicator {
       this.deps.metrics.counter('commitments_created', { source: source ?? 'explicit' });
     } else if (action === 'mark_kept') {
       // Update commitment status to kept
-      if (commitmentId && this.deps.statusUpdates) {
+      if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
           commitmentId, 'kept',
-          this.deps.domainTrackers!.signaledDueCommitments, this.deps.domainTrackers!.signaledOverdueCommitments,
+          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
           commitmentRecipientId,
         );
         this.deps.logger.info({ commitmentId }, 'Commitment marked as kept');
@@ -758,10 +758,10 @@ export class IntentApplicator {
       }
     } else if (action === 'mark_repaired') {
       // Update commitment status to repaired with note
-      if (commitmentId && this.deps.statusUpdates) {
+      if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
           commitmentId, 'repaired',
-          this.deps.domainTrackers!.signaledDueCommitments, this.deps.domainTrackers!.signaledOverdueCommitments,
+          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
           commitmentRecipientId, repairNote,
         );
         this.deps.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
@@ -769,10 +769,10 @@ export class IntentApplicator {
       }
     } else if (action === 'cancel') {
       // Update commitment status to cancelled
-      if (commitmentId && this.deps.statusUpdates) {
+      if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
           commitmentId, 'cancelled',
-          this.deps.domainTrackers!.signaledDueCommitments, this.deps.domainTrackers!.signaledOverdueCommitments,
+          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
           commitmentRecipientId,
         );
         this.deps.logger.info({ commitmentId }, 'Commitment cancelled');
@@ -959,9 +959,9 @@ export class IntentApplicator {
       );
       this.deps.metrics.counter('predictions_created');
     } else if (action === 'resolve_prediction') {
-      if (predictionId && outcome && this.deps.statusUpdates) {
+      if (predictionId && outcome && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updatePredictionStatus(
-          predictionId, outcome, this.deps.domainTrackers!.signaledDuePredictions,
+          predictionId, outcome, this.deps.domainTrackers.signaledDuePredictions,
         );
         this.deps.logger.info({ predictionId, outcome }, 'Prediction resolved');
         this.deps.metrics.counter('predictions_resolved', { outcome });
