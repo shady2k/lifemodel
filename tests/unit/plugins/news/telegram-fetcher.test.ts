@@ -155,7 +155,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@test_channel', 'Test Channel');
+      const result = await fetchTelegramChannel('@test_channel', 'Test Channel', 'src_test');
 
       expect(result.success).toBe(true);
       expect(result.articles.length).toBeGreaterThan(0);
@@ -170,7 +170,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      await fetchTelegramChannel('@testchannel', 'Test');
+      await fetchTelegramChannel('@testchannel', 'Test', 'src_test');
 
       expect(mockFetch).toHaveBeenCalledWith(
         'https://t.me/s/testchannel',
@@ -186,7 +186,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@nonexistent', 'Test');
+      const result = await fetchTelegramChannel('@nonexistent', 'Test', 'src_test');
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
@@ -200,7 +200,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@ratelimited', 'Test');
+      const result = await fetchTelegramChannel('@ratelimited', 'Test', 'src_test');
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Rate limited');
@@ -214,7 +214,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@privatechannel', 'Private');
+      const result = await fetchTelegramChannel('@privatechannel', 'Private', 'src_test');
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('private');
@@ -224,7 +224,7 @@ describe('Telegram Fetcher', () => {
       const mockFetch = vi.fn().mockRejectedValue(new Error('Network error'));
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@testchannel', 'Test');
+      const result = await fetchTelegramChannel('@testchannel', 'Test', 'src_test');
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Network error');
@@ -238,7 +238,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@slowchannel', 'Slow');
+      const result = await fetchTelegramChannel('@slowchannel', 'Slow', 'src_test');
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('timeout');
@@ -252,7 +252,7 @@ describe('Telegram Fetcher', () => {
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      const result = await fetchTelegramChannel('@emptychannel', 'Empty');
+      const result = await fetchTelegramChannel('@emptychannel', 'Empty', 'src_test');
 
       expect(result.success).toBe(true);
       expect(result.articles).toEqual([]);
@@ -296,6 +296,7 @@ describe('Telegram Fetcher', () => {
       const result = await fetchTelegramChannelUntil(
         '@gap_channel',
         'Gap Test Channel',
+        'src_gap',
         'tg_gap_channel_26580' // Higher than max post ID
       );
 
@@ -343,6 +344,7 @@ describe('Telegram Fetcher', () => {
       const result = await fetchTelegramChannelUntil(
         '@normal_channel',
         'Normal Test Channel',
+        'src_normal',
         'tg_normal_channel_102'
       );
 
@@ -362,11 +364,11 @@ describe('Telegram Fetcher', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       // First request
-      await fetchTelegramChannel('@testchannel', 'Test');
+      await fetchTelegramChannel('@testchannel', 'Test', 'src_test');
 
       // Second request immediately - should be delayed
       const startTime = Date.now();
-      const promise = fetchTelegramChannel('@testchannel', 'Test');
+      const promise = fetchTelegramChannel('@testchannel', 'Test', 'src_test');
 
       // Advance timers to trigger rate limit delay
       await vi.advanceTimersByTimeAsync(2000);
@@ -385,8 +387,8 @@ describe('Telegram Fetcher', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       // Requests to different channels
-      await fetchTelegramChannel('@channel1', 'Channel 1');
-      await fetchTelegramChannel('@channel2', 'Channel 2');
+      await fetchTelegramChannel('@channel1', 'Channel 1', 'src_ch1');
+      await fetchTelegramChannel('@channel2', 'Channel 2', 'src_ch2');
 
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });

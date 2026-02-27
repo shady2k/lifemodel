@@ -42,6 +42,8 @@ export interface TelegramFetchResult {
   latestId?: string | undefined;
   /** Cursor for fetching older messages (pagination) */
   nextBefore?: string | undefined;
+  /** Channel page exists (has title) but has no visible messages — likely private */
+  likelyPrivate?: boolean | undefined;
 }
 
 /**
@@ -54,7 +56,8 @@ export interface TelegramFetchResult {
 function telegramMsgToArticle(
   msg: TelegramParsedMessage,
   channelHandle: string,
-  channelName: string
+  channelName: string,
+  sourceId: string
 ): FetchedArticle {
   // Build title
   let title = '';
@@ -134,7 +137,7 @@ function telegramMsgToArticle(
     title: title || `Message ${msg.id}`,
     summary,
     url: `https://t.me/${channelHandle}/${msg.id}`,
-    sourceId: `telegram:${channelHandle}`,
+    sourceId,
     sourceName: channelName,
     publishedAt: publishedAt && !isNaN(publishedAt.getTime()) ? publishedAt : undefined,
   };
@@ -146,10 +149,11 @@ function telegramMsgToArticle(
 function parsedToArticles(
   parsed: TelegramParsedContent,
   channelHandle: string,
-  channelName: string
+  channelName: string,
+  sourceId: string
 ): { articles: FetchedArticle[]; nextBefore: string | null } {
   const articles = parsed.messages.map((msg) =>
-    telegramMsgToArticle(msg, channelHandle, channelName)
+    telegramMsgToArticle(msg, channelHandle, channelName, sourceId)
   );
 
   return {
@@ -183,6 +187,7 @@ async function applyRateLimit(channelHandle: string): Promise<void> {
 export async function fetchTelegramChannel(
   channelHandle: string,
   channelName: string,
+  sourceId: string,
   beforeId?: string
 ): Promise<TelegramFetchResult> {
   // Normalize handle (remove @ if present)
@@ -255,23 +260,29 @@ export async function fetchTelegramChannel(
       }
     }
 
+    // Channel page exists (has title/info)
+    const hasChannelInfo = html.includes('tgme_page_title') || html.includes('tgme_channel_info');
+
     // Check for empty results
     if (html.includes('tme_no_messages_found')) {
       return {
         success: true,
         articles: [],
+        likelyPrivate: hasChannelInfo,
       };
     }
 
     // Parse messages using shared parser
     const parsed = parseTelegramHtml(html, handle);
-    const { articles, nextBefore } = parsedToArticles(parsed, handle, channelName);
+    const { articles, nextBefore } = parsedToArticles(parsed, handle, channelName, sourceId);
 
     return {
       success: true,
       articles,
       latestId: articles[0]?.id,
       nextBefore: nextBefore ?? undefined,
+      // Channel exists but parser found 0 messages — likely private
+      likelyPrivate: hasChannelInfo && articles.length === 0,
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
@@ -291,6 +302,55 @@ export async function fetchTelegramChannel(
 }
 
 /**
+ * Probe a Telegram @handle to detect whether it's a public channel, group, or private.
+ * Fetches the t.me/<handle> info page (lightweight, no rate-limit concern).
+ *
+ * - 'channel': public channel (has "subscribers" in extra)
+ * - 'group': public group (has "members" or "online" in extra)
+ * - 'private': no public info page (contact/send-message page or not found)
+ */
+export async function probeTelegramHandle(
+  handle: string
+): Promise<'channel' | 'group' | 'private'> {
+  const normalized = handle.startsWith('@') ? handle.slice(1) : handle;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+    let response: Response;
+    try {
+      response = await fetch(`https://t.me/${normalized}`, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) return 'private';
+
+    const html = await response.text();
+
+    // tgme_page_extra contains "N subscribers" for channels, "N members" for groups
+    const extraMatch = html.match(/tgme_page_extra[^>]*>([^<]+)</);
+    if (extraMatch) {
+      const extra = (extraMatch[1] ?? '').toLowerCase();
+      if (extra.includes('subscriber')) return 'channel';
+      if (extra.includes('member') || extra.includes('online')) return 'group';
+    }
+
+    // Has page title but no extra → could be a bot or private entity
+    return 'private';
+  } catch {
+    return 'private';
+  }
+}
+
+/**
  * Clear rate limit tracking (useful for testing).
  */
 export function clearRateLimitTracking(): void {
@@ -303,10 +363,11 @@ export function clearRateLimitTracking(): void {
 export function parseHtml(
   html: string,
   channelHandle: string,
-  channelName: string
+  channelName: string,
+  sourceId?: string
 ): FetchedArticle[] {
   const parsed = parseTelegramHtml(html, channelHandle);
-  return parsedToArticles(parsed, channelHandle, channelName).articles;
+  return parsedToArticles(parsed, channelHandle, channelName, sourceId ?? channelHandle).articles;
 }
 
 /**
@@ -328,6 +389,7 @@ const MAX_POLL_PAGES = 10;
 export async function fetchTelegramChannelUntil(
   channelHandle: string,
   channelName: string,
+  sourceId: string,
   lastSeenId?: string,
   maxPages: number = MAX_POLL_PAGES
 ): Promise<TelegramFetchResult> {
@@ -341,7 +403,7 @@ export async function fetchTelegramChannelUntil(
   const lastSeenNumericId = lastSeenId ? parseInt(lastSeenId.split('_').pop() ?? '0', 10) : 0;
 
   while (pagesLoaded < maxPages) {
-    const result = await fetchTelegramChannel(channelHandle, channelName, currentBefore);
+    const result = await fetchTelegramChannel(channelHandle, channelName, sourceId, currentBefore);
 
     if (!result.success) {
       // If we already have some articles, return them with a warning

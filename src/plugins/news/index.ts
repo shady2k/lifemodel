@@ -452,7 +452,7 @@ async function fetchSingleTelegramSource(
 ): Promise<FetchSourceResult> {
   return fetchSourceWithHealthPolicy(
     source, storage, logger, 'Telegram channel',
-    (state) => fetchTelegramChannelUntil(source.url, source.name, state?.lastSeenId)
+    (state) => fetchTelegramChannelUntil(source.url, source.name, source.id, state?.lastSeenId)
   );
 }
 

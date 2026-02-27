@@ -16,6 +16,7 @@ import type {
   IntentEmitterPrimitive,
   MemorySearchPrimitive,
   ScriptRunnerPrimitive,
+  PluginScriptRunResult,
 } from '../../../types/plugin.js';
 import type { Logger } from '../../../types/logger.js';
 import type {
@@ -197,6 +198,55 @@ async function saveSourceState(storage: StoragePrimitive, state: SourceState): P
 }
 
 /**
+ * Discover the Telegram Web group URL for a @handle by running list_groups
+ * in the browser. Returns { profile, groupUrl } if found, null otherwise.
+ * Used during add_source to auto-upgrade telegram → telegram-group.
+ */
+async function tryUpgradeToGroup(
+  handle: string,
+  name: string,
+  scriptRunner: ScriptRunnerPrimitive,
+  logger: Logger
+): Promise<{ profile: string; groupUrl: string } | null> {
+  const profile = 'telegram';
+
+  let scriptResult: PluginScriptRunResult;
+  try {
+    scriptResult = await scriptRunner.runScript({
+      scriptId: 'news.telegram_group.list',
+      inputs: { profile },
+      timeoutMs: 60_000,
+    });
+  } catch {
+    logger.debug({ handle }, 'Auto-upgrade: list_groups script failed');
+    return null;
+  }
+
+  if (!scriptResult.ok) return null;
+
+  const output = scriptResult.output as
+    | { ok: boolean; groups: { id: string; name: string; url: string }[]; error?: { code: string; message: string } }
+    | undefined;
+  if (!output?.ok || !output.groups) return null;
+
+  // Match by name or handle (case-insensitive)
+  const normalizedName = name.toLowerCase().trim();
+  const normalizedHandle = handle.replace(/^@/, '').toLowerCase();
+  const match = output.groups.find((g) => {
+    const gName = g.name.toLowerCase().trim();
+    return gName === normalizedName || gName.includes(normalizedHandle);
+  });
+
+  if (!match) {
+    logger.debug({ handle, name, groupCount: output.groups.length }, 'Auto-upgrade: no matching group found');
+    return null;
+  }
+
+  logger.info({ handle, groupUrl: match.url, groupName: match.name }, 'Auto-upgrading telegram → telegram-group');
+  return { profile, groupUrl: match.url };
+}
+
+/**
  * Add a new news source and immediately fetch initial articles.
  */
 async function addSource(
@@ -253,10 +303,41 @@ async function addSource(
     normalizedUrl = validation.url ?? url;
   }
 
+  // Auto-detect: if LLM said "telegram" but the handle is actually a group,
+  // upgrade to "telegram-group" before saving. Probe is a single lightweight
+  // HTTP request to t.me/<handle> — no Docker/browser needed.
+  let effectiveType: 'rss' | 'telegram' | 'telegram-group' = type;
+  if (type === 'telegram' && options?.scriptRunner) {
+    const { probeTelegramHandle } = await import('../fetchers/telegram.js');
+    const handleType = await probeTelegramHandle(normalizedUrl);
+    if (handleType === 'group' || handleType === 'private') {
+      logger.info(
+        { handle: normalizedUrl, detected: handleType },
+        'Telegram handle is not a public channel — auto-upgrading to telegram-group'
+      );
+      const upgradeResult = await tryUpgradeToGroup(
+        normalizedUrl, name.trim(), options.scriptRunner, logger
+      );
+      if (upgradeResult) {
+        effectiveType = 'telegram-group';
+        options.profile = upgradeResult.profile;
+        options.groupUrl = upgradeResult.groupUrl;
+      } else if (handleType === 'private') {
+        return {
+          success: false,
+          action: 'add_source',
+          error: `Channel ${normalizedUrl} appears to be private and was not found in authenticated Telegram groups. ` +
+            'Make sure the bot account has joined this group/channel, then try again.',
+        };
+      }
+      // handleType === 'group' but no match in list_groups → fall through and try public fetch anyway
+    }
+  }
+
   // Check for duplicate URLs
   const sources = await loadSources(storage);
   for (const source of sources.values()) {
-    if (source.url === normalizedUrl && source.type === type) {
+    if (source.url === normalizedUrl && source.type === effectiveType) {
       return {
         success: false,
         action: 'add_source',
@@ -270,12 +351,12 @@ async function addSource(
   const trimmedName = name.trim();
   const newSource: NewsSource = {
     id: sourceId,
-    type,
+    type: effectiveType,
     url: normalizedUrl,
     name: trimmedName,
     enabled: true,
     createdAt: new Date(),
-    ...(type === 'telegram-group' && {
+    ...(effectiveType === 'telegram-group' && {
       profile: options?.profile,
       groupUrl: options?.groupUrl,
     }),
@@ -287,10 +368,10 @@ async function addSource(
   logger.info(
     {
       sourceId,
-      type,
+      type: effectiveType,
       url: normalizedUrl,
       name: trimmedName,
-      ...(type === 'telegram-group' && { profile: options?.profile }),
+      ...(effectiveType === 'telegram-group' && { profile: options?.profile }),
     },
     'News source added'
   );
@@ -300,14 +381,14 @@ async function addSource(
   let fetchError: string | undefined;
 
   try {
-    logger.debug({ sourceId, type, url: normalizedUrl }, 'Fetching initial articles');
+    logger.debug({ sourceId, type: effectiveType, url: normalizedUrl }, 'Fetching initial articles');
 
     let fetchSuccess = false;
     let fetchArticles: FetchedArticle[] = [];
     let fetchErrorMsg: string | undefined;
     let fetchLatestId: string | undefined;
 
-    if (type === 'telegram-group') {
+    if (effectiveType === 'telegram-group') {
       if (!options?.scriptRunner || !options.profile || !options.groupUrl) {
         fetchErrorMsg = 'Script runner not available — will retry on next poll';
       } else {
@@ -326,9 +407,9 @@ async function addSource(
       }
     } else {
       const fetchResult =
-        type === 'rss'
+        effectiveType === 'rss'
           ? await fetchRssFeed(normalizedUrl, sourceId, trimmedName)
-          : await fetchTelegramChannel(normalizedUrl, trimmedName);
+          : await fetchTelegramChannel(normalizedUrl, trimmedName, sourceId);
       fetchSuccess = fetchResult.success;
       fetchArticles = fetchResult.articles;
       fetchErrorMsg = fetchResult.error;
@@ -359,7 +440,7 @@ async function addSource(
           articles: newsArticles,
           sourceId,
           fetchedAt: new Date(),
-          sourceType: type,
+          sourceType: effectiveType,
         },
       });
 
@@ -384,7 +465,7 @@ async function addSource(
       };
       await saveSourceState(storage, state);
     } else {
-      // Success but no articles
+      // Success but no articles (RSS or telegram-group)
       logger.debug({ sourceId }, 'Initial fetch returned no articles');
 
       const state: SourceState = {
@@ -524,10 +605,8 @@ async function getNews(
   // Smart defaults for news type filtering:
   // - No query, no source: show 'interesting' (curated, not noise)
   // - Query or source filter: show 'all' but exclude 'filtered' topic stubs
-  //   (filtered entries are bare keywords like "data", "память" that pollute TF-IDF results)
   // - Explicit newsType: respect it exactly
   const effectiveType: NewsType = newsType ?? (searchQuery || sourceId ? 'all' : 'interesting');
-  const excludeFiltered = !newsType && effectiveType === 'all';
 
   // Pass source filter to the store level so it's applied before scoring/pagination
   const metadataFilter = sourceId ? { source: sourceId } : undefined;
@@ -544,10 +623,6 @@ async function getNews(
   if (effectiveType !== 'all') {
     const targetEventKind = `news:${effectiveType}`;
     filtered = filtered.filter((e) => e.metadata['eventKind'] === targetEventKind);
-  } else if (excludeFiltered) {
-    // Exclude bare topic stubs (news:filtered) — they are single keywords stored for
-    // mention detection, not real articles. They pollute search results with false matches.
-    filtered = filtered.filter((e) => e.metadata['eventKind'] !== 'news:filtered');
   }
 
   // Apply limit after type filtering
@@ -563,9 +638,8 @@ async function getNews(
 
     // Determine type from eventKind
     const eventKind = e.metadata['eventKind'] as string | undefined;
-    let type: 'urgent' | 'interesting' | 'filtered' = 'interesting';
+    let type: 'urgent' | 'interesting' = 'interesting';
     if (eventKind === 'news:urgent') type = 'urgent';
-    else if (eventKind === 'news:filtered') type = 'filtered';
 
     return {
       title,
@@ -1158,6 +1232,7 @@ For private Telegram groups:
               const tgResult = await fetchTelegramChannelUntil(
                 source.url,
                 source.name,
+                refreshSourceId,
                 state?.lastSeenId
               );
               fetchSuccess = tgResult.success;
