@@ -1351,19 +1351,23 @@ export function createCaloriesTool(
       };
     }
 
-    const entry = matching[0]!;
+    const entry = matching[0];
+    if (!entry) {
+      return { success: false, error: 'Entry not found' };
+    }
+    const updated: NonNullable<CorrectEntryResult['updated']> = {};
     const result: CorrectEntryResult = {
       success: true,
       entryId: entry.id,
       dishId: targetItem.id,
-      updated: {},
+      updated,
     };
 
     // --- 3. Update entry portion (first — most important for user) ---
     if (newPortion) {
       entry.portion = newPortion;
       await storage.set(dateKey, entries);
-      result.updated!.portion = newPortion;
+      updated.portion = newPortion;
     }
 
     // --- 4. Update dish basis (global — affects all entries) ---
@@ -1372,7 +1376,7 @@ export function createCaloriesTool(
         targetItem.basis = normalizeBasis(newBasis);
         targetItem.updatedAt = new Date().toISOString();
         await storage.set(CALORIES_STORAGE_KEYS.items, allItems);
-        result.updated!.basis = targetItem.basis;
+        updated.basis = targetItem.basis;
 
         // Count other entries affected by the basis change
         const dateKeys = await storage.keys(`${CALORIES_STORAGE_KEYS.foodPrefix}*`);
@@ -1380,7 +1384,9 @@ export function createCaloriesTool(
         for (const key of dateKeys) {
           const dateEntries = await storage.get<FoodEntry[]>(key);
           if (dateEntries) {
-            affectedCount += dateEntries.filter((e) => e.dishId === targetItem.id && e.recipientId === recipientId).length;
+            affectedCount += dateEntries.filter(
+              (e) => e.dishId === targetItem.id && e.recipientId === recipientId
+            ).length;
           }
         }
         // Subtract the corrected entry itself
@@ -1391,7 +1397,10 @@ export function createCaloriesTool(
           result.partial = true;
           result.error = `Entry portion updated, but basis update failed: ${err instanceof Error ? err.message : String(err)}`;
         } else {
-          return { success: false, error: `Basis update failed: ${err instanceof Error ? err.message : String(err)}` };
+          return {
+            success: false,
+            error: `Basis update failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
         }
       }
     }
@@ -1903,7 +1912,8 @@ export function createCaloriesTool(
       },
       new_basis: {
         type: 'object',
-        description: 'update_dish / correct: new nutritional basis (updates dish globally — all entries reflect new calorie density)',
+        description:
+          'update_dish / correct: new nutritional basis (updates dish globally — all entries reflect new calorie density)',
         properties: {
           caloriesPer: { type: 'number' },
           perQuantity: { type: 'number' },
@@ -2304,17 +2314,30 @@ Rules:
           };
         }
 
-        if (newPortion !== undefined && (typeof newPortion !== 'object' || newPortion === null || Array.isArray(newPortion))) {
+        if (
+          newPortion !== undefined &&
+          (typeof newPortion !== 'object' || newPortion === null || Array.isArray(newPortion))
+        ) {
           return { success: false, error: 'new_portion: must be an object { quantity, unit }' };
         }
 
-        if (newBasis !== undefined && (typeof newBasis !== 'object' || newBasis === null || Array.isArray(newBasis))) {
-          return { success: false, error: 'new_basis: must be an object { caloriesPer, perQuantity, perUnit }' };
+        if (
+          newBasis !== undefined &&
+          (typeof newBasis !== 'object' || newBasis === null || Array.isArray(newBasis))
+        ) {
+          return {
+            success: false,
+            error: 'new_basis: must be an object { caloriesPer, perQuantity, perUnit }',
+          };
         }
 
         if (newPortion && typeof newPortion === 'object') {
           const p = newPortion as Record<string, unknown>;
-          if (typeof p['quantity'] !== 'number' || !Number.isFinite(p['quantity']) || p['quantity'] <= 0) {
+          if (
+            typeof p['quantity'] !== 'number' ||
+            !Number.isFinite(p['quantity']) ||
+            p['quantity'] <= 0
+          ) {
             return { success: false, error: 'new_portion.quantity: must be a positive number' };
           }
           if (typeof p['unit'] !== 'string' || !VALID_UNITS.includes(p['unit'] as Unit)) {
