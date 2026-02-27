@@ -257,43 +257,66 @@ interface FetchSourceResult {
 }
 
 /**
- * Fetch a single RSS source (used for parallel fetching).
+ * Common shape returned by all fetcher functions (RSS, Telegram, Telegram group).
+ * Each concrete fetcher may add extra fields (e.g. errorCode), but the
+ * health-policy orchestrator only needs this base contract.
  */
-async function fetchSingleSource(
+interface BaseFetcherResult {
+  success: boolean;
+  articles: FetchedArticle[];
+  error?: string | undefined;
+  errorCode?: string | undefined;
+  latestId?: string | undefined;
+}
+
+/**
+ * Generic fetch orchestrator with health-policy handling.
+ *
+ * Encapsulates the shared pattern: load state → check disabled → call fetcher →
+ * handle failure (backoff, disable, alert) or success (filter, timestamp, reset) → save state.
+ *
+ * @param source       The news source to fetch
+ * @param storage      Storage primitive for persisting source state
+ * @param logger       Logger instance
+ * @param sourceLabel  Human-readable label for log messages (e.g. 'RSS feed', 'Telegram channel')
+ * @param fetcher      The actual fetch function to call; receives loaded state for lastSeenId etc.
+ * @param onSpecialError  Optional hook for source-specific error handling (e.g. NOT_AUTHENTICATED).
+ *                        Return a FetchSourceResult to short-circuit, or null to fall through to default handling.
+ */
+async function fetchSourceWithHealthPolicy(
   source: NewsSource,
   storage: StoragePrimitive,
-  logger: Logger
+  logger: Logger,
+  sourceLabel: string,
+  fetcher: (state: SourceState | null) => Promise<BaseFetcherResult>,
+  onSpecialError?: (result: BaseFetcherResult, state: SourceState | null) => FetchSourceResult | null
 ): Promise<FetchSourceResult> {
   const state = await loadSourceState(storage, source.id);
 
   // Check if source is temporarily disabled
   if (isSourceDisabled(state)) {
     logger.debug(
-      {
-        sourceId: source.id,
-        sourceName: source.name,
-        disabledUntil: state?.disabledUntil,
-      },
-      'Skipping disabled source'
+      { sourceId: source.id, sourceName: source.name, disabledUntil: state?.disabledUntil },
+      `Skipping disabled ${sourceLabel}`
     );
-    return {
-      articles: [],
-      failed: false,
-      sourceName: source.name,
-      skipped: true,
-      shouldAlertUser: false,
-    };
+    return { articles: [], failed: false, sourceName: source.name, skipped: true, shouldAlertUser: false };
   }
 
   logger.debug(
-    { sourceId: source.id, sourceName: source.name, url: source.url },
-    'Fetching RSS feed'
+    { sourceId: source.id, sourceName: source.name },
+    `Fetching ${sourceLabel}`
   );
 
-  const result = await fetchRssFeed(source.url, source.id, source.name);
+  const result = await fetcher(state);
 
   if (!result.success) {
-    // Track failure and apply disable policy
+    // Let caller handle source-specific errors (e.g. NOT_AUTHENTICATED)
+    if (onSpecialError) {
+      const override = onSpecialError(result, state);
+      if (override) return override;
+    }
+
+    // Generic failure: track and apply disable policy
     const newFailures = (state?.consecutiveFailures ?? 0) + 1;
     const disableUntil = calculateDisableUntil(newFailures);
 
@@ -306,60 +329,38 @@ async function fetchSingleSource(
       lastSeenHash: state?.lastSeenHash,
       disabledUntil: disableUntil ?? undefined,
     };
-
     await saveSourceState(storage, newState);
 
     logger.warn(
-      {
-        sourceId: source.id,
-        sourceName: source.name,
-        error: result.error,
-        consecutiveFailures: newFailures,
-        disabledUntil: disableUntil,
-      },
-      'Failed to fetch RSS feed'
+      { sourceId: source.id, sourceName: source.name, error: result.error, consecutiveFailures: newFailures, disabledUntil: disableUntil },
+      `Failed to fetch ${sourceLabel}`
     );
-
-    // Alert user when hitting threshold
-    const shouldAlert = newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD;
 
     return {
       articles: [],
       failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
       sourceName: source.name,
       skipped: false,
-      shouldAlertUser: shouldAlert,
+      shouldAlertUser: newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD,
     };
   }
 
-  // Filter to only new articles
+  // Success: filter new articles, update state
   const newArticles = filterNewArticles(result.articles, state);
-
-  // Use MAX timestamp from fetched articles (not current time).
-  // Articles may be sorted by popularity, not date, so we find the true max.
-  // This prevents missing articles published between newest article time and fetch time.
   const maxPublishedAt = getMaxPublishedAt(result.articles);
 
-  // Log warning if no timestamps found (helps identify problematic feeds)
   if (!maxPublishedAt && result.articles.length > 0) {
     logger.debug(
       { sourceId: source.id, articleCount: result.articles.length },
-      'No publishedAt timestamps in fetched RSS articles, using fallback'
+      `No publishedAt timestamps in fetched ${sourceLabel} articles, using fallback`
     );
   }
 
   logger.debug(
-    {
-      sourceId: source.id,
-      sourceName: source.name,
-      total: result.articles.length,
-      new: newArticles.length,
-    },
-    'Fetched RSS feed'
+    { sourceId: source.id, sourceName: source.name, total: result.articles.length, new: newArticles.length },
+    `Fetched ${sourceLabel}`
   );
 
-  // Update state - success resets failures and clears disable
-  // Use max article timestamp, falling back to previous state or current time
   const newState: SourceState = {
     sourceId: source.id,
     lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
@@ -368,16 +369,23 @@ async function fetchSingleSource(
     lastSeenHash: state?.lastSeenHash,
     disabledUntil: undefined,
   };
-
   await saveSourceState(storage, newState);
 
-  return {
-    articles: newArticles,
-    failed: false,
-    sourceName: source.name,
-    skipped: false,
-    shouldAlertUser: false,
-  };
+  return { articles: newArticles, failed: false, sourceName: source.name, skipped: false, shouldAlertUser: false };
+}
+
+/**
+ * Fetch a single RSS source (used for parallel fetching).
+ */
+async function fetchSingleSource(
+  source: NewsSource,
+  storage: StoragePrimitive,
+  logger: Logger
+): Promise<FetchSourceResult> {
+  return fetchSourceWithHealthPolicy(
+    source, storage, logger, 'RSS feed',
+    () => fetchRssFeed(source.url, source.id, source.name)
+  );
 }
 
 /**
@@ -442,125 +450,10 @@ async function fetchSingleTelegramSource(
   storage: StoragePrimitive,
   logger: Logger
 ): Promise<FetchSourceResult> {
-  const state = await loadSourceState(storage, source.id);
-
-  // Check if source is temporarily disabled
-  if (isSourceDisabled(state)) {
-    logger.debug(
-      {
-        sourceId: source.id,
-        sourceName: source.name,
-        disabledUntil: state?.disabledUntil,
-      },
-      'Skipping disabled Telegram source'
-    );
-    return {
-      articles: [],
-      failed: false,
-      sourceName: source.name,
-      skipped: true,
-      shouldAlertUser: false,
-    };
-  }
-
-  logger.debug(
-    {
-      sourceId: source.id,
-      sourceName: source.name,
-      handle: source.url,
-      lastSeenId: state?.lastSeenId,
-    },
-    'Fetching Telegram channel'
+  return fetchSourceWithHealthPolicy(
+    source, storage, logger, 'Telegram channel',
+    (state) => fetchTelegramChannelUntil(source.url, source.name, state?.lastSeenId)
   );
-
-  // Use pagination to fetch all new messages since lastSeenId
-  const result = await fetchTelegramChannelUntil(source.url, source.name, state?.lastSeenId);
-
-  if (!result.success) {
-    // Track failure and apply disable policy
-    const newFailures = (state?.consecutiveFailures ?? 0) + 1;
-    const disableUntil = calculateDisableUntil(newFailures);
-
-    const newState: SourceState = {
-      sourceId: source.id,
-      lastFetchedAt: state?.lastFetchedAt ?? new Date(),
-      consecutiveFailures: newFailures,
-      lastError: result.error,
-      lastSeenId: state?.lastSeenId,
-      lastSeenHash: state?.lastSeenHash,
-      disabledUntil: disableUntil ?? undefined,
-    };
-
-    await saveSourceState(storage, newState);
-
-    logger.warn(
-      {
-        sourceId: source.id,
-        sourceName: source.name,
-        error: result.error,
-        consecutiveFailures: newFailures,
-        disabledUntil: disableUntil,
-      },
-      'Failed to fetch Telegram channel'
-    );
-
-    // Alert user when hitting threshold
-    const shouldAlert = newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD;
-
-    return {
-      articles: [],
-      failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
-      sourceName: source.name,
-      skipped: false,
-      shouldAlertUser: shouldAlert,
-    };
-  }
-
-  // Filter to only new articles
-  const newArticles = filterNewArticles(result.articles, state);
-
-  // Use MAX timestamp from fetched articles (same fix as RSS).
-  // This ensures consistent timestamp-based filtering across source types.
-  const maxPublishedAt = getMaxPublishedAt(result.articles);
-
-  // Log warning if no timestamps found
-  if (!maxPublishedAt && result.articles.length > 0) {
-    logger.debug(
-      { sourceId: source.id, articleCount: result.articles.length },
-      'No publishedAt timestamps in fetched Telegram messages, using fallback'
-    );
-  }
-
-  logger.debug(
-    {
-      sourceId: source.id,
-      sourceName: source.name,
-      total: result.articles.length,
-      new: newArticles.length,
-    },
-    'Fetched Telegram channel'
-  );
-
-  // Update state - success resets failures and clears disable
-  // Use max article timestamp, falling back to previous state or current time
-  const newState: SourceState = {
-    sourceId: source.id,
-    lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
-    consecutiveFailures: 0,
-    lastSeenId: result.latestId ?? state?.lastSeenId,
-    lastSeenHash: state?.lastSeenHash,
-    disabledUntil: undefined,
-  };
-
-  await saveSourceState(storage, newState);
-
-  return {
-    articles: newArticles,
-    failed: false,
-    sourceName: source.name,
-    skipped: false,
-    shouldAlertUser: false,
-  };
 }
 
 /**
@@ -617,136 +510,26 @@ async function fetchSingleTelegramGroupSource(
   scriptRunner: ScriptRunnerPrimitive,
   intentEmitter: IntentEmitterPrimitive
 ): Promise<FetchSourceResult> {
-  const state = await loadSourceState(storage, source.id);
-
-  // Check if source is temporarily disabled
-  if (isSourceDisabled(state)) {
-    logger.debug(
-      { sourceId: source.id, sourceName: source.name, disabledUntil: state?.disabledUntil },
-      'Skipping disabled Telegram group source'
-    );
-    return {
-      articles: [],
-      failed: false,
-      sourceName: source.name,
-      skipped: true,
-      shouldAlertUser: false,
-    };
-  }
-
+  // Pre-fetch validation: group sources need profile + groupUrl
   if (!source.profile || !source.groupUrl) {
     logger.warn({ sourceId: source.id }, 'Telegram group source missing profile or groupUrl');
-    return {
-      articles: [],
-      failed: true,
-      sourceName: source.name,
-      skipped: false,
-      shouldAlertUser: false,
-    };
+    return { articles: [], failed: true, sourceName: source.name, skipped: false, shouldAlertUser: false };
   }
 
-  logger.debug(
-    {
-      sourceId: source.id,
-      sourceName: source.name,
-      groupUrl: source.groupUrl,
-      lastSeenId: state?.lastSeenId,
-    },
-    'Fetching Telegram group'
-  );
-
-  const result = await fetchTelegramGroup(
-    source.profile,
-    source.groupUrl,
-    source.id,
-    source.name,
-    state?.lastSeenId,
-    scriptRunner
-  );
-
-  if (!result.success) {
+  return fetchSourceWithHealthPolicy(
+    source, storage, logger, 'Telegram group',
+    (state) => fetchTelegramGroup(source.profile!, source.groupUrl!, source.id, source.name, state?.lastSeenId, scriptRunner),
     // NOT_AUTHENTICATED: emit pending intention immediately, no backoff
-    if (result.errorCode === 'NOT_AUTHENTICATED') {
+    (result) => {
+      if (result.errorCode !== 'NOT_AUTHENTICATED') return null;
       intentEmitter.emitPendingIntention(
         `Telegram group "${source.name}" requires authentication. ` +
           `Call auth_profile with profile="${source.profile ?? 'telegram'}" to start ` +
           `a browser session, then guide the user through login.`
       );
-      return {
-        articles: [],
-        failed: true,
-        sourceName: source.name,
-        skipped: false,
-        shouldAlertUser: false, // Already emitted specific message
-      };
+      return { articles: [], failed: true, sourceName: source.name, skipped: false, shouldAlertUser: false };
     }
-
-    // Track failure and apply disable policy
-    const newFailures = (state?.consecutiveFailures ?? 0) + 1;
-    const disableUntil = calculateDisableUntil(newFailures);
-
-    const newState: SourceState = {
-      sourceId: source.id,
-      lastFetchedAt: state?.lastFetchedAt ?? new Date(),
-      consecutiveFailures: newFailures,
-      lastError: result.error,
-      lastSeenId: state?.lastSeenId,
-      lastSeenHash: state?.lastSeenHash,
-      disabledUntil: disableUntil ?? undefined,
-    };
-    await saveSourceState(storage, newState);
-
-    logger.warn(
-      {
-        sourceId: source.id,
-        sourceName: source.name,
-        error: result.error,
-        consecutiveFailures: newFailures,
-      },
-      'Failed to fetch Telegram group'
-    );
-
-    return {
-      articles: [],
-      failed: newFailures >= SOURCE_HEALTH_POLICY.DISABLE_1H_THRESHOLD,
-      sourceName: source.name,
-      skipped: false,
-      shouldAlertUser: newFailures === SOURCE_HEALTH_POLICY.ALERT_USER_THRESHOLD,
-    };
-  }
-
-  // Filter to only new articles
-  const newArticles = filterNewArticles(result.articles, state);
-
-  const maxPublishedAt = getMaxPublishedAt(result.articles);
-
-  logger.debug(
-    {
-      sourceId: source.id,
-      sourceName: source.name,
-      total: result.articles.length,
-      new: newArticles.length,
-    },
-    'Fetched Telegram group'
   );
-
-  const newState: SourceState = {
-    sourceId: source.id,
-    lastFetchedAt: maxPublishedAt ?? state?.lastFetchedAt ?? new Date(),
-    consecutiveFailures: 0,
-    lastSeenId: result.latestId ?? state?.lastSeenId,
-    lastSeenHash: state?.lastSeenHash,
-    disabledUntil: undefined,
-  };
-  await saveSourceState(storage, newState);
-
-  return {
-    articles: newArticles,
-    failed: false,
-    sourceName: source.name,
-    skipped: false,
-    shouldAlertUser: false,
-  };
 }
 
 /**
