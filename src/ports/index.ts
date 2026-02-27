@@ -83,6 +83,9 @@ export type {
 } from './logger.js';
 export { createNoOpLogger } from './logger.js';
 
+// Alertness port
+export type { IAlertness } from './alertness.js';
+
 // Plugin ports
 export type {
   IPlugin,

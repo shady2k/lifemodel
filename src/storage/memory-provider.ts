@@ -64,10 +64,31 @@ export class JsonMemoryProvider implements MemoryProvider {
   readonly vectorStore: VectorStore;
   readonly graphStore: GraphStore | undefined;
 
+  /**
+   * Write-invalidated cache for getAll() results.
+   * Domain methods (getRecent, getRecentByType, findByKind, getBehaviorRules, getStats)
+   * all call getAll() independently — this cache ensures only one round-trip per tick.
+   * Invalidated on any write (save, delete, clear).
+   */
+  private allCache: MemoryEntry[] | null = null;
+
   constructor(logger: Logger, deps: MemoryProviderDeps) {
     this.logger = logger.child({ component: 'memory-provider' });
     this.vectorStore = deps.vectorStore;
     this.graphStore = deps.graphStore;
+  }
+
+  /** Get all entries with write-invalidated caching. */
+  private async getAllCached(): Promise<MemoryEntry[]> {
+    if (this.allCache === null) {
+      this.allCache = await this.vectorStore.getAll();
+    }
+    return this.allCache;
+  }
+
+  /** Invalidate the getAll cache (called on writes). */
+  private invalidateCache(): void {
+    this.allCache = null;
   }
 
   // ─── Search (delegates to VectorStore) ────────────────────────────────────
@@ -138,10 +159,12 @@ export class JsonMemoryProvider implements MemoryProvider {
   // ─── Save / Delete / GetById (delegates to VectorStore) ───────────────────
 
   async save(entry: MemoryEntry): Promise<void> {
+    this.invalidateCache();
     await this.vectorStore.save(entry);
   }
 
   async delete(id: string): Promise<boolean> {
+    this.invalidateCache();
     return this.vectorStore.delete(id);
   }
 
@@ -154,6 +177,7 @@ export class JsonMemoryProvider implements MemoryProvider {
   }
 
   async clear(): Promise<void> {
+    this.invalidateCache();
     await this.vectorStore.clear();
   }
 
@@ -164,7 +188,7 @@ export class JsonMemoryProvider implements MemoryProvider {
   // ─── Domain methods (orchestration over getAll + in-memory filtering) ─────
 
   async getRecent(recipientId: string, limit: number): Promise<MemoryEntry[]> {
-    const all = await this.vectorStore.getAll();
+    const all = await this.getAllCached();
     return all
       .filter((e) => e.recipientId === recipientId)
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
@@ -175,7 +199,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     type: 'thought' | 'fact' | 'intention',
     options?: RecentByTypeOptions
   ): Promise<MemoryEntry[]> {
-    const all = await this.vectorStore.getAll();
+    const all = await this.getAllCached();
 
     const windowMs = options?.windowMs ?? 30 * 60 * 1000;
     const limit = options?.limit ?? 10;
@@ -204,7 +228,7 @@ export class JsonMemoryProvider implements MemoryProvider {
       limit?: number | undefined;
     }
   ): Promise<MemoryEntry[]> {
-    const all = await this.vectorStore.getAll();
+    const all = await this.getAllCached();
 
     const state = options?.state;
     const recipientId = options?.recipientId;
@@ -224,7 +248,7 @@ export class JsonMemoryProvider implements MemoryProvider {
   }
 
   async getBehaviorRules(options?: BehaviorRuleOptions): Promise<BehaviorRule[]> {
-    const all = await this.vectorStore.getAll();
+    const all = await this.getAllCached();
 
     const limit = options?.limit ?? 5;
     const recipientId = options?.recipientId;
@@ -381,7 +405,7 @@ export class JsonMemoryProvider implements MemoryProvider {
     oldestEntry: Date | null;
     newestEntry: Date | null;
   }> {
-    const entries = await this.vectorStore.getAll();
+    const entries = await this.getAllCached();
 
     const byType: Record<string, number> = {};
     let oldest: Date | null = null;

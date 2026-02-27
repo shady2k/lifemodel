@@ -19,24 +19,18 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Signal,
-  SignalType,
   SignalSource,
   Logger,
   Metrics,
   Intent,
   Channel,
-  SendOptions,
-  Event,
   ThoughtData,
-  InterestIntensity,
   MessageReactionData,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
-import type { PluginEventData } from '../types/signal.js';
 import {
   createTraceContext,
   withTraceContext,
-  withCaller,
   type TraceContext,
 } from './trace-context.js';
 import type {
@@ -45,7 +39,6 @@ import type {
   CognitionResult,
   CognitionContext,
 } from '../types/layers.js';
-import { Priority } from '../types/index.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
 import type { SystemHealthMonitor } from './system-health.js';
@@ -64,16 +57,17 @@ import {
 } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { CognitionLLM } from '../layers/cognition/agentic-loop.js';
-import type { MemoryProvider, MemoryEntry } from '../layers/cognition/tools/registry.js';
+import type { MemoryProvider } from '../layers/cognition/tools/registry.js';
 import type { MemoryConsolidator } from '../storage/memory-consolidator.js';
 import type { SoulProvider } from '../storage/soul-provider.js';
-import type { Precedent } from '../types/agent/soul.js';
 import type { AlertnessMode } from '../types/agent/state.js';
 import type { SchedulerService } from './scheduler-service.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
 import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.js';
 import { setPrimaryRecipientId } from './globals.js';
-import { markdownToTelegramHtml } from '../utils/telegram-html.js';
+import { StatusUpdateService } from './status-update-service.js';
+import { DomainTrackerService } from './domain-trackers.js';
+import { IntentApplicator } from './intent-applicator.js';
 
 /**
  * Core loop configuration.
@@ -178,7 +172,6 @@ export class CoreLoop {
   private readonly pendingSignals: PendingSignal[] = [];
   private readonly healthMonitor: SystemHealthMonitor;
 
-  private readonly messageComposer: MessageComposer | undefined;
   private readonly conversationManager: ConversationManager | undefined;
   private readonly userModel: UserModel | undefined;
   private readonly memoryProvider: MemoryProvider | undefined;
@@ -192,10 +185,6 @@ export class CoreLoop {
   /** Subscription ID for typing events */
   private typingSubscriptionId: string | null = null;
 
-  /** Timestamp of last message sent (for response timing) */
-  private lastMessageSentAt: number | null = null;
-  private lastMessageRecipientId: string | null = null;
-
   /** Pending COGNITION operation (non-blocking) */
   private pendingCognition: PendingCognition | null = null;
 
@@ -207,6 +196,15 @@ export class CoreLoop {
 
   /** Primary recipient ID for proactive features */
   private primaryRecipientId: string | undefined;
+
+  /** Extracted service for domain status updates (predictions, opinions, desires, commitments) */
+  private statusUpdates: StatusUpdateService | undefined;
+
+  /** Extracted service for domain tracker scanning (commitments, predictions, desires, thoughts) */
+  private domainTrackers: DomainTrackerService | undefined;
+
+  /** Extracted intent applicator (handles the 15-case switch statement) */
+  private readonly intentApplicator: IntentApplicator;
 
   constructor(
     agent: Agent,
@@ -223,7 +221,6 @@ export class CoreLoop {
     this.logger = logger.child({ component: 'core-loop' });
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.messageComposer = deps.messageComposer;
     this.conversationManager = deps.conversationManager;
     this.userModel = deps.userModel;
     this.memoryProvider = deps.memoryProvider;
@@ -276,6 +273,47 @@ export class CoreLoop {
         this.layers.autonomic as { setPrimaryRecipientId: (id: string | undefined) => void }
       ).setPrimaryRecipientId(this.primaryRecipientId);
     }
+
+    // Initialize extracted services if memoryProvider is available
+    if (deps.memoryProvider) {
+      this.statusUpdates = new StatusUpdateService({
+        memoryProvider: deps.memoryProvider,
+        logger: this.logger,
+        soulProvider: deps.soulProvider,
+        conversationManager: deps.conversationManager,
+        enqueueThought: (data, source) => {
+          this.enqueueThoughtSignal(data, source as SignalSource);
+        },
+      });
+
+      this.domainTrackers = new DomainTrackerService({
+        memoryProvider: deps.memoryProvider,
+        logger: this.logger,
+        primaryRecipientId: this.primaryRecipientId,
+      });
+    }
+
+    // Initialize intent applicator with all dependencies
+    // The channels Map is passed by reference, so new channels registered later are visible
+    this.intentApplicator = new IntentApplicator({
+      agent,
+      logger: this.logger,
+      metrics,
+      recipientRegistry: deps.recipientRegistry,
+      channels: this.channels,
+      conversationManager: deps.conversationManager,
+      memoryProvider: deps.memoryProvider,
+      userModel: deps.userModel,
+      eventBus,
+      aggregation: layers.aggregation,
+      statusUpdates: this.statusUpdates,
+      domainTrackers: this.domainTrackers,
+      messageComposer: deps.messageComposer,
+      enqueueThought: (data, source) => {
+        this.enqueueThoughtSignal(data, source);
+      },
+      running: () => this.running,
+    });
   }
 
   /**
@@ -450,15 +488,31 @@ export class CoreLoop {
           '⏱️ Tick starting'
         );
 
-        // Update thought pressure before neurons run
-        await this.updateThoughtPressure();
+        // Run domain trackers before neurons (pressure calculations + overdue scanning)
+        if (this.domainTrackers) {
+          const state = this.agent.getState();
+          const [thoughtResult, desireResult] = await Promise.all([
+            this.domainTrackers.calculateThoughtPressure(state.energy),
+            this.domainTrackers.calculateDesirePressure(),
+          ]);
+          if (thoughtResult.thoughtPressure !== undefined) {
+            this.agent.updateState({
+              thoughtPressure: thoughtResult.thoughtPressure,
+              pendingThoughtCount: thoughtResult.pendingThoughtCount ?? 0,
+            });
+          }
+          if (desireResult.desirePressure !== undefined) {
+            this.agent.updateState({ desirePressure: desireResult.desirePressure });
+          }
 
-        // Update desire pressure before neurons run (Phase 6)
-        await this.updateDesirePressure();
-
-        // Scan for overdue commitments and predictions (Phases 5, 7)
-        await this.checkOverdueCommitments();
-        await this.checkOverduePredictions();
+          // Scan for overdue commitments and predictions (produce signals)
+          const [commitmentSignals, predictionSignals] = await Promise.all([
+            this.domainTrackers.checkOverdueCommitments(),
+            this.domainTrackers.checkOverduePredictions(),
+          ]);
+          for (const signal of commitmentSignals) this.pushSignal(signal);
+          for (const signal of predictionSignals) this.pushSignal(signal);
+        }
       });
 
       // ============================================================================
@@ -665,9 +719,11 @@ export class CoreLoop {
           });
 
           // Prune dedup sets to prevent unbounded growth
-          void this.pruneSignaledSets().catch((err: unknown) => {
-            this.logger.warn({ error: err }, 'Failed to prune dedup sets during sleep');
-          });
+          if (this.domainTrackers) {
+            void this.domainTrackers.pruneSignaledSets().catch((err: unknown) => {
+              this.logger.warn({ error: err }, 'Failed to prune dedup sets during sleep');
+            });
+          }
 
           // Soul sleep maintenance
           if (this.soulProvider) {
@@ -938,16 +994,17 @@ export class CoreLoop {
    * Process response timing for learning.
    */
   private processResponseTiming(signal: Signal): void {
-    if (!this.userModel || !this.lastMessageSentAt) {
+    const lastMessageSentAt = this.intentApplicator.lastMessageSentAt;
+    if (!this.userModel || !lastMessageSentAt) {
       return;
     }
 
     const data = signal.data as { recipientId?: string } | undefined;
-    if (!data?.recipientId || data.recipientId !== this.lastMessageRecipientId) {
+    if (!data?.recipientId || data.recipientId !== this.intentApplicator.lastMessageRecipientId) {
       return;
     }
 
-    const responseTimeMs = Date.now() - this.lastMessageSentAt;
+    const responseTimeMs = Date.now() - lastMessageSentAt;
     const responseTimeSec = responseTimeMs / 1000;
 
     if (responseTimeSec < 30) {
@@ -959,366 +1016,13 @@ export class CoreLoop {
     }
 
     // Reset tracking
-    this.lastMessageSentAt = null;
-    this.lastMessageRecipientId = null;
+    this.intentApplicator.resetResponseTracking();
 
     this.metrics.histogram('user_response_time_ms', responseTimeMs);
   }
 
-  /**
-   * Update thought pressure in agent state.
-   *
-   * Thought pressure is calculated from:
-   * - Count of recent thoughts (more thoughts = more pressure)
-   * - Age of oldest thought (older thoughts = more pressure, Zeigarnik Effect)
-   * - Energy amplifier (low energy = thoughts feel heavier)
-   */
-  private async updateThoughtPressure(): Promise<void> {
-    if (!this.memoryProvider) {
-      return;
-    }
-
-    try {
-      // Get recent thoughts from the last 30 minutes (working memory window)
-      const windowMs = 30 * 60 * 1000;
-      const recentThoughts = await this.memoryProvider.getRecentByType('thought', {
-        windowMs,
-        limit: 20, // Get enough to calculate accurately
-      });
-
-      const thoughtCount = recentThoughts.length;
-
-      // Calculate oldest thought age (for pressure calculation)
-      let oldestAgeMs = 0;
-      if (thoughtCount > 0) {
-        const now = Date.now();
-        const timestamps = recentThoughts.map((t) => t.timestamp.getTime());
-        const oldest = Math.min(...timestamps);
-        oldestAgeMs = now - oldest;
-      }
-
-      // Pressure formula:
-      // - More thoughts = more pressure (capped at 5 for full effect)
-      // - Older thoughts = more pressure (max at 2 hours)
-      const countFactor = Math.min(1, thoughtCount / 5);
-      const twoHoursMs = 2 * 60 * 60 * 1000;
-      const ageFactor = Math.min(1, oldestAgeMs / twoHoursMs);
-
-      // Energy amplifier: low energy = thoughts feel heavier
-      const state = this.agent.getState();
-      const energyAmplifier = 1 + (1 - state.energy) * 0.3;
-
-      // Combined pressure (60% count, 40% age)
-      const rawPressure = (countFactor * 0.6 + ageFactor * 0.4) * energyAmplifier;
-      const pressure = Math.min(1, rawPressure);
-
-      // Update agent state
-      this.agent.updateState({
-        thoughtPressure: pressure,
-        pendingThoughtCount: thoughtCount,
-      });
-    } catch (error) {
-      this.logger.trace(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to update thought pressure'
-      );
-    }
-  }
-
-  /** Throttle: last time desire pressure was computed */
-  private lastDesirePressureCheckAt = 0;
-
-  /**
-   * Update desire pressure in agent state.
-   *
-   * Desire pressure = weighted combination of active desire count and max intensity.
-   * Throttled to run at most once per 30 seconds (desires change slowly).
-   */
-  private async updateDesirePressure(): Promise<void> {
-    const mp = this.memoryProvider;
-    if (!mp) return;
-
-    // Throttle: only check every 30 seconds
-    const now = Date.now();
-    if (now - this.lastDesirePressureCheckAt < 30_000) return;
-    this.lastDesirePressureCheckAt = now;
-
-    try {
-      const activeDesires = await withCaller('updateDesirePressure', () =>
-        mp.findByKind('desire', { state: 'active', limit: 20 })
-      );
-      if (activeDesires.length === 0) {
-        this.agent.updateState({ desirePressure: 0 });
-        return;
-      }
-
-      // Extract intensities from metadata
-      const intensities = activeDesires.map((e) => {
-        const raw = e.metadata?.['intensity'];
-        return typeof raw === 'number' ? raw : (e.confidence ?? 0.5);
-      });
-
-      // Pressure formula:
-      // - maxIntensity (60%): strongest want dominates
-      // - countFactor (40%): more wants = more pressure (capped at 5)
-      const maxIntensity = Math.max(...intensities);
-      const countFactor = Math.min(1, activeDesires.length / 5);
-      const pressure = Math.min(1, maxIntensity * 0.6 + countFactor * 0.4);
-
-      this.agent.updateState({ desirePressure: pressure });
-    } catch (error) {
-      this.logger.trace(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to update desire pressure'
-      );
-    }
-  }
-
-  /** IDs of commitments already signaled as due (dedup — pruned on sleep) */
-  private readonly signaledDueCommitments = new Set<string>();
-  /** IDs of commitments already signaled as overdue (dedup — pruned on sleep) */
-  private readonly signaledOverdueCommitments = new Set<string>();
-  /** Grace period before a due commitment becomes overdue (1 hour) */
-  private static readonly COMMITMENT_GRACE_PERIOD_MS = 60 * 60 * 1000;
-  /** Throttle: last time overdue commitments were checked */
-  private lastCommitmentCheckAt = 0;
-
-  /**
-   * Check for due and overdue active commitments and emit plugin_event signals.
-   *
-   * Two-stage lifecycle:
-   * 1. `commitment:due` fires when dueAt <= now (nudge: "act on this now")
-   * 2. `commitment:overdue` fires when dueAt + grace period <= now (breach: "you missed it, repair")
-   *
-   * Throttled to run at most once per 60 seconds.
-   */
-  private async checkOverdueCommitments(): Promise<void> {
-    const mp = this.memoryProvider;
-    if (!mp) return;
-
-    const now = Date.now();
-    if (now - this.lastCommitmentCheckAt < 60_000) return;
-    this.lastCommitmentCheckAt = now;
-
-    try {
-      const activeCommitments = await withCaller('checkOverdueCommitments', () =>
-        mp.findByKind('commitment', { state: 'active', limit: 50 })
-      );
-
-      const nowDate = new Date();
-      for (const entry of activeCommitments) {
-        const dueAtStr = entry.metadata?.['dueAt'];
-        if (typeof dueAtStr !== 'string') continue;
-
-        const dueAt = new Date(dueAtStr);
-        if (dueAt > nowDate) continue; // Not yet due
-
-        const recipientId = entry.recipientId ?? this.primaryRecipientId ?? 'default';
-        const msSinceDue = now - dueAt.getTime();
-
-        // Stage 1: commitment:due (fires at dueAt)
-        if (!this.signaledDueCommitments.has(entry.id)) {
-          const signalData: PluginEventData = {
-            kind: 'plugin_event',
-            eventKind: 'commitment:due',
-            pluginId: 'commitment',
-            fireId: `due_${entry.id}_${String(now)}`,
-            payload: {
-              commitmentId: entry.id,
-              recipientId,
-              text: entry.content,
-              dueAt: dueAtStr,
-              source: (entry.metadata?.['source'] as string | undefined) ?? 'explicit',
-            },
-          };
-
-          this.pushSignal(
-            createSignal(
-              'plugin_event',
-              'plugin.commitment' as SignalSource,
-              { value: 1, confidence: 1 },
-              {
-                priority: Priority.HIGH,
-                data: signalData,
-              }
-            )
-          );
-          this.signaledDueCommitments.add(entry.id);
-
-          this.logger.info(
-            { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
-            'Commitment due, signal emitted'
-          );
-          continue; // Don't emit overdue in the same scan — give grace period
-        }
-
-        // Stage 2: commitment:overdue (fires after grace period)
-        if (
-          msSinceDue >= CoreLoop.COMMITMENT_GRACE_PERIOD_MS &&
-          !this.signaledOverdueCommitments.has(entry.id)
-        ) {
-          const signalData: PluginEventData = {
-            kind: 'plugin_event',
-            eventKind: 'commitment:overdue',
-            pluginId: 'commitment',
-            fireId: `overdue_${entry.id}_${String(now)}`,
-            payload: {
-              commitmentId: entry.id,
-              recipientId,
-              text: entry.content,
-              dueAt: dueAtStr,
-              source: (entry.metadata?.['source'] as string | undefined) ?? 'explicit',
-            },
-          };
-
-          this.pushSignal(
-            createSignal(
-              'plugin_event',
-              'plugin.commitment' as SignalSource,
-              { value: 1, confidence: 1 },
-              {
-                priority: Priority.HIGH,
-                data: signalData,
-              }
-            )
-          );
-          this.signaledOverdueCommitments.add(entry.id);
-
-          this.logger.info(
-            { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
-            'Overdue commitment detected, signal emitted'
-          );
-        }
-      }
-    } catch (error) {
-      this.logger.trace(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to check overdue commitments'
-      );
-    }
-  }
-
-  /** IDs of predictions already signaled as due (dedup — pruned on sleep) */
-  private readonly signaledDuePredictions = new Set<string>();
-  /** Throttle: last time overdue predictions were checked */
-  private lastPredictionCheckAt = 0;
-
-  /**
-   * Check for predictions past their horizon and emit plugin_event signals.
-   *
-   * Scans memory for pending predictions whose horizonAt has passed.
-   * Emits one `perspective:prediction_due` signal per overdue prediction (deduped).
-   * Throttled to run at most once per 60 seconds.
-   */
-  private async checkOverduePredictions(): Promise<void> {
-    const mp = this.memoryProvider;
-    if (!mp) return;
-
-    const now = Date.now();
-    if (now - this.lastPredictionCheckAt < 60_000) return;
-    this.lastPredictionCheckAt = now;
-
-    try {
-      const pendingPredictions = await withCaller('checkOverduePredictions', () =>
-        mp.findByKind('prediction', { state: 'pending', limit: 50 })
-      );
-
-      const nowDate = new Date();
-      for (const entry of pendingPredictions) {
-        const horizonAtStr = entry.metadata?.['horizonAt'];
-        if (typeof horizonAtStr !== 'string') continue;
-
-        const horizonAt = new Date(horizonAtStr);
-        if (horizonAt > nowDate) continue; // Not yet due
-
-        // Already signaled this prediction
-        if (this.signaledDuePredictions.has(entry.id)) continue;
-
-        // Emit prediction_due signal
-        const signalData: PluginEventData = {
-          kind: 'plugin_event',
-          eventKind: 'perspective:prediction_due',
-          pluginId: 'perspective',
-          fireId: `due_${entry.id}_${String(now)}`,
-          payload: {
-            predictionId: entry.id,
-            recipientId: entry.recipientId ?? this.primaryRecipientId ?? 'default',
-            claim: entry.content,
-            horizonAt: horizonAtStr,
-            confidence: (entry.metadata?.['confidence'] as number | undefined) ?? 0.6,
-          },
-        };
-
-        this.pushSignal(
-          createSignal(
-            'plugin_event',
-            'plugin.perspective' as SignalSource,
-            { value: 1, confidence: 1 },
-            {
-              data: signalData,
-            }
-          )
-        );
-        this.signaledDuePredictions.add(entry.id);
-
-        this.logger.info(
-          { predictionId: entry.id, horizonAt: horizonAtStr, claim: entry.content.slice(0, 50) },
-          'Overdue prediction detected, signal emitted'
-        );
-      }
-    } catch (error) {
-      this.logger.trace(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to check overdue predictions'
-      );
-    }
-  }
-
-  /**
-   * Prune dedup sets by removing IDs that no longer exist in memory.
-   * Called on sleep transition to prevent unbounded growth.
-   */
-  private async pruneSignaledSets(): Promise<void> {
-    const mp = this.memoryProvider;
-    if (!mp) return;
-
-    let pruned = 0;
-
-    for (const id of this.signaledDueCommitments) {
-      const entry = await mp.getById(id);
-      if (!entry) {
-        this.signaledDueCommitments.delete(id);
-        pruned++;
-      }
-    }
-    for (const id of this.signaledOverdueCommitments) {
-      const entry = await mp.getById(id);
-      if (!entry) {
-        this.signaledOverdueCommitments.delete(id);
-        pruned++;
-      }
-    }
-    for (const id of this.signaledDuePredictions) {
-      const entry = await mp.getById(id);
-      if (!entry) {
-        this.signaledDuePredictions.delete(id);
-        pruned++;
-      }
-    }
-
-    if (pruned > 0) {
-      this.logger.info(
-        {
-          pruned,
-          remaining:
-            this.signaledDueCommitments.size +
-            this.signaledOverdueCommitments.size +
-            this.signaledDuePredictions.size,
-        },
-        'Pruned stale entries from dedup sets'
-      );
-    }
-  }
+  // Note: Thought/desire pressure, commitment/prediction scanning, and dedup pruning
+  // are now handled by DomainTrackerService (domain-trackers.ts).
 
   /**
    * Process through AUTONOMIC layer.
@@ -1537,1120 +1241,15 @@ export class CoreLoop {
       intentCtx = createTraceContext(`intent_${String(Date.now())}`);
     }
 
-    this.applyIntents([intent], intentCtx);
+    this.intentApplicator.apply([intent], intentCtx);
   }
 
   /**
    * Apply intents from all layers.
-   * Each intent is applied under its own trace context.
+   * Delegates to IntentApplicator for the actual processing.
    */
   private applyIntents(intents: Intent[], tickCtx: TraceContext): void {
-    for (const intent of intents) {
-      // Create trace context for this intent
-      // Use intent's trace info if available, otherwise fall back to tick context
-      const trace = intent.trace;
-
-      let intentCtx: TraceContext;
-      if (trace?.parentSignalId ?? trace?.tickId) {
-        const traceId = trace.parentSignalId ?? trace.tickId ?? tickCtx.traceId;
-        const options: { correlationId?: string; parentId?: string } = {};
-        if (trace.tickId !== undefined) options.correlationId = trace.tickId;
-        else if (tickCtx.correlationId !== undefined) options.correlationId = tickCtx.correlationId;
-        if (trace.parentSignalId !== undefined) options.parentId = trace.parentSignalId;
-        intentCtx = createTraceContext(traceId, options);
-      } else {
-        intentCtx = tickCtx;
-      }
-
-      withTraceContext(intentCtx, () => {
-        switch (intent.type) {
-          case 'UPDATE_STATE':
-            this.agent.applyIntent(intent);
-            break;
-
-          case 'SEND_MESSAGE': {
-            const { recipientId, text, replyTo, conversationStatus } = intent.payload;
-
-            if (!this.recipientRegistry) {
-              this.logger.error({ recipientId }, 'RecipientRegistry not configured');
-              this.metrics.counter('messages_failed', { reason: 'no_registry' });
-              break;
-            }
-
-            const route = this.recipientRegistry.resolve(recipientId);
-            if (!route) {
-              this.logger.error({ recipientId }, 'Could not resolve recipientId');
-              this.metrics.counter('messages_failed', { reason: 'unresolved_recipient' });
-              break;
-            }
-
-            const channelImpl = this.channels.get(route.channel);
-            if (!channelImpl) {
-              this.logger.error(
-                {
-                  recipientId,
-                  channel: route.channel,
-                  registeredChannels: Array.from(this.channels.keys()),
-                },
-                'Channel not found'
-              );
-              this.metrics.counter('messages_failed', {
-                channel: route.channel,
-                reason: 'channel_not_found',
-              });
-              break;
-            }
-
-            const htmlText = markdownToTelegramHtml(text);
-            const sendOptions: SendOptions = {
-              ...(replyTo && { replyTo }),
-              parseMode: 'HTML',
-            };
-            Promise.resolve()
-              .then(async () => {
-                // Duplicate detection: skip sending if message is identical to last assistant message
-                // This prevents proactive contacts from repeating the same response
-                if (this.conversationManager) {
-                  const lastMessage =
-                    await this.conversationManager.getLastAssistantMessage(recipientId);
-                  if (lastMessage && lastMessage === text) {
-                    this.logger.warn(
-                      { recipientId, textLength: text.length },
-                      'Skipping duplicate message - identical to last assistant message'
-                    );
-                    this.metrics.counter('messages_skipped', { reason: 'duplicate' });
-                    return { success: false, skipped: true };
-                  }
-                }
-                return channelImpl.sendMessage(route.destination, htmlText, sendOptions);
-              })
-              .then((result) => {
-                if (result.success) {
-                  this.lastMessageSentAt = Date.now();
-                  this.lastMessageRecipientId = recipientId;
-                  this.metrics.counter('messages_sent', { channel: route.channel });
-                  this.agent.onMessageSent();
-
-                  if (this.conversationManager) {
-                    // Type guard: messageId only exists on actual send results, not on skipped results
-                    const messageId = 'messageId' in result ? result.messageId : undefined;
-                    // Note: toolCalls and toolResults are NOT saved to history
-                    // They're kept in agentic loop memory only to prevent pollution across triggers
-                    void this.saveAgentMessage(
-                      recipientId,
-                      text,
-                      conversationStatus,
-                      messageId
-                        ? { channelMessageId: messageId, channel: route.channel }
-                        : undefined
-                    );
-                  }
-                } else if ('skipped' in result && result.skipped) {
-                  // Message was intentionally skipped (duplicate detection)
-                  // Already logged and tracked in the duplicate check
-                } else {
-                  this.logger.warn(
-                    { recipientId, channel: route.channel, textLength: text.length },
-                    'Message send returned false'
-                  );
-                  this.metrics.counter('messages_failed', {
-                    channel: route.channel,
-                    reason: 'returned_false',
-                  });
-                }
-              })
-              .catch((error: unknown) => {
-                this.logger.error(
-                  { error: error instanceof Error ? error.message : String(error), recipientId },
-                  'Message send threw an error'
-                );
-                this.metrics.counter('messages_failed', {
-                  channel: route.channel,
-                  reason: 'exception',
-                });
-              });
-            break;
-          }
-
-          case 'SCHEDULE_EVENT': {
-            const { event, delay, scheduleId } = intent.payload;
-            const fullEvent: Event = {
-              id: scheduleId ?? randomUUID(),
-              source: event.source as Event['source'],
-              type: event.type,
-              priority: event.priority,
-              timestamp: new Date(),
-              payload: event.payload,
-            };
-            if (event.channel) {
-              fullEvent.channel = event.channel;
-            }
-
-            if (delay <= 0) {
-              void this.eventBus.publish(fullEvent);
-            } else {
-              setTimeout(() => {
-                if (this.running) {
-                  void this.eventBus.publish(fullEvent);
-                }
-              }, delay);
-            }
-            break;
-          }
-
-          case 'LOG':
-            this.logger[intent.payload.level](intent.payload.context ?? {}, intent.payload.message);
-            break;
-
-          case 'EMIT_METRIC': {
-            const { type: metricType, name, value, labels } = intent.payload;
-            switch (metricType) {
-              case 'gauge':
-                this.metrics.gauge(name, value, labels);
-                break;
-              case 'counter':
-                this.metrics.counter(name, labels);
-                break;
-              case 'histogram':
-                this.metrics.histogram(name, value, labels);
-                break;
-            }
-            break;
-          }
-
-          case 'CANCEL_EVENT':
-            this.logger.debug({ intent }, 'CANCEL_EVENT not yet implemented');
-            break;
-
-          case 'SAVE_TO_MEMORY': {
-            const {
-              type: memoryType,
-              recipientId: memoryRecipientId,
-              content,
-              fact,
-              tags,
-            } = intent.payload;
-
-            if (this.memoryProvider) {
-              const subject = fact?.subject ?? '';
-              const predicate = fact?.predicate ?? '';
-              const object = fact?.object ?? '';
-              const evidence = fact?.evidence ?? '';
-              const entryContent = fact
-                ? `${subject} ${predicate} ${object}${evidence ? ` (${evidence})` : ''}`
-                : (content ?? '');
-
-              if (entryContent.trim()) {
-                const entry = {
-                  id: `mem_${Date.now().toString()}_${Math.random().toString(36).slice(2, 8)}`,
-                  type: memoryType as 'fact' | 'thought' | 'message' | 'intention',
-                  content: entryContent,
-                  timestamp: new Date(),
-                  recipientId: memoryRecipientId,
-                  tags: tags ?? fact?.tags,
-                  confidence: fact?.confidence,
-                  metadata: fact ? { subject, predicate, object } : undefined,
-                };
-
-                this.memoryProvider.save(entry).catch((err: unknown) => {
-                  this.logger.error(
-                    { error: err instanceof Error ? err.message : String(err) },
-                    'Failed to save to memory'
-                  );
-                });
-
-                this.logger.debug(
-                  { entryId: entry.id, type: memoryType, content: entryContent.slice(0, 50) },
-                  'Memory entry saved'
-                );
-              }
-            } else {
-              this.logger.debug(
-                {
-                  memoryType,
-                  recipientId: memoryRecipientId,
-                  hasFact: !!fact,
-                  hasContent: !!content,
-                },
-                'Memory save skipped (no provider)'
-              );
-            }
-
-            this.metrics.counter('memory_saves', { type: memoryType });
-            break;
-          }
-
-          case 'ACK_SIGNAL': {
-            const { signalId, signalType, source, reason } = intent.payload;
-
-            const ackRegistry = this.layers.aggregation.getAckRegistry();
-
-            if (signalType === 'thought') {
-              if (signalId) {
-                ackRegistry.markHandled(signalId);
-              } else {
-                this.logger.warn({ signalType }, 'Thought ACK missing signalId');
-              }
-            }
-
-            ackRegistry.registerAck({
-              signalType: signalType as SignalType,
-              source: source as SignalSource | undefined,
-              ackType: 'handled',
-              reason,
-            });
-
-            this.logger.debug({ signalId, signalType, source, reason }, 'Signal acknowledged');
-            this.metrics.counter('signal_acks', { signalType, ackType: 'handled' });
-            break;
-          }
-
-          case 'DEFER_SIGNAL': {
-            const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } =
-              intent.payload;
-
-            let currentValue = valueAtDeferral;
-            if (currentValue === undefined) {
-              const aggregate = this.layers.aggregation.getAggregate(signalType as SignalType);
-              currentValue = aggregate?.currentValue;
-            }
-
-            const ackRegistry = this.layers.aggregation.getAckRegistry();
-            ackRegistry.registerAck({
-              signalType: signalType as SignalType,
-              source: source as SignalSource | undefined,
-              ackType: 'deferred',
-              deferUntil: new Date(Date.now() + deferMs),
-              valueAtAck: currentValue,
-              overrideDelta,
-              reason,
-            });
-
-            this.logger.info(
-              {
-                signalType,
-                deferMs,
-                deferHours: (deferMs / (60 * 60 * 1000)).toFixed(1),
-                reason,
-                valueAtDeferral: currentValue?.toFixed(2),
-              },
-              'Signal deferred'
-            );
-            this.metrics.counter('signal_acks', { signalType, ackType: 'deferred' });
-            break;
-          }
-
-          case 'EMIT_THOUGHT': {
-            const {
-              content,
-              triggerSource,
-              depth,
-              rootThoughtId,
-              parentThoughtId,
-              signalSource,
-              recipientId: thoughtRecipientId,
-            } = intent.payload;
-
-            const thoughtData: ThoughtData = {
-              kind: 'thought',
-              content,
-              triggerSource,
-              depth,
-              rootThoughtId,
-              ...(parentThoughtId !== undefined && { parentThoughtId }),
-              ...(thoughtRecipientId !== undefined && { recipientId: thoughtRecipientId }),
-            };
-
-            this.enqueueThoughtSignal(thoughtData, signalSource as SignalSource);
-            break;
-          }
-
-          case 'REMEMBER': {
-            const {
-              subject,
-              attribute,
-              value,
-              confidence,
-              source,
-              evidence,
-              isUserFact,
-              recipientId: rememberRecipientId,
-            } = intent.payload;
-            const trace = intent.trace;
-
-            if (isUserFact && this.userModel) {
-              const strValue = value.trim();
-              const isDelta = strValue.startsWith('+') || strValue.startsWith('-');
-              const deltaNum = isDelta ? this.parseDelta(value) : null;
-
-              if (isDelta && deltaNum !== null) {
-                const currentProp = this.userModel.getProperty(attribute);
-                const currentNum = typeof currentProp?.value === 'number' ? currentProp.value : 0.5;
-                const newValue = Math.max(0, Math.min(1, currentNum + deltaNum));
-                this.userModel.setProperty(attribute, newValue, confidence, source, evidence);
-                this.logger.debug(
-                  {
-                    attribute,
-                    delta: deltaNum,
-                    current: currentNum,
-                    newValue,
-                    tickId: trace?.tickId,
-                  },
-                  'User property updated (delta)'
-                );
-              } else {
-                this.userModel.setProperty(attribute, value, confidence, source, evidence);
-                this.logger.debug(
-                  {
-                    attribute,
-                    value,
-                    confidence,
-                    tickId: trace?.tickId,
-                    parentSignalId: trace?.parentSignalId,
-                  },
-                  'User property stored'
-                );
-              }
-            }
-
-            if (this.memoryProvider) {
-              const memoryEntry = {
-                id: `mem_${randomUUID()}`,
-                type: 'fact' as const,
-                content: `${subject}.${attribute}: ${value}`,
-                timestamp: new Date(),
-                recipientId: rememberRecipientId,
-                confidence,
-                metadata: { subject, attribute, source, evidence, isUserFact },
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              };
-
-              this.memoryProvider.save(memoryEntry).catch((err: unknown) => {
-                this.logger.error(
-                  { error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save remembered fact to memory'
-                );
-              });
-
-              this.logger.debug(
-                {
-                  subject,
-                  attribute,
-                  tickId: trace?.tickId,
-                  parentSignalId: trace?.parentSignalId,
-                },
-                'Memory stored'
-              );
-            }
-
-            if (rememberRecipientId && this.conversationManager) {
-              const summary = `${subject}.${attribute}="${value}"`;
-              this.conversationManager
-                .addCompletedAction(rememberRecipientId, {
-                  tool: 'core.remember',
-                  summary,
-                })
-                .catch((err: unknown) => {
-                  this.logger.warn(
-                    { error: err instanceof Error ? err.message : String(err) },
-                    'Failed to record completed action for remember'
-                  );
-                });
-            }
-
-            this.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
-            break;
-          }
-
-          case 'SET_INTEREST': {
-            const {
-              topic,
-              intensity,
-              urgent,
-              source,
-              recipientId: interestRecipientId,
-            } = intent.payload;
-            const trace = intent.trace;
-
-            if (!this.userModel) {
-              this.logger.warn({ topic }, 'SET_INTEREST skipped: no UserModel');
-              break;
-            }
-
-            if (typeof topic !== 'string' || topic.length === 0) {
-              this.logger.error({ topic, intensity }, 'SET_INTEREST: invalid topic');
-              break;
-            }
-
-            const keywords = topic
-              .split(',')
-              .map((kw) => kw.trim().toLowerCase())
-              .filter((kw) => kw.length >= 2);
-
-            if (keywords.length === 0) {
-              this.logger.error({ topic, intensity }, 'SET_INTEREST: no valid keywords');
-              break;
-            }
-
-            const delta = CoreLoop.INTENSITY_DELTAS[intensity];
-            const interests = this.userModel.getInterests();
-
-            for (const keyword of keywords) {
-              const currentWeight = interests?.weights[keyword] ?? 0.5;
-              const newWeight = Math.max(0, Math.min(1, currentWeight + delta));
-              this.userModel.setTopicWeight(keyword, newWeight);
-
-              if (urgent) {
-                const currentUrgency = interests?.urgency[keyword] ?? 0.5;
-                const newUrgency = Math.max(0, Math.min(1, currentUrgency + 0.5));
-                this.userModel.setTopicUrgency(keyword, newUrgency);
-              }
-            }
-
-            if (interestRecipientId && this.conversationManager) {
-              const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
-              this.conversationManager
-                .addCompletedAction(interestRecipientId, {
-                  tool: 'core.setInterest',
-                  summary,
-                })
-                .catch((err: unknown) => {
-                  this.logger.warn(
-                    { error: err instanceof Error ? err.message : String(err) },
-                    'Failed to record completed action for setInterest'
-                  );
-                });
-            }
-
-            this.logger.debug(
-              {
-                originalTopic: topic,
-                keywords,
-                intensity,
-                delta,
-                urgent,
-                source,
-                tickId: trace?.tickId,
-              },
-              'Topic interests updated'
-            );
-
-            this.metrics.counter('interests_set', { intensity, urgent: String(urgent) });
-
-            // Bump curiosity when user shows interest (Phase 2: Dynamic Curiosity)
-            // Random bump between 0.1-0.15 to add natural variation
-            const curiosityBump = 0.1 + Math.random() * 0.05;
-            this.agent.applyIntent({
-              type: 'UPDATE_STATE',
-              payload: { key: 'curiosity', value: curiosityBump, delta: true },
-            });
-            break;
-          }
-
-          case 'COMMITMENT': {
-            const {
-              action,
-              commitmentId,
-              text,
-              dueAt,
-              source,
-              confidence,
-              repairNote,
-              recipientId: commitmentRecipientId,
-            } = intent.payload;
-            const trace = intent.trace;
-
-            if (!this.memoryProvider) {
-              this.logger.warn({ action }, 'COMMITMENT skipped: no MemoryProvider');
-              break;
-            }
-
-            if (action === 'create') {
-              if (!commitmentId || !text || !dueAt) {
-                this.logger.error(
-                  { commitmentId, text, dueAt },
-                  'COMMITMENT create: missing fields'
-                );
-                break;
-              }
-
-              // Store commitment as MemoryEntry
-              const entry: MemoryEntry = {
-                id: commitmentId,
-                type: 'fact',
-                content: text,
-                timestamp: new Date(),
-                recipientId: commitmentRecipientId,
-                tags: ['commitment', 'state:active'],
-                confidence: confidence ?? 0.9,
-                metadata: {
-                  kind: 'commitment',
-                  dueAt: dueAt.toISOString(),
-                  source: source ?? 'explicit',
-                  createdAt: new Date().toISOString(),
-                },
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              };
-
-              this.memoryProvider.save(entry).catch((err: unknown) => {
-                this.logger.error(
-                  { commitmentId, error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save commitment'
-                );
-              });
-
-              // Record completed action
-              if (commitmentRecipientId && this.conversationManager) {
-                const dueDate = new Date(dueAt);
-                const summary = `promise: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" (due ${dueDate.toLocaleDateString()})`;
-                this.conversationManager
-                  .addCompletedAction(commitmentRecipientId, {
-                    tool: 'core.commitment',
-                    summary,
-                  })
-                  .catch((err: unknown) => {
-                    this.logger.warn(
-                      { error: err instanceof Error ? err.message : String(err) },
-                      'Failed to record completed action for commitment'
-                    );
-                  });
-              }
-
-              this.logger.info(
-                { commitmentId, text: text.slice(0, 50), dueAt, source },
-                'Commitment created'
-              );
-              this.metrics.counter('commitments_created', { source: source ?? 'explicit' });
-            } else if (action === 'mark_kept') {
-              // Update commitment status to kept
-              if (commitmentId) {
-                void this.updateCommitmentStatus(commitmentId, 'kept', commitmentRecipientId);
-                this.logger.info({ commitmentId }, 'Commitment marked as kept');
-                this.metrics.counter('commitments_kept');
-              }
-            } else if (action === 'mark_repaired') {
-              // Update commitment status to repaired with note
-              if (commitmentId) {
-                void this.updateCommitmentStatus(
-                  commitmentId,
-                  'repaired',
-                  commitmentRecipientId,
-                  repairNote
-                );
-                this.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
-                this.metrics.counter('commitments_repaired');
-              }
-            } else if (action === 'cancel') {
-              // Update commitment status to cancelled
-              if (commitmentId) {
-                void this.updateCommitmentStatus(commitmentId, 'cancelled', commitmentRecipientId);
-                this.logger.info({ commitmentId }, 'Commitment cancelled');
-                this.metrics.counter('commitments_cancelled');
-              }
-            }
-            break;
-          }
-
-          case 'DESIRE': {
-            const {
-              action,
-              desireId,
-              want,
-              intensity,
-              source,
-              evidence,
-              recipientId: desireRecipientId,
-            } = intent.payload;
-            const trace = intent.trace;
-
-            if (!this.memoryProvider) {
-              this.logger.warn({ action }, 'DESIRE skipped: no MemoryProvider');
-              break;
-            }
-
-            if (action === 'create') {
-              if (!desireId || !want) {
-                this.logger.error({ desireId, want }, 'DESIRE create: missing fields');
-                break;
-              }
-
-              // Store desire as MemoryEntry
-              const entry: MemoryEntry = {
-                id: desireId,
-                type: 'fact',
-                content: want,
-                timestamp: new Date(),
-                recipientId: desireRecipientId,
-                tags: ['desire', 'state:active'],
-                confidence: intensity ?? 0.5,
-                metadata: {
-                  kind: 'desire',
-                  intensity: intensity ?? 0.5,
-                  source: source ?? 'self_inference',
-                  evidence: evidence ?? '',
-                  createdAt: new Date().toISOString(),
-                },
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              };
-
-              this.memoryProvider.save(entry).catch((err: unknown) => {
-                this.logger.error(
-                  { desireId, error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save desire'
-                );
-              });
-
-              this.logger.info(
-                { desireId, want: want.slice(0, 50), intensity, source },
-                'Desire created'
-              );
-              this.metrics.counter('desires_created', { source: source ?? 'self_inference' });
-            } else if (action === 'adjust') {
-              // Update desire intensity
-              if (desireId) {
-                void this.updateDesireStatus(desireId, 'active', desireRecipientId, intensity);
-                this.logger.info({ desireId, intensity }, 'Desire intensity adjusted');
-                this.metrics.counter('desires_adjusted');
-              }
-            } else if (action === 'resolve') {
-              // Mark desire as satisfied
-              if (desireId) {
-                void this.updateDesireStatus(desireId, 'satisfied', desireRecipientId);
-                this.logger.info({ desireId }, 'Desire resolved');
-                this.metrics.counter('desires_resolved');
-              }
-            }
-            break;
-          }
-
-          case 'PERSPECTIVE': {
-            const {
-              action,
-              opinionId,
-              predictionId,
-              topic,
-              stance,
-              rationale,
-              confidence,
-              claim,
-              horizonAt,
-              outcome,
-              recipientId: perspectiveRecipientId,
-            } = intent.payload;
-            const trace = intent.trace;
-
-            if (!this.memoryProvider) {
-              this.logger.warn({ action }, 'PERSPECTIVE skipped: no MemoryProvider');
-              break;
-            }
-
-            if (action === 'set_opinion') {
-              if (!opinionId || !topic || !stance) {
-                this.logger.error(
-                  { opinionId, topic, stance },
-                  'PERSPECTIVE set_opinion: missing fields'
-                );
-                break;
-              }
-
-              // Store opinion as MemoryEntry
-              const entry: MemoryEntry = {
-                id: opinionId,
-                type: 'fact',
-                content: `${topic}: ${stance}`,
-                timestamp: new Date(),
-                recipientId: perspectiveRecipientId,
-                tags: ['opinion', 'state:active'],
-                confidence: confidence ?? 0.7,
-                metadata: {
-                  kind: 'opinion',
-                  topic,
-                  stance,
-                  rationale: rationale ?? '',
-                  confidence: confidence ?? 0.7,
-                  createdAt: new Date().toISOString(),
-                },
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              };
-
-              this.memoryProvider.save(entry).catch((err: unknown) => {
-                this.logger.error(
-                  { opinionId, error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save opinion'
-                );
-              });
-
-              this.logger.info(
-                { opinionId, topic, stance: stance.slice(0, 50), confidence },
-                'Opinion created'
-              );
-              this.metrics.counter('opinions_created');
-            } else if (action === 'predict') {
-              if (!predictionId || !claim || !horizonAt) {
-                this.logger.error(
-                  { predictionId, claim, horizonAt },
-                  'PERSPECTIVE predict: missing fields'
-                );
-                break;
-              }
-
-              // Store prediction as MemoryEntry
-              const entry: MemoryEntry = {
-                id: predictionId,
-                type: 'fact',
-                content: claim,
-                timestamp: new Date(),
-                recipientId: perspectiveRecipientId,
-                tags: ['prediction', 'state:pending'],
-                confidence: confidence ?? 0.6,
-                metadata: {
-                  kind: 'prediction',
-                  claim,
-                  horizonAt: horizonAt.toISOString(),
-                  confidence: confidence ?? 0.6,
-                  status: 'pending',
-                  createdAt: new Date().toISOString(),
-                },
-                tickId: trace?.tickId,
-                parentSignalId: trace?.parentSignalId,
-              };
-
-              this.memoryProvider.save(entry).catch((err: unknown) => {
-                this.logger.error(
-                  { predictionId, error: err instanceof Error ? err.message : String(err) },
-                  'Failed to save prediction'
-                );
-              });
-
-              this.logger.info(
-                { predictionId, claim: claim.slice(0, 50), horizonAt, confidence },
-                'Prediction created'
-              );
-              this.metrics.counter('predictions_created');
-            } else if (action === 'resolve_prediction') {
-              if (predictionId && outcome) {
-                void this.updatePredictionStatus(predictionId, outcome, perspectiveRecipientId);
-                this.logger.info({ predictionId, outcome }, 'Prediction resolved');
-                this.metrics.counter('predictions_resolved', { outcome });
-              }
-            } else if (action === 'revise_opinion') {
-              if (opinionId) {
-                void this.updateOpinionStatus(
-                  opinionId,
-                  stance,
-                  confidence,
-                  perspectiveRecipientId
-                );
-                this.logger.info({ opinionId }, 'Opinion revised');
-                this.metrics.counter('opinions_revised');
-              }
-            }
-            break;
-          }
-        }
-      });
-    }
-  }
-
-  /**
-   * Update prediction status in memory.
-   * If prediction is missed, enqueues a reflection thought.
-   */
-  private async updatePredictionStatus(
-    predictionId: string,
-    outcome: 'confirmed' | 'missed' | 'mixed',
-    _recipientId?: string
-  ): Promise<void> {
-    if (!this.memoryProvider) return;
-
-    try {
-      const prediction = await this.memoryProvider.getById(predictionId);
-      if (!prediction) {
-        this.logger.warn({ predictionId }, 'Prediction not found for status update');
-        return;
-      }
-
-      const claim = prediction.content;
-
-      // Update tags
-      const oldTags = prediction.tags ?? [];
-      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
-      newTags.push(`state:${outcome}`);
-
-      // Update metadata
-      const metadata = {
-        ...(prediction.metadata ?? {}),
-        status: outcome,
-        resolvedAt: new Date().toISOString(),
-      };
-
-      const updatedEntry: MemoryEntry = {
-        ...prediction,
-        tags: newTags,
-        metadata,
-      };
-
-      await this.memoryProvider.save(updatedEntry);
-
-      // Clear from due dedup set so it won't block future signals
-      this.signaledDuePredictions.delete(predictionId);
-
-      // If missed, enqueue reflection thought (Phase 7.2)
-      if (outcome === 'missed') {
-        const thoughtContent = `My prediction was wrong: "${claim}". What can I learn from this?`;
-        this.enqueueThoughtSignal(
-          {
-            kind: 'thought',
-            content: thoughtContent,
-            triggerSource: 'memory',
-            depth: 0,
-            rootThoughtId: `pred_missed_${predictionId}`,
-          },
-          'cognition.thought'
-        );
-        this.logger.info(
-          { predictionId, claim },
-          'Reflection thought enqueued for missed prediction'
-        );
-      }
-    } catch (err) {
-      this.logger.error(
-        { predictionId, outcome, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update prediction status'
-      );
-    }
-  }
-
-  /** Validation count threshold for promoting an opinion to a soul precedent */
-  private static readonly OPINION_PROMOTION_THRESHOLD = 3;
-
-  /**
-   * Update opinion status in memory.
-   *
-   * Tracks validation count: when an opinion is revised with same-or-higher
-   * confidence, it counts as a validation. After reaching the promotion
-   * threshold, the opinion is promoted to a soul precedent (case law).
-   */
-  private async updateOpinionStatus(
-    opinionId: string,
-    newStance?: string,
-    newConfidence?: number,
-    _recipientId?: string
-  ): Promise<void> {
-    if (!this.memoryProvider) return;
-
-    try {
-      const opinion = await this.memoryProvider.getById(opinionId);
-      if (!opinion) {
-        this.logger.warn({ opinionId }, 'Opinion not found for status update');
-        return;
-      }
-
-      const oldConfidence =
-        typeof opinion.metadata?.['confidence'] === 'number' ? opinion.metadata['confidence'] : 0.5;
-      const oldValidationCount =
-        typeof opinion.metadata?.['validationCount'] === 'number'
-          ? opinion.metadata['validationCount']
-          : 0;
-
-      // A revision with same-or-higher confidence counts as validation
-      const isValidation = newConfidence !== undefined && newConfidence >= oldConfidence;
-      const newValidationCount = isValidation ? oldValidationCount + 1 : oldValidationCount;
-
-      // Update metadata
-      const metadata: Record<string, unknown> = {
-        ...(opinion.metadata ?? {}),
-        previousStance: opinion.metadata?.['stance'],
-        revisedAt: new Date().toISOString(),
-        validationCount: newValidationCount,
-      };
-
-      if (newStance) {
-        metadata['stance'] = newStance;
-      }
-      if (newConfidence !== undefined) {
-        metadata['confidence'] = newConfidence;
-      }
-
-      const topicValue = opinion.metadata?.['topic'];
-      const topic = typeof topicValue === 'string' ? topicValue : 'topic';
-      const stance =
-        typeof metadata['stance'] === 'string'
-          ? metadata['stance']
-          : typeof opinion.metadata?.['stance'] === 'string'
-            ? opinion.metadata['stance']
-            : '';
-
-      const updatedEntry: MemoryEntry = {
-        ...opinion,
-        content: newStance ? `${topic}: ${newStance}` : opinion.content,
-        metadata,
-      };
-
-      await this.memoryProvider.save(updatedEntry);
-
-      // Promote to soul precedent if validation threshold reached
-      if (
-        newValidationCount >= CoreLoop.OPINION_PROMOTION_THRESHOLD &&
-        oldValidationCount < CoreLoop.OPINION_PROMOTION_THRESHOLD &&
-        this.soulProvider
-      ) {
-        const rationale =
-          typeof opinion.metadata?.['rationale'] === 'string' ? opinion.metadata['rationale'] : '';
-
-        const precedent: Precedent = {
-          id: `prec_${opinionId}`,
-          situation: `Forming a view on: ${topic}`,
-          choice: stance,
-          reasoning:
-            rationale || `Validated ${String(newValidationCount)} times through experience`,
-          valuesPrioritized: ['honesty', 'informed_judgment'],
-          outcome: 'helped',
-          binding: false, // Non-binding — can be overridden by stronger evidence
-          scopeConditions: [`topic:${topic}`],
-          createdAt: new Date(),
-        };
-
-        await this.soulProvider.addPrecedent(precedent);
-
-        this.logger.info(
-          { opinionId, topic, validationCount: newValidationCount, precedentId: precedent.id },
-          'Opinion promoted to soul precedent (case law)'
-        );
-        this.metrics.counter('opinions_promoted_to_precedent');
-      }
-    } catch (err) {
-      this.logger.error(
-        { opinionId, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update opinion status'
-      );
-    }
-  }
-
-  /**
-   * Update desire status in memory.
-   * Helper method for DESIRE intent handling.
-   */
-  private async updateDesireStatus(
-    desireId: string,
-    status: 'active' | 'satisfied' | 'stale' | 'dropped',
-    _recipientId?: string,
-    newIntensity?: number
-  ): Promise<void> {
-    if (!this.memoryProvider) return;
-
-    try {
-      const desire = await this.memoryProvider.getById(desireId);
-      if (!desire) {
-        this.logger.warn({ desireId }, 'Desire not found for status update');
-        return;
-      }
-
-      // Update tags (remove old state, add new state)
-      const oldTags = desire.tags ?? [];
-      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
-      newTags.push(`state:${status}`);
-
-      // Update metadata
-      const metadata = {
-        ...(desire.metadata ?? {}),
-        status,
-        [`${status}At`]: new Date().toISOString(),
-      };
-
-      if (newIntensity !== undefined) {
-        metadata['intensity'] = newIntensity;
-      }
-
-      // Save updated entry
-      const updatedEntry: MemoryEntry = {
-        ...desire,
-        tags: newTags,
-        metadata,
-      };
-
-      await this.memoryProvider.save(updatedEntry);
-    } catch (err) {
-      this.logger.error(
-        { desireId, status, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update desire status'
-      );
-    }
-  }
-
-  /**
-   * Update commitment status in memory.
-   * Helper method for COMMITMENT intent handling.
-   */
-  private async updateCommitmentStatus(
-    commitmentId: string,
-    status: 'kept' | 'breached' | 'repaired' | 'cancelled',
-    recipientId?: string,
-    repairNote?: string
-  ): Promise<void> {
-    if (!this.memoryProvider) return;
-
-    try {
-      const commitment = await this.memoryProvider.getById(commitmentId);
-      if (!commitment) {
-        this.logger.warn({ commitmentId }, 'Commitment not found for status update');
-        return;
-      }
-
-      // Update tags (remove old state, add new state)
-      const oldTags = commitment.tags ?? [];
-      const newTags = oldTags.filter((t) => !t.startsWith('state:'));
-      newTags.push(`state:${status}`);
-
-      // Update metadata
-      const metadata = {
-        ...(commitment.metadata ?? {}),
-        status,
-        [`${status}At`]: new Date().toISOString(),
-      };
-
-      if (repairNote) {
-        metadata['repairNote'] = repairNote;
-      }
-
-      // Save updated entry
-      const updatedEntry: MemoryEntry = {
-        ...commitment,
-        tags: newTags,
-        metadata,
-      };
-
-      await this.memoryProvider.save(updatedEntry);
-
-      // Clear from dedup sets so it won't block future signals if re-activated
-      this.signaledDueCommitments.delete(commitmentId);
-      this.signaledOverdueCommitments.delete(commitmentId);
-
-      // Record completed action for kept/repaired
-      if (recipientId && this.conversationManager && (status === 'kept' || status === 'repaired')) {
-        const summary = `commitment ${status}: "${commitment.content.slice(0, 30)}..."`;
-        this.conversationManager
-          .addCompletedAction(recipientId, {
-            tool: 'core.commitment',
-            summary,
-          })
-          .catch((err: unknown) => {
-            this.logger.warn(
-              { error: err instanceof Error ? err.message : String(err) },
-              'Failed to record completed action for commitment update'
-            );
-          });
-      }
-    } catch (err) {
-      this.logger.error(
-        { commitmentId, status, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update commitment status'
-      );
-    }
+    this.intentApplicator.apply(intents, tickCtx);
   }
 
   /**
@@ -2697,75 +1296,9 @@ export class CoreLoop {
   }
 
   /**
-   * Parse a delta value from string.
-   * Accepts formats: "+0.2", "-0.1", "0.3" (treated as +0.3)
-   * Returns null if parsing fails.
-   */
-  private parseDelta(value: unknown): number | null {
-    const str = String(value).trim();
-    const num = parseFloat(str);
-    if (Number.isNaN(num)) return null;
-    // Clamp delta to reasonable range (-1 to +1)
-    return Math.max(-1, Math.min(1, num));
-  }
-
-  /**
-   * Intensity-to-delta mapping for SET_INTEREST intent.
-   */
-  private static readonly INTENSITY_DELTAS: Record<InterestIntensity, number> = {
-    strong_positive: 0.5,
-    weak_positive: 0.2,
-    weak_negative: -0.2,
-    strong_negative: -0.5,
-  };
-
-  /**
-   * Save agent message to conversation history.
-   * When tool call data is present, saves as a full turn (assistant + tool results).
-   */
-  private async saveAgentMessage(
-    chatId: string,
-    text: string,
-    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle',
-    channelMeta?: {
-      channelMessageId?: string;
-      channel?: string;
-    }
-  ): Promise<void> {
-    if (!this.conversationManager) return;
-
-    try {
-      // Only save the final response text - tool calls are internal to the agentic loop
-      // This keeps conversation history clean: user messages, reactions, and assistant responses
-      await this.conversationManager.addMessage(
-        chatId,
-        {
-          role: 'assistant',
-          content: text,
-        },
-        channelMeta
-      );
-
-      // Use inline status if provided, otherwise fall back to LLM classification
-      if (conversationStatus) {
-        await this.conversationManager.setStatus(chatId, conversationStatus);
-      } else if (this.messageComposer) {
-        // Fallback: classify via separate LLM call (legacy path)
-        const classification = await this.messageComposer.classifyConversationStatus(text);
-        await this.conversationManager.setStatus(chatId, classification.status);
-      }
-    } catch (error) {
-      this.logger.warn(
-        { error: error instanceof Error ? error.message : String(error), chatId },
-        'Failed to save agent message'
-      );
-    }
-  }
-
-  /**
    * Handle typing event.
    */
-  private async handleTypingEvent(event: Event): Promise<void> {
+  private async handleTypingEvent(event: import('../types/index.js').Event): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
     const recipientId = payload?.['chatId'] as string | undefined;
     const channelName = event.channel;

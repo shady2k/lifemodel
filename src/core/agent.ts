@@ -4,6 +4,7 @@ import type { AgentIdentity } from '../types/agent/identity.js';
 import { createDefaultAgentState, createDefaultSleepState } from '../types/agent/state.js';
 import { createDefaultIdentity } from '../types/agent/identity.js';
 import { type EnergyModel, createEnergyModel } from './energy.js';
+import { getEffectiveTimezone } from '../utils/date.js';
 
 /**
  * Agent dependencies injected via constructor.
@@ -42,6 +43,10 @@ export interface AgentConfig {
 
   /** Curiosity decay rate toward 0.5 baseline per hour (default: 0.01) */
   curiosityDecayRatePerHour?: number;
+
+  /** User's timezone for time-of-day calculations (IANA name or UTC offset).
+   *  Falls back to 'Europe/Moscow' if not set. */
+  timezone?: string | undefined;
 }
 
 const DEFAULT_TICK_RATE = {
@@ -103,6 +108,7 @@ export class Agent {
       tickRate: config.tickRate ?? DEFAULT_TICK_RATE,
       socialDebtRate: config.socialDebtRate ?? 0.005, // Increased from 0.001 for faster accumulation
       curiosityDecayRatePerHour: config.curiosityDecayRatePerHour ?? 0.01, // Decay toward 0.5 baseline
+      timezone: config.timezone,
     };
 
     this.logger.info({ name: this.identity.name, energy: this.state.energy }, 'Agent initialized');
@@ -403,7 +409,15 @@ export class Agent {
   private updateAlertnessMode(): void {
     const pressure = this.calculateReachOutPressure();
     const energy = this.state.energy;
-    const hour = new Date().getHours();
+
+    // Use user's timezone for night-time detection (fixes server-time bug)
+    const tz = getEffectiveTimezone(this.config.timezone);
+    const localHourStr = new Date().toLocaleString('en-US', {
+      hour: 'numeric',
+      hour12: false,
+      timeZone: tz,
+    });
+    const hour = parseInt(localHourStr, 10);
     const isNightTime = hour >= 22 || hour < 6;
 
     // Determine new mode

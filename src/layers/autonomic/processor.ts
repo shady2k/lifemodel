@@ -25,7 +25,7 @@ import type { AutonomicLayer, AutonomicResult } from '../../types/layers.js';
 import type { Logger } from '../../types/logger.js';
 import type { Neuron, NeuronRegistry } from './neuron-registry.js';
 import { createNeuronRegistry } from './neuron-registry.js';
-import type { AlertnessNeuron } from '../../plugins/alertness/index.js';
+import type { IAlertness } from '../../ports/alertness.js';
 import type { FilterRegistry } from './filter-registry.js';
 import {
   createFilterRegistry,
@@ -68,8 +68,8 @@ export class AutonomicProcessor implements AutonomicLayer {
   private readonly logger: Logger;
   private readonly config: AutonomicProcessorConfig;
 
-  /** AlertnessNeuron reference (required, but registered dynamically) */
-  private alertnessNeuron: AlertnessNeuron | undefined;
+  /** Alertness provider reference (required, but registered dynamically via alertness plugin) */
+  private alertnessNeuron: (Neuron & IAlertness) | undefined;
 
   /** Whether validateRequiredNeurons() has been called */
   private alertnessValidated = false;
@@ -196,9 +196,9 @@ export class AutonomicProcessor implements AutonomicLayer {
       try {
         this.registry.register(neuron);
 
-        // Track AlertnessNeuron specially
+        // Track alertness neuron specially (must implement IAlertness)
         if (neuron.id === 'alertness') {
-          this.alertnessNeuron = neuron as AlertnessNeuron;
+          this.alertnessNeuron = neuron as Neuron & IAlertness;
           this.logger.info('AlertnessNeuron registered');
         }
 

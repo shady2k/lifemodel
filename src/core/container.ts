@@ -383,6 +383,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const metrics = createMetrics();
 
   // Build agent config from merged config and persisted state
+  const primaryTimezoneOffset =
+    configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
   const agentConfig: AgentConfig = {
     identity: configOverrides.agent?.identity ?? mergedConfig.identity,
     initialState: persistedState?.agent.state ?? {
@@ -390,6 +392,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       ...configOverrides.agent?.initialState,
     },
     tickRate: configOverrides.agent?.tickRate ?? mergedConfig.tickRate,
+    timezone: primaryTimezoneOffset != null
+      ? getEffectiveTimezone(undefined, primaryTimezoneOffset)
+      : undefined,
   };
   if (persistedState?.agent.sleepState) {
     agentConfig.initialSleepState = persistedState.agent.sleepState;

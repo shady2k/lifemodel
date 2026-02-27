@@ -192,6 +192,8 @@ You scheduled this for yourself: "${content}"${isRecurring ? ' (recurring)' : ''
 <task>
 Act on your own reminder. You set this because it mattered.
 If the task is complete, you can cancel it with plugin.reminder(action:"cancel", reminderId:"${(d['reminderId'] as string | undefined) ?? ''}").
+
+This is a proactive check — you initiated it, not the user. A real person doing a routine check (mail, news, notifications) only speaks up when they find something. Saying "I checked and there's nothing" creates noise — the user has to read and process a message with zero informational value. Every message you send costs the user's attention. If a check yields nothing new, stay quiet: {"response": ""}.
 </task>
 </trigger>`;
   }
