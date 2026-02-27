@@ -22,6 +22,7 @@ import {
   loadSkill,
   savePolicy,
   computeDirectoryHash,
+  invalidateSkillsCache,
 } from '../../../../runtime/skills/skill-loader.js';
 import type { SkillPolicy, MotorToolName } from '../../../../runtime/skills/skill-types.js';
 import { sanitizePolicyForDisplay } from '../../../../runtime/skills/skill-types.js';
@@ -337,6 +338,7 @@ Be specific and actionable. Do NOT give generic advice. Every credential, domain
       if (action === 'delete') {
         try {
           await rm(loaded.path, { recursive: true, force: true });
+          invalidateSkillsCache();
           return { success: true, skill: skillName };
         } catch (err) {
           return {

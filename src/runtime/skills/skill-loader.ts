@@ -418,6 +418,9 @@ export async function savePolicy(skillDir: string, policy: SkillPolicy): Promise
 
   const storage = new JSONStorage({ basePath: skillDir, createBackup: false });
   await storage.save('policy', policy);
+
+  // Invalidate discovery cache — policy changes affect skill status/metadata
+  invalidateSkillsCache();
 }
 
 /**
@@ -476,12 +479,16 @@ async function scanSkillsDir(dir: string, isBuiltIn: boolean): Promise<Discovere
   }
 }
 
+/** TTL cache for discoverSkills — avoids repeated filesystem scans on every cognition tick. */
+let skillsCache: { skills: DiscoveredSkill[]; key: string; expiresAt: number } | null = null;
+const SKILLS_CACHE_TTL_MS = 30_000; // 30 seconds
+
 /**
  * Discover all available skills by scanning the skills directory.
  *
- * Auto-discovery mode: always scans the directory, no index.json caching.
- * When builtinDir is provided, scans it first, then user dir.
- * User skills override builtin skills on name conflict.
+ * Results are cached for 30 seconds to avoid filesystem I/O on every
+ * cognition tick (~1s). Use {@link invalidateSkillsCache} after adding
+ * or modifying skills to force a fresh scan.
  *
  * @param baseDir - Base directory (default: data/skills)
  * @param builtinDir - Optional directory for built-in skills
@@ -492,6 +499,11 @@ export async function discoverSkills(
   builtinDir?: string
 ): Promise<DiscoveredSkill[]> {
   const dir = resolve(baseDir ?? DEFAULT_SKILLS_DIR);
+  const cacheKey = `${dir}:${builtinDir ?? ''}`;
+
+  if (skillsCache?.key === cacheKey && Date.now() < skillsCache.expiresAt) {
+    return skillsCache.skills;
+  }
 
   // Scan builtin skills first, then user skills (user overrides on name conflict)
   const builtinSkills = builtinDir ? await scanSkillsDir(builtinDir, true) : [];
@@ -501,7 +513,16 @@ export async function discoverSkills(
   const userNames = new Set(userSkills.map((s) => s.name));
   const merged = [...builtinSkills.filter((s) => !userNames.has(s.name)), ...userSkills];
 
+  skillsCache = { skills: merged, key: cacheKey, expiresAt: Date.now() + SKILLS_CACHE_TTL_MS };
   return merged;
+}
+
+/**
+ * Invalidate the skills discovery cache.
+ * Call after adding, removing, or modifying skills.
+ */
+export function invalidateSkillsCache(): void {
+  skillsCache = null;
 }
 
 /**

@@ -246,7 +246,11 @@ export class SystemHealthMonitor {
       (1 - SystemHealthMonitor.CPU_EMA_ALPHA) * this.cpuEma;
 
     // Calculate stress level from all 3 metrics (uses smoothed CPU)
-    const measuredLevel = this.calculateStressLevel(eventLoopLagMs, this.cpuEma, elu);
+    const { level: measuredLevel, triggers } = this.calculateStressLevel(
+      eventLoopLagMs,
+      this.cpuEma,
+      elu
+    );
 
     // Apply hysteresis - don't drop stress level immediately
     const newStressLevel = this.applyHysteresis(measuredLevel);
@@ -257,11 +261,13 @@ export class SystemHealthMonitor {
         {
           from: this.currentStressLevel,
           to: newStressLevel,
+          trigger: triggers.join('+') || 'recovery',
           eventLoopLagMs: eventLoopLagMs.toFixed(1),
           cpuPercent: cpuPercent.toFixed(1),
+          cpuEma: this.cpuEma.toFixed(1),
           elu: elu.toFixed(3),
         },
-        `Stress level changed: ${this.currentStressLevel} → ${newStressLevel}`
+        `Stress level changed: ${this.currentStressLevel} → ${newStressLevel} [${triggers.join('+') || 'recovery'}]`
       );
       this.currentStressLevel = newStressLevel;
       this.stressLevelChangedAt = Date.now();
@@ -326,6 +332,7 @@ export class SystemHealthMonitor {
 
   /**
    * Calculate stress level from 3 metrics: max(lagSeverity, cpuSeverity, eluSeverity).
+   * Returns overall level plus per-metric breakdown for diagnostics.
    *
    * - ELU: primary JS thread saturation signal (catches tight loops, heavy computation)
    * - Lag: catches blocking stalls and GC pauses
@@ -336,7 +343,7 @@ export class SystemHealthMonitor {
     eventLoopLagMs: number,
     smoothedCpu: number,
     elu: number
-  ): StressLevel {
+  ): { level: StressLevel; triggers: string[] } {
     const { eventLoopLag, cpuUsage, elu: eluThresholds } = this.config;
 
     const levelOrder: StressLevel[] = ['normal', 'elevated', 'high', 'critical'];
@@ -366,7 +373,15 @@ export class SystemHealthMonitor {
       levelOrder.indexOf(cpuSeverity),
       levelOrder.indexOf(eluSeverity)
     );
-    return levelOrder[maxIndex] ?? 'normal';
+    const level = levelOrder[maxIndex] ?? 'normal';
+
+    // Identify which metrics are at or above the resulting level
+    const triggers: string[] = [];
+    if (lagSeverity === level && level !== 'normal') triggers.push('lag');
+    if (cpuSeverity === level && level !== 'normal') triggers.push('cpu');
+    if (eluSeverity === level && level !== 'normal') triggers.push('elu');
+
+    return { level, triggers };
   }
 
   /**
