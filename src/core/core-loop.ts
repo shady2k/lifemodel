@@ -547,6 +547,7 @@ export class CoreLoop {
               stressLevel,
               eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
               cpuPercent: health.cpuPercent.toFixed(1),
+              elu: health.eventLoopUtilization.toFixed(3),
             },
             'AUTONOMIC layer disabled due to stress'
           );
@@ -600,6 +601,7 @@ export class CoreLoop {
               stressLevel,
               eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
               cpuPercent: health.cpuPercent.toFixed(1),
+              elu: health.eventLoopUtilization.toFixed(3),
             },
             'AGGREGATION layer disabled due to stress'
           );
@@ -663,6 +665,7 @@ export class CoreLoop {
               wakeReason: aggregationResult.wakeReason,
               eventLoopLagMs: health.eventLoopLagMs.toFixed(1),
               cpuPercent: health.cpuPercent.toFixed(1),
+              elu: health.eventLoopUtilization.toFixed(3),
             },
             'COGNITION layer disabled due to stress - wake blocked'
           );
@@ -808,6 +811,7 @@ export class CoreLoop {
         this.metrics.gauge('signal_loop_signals_processed', allSignals.length);
         this.metrics.gauge('system_event_loop_lag_ms', health.eventLoopLagMs);
         this.metrics.gauge('system_cpu_percent', health.cpuPercent);
+        this.metrics.gauge('system_elu', health.eventLoopUtilization);
         this.metrics.gauge('system_stress_level', this.stressLevelToNumber(stressLevel));
 
         this.scheduleTick();
