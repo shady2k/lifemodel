@@ -20,6 +20,7 @@ import type { DiscoveredSkill } from '../../runtime/skills/skill-types.js';
 import type { CommitmentSummary } from '../../types/agent/commitment.js';
 import type { DesireSummary } from '../../types/agent/desire.js';
 import type { OpinionSummary, PredictionSummary } from '../../types/agent/perspective.js';
+import type { InterestGroup } from './soul/interest-compaction.js';
 
 /**
  * Request for LLM completion with native tool calling.
@@ -204,6 +205,9 @@ export interface LoopContext {
   /** Active opinions and pending predictions for perspective awareness */
   opinions?: OpinionSummary[] | undefined;
   predictions?: PredictionSummary[] | undefined;
+
+  /** Display groups for interests (from sleep compaction, display-only metadata) */
+  interestGroups?: InterestGroup[] | undefined;
 
   /** Associated memories from graph expansion (direct + related + commitments) */
   associations?: AssociationResult | undefined;

@@ -13,6 +13,11 @@
 import type { Logger } from '../../../types/logger.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 import type { MemoryProvider, MemoryEntry } from '../tools/registry.js';
+import type { CognitionLLM } from '../agentic-loop-types.js';
+import type { UserModel } from '../../../models/user-model.js';
+import type { Interests } from '../../../types/user/interests.js';
+import { compactInterests, computeInterestsHash } from './interest-compaction.js';
+import type { CompactionResult } from './interest-compaction.js';
 
 /**
  * Dependencies for sleep maintenance.
@@ -21,6 +26,10 @@ export interface SleepMaintenanceDeps {
   logger: Logger;
   soulProvider: SoulProvider;
   memoryProvider: MemoryProvider;
+  /** Optional: needed for interest compaction */
+  cognitionLLM?: CognitionLLM | undefined;
+  /** Optional: needed to read/store interest groups */
+  userModel?: UserModel | undefined;
 }
 
 /**
@@ -53,6 +62,8 @@ export interface SleepMaintenanceResult {
   softLearningPromoted: number;
   /** Number of old resolved thoughts marked for pruning */
   thoughtsMarkedForPruning: number;
+  /** Whether interest compaction ran */
+  interestsCompacted: boolean;
   /** Duration of maintenance in ms */
   durationMs: number;
   /** Error message if failed */
@@ -123,6 +134,13 @@ export async function runSleepMaintenance(
       ).length;
     });
 
+    // 6. Interest compaction (LLM-based, only when many interests exist)
+    let interestsCompacted = false;
+    const { cognitionLLM, userModel } = deps;
+    if (cognitionLLM && userModel) {
+      interestsCompacted = await runInterestCompaction(cognitionLLM, userModel, log);
+    }
+
     const durationMs = Date.now() - startTime;
 
     log.info(
@@ -130,6 +148,7 @@ export async function runSleepMaintenance(
         voicesRefreshed,
         softLearningPromoted,
         thoughtsMarkedForPruning,
+        interestsCompacted,
         durationMs,
       },
       'Soul sleep maintenance completed'
@@ -140,6 +159,7 @@ export async function runSleepMaintenance(
       voicesRefreshed,
       softLearningPromoted,
       thoughtsMarkedForPruning,
+      interestsCompacted,
       durationMs,
     };
   } catch (error) {
@@ -152,6 +172,7 @@ export async function runSleepMaintenance(
       voicesRefreshed: 0,
       softLearningPromoted: 0,
       thoughtsMarkedForPruning: 0,
+      interestsCompacted: false,
       durationMs,
       error: errorMsg,
     };
@@ -288,4 +309,55 @@ async function markOldResolvedThoughts(
   }
 
   return marked;
+}
+
+/**
+ * Run interest compaction if interests have changed since last compaction.
+ *
+ * Only triggers when interestCount > 20 and LLM is available.
+ * Uses hash comparison to skip redundant LLM calls.
+ * Fail-closed: any error → warn + continue (returns false).
+ */
+async function runInterestCompaction(
+  llm: CognitionLLM,
+  userModel: UserModel,
+  logger: Logger
+): Promise<boolean> {
+  const interests: Interests | null = userModel.getInterests();
+  if (!interests) return false;
+
+  const positiveCount = Object.values(interests.weights).filter((w) => w > 0).length;
+  if (positiveCount <= 20) return false;
+
+  // Check if hash changed since last compaction
+  const currentHash = computeInterestsHash(interests);
+  const existingProp = userModel.getProperty('interest_groups');
+  if (existingProp) {
+    const existing = existingProp.value as CompactionResult | undefined;
+    if (existing?.interestsHash === currentHash) {
+      logger.debug('Interest compaction skipped: hash unchanged');
+      return false;
+    }
+  }
+
+  try {
+    const result = await compactInterests(interests, llm, logger);
+    if (result) {
+      userModel.setProperty(
+        'interest_groups',
+        result,
+        0.9,
+        'system',
+        'sleep-maintenance compaction'
+      );
+      return true;
+    }
+  } catch (error) {
+    logger.warn(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Interest compaction failed during sleep maintenance'
+    );
+  }
+
+  return false;
 }

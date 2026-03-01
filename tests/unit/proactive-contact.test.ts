@@ -151,7 +151,7 @@ describe('Proactive Contact', () => {
       // Prompt gives agent decision guidance with tool limit
       expect(fullPrompt).toContain('Then decide what to do');
       expect(fullPrompt).toContain('Max 7 tool calls');
-      expect(fullPrompt).toContain('you MUST defer');
+      expect(fullPrompt).toContain('something concrete and new to share');
       expect(fullPrompt).toContain('do nothing');
     });
 

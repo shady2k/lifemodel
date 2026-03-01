@@ -26,13 +26,10 @@ import type {
   Channel,
   ThoughtData,
   MessageReactionData,
+  Event,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
-import {
-  createTraceContext,
-  withTraceContext,
-  type TraceContext,
-} from './trace-context.js';
+import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type {
   AutonomicResult,
   AggregationResult,
@@ -178,6 +175,7 @@ export class CoreLoop {
   private readonly memoryConsolidator: MemoryConsolidator | undefined;
   private readonly recipientRegistry: IRecipientRegistry | undefined;
   private readonly soulProvider: SoulProvider | undefined;
+  private readonly cognitionLLM: CognitionLLM | undefined;
 
   /** Previous alertness mode for detecting transitions */
   private previousAlertnessMode: AlertnessMode | undefined;
@@ -227,6 +225,7 @@ export class CoreLoop {
     this.memoryConsolidator = deps.memoryConsolidator;
     this.recipientRegistry = deps.recipientRegistry;
     this.soulProvider = deps.soulProvider;
+    this.cognitionLLM = deps.cognitionLLM;
 
     // Initialize system health monitor
     this.healthMonitor = createSystemHealthMonitor(logger, config.health);
@@ -734,6 +733,8 @@ export class CoreLoop {
               logger: this.logger,
               soulProvider: this.soulProvider,
               memoryProvider: this.memoryProvider,
+              cognitionLLM: this.cognitionLLM,
+              userModel: this.userModel,
             }).then((result) => {
               if (result.success) {
                 this.logger.info(
@@ -1302,7 +1303,7 @@ export class CoreLoop {
   /**
    * Handle typing event.
    */
-  private async handleTypingEvent(event: import('../types/index.js').Event): Promise<void> {
+  private async handleTypingEvent(event: Event): Promise<void> {
     const payload = event.payload as Record<string, unknown> | undefined;
     const recipientId = payload?.['chatId'] as string | undefined;
     const channelName = event.channel;

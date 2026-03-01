@@ -53,6 +53,36 @@ import {
 import type { PendingReflection } from '../../types/agent/soul.js';
 import { getPrimaryRecipientId } from '../../core/globals.js';
 import { withCaller } from '../../core/trace-context.js';
+import type { InterestGroup } from './soul/interest-compaction.js';
+
+/**
+ * Safely extract interest groups from UserModel property storage.
+ * Returns undefined if the stored value is malformed (fail-safe).
+ */
+function extractInterestGroups(userModel: UserModel | undefined): InterestGroup[] | undefined {
+  if (!userModel) return undefined;
+  const prop = userModel.getProperty('interest_groups');
+  if (!prop) return undefined;
+
+  const result = prop.value as { groups?: unknown } | undefined;
+  if (!result || !Array.isArray(result.groups)) return undefined;
+
+  // Validate each group has label: string and topics: string[]
+  const groups: InterestGroup[] = [];
+  for (const g of result.groups) {
+    if (
+      typeof g === 'object' &&
+      g !== null &&
+      typeof (g as Record<string, unknown>)['label'] === 'string' &&
+      Array.isArray((g as Record<string, unknown>)['topics']) &&
+      ((g as Record<string, unknown>)['topics'] as unknown[]).every((t) => typeof t === 'string')
+    ) {
+      groups.push(g as InterestGroup);
+    }
+  }
+
+  return groups.length > 0 ? groups : undefined;
+}
 
 /**
  * Configuration for COGNITION processor.
@@ -463,6 +493,7 @@ export class CognitionProcessor implements CognitionLayer {
       drainPendingUserMessages: context.drainPendingUserMessages,
       // Phase 3: Interest-driven proactivity - surface user interests for proactive triggers
       userInterests: this.userModel?.getInterests() ?? undefined,
+      interestGroups: extractInterestGroups(this.userModel),
       // Phase 5: Commitment tracking - surface active commitments for follow-up/repair
       activeCommitments: activeCommitments.length > 0 ? activeCommitments : undefined,
       // Phase 6: Desire-driven proactivity - surface active desires for want-driven contact

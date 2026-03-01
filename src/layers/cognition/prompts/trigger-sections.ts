@@ -13,22 +13,149 @@
 import type { LoopContext } from '../agentic-loop-types.js';
 import type { MotorResultData } from '../../../types/signal.js';
 import type { Interests } from '../../../types/user/interests.js';
+import type { InterestGroup } from '../soul/interest-compaction.js';
 
 /**
- * Format user interests as a prioritized list.
- * Returns top N interests sorted by weight (strongest first).
+ * Structured result from formatInterests — lines to display plus metadata.
  */
-function formatInterests(interests: Interests, limit = 3): string[] {
-  const sorted = Object.entries(interests.weights)
-    .filter(([, weight]) => weight > 0) // Only positive interests
-    .sort((a, b) => b[1] - a[1]) // Sort by weight descending
-    .slice(0, limit);
+export interface FormattedInterests {
+  lines: string[];
+  omittedCount: number;
+}
 
-  return sorted.map(([topic]) => {
-    const urgency = interests.urgency[topic] ?? 0.5;
-    const urgencyLabel = urgency > 0.7 ? ' (high urgency)' : urgency > 0.4 ? '' : ' (low urgency)';
-    return `- ${topic}${urgencyLabel}`;
+/**
+ * Format user interests as a prioritized list with priority buckets.
+ *
+ * Selection logic:
+ * 1. Sort all positive interests by: weight DESC → urgency DESC → topic ASC (deterministic tie-break)
+ * 2. All interests with urgency > 0.7 are always included (high-urgency bucket)
+ * 3. Fill remaining slots up to maxItems from the sorted remainder
+ * 4. When interestGroups are available, non-pinned topics are grouped by label
+ *
+ * @param interests User's interests (weights + urgency)
+ * @param maxItems Soft cap on displayed items (high-urgency may exceed this)
+ * @param interestGroups Optional display groups from sleep compaction
+ */
+export function formatInterests(
+  interests: Interests,
+  maxItems = 15,
+  interestGroups?: InterestGroup[]
+): FormattedInterests {
+  const entries = Object.entries(interests.weights).filter(([, weight]) => weight > 0);
+
+  if (entries.length === 0) {
+    return { lines: [], omittedCount: 0 };
+  }
+
+  // Deterministic sort: weight DESC → urgency DESC → topic ASC
+  const sorted = entries.sort((a, b) => {
+    const weightDiff = b[1] - a[1];
+    if (weightDiff !== 0) return weightDiff;
+    const urgencyDiff = (interests.urgency[b[0]] ?? 0.5) - (interests.urgency[a[0]] ?? 0.5);
+    if (urgencyDiff !== 0) return urgencyDiff;
+    return a[0].localeCompare(b[0]);
   });
+
+  // Partition into high-urgency (pinned) and remainder
+  const pinned: [string, number][] = [];
+  const remainder: [string, number][] = [];
+
+  for (const entry of sorted) {
+    const urgency = interests.urgency[entry[0]] ?? 0.5;
+    if (urgency > 0.7) {
+      pinned.push(entry);
+    } else {
+      remainder.push(entry);
+    }
+  }
+
+  // Fill remaining slots
+  const remainderSlots = Math.max(0, maxItems - pinned.length);
+  const selected = remainder.slice(0, remainderSlots);
+  const omittedCount = remainder.length - selected.length;
+
+  // Build lines — pinned topics always shown individually
+  const lines: string[] = [];
+  const pinnedTopics = new Set(pinned.map(([topic]) => topic));
+
+  // Render pinned topics
+  for (const [topic] of pinned) {
+    lines.push(`- ${topic} (high urgency)`);
+  }
+
+  // Render remaining topics — group if interestGroups available
+  // Collect as (sortKey, line) tuples for deterministic output order
+  const remainderLines: { weight: number; urgency: number; key: string; line: string }[] = [];
+
+  if (interestGroups && interestGroups.length > 0) {
+    const selectedTopics = new Set(selected.map(([topic]) => topic));
+    const groupedTopics = new Set<string>();
+
+    for (const group of interestGroups) {
+      // Only include groups where at least one member is in selected and none are pinned
+      const membersInSelected = group.topics.filter(
+        (t) => selectedTopics.has(t) && !pinnedTopics.has(t)
+      );
+      if (membersInSelected.length < 2) continue;
+
+      // Use max weight/urgency of members for the group label
+      const maxWeight = Math.max(...membersInSelected.map((t) => interests.weights[t] ?? 0));
+      const maxUrgency = Math.max(...membersInSelected.map((t) => interests.urgency[t] ?? 0.5));
+      const urgencyLabel = maxUrgency > 0.4 ? '' : ' (low urgency)';
+
+      remainderLines.push({
+        weight: maxWeight,
+        urgency: maxUrgency,
+        key: group.label,
+        line: `- ${group.label} [${membersInSelected.join(', ')}]${urgencyLabel} (w:${maxWeight.toFixed(1)})`,
+      });
+      for (const t of membersInSelected) groupedTopics.add(t);
+    }
+
+    // Add ungrouped remainder
+    for (const [topic] of selected) {
+      if (groupedTopics.has(topic)) continue;
+      const urgency = interests.urgency[topic] ?? 0.5;
+      const urgencyLabel = urgency > 0.4 ? '' : ' (low urgency)';
+      remainderLines.push({
+        weight: interests.weights[topic] ?? 0,
+        urgency,
+        key: topic,
+        line: `- ${topic}${urgencyLabel}`,
+      });
+    }
+  } else {
+    // No groups — render individually
+    for (const [topic] of selected) {
+      const urgency = interests.urgency[topic] ?? 0.5;
+      const urgencyLabel = urgency > 0.4 ? '' : ' (low urgency)';
+      remainderLines.push({
+        weight: interests.weights[topic] ?? 0,
+        urgency,
+        key: topic,
+        line: `- ${topic}${urgencyLabel}`,
+      });
+    }
+  }
+
+  // Sort remainder deterministically: weight DESC → urgency DESC → key ASC
+  remainderLines.sort((a, b) => {
+    const wDiff = b.weight - a.weight;
+    if (wDiff !== 0) return wDiff;
+    const uDiff = b.urgency - a.urgency;
+    if (uDiff !== 0) return uDiff;
+    return a.key.localeCompare(b.key);
+  });
+
+  for (const entry of remainderLines) {
+    lines.push(entry.line);
+  }
+
+  if (omittedCount > 0) {
+    lines.push(`(+${String(omittedCount)} lower-priority interests omitted)`);
+  }
+
+  return { lines, omittedCount };
 }
 
 /**
@@ -72,9 +199,11 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
   // Build interests section (Phase 3: Interest-Driven Proactivity)
   const interests = context.userInterests;
   const hasInterests = interests && Object.values(interests.weights).some((w) => w > 0);
-  const interestsSection = hasInterests
-    ? `\n\nUser's interests (sorted by weight):\n${formatInterests(interests).join('\n')}`
-    : '';
+  let interestsSection = '';
+  if (hasInterests) {
+    const formatted = formatInterests(interests, 15, context.interestGroups);
+    interestsSection = `\n\nUser's interests (sorted by weight):\n${formatted.lines.join('\n')}`;
+  }
 
   // Build desires hint (Phase 6: Lightweight Desires)
   const desires = context.activeDesires;
@@ -90,9 +219,11 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 Look at the conversation history, <msg_time> tags, <completed_actions>, and <active_desires>. Understand what happened recently and what matters right now.
 
-If after checking you have nothing NEW or meaningful to share, you MUST defer. Do not contact just to "check in." Silence is better than empty contact.
+Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently.
 
-When you search for news or information, check each result's timestamp. Results from days ago are not updates — they are old facts the user likely already knows. "No new complaints" about a week-old event is not news. Only share information that actually changed since your last conversation.
+When you search for news or information, check each result's timestamp. Share only fresh changes since your last conversation — results from days ago are old facts the user already knows.
+
+For local checks, topic interests describe what to look for and location interests describe where it applies; keeping both together avoids generic results from unrelated places.
 
 Then decide what to do. You might:
 - finish something that was left incomplete or failed
@@ -193,7 +324,7 @@ You scheduled this for yourself: "${content}"${isRecurring ? ' (recurring)' : ''
 Act on your own reminder. You set this because it mattered.
 If the task is complete, you can cancel it with plugin.reminder(action:"cancel", reminderId:"${(d['reminderId'] as string | undefined) ?? ''}").
 
-This is a proactive check — you initiated it, not the user. A real person doing a routine check (mail, news, notifications) only speaks up when they find something. Saying "I checked and there's nothing" creates noise — the user has to read and process a message with zero informational value. Every message you send costs the user's attention. If a check yields nothing new, stay quiet: {"response": ""}.
+This is a proactive check — you initiated it. Speak up only when you find something concrete and new. When a routine check yields no results, complete silently: {"response": ""}.
 </task>
 </trigger>`;
   }

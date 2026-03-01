@@ -59,6 +59,29 @@ Desires complement social debt as a driver of proactive contact:
 - **Threshold**: Agent wakes for proactive contact when desire pressure ≥ 0.6
 - **Prompt**: Active desires are surfaced in proactive contact triggers for the LLM to act on
 
+## Interest-Driven Proactivity
+
+User interests (topic weights + urgency) are surfaced in proactive contact triggers so the LLM knows what matters to the user.
+
+### Priority Buckets
+
+With many interests (78+), naive truncation (top 3 by weight) drops critical context like location keywords. The `formatInterests()` function uses priority buckets:
+
+1. **High-urgency bucket** (urgency > 0.7): Always included regardless of cap — ensures location + topic keywords appear together
+2. **Sorted remainder**: Fills up to `maxItems` (default 15) from remaining interests, sorted by weight DESC → urgency DESC → topic ASC (deterministic tie-break)
+3. **Omitted count**: Appended as `(+N lower-priority interests omitted)` when interests exceed the cap
+
+### Interest Compaction (Sleep Cycle)
+
+When interests exceed 20 topics, sleep maintenance runs LLM-based compaction to create display-only groups:
+
+- **Groups** are stored as `interest_groups` user property (not inside `Interests` type)
+- **Canonical keys** (weights, urgency) are never modified — downstream matching (news filter, threshold engine) depends on exact keywords
+- **Change detection**: Hash of interest keys compared against stored hash to avoid redundant LLM calls
+- **Validation**: Strict, fail-closed — any invalid group → no-op, log warning
+
+Groups appear in `formatInterests()` as labeled clusters (e.g., "коммунальные отключения [газ, вода, отключения]"), reducing prompt noise while preserving all interests.
+
 ## LLM Deferral (core.defer)
 
 When COGNITION is woken for a proactive contact trigger, the LLM can decide **not** to contact by calling `core.defer`:
