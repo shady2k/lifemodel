@@ -185,6 +185,13 @@ export class StateManager {
       const state = data as PersistableState;
       const migrated = this.migrateState(state);
 
+      // Ensure Date fields are proper Date objects (JSON deserialization yields strings)
+      if (migrated.agent?.state?.lastTickAt && !(migrated.agent.state.lastTickAt instanceof Date)) {
+        migrated.agent.state.lastTickAt = new Date(
+          migrated.agent.state.lastTickAt as unknown as string
+        );
+      }
+
       this.logger.info({ version: migrated.version, savedAt: migrated.savedAt }, 'State loaded');
 
       return migrated;
