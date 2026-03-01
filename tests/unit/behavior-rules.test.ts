@@ -81,7 +81,6 @@ function createMinimalLoopContext(overrides: Partial<LoopContext> = {}): LoopCon
       thoughtPressure: 0,
       pendingThoughtCount: 0,
       lastTickAt: new Date(),
-      tickInterval: 1000,
     },
     conversationHistory: [],
     userModel: {},

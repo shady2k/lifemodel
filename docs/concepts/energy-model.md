@@ -10,20 +10,23 @@ Affects:
 - Communication frequency
 - Response verbosity
 
-## Alertness States
+## Sleep/Wake Cycle
 
-- **sleepy** - Minimal processing, brief responses
-- **tired** - Reduced engagement
-- **alert** - Normal operation
-- **energized** - Proactive, verbose
+Binary alertness: **awake** or **sleeping**.
 
-## State Transitions
+Transitions are clock-driven based on the user's sleep schedule (`sleepHour`/`wakeHour`):
+- When the local hour enters the sleep window → agent transitions to `sleeping`
+- When the local hour exits the sleep window → agent transitions to `awake`
+- Disturbance wake sets a 5-minute grace period to prevent immediate re-sleep
 
-Energy and alertness change based on:
-- Time of day
-- Activity level
-- Conversation intensity
-- Rest periods
+Sleep mode triggers maintenance (memory consolidation, entity extraction).
+
+## Energy Transitions
+
+Energy changes based on:
+- Time of day (faster recharge during sleep window)
+- Activity level (LLM calls, messages drain energy)
+- Positive feedback (recharges energy)
 
 ## Impact on Behavior
 

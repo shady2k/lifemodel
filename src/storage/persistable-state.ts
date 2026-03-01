@@ -59,7 +59,7 @@ export interface PersistableState {
  * Current schema version.
  * Increment when making breaking changes to PersistableState.
  */
-export const PERSISTABLE_STATE_VERSION = 1;
+export const PERSISTABLE_STATE_VERSION = 2;
 
 /**
  * Create an empty persistable state with defaults.
@@ -80,10 +80,9 @@ export function createEmptyPersistableState(): PersistableState {
         pendingThoughtCount: 0,
         desirePressure: 0.0,
         lastTickAt: new Date(),
-        tickInterval: 30_000,
       },
       sleepState: {
-        mode: 'normal',
+        mode: 'awake',
         disturbance: 0.0,
         disturbanceDecay: 0.95,
         wakeThreshold: 0.5,

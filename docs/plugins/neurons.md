@@ -24,7 +24,7 @@ This prevents:
 | Neuron | Monitors | Emits |
 |--------|----------|-------|
 | EnergyNeuron | Energy level | `energy` signal |
-| AlertnessNeuron | Alertness state | `alertness` signal |
+| AlertnessNeuron | Alertness level (continuous 0-1) | `alertness` signal |
 | TimeNeuron | Time boundaries | `hour_changed`, `time_of_day` |
 | SocialDebtNeuron | Contact debt | `social_debt` signal |
 | ContactPressureNeuron | Combined urgency | `contact_pressure` signal |

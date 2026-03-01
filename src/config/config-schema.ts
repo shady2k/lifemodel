@@ -35,16 +35,6 @@ export interface AgentConfigFile {
     curiosity?: number;
   };
 
-  /** Tick rate configuration */
-  tickRate?: {
-    /** Minimum tick interval in ms */
-    min?: number;
-    /** Maximum tick interval in ms */
-    max?: number;
-    /** Base tick interval in ms */
-    base?: number;
-  };
-
   /** Contact decision configuration */
   contactDecision?: {
     /** Base threshold for contact (0-1) */
@@ -120,13 +110,6 @@ export interface MergedConfig {
 
   /** Initial agent state */
   initialState: Partial<AgentState>;
-
-  /** Tick rate configuration */
-  tickRate: {
-    min: number;
-    max: number;
-    base: number;
-  };
 
   /** Contact decision configuration */
   contactDecision: {
@@ -230,11 +213,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
     socialDebt: 0.0,
     taskPressure: 0.0,
     curiosity: 0.5,
-  },
-  tickRate: {
-    min: 1_000,
-    max: 60_000,
-    base: 30_000,
   },
   contactDecision: {
     baseThreshold: 0.6,

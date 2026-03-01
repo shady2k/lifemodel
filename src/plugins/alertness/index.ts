@@ -15,11 +15,10 @@
 
 import type { Signal, SignalSource, SignalType, SignalMetrics } from '../../types/signal.js';
 import { createSignal } from '../../types/signal.js';
-import type { AgentState, AlertnessMode } from '../../types/agent/state.js';
+import type { AgentState } from '../../types/agent/state.js';
 import type { Logger } from '../../types/logger.js';
 import type { NeuronPluginV2, PluginPrimitives } from '../../types/plugin.js';
 import { BaseNeuron } from '../../layers/autonomic/neuron-registry.js';
-import { detectTransition } from '../../layers/autonomic/change-detector.js';
 import { Priority } from '../../types/priority.js';
 import { neuron, type NeuronResult } from '../../core/utils/weighted-score.js';
 import { DateTime } from 'luxon';
@@ -38,16 +37,6 @@ export interface AlertnessNeuronConfig {
     recentActivity: number;
     timeOfDay: number;
   };
-
-  /** Thresholds for mode transitions */
-  modeThresholds: {
-    alert: number; // Above this = alert
-    normal: number; // Above this = normal
-    relaxed: number; // Above this = relaxed, below = sleep
-  };
-
-  /** Minimum interval between mode change emissions (ms) */
-  modeChangeRefractoryMs: number;
 }
 
 /**
@@ -59,12 +48,6 @@ export const DEFAULT_ALERTNESS_CONFIG: AlertnessNeuronConfig = {
     recentActivity: 0.3,
     timeOfDay: 0.3,
   },
-  modeThresholds: {
-    alert: 0.8,
-    normal: 0.5,
-    relaxed: 0.25,
-  },
-  modeChangeRefractoryMs: 10000, // 10 seconds between mode changes
 };
 
 /**
@@ -78,8 +61,6 @@ export class AlertnessNeuron extends BaseNeuron implements IAlertness {
 
   private readonly config: AlertnessNeuronConfig;
   private readonly getTimezone: () => string;
-  private lastMode: AlertnessMode | undefined;
-  private lastModeChangeAt: Date | undefined;
   private _lastNeuronResult: NeuronResult | undefined;
   private recentActivityLevel = 0.5;
 
@@ -96,41 +77,25 @@ export class AlertnessNeuron extends BaseNeuron implements IAlertness {
   check(state: AgentState, _alertness: number, correlationId: string): Signal | undefined {
     const result = this.calculateAlertness(state);
     const currentValue = result.output;
-    const currentMode = this.valueToMode(currentValue);
 
     if (this.previousValue === undefined) {
       this.updatePrevious(currentValue);
-      this.lastMode = currentMode;
       this._lastNeuronResult = result;
-      return this.createSignal(currentValue, currentMode, result, correlationId);
+      return this.createSignal(currentValue, result, correlationId);
     }
 
-    const modeChanged = detectTransition(currentMode, this.lastMode);
-    const canEmitModeChange =
-      !this.lastModeChangeAt ||
-      Date.now() - this.lastModeChangeAt.getTime() >= this.config.modeChangeRefractoryMs;
-
-    if (modeChanged && canEmitModeChange) {
-      const signal = this.createSignal(currentValue, currentMode, result, correlationId);
-
+    // Emit on significant change (>0.15 delta)
+    const delta = Math.abs(currentValue - this.previousValue);
+    if (delta > 0.15) {
+      const signal = this.createSignal(currentValue, result, correlationId);
       this.updatePrevious(currentValue);
-      this.lastMode = currentMode;
-      this.lastModeChangeAt = new Date();
       this._lastNeuronResult = result;
       this.recordEmission();
-
-      this.logger.info(
-        { previousMode: this.lastMode, currentMode, alertnessValue: currentValue.toFixed(2) },
-        'Alertness mode changed'
-      );
-
       return signal;
     }
 
     this.updatePrevious(currentValue);
-    this.lastMode = currentMode;
     this._lastNeuronResult = result;
-
     return undefined;
   }
 
@@ -159,25 +124,10 @@ export class AlertnessNeuron extends BaseNeuron implements IAlertness {
     return 0.5;
   }
 
-  private valueToMode(value: number): AlertnessMode {
-    if (value >= this.config.modeThresholds.alert) return 'alert';
-    if (value >= this.config.modeThresholds.normal) return 'normal';
-    if (value >= this.config.modeThresholds.relaxed) return 'relaxed';
-    return 'sleep';
-  }
-
-  private createSignal(
-    value: number,
-    mode: AlertnessMode,
-    result: NeuronResult,
-    correlationId: string
-  ): Signal {
-    const priority = mode === 'alert' || mode === 'sleep' ? Priority.NORMAL : Priority.LOW;
-
+  private createSignal(value: number, result: NeuronResult, correlationId: string): Signal {
     const metrics: SignalMetrics = {
       value,
       confidence: 1.0,
-      modeValue: this.modeToValue(mode),
     };
 
     if (this.previousValue !== undefined) {
@@ -188,21 +138,10 @@ export class AlertnessNeuron extends BaseNeuron implements IAlertness {
       metrics[`contrib_${contribution.name}`] = contribution.contribution;
     }
 
-    return createSignal(this.signalType, this.source, metrics, { priority, correlationId });
-  }
-
-  private modeToValue(mode: AlertnessMode): number {
-    switch (mode) {
-      case 'alert':
-        return 1.0;
-      case 'normal':
-        return 0.66;
-      case 'relaxed':
-        return 0.33;
-      case 'sleep':
-      default:
-        return 0;
-    }
+    return createSignal(this.signalType, this.source, metrics, {
+      priority: Priority.LOW,
+      correlationId,
+    });
   }
 
   recordActivity(intensity = 0.1): void {
@@ -217,18 +156,12 @@ export class AlertnessNeuron extends BaseNeuron implements IAlertness {
     return this.calculateAlertness(state).output;
   }
 
-  getCurrentMode(state: AgentState): AlertnessMode {
-    return this.valueToMode(this.getCurrentAlertness(state));
-  }
-
   getLastNeuronResult(): NeuronResult | undefined {
     return this._lastNeuronResult;
   }
 
   reset(): void {
     super.reset();
-    this.lastMode = undefined;
-    this.lastModeChangeAt = undefined;
     this._lastNeuronResult = undefined;
     this.recentActivityLevel = 0.5;
   }

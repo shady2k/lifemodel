@@ -198,15 +198,28 @@ export class StateManager {
    * Migrate state from older versions.
    */
   private migrateState(state: PersistableState): PersistableState {
-    // Currently at version 1, no migrations needed yet
     if (state.version === PERSISTABLE_STATE_VERSION) {
       return state;
     }
 
     this.logger.info({ from: state.version, to: PERSISTABLE_STATE_VERSION }, 'Migrating state');
 
-    // Future migrations go here
-    // if (state.version < 2) { ... migrate to v2 ... }
+    if (state.version < 2) {
+      // v1→v2: Collapse 4 alertness modes to binary
+      const mode = state.agent?.sleepState?.mode as string | undefined;
+      if (state.agent?.sleepState) {
+        if (mode === 'sleep' || mode === 'sleeping') {
+          state.agent.sleepState.mode = 'sleeping';
+        } else {
+          state.agent.sleepState.mode = 'awake';
+        }
+      }
+      // Remove phantom tickInterval
+      if (state.agent?.state) {
+        const agentState = state.agent.state as unknown as Record<string, unknown>;
+        delete agentState['tickInterval'];
+      }
+    }
 
     state.version = PERSISTABLE_STATE_VERSION;
     return state;

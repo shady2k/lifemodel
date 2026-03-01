@@ -4,7 +4,7 @@ import type { AgentIdentity } from '../types/agent/identity.js';
 import { createDefaultAgentState, createDefaultSleepState } from '../types/agent/state.js';
 import { createDefaultIdentity } from '../types/agent/identity.js';
 import { type EnergyModel, createEnergyModel } from './energy.js';
-import { getEffectiveTimezone } from '../utils/date.js';
+import { getEffectiveTimezone, isWithinSleepWindow } from '../utils/date.js';
 
 /**
  * Agent dependencies injected via constructor.
@@ -28,15 +28,8 @@ export interface AgentConfig {
   /** Agent identity (optional, uses defaults if not provided) */
   identity?: AgentIdentity;
 
-  /** Tick rate configuration */
-  tickRate?: {
-    /** Minimum tick interval in ms (default: 1000 = 1s) */
-    min: number;
-    /** Maximum tick interval in ms (default: 60000 = 1min) */
-    max: number;
-    /** Base interval in ms (default: 30000 = 30s) */
-    base: number;
-  };
+  /** User's sleep schedule for clock-driven sleep mode */
+  sleepSchedule?: { sleepHour: number; wakeHour: number } | undefined;
 
   /** Social debt accumulation rate per tick (default: 0.005) */
   socialDebtRate?: number;
@@ -49,19 +42,13 @@ export interface AgentConfig {
   timezone?: string | undefined;
 }
 
-const DEFAULT_TICK_RATE = {
-  min: 1_000, // 1 second minimum
-  max: 60_000, // 1 minute maximum
-  base: 30_000, // 30 seconds base
-};
-
 /**
  * The Agent - a human-like proactive AI entity.
  *
  * Unlike a chatbot that responds on command, the Agent has:
  * - Internal state (energy, social debt, pressure)
  * - Identity (personality traits, values, boundaries)
- * - Dynamic behavior (tick rate adapts to state)
+ * - Clock-driven sleep/wake cycle
  *
  * The Agent receives dependencies via constructor (manual DI)
  * and does not directly mutate external state - it returns Intents.
@@ -75,7 +62,16 @@ export class Agent {
   private sleepState: SleepState;
   private readonly identity: AgentIdentity;
   private readonly energy: EnergyModel;
-  private readonly config: Required<AgentConfig>;
+  private readonly config: {
+    initialState: AgentState;
+    initialSleepState: SleepState;
+    identity: AgentIdentity;
+    sleepSchedule: { sleepHour: number; wakeHour: number };
+    socialDebtRate: number;
+    curiosityDecayRatePerHour: number;
+    timezone: string | undefined;
+  };
+  private forcedAwakeUntil: Date | null = null;
 
   constructor(dependencies: AgentDependencies, config: AgentConfig = {}) {
     this.logger = dependencies.logger.child({ component: 'agent' });
@@ -97,15 +93,22 @@ export class Agent {
     };
     this.identity = config.identity ?? createDefaultIdentity();
 
-    // Create energy model
-    this.energy = createEnergyModel(this.state.energy, this.logger);
+    const sleepSchedule = config.sleepSchedule ?? { sleepHour: 23, wakeHour: 8 };
+
+    // Create energy model with resolved timezone (same fallback as updateSleepMode)
+    const resolvedTimezone = getEffectiveTimezone(config.timezone);
+    this.energy = createEnergyModel(this.state.energy, this.logger, {
+      timezone: resolvedTimezone,
+      sleepHour: sleepSchedule.sleepHour,
+      wakeHour: sleepSchedule.wakeHour,
+    });
 
     // Store config with defaults
     this.config = {
       initialState: this.state,
       initialSleepState: this.sleepState,
       identity: this.identity,
-      tickRate: config.tickRate ?? DEFAULT_TICK_RATE,
+      sleepSchedule,
       socialDebtRate: config.socialDebtRate ?? 0.005, // Increased from 0.001 for faster accumulation
       curiosityDecayRatePerHour: config.curiosityDecayRatePerHour ?? 0.01, // Decay toward 0.5 baseline
       timezone: config.timezone,
@@ -190,10 +193,12 @@ export class Agent {
     // Decay curiosity toward 0.5 baseline (slow return to equilibrium)
     const curiosityBaseline = 0.5;
     if (this.state.curiosity !== curiosityBaseline) {
-      // Calculate decay based on time elapsed since last tick
-      // decay per tick = rate per hour * (tickInterval / hour in ms)
-      const tickIntervalMs = this.state.tickInterval;
-      const decayPerTick = this.config.curiosityDecayRatePerHour * (tickIntervalMs / 3_600_000);
+      // Calculate decay based on actual elapsed time since last tick
+      const elapsedMs = Math.min(
+        5000,
+        Math.max(1, now.getTime() - this.state.lastTickAt.getTime())
+      );
+      const decayPerTick = this.config.curiosityDecayRatePerHour * (elapsedMs / 3_600_000);
 
       if (this.state.curiosity > curiosityBaseline) {
         // Decay downward toward baseline
@@ -206,11 +211,8 @@ export class Agent {
       }
     }
 
-    // Update alertness mode based on state
-    this.updateAlertnessMode();
-
-    // Calculate next tick interval
-    this.state.tickInterval = this.calculateNextTickInterval();
+    // Update sleep mode based on clock
+    this.updateSleepMode();
     this.state.lastTickAt = now;
 
     // Log state periodically (every 10th tick or on mode change)
@@ -219,7 +221,6 @@ export class Agent {
         energy: this.state.energy.toFixed(3),
         socialDebt: this.state.socialDebt.toFixed(3),
         mode: this.sleepState.mode,
-        nextTick: this.state.tickInterval,
       },
       'Tick completed'
     );
@@ -228,7 +229,6 @@ export class Agent {
     this.metrics.gauge('agent_energy', this.state.energy);
     this.metrics.gauge('agent_social_debt', this.state.socialDebt);
     this.metrics.gauge('agent_task_pressure', this.state.taskPressure);
-    this.metrics.gauge('agent_tick_interval', this.state.tickInterval);
     this.metrics.counter('agent_ticks');
 
     return intents;
@@ -264,7 +264,7 @@ export class Agent {
         return;
       }
 
-      // Non-numeric fields (acquaintancePending, lastTickAt, tickInterval)
+      // Non-numeric fields (acquaintancePending, lastTickAt)
       // These are rarely updated via intents, handle explicitly if needed
       this.logger.trace({ key, value }, 'Non-numeric state update ignored');
     }
@@ -344,24 +344,21 @@ export class Agent {
    * @returns true if the disturbance woke the agent
    */
   addDisturbance(amount: number): boolean {
-    if (this.sleepState.mode !== 'sleep' && this.sleepState.mode !== 'relaxed') {
+    if (this.sleepState.mode !== 'sleeping') {
       return false;
     }
 
     this.sleepState.disturbance = Math.min(1, this.sleepState.disturbance + amount);
-
     const threshold = this.energy.calculateWakeThreshold(this.sleepState.wakeThreshold);
 
     if (this.sleepState.disturbance > threshold) {
       this.logger.info(
-        {
-          disturbance: this.sleepState.disturbance,
-          threshold,
-        },
+        { disturbance: this.sleepState.disturbance, threshold },
         'Agent woken by accumulated disturbance'
       );
-      this.sleepState.mode = 'normal';
+      this.sleepState.mode = 'awake';
       this.sleepState.disturbance = 0;
+      this.forcedAwakeUntil = new Date(Date.now() + 5 * 60 * 1000); // 5min grace
       return true;
     }
 
@@ -372,10 +369,11 @@ export class Agent {
    * Force wake the agent (e.g., for CRITICAL events).
    */
   wake(): void {
-    if (this.sleepState.mode === 'sleep' || this.sleepState.mode === 'relaxed') {
+    if (this.sleepState.mode === 'sleeping') {
       this.logger.info('Agent force-woken');
-      this.sleepState.mode = 'alert';
+      this.sleepState.mode = 'awake';
       this.sleepState.disturbance = 0;
+      this.forcedAwakeUntil = new Date(Date.now() + 5 * 60 * 1000); // 5min grace
     }
   }
 
@@ -404,13 +402,9 @@ export class Agent {
   }
 
   /**
-   * Update alertness mode based on current state.
+   * Update sleep mode based on clock (user's sleep schedule).
    */
-  private updateAlertnessMode(): void {
-    const pressure = this.calculateReachOutPressure();
-    const energy = this.state.energy;
-
-    // Use user's timezone for night-time detection (fixes server-time bug)
+  private updateSleepMode(): void {
     const tz = getEffectiveTimezone(this.config.timezone);
     const localHourStr = new Date().toLocaleString('en-US', {
       hour: 'numeric',
@@ -418,31 +412,28 @@ export class Agent {
       timeZone: tz,
     });
     const hour = parseInt(localHourStr, 10);
-    const isNightTime = hour >= 22 || hour < 6;
+    const { sleepHour, wakeHour } = this.config.sleepSchedule;
+    const shouldSleep = isWithinSleepWindow(hour, sleepHour, wakeHour);
 
-    // Determine new mode
-    let newMode: AlertnessMode;
-
-    if (pressure > 0.7 || this.state.taskPressure > 0.8) {
-      newMode = 'alert';
-    } else if (isNightTime && pressure < 0.3 && energy < 0.5) {
-      newMode = 'sleep';
-    } else if (pressure < 0.3 && energy < 0.4) {
-      newMode = 'relaxed';
-    } else {
-      newMode = 'normal';
+    if (shouldSleep && this.sleepState.mode === 'awake') {
+      // Check wake grace period (prevents flapping after disturbance wake)
+      if (this.forcedAwakeUntil && new Date() < this.forcedAwakeUntil) {
+        return;
+      }
+      this.logger.info({ hour, sleepHour, wakeHour }, 'Entering sleep mode (clock-driven)');
+      this.sleepState.mode = 'sleeping';
+      this.forcedAwakeUntil = null;
+    } else if (!shouldSleep && this.sleepState.mode === 'sleeping') {
+      this.logger.info({ hour, sleepHour, wakeHour }, 'Waking up (clock-driven)');
+      this.sleepState.mode = 'awake';
+      this.sleepState.disturbance = 0;
+      this.forcedAwakeUntil = null;
     }
 
-    if (newMode !== this.sleepState.mode) {
-      this.logger.info(
-        { from: this.sleepState.mode, to: newMode, pressure, energy },
-        'Alertness mode changed'
-      );
-      this.sleepState.mode = newMode;
+    // Decay disturbance while sleeping
+    if (this.sleepState.mode === 'sleeping') {
+      this.sleepState.disturbance *= this.sleepState.disturbanceDecay;
     }
-
-    // Decay disturbance
-    this.sleepState.disturbance *= this.sleepState.disturbanceDecay;
   }
 
   /**
@@ -468,43 +459,6 @@ export class Agent {
     if (updates.desirePressure !== undefined) {
       this.state.desirePressure = round3(Math.max(0, Math.min(1, updates.desirePressure)));
     }
-  }
-
-  /**
-   * Calculate the next tick interval based on current state.
-   */
-  private calculateNextTickInterval(): number {
-    const { min, max, base } = this.config.tickRate;
-
-    // Mode-based multiplier
-    let modeMultiplier: number;
-    switch (this.sleepState.mode) {
-      case 'alert':
-        modeMultiplier = 0.3; // Much faster
-        break;
-      case 'normal':
-        modeMultiplier = 1.0;
-        break;
-      case 'relaxed':
-        modeMultiplier = 2.0; // Slower
-        break;
-      case 'sleep':
-        modeMultiplier = 4.0; // Much slower
-        break;
-    }
-
-    // Energy multiplier (low energy = longer intervals)
-    const energyMultiplier = this.energy.calculateTickMultiplier();
-
-    // Pressure reduces interval (more alert when under pressure)
-    const pressure = this.calculateReachOutPressure();
-    const pressureMultiplier = Math.max(0.5, 1 - pressure * 0.5);
-
-    // Calculate final interval
-    const interval = base * modeMultiplier * energyMultiplier * pressureMultiplier;
-
-    // Clamp to bounds
-    return Math.max(min, Math.min(max, Math.round(interval)));
   }
 
   /**

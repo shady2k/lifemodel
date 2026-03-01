@@ -112,14 +112,6 @@ export class ConfigLoader {
       };
     }
 
-    // Tick rate
-    if (file.tickRate) {
-      config.tickRate = {
-        ...config.tickRate,
-        ...file.tickRate,
-      };
-    }
-
     // Contact decision
     if (file.contactDecision) {
       config.contactDecision = {

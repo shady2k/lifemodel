@@ -64,7 +64,6 @@ export function createAgentState(overrides: Partial<AgentState> = {}): AgentStat
     pendingThoughtCount: 0,
     desirePressure: 0,
     lastTickAt: new Date(),
-    tickInterval: 1000,
     ...overrides,
   };
 }

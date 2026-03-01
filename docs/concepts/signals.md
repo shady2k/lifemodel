@@ -11,7 +11,7 @@ Signals are the nervous system's universal currency. Everything flowing through 
 ### Internal (from Neurons)
 - `social_debt` - Pressure from lack of contact
 - `energy` - Agent's energy level changed
-- `alertness` - Alertness mode changed
+- `alertness` - Alertness level changed significantly
 - `contact_pressure` - Combined contact urgency
 - `desire_pressure` - Want-driven initiative pressure
 

@@ -7,19 +7,10 @@
  */
 
 import { DateTime } from 'luxon';
+import { calculateSleepMidpointHour } from '../../utils/date.js';
 
-/**
- * Calculate the cutoff hour for food day boundary from sleep/wake patterns.
- * Hours before the cutoff belong to the previous food day.
- */
-export function calculateCutoffHour(sleepHour: number, wakeHour: number): number {
-  if (sleepHour < wakeHour) {
-    return Math.floor((sleepHour + wakeHour) / 2);
-  }
-  const wakeNormalized = wakeHour + 24;
-  const midpoint = (sleepHour + wakeNormalized) / 2;
-  return Math.floor(midpoint % 24);
-}
+// Re-export under the old name for calories-tool.ts compatibility
+export const calculateCutoffHour = calculateSleepMidpointHour;
 
 /**
  * Get the current "food day" based on user's sleep patterns.

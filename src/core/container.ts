@@ -102,8 +102,6 @@ export interface AppConfig {
     identity?: AgentIdentity;
     /** Initial agent state */
     initialState?: Partial<AgentState>;
-    /** Tick rate configuration */
-    tickRate?: AgentConfig['tickRate'];
     /** Social debt accumulation rate */
     socialDebtRate?: number;
   };
@@ -391,10 +389,14 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       ...mergedConfig.initialState,
       ...configOverrides.agent?.initialState,
     },
-    tickRate: configOverrides.agent?.tickRate ?? mergedConfig.tickRate,
-    timezone: primaryTimezoneOffset != null
-      ? getEffectiveTimezone(undefined, primaryTimezoneOffset)
-      : undefined,
+    sleepSchedule: {
+      sleepHour: persistedState?.user?.patterns?.sleepHour ?? 23,
+      wakeHour: persistedState?.user?.patterns?.wakeHour ?? 8,
+    },
+    timezone:
+      primaryTimezoneOffset != null
+        ? getEffectiveTimezone(undefined, primaryTimezoneOffset)
+        : undefined,
   };
   if (persistedState?.agent.sleepState) {
     agentConfig.initialSleepState = persistedState.agent.sleepState;

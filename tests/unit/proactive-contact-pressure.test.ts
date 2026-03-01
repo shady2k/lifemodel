@@ -49,7 +49,6 @@ function createHighPressureState(): AgentState {
     thoughtPressure: 0,
     pendingThoughtCount: 0,
     lastTickAt: new Date(),
-    tickInterval: 1000,
   };
 }
 

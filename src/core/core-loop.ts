@@ -684,10 +684,10 @@ export class CoreLoop {
         if (
           this.memoryConsolidator &&
           this.memoryProvider &&
-          currentMode === 'sleep' &&
-          this.previousAlertnessMode !== 'sleep'
+          currentMode === 'sleeping' &&
+          this.previousAlertnessMode !== 'sleeping'
         ) {
-          this.logger.info('Entering sleep mode - triggering memory consolidation');
+          this.logger.info('Entering sleep mode - triggering maintenance');
           void this.memoryConsolidator.consolidate(this.memoryProvider).then((result) => {
             this.logger.info(
               {

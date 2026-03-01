@@ -209,3 +209,36 @@ export function formatRelativeTime(ts: Date, now: Date, timezone: string): strin
 export function formatTimestampPrefix(ts: Date, now: Date, timezone: string): string {
   return `<msg_time>${formatRelativeTime(ts, now, timezone)}</msg_time>`;
 }
+
+/**
+ * Check if a given hour falls within a sleep window.
+ * Handles midnight wrap (e.g., sleepHour=23, wakeHour=7).
+ */
+export function isWithinSleepWindow(
+  currentHour: number,
+  sleepHour: number,
+  wakeHour: number
+): boolean {
+  if (sleepHour === wakeHour) return false; // 0-width window = never sleeping
+  if (sleepHour > wakeHour) {
+    // Wraps midnight: e.g., 23→7 means 23,0,1,2,3,4,5,6 are sleep
+    return currentHour >= sleepHour || currentHour < wakeHour;
+  }
+  // No wrap: e.g., 2→10 means 2,3,4,5,6,7,8,9 are sleep
+  return currentHour >= sleepHour && currentHour < wakeHour;
+}
+
+/**
+ * Calculate the midpoint hour of a sleep window.
+ * Used for daily maintenance scheduling and food-day boundaries.
+ *
+ * Example: sleepHour=23, wakeHour=7 → midpoint=3
+ */
+export function calculateSleepMidpointHour(sleepHour: number, wakeHour: number): number {
+  if (sleepHour < wakeHour) {
+    return Math.floor((sleepHour + wakeHour) / 2);
+  }
+  const wakeNormalized = wakeHour + 24;
+  const midpoint = (sleepHour + wakeNormalized) / 2;
+  return Math.floor(midpoint % 24);
+}

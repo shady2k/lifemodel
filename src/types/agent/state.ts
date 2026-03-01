@@ -53,9 +53,6 @@ export interface AgentState {
 
   /** Timestamp of last tick. */
   lastTickAt: Date;
-
-  /** Current tick interval in milliseconds. Dynamic based on state. */
-  tickInterval: number;
 }
 
 /**
@@ -63,7 +60,7 @@ export interface AgentState {
  *
  * Affects which events get processed and how.
  */
-export type AlertnessMode = 'alert' | 'normal' | 'relaxed' | 'sleep';
+export type AlertnessMode = 'awake' | 'sleeping';
 
 /**
  * Extended state including sleep mechanics.
@@ -97,7 +94,6 @@ export function createDefaultAgentState(): AgentState {
     pendingThoughtCount: 0,
     desirePressure: 0.0,
     lastTickAt: new Date(),
-    tickInterval: 30_000, // 30 seconds default
   };
 }
 
@@ -106,7 +102,7 @@ export function createDefaultAgentState(): AgentState {
  */
 export function createDefaultSleepState(): SleepState {
   return {
-    mode: 'normal',
+    mode: 'awake',
     disturbance: 0.0,
     disturbanceDecay: 0.95,
     wakeThreshold: 0.5,

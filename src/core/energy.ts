@@ -1,4 +1,5 @@
 import { round3, type Logger } from '../types/index.js';
+import { isWithinSleepWindow } from '../utils/date.js';
 
 /**
  * Energy model configuration.
@@ -34,11 +35,14 @@ export interface EnergyConfig {
   /** Maximum energy level (default: 1.0) */
   maxEnergy: number;
 
-  /** Night start hour (0-23, default: 22) */
-  nightStartHour: number;
+  /** Sleep start hour (0-23, default: 23) */
+  sleepHour: number;
 
-  /** Night end hour (0-23, default: 6) */
-  nightEndHour: number;
+  /** Wake hour (0-23, default: 8) */
+  wakeHour: number;
+
+  /** IANA timezone for time-of-day calculations */
+  timezone?: string | undefined;
 }
 
 /**
@@ -55,8 +59,9 @@ export const DEFAULT_ENERGY_CONFIG: EnergyConfig = {
   nightRechargeMultiplier: 2.0,
   minEnergy: 0.05,
   maxEnergy: 1.0,
-  nightStartHour: 22,
-  nightEndHour: 6,
+  sleepHour: 23,
+  wakeHour: 8,
+  timezone: undefined,
 };
 
 /**
@@ -154,19 +159,6 @@ export class EnergyModel {
   }
 
   /**
-   * Calculate tick interval multiplier based on energy.
-   *
-   * Low energy = longer intervals (more rest).
-   * Returns multiplier > 1 when energy is low.
-   */
-  calculateTickMultiplier(): number {
-    // At full energy (1.0): multiplier = 1.0
-    // At half energy (0.5): multiplier = 1.5
-    // At low energy (0.1): multiplier = 2.0
-    return 1 + (1 - this.energy);
-  }
-
-  /**
    * Set energy directly (for loading state).
    */
   setEnergy(value: number): void {
@@ -177,14 +169,18 @@ export class EnergyModel {
    * Check if it's night time.
    */
   private isNightTime(): boolean {
-    const hour = new Date().getHours();
-    const { nightStartHour, nightEndHour } = this.config;
-
-    // Handle wrap-around (e.g., 22:00 to 06:00)
-    if (nightStartHour > nightEndHour) {
-      return hour >= nightStartHour || hour < nightEndHour;
+    let hour: number;
+    if (this.config.timezone) {
+      const localHourStr = new Date().toLocaleString('en-US', {
+        hour: 'numeric',
+        hour12: false,
+        timeZone: this.config.timezone,
+      });
+      hour = parseInt(localHourStr, 10);
+    } else {
+      hour = new Date().getHours();
     }
-    return hour >= nightStartHour && hour < nightEndHour;
+    return isWithinSleepWindow(hour, this.config.sleepHour, this.config.wakeHour);
   }
 
   private getDrainAmount(type: DrainType): number {
@@ -226,7 +222,12 @@ export class EnergyModel {
 export function createEnergyModel(
   initialEnergy: number,
   logger: Logger,
-  config?: Partial<EnergyConfig>
+  sleepConfig?: { timezone?: string; sleepHour?: number; wakeHour?: number }
 ): EnergyModel {
-  return new EnergyModel(initialEnergy, logger, config);
+  return new EnergyModel(initialEnergy, logger, {
+    ...DEFAULT_ENERGY_CONFIG,
+    ...(sleepConfig?.timezone != null ? { timezone: sleepConfig.timezone } : {}),
+    ...(sleepConfig?.sleepHour != null ? { sleepHour: sleepConfig.sleepHour } : {}),
+    ...(sleepConfig?.wakeHour != null ? { wakeHour: sleepConfig.wakeHour } : {}),
+  });
 }
