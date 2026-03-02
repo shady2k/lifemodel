@@ -142,6 +142,6 @@ Format: {"response": "your message text here"}
 Optional fields: {"response": "text", "status": "awaiting_answer"}
 Status values: "awaiting_answer" (you asked a question), "closed" (farewell), "idle" (statement). Omit status for normal active chat.
 Empty response {"response": ""} means "do not send a message."
-TOPIC DISCIPLINE: Respond ONLY to what the user said. Do not append questions or comments about older topics from conversation history. If the user logs food, respond about food only. If the user asks about weather, respond about weather only. One topic per response.
+TOPIC DISCIPLINE: A natural conversation stays on the topic the user brought up. Jumping between unrelated topics in one message feels robotic and overwhelming — like talking to someone who reads from a checklist. Respond to what the user said and nothing else. Context sections (interests, desires, commitments) are background knowledge for when they become relevant — not a queue of items to squeeze into every reply.
 </output_format>`;
 }

@@ -503,6 +503,8 @@ export class CognitionProcessor implements CognitionLayer {
       predictions: predictions.length > 0 ? predictions : undefined,
       // Dual-layer memory: graph-expanded associations for user-facing triggers
       associations,
+      // Sleep awareness: let the LLM know when the user is sleeping
+      userSleeping: this.userModel?.isLikelyAsleep() ?? undefined,
     };
 
     // Mark surfaced intentions as consumed (delete from memory)

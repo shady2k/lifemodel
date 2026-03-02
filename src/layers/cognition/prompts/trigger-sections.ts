@@ -210,16 +210,21 @@ export function buildProactiveContactSection(context: LoopContext, triggerType: 
   const desireHint =
     desires && desires.length > 0 ? '\nYou have things you want to do. See <active_desires>.' : '';
 
+  // Sleep status hint — explain the situation, let the LLM reason about it
+  const sleepNote = context.userSleeping
+    ? '\nThe user is currently sleeping. Sending a message now would wake them up with a notification.'
+    : '';
+
   return `<trigger type="proactive_contact">
 <context>
 Last conversation: ${timeContext || 'unknown'} ago
-Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}${interestsSection}${desireHint}
+Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure increased significantly.' : ''}${curiosityNote}${sleepNote}${interestsSection}${desireHint}
 </context>
 
 <task>
 Look at the conversation history, <msg_time> tags, <completed_actions>, and <active_desires>. Understand what happened recently and what matters right now.
 
-Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently.
+Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently. Never tell the user that you checked and found nothing, or that "everything is quiet" — absence of news is not a message.
 
 When you search for news or information, check each result's timestamp. Share only fresh changes since your last conversation — results from days ago are old facts the user already knows.
 

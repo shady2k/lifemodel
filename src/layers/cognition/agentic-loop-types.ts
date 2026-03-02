@@ -211,6 +211,9 @@ export interface LoopContext {
 
   /** Associated memories from graph expansion (direct + related + commitments) */
   associations?: AssociationResult | undefined;
+
+  /** Whether the user is likely asleep based on their sleep schedule */
+  userSleeping?: boolean | undefined;
 }
 
 /**
