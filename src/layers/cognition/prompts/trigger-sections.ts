@@ -241,7 +241,8 @@ Choose ONE:
 - defer: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
 Use tools to research before messaging. Do not repeat completed actions. Max 7 tool calls.
-Respond with {"response": "your message"} or defer.
+{"response": "your message"} — sends a push notification to the user's phone immediately.
+core.defer(signalType="${triggerType}", deferHours=1-24, reason="...") — stays silent, checks back later.
 </task>
 </trigger>`;
 }

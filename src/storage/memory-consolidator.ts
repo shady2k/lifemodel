@@ -121,11 +121,11 @@ export class MemoryConsolidator {
 
     this.logger.info('Starting memory consolidation (sleep cycle)');
 
-    // Get all entries (cast to access getAll method)
+    // Get all entries (cast to access getAll/save/delete methods)
     const provider = memoryProvider as MemoryProvider & {
       getAll(): Promise<MemoryEntry[]>;
-      clear(): Promise<void>;
       save(entry: MemoryEntry): Promise<void>;
+      delete(id: string): Promise<boolean>;
     };
 
     const allEntries = await provider.getAll();
@@ -155,15 +155,26 @@ export class MemoryConsolidator {
     // Group facts by key
     const groups = this.groupFacts(facts);
 
+    // Delta tracking: only save changed entries, only delete removed ones
+    const entriesToSave: MemoryEntry[] = [];
+    const idsToDelete: string[] = [];
+
     // Merge duplicates within each group
     let merged = 0;
-    const mergedFacts: MemoryEntry[] = [];
+    const mergedFacts: { entry: MemoryEntry; wasMerged: boolean }[] = [];
 
     for (const [key, group] of Array.from(groups.entries())) {
       if (group.length > 1) {
         const mergedEntry = this.mergeFacts(group);
-        mergedFacts.push(mergedEntry);
+        mergedFacts.push({ entry: mergedEntry, wasMerged: true });
         merged += group.length - 1;
+
+        // Delete source entries that were absorbed into the merge
+        for (const fact of group) {
+          if (fact.id !== mergedEntry.id) {
+            idsToDelete.push(fact.id);
+          }
+        }
 
         this.logger.debug(
           {
@@ -174,7 +185,7 @@ export class MemoryConsolidator {
           'Merged duplicate facts'
         );
       } else if (group.length === 1 && group[0]) {
-        mergedFacts.push(group[0]);
+        mergedFacts.push({ entry: group[0], wasMerged: false });
       }
     }
 
@@ -183,20 +194,26 @@ export class MemoryConsolidator {
     let forgotten = 0;
     const survivingFacts: MemoryEntry[] = [];
 
-    for (const entry of mergedFacts) {
+    for (const { entry, wasMerged } of mergedFacts) {
       const ageMs = now.getTime() - entry.timestamp.getTime();
       const decayedEntry = this.applyDecay(entry, ageMs);
       const entryConfidence = entry.confidence ?? 0.5;
       const decayedConfidence = decayedEntry.confidence ?? 0.5;
+      const wasDecayed = decayedConfidence !== entryConfidence;
 
-      if (decayedConfidence !== entryConfidence) {
+      if (wasDecayed) {
         decayed++;
       }
 
       if (decayedConfidence >= this.config.forgetThreshold) {
         survivingFacts.push(decayedEntry);
+        // Save only if something actually changed
+        if (wasMerged || wasDecayed) {
+          entriesToSave.push(decayedEntry);
+        }
       } else {
         forgotten++;
+        idsToDelete.push(entry.id);
         this.logger.debug(
           {
             content: entry.content.slice(0, 50),
@@ -215,6 +232,7 @@ export class MemoryConsolidator {
       // Non-facts decay faster and are forgotten sooner
       if (ageMs > this.config.maxAgeMs) {
         forgotten++;
+        idsToDelete.push(entry.id);
         continue;
       }
 
@@ -228,12 +246,12 @@ export class MemoryConsolidator {
     // Scan for actionable memories (reminders, etc.) and generate thoughts
     const thoughts = this.scanForActionableMemories(survivingFacts);
 
-    // Only update storage if changes were made
-    if (merged > 0 || forgotten > 0 || decayed > 0) {
-      // Clear and re-save (atomic update)
-      await provider.clear();
-
-      for (const entry of consolidated) {
+    // Apply delta changes (only touch what actually changed)
+    if (idsToDelete.length > 0 || entriesToSave.length > 0) {
+      for (const id of idsToDelete) {
+        await provider.delete(id);
+      }
+      for (const entry of entriesToSave) {
         await provider.save(entry);
       }
 
@@ -244,6 +262,8 @@ export class MemoryConsolidator {
           merged,
           forgotten,
           decayed,
+          saved: entriesToSave.length,
+          deleted: idsToDelete.length,
           thoughtsGenerated: thoughts.length,
         },
         'Memory consolidation complete'

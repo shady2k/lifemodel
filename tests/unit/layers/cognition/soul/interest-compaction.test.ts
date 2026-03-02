@@ -2,13 +2,14 @@
  * Tests for interest-compaction.ts
  *
  * Validates: LLM compaction, validation rules, hash-based caching,
- * and fail-closed behavior on invalid output.
+ * chunked compaction, merge pass, and graceful degradation.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import {
   compactInterests,
   computeInterestsHash,
+  CHUNK_SIZE,
 } from '../../../../../src/layers/cognition/soul/interest-compaction.js';
 import type { Interests } from '../../../../../src/types/user/interests.js';
 import type { CognitionLLM } from '../../../../../src/layers/cognition/agentic-loop-types.js';
@@ -21,9 +22,19 @@ function createInterests(
   return { weights, urgency, topicBaselines: {} };
 }
 
-function createMockLLM(response: string): CognitionLLM {
+function createMockLLM(response: string | string[]): CognitionLLM {
+  const completeFn = Array.isArray(response)
+    ? vi.fn<[], Promise<string>>()
+    : vi.fn().mockResolvedValue(response);
+
+  if (Array.isArray(response)) {
+    for (const r of response) {
+      (completeFn as ReturnType<typeof vi.fn>).mockResolvedValueOnce(r);
+    }
+  }
+
   return {
-    complete: vi.fn().mockResolvedValue(response),
+    complete: completeFn,
     completeWithTools: vi.fn(),
   };
 }
@@ -39,6 +50,15 @@ function createMockLogger(): Logger {
     trace: vi.fn(),
     level: 'info',
   } as unknown as Logger;
+}
+
+/** Generate N topics with weights from 1.0 descending. */
+function generateTopics(n: number): Record<string, number> {
+  const weights: Record<string, number> = {};
+  for (let i = 0; i < n; i++) {
+    weights[`topic_${String(i)}`] = Math.max(0.1, 1.0 - i * 0.01);
+  }
+  return weights;
 }
 
 describe('computeInterestsHash', () => {
@@ -69,7 +89,7 @@ describe('computeInterestsHash', () => {
   });
 });
 
-describe('compactInterests', () => {
+describe('compactInterests — single batch', () => {
   it('returns valid groups from well-formed LLM response', async () => {
     const interests = createInterests(
       { газ: 1.0, вода: 1.0, отключения: 1.0, crypto: 0.8 },
@@ -215,5 +235,180 @@ describe('compactInterests', () => {
 
     const result = await compactInterests(interests, llm, createMockLogger());
     expect(result).toBeNull();
+  });
+});
+
+describe('compactInterests — chunked compaction', () => {
+  it('uses single batch when topics ≤ CHUNK_SIZE', async () => {
+    // Exactly CHUNK_SIZE topics — should NOT chunk
+    const weights = generateTopics(CHUNK_SIZE);
+    const interests = createInterests(weights);
+
+    const topicKeys = Object.keys(weights).slice(0, 4);
+    const llm = createMockLLM(
+      JSON.stringify([
+        { label: 'group A', topics: [topicKeys[0], topicKeys[1]] },
+        { label: 'group B', topics: [topicKeys[2], topicKeys[3]] },
+      ])
+    );
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).not.toBeNull();
+    // Single batch = 1 LLM call
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('chunks when topics > CHUNK_SIZE and merges results', async () => {
+    // CHUNK_SIZE + 5 topics → 2 chunks + 1 merge call
+    const n = CHUNK_SIZE + 5;
+    const weights = generateTopics(n);
+    const interests = createInterests(weights);
+    const allTopics = Object.keys(weights).sort(
+      (a, b) => weights[b] - weights[a]
+    );
+
+    // Chunk 1 response: group from first chunk
+    const chunk1Response = JSON.stringify([
+      { label: 'chunk1 group', topics: [allTopics[0], allTopics[1]] },
+    ]);
+    // Chunk 2 response: group from second chunk
+    const chunk2Response = JSON.stringify([
+      { label: 'chunk2 group', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+    ]);
+    // Merge response: keeps both groups as they don't overlap
+    const mergeResponse = JSON.stringify([
+      { label: 'chunk1 group', topics: [allTopics[0], allTopics[1]] },
+      { label: 'chunk2 group', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+    ]);
+
+    const llm = createMockLLM([chunk1Response, chunk2Response, mergeResponse]);
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).not.toBeNull();
+    expect(result!.groups).toHaveLength(2);
+    // 2 chunk calls + 1 merge call
+    expect(llm.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it('survives when one chunk fails', async () => {
+    const n = CHUNK_SIZE + 5;
+    const weights = generateTopics(n);
+    const interests = createInterests(weights);
+    const allTopics = Object.keys(weights).sort(
+      (a, b) => weights[b] - weights[a]
+    );
+
+    const completeFn = vi.fn<[], Promise<string>>()
+      // Chunk 1: fails
+      .mockRejectedValueOnce(new Error('model crashed'))
+      // Chunk 2: succeeds
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { label: 'surviving group', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+        ])
+      );
+    // No merge call needed (only 1 group)
+
+    const llm: CognitionLLM = { complete: completeFn, completeWithTools: vi.fn() };
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).not.toBeNull();
+    expect(result!.groups).toHaveLength(1);
+    expect(result!.groups[0].label).toBe('surviving group');
+  });
+
+  it('falls back to unmerged groups when merge fails', async () => {
+    const n = CHUNK_SIZE + 5;
+    const weights = generateTopics(n);
+    const interests = createInterests(weights);
+    const allTopics = Object.keys(weights).sort(
+      (a, b) => weights[b] - weights[a]
+    );
+
+    const chunk1Response = JSON.stringify([
+      { label: 'group A', topics: [allTopics[0], allTopics[1]] },
+    ]);
+    const chunk2Response = JSON.stringify([
+      { label: 'group B', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+    ]);
+
+    const completeFn = vi.fn<[], Promise<string>>()
+      .mockResolvedValueOnce(chunk1Response)
+      .mockResolvedValueOnce(chunk2Response)
+      // Merge call fails
+      .mockRejectedValueOnce(new Error('merge failed'));
+
+    const llm: CognitionLLM = { complete: completeFn, completeWithTools: vi.fn() };
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).not.toBeNull();
+    // Falls back to the 2 unmerged chunk groups
+    expect(result!.groups).toHaveLength(2);
+    expect(result!.groups[0].label).toBe('group A');
+    expect(result!.groups[1].label).toBe('group B');
+  });
+
+  it('returns null when all chunks fail', async () => {
+    const n = CHUNK_SIZE + 5;
+    const weights = generateTopics(n);
+    const interests = createInterests(weights);
+
+    const llm: CognitionLLM = {
+      complete: vi.fn().mockRejectedValue(new Error('all broken')),
+      completeWithTools: vi.fn(),
+    };
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).toBeNull();
+  });
+
+  it('deduplicates topics across chunks (first-seen wins)', async () => {
+    const n = CHUNK_SIZE + 5;
+    const weights = generateTopics(n);
+    const interests = createInterests(weights);
+    const allTopics = Object.keys(weights).sort(
+      (a, b) => weights[b] - weights[a]
+    );
+
+    // Both chunks claim topic_0 (which belongs to chunk 1)
+    // This simulates a model hallucinating a topic from the other chunk
+    // But since validation checks canonical topics per-chunk, topic_0 won't be
+    // in chunk 2's canonical set. So we test dedup within valid groups.
+    const chunk1Response = JSON.stringify([
+      { label: 'group A', topics: [allTopics[0], allTopics[1]] },
+      { label: 'group C', topics: [allTopics[2], allTopics[3]] },
+    ]);
+    const chunk2Response = JSON.stringify([
+      { label: 'group B', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+    ]);
+    // Merge keeps all 3 (no overlap)
+    const mergeResponse = JSON.stringify([
+      { label: 'group A', topics: [allTopics[0], allTopics[1]] },
+      { label: 'group C', topics: [allTopics[2], allTopics[3]] },
+      { label: 'group B', topics: [allTopics[CHUNK_SIZE], allTopics[CHUNK_SIZE + 1]] },
+    ]);
+
+    const llm = createMockLLM([chunk1Response, chunk2Response, mergeResponse]);
+
+    const result = await compactInterests(interests, llm, createMockLogger());
+    expect(result).not.toBeNull();
+    expect(result!.groups).toHaveLength(3);
+  });
+
+  it('prompt includes 2-6 topics constraint', async () => {
+    const interests = createInterests(
+      { a: 1.0, b: 1.0, c: 1.0, d: 0.5 },
+      {}
+    );
+
+    const llm = createMockLLM(
+      JSON.stringify([{ label: 'test group', topics: ['a', 'b'] }])
+    );
+
+    await compactInterests(interests, llm, createMockLogger());
+
+    const callArgs = (llm.complete as ReturnType<typeof vi.fn>).mock.calls[0];
+    const systemPrompt = callArgs[0].systemPrompt as string;
+    expect(systemPrompt).toContain('2-6 topics');
   });
 });

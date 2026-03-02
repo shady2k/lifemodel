@@ -15,12 +15,21 @@ function createMockMemoryProvider(entries: MemoryEntry[]) {
   return {
     getAll: vi.fn().mockResolvedValue(store),
     save: vi.fn().mockImplementation((entry: MemoryEntry) => {
-      store.push(entry);
+      const idx = store.findIndex((e) => e.id === entry.id);
+      if (idx >= 0) {
+        store[idx] = entry;
+      } else {
+        store.push(entry);
+      }
       return Promise.resolve();
     }),
-    clear: vi.fn().mockImplementation(() => {
-      store.length = 0;
-      return Promise.resolve();
+    delete: vi.fn().mockImplementation((id: string) => {
+      const idx = store.findIndex((e) => e.id === id);
+      if (idx >= 0) {
+        store.splice(idx, 1);
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(false);
     }),
     search: vi.fn().mockResolvedValue([]),
     getRecent: vi.fn().mockResolvedValue([]),
@@ -90,8 +99,9 @@ describe('MemoryConsolidator', () => {
       expect(result.merged).toBe(1); // 2 entries -> 1
       expect(result.totalBefore).toBe(2);
       expect(result.totalAfter).toBe(1);
-      expect(provider.clear).toHaveBeenCalled();
+      // Delta update: save the merged entry, delete the absorbed one
       expect(provider.save).toHaveBeenCalledTimes(1);
+      expect(provider.delete).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the most specific (longest content) entry when merging', async () => {
@@ -373,7 +383,8 @@ describe('MemoryConsolidator', () => {
       expect(result.totalAfter).toBe(0);
       expect(result.merged).toBe(0);
       expect(result.forgotten).toBe(0);
-      expect(provider.clear).not.toHaveBeenCalled();
+      expect(provider.save).not.toHaveBeenCalled();
+      expect(provider.delete).not.toHaveBeenCalled();
     });
 
     it('handles single entry (no duplicates)', async () => {
