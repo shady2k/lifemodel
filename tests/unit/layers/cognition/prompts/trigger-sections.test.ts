@@ -193,13 +193,16 @@ describe('buildProactiveContactSection', () => {
     expect(result).toContain('location interests describe where it applies');
   });
 
-  it('includes positive-framing guidance about concrete findings', () => {
+  it('includes one-topic-per-message and deduplication guidance', () => {
     const context = createMockContext({
       timeSinceLastMessageMs: 3600000,
     });
     const result = buildProactiveContactSection(context, 'contact_urge');
 
-    expect(result).toContain('something concrete and new to share');
+    expect(result).toContain('single most valuable thing');
+    expect(result).toContain('One topic per message');
+    expect(result).toContain('scan conversation history for URLs');
+    expect(result).toContain('Choose ONE');
   });
 
   it('renders interests section with formatted interests', () => {

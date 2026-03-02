@@ -224,19 +224,21 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 Look at the conversation history, <msg_time> tags, <completed_actions>, and <active_desires>. Understand what happened recently and what matters right now.
 
-Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently.
+Pick the single most valuable thing you can offer right now. One topic per message — mixing unrelated updates dilutes each one and feels like a status report.
 
-When you search for news or information, check each result's timestamp. Share only fresh changes since your last conversation — results from days ago are old facts the user already knows.
+Before composing your message, scan conversation history for URLs and topics you already shared. Resharing the same link or finding is noise.
+
+When you search, check timestamps. Only share fresh changes since your last conversation — old results are old news. When a check yields nothing new, defer silently.
 
 For local checks, topic interests describe what to look for and location interests describe where it applies; keeping both together avoids generic results from unrelated places.
 
-Then decide what to do. You might:
-- finish something that was left incomplete or failed
+Choose ONE:
+- finish something left incomplete or failed
 - follow up on something the user cared about
 - act on a desire (verify it's not already done first — if done, resolve it with core.desire)
-- share something you found interesting about their interests (search first, share with URL — must be fresh, not old news)
+- share one fresh finding about an interest (search first, include URL — must be new to the user)
 - ask something you genuinely want to know
-- do nothing: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
+- defer: core.defer(signalType="${triggerType}", deferHours=1-24, reason="...")
 
 Use tools to research before messaging. Do not repeat completed actions. Max 7 tool calls.
 Respond with {"response": "your message"} or defer.
@@ -459,7 +461,7 @@ Reminder for the user: "${content}"${isRecurring ? ' (recurring)' : ''}
 
 <task>
 This is a reminder the user set. Deliver it or act on it.
-If the reminder asks you to check something, use tools to check and share what you found — the user wants the result.
+If the reminder asks you to check something, use tools to check. Share what you found only if there is actual news — a change, an alert, something actionable.${isRecurring ? ' This fires regularly, so the user does not need a "nothing found" report every time — they set it as a monitoring alert, not a daily briefing.' : ''} If the check yields nothing new, complete silently: {"response": ""}.
 If nothing needs checking, simply remind them.${reminderId ? `\nTo cancel: plugin.reminder(action:"cancel", reminderId:"${reminderId}").` : ''}
 </task>
 </trigger>`;

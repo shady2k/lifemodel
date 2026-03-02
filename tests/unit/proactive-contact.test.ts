@@ -149,10 +149,10 @@ describe('Proactive Contact', () => {
         .map((m) => (typeof m.content === 'string' ? m.content : ''))
         .join('\n\n');
       // Prompt gives agent decision guidance with tool limit
-      expect(fullPrompt).toContain('Then decide what to do');
+      expect(fullPrompt).toContain('Choose ONE');
       expect(fullPrompt).toContain('Max 7 tool calls');
-      expect(fullPrompt).toContain('something concrete and new to share');
-      expect(fullPrompt).toContain('do nothing');
+      expect(fullPrompt).toContain('single most valuable thing');
+      expect(fullPrompt).toContain('defer');
     });
 
     it('shows minutes when time is less than 1 hour', async () => {
