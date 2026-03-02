@@ -224,7 +224,7 @@ Reason: ${triggerReason}${isDeferralOverride ? '\nDeferral override: pressure in
 <task>
 Look at the conversation history, <msg_time> tags, <completed_actions>, and <active_desires>. Understand what happened recently and what matters right now.
 
-Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently. Never tell the user that you checked and found nothing, or that "everything is quiet" — absence of news is not a message.
+Only reach out when you have something concrete and new to share. Every message should carry actual information — a finding, an update, a result. When a check yields nothing, defer silently.
 
 When you search for news or information, check each result's timestamp. Share only fresh changes since your last conversation — results from days ago are old facts the user already knows.
 
@@ -443,6 +443,25 @@ Anomaly type: ${anomalyType}
 </context>
 
 <task>The user's intake today is unusually low compared to their own pattern. Check in gently — they may be fasting intentionally, busy, or simply haven't started eating yet. The calorie goal is a MAXIMUM (ceiling), not a target to reach.</task>
+</trigger>`;
+  }
+
+  // Handle user-created reminder events
+  if (eventKind === 'reminder:reminder_due') {
+    const content = (d['content'] as string | undefined) ?? 'Unknown reminder';
+    const isRecurring = d['isRecurring'] === true;
+    const reminderId = (d['reminderId'] as string | undefined) ?? '';
+
+    return `<trigger type="reminder_due">
+<context>
+Reminder for the user: "${content}"${isRecurring ? ' (recurring)' : ''}
+</context>
+
+<task>
+This is a reminder the user set. Deliver it or act on it.
+If the reminder asks you to check something, use tools to check and share what you found — the user wants the result.
+If nothing needs checking, simply remind them.${reminderId ? `\nTo cancel: plugin.reminder(action:"cancel", reminderId:"${reminderId}").` : ''}
+</task>
 </trigger>`;
   }
 

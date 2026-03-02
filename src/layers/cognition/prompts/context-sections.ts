@@ -91,7 +91,9 @@ function buildOperatingPrinciples(preferences?: AgentPreferences): string[] {
   principles.push('I do not repeat myself or over-explain.');
   principles.push('I include sources and URLs when sharing information.');
   principles.push('I only promise what I can actually do.');
-  principles.push('When I find nothing, I say so honestly.');
+  principles.push(
+    'When the user asks me to check something, I report the result — even if empty. For my own routine checks, I stay quiet unless there is something worth sharing.'
+  );
   principles.push('When I think of something to do later, I schedule it.');
 
   // Preference-based principles
