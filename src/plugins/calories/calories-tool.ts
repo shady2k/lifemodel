@@ -1973,7 +1973,8 @@ Rules:
 - date: "today", "yesterday", "tomorrow", or YYYY-MM-DD. dish_id (item_*) for update_dish/delete_dish. entry_id (food_*) for unlog/update_entry.
 - update_entry: change meal_type on existing entries. Use entry_ids (array) for bulk. Prefer over unlog+log when only reclassifying.
 - correct: fix a previously logged entry by food name. Updates portion (new_portion) and/or calorie basis (new_basis) in one call. No entry_id needed — finds by name+date+meal_type. new_basis updates the dish globally (all past/future entries reflect new calorie density). Use when user corrects weight, quantity, or calorie density.
-- LOG FIRST: The tool has its own food database with fuzzy matching. Log food by name+portion WITHOUT calories — if the food was logged before, calories auto-fill from history. Only look up calories externally when status="failed" with reason "No calorie data".`;
+- LOG FIRST: The tool has its own food database with fuzzy matching. Log food by name+portion WITHOUT calories — if the food was logged before, calories auto-fill from history. Only look up calories externally when status="failed" with reason "No calorie data".
+- AUTONOMY: When status="failed" with "No calorie data", ALWAYS search the web for calories yourself — NEVER ask the user for calorie values. After finding calories, re-call this tool with calories_per_100g. When the user says "add [food items]", that IS the instruction to log — do NOT ask for confirmation after looking up calories.`;
 
   const caloriesTool: PluginTool = {
     name: 'calories',

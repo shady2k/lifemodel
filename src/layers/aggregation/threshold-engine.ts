@@ -213,7 +213,15 @@ export class ThresholdEngine {
     }
 
     // Motor Cortex results — always wake immediately (user is waiting)
-    const motorResults = signals.filter((s) => s.type === 'motor_result');
+    // Filter out already-handled results (prevents re-processing on subsequent ticks)
+    const motorResults = signals.filter((s) => {
+      if (s.type !== 'motor_result') return false;
+      const isHandled = this.ackRegistry.isHandled(s.id);
+      if (isHandled) {
+        this.logger.debug({ signalId: s.id }, 'Skipping already-handled motor_result');
+      }
+      return !isHandled;
+    });
     if (motorResults.length > 0) {
       return {
         shouldWake: true,

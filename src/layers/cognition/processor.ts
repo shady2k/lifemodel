@@ -663,6 +663,23 @@ export class CognitionProcessor implements CognitionLayer {
       );
     }
 
+    // ACK motor_result signals to prevent duplicate reporting
+    // (without this, a proactive contact_urge can re-share the same result)
+    if (triggerSignal.type === 'motor_result') {
+      result.intents.push({
+        type: 'ACK_SIGNAL',
+        payload: {
+          signalId: triggerSignal.id,
+          signalType: 'motor_result',
+          reason: `Motor result processed with terminal: ${loopResult.terminal.type}`,
+        },
+      });
+      this.logger.debug(
+        { signalId: triggerSignal.id, terminal: loopResult.terminal.type },
+        'Motor result processed, marking as handled'
+      );
+    }
+
     // Trigger compaction check (non-blocking, fire-and-forget)
     if (recipientId) {
       void this.triggerCompactionIfNeeded(recipientId);

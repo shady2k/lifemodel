@@ -33,11 +33,7 @@ import type {
   DesireIntent,
   PerspectiveIntent,
 } from '../types/intent.js';
-import {
-  createTraceContext,
-  withTraceContext,
-  type TraceContext,
-} from './trace-context.js';
+import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type { Agent } from './agent.js';
 import type { EventBus } from './event-bus.js';
 import type { AggregationProcessor } from '../layers/aggregation/processor.js';
@@ -279,9 +275,7 @@ export class IntentApplicator {
               recipientId,
               text,
               conversationStatus,
-              messageId
-                ? { channelMessageId: messageId, channel: route.channel }
-                : undefined
+              messageId ? { channelMessageId: messageId, channel: route.channel } : undefined
             );
           }
         } else if ('skipped' in result && result.skipped) {
@@ -412,11 +406,11 @@ export class IntentApplicator {
 
     const ackRegistry = this.deps.aggregation.getAckRegistry();
 
-    if (signalType === 'thought') {
+    if (signalType === 'thought' || signalType === 'motor_result') {
       if (signalId) {
         ackRegistry.markHandled(signalId);
       } else {
-        this.deps.logger.warn({ signalType }, 'Thought ACK missing signalId');
+        this.deps.logger.warn({ signalType }, `${signalType} ACK missing signalId`);
       }
     }
 
@@ -432,8 +426,7 @@ export class IntentApplicator {
   }
 
   private applyDeferSignal(intent: DeferSignalIntent): void {
-    const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } =
-      intent.payload;
+    const { signalType, source, deferMs, valueAtDeferral, overrideDelta, reason } = intent.payload;
 
     let currentValue = valueAtDeferral;
     if (currentValue === undefined) {
@@ -587,13 +580,7 @@ export class IntentApplicator {
   }
 
   private applySetInterest(intent: SetInterestIntent): void {
-    const {
-      topic,
-      intensity,
-      urgent,
-      source,
-      recipientId: interestRecipientId,
-    } = intent.payload;
+    const { topic, intensity, urgent, source, recipientId: interestRecipientId } = intent.payload;
     const trace = intent.trace;
 
     if (!this.deps.userModel) {
@@ -690,10 +677,7 @@ export class IntentApplicator {
 
     if (action === 'create') {
       if (!commitmentId || !text || !dueAt) {
-        this.deps.logger.error(
-          { commitmentId, text, dueAt },
-          'COMMITMENT create: missing fields'
-        );
+        this.deps.logger.error({ commitmentId, text, dueAt }, 'COMMITMENT create: missing fields');
         return;
       }
 
@@ -749,9 +733,11 @@ export class IntentApplicator {
       // Update commitment status to kept
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId, 'kept',
-          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId,
+          commitmentId,
+          'kept',
+          this.deps.domainTrackers.signaledDueCommitments,
+          this.deps.domainTrackers.signaledOverdueCommitments,
+          commitmentRecipientId
         );
         this.deps.logger.info({ commitmentId }, 'Commitment marked as kept');
         this.deps.metrics.counter('commitments_kept');
@@ -760,9 +746,12 @@ export class IntentApplicator {
       // Update commitment status to repaired with note
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId, 'repaired',
-          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId, repairNote,
+          commitmentId,
+          'repaired',
+          this.deps.domainTrackers.signaledDueCommitments,
+          this.deps.domainTrackers.signaledOverdueCommitments,
+          commitmentRecipientId,
+          repairNote
         );
         this.deps.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
         this.deps.metrics.counter('commitments_repaired');
@@ -771,9 +760,11 @@ export class IntentApplicator {
       // Update commitment status to cancelled
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId, 'cancelled',
-          this.deps.domainTrackers.signaledDueCommitments, this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId,
+          commitmentId,
+          'cancelled',
+          this.deps.domainTrackers.signaledDueCommitments,
+          this.deps.domainTrackers.signaledOverdueCommitments,
+          commitmentRecipientId
         );
         this.deps.logger.info({ commitmentId }, 'Commitment cancelled');
         this.deps.metrics.counter('commitments_cancelled');
@@ -961,18 +952,16 @@ export class IntentApplicator {
     } else if (action === 'resolve_prediction') {
       if (predictionId && outcome && this.deps.statusUpdates && this.deps.domainTrackers) {
         void this.deps.statusUpdates.updatePredictionStatus(
-          predictionId, outcome, this.deps.domainTrackers.signaledDuePredictions,
+          predictionId,
+          outcome,
+          this.deps.domainTrackers.signaledDuePredictions
         );
         this.deps.logger.info({ predictionId, outcome }, 'Prediction resolved');
         this.deps.metrics.counter('predictions_resolved', { outcome });
       }
     } else if (action === 'revise_opinion') {
       if (opinionId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateOpinionStatus(
-          opinionId,
-          stance,
-          confidence,
-        );
+        void this.deps.statusUpdates.updateOpinionStatus(opinionId, stance, confidence);
         this.deps.logger.info({ opinionId }, 'Opinion revised');
         this.deps.metrics.counter('opinions_revised');
       }

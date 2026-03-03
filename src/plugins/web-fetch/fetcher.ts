@@ -37,6 +37,7 @@ import {
   parseTelegramHtml,
   formatTelegramAsMarkdown,
 } from '../web-shared/telegram.js';
+import { isTwitterUrl, normalizeTwitterUrl, formatTweetAsMarkdown } from '../web-shared/twitter.js';
 
 // ═══════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -274,10 +275,11 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
 
   logger.debug({ requestId, url: input.url, limits }, 'Starting fetch');
 
-  // Detect and normalize Telegram URLs before validation
+  // Detect and normalize special URLs before validation
   // (so SSRF checks run on the actual URL we'll fetch)
   let telegramPostId: string | undefined;
   let isTelegram = false;
+  let isTwitter = false;
   let inputUrl = input.url;
 
   try {
@@ -286,6 +288,10 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
       isTelegram = true;
       const normalized = normalizeTelegramUrl(parsed);
       telegramPostId = normalized.postId;
+      inputUrl = normalized.url.href;
+    } else if (isTwitterUrl(parsed)) {
+      const normalized = normalizeTwitterUrl(parsed);
+      isTwitter = normalized.isApi;
       inputUrl = normalized.url.href;
     }
   } catch {
@@ -303,8 +309,8 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
   const redirects: RedirectHop[] = [];
   let redirectCount = 0;
 
-  // Check robots.txt if enabled (skip for Telegram — /s/ pages are public preview)
-  if (respectRobots && !isTelegram) {
+  // Check robots.txt if enabled (skip for Telegram /s/ pages and Twitter→FxTwitter API rewrites)
+  if (respectRobots && !isTelegram && !isTwitter) {
     const allowed = await isAllowedByRobots(currentUrl);
     if (!allowed) {
       logger.info({ requestId, url: input.url }, 'Blocked by robots.txt');
@@ -340,7 +346,7 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
           signal: controller.signal,
           redirect: 'manual', // Handle redirects manually for security
           headers: {
-            'User-Agent': isTelegram ? BROWSER_USER_AGENT : USER_AGENT,
+            'User-Agent': isTelegram || isTwitter ? BROWSER_USER_AGENT : USER_AGENT,
             Accept: 'text/html, application/xhtml+xml, text/plain, application/json',
             'Accept-Language': 'en-US,en;q=0.9',
           },
@@ -517,6 +523,14 @@ export async function fetchPage(input: WebFetchInput, logger: Logger): Promise<W
           .replace(/\n{3,}/g, '\n\n')
           .trim();
         plainText = text;
+      } else if (isTwitter && baseContentType === 'application/json') {
+        // FxTwitter API JSON — format as readable tweet
+        try {
+          const parsed: unknown = JSON.parse(text);
+          markdown = formatTweetAsMarkdown(parsed);
+        } catch {
+          markdown = '```\n' + text + '\n```';
+        }
       } else if (baseContentType === 'application/json') {
         // Format JSON nicely
         try {
