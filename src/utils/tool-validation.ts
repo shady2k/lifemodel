@@ -225,7 +225,12 @@ export function validateToolArgs(
     const value = args[key];
 
     // Skip validation if not provided (optional field)
-    if (value === undefined || value === null) continue;
+    // Strip null from args so downstream tools see undefined, not null.
+    // LLMs (especially OpenAI-compatible) send explicit null for optional fields.
+    if (value === undefined || value === null) {
+      if (value === null) Reflect.deleteProperty(args, key);
+      continue;
+    }
 
     // Check 5: Placeholder detection (before type check, so placeholders get specific error)
     if (looksLikePlaceholder(value)) {

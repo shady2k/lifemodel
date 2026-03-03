@@ -2305,8 +2305,8 @@ Rules:
           return { success: false, error: 'name: required for correct action (food name to find)' };
         }
 
-        const newPortion = a['new_portion'];
-        const newBasis = a['new_basis'];
+        const newPortion = a['new_portion'] ?? undefined;
+        const newBasis = a['new_basis'] ?? undefined;
         if (!newPortion && !newBasis) {
           return {
             success: false,
