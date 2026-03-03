@@ -1614,8 +1614,29 @@ export class MotorCortex {
           break;
         }
 
-        case 'awaiting_input':
-          // Re-emit signal
+        case 'awaiting_input': {
+          // Stale check: if awaiting input for over 1 hour, the question was likely
+          // already relayed to the user in a prior session — fail instead of re-asking.
+          const inputAgeMs = Date.now() - new Date(run.startedAt).getTime();
+          const INPUT_STALE_MS = 60 * 60 * 1000; // 1 hour
+          if (inputAgeMs > INPUT_STALE_MS) {
+            this.logger.info(
+              { runId: run.id, inputAgeMs },
+              'Failing stale awaiting_input run (older than 1 hour)'
+            );
+            attempt.status = 'failed';
+            attempt.completedAt = new Date().toISOString();
+            delete attempt.pendingQuestion;
+            delete attempt.pendingToolCallId;
+            run.status = 'failed';
+            run.completedAt = new Date().toISOString();
+            await this.stateManager.updateRun(run);
+            // No signal — the question was already relayed, user may have moved on.
+            // Cognition will see the run as failed if it checks status.
+            break;
+          }
+
+          // Recent run — re-emit signal so cognition relays the question
           this.logger.info({ runId: run.id }, 'Re-emitting awaiting_input signal');
           if (attempt.pendingQuestion) {
             this.pushSignal(
@@ -1630,6 +1651,7 @@ export class MotorCortex {
                     status: 'awaiting_input',
                     attemptIndex: attempt.index,
                     question: attempt.pendingQuestion,
+                    isRecovery: true,
                   },
                 }
               )
@@ -1637,6 +1659,7 @@ export class MotorCortex {
           }
           reEmitted++;
           break;
+        }
 
         case 'awaiting_approval':
           // Check timeout, auto-cancel if expired

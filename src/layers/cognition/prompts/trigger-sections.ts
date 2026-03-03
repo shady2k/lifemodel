@@ -754,10 +754,15 @@ Exception: skill review runs (read-only security analysis) can be re-dispatched 
 
     case 'awaiting_input': {
       const question = data.question ?? 'No question provided';
+      const isRecovery = data.isRecovery === true;
+
+      const recoveryNote = isRecovery
+        ? `\nNOTE: This question was re-emitted after a restart. Check conversation history — if you already relayed this question to the user AND they replied, call core.task(action:"respond", runId:"${runId}", answer:"their answer") immediately. If they replied but the run is no longer relevant, call core.task(action:"cancel", runId:"${runId}"). Only re-ask if the question was never sent.`
+        : `\nIMPORTANT: The user has NOT seen this question yet. Any prior "yes"/"no"/"Да" in the conversation history above is for a DIFFERENT question — do NOT reuse it.`;
+
       return `<trigger type="motor_awaiting_input">
 <context>Task run ${runId} needs user input: "${question}"</context>
-<task>
-IMPORTANT: The user has NOT seen this question yet. Any prior "yes"/"no"/"Да" in the conversation history above is for a DIFFERENT question — do NOT reuse it.
+<task>${recoveryNote}
 You MUST ask the user this question and WAIT for their answer. Do NOT auto-approve or answer on behalf of the user.
 1. Send the question to the user in your response (rephrase naturally).
 2. STOP — do not call core.task.respond yet. Wait for the user to reply in a follow-up message.

@@ -528,6 +528,9 @@ export interface MotorResultData {
 
   /** Whether this is a skill_review run result */
   skillReview?: boolean;
+
+  /** Whether this signal was re-emitted during restart recovery (not first-time) */
+  isRecovery?: boolean | undefined;
 }
 
 /**
