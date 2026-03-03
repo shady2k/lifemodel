@@ -80,9 +80,7 @@ export class JsonMemoryProvider implements MemoryProvider {
 
   /** Get all entries with write-invalidated caching. */
   private async getAllCached(): Promise<MemoryEntry[]> {
-    if (this.allCache === null) {
-      this.allCache = await this.vectorStore.getAll();
-    }
+    this.allCache ??= await this.vectorStore.getAll();
     return this.allCache;
   }
 
@@ -298,6 +296,21 @@ export class JsonMemoryProvider implements MemoryProvider {
     }
 
     return rulesWithWeight.sort((a, b) => b.effectiveWeight - a.effectiveWeight).slice(0, limit);
+  }
+
+  async getLatestByKind(kind: string, recipientId?: string): Promise<MemoryEntry | undefined> {
+    const all = await this.getAllCached();
+    let latest: MemoryEntry | undefined;
+
+    for (const entry of all) {
+      if (entry.metadata?.['kind'] !== kind) continue;
+      if (recipientId && entry.recipientId !== recipientId) continue;
+      if (!latest || entry.timestamp > latest.timestamp) {
+        latest = entry;
+      }
+    }
+
+    return latest;
   }
 
   // ─── Associations (graph-enhanced) ─────────────────────────────────────────

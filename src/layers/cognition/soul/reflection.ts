@@ -768,7 +768,6 @@ export async function processBatchReflection(
         try {
           const history = await deps.conversationManager.getHistory(primaryRecipientId, {
             maxRecentTurns: 4,
-            includeCompacted: false,
           });
           // Filter to user/assistant messages only — tool messages add noise
           conversationContext = history.filter(

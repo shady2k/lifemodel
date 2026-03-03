@@ -47,11 +47,15 @@ When truncating history to fit context limits:
 
 ### Compaction
 
-When summarizing old messages:
+When the conversation exceeds the turn or size threshold, older messages are compacted:
 
+- The processor generates a rolling summary via LLM, chaining the previous summary from memory
+- The summary is saved to VectorStore as a `MemoryEntry` with `metadata.kind: 'conversation_summary'`
+- Messages are then trimmed to the last 3 turns (CAS-guarded for concurrent safety)
+- Summaries are searchable via `core.memory` and surface through associations
+- Older summaries naturally decay through consolidation — mimics human memory fading
 - Keep recent tool call/result pairs intact
 - Summarize user/assistant exchanges (skip tool details)
-- The summary goes into a system message, not inline
 
 ## Turn-Based Counting
 
@@ -93,7 +97,7 @@ const turnCount = messages.filter(m => m.role === 'user').length;
 
 - Key format: `conversation:{recipientId}`
 - Messages stored with ISO timestamps
-- Compacted summary stored separately
+- Conversation summaries stored in VectorStore as `MemoryEntry` objects (`metadata.kind: 'conversation_summary'`)
 - Status tracking (active, awaiting_answer, closed, idle)
 
 ## Related

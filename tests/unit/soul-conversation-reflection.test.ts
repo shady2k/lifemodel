@@ -124,7 +124,8 @@ function createMockConversationManager(messages: ConversationMessage[] = []) {
     getRecentActions: vi.fn().mockResolvedValue([]),
     needsCompaction: vi.fn().mockResolvedValue(false),
     getMessagesToCompact: vi.fn().mockResolvedValue([]),
-    compact: vi.fn().mockResolvedValue(undefined),
+    compactMessages: vi.fn().mockResolvedValue(true),
+    getMessageCount: vi.fn().mockResolvedValue(0),
   };
 }
 
@@ -172,7 +173,6 @@ describe('conversation-aware batch reflection', () => {
 
     expect(convManager.getHistory).toHaveBeenCalledWith('user-42', {
       maxRecentTurns: 4,
-      includeCompacted: false,
     });
   });
 

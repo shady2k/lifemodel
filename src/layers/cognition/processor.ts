@@ -681,44 +681,120 @@ export class CognitionProcessor implements CognitionLayer {
     return result;
   }
 
+  /** In-flight guard: prevents parallel compactions for the same chat. */
+  private readonly compactionInFlight = new Set<string>();
+
+  /** Max conversation text length for compaction prompt (~16K chars, tail-biased). */
+  private static readonly MAX_COMPACTION_TEXT_LENGTH = 16_000;
+
   /**
    * Check if conversation needs compaction and run if needed.
+   * Flow: check → fetch previous summary from memory → summarize → save to memory → trim messages.
    */
   private async triggerCompactionIfNeeded(chatId: string): Promise<void> {
-    if (!this.conversationManager || !this.cognitionLLM) {
+    // Require memoryProvider — without it, trimming would discard context with no summary backup
+    if (!this.conversationManager || !this.cognitionLLM || !this.memoryProvider) {
       return;
     }
 
+    // In-flight guard: skip if already compacting this chat
+    if (this.compactionInFlight.has(chatId)) {
+      return;
+    }
+
+    this.compactionInFlight.add(chatId);
     try {
       if (!(await this.conversationManager.needsCompaction(chatId))) {
         return;
       }
 
-      const toCompact = await this.conversationManager.getMessagesToCompact(chatId);
+      // Single-read snapshot: message count + messages-to-compact from one storage load
+      // Ensures the CAS guard covers exactly the messages we summarized
+      const { messagesToCompact: toCompact, totalMessageCount: expectedMessageCount } =
+        await this.conversationManager.getCompactionSnapshot(chatId);
       if (toCompact.length === 0) {
         return;
       }
 
-      const conversationText = toCompact.map((m) => `${m.role}: ${m.content ?? ''}`).join('\n');
+      // Fetch previous summary from memory for continuity chaining
+      let previousSummary = '';
+      const prev = await this.memoryProvider.getLatestByKind('conversation_summary', chatId);
+      if (prev) {
+        previousSummary = prev.content;
+      }
 
-      const summary = await this.cognitionLLM.complete({
-        systemPrompt: 'You are a helpful assistant that summarizes conversations.',
-        userPrompt: `Summarize the key facts from this conversation in 2-3 sentences:\n${conversationText}`,
+      // Build conversation text (role: content format), tail-biased truncation
+      let conversationText = toCompact.map((m) => `${m.role}: ${m.content ?? ''}`).join('\n');
+      if (conversationText.length > CognitionProcessor.MAX_COMPACTION_TEXT_LENGTH) {
+        // Keep the newest messages (tail) — more recent context is more valuable
+        conversationText = conversationText.slice(-CognitionProcessor.MAX_COMPACTION_TEXT_LENGTH);
+      }
+
+      // Always include full previous summary in the prompt
+      const userPrompt = `Previous summary (may be empty):\n${previousSummary || '(none)'}\n\nOlder messages being compacted:\n${conversationText}\n\nWrite the updated rolling summary.`;
+
+      const summary = await this.cognitionLLM.complete(
+        {
+          systemPrompt: `You maintain a rolling conversation memory summary.
+Write an UPDATED summary that preserves continuity across compactions.
+
+Rules:
+- Keep stable user preferences, constraints, goals, ongoing topics, and unresolved threads.
+- Include only information useful for future responses.
+- Prefer durable context over one-off chatter.
+- If new messages contradict the previous summary, keep the newer version.
+- Do not invent facts. If uncertain, omit.
+- Output 6-10 short bullet lines. Plain text only, no markdown headers.`,
+          userPrompt,
+        },
+        { maxTokens: 320, temperature: 0.2 }
+      );
+
+      // Validate summary
+      if (!summary || summary.trim().length === 0 || summary.length > 1500) {
+        this.logger.warn(
+          { chatId, summaryLength: summary?.length ?? 0 },
+          'Compaction summary invalid, skipping'
+        );
+        return;
+      }
+
+      // Save summary to memory BEFORE trimming — if trim fails, summary is still saved
+      await this.memoryProvider.save({
+        id: `mem-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'message',
+        content: summary.trim(),
+        timestamp: new Date(),
+        recipientId: chatId,
+        tags: ['conversation:summary'],
+        confidence: 1.0,
+        metadata: { kind: 'conversation_summary', source: 'compaction' },
       });
-      await this.conversationManager.compact(chatId, summary);
 
-      this.logger.info({ chatId, messageCount: toCompact.length }, 'Conversation compacted');
+      // CAS trim — if stale, log and skip (summary is already saved)
+      const trimmed = await this.conversationManager.compactMessages(chatId, expectedMessageCount);
+      if (!trimmed) {
+        this.logger.info({ chatId }, 'Compaction trim skipped (stale), summary saved to memory');
+      } else {
+        this.logger.info(
+          { chatId, messageCount: toCompact.length },
+          'Conversation compacted with memory-backed summary'
+        );
+      }
     } catch (error) {
       this.logger.warn(
         { error: error instanceof Error ? error.message : String(error), chatId },
         'Compaction failed'
       );
+    } finally {
+      this.compactionInFlight.delete(chatId);
     }
   }
 
   /**
    * Get conversation history for context.
    * Returns proper OpenAI format with tool_calls preserved.
+   * Injects the latest conversation summary from memory (if available) as a leading system message.
    */
   private async getConversationHistory(chatId?: string): Promise<ConversationMessage[]> {
     if (!chatId || !this.conversationManager) {
@@ -727,7 +803,28 @@ export class CognitionProcessor implements CognitionLayer {
 
     try {
       const history = await this.conversationManager.getHistory(chatId, { maxRecentTurns: 10 });
-      return history.map((msg): ConversationMessage => {
+
+      const result: ConversationMessage[] = [];
+
+      // Inject latest conversation summary from memory (isolated — failure doesn't drop history)
+      if (this.memoryProvider) {
+        try {
+          const summary = await this.memoryProvider.getLatestByKind('conversation_summary', chatId);
+          if (summary) {
+            result.push({
+              role: 'system',
+              content: `Earlier conversation summary:\n${summary.content}`,
+            });
+          }
+        } catch (summaryError) {
+          this.logger.trace(
+            { chatId, error: summaryError instanceof Error ? summaryError.message : 'Unknown' },
+            'Failed to fetch conversation summary from memory, continuing without'
+          );
+        }
+      }
+
+      for (const msg of history) {
         const convMsg: ConversationMessage = {
           role: msg.role,
           content: msg.content,
@@ -743,8 +840,10 @@ export class CognitionProcessor implements CognitionLayer {
         if (msg.tool_call_id) {
           convMsg.tool_call_id = msg.tool_call_id;
         }
-        return convMsg;
-      });
+        result.push(convMsg);
+      }
+
+      return result;
     } catch (error) {
       this.logger.trace(
         { chatId, error: error instanceof Error ? error.message : 'Unknown' },

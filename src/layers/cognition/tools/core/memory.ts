@@ -162,6 +162,12 @@ export interface MemoryProvider {
   getById(id: string): Promise<MemoryEntry | undefined>;
 
   /**
+   * Get the most recent entry matching a metadata kind and optional recipientId.
+   * O(n) single-pass scan — used for retrieving latest conversation summary, etc.
+   */
+  getLatestByKind(kind: string, recipientId?: string): Promise<MemoryEntry | undefined>;
+
+  /**
    * Get associated memories via graph expansion.
    * Returns direct vector matches + graph-expanded related context + open commitments.
    * Only available when GraphStore is populated (after consolidation).
