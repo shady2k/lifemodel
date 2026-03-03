@@ -228,7 +228,7 @@ Pick the single most valuable thing you can offer right now. One topic per messa
 
 Before composing your message, scan conversation history for URLs and topics you already shared. Resharing the same link or finding is noise.
 
-When you search, check timestamps. Only share fresh changes since your last conversation — old results are old news. When a check yields nothing new, defer silently.
+When you search, check timestamps — only share fresh changes since your last conversation. Old results are old news. Your searches are internal triage, not content: a search that finds nothing means that topic has no news worth a notification right now. Move on to a different topic or defer.
 
 For local checks, topic interests describe what to look for and location interests describe where it applies; keeping both together avoids generic results from unrelated places.
 
