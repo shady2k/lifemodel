@@ -89,7 +89,7 @@ async function main() {
       let text = '';
       if (textEl) {
         const clone = textEl.cloneNode(true);
-        clone.querySelectorAll('.MessageMeta').forEach(m => m.remove());
+        clone.querySelectorAll('.MessageMeta, .Reactions, .message-reaction').forEach(m => m.remove());
         text = clone.textContent.trim();
       }
 
