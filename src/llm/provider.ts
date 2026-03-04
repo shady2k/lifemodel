@@ -27,6 +27,14 @@ export interface ToolCall {
 }
 
 /**
+ * Multimodal content part for vision-capable models.
+ * Used in Message.contentParts to pass images alongside text.
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string; mediaType: string }; // base64 data, AI SDK uses mediaType
+
+/**
  * Message in a conversation.
  * Extended to support tool calling flow.
  */
@@ -34,6 +42,10 @@ export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   /** Message content - can be null for assistant messages with only tool_calls */
   content: string | null;
+  /** Multimodal content for the LLM provider (e.g., text + images). When set,
+   *  the provider uses this instead of `content`. `content` stays as text for
+   *  logging, transcript compilation, and conversation history. */
+  contentParts?: ContentPart[] | undefined;
   /** Tool calls made by assistant (only for role: 'assistant') */
   tool_calls?: ToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */

@@ -2,6 +2,7 @@ import { Bot, GrammyError } from 'grammy';
 import type { Context } from 'grammy';
 import type { MessageReactionUpdated } from 'grammy/types';
 import type { Logger, Signal } from '../../types/index.js';
+import type { ImageAttachment } from '../../types/signal.js';
 import { createUserMessageSignal, createMessageReactionSignal } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
@@ -211,6 +212,11 @@ export class TelegramChannel implements Channel {
       this.onMessage(ctx);
     });
 
+    // Handle photo messages (vision support)
+    this.bot.on('message:photo', (ctx) => {
+      void this.onPhoto(ctx);
+    });
+
     // Handle message reactions (non-verbal feedback)
     this.bot.on('message_reaction', (ctx: Context) => {
       this.onReaction(ctx);
@@ -383,6 +389,135 @@ export class TelegramChannel implements Channel {
         }
       }
     );
+  }
+
+  /**
+   * Handle incoming photo messages.
+   * Downloads the photo, encodes as base64, and emits a user_message signal with image data.
+   */
+  private async onPhoto(ctx: {
+    from?: { id: number; username?: string; first_name?: string; last_name?: string };
+    chat: { id: number };
+    message: {
+      message_id: number;
+      photo?: { file_id: string; file_size?: number }[];
+      caption?: string;
+    };
+    api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
+  }): Promise<void> {
+    if (!ctx.from || !ctx.message.photo?.length) {
+      return;
+    }
+
+    const chatId = ctx.chat.id.toString();
+
+    // Filter by allowed chat IDs if configured
+    const allowedChatIds = this.config.allowedChatIds;
+    if (allowedChatIds && allowedChatIds.length > 0 && !allowedChatIds.includes(chatId)) {
+      this.logger?.debug({ chatId }, 'Ignoring photo from non-allowed chat ID');
+      return;
+    }
+
+    const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5MB
+
+    try {
+      // Get largest photo (grammY sorts ascending by size)
+      const photo = ctx.message.photo[ctx.message.photo.length - 1];
+      if (!photo) return;
+
+      // Pre-check size from Telegram metadata (if available)
+      if (photo.file_size && photo.file_size > MAX_PHOTO_BYTES) {
+        this.logger?.warn({ fileSize: photo.file_size }, 'Photo too large, skipping');
+        return;
+      }
+
+      // Download the photo
+      const file = await ctx.api.getFile(photo.file_id);
+      if (!file.file_path) {
+        this.logger?.warn('Photo file_path missing from Telegram API response');
+        return;
+      }
+
+      // Build download URL (not logged — contains bot token)
+      const downloadUrl = `https://api.telegram.org/file/bot${this.config.botToken}/${file.file_path}`;
+      const response = await fetch(downloadUrl);
+
+      if (!response.ok) {
+        this.logger?.warn(
+          { status: response.status, statusText: response.statusText },
+          'Photo download failed'
+        );
+        return;
+      }
+
+      const buffer = await response.arrayBuffer();
+
+      // Post-download size guard
+      if (buffer.byteLength > MAX_PHOTO_BYTES) {
+        this.logger?.warn(
+          { byteLength: buffer.byteLength },
+          'Photo too large after download, skipping'
+        );
+        return;
+      }
+
+      const base64 = Buffer.from(buffer).toString('base64');
+
+      // Determine media type: prefer Content-Type header, fall back to extension
+      let mediaType = response.headers.get('content-type') ?? '';
+      if (!mediaType.startsWith('image/')) {
+        const ext = file.file_path.split('.').pop()?.toLowerCase();
+        mediaType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+      }
+
+      const userId = ctx.from.id.toString();
+      const destination = chatId;
+      const text = ctx.message.caption ?? '[Photo]';
+      const recipientId = this.recipientRegistry.getOrCreate(this.name, destination);
+
+      const image: ImageAttachment = { data: base64, mediaType };
+      const correlationId = ctx.message.message_id.toString();
+      const signal = createUserMessageSignal(
+        {
+          text,
+          channel: 'telegram',
+          userId,
+          recipientId,
+          images: [image],
+        },
+        { correlationId }
+      );
+
+      // Wrap callback in trace context (same pattern as onMessage)
+      withTraceContext(
+        createTraceContext(signal.id, {
+          correlationId,
+          spanId: `photo_${String(ctx.message.message_id)}`,
+        }),
+        () => {
+          if (this.signalCallback) {
+            this.signalCallback(signal);
+
+            this.logger?.debug(
+              {
+                signalId: signal.id,
+                userId,
+                recipientId,
+                hasCaption: !!ctx.message.caption,
+                imageSize: buffer.byteLength,
+                mediaType,
+              },
+              'Photo received as Signal'
+            );
+          }
+        }
+      );
+    } catch (error) {
+      this.logger?.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to process incoming photo'
+      );
+    }
   }
 
   /**

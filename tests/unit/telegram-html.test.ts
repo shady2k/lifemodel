@@ -235,6 +235,50 @@ describe('markdownToTelegramHtml', () => {
     });
   });
 
+  describe('markdown headers', () => {
+    it('converts # Header to bold', () => {
+      expect(markdownToTelegramHtml('# Main Title')).toBe('<b>Main Title</b>');
+    });
+
+    it('converts ## Header to bold', () => {
+      expect(markdownToTelegramHtml('## Section')).toBe('<b>Section</b>');
+    });
+
+    it('converts ### through ###### to bold', () => {
+      expect(markdownToTelegramHtml('### Sub')).toBe('<b>Sub</b>');
+      expect(markdownToTelegramHtml('###### Deep')).toBe('<b>Deep</b>');
+    });
+
+    it('handles headers with inline formatting', () => {
+      // Bold inside header: **text** inside # should still produce bold
+      expect(markdownToTelegramHtml('## **Already bold**')).toBe('<b><b>Already bold</b></b>');
+    });
+
+    it('handles headers mixed with regular text', () => {
+      const input = '## Основная идея\n\nSome paragraph text.';
+      const result = markdownToTelegramHtml(input);
+      expect(result).toBe('<b>Основная идея</b>\n\nSome paragraph text.');
+    });
+
+    it('handles multiple headers in a message', () => {
+      const input = '## Section 1\n\nText.\n\n## Section 2\n\nMore text.';
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('<b>Section 1</b>');
+      expect(result).toContain('<b>Section 2</b>');
+    });
+
+    it('does not convert # inside code blocks', () => {
+      const input = '```\n## not a header\n```';
+      const result = markdownToTelegramHtml(input);
+      expect(result).toContain('## not a header');
+      expect(result).not.toContain('<b>not a header</b>');
+    });
+
+    it('does not convert mid-line # characters', () => {
+      expect(markdownToTelegramHtml('Issue #42 is fixed')).toBe('Issue #42 is fixed');
+    });
+  });
+
   describe('fallback on error', () => {
     it('returns HTML-escaped text if conversion somehow throws', () => {
       // The function should never throw — it catches internally.

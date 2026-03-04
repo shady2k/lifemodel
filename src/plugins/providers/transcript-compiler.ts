@@ -299,15 +299,20 @@ function mergeConsecutiveRoles(
   for (const msg of messages) {
     // Check if this message can be merged
     // Empty tool_calls arrays are treated as absent (not blocking)
+    // Messages with contentParts (multimodal) must not be merged — merging
+    // concatenates text content only, which would discard image data.
+    const msgRecord = msg as unknown as Record<string, unknown>;
     const canMerge =
       (!msg.tool_calls || msg.tool_calls.length === 0) &&
       !msg.tool_call_id &&
       !msg._noMerge &&
+      !msgRecord['contentParts'] &&
       msg.content !== null;
 
     const prev = result[result.length - 1];
 
     // Check if we can merge with previous message
+    const prevRecord = prev as unknown as Record<string, unknown> | undefined;
     if (
       canMerge &&
       prev &&
@@ -315,6 +320,7 @@ function mergeConsecutiveRoles(
       (!prev.tool_calls || prev.tool_calls.length === 0) &&
       !prev.tool_call_id &&
       !prev._noMerge &&
+      !prevRecord?.['contentParts'] &&
       prev.content !== null
     ) {
       // Merge: append content with double newline

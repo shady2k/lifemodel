@@ -171,6 +171,17 @@ export type SignalData =
   | MotorResultData;
 
 /**
+ * Image attached to a user message (e.g., Telegram photo).
+ * Carried through the signal pipeline and converted to vision content at the provider boundary.
+ */
+export interface ImageAttachment {
+  /** Base64-encoded image data */
+  data: string;
+  /** IANA media type, e.g. 'image/jpeg' (matches AI SDK naming) */
+  mediaType: string;
+}
+
+/**
  * Data for user_message signals.
  * Carries the actual message content from the sensory organ.
  */
@@ -197,6 +208,9 @@ export interface UserMessageData {
 
   /** Detected language (if available) */
   language?: string;
+
+  /** Attached images (e.g., photos from Telegram) */
+  images?: ImageAttachment[] | undefined;
 }
 
 /**

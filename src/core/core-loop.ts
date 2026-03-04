@@ -982,14 +982,18 @@ export class CoreLoop {
       this.processResponseTiming(signal);
     }
 
-    // Save to conversation history
+    // Save to conversation history (text only — base64 images are NOT persisted)
     if (this.conversationManager) {
-      const data = signal.data as { text?: string; recipientId?: string } | undefined;
+      const data = signal.data as
+        | { text?: string; recipientId?: string; images?: unknown[] }
+        | undefined;
       if (data?.text && data.recipientId) {
-        // Use recipientId as conversation key
+        const photoPrefix = data.images?.length
+          ? `[Photo${data.images.length > 1 ? ` x${String(data.images.length)}` : ''} attached] `
+          : '';
         void this.conversationManager.addMessage(data.recipientId, {
           role: 'user',
-          content: data.text,
+          content: photoPrefix + data.text,
         });
       }
     }

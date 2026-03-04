@@ -6,9 +6,10 @@
  */
 
 import { getEffectiveTimezone, formatTimestampPrefix } from '../../../utils/date.js';
-import type { Message } from '../../../llm/provider.js';
+import type { Message, ContentPart } from '../../../llm/provider.js';
 import type { LoopContext, PromptBuilders } from '../agentic-loop-types.js';
 import type { ToolContext } from '../tools/types.js';
+import type { ImageAttachment } from '../../../types/signal.js';
 
 /**
  * Build initial messages for the conversation.
@@ -95,7 +96,19 @@ export function buildInitialMessages(
     });
   }
 
-  messages.push({ role: isUserInteraction ? 'user' : 'system', content: triggerPrompt });
+  // Build the trigger message — attach contentParts for vision if images are present
+  const triggerData = context.triggerSignal.data as { images?: ImageAttachment[] } | undefined;
+  const triggerImages = isUserInteraction ? triggerData?.images : undefined;
+
+  if (triggerImages?.length) {
+    const parts: ContentPart[] = [{ type: 'text', text: triggerPrompt }];
+    for (const img of triggerImages) {
+      parts.push({ type: 'image', image: img.data, mediaType: img.mediaType });
+    }
+    messages.push({ role: 'user', content: triggerPrompt, contentParts: parts });
+  } else {
+    messages.push({ role: isUserInteraction ? 'user' : 'system', content: triggerPrompt });
+  }
 
   return messages;
 }

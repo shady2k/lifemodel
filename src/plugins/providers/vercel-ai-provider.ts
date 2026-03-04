@@ -476,6 +476,22 @@ export class VercelAIProvider extends BaseLLMProvider {
       }
 
       // system, user, or assistant without tool calls
+
+      // Handle multimodal contentParts (e.g., user message with attached photos).
+      // contentParts carries the full vision payload; content stays as text for logging.
+      const contentParts = (msg as unknown as Record<string, unknown>)['contentParts'] as
+        | { type: string; text?: string; image?: string; mediaType?: string }[]
+        | undefined;
+      if (contentParts?.length) {
+        const parts = contentParts.map((part) => {
+          if (part.type === 'image') {
+            return { type: 'image' as const, image: part.image, mediaType: part.mediaType };
+          }
+          return { type: 'text' as const, text: part.text ?? '' };
+        });
+        return { role: msg.role, content: parts };
+      }
+
       // Handle multipart content from addCacheControl
       // MUTATION BOUNDARY: addCacheControl mutates content from string → Array.
       // This cast acknowledges the mutation; the actual type safety happens at the
@@ -776,6 +792,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     let messages: Message[] = request.messages.map((m) => ({
       role: m.role,
       content: m.content,
+      ...(m.contentParts && { contentParts: m.contentParts }),
       ...(m.tool_calls && { tool_calls: m.tool_calls }),
       ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
       ...(m.tool_name && { tool_name: m.tool_name }),

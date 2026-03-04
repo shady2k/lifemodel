@@ -119,11 +119,16 @@ function convert(md: string): string {
   // 8. Strikethrough: ~~text~~
   text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
 
-  // 9. Unordered list items: lines starting with "- " or "• "
-  //    Convert to simple "• " prefix (Telegram doesn't support <ul>/<li>)
+  // 9. Markdown headers: # Heading → bold text
+  //    Telegram has no header tags, so bold is the closest visual equivalent.
+  //    Strip the # markers and wrap the text in <b>.
+  text = text.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+
+  // 10. Unordered list items: lines starting with "- " or "• "
+  //     Convert to simple "• " prefix (Telegram doesn't support <ul>/<li>)
   text = text.replace(/^[-•] +/gm, '• ');
 
-  // 10. Restore placeholders
+  // 11. Restore placeholders
   text = text.replace(/\u2060PH(\d+)\u2060/g, (_m, idx: string) => {
     return placeholders[parseInt(idx, 10)] ?? '';
   });
