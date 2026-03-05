@@ -631,12 +631,20 @@ export class AgenticLoop {
       state.conversationStatus = parsed.status;
     }
 
-    // Edge case: user message or motor_result but no response text
+    // Edge case: user message or motor_result but no response text.
+    // First retry WITH tools (the model may have glitched and needs another chance
+    // to call tools). Only strip tools via forceRespond on the second failure —
+    // stripping tools on a factual question guarantees hallucination.
     const requiresResponse =
       context.triggerSignal.type === 'user_message' ||
       context.triggerSignal.type === 'motor_result';
     if (!messageText && requiresResponse) {
-      this.logger.debug('No response text for motor/user trigger, forcing response');
+      if (!state.emptyResponseRetried) {
+        state.emptyResponseRetried = true;
+        this.logger.debug('No response text for motor/user trigger, retrying with tools');
+        return null; // retry with tools intact
+      }
+      this.logger.debug('No response text after retry with tools, forcing response');
       state.forceRespond = true;
       return null; // Signal caller to continue loop
     }
