@@ -382,8 +382,11 @@ export class NewsSignalFilter implements SignalFilter {
   private static readonly DIGEST_MAX_MESSAGES = 25;
   /** Max total characters per digest chunk */
   private static readonly DIGEST_MAX_CHARS = 4000;
-  /** Min content chars for a chunk to survive quality guard */
-  private static readonly DIGEST_MIN_CONTENT_CHARS = 120;
+  /** Min content chars for a chunk to survive quality guard.
+   * Keep this low — the user explicitly added the source, so even short
+   * channel posts (photo + caption) are intentional content. Interest
+   * scoring handles relevance filtering downstream. */
+  private static readonly DIGEST_MIN_CONTENT_CHARS = 20;
 
   /**
    * Consolidate individual Telegram messages into time-sessionized digest chunks.
