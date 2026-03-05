@@ -761,6 +761,7 @@ Rules:
 - Prefer durable context over one-off chatter.
 - If new messages contradict the previous summary, keep the newer version.
 - Do not invent facts. If uncertain, omit.
+- Source attribution: only attribute goals, projects, or plans to the user if they explicitly stated them. Do not attribute external content (news digests, feed items, third-party posts) as user goals or intentions.
 - Output 6-10 short bullet lines. Plain text only, no markdown headers.`,
           userPrompt,
         },

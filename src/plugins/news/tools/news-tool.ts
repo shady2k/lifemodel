@@ -90,7 +90,8 @@ const SCHEMA_GET_NEWS = {
   query: {
     type: 'string',
     required: false,
-    description: 'Search term (default: all news)',
+    description:
+      'Optional keyword filter. Omit to list recent articles. Only use when the user explicitly asks to find articles about a specific topic.',
   },
   urgency: {
     type: 'string',
@@ -225,7 +226,11 @@ async function tryUpgradeToGroup(
   if (!scriptResult.ok) return null;
 
   const output = scriptResult.output as
-    | { ok: boolean; groups: { id: string; name: string; url: string }[]; error?: { code: string; message: string } }
+    | {
+        ok: boolean;
+        groups: { id: string; name: string; url: string }[];
+        error?: { code: string; message: string };
+      }
     | undefined;
   if (!output?.ok || !output.groups) return null;
 
@@ -238,11 +243,17 @@ async function tryUpgradeToGroup(
   });
 
   if (!match) {
-    logger.debug({ handle, name, groupCount: output.groups.length }, 'Auto-upgrade: no matching group found');
+    logger.debug(
+      { handle, name, groupCount: output.groups.length },
+      'Auto-upgrade: no matching group found'
+    );
     return null;
   }
 
-  logger.info({ handle, groupUrl: match.url, groupName: match.name }, 'Auto-upgrading telegram → telegram-group');
+  logger.info(
+    { handle, groupUrl: match.url, groupName: match.name },
+    'Auto-upgrading telegram → telegram-group'
+  );
   return { profile, groupUrl: match.url };
 }
 
@@ -316,7 +327,10 @@ async function addSource(
         'Telegram handle is not a public channel — auto-upgrading to telegram-group'
       );
       const upgradeResult = await tryUpgradeToGroup(
-        normalizedUrl, name.trim(), options.scriptRunner, logger
+        normalizedUrl,
+        name.trim(),
+        options.scriptRunner,
+        logger
       );
       if (upgradeResult) {
         effectiveType = 'telegram-group';
@@ -326,7 +340,8 @@ async function addSource(
         return {
           success: false,
           action: 'add_source',
-          error: `Channel ${normalizedUrl} appears to be private and was not found in authenticated Telegram groups. ` +
+          error:
+            `Channel ${normalizedUrl} appears to be private and was not found in authenticated Telegram groups. ` +
             'Make sure the bot account has joined this group/channel, then try again.',
         };
       }
@@ -381,7 +396,10 @@ async function addSource(
   let fetchError: string | undefined;
 
   try {
-    logger.debug({ sourceId, type: effectiveType, url: normalizedUrl }, 'Fetching initial articles');
+    logger.debug(
+      { sourceId, type: effectiveType, url: normalizedUrl },
+      'Fetching initial articles'
+    );
 
     let fetchSuccess = false;
     let fetchArticles: FetchedArticle[] = [];
@@ -585,7 +603,7 @@ type NewsType = 'urgent' | 'interesting' | 'all';
  * Retrieves facts created by this plugin (polled articles saved to memory).
  *
  * @param memorySearch - Memory search primitive
- * @param query - Search term (default: all news)
+ * @param query - Optional keyword filter; omit to list recent articles
  * @param newsType - Filter by urgency: "urgent", "interesting", or "all" (default)
  * @param limit - Max results (default: 10)
  * @param offset - Skip first N results
@@ -598,8 +616,7 @@ async function getNews(
   offset = 0,
   sourceId?: string
 ): Promise<NewsToolResult> {
-  // Use empty string for "all news" - searching 'news' would limit to content matching that word
-  // Empty query with tag-based storage will return all plugin facts
+  // Empty query = list recent articles (browse mode); non-empty = keyword filter
   const searchQuery = query ?? '';
 
   // Smart defaults for news type filtering:
@@ -778,7 +795,8 @@ For private Telegram groups:
       {
         name: 'query',
         type: 'string',
-        description: 'Search term for articles (default: all news). Used with get_news action.',
+        description:
+          'Optional keyword filter. Omit to list recent articles. Only use when the user explicitly asks to find articles about a specific topic. Used with get_news action.',
         required: false,
       },
       {
