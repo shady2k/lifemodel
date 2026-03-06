@@ -54,6 +54,35 @@ export function hasBreakingPattern(text: string): boolean {
   return false;
 }
 
+/** Max topics kept per article — prevents tag-flood feeds (e.g. Habr) from dominating scoring. */
+const MAX_TOPICS = 15;
+
+/** Minimum meaningful tag length. */
+const MIN_TAG_LENGTH = 2;
+
+/** Maximum tag length — longer strings are usually sentence fragments, not topics. */
+const MAX_TAG_LENGTH = 60;
+
+/**
+ * Normalize, deduplicate, and cap feed tags.
+ * Drops junk (empty, too short/long) and limits to MAX_TOPICS.
+ */
+export function sanitizeTopics(tags: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const raw of tags) {
+    const tag = raw.trim().toLowerCase();
+    if (tag.length < MIN_TAG_LENGTH || tag.length > MAX_TAG_LENGTH) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    result.push(tag);
+    if (result.length >= MAX_TOPICS) break;
+  }
+
+  return result;
+}
+
 /**
  * Convert a FetchedArticle to a NewsArticle for signal emission.
  * Uses tags from RSS/Atom feeds if available, otherwise empty.
@@ -61,8 +90,7 @@ export function hasBreakingPattern(text: string): boolean {
 export function convertToNewsArticle(article: FetchedArticle): NewsArticle {
   const combinedText = article.summary ? `${article.title} ${article.summary}` : article.title;
 
-  // Use tags from feed if available (normalized to lowercase)
-  const topics = article.tags?.map((tag) => tag.toLowerCase()) ?? [];
+  const topics = sanitizeTopics(article.tags ?? []);
 
   return {
     id: article.id,

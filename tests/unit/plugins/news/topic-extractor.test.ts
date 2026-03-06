@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { hasBreakingPattern, convertToNewsArticle } from '../../../../src/plugins/news/topic-extractor.js';
+import { hasBreakingPattern, convertToNewsArticle, sanitizeTopics } from '../../../../src/plugins/news/topic-extractor.js';
 import type { FetchedArticle } from '../../../../src/plugins/news/types.js';
 
 describe('Topic Extractor', () => {
@@ -63,6 +63,43 @@ describe('Topic Extractor', () => {
     it('should handle undefined/null gracefully', () => {
       expect(hasBreakingPattern(null as unknown as string)).toBe(false);
       expect(hasBreakingPattern(undefined as unknown as string)).toBe(false);
+    });
+  });
+
+  describe('sanitizeTopics', () => {
+    it('should lowercase and deduplicate tags', () => {
+      expect(sanitizeTopics(['AI', 'ai', 'Machine Learning', 'AI'])).toEqual(['ai', 'machine learning']);
+    });
+
+    it('should drop tags shorter than 2 characters', () => {
+      expect(sanitizeTopics(['a', 'ai', '', 'x', 'ml'])).toEqual(['ai', 'ml']);
+    });
+
+    it('should drop tags longer than 60 characters', () => {
+      const longTag = 'a'.repeat(61);
+      expect(sanitizeTopics([longTag, 'ai'])).toEqual(['ai']);
+    });
+
+    it('should trim whitespace', () => {
+      expect(sanitizeTopics(['  ai  ', ' ml ', 'ai'])).toEqual(['ai', 'ml']);
+    });
+
+    it('should cap at 15 topics', () => {
+      const tags = Array.from({ length: 100 }, (_, i) => `topic-${i}`);
+      const result = sanitizeTopics(tags);
+      expect(result).toHaveLength(15);
+      expect(result[0]).toBe('topic-0');
+      expect(result[14]).toBe('topic-14');
+    });
+
+    it('should return empty array for empty input', () => {
+      expect(sanitizeTopics([])).toEqual([]);
+    });
+
+    it('should handle Habr-style tag floods', () => {
+      const habrTags = Array.from({ length: 500 }, (_, i) => `tag-${i}`);
+      const result = sanitizeTopics(habrTags);
+      expect(result).toHaveLength(15);
     });
   });
 
