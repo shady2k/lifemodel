@@ -632,13 +632,29 @@ export class AgenticLoop {
     }
 
     // Edge case: user message or motor_result but no response text.
-    // First retry WITH tools (the model may have glitched and needs another chance
-    // to call tools). Only strip tools via forceRespond on the second failure —
-    // stripping tools on a factual question guarantees hallucination.
+    // If core.say already delivered a message to the user during this turn,
+    // an empty final response is valid — the user already got their answer
+    // (e.g. "extracting transcript..." before a background motor run).
     const requiresResponse =
       context.triggerSignal.type === 'user_message' ||
       context.triggerSignal.type === 'motor_result';
+    const saySent = (state.toolCallCounts.get('core.say') ?? 0) > 0;
     if (!messageText && requiresResponse) {
+      if (saySent) {
+        this.logger.debug(
+          'Empty response after core.say — accepting (user already received a message)'
+        );
+        // Fall through to build a valid noAction terminal
+        const terminal: Terminal = {
+          type: 'noAction',
+          reason: 'Response already delivered via core.say',
+        };
+        const intents = compileIntentsFromToolResults(terminal, context, state, this.logger);
+        return { success: true, terminal, intents, state };
+      }
+      // First retry WITH tools (the model may have glitched and needs another chance
+      // to call tools). Only strip tools via forceRespond on the second failure —
+      // stripping tools on a factual question guarantees hallucination.
       if (!state.emptyResponseRetried) {
         state.emptyResponseRetried = true;
         this.logger.debug('No response text for motor/user trigger, retrying with tools');
