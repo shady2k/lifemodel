@@ -289,7 +289,10 @@ async function fetchSourceWithHealthPolicy(
   logger: Logger,
   sourceLabel: string,
   fetcher: (state: SourceState | null) => Promise<BaseFetcherResult>,
-  onSpecialError?: (result: BaseFetcherResult, state: SourceState | null) => FetchSourceResult | null
+  onSpecialError?: (
+    result: BaseFetcherResult,
+    state: SourceState | null
+  ) => FetchSourceResult | null
 ): Promise<FetchSourceResult> {
   const state = await loadSourceState(storage, source.id);
 
@@ -299,13 +302,16 @@ async function fetchSourceWithHealthPolicy(
       { sourceId: source.id, sourceName: source.name, disabledUntil: state?.disabledUntil },
       `Skipping disabled ${sourceLabel}`
     );
-    return { articles: [], failed: false, sourceName: source.name, skipped: true, shouldAlertUser: false };
+    return {
+      articles: [],
+      failed: false,
+      sourceName: source.name,
+      skipped: true,
+      shouldAlertUser: false,
+    };
   }
 
-  logger.debug(
-    { sourceId: source.id, sourceName: source.name },
-    `Fetching ${sourceLabel}`
-  );
+  logger.debug({ sourceId: source.id, sourceName: source.name }, `Fetching ${sourceLabel}`);
 
   const result = await fetcher(state);
 
@@ -332,7 +338,13 @@ async function fetchSourceWithHealthPolicy(
     await saveSourceState(storage, newState);
 
     logger.warn(
-      { sourceId: source.id, sourceName: source.name, error: result.error, consecutiveFailures: newFailures, disabledUntil: disableUntil },
+      {
+        sourceId: source.id,
+        sourceName: source.name,
+        error: result.error,
+        consecutiveFailures: newFailures,
+        disabledUntil: disableUntil,
+      },
       `Failed to fetch ${sourceLabel}`
     );
 
@@ -357,7 +369,12 @@ async function fetchSourceWithHealthPolicy(
   }
 
   logger.debug(
-    { sourceId: source.id, sourceName: source.name, total: result.articles.length, new: newArticles.length },
+    {
+      sourceId: source.id,
+      sourceName: source.name,
+      total: result.articles.length,
+      new: newArticles.length,
+    },
     `Fetched ${sourceLabel}`
   );
 
@@ -371,7 +388,13 @@ async function fetchSourceWithHealthPolicy(
   };
   await saveSourceState(storage, newState);
 
-  return { articles: newArticles, failed: false, sourceName: source.name, skipped: false, shouldAlertUser: false };
+  return {
+    articles: newArticles,
+    failed: false,
+    sourceName: source.name,
+    skipped: false,
+    shouldAlertUser: false,
+  };
 }
 
 /**
@@ -382,9 +405,8 @@ async function fetchSingleSource(
   storage: StoragePrimitive,
   logger: Logger
 ): Promise<FetchSourceResult> {
-  return fetchSourceWithHealthPolicy(
-    source, storage, logger, 'RSS feed',
-    () => fetchRssFeed(source.url, source.id, source.name)
+  return fetchSourceWithHealthPolicy(source, storage, logger, 'RSS feed', () =>
+    fetchRssFeed(source.url, source.id, source.name)
   );
 }
 
@@ -450,9 +472,8 @@ async function fetchSingleTelegramSource(
   storage: StoragePrimitive,
   logger: Logger
 ): Promise<FetchSourceResult> {
-  return fetchSourceWithHealthPolicy(
-    source, storage, logger, 'Telegram channel',
-    (state) => fetchTelegramChannelUntil(source.url, source.name, source.id, state?.lastSeenId)
+  return fetchSourceWithHealthPolicy(source, storage, logger, 'Telegram channel', (state) =>
+    fetchTelegramChannelUntil(source.url, source.name, source.id, state?.lastSeenId)
   );
 }
 
@@ -513,12 +534,29 @@ async function fetchSingleTelegramGroupSource(
   // Pre-fetch validation: group sources need profile + groupUrl
   if (!source.profile || !source.groupUrl) {
     logger.warn({ sourceId: source.id }, 'Telegram group source missing profile or groupUrl');
-    return { articles: [], failed: true, sourceName: source.name, skipped: false, shouldAlertUser: false };
+    return {
+      articles: [],
+      failed: true,
+      sourceName: source.name,
+      skipped: false,
+      shouldAlertUser: false,
+    };
   }
 
   return fetchSourceWithHealthPolicy(
-    source, storage, logger, 'Telegram group',
-    (state) => fetchTelegramGroup(source.profile!, source.groupUrl!, source.id, source.name, state?.lastSeenId, scriptRunner),
+    source,
+    storage,
+    logger,
+    'Telegram group',
+    (state) =>
+      fetchTelegramGroup(
+        source.profile ?? '',
+        source.groupUrl ?? '',
+        source.id,
+        source.name,
+        state?.lastSeenId,
+        scriptRunner
+      ),
     // NOT_AUTHENTICATED: emit pending intention immediately, no backoff
     (result) => {
       if (result.errorCode !== 'NOT_AUTHENTICATED') return null;
@@ -527,7 +565,13 @@ async function fetchSingleTelegramGroupSource(
           `Call auth_profile with profile="${source.profile ?? 'telegram'}" to start ` +
           `a browser session, then guide the user through login.`
       );
-      return { articles: [], failed: true, sourceName: source.name, skipped: false, shouldAlertUser: false };
+      return {
+        articles: [],
+        failed: true,
+        sourceName: source.name,
+        skipped: false,
+        shouldAlertUser: false,
+      };
     }
   );
 }
@@ -544,8 +588,27 @@ async function fetchAllTelegramGroupSources(
 ): Promise<FetchAllResult> {
   if (!scriptRunner) {
     logger.warn('scriptRunner unavailable (Docker not running?), skipping Telegram group sources');
+
+    // Notify user once per Docker-down episode so they know group sources are degraded
+    const sources = await loadSources(storage);
+    const enabledGroupSources = sources.filter((s) => s.enabled && s.type === 'telegram-group');
+    if (enabledGroupSources.length > 0) {
+      const alreadyNotified = await storage.get<boolean>('docker_down_notified');
+      if (!alreadyNotified) {
+        const names = enabledGroupSources.map((s) => s.name).join(', ');
+        intentEmitter.emitPendingIntention(
+          `Docker is not running — Telegram group sources (${names}) cannot be fetched. ` +
+            `Start Docker to resume updates from these sources.`
+        );
+        await storage.set('docker_down_notified', true);
+      }
+    }
+
     return { newArticles: [], failedSources: [], sourcesToAlert: [] };
   }
+
+  // Clear Docker-down notification flag now that scriptRunner is available
+  await storage.delete('docker_down_notified');
 
   const sources = await loadSources(storage);
   const enabledGroupSources = sources.filter((s) => s.enabled && s.type === 'telegram-group');
