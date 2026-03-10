@@ -65,6 +65,9 @@ import { setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
 import { IntentApplicator } from './intent-applicator.js';
+import type { Storage } from '../storage/storage.js';
+import type { PluginLoader } from './plugin-loader.js';
+import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 
 /**
  * Core loop configuration.
@@ -124,6 +127,12 @@ export interface CoreLoopDeps {
   recipientRegistry?: IRecipientRegistry | undefined;
   /** Soul provider for identity awareness */
   soulProvider?: SoulProvider | undefined;
+  /** Storage for intent applicator (plugin disable persistence) */
+  storage?: Storage | undefined;
+  /** Plugin loader for intent applicator (plugin disable/enable) */
+  pluginLoader?: PluginLoader | undefined;
+  /** Plugin manager for core.manage tool (list statuses) */
+  pluginManager?: { listStatuses(): PluginStatus[] } | undefined;
 }
 
 /**
@@ -241,6 +250,7 @@ export class CoreLoop {
       cognitionLLM: deps.cognitionLLM,
       memoryProvider: deps.memoryProvider,
       soulProvider: deps.soulProvider,
+      pluginManager: deps.pluginManager,
       immediateIntentCallback: (intent) => {
         this.applyImmediateIntent(intent);
       },
@@ -312,6 +322,8 @@ export class CoreLoop {
         this.enqueueThoughtSignal(data, source);
       },
       running: () => this.running,
+      storage: deps.storage,
+      pluginLoader: deps.pluginLoader,
     });
   }
 

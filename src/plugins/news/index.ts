@@ -21,6 +21,7 @@ import type {
   FireContext,
   ScriptRunnerPrimitive,
   IntentEmitterPrimitive,
+  ScheduleEntry,
 } from '../../types/plugin.js';
 import type { Logger } from '../../types/logger.js';
 import type { NewsArticle } from '../../types/news.js';
@@ -38,6 +39,7 @@ import { fetchTelegramChannelUntil } from './fetchers/telegram.js';
 import { convertToNewsArticle } from './topic-extractor.js';
 import { createNewsSignalFilter } from './news-signal-filter.js';
 import { fetchTelegramGroup } from './fetchers/telegram-group.js';
+import { DateTime } from 'luxon';
 
 /**
  * Get the maximum publishedAt timestamp from articles.
@@ -649,7 +651,7 @@ async function fetchAllTelegramGroupSources(
 
 /**
  * Handle the poll_feeds event.
- * Fetches all sources (RSS, Telegram, and Telegram groups), filters new articles, and emits thoughts.
+ * Fetches all sources (RSS, Telegram, and Telegram groups), filters new articles, and emits signals.
  */
 async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   const { storage, logger, intentEmitter, scriptRunner } = primitives;
@@ -718,26 +720,6 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
   // Convert to NewsArticle format with topic extraction and breaking detection
   const newsArticles = fetchedArticles.map(convertToNewsArticle);
 
-  // Nudge about noteworthy articles (breaking patterns or large batches)
-  const breakingArticles = newsArticles.filter((a) => a.hasBreakingPattern);
-  if (breakingArticles.length > 0) {
-    const headlines = breakingArticles
-      .slice(0, 3)
-      .map((a) => `- ${a.title}`)
-      .join('\n');
-    intentEmitter.emitPendingIntention(
-      `Breaking news detected:\n${headlines}\nShare with the user if it matches their interests.`
-    );
-  } else if (newsArticles.length >= 5) {
-    const headlines = newsArticles
-      .slice(0, 3)
-      .map((a) => `- ${a.title}`)
-      .join('\n');
-    intentEmitter.emitPendingIntention(
-      `${String(newsArticles.length)} new articles from feeds. Top headlines:\n${headlines}\nMention any that match the user's interests.`
-    );
-  }
-
   // Group articles by source for the signal payload
   const articlesBySource = new Map<string, NewsArticle[]>();
   for (const article of newsArticles) {
@@ -776,6 +758,72 @@ async function handlePollFeeds(primitives: PluginPrimitives): Promise<void> {
 }
 
 /**
+ * Schedule daily news digests at 08:00 and 20:00 in user timezone (restart-safe).
+ * Follows the same pattern as reminder plugin's scheduleDailyAgenda.
+ */
+async function scheduleDailyDigests(primitives: PluginPrimitives): Promise<void> {
+  const timezone = primitives.services.getTimezone('default');
+  const existing = await primitives.scheduler.getSchedules();
+
+  const windows: { id: string; hour: number; window: 'morning' | 'evening' }[] = [
+    { id: 'news_digest_morning_default', hour: 8, window: 'morning' },
+    { id: 'news_digest_evening_default', hour: 20, window: 'evening' },
+  ];
+
+  for (const { id, hour, window } of windows) {
+    const hasExisting = existing.some((s: ScheduleEntry) => s.id === id);
+    if (hasExisting) {
+      primitives.logger.debug({ scheduleId: id }, 'Digest schedule already exists');
+      continue;
+    }
+
+    const now = DateTime.now().setZone(timezone);
+    let fireAt = now.set({ hour, minute: 0, second: 0, millisecond: 0 });
+    if (fireAt <= now) {
+      fireAt = fireAt.plus({ days: 1 });
+    }
+
+    await primitives.scheduler.schedule({
+      id,
+      fireAt: fireAt.toJSDate(),
+      recurrence: { frequency: 'daily', interval: 1 },
+      timezone,
+      data: {
+        kind: NEWS_EVENT_KINDS.DAILY_DIGEST,
+        recipientId: 'default',
+        window,
+      },
+    });
+
+    primitives.logger.info(
+      { scheduleId: id, fireAt: fireAt.toISO(), timezone, window },
+      'Daily digest schedule created'
+    );
+  }
+}
+
+/**
+ * Handle daily digest event.
+ * Returns enrichment with digest cursor data for cognition layer.
+ */
+async function handleDailyDigest(
+  primitives: PluginPrimitives,
+  payload: Record<string, unknown>
+): Promise<{ enrichment: Record<string, unknown> }> {
+  const window = (payload['window'] as string | undefined) ?? 'morning';
+
+  const cursorKey = `${NEWS_STORAGE_KEYS.DIGEST_CURSOR_PREFIX}${window}`;
+  const cursor = await primitives.storage.get<{ lastDigestAt: string }>(cursorKey);
+
+  return {
+    enrichment: {
+      window,
+      lastDigestAt: cursor?.lastDigestAt ?? null,
+    },
+  };
+}
+
+/**
  * News plugin lifecycle.
  */
 const lifecycle: PluginLifecycleV2 = {
@@ -795,6 +843,14 @@ const lifecycle: PluginLifecycleV2 = {
 
     // Create tools
     pluginTools = [createNewsTool(primitives)];
+
+    // Schedule daily digests (restart-safe)
+    scheduleDailyDigests(primitives).catch((err: unknown) => {
+      primitives.logger.error(
+        { error: err instanceof Error ? err.message : String(err) },
+        'Failed to schedule daily digests'
+      );
+    });
 
     // Polling schedule is declared in manifest - core manages it
     primitives.logger.info('News plugin activated');
@@ -846,11 +902,13 @@ const lifecycle: PluginLifecycleV2 = {
   /**
    * Handle plugin events (called by scheduler for feed polling).
    */
-  async onEvent(eventKind: string, _payload: Record<string, unknown>, _fireContext?: FireContext) {
+  async onEvent(eventKind: string, payload: Record<string, unknown>, _fireContext?: FireContext) {
     if (!pluginPrimitives) return undefined;
 
     if (eventKind === NEWS_EVENT_KINDS.POLL_FEEDS) {
       await handlePollFeeds(pluginPrimitives);
+    } else if (eventKind === NEWS_EVENT_KINDS.DAILY_DIGEST) {
+      return handleDailyDigest(pluginPrimitives, payload);
     }
     return undefined;
   },

@@ -824,10 +824,20 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   });
 
   // 7. Discover and load plugins (triggers dynamic neuron registration via callbacks)
-  const pluginConfig = mergedConfig.plugins;
-  const discoveredPlugins = await loadAllPlugins(pluginConfig, logger);
+  // Load persisted disabled plugins list from storage
+  const persistedDisabled =
+    ((await storage.load('core:disabled_plugins')) as string[] | null) ?? [];
+  const runtimeDisabledIds = new Set(persistedDisabled);
 
-  for (const { plugin } of discoveredPlugins) {
+  const pluginConfig = mergedConfig.plugins;
+  const {
+    enabled: enabledPlugins,
+    runtimeDisabled,
+    configDisabled,
+  } = await loadAllPlugins(pluginConfig, logger, runtimeDisabledIds);
+
+  // Activate only enabled plugins
+  for (const { plugin } of enabledPlugins) {
     try {
       await pluginLoader.loadWithRetry({ default: plugin });
       logger.info({ pluginId: plugin.manifest.id }, 'Plugin activated');
@@ -842,10 +852,21 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     }
   }
 
+  // Store disabled plugin metadata for runtime management
+  // Only runtime-disabled plugins can be re-enabled; config-disabled are view-only
+  pluginLoader.setDisabledCatalog(runtimeDisabled, configDisabled);
+
   // 8. Validate required neurons are registered (throws if alertness missing)
   layers.autonomic.validateRequiredNeurons();
 
-  logger.info({ loadedPlugins: discoveredPlugins.length }, 'Plugin system configured');
+  logger.info(
+    {
+      enabledPlugins: enabledPlugins.length,
+      runtimeDisabled: runtimeDisabled.length,
+      configDisabled: configDisabled.length,
+    },
+    'Plugin system configured'
+  );
 
   // Wire plugin event validator, memory provider, and ack registry to aggregation layer
   // Memory provider is needed for fact storage (fact_batch signals → memory)
@@ -875,6 +896,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryConsolidator,
     recipientRegistry,
     soulProvider,
+    storage,
+    pluginLoader,
+    pluginManager: {
+      listStatuses: () => pluginLoader.getPluginStatuses(),
+    },
   });
 
   // Wire signal callbacks now that coreLoop exists

@@ -395,6 +395,19 @@ export function toolResultToIntent(result: ToolResult, context: LoopContext): In
       return null;
     }
 
+    case 'core.manage': {
+      // core.manage disable/enable → PLUGIN_CONTROL intent
+      const action = data['action'] as string;
+      if (action === 'disable_plugin' || action === 'enable_plugin') {
+        return {
+          type: 'PLUGIN_CONTROL',
+          payload: { action, pluginId: data['pluginId'] as string },
+        };
+      }
+      // list_plugins is read-only
+      return null;
+    }
+
     // core.thought is handled separately via thoughtToolResultToIntent
     // because it has complex depth/recursion logic
 

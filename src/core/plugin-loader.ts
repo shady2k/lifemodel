@@ -174,6 +174,17 @@ export class PluginLoader {
   /** Map pluginId to filter ID (for correct unregistration) */
   private readonly pluginFilterIds = new Map<string, string>();
 
+  /** Runtime-disabled plugins: can be re-enabled via core.manage. */
+  private readonly disabledCatalog = new Map<
+    string,
+    { plugin: PluginV2; name: string; description: string | undefined }
+  >();
+  /** Config-disabled plugins: view-only, cannot be re-enabled at runtime. */
+  private readonly configDisabledCatalog = new Map<
+    string,
+    { name: string; description: string | undefined }
+  >();
+
   constructor(
     logger: Logger,
     coreStorage: Storage,
@@ -943,6 +954,166 @@ export class PluginLoader {
   }
 
   /**
+   * Set the disabled plugin catalog (called from container at startup).
+   * These plugins were imported for metadata but not activated.
+   */
+  setDisabledCatalog(
+    runtimeDisabled: { plugin: PluginV2 }[],
+    configDisabled: { plugin: PluginV2 }[] = []
+  ): void {
+    for (const entry of runtimeDisabled) {
+      const id = entry.plugin.manifest.id;
+      this.disabledCatalog.set(id, {
+        plugin: entry.plugin,
+        name: entry.plugin.manifest.name,
+        description: entry.plugin.manifest.description,
+      });
+    }
+    for (const entry of configDisabled) {
+      const id = entry.plugin.manifest.id;
+      this.configDisabledCatalog.set(id, {
+        name: entry.plugin.manifest.name,
+        description: entry.plugin.manifest.description,
+      });
+    }
+    this.logger.info(
+      { runtimeDisabled: runtimeDisabled.length, configDisabled: configDisabled.length },
+      'Disabled plugin catalogs initialized'
+    );
+  }
+
+  /**
+   * Get status of all known plugins (active + paused + disabled catalog).
+   */
+  getPluginStatuses(): {
+    pluginId: string;
+    name: string;
+    status: 'active' | 'paused' | 'disabled' | 'config_disabled';
+    required: boolean;
+  }[] {
+    const statuses: {
+      pluginId: string;
+      name: string;
+      status: 'active' | 'paused' | 'disabled' | 'config_disabled';
+      required: boolean;
+    }[] = [];
+
+    // Active and paused plugins (loaded into the loader)
+    for (const [pluginId, state] of this.plugins) {
+      statuses.push({
+        pluginId,
+        name: state.plugin.manifest.name,
+        status: state.status === 'paused' ? 'paused' : 'active',
+        required: this.requiredPlugins.has(pluginId),
+      });
+    }
+
+    // Runtime-disabled catalog plugins (can be re-enabled)
+    for (const [pluginId, entry] of this.disabledCatalog) {
+      statuses.push({
+        pluginId,
+        name: entry.name,
+        status: 'disabled',
+        required: false,
+      });
+    }
+
+    // Config-disabled catalog plugins (cannot be re-enabled at runtime)
+    for (const [pluginId, entry] of this.configDisabledCatalog) {
+      statuses.push({
+        pluginId,
+        name: entry.name,
+        status: 'config_disabled',
+        required: false,
+      });
+    }
+
+    return statuses;
+  }
+
+  /**
+   * Disable a plugin at runtime.
+   * If active, pauses it. If already in catalog, no-op.
+   * @returns true if disabled, false if required or unknown
+   */
+  async disablePlugin(pluginId: string): Promise<boolean> {
+    // Already in disabled catalog
+    if (this.disabledCatalog.has(pluginId)) {
+      return true;
+    }
+
+    const state = this.plugins.get(pluginId);
+    if (!state) {
+      this.logger.warn({ pluginId }, 'Cannot disable unknown plugin');
+      return false;
+    }
+
+    if (!this.canRemove(pluginId)) {
+      return false;
+    }
+
+    // Save reference before pausing
+    const plugin = state.plugin;
+
+    // Pause deactivates everything (neurons, filters, tools, schedules)
+    if (state.status === 'active') {
+      await this.pause(pluginId);
+    }
+
+    // Move from loaded to disabled catalog
+    this.plugins.delete(pluginId);
+    this.disabledCatalog.set(pluginId, {
+      plugin,
+      name: plugin.manifest.name,
+      description: plugin.manifest.description,
+    });
+
+    this.logger.info({ pluginId }, 'Plugin moved to disabled catalog');
+    return true;
+  }
+
+  /**
+   * Enable a previously disabled plugin at runtime.
+   * If in disabled catalog, loads and activates it.
+   * If paused, resumes it.
+   * @returns true if enabled, false if unknown or already active
+   */
+  async enablePlugin(pluginId: string): Promise<boolean> {
+    // Check if it's in the disabled catalog (never activated)
+    const catalogEntry = this.disabledCatalog.get(pluginId);
+    if (catalogEntry) {
+      try {
+        await this.load({ default: catalogEntry.plugin });
+        this.disabledCatalog.delete(pluginId);
+        // Clear paused flag left by disablePlugin() → pause() so scheduler fires again
+        this.schedulerService.resumePlugin(pluginId);
+        this.logger.info({ pluginId }, 'Plugin loaded from disabled catalog');
+        return true;
+      } catch (error) {
+        this.logger.error(
+          { pluginId, error: error instanceof Error ? error.message : String(error) },
+          'Failed to load plugin from disabled catalog'
+        );
+        return false;
+      }
+    }
+
+    // Check if it's paused (was active, then paused at runtime)
+    const state = this.plugins.get(pluginId);
+    if (state?.status === 'paused') {
+      return this.resume(pluginId);
+    }
+
+    if (state?.status === 'active') {
+      this.logger.debug({ pluginId }, 'Plugin already active');
+      return true;
+    }
+
+    this.logger.warn({ pluginId }, 'Cannot enable unknown plugin');
+    return false;
+  }
+
+  /**
    * Restart a plugin (unload + load with fresh state).
    *
    * @returns true if restarted, false if required plugin or restart failed
@@ -1300,6 +1471,7 @@ export class PluginLoader {
             offset,
             minConfidence,
             metadata: mergedMetadata,
+            since: options?.since,
           })
         );
 

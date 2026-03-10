@@ -24,6 +24,8 @@ export interface MemorySearchOptions {
   minConfidence?: number | undefined;
   /** Filter by metadata key-value pairs (all must match) */
   metadata?: Record<string, unknown> | undefined;
+  /** Only return entries with timestamp >= since */
+  since?: Date | undefined;
 }
 
 /**

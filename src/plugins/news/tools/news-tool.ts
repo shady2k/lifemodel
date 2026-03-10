@@ -109,6 +109,12 @@ const SCHEMA_GET_NEWS = {
     required: false,
     description: 'Skip first N results for pagination',
   },
+  since: {
+    type: 'string',
+    required: false,
+    description:
+      'ISO timestamp. Only return articles published after this time. Used for digest cursors.',
+  },
 };
 
 const SCHEMA_LIST_GROUPS = {
@@ -614,7 +620,8 @@ async function getNews(
   newsType?: NewsType,
   limit = 10,
   offset = 0,
-  sourceId?: string
+  sourceId?: string,
+  since?: string
 ): Promise<NewsToolResult> {
   // Empty query = list recent articles (browse mode); non-empty = keyword filter
   const searchQuery = query ?? '';
@@ -627,6 +634,7 @@ async function getNews(
 
   // Pass source filter to the store level so it's applied before scoring/pagination
   const metadataFilter = sourceId ? { source: sourceId } : undefined;
+  const sinceDate = since ? new Date(since) : undefined;
   const result = await memorySearch.searchOwnFacts(searchQuery, {
     limit: limit * 2, // Fetch extra since we'll filter by type
     offset,
@@ -635,6 +643,11 @@ async function getNews(
   });
 
   let filtered = result.entries;
+
+  // Filter by timestamp if since is provided (for digest cursors)
+  if (sinceDate && !isNaN(sinceDate.getTime())) {
+    filtered = filtered.filter((e) => e.timestamp > sinceDate);
+  }
 
   // Filter by news type based on metadata.eventKind
   if (effectiveType !== 'all') {
@@ -655,8 +668,9 @@ async function getNews(
 
     // Determine type from eventKind
     const eventKind = e.metadata['eventKind'] as string | undefined;
-    let type: 'urgent' | 'interesting' = 'interesting';
+    let type: 'urgent' | 'interesting' | 'filtered' = 'interesting';
     if (eventKind === 'news:urgent') type = 'urgent';
+    else if (eventKind === 'news:collected') type = 'filtered';
 
     return {
       title,
@@ -733,7 +747,7 @@ For private Telegram groups:
         name: 'action',
         type: 'string',
         description:
-          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source',
+          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor',
         required: true,
         enum: [
           'add_source',
@@ -743,6 +757,8 @@ For private Telegram groups:
           'list_groups',
           'stop_auth',
           'refresh_source',
+          'mark_digest_sent',
+          'get_digest_cursor',
         ],
       },
       {
@@ -813,6 +829,20 @@ For private Telegram groups:
         description: 'Skip first N results for pagination. Used with get_news action.',
         required: false,
       },
+      {
+        name: 'since',
+        type: 'string',
+        description:
+          'ISO timestamp. Only return articles after this time. Used with get_news for digest cursors.',
+        required: false,
+      },
+      {
+        name: 'window',
+        type: 'string',
+        description:
+          'Digest window: "morning" or "evening". Required for mark_digest_sent/get_digest_cursor.',
+        required: false,
+      },
     ],
     validate: (args) => {
       const a = args as Record<string, unknown>;
@@ -830,12 +860,14 @@ For private Telegram groups:
           'list_groups',
           'stop_auth',
           'refresh_source',
+          'mark_digest_sent',
+          'get_digest_cursor',
         ].includes(a['action'])
       ) {
         return {
           success: false,
           error:
-            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source]',
+            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor]',
         };
       }
 
@@ -946,8 +978,9 @@ For private Telegram groups:
           const limit = Math.max(0, Math.min(rawLimit, 50));
           const offset = Math.max(0, rawOffset);
           const getNewsSourceId = args['source_id'] as string | undefined;
+          const since = args['since'] as string | undefined;
 
-          return getNews(memorySearch, query, newsType, limit, offset, getNewsSourceId);
+          return getNews(memorySearch, query, newsType, limit, offset, getNewsSourceId, since);
         }
 
         case 'list_groups': {
@@ -1378,11 +1411,49 @@ For private Telegram groups:
           };
         }
 
+        case 'mark_digest_sent': {
+          const digestWindow = args['window'] as string | undefined;
+          if (!digestWindow) {
+            return {
+              success: false,
+              action: 'mark_digest_sent',
+              error: 'Missing required parameter: window ("morning" or "evening")',
+            };
+          }
+          const cursorKey = `${NEWS_STORAGE_KEYS.DIGEST_CURSOR_PREFIX}${digestWindow}`;
+          await storage.set(cursorKey, { lastDigestAt: new Date().toISOString() });
+          return {
+            success: true,
+            action: 'mark_digest_sent',
+            window: digestWindow,
+          };
+        }
+
+        case 'get_digest_cursor': {
+          const cursorWindow = args['window'] as string | undefined;
+          if (!cursorWindow) {
+            return {
+              success: false,
+              action: 'get_digest_cursor',
+              error: 'Missing required parameter: window ("morning" or "evening")',
+            };
+          }
+          const cursor = await storage.get<{ lastDigestAt: string }>(
+            `${NEWS_STORAGE_KEYS.DIGEST_CURSOR_PREFIX}${cursorWindow}`
+          );
+          return {
+            success: true,
+            action: 'get_digest_cursor',
+            window: cursorWindow,
+            lastDigestAt: cursor?.lastDigestAt,
+          };
+        }
+
         default:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", "stop_auth", or "refresh_source".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", "stop_auth", "refresh_source", "mark_digest_sent", or "get_digest_cursor".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {

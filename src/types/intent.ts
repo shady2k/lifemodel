@@ -25,7 +25,8 @@ export type IntentType =
   | 'SET_INTEREST'
   | 'COMMITMENT'
   | 'DESIRE'
-  | 'PERSPECTIVE';
+  | 'PERSPECTIVE'
+  | 'PLUGIN_CONTROL';
 
 /**
  * Trace metadata for intent tracking in logs.
@@ -386,6 +387,18 @@ export interface DesireIntent {
 }
 
 /**
+ * Control plugin lifecycle (disable/enable).
+ */
+export interface PluginControlIntent {
+  type: 'PLUGIN_CONTROL';
+  payload: {
+    action: 'disable_plugin' | 'enable_plugin';
+    pluginId: string;
+  };
+  trace?: IntentTrace | undefined;
+}
+
+/**
  * Union of all intent types.
  */
 export type Intent =
@@ -403,7 +416,8 @@ export type Intent =
   | SetInterestIntent
   | CommitmentIntent
   | DesireIntent
-  | PerspectiveIntent;
+  | PerspectiveIntent
+  | PluginControlIntent;
 
 /**
  * Perspective action types.

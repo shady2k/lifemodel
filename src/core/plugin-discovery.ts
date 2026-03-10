@@ -260,7 +260,7 @@ export async function loadDiscoveredPlugin(
     const plugin = module.default;
 
     // Validate manifest (runtime check - manifestVersion could be wrong in invalid plugins)
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+
     if (!plugin.manifest || (plugin.manifest.manifestVersion as number) !== 2) {
       logger.error({ pluginId: discovered.id }, 'Plugin has invalid or missing manifest');
       return null;
@@ -297,30 +297,66 @@ export async function loadDiscoveredPlugin(
 }
 
 /**
+ * Result from loading all plugins.
+ * Separates enabled plugins (to activate) from disabled plugins (metadata only).
+ */
+export interface LoadAllPluginsResult {
+  /** Plugins to activate (passed config + persisted disabled check) */
+  enabled: LoadedPluginInfo[];
+  /** Plugins disabled at runtime (can be re-enabled via core.manage) */
+  runtimeDisabled: LoadedPluginInfo[];
+  /** Plugins disabled by config (cannot be re-enabled at runtime) */
+  configDisabled: LoadedPluginInfo[];
+}
+
+/**
  * Load all discovered plugins.
- * Filtering by enabled/disabled happens AFTER loading to use manifest IDs.
+ * Dynamic-imports all plugins to get their manifests, then separates into
+ * enabled (to activate) and disabled (metadata only, available for runtime re-enable).
+ *
+ * @param config - Discovery config with enabled/disabled lists
+ * @param logger - Logger
+ * @param runtimeDisabledIds - Additional plugin IDs disabled at runtime (persisted in storage)
  */
 export async function loadAllPlugins(
   config: PluginDiscoveryConfig,
-  logger: Logger
-): Promise<LoadedPluginInfo[]> {
+  logger: Logger,
+  runtimeDisabledIds: ReadonlySet<string> = new Set()
+): Promise<LoadAllPluginsResult> {
   const discovered = await discoverPlugins(config, logger);
-  const loaded: LoadedPluginInfo[] = [];
+  const enabled: LoadedPluginInfo[] = [];
+  const runtimeDisabled: LoadedPluginInfo[] = [];
+  const configDisabled: LoadedPluginInfo[] = [];
 
   for (const d of discovered) {
     const result = await loadDiscoveredPlugin(d, logger);
     if (!result) continue;
 
-    // Filter by manifest ID (not folder name)
     const manifestId = result.plugin.manifest.id;
+
+    // Separate config-disabled from runtime-disabled
     if (!isPluginEnabled(manifestId, config, logger)) {
-      logger.info({ pluginId: manifestId }, 'Plugin loaded but disabled by config');
+      logger.info({ pluginId: manifestId }, 'Plugin imported but disabled by config');
+      configDisabled.push(result);
       continue;
     }
 
-    loaded.push(result);
+    if (runtimeDisabledIds.has(manifestId)) {
+      logger.info({ pluginId: manifestId }, 'Plugin imported but disabled at runtime');
+      runtimeDisabled.push(result);
+      continue;
+    }
+
+    enabled.push(result);
   }
 
-  logger.info({ enabledPlugins: loaded.length }, 'Plugin loading complete');
-  return loaded;
+  logger.info(
+    {
+      enabledPlugins: enabled.length,
+      runtimeDisabled: runtimeDisabled.length,
+      configDisabled: configDisabled.length,
+    },
+    'Plugin loading complete'
+  );
+  return { enabled, runtimeDisabled, configDisabled };
 }

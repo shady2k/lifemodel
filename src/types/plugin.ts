@@ -656,6 +656,8 @@ export interface MemorySearchOptions {
   offset?: number;
   /** Minimum confidence threshold (0-1, default: 0.3) */
   minConfidence?: number;
+  /** Only return entries with timestamp >= since */
+  since?: Date | undefined;
   /** Filter by metadata key-value pairs (ANDed with core-enforced filters) */
   metadata?: Record<string, string> | undefined;
 }

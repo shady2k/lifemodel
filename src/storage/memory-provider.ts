@@ -108,13 +108,19 @@ export class JsonMemoryProvider implements MemoryProvider {
       metadata: options?.metadata,
     });
 
-    const totalMatched = allResults.length;
-    const entries = allResults.slice(offset, offset + limit).map((r) => r.entry);
+    // Filter by since if provided (before pagination so counts are correct)
+    const sinceDate = options?.since;
+    const filtered = sinceDate
+      ? allResults.filter((r) => r.entry.timestamp >= sinceDate)
+      : allResults;
+
+    const totalMatched = filtered.length;
+    const entries = filtered.slice(offset, offset + limit).map((r) => r.entry);
 
     let highConfidence = 0;
     let mediumConfidence = 0;
     let lowConfidence = 0;
-    for (const s of allResults) {
+    for (const s of filtered) {
       const c = s.entry.confidence ?? 0.5;
       if (c >= 0.5) highConfidence++;
       else if (c >= 0.3) mediumConfidence++;

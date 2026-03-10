@@ -13,6 +13,8 @@ export const NEWS_STORAGE_KEYS = {
   SOURCES: 'sources',
   /** Per-source fetch state (keyed by source ID) */
   SOURCE_STATE_PREFIX: 'state:',
+  /** Digest cursor per recipient+window (tracks last digest sent time) */
+  DIGEST_CURSOR_PREFIX: 'digest_cursor:',
 } as const;
 
 /**
@@ -23,6 +25,8 @@ export const NEWS_EVENT_KINDS = {
   POLL_FEEDS: 'news:poll_feeds',
   /** Article batch ready for processing by brain layers */
   ARTICLE_BATCH: 'news:article_batch',
+  /** Daily digest trigger (morning/evening) */
+  DAILY_DIGEST: 'news:daily_digest',
 } as const;
 
 /**
@@ -197,6 +201,10 @@ export interface NewsToolResult {
   lastSuccessfulFetch?: string | undefined;
   /** Warning about source health (e.g. stale data) */
   warning?: string | undefined;
+  /** Digest cursor data (for get_digest_cursor action) */
+  lastDigestAt?: string | undefined;
+  /** Window identifier (for mark_digest_sent action) */
+  window?: string | undefined;
 }
 
 /**

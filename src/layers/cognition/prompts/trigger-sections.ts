@@ -298,7 +298,32 @@ ${factSections}
 
 <task>
 You are initiating contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
-Deliver this news with URLs inline in your response. Do not send teasers or previews — include the full news content directly.
+Analyze this news: explain why it matters to the user, connect it to their context and interests. Include URLs inline in your response. Do not send teasers or previews — provide your analysis directly.
+</task>
+</trigger>`;
+  }
+
+  // Handle daily digest events
+  if (eventKind === 'news:daily_digest') {
+    const window = (d['window'] as string | undefined) ?? 'morning';
+    const lastDigestAt = (d['lastDigestAt'] as string | null | undefined) ?? null;
+
+    return `<trigger type="news_digest">
+<context>
+Time for your ${window} news digest.
+Last digest sent: ${lastDigestAt ?? 'never'}
+</context>
+
+<task>
+Compile a news digest for the user.
+1. Call plugin.news(action:"get_news", urgency:"all"${lastDigestAt ? `, since:"${lastDigestAt}"` : ''}) to retrieve recent articles.
+2. Group articles by topic or source.
+3. Prioritize topics matching the user's interests.
+4. Write a brief analytical summary per group — explain WHY it matters, don't just list headlines.
+5. Include article URLs inline.
+6. Keep it concise — this is a digest, not an essay.
+7. If nothing notable happened since last digest, say so briefly.
+8. After sending, call plugin.news(action:"mark_digest_sent", window:"${window}").
 </task>
 </trigger>`;
   }

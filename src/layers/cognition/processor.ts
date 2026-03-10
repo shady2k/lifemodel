@@ -33,6 +33,7 @@ import {
 } from './agentic-loop.js';
 import type { Intent } from '../../types/intent.js';
 import type { ToolRegistry } from './tools/registry.js';
+import type { PluginStatus } from './tools/core/manage.js';
 import {
   createToolRegistry,
   type MemoryProvider,
@@ -123,6 +124,8 @@ export interface CognitionProcessorDeps {
    * Used for REMEMBER and SET_INTEREST so data is visible to subsequent tools.
    */
   immediateIntentCallback?: ((intent: Intent) => void) | undefined;
+  /** Plugin manager for core.manage tool */
+  pluginManager?: { listStatuses(): PluginStatus[] } | undefined;
 }
 
 /**
@@ -302,6 +305,7 @@ export class CognitionProcessor implements CognitionLayer {
         userModelProvider: depsUserModel
           ? { getModel: () => depsUserModel.getBeliefs() }
           : undefined,
+        pluginManager: deps.pluginManager,
       });
     }
 

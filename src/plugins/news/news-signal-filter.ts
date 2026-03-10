@@ -4,7 +4,7 @@
  * This filter runs in the AUTONOMIC layer and classifies articles into:
  * - URGENT (urgency > 0.8): Wake COGNITION immediately
  * - INTERESTING (interest 0.4-1.0): Emit as extractable content → stored as facts in memory
- * - NOISE (interest < 0.4): Filter out
+ * - COLLECTED (interest < 0.4): Emit as low-priority facts → stored in memory for digest
  *
  * The filter receives user Interests via context.userModel.getInterests(),
  * populated by core from UserModel. This keeps the plugin decoupled from core.
@@ -217,7 +217,7 @@ export class NewsSignalFilter implements SignalFilter {
   }
 
   /**
-   * Classify a batch of articles into urgent/interesting signals.
+   * Classify a batch of articles into urgent/interesting/collected signals.
    */
   private classifyBatch(
     originalSignal: Signal,
@@ -270,6 +270,7 @@ export class NewsSignalFilter implements SignalFilter {
 
     const urgentArticles: ScoredArticle[] = [];
     const interestingArticles: ScoredArticle[] = [];
+    const collectedArticles: ScoredArticle[] = [];
     // Score and classify each article
     for (const article of articles) {
       const { interestScore, urgencyScore } = this.scoreArticle(article, sourceId, interests);
@@ -280,6 +281,8 @@ export class NewsSignalFilter implements SignalFilter {
         urgentArticles.push(scored);
       } else if (interestScore >= this.config.interestThreshold) {
         interestingArticles.push(scored);
+      } else {
+        collectedArticles.push(scored);
       }
 
       // Mark topics as seen
@@ -291,13 +294,14 @@ export class NewsSignalFilter implements SignalFilter {
     // Sort by score (highest first)
     urgentArticles.sort((a, b) => b.urgencyScore - a.urgencyScore);
     interestingArticles.sort((a, b) => b.interestScore - a.interestScore);
+    collectedArticles.sort((a, b) => b.interestScore - a.interestScore);
 
     this.logger.info(
       {
         total: articles.length,
         urgent: urgentArticles.length,
         interesting: interestingArticles.length,
-        filtered: articles.length - urgentArticles.length - interestingArticles.length,
+        collected: collectedArticles.length,
       },
       'Batch classified'
     );
@@ -361,6 +365,33 @@ export class NewsSignalFilter implements SignalFilter {
           { value: interestingArticles.length },
           {
             priority: 3, // LOW priority - saved to memory, not wake
+            correlationId: context.correlationId,
+            parentId: originalSignal.id,
+            data: factBatchData,
+          }
+        )
+      );
+    }
+
+    if (collectedArticles.length > 0) {
+      // Save below-threshold articles with lower confidence for faster pruning
+      const facts = collectedArticles.map((scored) => this.toFact(scored, sourceId, 0.2));
+
+      const factBatchData: FactBatchData = {
+        kind: 'fact_batch',
+        pluginId: NEWS_PLUGIN_ID,
+        eventKind: 'news:collected',
+        facts,
+        recipientId: context.primaryRecipientId,
+      };
+
+      outputSignals.push(
+        createSignal(
+          'plugin_event',
+          `plugin.${NEWS_PLUGIN_ID}`,
+          { value: collectedArticles.length },
+          {
+            priority: 4, // Priority.IDLE - background storage only
             correlationId: context.correlationId,
             parentId: originalSignal.id,
             data: factBatchData,
@@ -733,8 +764,12 @@ export class NewsSignalFilter implements SignalFilter {
    * This is where plugin-specific types (ScoredArticle) are converted
    * to the generic format that core understands. The brain stores facts,
    * not articles - this method extracts the fact from the article.
+   *
+   * @param scored The scored article to convert
+   * @param sourceId Source identifier for provenance
+   * @param confidenceOverride Optional override for confidence (used for collected articles)
    */
-  private toFact(scored: ScoredArticle, sourceId: string): Fact {
+  private toFact(scored: ScoredArticle, sourceId: string, confidenceOverride?: number): Fact {
     const { article, interestScore } = scored;
 
     // Combine title and summary for richer fact content
@@ -743,8 +778,8 @@ export class NewsSignalFilter implements SignalFilter {
     return {
       // The fact includes headline + summary for context
       content,
-      // Interest score becomes confidence in memory
-      confidence: interestScore,
+      // Interest score becomes confidence in memory (or override for collected)
+      confidence: confidenceOverride ?? interestScore,
       // Topics become tags for retrieval (normalized to lowercase for consistent matching)
       tags: [...new Set(['news', ...article.topics.map((t) => t.toLowerCase())])],
       // Provenance - where this fact came from

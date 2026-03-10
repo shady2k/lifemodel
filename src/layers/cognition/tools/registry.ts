@@ -30,7 +30,9 @@ import {
   createCommitmentTool,
   createDesireTool,
   createPerspectiveTool,
+  createManageTool,
 } from './core/index.js';
+import type { PluginStatus } from './core/index.js';
 import type { SoulProvider } from '../../../storage/soul-provider.js';
 
 // Import and re-export types for convenience
@@ -73,6 +75,7 @@ export interface ToolRegistryDeps {
   userModelProvider?: UserModelProvider | undefined;
   conversationProvider?: ConversationProvider | undefined;
   soulProvider?: SoulProvider | undefined;
+  pluginManager?: { listStatuses(): PluginStatus[] } | undefined;
 }
 
 /**
@@ -467,6 +470,16 @@ export class ToolRegistry {
 
     // Perspective tool (track opinions and predictions)
     this.tools.set('core.perspective', createPerspectiveTool());
+
+    // Manage tool (disable/enable plugins at runtime)
+    if (this.deps.pluginManager) {
+      this.tools.set(
+        'core.manage',
+        createManageTool({
+          pluginManager: this.deps.pluginManager,
+        })
+      );
+    }
 
     // Soul tool (identity introspection - only if soulProvider available)
     if (this.deps.soulProvider) {

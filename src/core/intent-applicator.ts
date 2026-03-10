@@ -32,6 +32,7 @@ import type {
   CommitmentIntent,
   DesireIntent,
   PerspectiveIntent,
+  PluginControlIntent,
 } from '../types/intent.js';
 import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type { Agent } from './agent.js';
@@ -45,6 +46,8 @@ import type { IRecipientRegistry } from './recipient-registry.js';
 import { markdownToTelegramHtml } from '../utils/telegram-html.js';
 import type { StatusUpdateService } from './status-update-service.js';
 import type { DomainTrackerService } from './domain-trackers.js';
+import type { Storage } from '../storage/storage.js';
+import type { PluginLoader } from './plugin-loader.js';
 
 /**
  * Dependencies injected into IntentApplicator.
@@ -65,6 +68,8 @@ export interface IntentApplicatorDeps {
   messageComposer?: MessageComposer | undefined;
   enqueueThought: (data: ThoughtData, source: SignalSource) => void;
   running: () => boolean;
+  storage?: Storage | undefined;
+  pluginLoader?: PluginLoader | undefined;
 }
 
 /**
@@ -77,6 +82,9 @@ export class IntentApplicator {
   /** Timestamp of last message sent (for response timing) */
   private _lastMessageSentAt: number | null = null;
   private _lastMessageRecipientId: string | null = null;
+
+  /** Serialization chain for PLUGIN_CONTROL to prevent lost-update races */
+  private pluginControlChain: Promise<void> = Promise.resolve();
 
   /**
    * Intensity-to-delta mapping for SET_INTEREST intent.
@@ -193,6 +201,21 @@ export class IntentApplicator {
 
           case 'PERSPECTIVE':
             this.applyPerspective(intent);
+            break;
+
+          case 'PLUGIN_CONTROL':
+            // Serialize through chain to prevent lost-update races on concurrent intents
+            this.pluginControlChain = this.pluginControlChain
+              .then(() => this.applyPluginControl(intent))
+              .catch((err: unknown) => {
+                this.deps.logger.error(
+                  {
+                    pluginId: intent.payload.pluginId,
+                    error: err instanceof Error ? err.message : String(err),
+                  },
+                  'PLUGIN_CONTROL failed'
+                );
+              });
             break;
         }
       });
@@ -965,6 +988,48 @@ export class IntentApplicator {
         this.deps.logger.info({ opinionId }, 'Opinion revised');
         this.deps.metrics.counter('opinions_revised');
       }
+    }
+  }
+
+  private async applyPluginControl(intent: PluginControlIntent): Promise<void> {
+    const { action, pluginId } = intent.payload;
+
+    if (!this.deps.storage || !this.deps.pluginLoader) {
+      this.deps.logger.warn({ action, pluginId }, 'PLUGIN_CONTROL skipped: missing deps');
+      return;
+    }
+
+    if (action === 'disable_plugin') {
+      const success = await this.deps.pluginLoader.disablePlugin(pluginId);
+      if (!success) {
+        this.deps.logger.warn({ pluginId }, 'Plugin disable failed at runtime');
+        return;
+      }
+      // Persist only after runtime success
+      const disabledList =
+        ((await this.deps.storage.load('core:disabled_plugins')) as string[]) ?? [];
+      if (!disabledList.includes(pluginId)) {
+        disabledList.push(pluginId);
+      }
+      await this.deps.storage.save('core:disabled_plugins', disabledList);
+      this.deps.logger.info({ pluginId }, 'Plugin disabled');
+      this.deps.metrics.counter('plugins_disabled');
+    } else if (action === 'enable_plugin') {
+      const success = await this.deps.pluginLoader.enablePlugin(pluginId);
+      if (!success) {
+        this.deps.logger.warn({ pluginId }, 'Plugin enable failed at runtime');
+        return;
+      }
+      // Persist only after runtime success
+      const disabledList =
+        ((await this.deps.storage.load('core:disabled_plugins')) as string[]) ?? [];
+      const idx = disabledList.indexOf(pluginId);
+      if (idx >= 0) {
+        disabledList.splice(idx, 1);
+      }
+      await this.deps.storage.save('core:disabled_plugins', disabledList);
+      this.deps.logger.info({ pluginId }, 'Plugin enabled');
+      this.deps.metrics.counter('plugins_enabled');
     }
   }
 

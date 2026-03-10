@@ -23,6 +23,7 @@ export { createSkillTool } from './skill.js';
 export { createCommitmentTool } from './commitment.js';
 export { createDesireTool } from './desire.js';
 export { createPerspectiveTool } from './perspective.js';
+export { createManageTool } from './manage.js';
 
 // Types
 export type {
@@ -41,3 +42,4 @@ export type { AgentStateProvider, UserModelProvider, StateToolDeps } from './sta
 export type { ToolSchema, SchemaProvider, ToolsMetaToolDeps } from './tools-meta.js';
 export type { SoulToolDeps } from './soul.js';
 export type { CredentialToolDeps } from './credential.js';
+export type { ManageToolDeps, PluginStatus } from './manage.js';
