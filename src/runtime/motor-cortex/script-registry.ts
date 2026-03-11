@@ -22,7 +22,13 @@ const entries = new Map<string, ScriptRegistryEntry>();
  */
 // Telegram Web A domains — wildcard covers all DC subdomains (pluto, venus, zws2, etc.)
 // and WebSocket MTProto endpoints that the SPA discovers at runtime.
-const TELEGRAM_DOMAINS = ['web.telegram.org', '*.web.telegram.org', 'telegram.org', 't.me'];
+const TELEGRAM_DOMAINS = [
+  'web.telegram.org',
+  '*.web.telegram.org',
+  'telegram.org',
+  't.me',
+  'telegram.me',
+];
 
 entries.set('news.telegram_group.fetch', {
   id: 'news.telegram_group.fetch',

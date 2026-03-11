@@ -318,11 +318,15 @@ export class Agent {
     this.energy.drain('message');
     this.state.energy = this.energy.getEnergy();
 
-    // Sending a message relieves social pressure significantly
-    // Like a human who calls their mom - the guilt is relieved by the act itself
+    // Sending a message relieves the overall urge to contact.
+    // Like a human who calls their mom — the guilt, the "I should say something",
+    // and the curiosity are all relieved by the act of reaching out.
     this.setStateValue('socialDebt', this.state.socialDebt - 0.4);
+    this.setStateValue('taskPressure', this.state.taskPressure * 0.3);
+    this.setStateValue('curiosity', this.state.curiosity * 0.3);
+    this.setStateValue('desirePressure', this.state.desirePressure * 0.5);
 
-    this.logger.debug('Message sent - social debt relieved');
+    this.logger.debug('Message sent - contact pressure relieved');
   }
 
   /**
@@ -439,7 +443,10 @@ export class Agent {
   /**
    * Set a numeric state value with rounding and clamping.
    */
-  private setStateValue(key: 'socialDebt' | 'taskPressure' | 'curiosity', value: number): void {
+  private setStateValue(
+    key: 'socialDebt' | 'taskPressure' | 'curiosity' | 'desirePressure',
+    value: number
+  ): void {
     this.state[key] = round3(Math.max(0, Math.min(1, value)));
   }
 
