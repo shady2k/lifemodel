@@ -298,7 +298,8 @@ ${factSections}
 
 <task>
 You are initiating contact (not responding).${isUrgent ? ' This overrides previous context.' : ''}
-Analyze this news: explain why it matters to the user, connect it to their context and interests. Include URLs inline in your response. Do not send teasers or previews — provide your analysis directly.
+The context above contains only RSS headlines and short snippets — not the full articles. You cannot produce a meaningful analysis from a headline alone. Read the full content before forming your take.
+Analyze this news: explain why it matters to the user, connect it to their context and interests. Include URLs inline. Your response must contain substance the user couldn't get from the headline — otherwise it's a teaser, not an analysis.
 </task>
 </trigger>`;
   }
