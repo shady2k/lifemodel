@@ -14,12 +14,15 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { resolve4 } from 'node:dns/promises';
 import type { Server } from 'node:http';
 import { matchesDomainPattern, isPrivateIP } from './network-policy.js';
 import type { Logger } from '../../types/index.js';
+
+/** Timeout for server.close() during release — prevents tick loop from hanging forever. */
+const RELEASE_TIMEOUT_MS = 5_000;
 
 /**
  * Per-run proxy allocation.
@@ -29,6 +32,10 @@ interface ProxyAllocation {
   domains: Set<string>;
   ports: Set<number>;
   port: number;
+  /** Track all tunnel sockets so we can force-destroy them on release. */
+  tunnelSockets: Set<Socket>;
+  /** Set to true when release() starts — in-flight handlers should destroy sockets immediately. */
+  released: boolean;
 }
 
 /**
@@ -70,6 +77,7 @@ class EgressProxyManager {
 
     const domainSet = new Set(domains.map((d) => d.toLowerCase()));
     const portSet = new Set(ports);
+    const tunnelSockets = new Set<Socket>();
 
     const server = createServer((req, res) => {
       this.handlePlainHttp(req, res, domainSet, portSet).catch(() => {
@@ -80,9 +88,20 @@ class EgressProxyManager {
       });
     });
 
+    // Build allocation BEFORE registering CONNECT handler / listening,
+    // so the closure captures an initialized object (no TDZ).
+    const alloc: ProxyAllocation = {
+      server,
+      domains: domainSet,
+      ports: portSet,
+      port: 0, // placeholder — updated after listen
+      tunnelSockets,
+      released: false,
+    };
+
     // CONNECT handler for HTTPS tunneling
     server.on('connect', (req, clientSocket, head) => {
-      this.handleConnect(req, clientSocket, head, domainSet, portSet).catch(() => {
+      this.handleConnect(req, clientSocket, head, domainSet, portSet, alloc).catch(() => {
         if (!clientSocket.destroyed) {
           clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
         }
@@ -102,7 +121,8 @@ class EgressProxyManager {
       server.on('error', reject);
     });
 
-    this.allocations.set(runId, { server, domains: domainSet, ports: portSet, port });
+    alloc.port = port;
+    this.allocations.set(runId, alloc);
 
     return { port };
   }
@@ -120,18 +140,43 @@ class EgressProxyManager {
 
   /**
    * Release a proxy for a run.
+   *
+   * 1. Stop accepting new connections (server.close())
+   * 2. Force-destroy tracked CONNECT tunnel sockets (invisible to http.Server)
+   * 3. Force-destroy remaining HTTP connections
+   * 4. Timeout safety net to never hang the caller
    */
   async release(runId: string): Promise<void> {
     const alloc = this.allocations.get(runId);
     if (!alloc) return;
 
+    // Mark released BEFORE removing from map — in-flight CONNECT handlers
+    // that finish DNS resolution after this point will see the flag and
+    // destroy their sockets immediately instead of tracking them.
+    alloc.released = true;
     this.allocations.delete(runId);
 
     await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        // Safety net: if server.close() still hangs, force-resolve.
+        resolve();
+      }, RELEASE_TIMEOUT_MS);
+
+      // Stop accepting new connections FIRST — prevents new CONNECT tunnels
+      // from being created during teardown (e.g. while DNS resolution is in-flight).
       alloc.server.close(() => {
+        clearTimeout(timer);
         resolve();
       });
-      // Force-destroy any remaining connections
+
+      // Destroy all tracked tunnel sockets — these are upgraded CONNECT
+      // connections invisible to server.closeAllConnections().
+      for (const sock of alloc.tunnelSockets) {
+        sock.destroy();
+      }
+      alloc.tunnelSockets.clear();
+
+      // Force-destroy remaining HTTP connections tracked by the server.
       alloc.server.closeAllConnections?.();
     });
   }
@@ -156,7 +201,8 @@ class EgressProxyManager {
     clientSocket: Duplex,
     head: Buffer,
     domains: Set<string>,
-    allowedPorts: Set<number>
+    allowedPorts: Set<number>,
+    alloc?: ProxyAllocation
   ): Promise<void> {
     const target = req.url ?? '';
     const colonIdx = target.lastIndexOf(':');
@@ -239,6 +285,26 @@ class EgressProxyManager {
       serverSocket.pipe(clientSocket);
       clientSocket.pipe(serverSocket);
     });
+
+    // Track both ends of the tunnel so release() can force-destroy them.
+    // CONNECT tunnels are "upgraded" and invisible to http.Server connection tracking.
+    if (alloc) {
+      const clientSock = clientSocket as Socket;
+      if (alloc.released) {
+        // release() already ran — destroy immediately to prevent leaks.
+        serverSocket.destroy();
+        clientSock.destroy();
+        return;
+      }
+      alloc.tunnelSockets.add(serverSocket);
+      alloc.tunnelSockets.add(clientSock);
+      const cleanup = () => {
+        alloc.tunnelSockets.delete(serverSocket);
+        alloc.tunnelSockets.delete(clientSock);
+      };
+      serverSocket.on('close', cleanup);
+      clientSock.on('close', cleanup);
+    }
 
     serverSocket.on('error', () => {
       if (!clientSocket.destroyed) {

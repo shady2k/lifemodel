@@ -1011,7 +1011,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Shutdown function with persistence
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
-    coreLoop.stop();
+    await coreLoop.stop();
 
     // Save state
     await stateManager.shutdown();

@@ -198,6 +198,12 @@ export class CoreLoop {
   /** Scheduler service for plugin timers */
   private schedulerService: SchedulerService | null = null;
 
+  /** Guard: true while a scheduler tick is in-flight (prevents re-entrant overlap) */
+  private schedulerTickInFlight = false;
+
+  /** Promise for the in-flight scheduler tick (for drain on shutdown) */
+  private schedulerTickPromise: Promise<void> | null = null;
+
   /** Track thoughts emitted per tick for budget enforcement */
   private thoughtsThisTick = 0;
 
@@ -355,8 +361,10 @@ export class CoreLoop {
 
   /**
    * Stop the signal loop.
+   * Waits for any in-flight scheduler tick to complete before returning,
+   * so plugin code does not run after storage/persistence is torn down.
    */
-  stop(): void {
+  async stop(): Promise<void> {
     if (!this.running) {
       return;
     }
@@ -375,6 +383,12 @@ export class CoreLoop {
     if (this.typingSubscriptionId) {
       this.eventBus.unsubscribe(this.typingSubscriptionId);
       this.typingSubscriptionId = null;
+    }
+
+    // Drain in-flight scheduler tick so plugin callbacks complete
+    // before storage/persistence teardown.
+    if (this.schedulerTickPromise) {
+      await this.schedulerTickPromise;
     }
 
     this.logger.info({ tickCount: this.tickCount }, 'Core loop stopped');
@@ -477,8 +491,12 @@ export class CoreLoop {
       // Uses tickId as trace root for grouping housekeeping work
       // ============================================================================
 
-      // Apply pending plugin changes FIRST (before any processing)
-      this.schedulerService?.applyPendingChanges();
+      // Apply pending plugin changes only when no scheduler tick is in-flight.
+      // applyPendingChanges() mutates scheduler state (unregister/pause) which is
+      // unsafe while schedulerService.tick() is iterating schedulers concurrently.
+      if (!this.schedulerTickInFlight) {
+        this.schedulerService?.applyPendingChanges();
+      }
 
       // Check system health - determines which layers are active
       const health = this.healthMonitor.getHealth();
@@ -779,16 +797,24 @@ export class CoreLoop {
           await this.checkConversationDecay();
         }
 
-        // Check plugin schedulers for due events
-        if (this.schedulerService) {
-          try {
-            await this.schedulerService.tick();
-          } catch (error) {
-            this.logger.error(
-              { error: error instanceof Error ? error.message : String(error) },
-              'Scheduler service tick failed'
-            );
-          }
+        // Check plugin schedulers for due events (non-blocking — fire and forget).
+        // Plugin event callbacks may run Docker containers that take 10-30s.
+        // Blocking the tick loop would freeze signal processing and conversation decay.
+        // Guard prevents re-entrant overlap (next tick skips if previous still running).
+        if (this.schedulerService && !this.schedulerTickInFlight) {
+          this.schedulerTickInFlight = true;
+          this.schedulerTickPromise = this.schedulerService
+            .tick()
+            .catch((error: unknown) => {
+              this.logger.error(
+                { error: error instanceof Error ? error.message : String(error) },
+                'Scheduler service tick failed'
+              );
+            })
+            .finally(() => {
+              this.schedulerTickInFlight = false;
+              this.schedulerTickPromise = null;
+            });
         }
 
         // Apply all intents (per-intent context handled inside)
