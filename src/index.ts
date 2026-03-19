@@ -66,37 +66,41 @@ async function main(): Promise<void> {
 }
 
 // Handle shutdown gracefully
-async function shutdown(): Promise<void> {
+async function shutdown(reason: string, error?: unknown): Promise<void> {
   if (isShuttingDown) {
     return; // Already shutting down, ignore duplicate signals
   }
   isShuttingDown = true;
 
   if (container) {
+    if (error) {
+      container.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
+    } else {
+      container.logger.info('Shutdown triggered: %s', reason);
+    }
     await container.shutdown();
+  } else {
+    // eslint-disable-next-line no-console
+    console.error(`Shutdown triggered: ${reason}`, error ?? '');
   }
-  process.exit(0);
+  process.exit(error ? 1 : 0);
 }
 
 process.on('SIGINT', () => {
-  void shutdown();
+  void shutdown('SIGINT');
 });
 
 process.on('SIGTERM', () => {
-  void shutdown();
+  void shutdown('SIGTERM');
 });
 
 // Handle uncaught errors
 process.on('uncaughtException', (error: unknown) => {
-  // eslint-disable-next-line no-console
-  console.error('Uncaught exception:', error);
-  void shutdown();
+  void shutdown('uncaughtException', error);
 });
 
 process.on('unhandledRejection', (reason: unknown) => {
-  // eslint-disable-next-line no-console
-  console.error('Unhandled rejection:', reason);
-  void shutdown();
+  void shutdown('unhandledRejection', reason);
 });
 
 // Start the application
