@@ -233,9 +233,29 @@ async function collectMessages(page, groupUrl, lastSeenId, maxMessages) {
         break;
       }
 
+      // Scroll the message list container to the top to trigger Telegram's
+      // intersection observer that loads older messages from the server.
+      // mouse.wheel / PageUp alone can fail when the virtual scroll viewport
+      // is small (few messages rendered) — the container is already at scrollTop=0
+      // but Telegram hasn't loaded the next chunk yet.
+      await page.evaluate(() => {
+        // Find the scrollable container — Telegram Web A uses a div with
+        // class containing "MessageList" or a bubbles container
+        const scrollEl = document.querySelector('.MessageList') ||
+                         document.querySelector('[class*="MessageList"]') ||
+                         document.querySelector('.messages-container');
+        if (scrollEl) {
+          scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+        // Also scroll the first message into view to trigger intersection observer
+        const firstMsg = document.querySelector('.Message[data-message-id]');
+        if (firstMsg) {
+          firstMsg.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+      await page.waitForTimeout(500);
+      // Follow up with keyboard PageUp for redundancy
       await page.keyboard.press('PageUp');
-      await page.waitForTimeout(300);
-      await page.mouse.wheel(0, -3000);
       await page.waitForTimeout(SCROLL_PAGE_SETTLE_MS);
 
       const pgMsgs = await extractVisibleMessages(page);
@@ -248,10 +268,12 @@ async function collectMessages(page, groupUrl, lastSeenId, maxMessages) {
 
       if (added === 0) {
         noProgressCount++;
-        if (noProgressCount >= 2) {
+        if (noProgressCount >= 3) {
           dbg('  no progress scrolling up, stopping');
           break;
         }
+        // Extra wait on stall — Telegram may be fetching from server
+        await page.waitForTimeout(2000);
       } else {
         noProgressCount = 0;
       }
