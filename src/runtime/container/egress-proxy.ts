@@ -24,6 +24,30 @@ import type { Logger } from '../../types/index.js';
 /** Timeout for server.close() during release — prevents tick loop from hanging forever. */
 const RELEASE_TIMEOUT_MS = 5_000;
 
+/** DNS retry config — transient resolver failures cause cascading script failures. */
+const DNS_MAX_RETRIES = 2;
+const DNS_RETRY_DELAY_MS = 150;
+
+/**
+ * Resolve a hostname with retries.
+ * dns.resolve4() can transiently fail (resolver timeouts, brief network blips).
+ * Browsers mask this with their own DNS cache + retry, but the proxy must handle it.
+ */
+async function resolve4WithRetry(hostname: string): Promise<string[]> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= DNS_MAX_RETRIES; attempt++) {
+    try {
+      return await resolve4(hostname);
+    } catch (err) {
+      lastError = err;
+      if (attempt < DNS_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, DNS_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Per-run proxy allocation.
  */
@@ -248,10 +272,10 @@ class EgressProxyManager {
 
     this.logger?.debug({ domain: hostname, port }, 'CONNECT allowed');
 
-    // Resolve DNS on host side
+    // Resolve DNS on host side (with retry for transient failures)
     let resolvedIp: string;
     try {
-      const ips = await resolve4(hostname);
+      const ips = await resolve4WithRetry(hostname);
       if (ips.length === 0) {
         this.logger?.warn({ domain: hostname }, 'CONNECT failed: no DNS records');
         clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\nNo DNS records');
@@ -360,10 +384,10 @@ class EgressProxyManager {
       return;
     }
 
-    // Resolve DNS
+    // Resolve DNS (with retry for transient failures)
     let resolvedIp: string;
     try {
-      const ips = await resolve4(hostname);
+      const ips = await resolve4WithRetry(hostname);
       if (ips.length === 0) {
         res.writeHead(502);
         res.end('No DNS records');

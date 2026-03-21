@@ -173,9 +173,12 @@ async function collectMessages(page, groupUrl, lastSeenId, maxMessages) {
     has: page.locator('i[class*="arrow-down"]'),
   }).first();
 
-  for (let fabAttempt = 0; fabAttempt < 5; fabAttempt++) {
+  // Keep clicking FAB until it disappears (we're at the true bottom) or maxId
+  // stops advancing. Telegram may jump in chunks when there are many unread.
+  let prevMax = prevMaxBeforeFab;
+  for (let fabAttempt = 0; fabAttempt < 10; fabAttempt++) {
     if (await fabBtn.count() === 0) {
-      dbg(`  FAB click ${fabAttempt + 1}: no FAB found (already at bottom?)`);
+      dbg(`  FAB click ${fabAttempt + 1}: no FAB found (at bottom)`);
       fabWorked = true;
       break;
     }
@@ -189,12 +192,16 @@ async function collectMessages(page, groupUrl, lastSeenId, maxMessages) {
     // Wait for Telegram to fetch and render new messages
     await page.waitForTimeout(3000);
     const curMax = await getMaxVisibleId(page) || 0;
-    dbg(`  after FAB click: maxId ${prevMaxBeforeFab} → ${curMax}`);
+    dbg(`  after FAB click: maxId ${prevMax} → ${curMax}`);
 
-    if (curMax > prevMaxBeforeFab + 5) {
+    if (curMax > prevMax) {
       fabWorked = true;
-      dbg(`  FAB worked! Jumped from ${prevMaxBeforeFab} to ${curMax}`);
-      break;
+      prevMax = curMax;
+      dbg(`  FAB advanced to ${curMax}, checking for more...`);
+      // Don't break — check if FAB is still visible (more messages below)
+    } else {
+      // maxId didn't change — FAB click had no effect
+      if (fabWorked) break; // already made progress, stop
     }
   }
 
