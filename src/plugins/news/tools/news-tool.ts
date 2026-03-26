@@ -12,6 +12,7 @@ import type {
   PluginPrimitives,
   PluginTool,
   PluginToolContext,
+  PluginMemoryEntry,
   StoragePrimitive,
   IntentEmitterPrimitive,
   MemorySearchPrimitive,
@@ -141,6 +142,16 @@ const SCHEMA_REFRESH_SOURCE = {
     type: 'string',
     required: true,
     description: 'Source ID to refresh (from list_sources)',
+  },
+};
+
+const SCHEMA_GET_SOURCE_DIGEST = {
+  action: { type: 'string', required: true, enum: ['get_source_digest'] },
+  source_id: { type: 'string', required: true, description: 'Source ID (from list_sources)' },
+  since: {
+    type: 'string',
+    required: false,
+    description: 'ISO timestamp. Only return articles after this time. Defaults to 24h ago.',
   },
 };
 
@@ -660,30 +671,7 @@ async function getNews(
 
   // Transform memory entries to article format
   const now = new Date();
-  const articles: NewsArticleEntry[] = limitedEntries.map((e) => {
-    // Parse the content (format: "Title\n\nSummary" or just "Title")
-    const lines = e.content.split('\n');
-    const title = lines[0] ?? '';
-    const summary = lines.slice(2).join('\n') || undefined;
-
-    // Determine type from eventKind
-    const eventKind = e.metadata['eventKind'] as string | undefined;
-    let type: 'urgent' | 'interesting' | 'filtered' = 'interesting';
-    if (eventKind === 'news:urgent') type = 'urgent';
-    else if (eventKind === 'news:collected') type = 'filtered';
-
-    return {
-      title,
-      summary,
-      // Relative time so the model sees age without date arithmetic
-      timestamp: formatRelativeTime(e.timestamp, now, 'UTC'),
-      topics: e.tags.filter((t) => t !== 'news'),
-      confidence: e.confidence,
-      type,
-      url: e.metadata['url'] as string | undefined,
-      source: e.metadata['source'] as string | undefined,
-    };
-  });
+  const articles: NewsArticleEntry[] = limitedEntries.map((e) => toArticleEntry(e, now));
 
   // Determine hasMore: true if we have more filtered results than limit,
   // OR if the underlying search has more pages we haven't fetched yet
@@ -706,6 +694,106 @@ async function getNews(
 }
 
 /**
+ * Convert a plugin memory entry to a news article entry for tool output.
+ */
+function toArticleEntry(e: PluginMemoryEntry, now: Date): NewsArticleEntry {
+  // Parse the content (format: "Title\n\nSummary" or just "Title")
+  const lines = e.content.split('\n');
+  const title = lines[0] ?? '';
+  const summary = lines.slice(2).join('\n') || undefined;
+
+  // Determine type from eventKind
+  const eventKind = e.metadata['eventKind'] as string | undefined;
+  let type: 'urgent' | 'interesting' | 'filtered' = 'interesting';
+  if (eventKind === 'news:urgent') type = 'urgent';
+  else if (eventKind === 'news:collected') type = 'filtered';
+
+  return {
+    title,
+    summary,
+    // Relative time so the model sees age without date arithmetic
+    timestamp: formatRelativeTime(e.timestamp, now, 'UTC'),
+    topics: e.tags.filter((t) => t !== 'news'),
+    confidence: e.confidence,
+    type,
+    url: e.metadata['url'] as string | undefined,
+    source: e.metadata['source'] as string | undefined,
+  };
+}
+
+/**
+ * Get ALL articles from a single source within a time window.
+ * Paginates internally to collect every article, returns them chronologically.
+ */
+async function getSourceDigest(
+  memorySearch: MemorySearchPrimitive,
+  storage: StoragePrimitive,
+  sourceId: string,
+  since?: string
+): Promise<NewsToolResult> {
+  // Validate source exists
+  const sources = await loadSources(storage);
+  if (!sources.has(sourceId)) {
+    return {
+      success: false,
+      action: 'get_source_digest',
+      error: `Source not found: ${sourceId}. Use list_sources to see available sources.`,
+      schema: SCHEMA_GET_SOURCE_DIGEST,
+    };
+  }
+
+  // Parse since or default to 24h ago
+  let sinceDate: Date;
+  if (since) {
+    sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      return {
+        success: false,
+        action: 'get_source_digest',
+        error: `Invalid since timestamp: ${since}. Use ISO format (e.g., 2026-03-26T00:00:00Z).`,
+        schema: SCHEMA_GET_SOURCE_DIGEST,
+      };
+    }
+  } else {
+    sinceDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  }
+
+  // Paginate to collect ALL articles from this source
+  const PAGE_SIZE = 50;
+  const allEntries: PluginMemoryEntry[] = [];
+  let offset = 0;
+
+  while (true) {
+    const result = await memorySearch.searchOwnFacts('', {
+      limit: PAGE_SIZE,
+      offset,
+      minConfidence: 0,
+      metadata: { source: sourceId },
+      since: sinceDate,
+    });
+
+    allEntries.push(...result.entries);
+
+    if (!result.pagination.hasMore || result.entries.length === 0) break;
+    offset += PAGE_SIZE;
+  }
+
+  // Sort chronologically (oldest first) for digest reading
+  allEntries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+  const now = new Date();
+  const articles = allEntries.map((e) => toArticleEntry(e, now));
+
+  return {
+    success: true,
+    action: 'get_source_digest',
+    articles,
+    count: articles.length,
+    filter: 'all',
+  };
+}
+
+/**
  * Create the news tool.
  */
 export function createNewsTool(primitives: PluginPrimitives): PluginTool {
@@ -714,16 +802,20 @@ export function createNewsTool(primitives: PluginPrimitives): PluginTool {
   const newsTool: PluginTool = {
     name: 'news',
     description: `Manage news sources and retrieve polled articles.
-Actions: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source.
+Actions: add_source, remove_source, list_sources, get_news, get_source_digest, list_groups, stop_auth, refresh_source.
 
 **get_news** — instant local search across stored articles (no network, no container). Sources are auto-polled periodically so stored articles are usually current. Always try this first. Use source_id to filter articles from a specific source.
 Example: {"action": "get_news", "query": "technology"}
 Example: {"action": "get_news", "source_id": "src_xxx"} — latest from one source
 
+**get_source_digest** — get ALL articles from one source within a time window (default: last 24h). Use when the user asks what happened in a specific source/chat (e.g., "what's in the bond chat?", "summarize today's news from X"). Returns all articles chronologically, no limit.
+Example: {"action": "get_source_digest", "source_id": "src_xxx"}
+Example: {"action": "get_source_digest", "source_id": "src_xxx", "since": "2026-03-26T00:00:00Z"}
+
 **refresh_source** — launches a browser container to fetch fresh content from the source (~15 seconds, expensive). Only use when the user explicitly asks to update/refresh a specific source. After refreshing, use get_news with the same source_id to see new articles.
 Example: {"action": "refresh_source", "source_id": "src_xxx"}
 
-**For any question about what a source writes or recent news, use get_news FIRST** with a relevant query (location, topic, person name, keyword).
+**For any question about what a source writes or recent news, use get_source_digest with the source_id if the user references a specific source/chat.** Use get_news with a query for topic searches across all sources.
 Only fall back to web search if get_news returns no relevant results.
 
 For private Telegram groups:
@@ -747,13 +839,14 @@ For private Telegram groups:
         name: 'action',
         type: 'string',
         description:
-          'Required. One of: add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor',
+          'Required. One of: add_source, remove_source, list_sources, get_news, get_source_digest, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor',
         required: true,
         enum: [
           'add_source',
           'remove_source',
           'list_sources',
           'get_news',
+          'get_source_digest',
           'list_groups',
           'stop_auth',
           'refresh_source',
@@ -805,7 +898,7 @@ For private Telegram groups:
         name: 'source_id',
         type: 'string',
         description:
-          'Source ID. Required for refresh_source. Optional for get_news (filters articles to this source only). Get IDs from list_sources.',
+          'Source ID. Required for refresh_source and get_source_digest. Optional for get_news (filters articles to this source only). Get IDs from list_sources.',
         required: false,
       },
       {
@@ -857,6 +950,7 @@ For private Telegram groups:
           'remove_source',
           'list_sources',
           'get_news',
+          'get_source_digest',
           'list_groups',
           'stop_auth',
           'refresh_source',
@@ -867,7 +961,7 @@ For private Telegram groups:
         return {
           success: false,
           error:
-            'action: must be one of [add_source, remove_source, list_sources, get_news, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor]',
+            'action: must be one of [add_source, remove_source, list_sources, get_news, get_source_digest, list_groups, stop_auth, refresh_source, mark_digest_sent, get_digest_cursor]',
         };
       }
 
@@ -888,6 +982,7 @@ For private Telegram groups:
               remove_source: SCHEMA_REMOVE_SOURCE,
               list_sources: SCHEMA_LIST_SOURCES,
               get_news: SCHEMA_GET_NEWS,
+              get_source_digest: SCHEMA_GET_SOURCE_DIGEST,
               list_groups: SCHEMA_LIST_GROUPS,
               stop_auth: SCHEMA_STOP_AUTH,
               refresh_source: SCHEMA_REFRESH_SOURCE,
@@ -981,6 +1076,23 @@ For private Telegram groups:
           const since = args['since'] as string | undefined;
 
           return getNews(memorySearch, query, newsType, limit, offset, getNewsSourceId, since);
+        }
+
+        case 'get_source_digest': {
+          const digestSourceId = args['source_id'] as string | undefined;
+          const digestSince = args['since'] as string | undefined;
+
+          if (!digestSourceId) {
+            return {
+              success: false,
+              action: 'get_source_digest',
+              error: 'Missing required parameter: source_id',
+              receivedParams: Object.keys(args),
+              schema: SCHEMA_GET_SOURCE_DIGEST,
+            };
+          }
+
+          return getSourceDigest(memorySearch, storage, digestSourceId, digestSince);
         }
 
         case 'list_groups': {
@@ -1453,7 +1565,7 @@ For private Telegram groups:
           return {
             success: false,
             action: action || 'unknown',
-            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "list_groups", "stop_auth", "refresh_source", "mark_digest_sent", or "get_digest_cursor".`,
+            error: `Unknown action: ${action}. Use "add_source", "remove_source", "list_sources", "get_news", "get_source_digest", "list_groups", "stop_auth", "refresh_source", "mark_digest_sent", or "get_digest_cursor".`,
             receivedParams: Object.keys(args),
             schema: {
               availableActions: {
@@ -1461,6 +1573,7 @@ For private Telegram groups:
                 remove_source: SCHEMA_REMOVE_SOURCE,
                 list_sources: SCHEMA_LIST_SOURCES,
                 get_news: SCHEMA_GET_NEWS,
+                get_source_digest: SCHEMA_GET_SOURCE_DIGEST,
                 list_groups: SCHEMA_LIST_GROUPS,
                 stop_auth: SCHEMA_STOP_AUTH,
                 refresh_source: SCHEMA_REFRESH_SOURCE,
