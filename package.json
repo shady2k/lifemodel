@@ -19,7 +19,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "husky",
-    "browser:auth": "tsx cli/browser-auth.ts"
+    "browser:auth": "tsx cli/browser-auth.ts",
+    "connect": "sh scripts/connect-clone.sh",
+    "backlog": "node .backlog/gate.mjs --worktree",
+    "backlog:json": "node .backlog/gate.mjs --worktree --json",
+    "ready": "node .backlog/ready.mjs",
+    "present": "node .backlog/rules/check-present.mjs --config .backlog/config.json --base \"${BASE:-$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse HEAD)}\""
   },
   "keywords": [
     "ai",

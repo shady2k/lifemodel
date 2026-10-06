@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+
+
+# --- BEGIN LIFEMODEL BACKLOG GATE ---
+# Managed by scripts/connect-clone.sh. Every commit names its leaf task.
+if command -v node >/dev/null 2>&1 && [ -f .backlog/commits.mjs ]; then
+    node .backlog/commits.mjs --message-file "$1" || exit 1
+else
+    printf "commit-msg: the commit-link check cannot run here; run npm run connect\n" >&2
+    exit 1
+fi
+# --- END LIFEMODEL BACKLOG GATE ---

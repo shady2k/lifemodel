@@ -1,0 +1,69 @@
+#!/bin/sh
+# pre-commit — the backlog gate and the tracker layout guard.
+#
+# Team scope: this hook ships with the repository and `npm run connect`
+# (scripts/connect-clone.sh) points git at .githooks. The product checks
+# (lint-staged, tsc, vitest) are NOT here: they live in .husky/pre-commit and
+# need node_modules. When husky is active (npm ci ran, so core.hooksPath is
+# .husky/_), .husky/pre-commit runs them and this gate with them. When it is
+# not, this hook runs the gate alone and says so; CI runs the product checks.
+set -eu
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+command -v node >/dev/null 2>&1 || fail "node is not on PATH — the backlog gate runs on it. Install Node.js 24+ or run: npm run connect"
+
+gate=.backlog
+for f in adapter.mjs gate.mjs merge-gate.mjs config.json; do
+    if [ ! -f "$gate/$f" ]; then
+        printf 'pre-commit: %s is missing from this checkout; run npm run connect, which names what is missing\n' "$gate/$f" >&2
+        exit 1
+    fi
+done
+for f in check.mjs time-format.mjs; do
+    if [ ! -f "$gate/rules/$f" ]; then
+        printf 'pre-commit: %s is missing from this checkout; run npm run connect, which names what is missing\n' "$gate/rules/$f" >&2
+        exit 1
+    fi
+done
+
+# --- 1. the tracker layout --------------------------------------------------
+# The tracker is one state for every branch: .beads/issues.jsonl is committed on
+# main only. A feature branch that carries it would land every other run's
+# states with its own. The one exception is the seeding commit of the
+# installation itself: the branch that first lands .backlog/ also lands the
+# export, because before it main has no tracker file at all.
+if git diff --cached --name-only -- .beads/issues.jsonl | grep -q .; then
+    branch=$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")
+    if [ "$branch" != "main" ] && git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
+        printf 'TRACKER: the tracker export is staged on %s:\n' "$branch" >&2
+        git diff --cached --name-only -- .beads/issues.jsonl | sed 's/^/         /' >&2
+        printf '         The tracker is shared by every branch; its export is committed on main only.\n' >&2
+        printf '         Unstage it and commit the rest: git restore --staged .beads/issues.jsonl\n' >&2
+        exit 1
+    fi
+fi
+
+# --- 2. the backlog gate ----------------------------------------------------
+# It compares the STAGED export against HEAD, never the working tree: br
+# rewrites the export on almost every command. It runs only when the export or
+# the gate itself is staged; a change that touches neither owes it nothing.
+CHANGED=$(git diff --cached --name-only 2>/dev/null || true)
+RUN_BACKLOG=1
+if [ -n "$CHANGED" ]; then
+    RUN_BACKLOG=0
+    case "$CHANGED" in
+        *.beads/issues.jsonl*|*.backlog/*) RUN_BACKLOG=1 ;;
+    esac
+fi
+
+if [ "$RUN_BACKLOG" = 1 ]; then
+    # Exit 1 is red and exit 2 is misuse — a gate that cannot run is as red as
+    # one that found a problem; both refuse the commit.
+    node "$gate/gate.mjs"
+    printf 'OK:   backlog gate\n'
+else
+    printf 'OK:   backlog gate — skipped (the backlog export is not staged)\n'
+fi
+
+printf 'note: the product checks (lint-staged, tsc, vitest) are not run here; run them with npm ci + husky, or in CI.\n'

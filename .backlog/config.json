@@ -1,0 +1,81 @@
+{
+  "strength": "block-new",
+  "currentMilestone": "platform-1",
+  "milestoneLabels": [
+    "platform-1",
+    "dialogue-1",
+    "hands-1",
+    "memory-1",
+    "evolution-1",
+    "maturity-1"
+  ],
+  "areaLabels": [
+    "core",
+    "layers",
+    "runtime",
+    "storage",
+    "plugins",
+    "channels",
+    "llm",
+    "config",
+    "evolution",
+    "tooling",
+    "docs"
+  ],
+  "roadmapLabels": [],
+  "triageLabels": [],
+  "ideaLabels": [
+    "idea"
+  ],
+  "ideaTitlePrefixes": [
+    "Brainstorming:"
+  ],
+  "findingLabels": [
+    "finding"
+  ],
+  "findingBudget": 10,
+  "staleDays": 14,
+  "holdDays": 2,
+  "bulkCluster": 20,
+  "timeRecordsExempt": [],
+  "presentDocuments": [
+    "claude.md",
+    "README.md",
+    "docs/architecture.md",
+    "docs/concepts/*.md",
+    "docs/features/**/*.md",
+    "docs/plugins/*.md"
+  ],
+  "presentAreas": [
+    ""
+  ],
+  "presentIgnores": [],
+  "presentChurnCommits": 20,
+  "commitLinksFrom": "2026-10-06T22:20:29Z",
+  "execution": {
+    "development": "tdd",
+    "runMode": "worker-sessions",
+    "maxBranchDays": 2,
+    "landing": "pull-request",
+    "maxWorkers": 3,
+    "workersRunTests": true,
+    "claims": "atomic and exclusive (claim_exclusive in .beads/config.yaml) through `br update <id> --claim --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>'`; the holder is the agent doing the work, never the person",
+    "mutationBudgetMinutes": 10,
+    "mutationFallback": "no mutation tool: at stage acceptance the coordinator hand-plants 2-3 mutations in the changed logic and records whether a test went red; a survivor becomes a test or a question to the owner, never a pass",
+    "reviewPreference": "different-model",
+    "reviewer": "openai-codex/gpt-6-sol (a codex worker session), one round, at stage acceptance",
+    "reviewFallback": "same-model independent session (a fresh zai/glm-5.3 session), disclosed as the same model",
+    "reviewRequiredForAcceptance": true
+  },
+  "scope": "team",
+  "artifactLanguage": "en",
+  "projectWords": [
+    "lifemodel",
+    "Digital Human"
+  ],
+  "trackerWords": [
+    "beads",
+    "br ",
+    ".beads"
+  ]
+}

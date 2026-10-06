@@ -1,0 +1,4 @@
+# br (beads_rust) configuration of this repository. See docs/backlog-integration.md.
+issue_prefix: lifemodel
+# A claim is refused while another actor holds the item.
+claim_exclusive: true

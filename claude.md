@@ -1,5 +1,21 @@
 # Digital Human 2.0
 
+## Backlog workflow
+
+All retained work and commits belong to tracked tasks. File discoveries through
+`to-backlog`; implement through `take-task`; close only after stage acceptance
+through `close-out`. Read Backlog integration in `docs/backlog-integration.md`
+before writes. When a skill reports the installation is out of date, run
+`setup-shady2k-skills`.
+
+This repository works through the shady2k-skills plugin. Without it, install it once
+(Claude Code: `/plugin marketplace add shady2k/skills`, then
+`/plugin install shady2k-skills@shady2k`; Prime Agent or Pi:
+`prime-agent package install git:github.com/shady2k/skills` / `pi install git:github.com/shady2k/skills`).
+
+**Every commit names its leaf task** in parentheses in the subject, e.g.
+`Fix the thing (lifemodel-7ld)`; the commit-msg hook and CI enforce it.
+
 ## Core Philosophy
 
 **We are building a digital human, not a chatbot.**
