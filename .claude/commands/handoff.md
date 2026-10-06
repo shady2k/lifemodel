@@ -14,7 +14,7 @@ Continue [feature] on branch `[branch]`.
 
 **Context:** [1 sentence — what and why]
 
-**Tracker:** [ISSUE-ID]
+**Tracker:** [br task id, e.g. lifemodel-xxx]
 
 **Done:** [bullet list, max 5 items, brief]
 
@@ -27,7 +27,7 @@ Continue [feature] on branch `[branch]`.
 
 **Watch out:**
 - [critical gotcha that will waste time if missed]
-- **Check tracker** — run yandex tracker skill to see overall progress, don't lose the big picture
+- **Check the backlog** — `ask-shady2k` for where the project stands; `br ready --json` for open work
 
 **Future Plans:** [if known — upcoming phases/features after current task]
 - [next phase or feature to implement]
@@ -35,6 +35,6 @@ Continue [feature] on branch `[branch]`.
 
 **Important notes:**
 - **Explore if needed** — if unclear what's next, explore codebase/spec to determine next functional task
-- **Update tracker checklist** — mark items done with yandex tracker skill
+- **Track work through the skills** — file discoveries with `to-backlog`, implement with `take-task`, close only after stage acceptance with `close-out` (see `docs/backlog-integration.md`)
 - **No optional tasks** — ALL checklist items must be done. Complete current layer before moving to next
 ```
