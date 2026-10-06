@@ -1,0 +1,35 @@
+#!/bin/sh
+# commit-msg — every commit names the leaf task it belongs to.
+#
+# The convention: the task id in parentheses in the subject, e.g.
+# "Fix the thing (lifemodel-7ld)". The check is check-commits.mjs (vendored in
+# .backlog/rules/), fed by commits.mjs, which reads the message by this
+# repository's convention and resolves the ids against the tracker — closed
+# tasks included, containers refused. CI checks every introduced commit again,
+# because a local hook is one --no-verify away.
+set -eu
+
+gate=.backlog
+if [ ! -f "$gate/commits.mjs" ]; then
+    # A tree from before the commit check: this hook came from a hooksPath the
+    # checkout does not carry. Say so instead of passing quietly.
+    printf 'commit-msg: this tree has no %s/commits.mjs; commit links are not checked here\n' "$gate" >&2
+    exit 0
+fi
+if ! command -v node >/dev/null 2>&1; then
+    printf 'commit-msg: node is not on PATH, so the commit-link check cannot run; run npm run connect, which names what is missing\n' >&2
+    exit 1
+fi
+# A missing input refuses by name: without one of these, node dies on a module
+# import or a spawn, which says nothing about how to repair the clone.
+for f in adapter.mjs commits.mjs config.json; do
+    if [ ! -f "$gate/$f" ]; then
+        printf 'commit-msg: %s is missing from this checkout; run npm run connect\n' "$gate/$f" >&2
+        exit 1
+    fi
+done
+if [ ! -f "$gate/rules/check-commits.mjs" ]; then
+    printf 'commit-msg: %s is missing from this checkout; run npm run connect\n' "$gate/rules/check-commits.mjs" >&2
+    exit 1
+fi
+exec node "$gate/commits.mjs" --message-file "$1"

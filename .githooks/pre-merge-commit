@@ -1,0 +1,8 @@
+#!/bin/sh
+# pre-merge-commit — the same gate as pre-commit, on the commit git makes itself.
+#
+# Git does not run pre-commit for a clean automatic merge; it runs this hook
+# instead. Only for a *clean* one — a merge that stops on conflicts is finished
+# by an ordinary `git commit`, which does run pre-commit. The backlog gate in
+# pre-commit judges a merge against both parents (merge-gate.mjs).
+exec "$(dirname "$0")/pre-commit" "$@"

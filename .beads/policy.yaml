@@ -1,0 +1,15 @@
+# Statuses of this project. `submitted` (a worker's result, awaiting merge) and
+# `implemented` (merged into its stage, awaiting acceptance) are the backlog
+# protocol's; the transition that sets one carries "<status>: <rev> -- <evidence>"
+# as its comment, written in the same transaction (required_fields below). Neither
+# is ready: `br ready` offers `open` only. `strict` makes br refuse a status not
+# listed here, so a typo cannot become a status the adapter stops on. br reads
+# this file from the MAIN checkout's .beads, whichever worktree runs it.
+workflow:
+  strict: true
+  statuses: [open, in_progress, blocked, deferred, submitted, implemented, closed, tombstone]
+  status_groups:
+    ready: [open]
+  required_fields:
+    submitted: [transition_comment]
+    implemented: [transition_comment]

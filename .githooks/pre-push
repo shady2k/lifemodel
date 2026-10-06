@@ -1,0 +1,55 @@
+#!/bin/sh
+# pre-push — what this push introduces, checked for task links.
+#
+# For each ref being pushed: the commits of its tip that no ref the remote
+# already holds reaches. A tag, or a new branch, on a commit the remote already
+# holds introduces nothing and passes with "nothing to check". A hook given no
+# ref lines is refused: an empty input is an error, never a pass.
+#
+# Product suites are NOT here, deliberately: a push has to be cheap or people
+# learn to pass hooks with --no-verify. CI is the source of truth.
+set -eu
+
+gate=.backlog
+if [ ! -f "$gate/commits.mjs" ]; then
+    printf 'pre-push: this tree has no %s/commits.mjs; commit links are not checked here\n' "$gate" >&2
+    exit 0
+fi
+command -v node >/dev/null 2>&1 || { printf 'pre-push: node is not on PATH; run npm run connect\n' >&2; exit 1; }
+
+# git feeds ref lines on stdin: "<local ref> <local sha> <remote ref> <remote sha>".
+refs=$(cat)
+[ -n "$refs" ] || { printf 'pre-push: no ref lines on stdin — an empty input is an error, never a pass\n' >&2; exit 1; }
+
+status=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    set -- $line
+    local_sha=$2; remote_ref=$3; remote_sha=$4
+    # A ref deletion pushes no commits; there is nothing to check for it.
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        printf '%s is being deleted: nothing to check
+' "$remote_ref"
+        continue
+    fi
+    # The export the checked commits resolve tasks against: the newest snapshot
+    # this history reaches (branches do not carry the export; main does).
+    export_at=$(git rev-list -1 HEAD -- .beads/issues.jsonl 2>/dev/null || true)
+    before_args=""
+    if [ "$remote_sha" != "0000000000000000000000000000000000000000" ] &&
+        git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null 2>&1; then
+        before_args="--before $remote_sha"
+    fi
+    if [ -n "$export_at" ]; then
+        export_args="--export-at $export_at"
+    else
+        export_args=""
+    fi
+    # shellcheck disable=SC2086
+    if ! node "$gate/commits.mjs" --introduced "$local_sha" --by "$remote_ref" $before_args $export_args; then
+        status=1
+    fi
+done <<EOF
+$refs
+EOF
+exit $status

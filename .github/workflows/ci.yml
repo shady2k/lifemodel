@@ -1,0 +1,139 @@
+# CI — the backlog gate for lifemodel.
+#
+# One job, no npm install, seconds: the tracker is checked on every pull
+# request and every push to main, for everyone. The product checks
+# (typecheck, lint, test) are NOT here yet — "Run typecheck, lint and tests in
+# CI" (filed with the setup task) adds them.
+#
+# The three steps mirror the local hooks (.githooks/pre-commit,
+# .githooks/commit-msg), which a push is one --no-verify away from skipping:
+#
+#   1. the backlog gate: the export at the head of the change judged against
+#      the export at its baseline, under the config's strength (block-new),
+#      each judged by the config of its own day;
+#   2. the commit-link check: every commit the change introduces names a leaf
+#      task that exists;
+#   3. the present-documents check, on pull requests only: the documents the
+#      config lists as describing the present may not be left naming a path
+#      the change removed.
+#
+# Node and a full history are the whole toolchain.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci-backlog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The baseline is another revision of the tracked export and the
+          # commit range needs the merge base, so the history has to be here.
+          # A shallow clone has neither.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: The backlog is still a queue
+        env:
+          # Through the environment rather than into the script: an expression
+          # interpolated into a shell line is a shell line somebody else can
+          # write.
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          gate=.backlog
+          # The baseline: what was already wrong before this change. On a pull
+          # request that is the merge base with the branch being merged into;
+          # on a push to main it is the commit main was at before the push,
+          # because a merge base against the branch's own upstream is the
+          # branch itself. A first push or a shallow surprise leaves neither,
+          # and then the previous commit is the honest answer.
+          base=""
+          if [ "$EVENT" = pull_request ]; then
+            base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
+            base="$BEFORE"
+          fi
+          if [ -z "$base" ] || [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          echo "baseline: $base"
+          # The export at the head of the change: branches do not carry the
+          # export (it is committed on main only), so the newest snapshot the
+          # checked history reaches is the honest head. A change that removes
+          # the export entirely is an input error, said as one.
+          head_export=$(git rev-list -1 "$HEAD_SHA" -- .beads/issues.jsonl 2>/dev/null \
+            || git rev-list -1 HEAD -- .beads/issues.jsonl)
+          [ -n "$head_export" ] || { echo "no .beads/issues.jsonl anywhere in this history" >&2; exit 2; }
+          node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json" 2>/dev/null \
+            || printf '{"generatedAt":"1970-01-01T00:00:00Z","source":"empty","issues":[]}' > "$RUNNER_TEMP/backlog-baseline.json"
+          baseline_config=""
+          if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
+            baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
+          fi
+          # shellcheck disable=SC2086 # baseline_config is two words or none
+          node "$gate/adapter.mjs" --at "$head_export" |
+            node "$gate/rules/check.mjs" \
+              --config "$gate/config.json" \
+              --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config -
+
+      - name: Every new commit names a task
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          gate=.backlog
+          # Every commit this change introduces, each checked on its own. On a
+          # pull request that is the merge base to the PR's head — not HEAD,
+          # which is GitHub's synthetic merge — and an empty range is an error,
+          # never a pass. On a push to main it is the commits of the pushed tip
+          # that no ref the remote already had reaches, past main's own "before"
+          # when the push has one. Never a merge base with main itself.
+          head_export=$(git rev-list -1 "${HEAD_SHA:-HEAD}" -- .beads/issues.jsonl 2>/dev/null \
+            || git rev-list -1 HEAD -- .beads/issues.jsonl)
+          [ -n "$head_export" ] || { echo "no .beads/issues.jsonl anywhere in this history" >&2; exit 2; }
+          if [ "$EVENT" = pull_request ]; then
+            range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
+            echo "range: $range"
+            node "$gate/commits.mjs" --range "$range" --export-at "$head_export"
+          else
+            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF" --export-at "$head_export"
+            if [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
+              set -- "$@" --before "$BEFORE"
+            fi
+            echo "introduced by $GITHUB_REF at $(git rev-parse --short HEAD)"
+            node "$gate/commits.mjs" "$@"
+          fi
+
+      - name: The documents that describe the present name paths that exist
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          gate=.backlog
+          # From the merge base to the PR's head, not GitHub's synthetic merge,
+          # as the commit check above.
+          base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "base: $base"
+          node "$gate/rules/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
