@@ -78,7 +78,7 @@ jobs:
           # export (it is committed on main only), so the newest snapshot the
           # checked history reaches is the honest head. A change that removes
           # the export entirely is an input error, said as one.
-          head_export=$(git rev-list -1 "$HEAD_SHA" -- .beads/issues.jsonl 2>/dev/null \
+          head_export=$(git rev-list -1 "${HEAD_SHA:-HEAD}" -- .beads/issues.jsonl 2>/dev/null \
             || git rev-list -1 HEAD -- .beads/issues.jsonl)
           [ -n "$head_export" ] || { echo "no .beads/issues.jsonl anywhere in this history" >&2; exit 2; }
           node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json" 2>/dev/null \
