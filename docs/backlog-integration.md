@@ -13,11 +13,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   carries the install line for people who do not have the plugin yet.
 - **Artifact language:** English (owner, 2026-10-07). The Russian ADRs
   (docs/adr/006..009, on their own branches) stay as they are.
-- **Vision, roadmap and charters:** none yet. `README.md` describes what the
-  system does today; the current milestone (`platform-1`, ADR-006 stages 1–2:
-  loader + generations + cutover, Motor Cortex on prime-agent) has no charter
-  until `/to-milestone` writes one. Status comes from the tracker, never from a
-  document.
+- **Vision, roadmap and charters:** `docs/vision.md` holds the vision and the
+  roadmap (milestones in order); charters are `docs/charters/<milestone label>.md`.
+  Status comes from the tracker, never from a document.
 - **Current specifications:** none in the capability format. The nearest
   current-state documents are `docs/architecture.md`, `docs/concepts/*.md`,
   `docs/features/**/*.md` and `docs/plugins/*.md` — the config's
