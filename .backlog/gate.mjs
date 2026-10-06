@@ -59,6 +59,7 @@ function judged(base, nowFile, json) {
       nowFile,
     ];
     const res = spawnSync(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' });
+    if (!json && res.stdout) process.stdout.write(res.stdout);
     return { status: res.status ?? 2, stdout: res.stdout || '' };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -95,8 +96,7 @@ function main(argv) {
         console.error('\nBACKLOG GATE: this merge adds a problem to the tracker (lines above, with their fix). Older problems do not block.');
       return mg.status ?? 2;
     }
-    const r = judged(base, now, json);
-    if (json) process.stdout.write(r.stdout);
+    const r = judged(base, now, json); // judged() already printed the report
     if (r.status === 1) {
       console.error('\nBACKLOG GATE: this change adds a problem to the tracker (FAIL lines above, with their fix).');
       console.error('Older problems are listed but do not block. Fix the new ones, then commit again.');
