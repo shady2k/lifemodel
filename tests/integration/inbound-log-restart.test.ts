@@ -78,11 +78,13 @@ const instances: InboundInstance[] = [];
 /**
  * kill -9 emulation: the instance is killed WITHOUT any stop - no drain, no
  * applied intents, no commit - and then FENCED: its timers and subscription
- * stop, its late effects are dropped and the work it had in flight (the tick,
- * the scheduler callback) is joined before this resolves. A killed instance
- * must not keep ticking or flush its cache behind the restart under test
- * (review round 3: an unfenced "killed" instance wrote into the shared data
- * and log directories and once failed the teardown with ENOTEMPTY).
+ * stop, its late effects are dropped, the work it had in flight (the tick, the
+ * scheduler callback) is joined, and its STORAGE is closed, so work that is
+ * still running (a conversation save of a send chain, a log flush) cannot
+ * write anything to the data directory any more - every later write is dropped
+ * and counted on the handle (review round 5: an unfenced killed instance kept
+ * writing conversation state and raced the teardown's rmdir with ENOTEMPTY /
+ * ENOENT).
  */
 async function die(instance: InboundInstance): Promise<void> {
   await fenceKilledInstance(instance);
@@ -130,6 +132,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await die(h1);
     const killed = activityOf(h1);
     expect(killed.running).toBe(false);
+    expect(h1.storage.isFenced).toBe(true);
 
     // a fresh container on the SAME data dir replays and answers once
     const h2 = await startInboundInstance(storagePath, logDir, {
@@ -233,6 +236,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await die(h1);
     await die(h2);
     const killed = activityOf(h2);
+    expect(h2.storage.isFenced).toBe(true);
     // crash WITHOUT an outcome: nothing settled (the turn hangs)
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
