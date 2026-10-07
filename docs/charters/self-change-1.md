@@ -14,16 +14,18 @@ Each outcome is one feature issue labelled `self-change-1`. They are listed in
 the order they build on each other; checks run in a development test
 environment.
 
-1. **A restart loses neither the turn in flight nor a message.** Applying a
+1. **`AGENTS.md` is the one agent doc and describes the code as it is**,
+   since the agent changes itself by it. `claude.md` is removed; `AGENTS.md`
+   is written anew from the code. *Check:* `claude.md` no longer exists, every
+   path `AGENTS.md` names exists, and the present-documents check reports no
+   drift in `AGENTS.md` and `docs/architecture.md`.
+2. **A restart loses neither the turn in flight nor a message.** Applying a
    change is a restart. *Check:* a restart in the middle of a cognition turn
    ends with that turn completed or redone exactly once, and no Telegram
    message around the restart is lost or answered twice.
-2. **Every change to lifemodel is checked before it is applied.** *Check:*
+3. **Every change to lifemodel is checked before it is applied.** *Check:*
    typecheck, lint and the tests run in CI on every pull request and push to
    main, and one local command runs the same checks with the same verdict.
-3. **The agent doc and the architecture describe the code as it is**, since
-   the agent changes itself by them. *Check:* the present-documents check
-   reports no drift in `claude.md` and `docs/architecture.md`.
 4. **lifemodel runs on a test VM and rolls out, stops and panics on
    command.** *Check:* one command rolls it out to a given commit and
    restarts it; panic keeps it down across a VM reboot until resumed; the
@@ -50,8 +52,9 @@ environment.
 ## Carried over
 
 From the replaced `platform-1` charter: the product checks in CI
-(lifemodel-cup, now under outcome 2) and the `claude.md` drift
-(lifemodel-9vw, now planned work under outcome 3). The five `platform-1`
+(lifemodel-cup, now under outcome 3). The `claude.md` drift (lifemodel-9vw)
+was closed as moot when the owner decided to replace `claude.md` with a new
+`AGENTS.md` (outcome 1). The five `platform-1`
 features and the document gate are deferred.
 
 ## Finding budget
