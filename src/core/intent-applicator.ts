@@ -71,13 +71,10 @@ export interface IntentApplicatorDeps {
   storage?: Storage | undefined;
   pluginLoader?: PluginLoader | undefined;
   /**
-   * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1) -
-   * the turn whose entries wait for this send before its outcome is decided -
-   * and whether the send is one of the turn's FINAL answers (`final`: the
-   * turn already resolved) or an in-loop acknowledgement (core.say) that
-   * cannot speak for the answer (review round 4, findings 1 and 3).
+   * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1) and
+   * what it does there (see SendTurnRef).
    */
-  resolveSendTurn?: (intent: SendMessageIntent) => { turnKey: string; final: boolean } | undefined;
+  resolveSendTurn?: (intent: SendMessageIntent) => SendTurnRef | undefined;
   /**
    * A send of that turn started, registered SYNCHRONOUSLY where the intent is
    * applied, so the turn's outcome can never be decided while a send of it is
@@ -99,6 +96,27 @@ export interface IntentApplicatorDeps {
     final: boolean,
     outcome: SendOutcome
   ) => void | Promise<void>;
+}
+
+/**
+ * What one SEND_MESSAGE is to the durable-log turn it belongs to
+ * (lifemodel-ctc.2.1) and what it answers (lifemodel-q4f).
+ */
+export interface SendTurnRef {
+  /** The turn whose entries wait for this send (see settleTurn). */
+  turnKey: string;
+  /**
+   * The turn already resolved on this send: it is one of the turn's FINAL
+   * answers, not an in-loop acknowledgement (review round 4, findings 1/3).
+   */
+  final: boolean;
+  /**
+   * The turn owns at least one logged inbound message of the recipient this
+   * send addresses, so the send ANSWERS an inbound message
+   * (lifemodel-q4f). Such a send is never treated as a proactive repeat:
+   * two different inbound questions can legitimately need the same reply.
+   */
+  answersInbound: boolean;
 }
 
 /**
@@ -287,6 +305,9 @@ export class IntentApplicator {
     const send = this.deps.resolveSendTurn?.(intent);
     const turnKey = send?.turnKey;
     const finalSend = send?.final ?? false;
+    // Does this send answer a logged inbound message? Then it is no proactive
+    // repeat, whatever its text (lifemodel-q4f).
+    const answersInbound = send?.answersInbound ?? false;
     let delivered = false;
     let failureReason: string | undefined;
     const reportSettled = (outcome: SendOutcome): void => {
@@ -343,11 +364,15 @@ export class IntentApplicator {
 
     const sendChain = Promise.resolve()
       .then(async () => {
-        // The pre-existing duplicate guard: a proactive message that repeats
-        // the last assistant message verbatim is not sent again. A skipped
-        // send is not a failure - the text is already in the chat, so it
-        // counts as delivered for the turn's outcome (no endless replay).
-        if (this.deps.conversationManager) {
+        // The pre-existing duplicate guard, PROACTIVE sends only
+        // (lifemodel-q4f): a message that repeats the last assistant message
+        // verbatim is not sent again - but never when this send answers a
+        // logged inbound message. Two ordinary questions can need the same
+        // reply; suppressing the second would leave that user with nothing
+        // while the turn reported the entry answered. A skipped send is not a
+        // failure - the text is already in the chat, so it counts as
+        // delivered for the turn's outcome (no endless replay).
+        if (this.deps.conversationManager && !answersInbound) {
           const lastMessage =
             await this.deps.conversationManager.getLastAssistantMessage(recipientId);
           if (lastMessage && lastMessage === text) {

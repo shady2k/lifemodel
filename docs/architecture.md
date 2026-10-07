@@ -135,8 +135,7 @@ callback:
    the sends its own result produces have really started:
 
    - answered: the turn's FINAL send (the one its own result applies) reached
-     the chat, or was skipped as a verbatim repeat of the last assistant
-     message. A turn that ends with no final send counts as answered when the
+     the chat. A turn that ends with no final send counts as answered when the
      acknowledgement it did send reached the chat (an empty final response
      after `core.say` is a valid answer).
    - deliberately silent: no send is involved - `core.defer` or an explicit
@@ -146,6 +145,14 @@ callback:
      acknowledgement that landed does not turn this into `answered`.
    - failed turn: an `error` disposition (provider error, malformed output,
      exhausted retries, forced refusal), whether or not a message went out.
+
+   The proactive duplicate guard (the send path skips a message whose text
+   repeats the last assistant message verbatim) covers sends that answer NO
+   logged inbound message only (lifemodel-q4f). A turn that owns a logged
+   message of the recipient always speaks: two different questions can need the
+   same reply, and suppressing the second answer would leave that user with
+   nothing while the turn reported the entry answered. The guard is therefore
+   never part of an inbound message's outcome.
 
    An `error` disposition wins over the send outcome; without it the FINAL
    send decides between answered and failed send. A FAILED outcome is never

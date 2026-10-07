@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import type { SendMessageIntent } from '../../src/types/intent.js';
 
-import { FakeCognitionLayer } from '../helpers/core-loop-drain-harness.js';
+import { FakeCognitionLayer, thoughtSignal } from '../helpers/core-loop-drain-harness.js';
 import {
   makeDeferred,
   startInboundInstance,
@@ -32,13 +32,14 @@ import {
   waitFor,
   llmRequests,
   seedAssistantAnswer,
+  harnessRecipientId,
   activityOf,
   fenceKilledInstance,
   flushInstanceLogs,
   SETTLE_TICKS,
   type InboundInstance,
 } from '../helpers/inbound-log-harness.js';
-import { openStorage, rmDir } from '../helpers/core-loop-drain-harness.js';
+import { rmDir } from '../helpers/core-loop-drain-harness.js';
 
 const DRAIN_DEADLINE_MS = 150;
 
@@ -351,7 +352,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.inboundLog.size()).toEqual({ total: 1, uncommitted: 0 });
 
     // a restart also does not re-answer the re-delivered update
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -380,7 +381,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'the message that arrives before the stop', 'u-1');
     await waitFor(() => llmRequests(h1) === 1, 'turn started (LLM held)');
 
-    const stopping = stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    const stopping = stopInboundInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     // the turn finishes INSIDE the drain deadline
     h1.cognition.hang = false;
@@ -417,7 +418,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'the overrunning message', 'u-1');
     await waitFor(() => llmRequests(h1) === 1, 'turn started (LLM held)');
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     // the turn recorded no outcome: nothing was sent and the entry stays
     expect(h1.channel.sent).toEqual([]);
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
@@ -452,7 +453,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'queued when the stop arrives', 'u-1');
     expect(h1.coreLoop.pendingSignalCount()).toBe(1);
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     // it never got a turn: uncommitted in the log, queued in the journal too
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
@@ -503,7 +504,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(sentTexts(h1)).toEqual([]);
     expect(h1.inboundLog.size()).toEqual({ total: 1, uncommitted: 1 });
 
-    const stopping = stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    const stopping = stopInboundInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     // the held acknowledgement delivers INSIDE the drain: with it the turn's
     // outcome (answered) is recorded before the channels are released
@@ -564,7 +565,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.inboundLog.size()).toEqual({ total: 1, uncommitted: 1 });
 
     // the answer hangs past the stop deadline: still no outcome, so it is kept
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     expect(sentTexts(h1)).toEqual([expect.stringContaining('working on it')]);
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
@@ -613,7 +614,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       reason: 'returned_false',
     });
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -641,7 +642,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
     expect(h1.channel.sent).toEqual([]);
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'immediate',
       cognitionResult: { disposition: 'no_reply' },
@@ -686,7 +687,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       h1.recordedLogs.filter((l) => l.level === 'warn' && l.msg.includes('reached no outcome'))
     ).toHaveLength(1);
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     // HANG the replayed turn: nothing settles, so the replayed entry is
     // observable (a settling turn would remove it within the same tick).
     const h2 = await startInboundInstance(storagePath, logDir, {
@@ -732,7 +733,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(settled[0]?.obj).toMatchObject({ recipientId: h1.recipientId, outcome: 'failed_turn' });
 
     // the restart does NOT retry it
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
@@ -770,7 +771,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       reason: 'returned_false',
     });
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -810,7 +811,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       reason: 'channel_not_found',
     });
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -836,7 +837,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'hello there', 'u-1');
     await waitFor(() => h1.channel.sendStarted.length === 1, 'send started (now hung)');
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
     // the send never settled -> no outcome -> the entry is still there
     expect(h1.channel.sent).toEqual([]);
     expect((await readLogSize(storagePath)).uncommitted).toBe(1);
@@ -872,7 +873,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       'the rejected turn left its entry in the log'
     );
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
 
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
@@ -908,7 +909,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // both entries are in the log, neither settled (the turn has no outcome)
     expect(h1.inboundLog.size()).toEqual({ total: 2, uncommitted: 2 });
 
-    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await stopInboundInstance(h1);
 
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
@@ -982,7 +983,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'the first message', 'u-1');
     await waitFor(() => llmRequests(h1) === 1, 'turn started (LLM held)');
 
-    const stopping = stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    const stopping = stopInboundInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     // GATE: the drain CLAIMS the turn (clears pendingCognition) before it
     // awaits it - the absorb below happens after that, deterministically
@@ -1040,7 +1041,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'the first message', 'u-1');
     await waitFor(() => llmRequests(h1) === 1, 'turn started (LLM held)');
 
-    const stopping = stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    const stopping = stopInboundInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     await waitFor(
       () => h1.coreLoop.pendingCognitionTickId() === null,
@@ -1080,7 +1081,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h2.channel.sent).toEqual([]);
   });
 
-  it('an identical-text answer is skipped by the duplicate guard and still settles its entry', async () => {
+  it('a new question whose answer repeats the last one is SENT all the same (lifemodel-q4f)', async () => {
     const { storagePath, logDir } = await fresh('ctc2-duptext-');
     // the new question is logged; the process dies before answering it
     const h1 = await startInboundInstance(storagePath, logDir, {
@@ -1091,9 +1092,9 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     instances.push(h1);
     await receiveMessage(h1, 'tell me something', 'u-1');
     await die(h1);
-    // an earlier answer with EXACTLY the text this question will get: the
-    // pre-existing duplicate guard stops the send, so the user is not told
-    // the same thing twice - and the turn still recorded an outcome
+    // an earlier answer with EXACTLY the text this question will get: it
+    // answers a DIFFERENT message, so the duplicate guard must not touch it -
+    // the same words are the right answer to a question never answered before
     await seedAssistantAnswer(storagePath, 'the very same answer', h1.recipientId);
 
     const h2 = await startInboundInstance(storagePath, logDir, {
@@ -1103,16 +1104,79 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       drainTimeoutMs: 5_000,
     });
     instances.push(h2);
-    await waitFor(() => llmRequests(h2) === 1, 'the replayed turn ran');
+    await waitFor(() => h2.channel.sent.length === 1, 'the replayed question is answered');
+    // ...and it really reached the channel: no guard stopped it
+    expect(sentTexts(h2)).toEqual([expect.stringContaining('the very same answer')]);
+    expect(h2.channel.sendStarted).toHaveLength(1);
     await waitFor(
       () => h2.inboundLog.size().uncommitted === 0,
-      'the skipped send is not a failure: the entry settles instead of replaying forever'
+      'the sent answer settles its entry'
     );
-    // nothing reached the channel: the guard stopped it before the send
-    expect(h2.channel.sendStarted).toEqual([]);
-    expect(h2.channel.sent).toEqual([]);
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance ran ticks');
     expect(llmRequests(h2)).toBe(1);
+
+    // the answer is the last assistant message now, so a graceful restart
+    // neither replays the entry nor answers the question twice
+    await stopInboundInstance(h2);
+    const h3 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h3);
+    await waitFor(() => h3.autonomic.ticks() >= SETTLE_TICKS, 'instance 3 ran ticks');
+    expect(llmRequests(h3)).toBe(0);
+    expect(h3.channel.sent).toEqual([]);
+  });
+
+  it('a proactive repeat of the last assistant message is still suppressed (lifemodel-q4f)', async () => {
+    const { storagePath, logDir } = await fresh('q4f-proactive-');
+    // the last thing the agent said, in an EARLIER session: a proactive turn
+    // that would repeat it verbatim answers no inbound message, so the guard
+    // holds - a user must not be told the same thing twice
+    const recipientId = harnessRecipientId();
+    const text = 'the proactive line';
+    await seedAssistantAnswer(storagePath, text, recipientId);
+
+    const h1 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'immediate',
+      recordLogs: true,
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h1);
+    // the seeded recipient is the one this instance answers (no coupling
+    // asserted by hand: the same channel+destination the harness registers)
+    expect(h1.recipientId).toBe(recipientId);
+    const fake = h1.cognition as FakeCognitionLayer;
+    const proactive = (body: string): void => {
+      const send: SendMessageIntent = {
+        type: 'SEND_MESSAGE',
+        payload: { recipientId: h1.recipientId, text: body },
+      };
+      fake.result = { confidence: 1, intents: [send], response: undefined };
+    };
+
+    // a proactive turn repeating the seeded last assistant message: stopped
+    // before the channel, and reported as a skip, never as a failure
+    proactive(text);
+    h1.coreLoop.pushSignal(thoughtSignal('proactive 1', h1.recipientId));
+    await waitFor(
+      () =>
+        h1.recordedLogs.some(
+          (l) => typeof l.msg === 'string' && l.msg.includes('Skipping duplicate message')
+        ),
+      'the duplicate guard stopped the proactive repeat'
+    );
+    expect(h1.channel.sendStarted).toEqual([]);
+    expect(h1.channel.sent).toEqual([]);
+
+    // the same proactive turn with different words goes out: the guard is
+    // about the TEXT, not about proactive sends in general
+    proactive('a different proactive line');
+    h1.coreLoop.pushSignal(thoughtSignal('proactive 2', h1.recipientId));
+    await waitFor(() => h1.channel.sent.length === 1, 'the new proactive message went out');
+    expect(sentTexts(h1)).toEqual([expect.stringContaining('a different proactive line')]);
   });
 });
 

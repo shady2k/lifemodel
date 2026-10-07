@@ -469,7 +469,16 @@ export class CoreLoop {
             ? tickId
             : (this.activeTurnCommits?.tickId ?? this.pendingCognition?.tickId);
         if (turnKey === undefined) return undefined;
-        return { turnKey, final: this.turnCommits.get(turnKey)?.resolved ?? false };
+        const state = this.turnCommits.get(turnKey);
+        return {
+          turnKey,
+          final: state?.resolved ?? false,
+          // The logged inbound messages of THIS recipient the turn owns
+          // (lifemodel-q4f): a send that answers one of them is never a
+          // proactive repeat, however it reads.
+          answersInbound:
+            state !== undefined && this.ownedSeqs(state.turn, intent.payload.recipientId).length > 0,
+        };
       },
       onSendStarted: (turnKey, recipientId, final) => {
         this.onTurnSendStarted(turnKey, recipientId, final);
