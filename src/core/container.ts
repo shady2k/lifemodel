@@ -231,22 +231,30 @@ export interface ShutdownSequenceDeps {
  *
  * 1. Channel intake stops FIRST (new updates are no longer accepted);
  *    updates already accepted sit in pendingSignals, not in the channel.
+ *    Sending keeps working, so the turn drained in step 2 delivers its answer.
  * 2. coreLoop.stop() waits for the COGNITION turn in flight up to
  *    coreLoop.shutdownDrainTimeoutMs (default 90 s) and requeues its
  *    trigger signal past the deadline.
  * 3. Signals accepted but never processed are persisted through
  *    DeferredStorage for the next start to restore.
  * 4. State and registries persist.
- * 5. Storage flushes LAST - nothing may write after it.
+ * 5. Channels stop fully (clients released; sending no longer possible).
+ * 6. Storage flushes LAST - nothing may write after it.
  */
 export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void> {
   const { logger } = deps;
   logger.info('Shutting down...');
 
-  // 1. Stop channel intake first
+  // 1. Stop channel intake first. Channels that separate intake keep sending;
+  //    for those that do not, stop() is the only intake stop and they are
+  //    already fully stopped here (never released twice in step 5).
+  const alreadyStopped = new Set<Channel>();
   for (const channel of deps.channels) {
-    if (channel.stop) {
+    if (channel.stopIntake) {
+      await channel.stopIntake();
+    } else if (channel.stop) {
       await channel.stop();
+      alreadyStopped.add(channel);
     }
   }
   logger.info('Channel intake stopped');
@@ -265,7 +273,14 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   await deps.recipientRegistry.flush();
   await deps.ackRegistry.flush();
 
-  // 5. Storage last: the deferred writes of steps 3-4 reach disk here, and no
+  // 5. Channels stop fully (clients released; after this a send refuses).
+  for (const channel of deps.channels) {
+    if (channel.stop && !alreadyStopped.has(channel)) {
+      await channel.stop();
+    }
+  }
+
+  // 6. Storage last: the deferred writes of steps 3-4 reach disk here, and no
   //    component writes after this flush.
   await deps.storage.shutdown();
 

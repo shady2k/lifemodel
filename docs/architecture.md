@@ -69,17 +69,18 @@ One fixed order, `shutdownSequence` in `src/core/container.ts`:
 
 1. Channel intake stops first — no new updates are accepted from here on.
    Updates already accepted sit in `pendingSignals`, not in the channel.
+   Sending keeps working: the answer the drained turn computes is delivered.
 2. `coreLoop.stop()` waits for the COGNITION turn in flight up to
    `coreLoop.shutdownDrainTimeoutMs` (default 90 s; set through the
    `coreLoop` field of `AppConfig` when the container is created). A turn
-   that finishes within
-   the deadline is applied exactly once. A turn that overruns has its trigger
-   signal requeued.
+   that finishes within the deadline is applied exactly once. A turn that
+   overruns has its trigger signal requeued.
 3. Signals accepted but never processed (`pendingSignals`, plus a requeued
    trigger) are written to the pending-signal journal
    (`data/state/core/pending_signals.json`) through DeferredStorage.
 4. State, recipient and ack registries persist.
-5. DeferredStorage flushes last — nothing writes after it.
+5. Channels stop fully (clients released; after this a send refuses).
+6. DeferredStorage flushes last — nothing writes after it.
 
 On start, `createContainerAsync` restores the journal into `pendingSignals`
 and clears it, so the same signal is processed exactly once. A corrupt or

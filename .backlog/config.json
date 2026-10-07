@@ -48,7 +48,9 @@
   "presentAreas": [
     ""
   ],
-  "presentIgnores": [],
+  "presentIgnores": [
+    "core/pending_signals.json"
+  ],
   "presentChurnCommits": 20,
   "commitLinksFrom": "2026-10-06T22:20:29Z",
   "execution": {

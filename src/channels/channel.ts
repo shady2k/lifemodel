@@ -78,10 +78,19 @@ export interface Channel {
   start?(): Promise<void>;
 
   /**
-   * Stop the channel (stop receiving messages).
-   * Optional - for graceful shutdown.
+   * Stop the channel (stop receiving messages and release the client).
+   * Optional - for graceful shutdown. After a full stop, sendMessage refuses.
    */
   stop?(): Promise<void>;
+
+  /**
+   * Stop the channel's intake only: accept no new input, keep sending.
+   * Optional - the core uses it at the very start of the shutdown sequence
+   * (before the cognition turn in flight is drained) so the turn can still
+   * deliver its answer; the full stop runs later. Channels that do not
+   * separate intake may omit it; the core falls back to stop().
+   */
+  stopIntake?(): Promise<void>;
 
   /**
    * Get circuit breaker statistics.
