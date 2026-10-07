@@ -240,8 +240,8 @@ never finished.
   entry without one replays exactly once at the next start. A stop that hits
   the deadline is best effort like a crash: the steps after it did not run.
 - **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
-  turn recorded no outcome replay once at start; an unprocessed one-shot
-  schedule firing and an unconsumed Motor Cortex result are delivered at start.
+  turn recorded no outcome replay once at start. Signals that were only queued
+  in memory are lost, as on main.
 
 Known crash windows (named, not fixed; one debt item): an update lost between
 receipt and the emit-time flush; an answer delivered while its removal is not
