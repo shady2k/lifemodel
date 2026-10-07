@@ -15,22 +15,23 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createCoreLoop, type CoreLoopConfig, type CoreLoopDeps } from '../../src/core/core-loop.js';
+import {
+  createCoreLoop,
+  type CoreLoopConfig,
+  type CoreLoopDeps,
+} from '../../src/core/core-loop.js';
 import { createAgent } from '../../src/core/agent.js';
 import { RecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
-import { createLogger } from '../../src/core/logger.js';
 import type { Logger } from '../../src/types/logger.js';
 import {
   createJSONStorage,
   createDeferredStorage,
   type DeferredStorage,
 } from '../../src/storage/index.js';
-import {
-  RealCognitionFacade,
-  createRealCognitionProcessor,
-} from './core-loop-real-cognition.js';
+import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
+import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
 import {
   loadPendingSignals,
   persistPendingSignals,
@@ -302,29 +303,7 @@ export function thoughtSignal(text: string, recipientId?: string): Signal {
   );
 }
 
-/** Log lines a test wants to observe (the failure reporting contract). */
-export interface RecordedLog {
-  level: string;
-  obj: Record<string, unknown>;
-  msg: string;
-}
-
-function recordingLogger(base: Logger, calls: RecordedLog[]): Logger {
-  const record = (level: string) => (obj: Record<string, unknown>, msg: string) => {
-    calls.push({ level, obj, msg });
-    base[level](obj, msg);
-  };
-  return {
-    child: (bindings: Record<string, unknown>) =>
-      recordingLogger(base.child(bindings as never), calls),
-    info: record('info'),
-    debug: record('debug'),
-    warn: record('warn'),
-    error: record('error'),
-    trace: record('trace'),
-  } as unknown as Logger;
-}
-
+/** A logger that writes nothing (storage/journal plumbing of a test instance). */
 const noopLogger = {
   child: () => noopLogger,
   info: () => {},
@@ -370,10 +349,9 @@ const TEST_TICK_INTERVAL = 5;
  */
 export async function startInstance(
   storagePath: string,
-  logDir: string,
   opts: HarnessOptions = {}
 ): Promise<CoreLoopInstance> {
-  const base = createLogger({ logDir, level: 'warn', pretty: false });
+  const base = createTestLogger('warn');
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
@@ -491,10 +469,7 @@ export async function stopInstance(
   });
 }
 
-export async function openStorage(
-  storagePath: string,
-  logger?: Logger
-): Promise<DeferredStorage> {
+export async function openStorage(storagePath: string, logger?: Logger): Promise<DeferredStorage> {
   const json = createJSONStorage(storagePath, { logger });
   return createDeferredStorage(json, logger ?? noopLoggerForJournal, { flushIntervalMs: 60_000 });
 }

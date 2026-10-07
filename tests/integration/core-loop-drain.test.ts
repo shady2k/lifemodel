@@ -39,25 +39,25 @@ const SETTLE_TICKS = 5;
 
 const scratchRoots: string[] = [];
 
-async function freshScratch(prefix: string): Promise<{ storagePath: string; logDir: string }> {
+async function freshScratch(prefix: string): Promise<string> {
   const root = await makeScratchDir(prefix);
   scratchRoots.push(root);
-  const storagePath = root;
-  const logDir = `${root}-logs`;
-  return { storagePath, logDir };
+  return root;
 }
 
 afterEach(async () => {
+  // Only the data directory: the instance logger has no transport, so it
+  // creates no log file and needs no flush before the directory goes
+  // (test-logger.ts).
   for (const root of scratchRoots.splice(0)) {
     await rmDir(root);
-    await rmDir(`${root}-logs`);
   }
 });
 
 describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   it('stop during a turn that finishes within the deadline: turn completed once, nothing persisted for redo', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-finish-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-finish-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'immediate',
       drainTimeoutMs: 5_000,
     });
@@ -79,7 +79,7 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     expect((await readJournal(storagePath)).map((s) => s.id)).toEqual([]);
 
     // Fresh start: no redo
-    const h2 = await startInstance(storagePath, logDir, { cognitionMode: 'immediate' });
+    const h2 = await startInstance(storagePath, { cognitionMode: 'immediate' });
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
     expect(h2.cognition.triggerIds()).toEqual([]);
     await h2.coreLoop.stop();
@@ -87,8 +87,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('stop during a turn that overruns the deadline: the trigger is processed exactly once after a fresh start', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-overrun-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-overrun-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -103,7 +103,7 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     expect((await readJournal(storagePath)).map((s) => s.id)).toEqual([trigger.id]);
 
     // Fresh start processes it exactly once
-    const h2 = await startInstance(storagePath, logDir, { cognitionMode: 'immediate' });
+    const h2 = await startInstance(storagePath, { cognitionMode: 'immediate' });
     await waitFor(() => h2.cognition.triggerIds().includes(trigger.id), 'trigger redone');
     expect(h2.cognition.triggerIds()).toEqual([trigger.id]);
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
@@ -115,8 +115,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('an overrunning turn requeues ALL its triggers and the message it absorbed mid-turn', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-own-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-own-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -149,7 +149,7 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
       absorbed.id,
     ]);
 
-    const h2 = await startInstance(storagePath, logDir, { cognitionMode: 'immediate' });
+    const h2 = await startInstance(storagePath, { cognitionMode: 'immediate' });
     await waitFor(() => h2.cognition.triggerIds().includes(absorbed.id), 'redone');
     const ids = h2.cognition.triggerIds();
     expect(ids).toEqual([trigger1.id, trigger2.id, absorbed.id]);
@@ -159,8 +159,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('pending signals at stop: processed after a fresh start, in order, once', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-pending-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-pending-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -191,7 +191,7 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     ]);
 
     // Fresh start processes all three, in order, each exactly once
-    const h2 = await startInstance(storagePath, logDir, { cognitionMode: 'immediate' });
+    const h2 = await startInstance(storagePath, { cognitionMode: 'immediate' });
     await waitFor(() => h2.cognition.triggerIds().includes(second.id), 'messages redone');
     expect(h2.cognition.triggerIds()).toEqual([trigger.id, first.id, second.id]);
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
@@ -202,8 +202,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('a turn that finishes during the drain delivers its answer through a channel that has stopped intake (sent once, success)', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-deliver-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-deliver-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: 5_000,
     });
@@ -236,8 +236,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('a FAILED send during the drain is reported, not silently dropped', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-failsend-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-failsend-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: 5_000,
     });
@@ -261,8 +261,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('a tick suspended after taking signals has its batch journaled, not discarded', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-tickbatch-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-tickbatch-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'immediate',
       drainTimeoutMs: 200,
     });
@@ -282,8 +282,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('stop past the overall deadline continues: a stalled tick and a stalled scheduler do not hang it', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-stall-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-stall-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'immediate',
       drainTimeoutMs: 150,
     });
@@ -299,8 +299,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('container shutdown is idempotent: a second call never overwrites the journal', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-idem-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-idem-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -323,8 +323,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('container.shutdown called twice (sequential and concurrent) keeps the journal', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-idem2-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-idem2-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -348,8 +348,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   // ── real cognition (agentic loop) with a scripted fake LLM provider ──
 
   it('REAL cognition: a turn completing during the stop drain delivers its reply', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-real-finish-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-real-finish-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'The real loop reply' }],
@@ -357,7 +357,11 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     });
     // a user_message trigger: the real agentic loop answers it
     h1.coreLoop.pushSignal(
-      createUserMessageSignal({ text: 'hello there', chatId: 'chat-42', recipientId: h1.recipientId })
+      createUserMessageSignal({
+        text: 'hello there',
+        chatId: 'chat-42',
+        recipientId: h1.recipientId,
+      })
     );
     // the real agentic loop ran exactly once (one LLM completion) ...
     await waitFor(() => h1.cognition.provider.requests.length === 1, 'LLM called once');
@@ -374,8 +378,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('REAL cognition: an overrunning turn is redone exactly once after a fresh start', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-real-overrun-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-real-overrun-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true, // the turn never completes: LLM held
       script: [{ content: 'never reached' }],
@@ -395,7 +399,7 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     h1.cognition.settleHangingTurn();
 
     // fresh start: the real loop redoes the trigger exactly once and delivers
-    const h2 = await startInstance(storagePath, logDir, {
+    const h2 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'The redone real-loop reply' }],
@@ -412,8 +416,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
   });
 
   it('a turn that REJECTS during the drain is logged with the error (err) and its tick id', async () => {
-    const { storagePath, logDir } = await freshScratch('ctc-drain-reject-');
-    const h1 = await startInstance(storagePath, logDir, {
+    const storagePath = await freshScratch('ctc-drain-reject-');
+    const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: 5_000,
       recordLogs: true,
@@ -431,7 +435,8 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     await stopping;
 
     const failLine = h1.recordedLogs.find(
-      (c) => c.level === 'error' && c.msg === 'COGNITION rejected unexpectedly during the stop drain'
+      (c) =>
+        c.level === 'error' && c.msg === 'COGNITION rejected unexpectedly during the stop drain'
     );
     expect(failLine).toBeDefined();
     expect((failLine?.obj as Record<string, unknown>)['err']).toBeInstanceOf(Error);
