@@ -13,30 +13,30 @@
  *         clear the journal, start the loop;
  * stop  = the production shutdownSequence().
  */
-import { createCoreLoop, type CoreLoopConfig, type CoreLoopDeps } from '../../src/core/core-loop.js';
+import {
+  createCoreLoop,
+  type CoreLoopConfig,
+  type CoreLoopDeps,
+} from '../../src/core/core-loop.js';
 import { createAgent } from '../../src/core/agent.js';
 import { RecipientRegistry } from '../../src/core/recipient-registry.js';
+import { createConversationManager } from '../../src/storage/index.js';
+
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
 import { createLogger } from '../../src/core/logger.js';
 import type { Logger } from '../../src/types/logger.js';
 import type { Channel } from '../../src/types/index.js';
-import { createUserMessageSignal, type Signal } from '../../src/types/signal.js';
+import {
+  createUserMessageSignal,
+  type Signal,
+  type UserMessageData,
+} from '../../src/types/signal.js';
 import type { DeferredStorage } from '../../src/storage/index.js';
-import {
-  createInboundLog,
-  dedupKeyOf,
-  type InboundLog,
-} from '../../src/core/inbound-log.js';
-import {
-  loadPendingSignals,
-  clearPendingSignals,
-} from '../../src/core/pending-signal-journal.js';
+import { createInboundLog, dedupKeyOf, type InboundLog } from '../../src/core/inbound-log.js';
+import { loadPendingSignals, clearPendingSignals } from '../../src/core/pending-signal-journal.js';
 import { shutdownSequence } from '../../src/core/container.js';
-import {
-  RealCognitionFacade,
-  createRealCognitionProcessor,
-} from './core-loop-real-cognition.js';
+import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import {
   FakeAutonomicLayer,
   FakeAggregationLayer,
@@ -156,6 +156,31 @@ export class InboundFakeChannel {
    * when the send then hangs. */
   readonly sendStarted: { target: string; text: string }[] = [];
 
+  /** When true, completePhotoReceipt re-fetches like the real channel would. */
+  photoCompletionFails = false;
+  readonly photoCompletions: string[] = [];
+
+  /** A receipt replayed after a restart is re-fetched by the channel. */
+  async completePhotoReceipt(receipt: Signal): Promise<boolean> {
+    const data = receipt.data as
+      | (UserMessageData & { pendingPhoto?: { fileId: string } })
+      | undefined;
+    if (!data?.pendingPhoto || this.photoCompletionFails) {
+      return false;
+    }
+    this.photoCompletions.push(data.pendingPhoto.fileId);
+    const full = createUserMessageSignal({
+      text: data.text,
+      channel: 'telegram',
+      userId: data.userId,
+      recipientId: data.recipientId,
+      ...(data.updateId !== undefined && { updateId: data.updateId }),
+      images: [{ data: 're-fetched-image-data', mediaType: 'image/png' }],
+    });
+    await this.emit(full);
+    return true;
+  }
+
   async sendMessage(
     target: string,
     text: string
@@ -188,11 +213,7 @@ export class InboundFakeChannel {
   }
 }
 
-export function userMessage(
-  text: string,
-  recipientId: string,
-  updateId?: string
-): Signal {
+export function userMessage(text: string, recipientId: string, updateId?: string): Signal {
   return createUserMessageSignal({
     text,
     recipientId,
@@ -203,6 +224,7 @@ export function userMessage(
 export interface InboundInstance {
   coreLoop: ReturnType<typeof createCoreLoop>;
   inboundLog: InboundLog;
+  storagePath: string;
   channel: InboundFakeChannel;
   cognition: FakeCognitionLayer | RealCognitionFacade;
   autonomic: FakeAutonomicLayer;
@@ -216,6 +238,8 @@ export interface InboundInstance {
 export interface HarnessOptions {
   drainTimeoutMs?: number;
   cognitionMode?: 'immediate' | 'hang' | 'real-scripted';
+  /** make completePhotoReceipt fail like a broken channel (finding 7 fallback) */
+  photoCompletionFails?: boolean;
   hang?: boolean;
   script?: {
     content?: string | null;
@@ -266,7 +290,9 @@ export async function startInboundInstance(
     ...(opts.drainTimeoutMs !== undefined && { shutdownDrainTimeoutMs: opts.drainTimeoutMs }),
   };
   const registry = new RecipientRegistry();
+  const conversationManager = createConversationManager(storage as never, logger);
   const channel = new InboundFakeChannel();
+  channel.photoCompletionFails = opts.photoCompletionFails ?? false;
   const coreLoop = createCoreLoop(
     agent as never,
     eventBus as never,
@@ -277,16 +303,36 @@ export async function startInboundInstance(
     {
       recipientRegistry: registry as never,
       inboundLog,
+      conversationManager: conversationManager as never,
       ...cognitionDeps,
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);
   const recipientId = registry.getOrCreate('test', 'chat-42');
 
+  // Inbound wiring BEFORE the replay: a completing channel re-fetched
+  // during the replay emits its full signal through the same callback path
+  // the live channel uses (the container wires the callback at channel
+  // creation, before the replay block).
+  channel.setSignalCallback((signal) => coreLoop.pushInboundSignal(signal));
+
   // container start path: replay uncommitted entries, restore the journal
   // (filtered against the log), clear it, then run (container.ts).
   const replay = inboundLog.replayable();
   for (const entry of replay) {
+    // same as the container: re-register the route the entry carries
+    if (entry.routing && registry.resolve(entry.recipientId) === null) {
+      registry.getOrCreate(entry.routing.channel, entry.routing.destination);
+    }
+    // same as the container: a pending photo receipt is re-fetched by the
+    // channel; on re-fetch failure the receipt itself is queued
+    const data = entry.signal.data as { pendingPhoto?: { fileId?: unknown } } | undefined;
+    if (typeof data?.pendingPhoto?.fileId === 'string') {
+      const completed = await channel.completePhotoReceipt(entry.signal);
+      if (completed) {
+        continue;
+      }
+    }
     coreLoop.pushSignal(entry.signal);
   }
   const restored = await loadPendingSignals(storage, storagePath, logger);
@@ -297,7 +343,6 @@ export async function startInboundInstance(
   await clearPendingSignals(storage, logger);
   await storage.flush();
 
-  channel.setSignalCallback((signal) => coreLoop.pushInboundSignal(signal));
   coreLoop.start();
   return {
     coreLoop,
@@ -310,6 +355,7 @@ export async function startInboundInstance(
     recipientId,
     recordedLogs,
     logger,
+    storagePath,
   };
 }
 
@@ -351,6 +397,26 @@ export async function receiveMessage(
   updateId?: string
 ): Promise<void> {
   await instance.channel.emit(userMessage(text, instance.recipientId, updateId));
+}
+
+/**
+ * Seed the persisted conversation history with an assistant message, as if
+ * the answer had been delivered before the crash named window (finding 10).
+ * Uses the REAL ConversationManager over the instance's own data dir.
+ */
+export async function seedAssistantAnswer(
+  storagePath: string,
+  text: string,
+  recipientId: string
+): Promise<void> {
+  const storage = await openStorage(storagePath);
+  const manager = createConversationManager(storage as never, noopLogger);
+  await manager.addMessage(recipientId, { role: 'assistant', content: text });
+  const last = await manager.getLastAssistantMessage(recipientId);
+  if (last !== text) {
+    throw new Error(`conversation seeding failed: stored ${String(last)}`);
+  }
+  await storage.flush();
 }
 
 /** Read the log's size through a FRESH storage handle (what a new process sees). */

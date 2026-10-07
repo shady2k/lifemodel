@@ -16,20 +16,34 @@
  * only to the recipient whose answer was not delivered.
  *
  * Commits are tied to cognition turns by CoreLoop: a turn owns the log
- * entries of its trigger signals and of the messages it absorbed mid-loop;
- * CoreLoop commits them per recipient when the turn settles and every send
- * of that turn to that recipient succeeded - or when the turn settled with
- * no send at all (core.defer, a message that needs no reply). A rejecting,
- * overrunning turn or a failed/hung send never commits: the entry stays in
- * the log and is replayed once at the next start.
+ * entries of the recipient it answers (its first trigger) and of the
+ * messages it absorbed mid-loop for that recipient; CoreLoop commits them
+ * when the turn settles with that recipient's answer delivered - or when
+ * the turn settles with no send at all (the owner decision for zero-send
+ * resolution is pending, lifemodel-ctc review round 2 finding 4). A
+ * rejecting, overrunning turn or a failed/hung/unsent send never commits:
+ * the entry stays in the log and is replayed once at the next start.
  *
- * Compaction keeps the file bounded: committed entries are dropped, while
- * the dedup index survives (Telegram update ids are monotone, so the
- * highest seen update id plus a bounded ring of recent keys is enough).
+ * The file is bounded by compaction: committed entries drop, and the dedup
+ * index is a bounded ring of recent keys (review round 2, findings 5-6: no
+ * update-id watermark - Telegram may legitimately pick a RANDOM update_id
+ * again, smaller than any before it, after a week of silence; exact keys
+ * plus the recent ring are the only sound dedup, because Telegram
+ * re-delivers only recent unconfirmed updates).
+ *
+ * Each entry also carries the ROUTING data (channel, destination) that the
+ * answer needs: a first message of a new chat can outlive the registry's
+ * debounce, so replay re-registers the route from the entry.
+ *
+ * A durable photo receipt (pendingPhoto) is appended at handler entry; the
+ * completed photo message REPLACES that entry in place (still one entry per
+ * update) and is queued. A crash mid-download replays the receipt, which
+ * the channel then completes by re-fetching the file (or queues it as its
+ * caption text on failure).
  *
  * The persisted file is a versioned envelope under the unified storage path;
- * a missing file is a fresh log (first run), a corrupt one fails loudly with
- * its path and the original error as `cause`.
+ * a missing file is a fresh log (first run), a corrupt or foreign-version
+ * one fails loudly with its path and the original error as `cause`.
  */
 import { join } from 'node:path';
 
@@ -41,13 +55,19 @@ import { encodeDates, decodeDates } from '../utils/json-dates.js';
 /** Colon-delimited storage key; maps to <statePath>/core/inbound_log.json. */
 export const INBOUND_LOG_KEY = 'core:inbound_log';
 
-const ENVELOPE_VERSION = 1;
+const ENVELOPE_VERSION = 2;
 
 /** Default number of entries before a commit compacts them away. */
 const DEFAULT_MAX_ENTRIES = 1_000;
 
-/** Default size of the recent-keys ring (non-monotone dedup fallback). */
+/** Default size of the recent-keys ring (the dedup memory beyond compaction). */
 const DEFAULT_MAX_RECENT_KEYS = 1_000;
+
+/** Routing data an answer after a restart needs (review round 2, finding 1). */
+export interface EntryRouting {
+  channel: string;
+  destination: string;
+}
 
 export interface InboundLogEntry {
   /** Monotone append-order sequence number across all recipients. */
@@ -56,6 +76,8 @@ export interface InboundLogEntry {
   key: string;
   /** Opaque recipient the answer for this message goes to. */
   recipientId: string;
+  /** The routing the answer must use after a restart (null when unknown). */
+  routing: EntryRouting | null;
   /** The signal as the channel emitted it. */
   signal: Signal;
 }
@@ -63,6 +85,8 @@ export interface InboundLogEntry {
 export interface ReplayEntry {
   seq: number;
   signal: Signal;
+  routing: EntryRouting | null;
+  recipientId: string;
 }
 
 /** A recipient's consumer offset: everything <= committedThrough is committed
@@ -74,18 +98,17 @@ export interface RecipientProgress {
 }
 
 interface InboundLogEnvelope {
-  version: 1;
+  version: 2;
   savedAt: string;
   nextSeq: number;
-  /** Highest Telegram update id ever appended (monotone dedup index). */
-  maxUpdateId: string | null;
-  /** Bounded ring of recent dedup keys for non-monotone sources. */
+  /** Bounded ring of recent dedup keys (the compaction-surviving dedup index). */
   recentKeys: string[];
   recipients: Record<string, RecipientProgress>;
   entries: {
     seq: number;
     key: string;
     recipientId: string;
+    routing: EntryRouting | null;
     /** Date-encoded signal (as it is stored in the file). */
     signal: Signal;
   }[];
@@ -104,6 +127,12 @@ export function dedupKeyOf(signal: Signal): string {
 export function recipientIdOf(signal: Signal): string {
   const data = signal.data as { recipientId?: unknown } | undefined;
   return typeof data?.recipientId === 'string' ? data.recipientId : '';
+}
+
+/** True while the entry's payload is a photo still being downloaded. */
+export function isPhotoReceipt(signal: Signal): boolean {
+  const data = signal.data as { pendingPhoto?: unknown } | undefined;
+  return data !== undefined && typeof data === 'object' && data.pendingPhoto != null;
 }
 
 export interface InboundLogConfig {
@@ -131,15 +160,6 @@ export interface InboundLogDeps {
   config?: InboundLogConfig;
 }
 
-/**
- * True if both keys are plain integers and seen is strictly newer. Telegram
- * update ids grow monotonically, so "at or below the newest seen id" implies
- * the update was already observed.
- */
-function isNewerNumeric(a: string, b: string | null): boolean {
-  return /^\d+$/.test(a) && b !== null && /^\d+$/.test(b) && BigInt(a) > BigInt(b);
-}
-
 export class InboundLog {
   private readonly storage: DurablyFlushingStorage;
   private readonly logger: Logger;
@@ -148,12 +168,17 @@ export class InboundLog {
   private readonly maxRecentKeys: number;
 
   private envelope: InboundLogEnvelope = InboundLog.freshEnvelope();
-  /** seq -> entry index of the current envelope (parallel to entries). */
-  private readonly bySeq = new Map<number, { key: string; recipientId: string }>();
+  /** key -> seq, and seq -> array index, both rebuilt on load/compact/change. */
+  private readonly keyIndex = new Map<string, number>();
+  private readonly seqIndex = new Map<number, number>();
   /** signal id -> seq, for ownership mapping from CoreLoop. */
   private readonly seqBySignalId = new Map<string, number>();
 
-  /** Serializes record()/commit() so the file never interleaves. */
+  /**
+   * REAL serialization of record()/commit(): every operation runs on the
+   * chain; the tail is always reassigned (review round 2, finding 13), and
+   * an operation's failure never bricks the chain for later ones.
+   */
   private chain: Promise<void> = Promise.resolve();
 
   constructor(deps: InboundLogDeps) {
@@ -166,20 +191,35 @@ export class InboundLog {
 
   private static freshEnvelope(): InboundLogEnvelope {
     return {
-      version: 1,
+      version: 2,
       savedAt: new Date().toISOString(),
       nextSeq: 1,
-      maxUpdateId: null,
       recentKeys: [],
       recipients: {},
       entries: [],
     };
   }
 
+  private enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(op);
+    // The tail swallows the error so later operations still run; the caller
+    // gets the original rejection through `run`.
+    this.chain = run.then(
+      () => undefined,
+      (error: unknown) => {
+        this.logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Inbound log operation failed; the chain continues for later operations'
+        );
+      }
+    );
+    return run;
+  }
+
   /**
-   * Load the persisted log. A missing file is a fresh log; a corrupt one
-   * fails loudly with the file path and the cause - an unreadable inbound
-   * log must never be treated as empty.
+   * Load the persisted log. A missing file is a fresh log; a corrupt one (or
+   * a foreign envelope version) fails loudly with the file path and the
+   * cause - an unreadable inbound log must never be treated as empty.
    */
   async load(): Promise<void> {
     let raw: unknown;
@@ -199,27 +239,38 @@ export class InboundLog {
       return;
     }
     const decoded = decodeDates(raw) as Partial<InboundLogEnvelope>;
+    const rawVersion = (decoded as { version?: unknown } | null)?.version;
     if (
       decoded === null ||
       typeof decoded !== 'object' ||
-      decoded.version !== ENVELOPE_VERSION ||
+      rawVersion !== ENVELOPE_VERSION ||
       typeof decoded.nextSeq !== 'number' ||
       !Array.isArray(decoded.entries) ||
       typeof decoded.recipients !== 'object' ||
       decoded.recipients === null
     ) {
-      throw new Error(`Corrupt durable inbound log at ${this.path}: unexpected envelope shape`, {
-        cause: raw instanceof Error ? raw : new Error(JSON.stringify(raw).slice(0, 500)),
-      });
+      throw new Error(
+        `Corrupt durable inbound log at ${this.path}: unexpected envelope shape (version ${
+          typeof rawVersion === 'number' ? String(rawVersion) : 'unknown'
+        }, expected ${String(ENVELOPE_VERSION)})`,
+        { cause: raw instanceof Error ? raw : new Error(JSON.stringify(raw).slice(0, 500)) }
+      );
     }
     for (const entry of decoded.entries) {
-      const e = entry as { seq?: unknown; key?: unknown; recipientId?: unknown; signal?: unknown };
+      const e = entry as {
+        seq?: unknown;
+        key?: unknown;
+        recipientId?: unknown;
+        routing?: unknown;
+        signal?: unknown;
+      };
       if (
         typeof e.seq !== 'number' ||
         typeof e.key !== 'string' ||
         typeof e.recipientId !== 'string' ||
         typeof e.signal !== 'object' ||
-        e.signal === null
+        e.signal === null ||
+        !(e.routing === null || (typeof e.routing === 'object' && e.routing !== null))
       ) {
         throw new Error(`Corrupt durable inbound log at ${this.path}: invalid entry`, {
           cause: new Error(JSON.stringify(entry).slice(0, 500)),
@@ -236,7 +287,6 @@ export class InboundLog {
       version: ENVELOPE_VERSION,
       savedAt: typeof decoded.savedAt === 'string' ? decoded.savedAt : new Date().toISOString(),
       nextSeq: decoded.nextSeq,
-      maxUpdateId: typeof decoded.maxUpdateId === 'string' ? decoded.maxUpdateId : null,
       recentKeys: Array.isArray(decoded.recentKeys)
         ? decoded.recentKeys.filter((k): k is string => typeof k === 'string')
         : [],
@@ -246,67 +296,131 @@ export class InboundLog {
     this.indexEnvelope();
   }
 
-  /** Build the in-memory lookup indexes from the envelopes entries. */
+  /** Rebuild the in-memory lookup indexes from the envelope's entries. */
   private indexEnvelope(): void {
-    this.bySeq.clear();
+    this.keyIndex.clear();
+    this.seqIndex.clear();
     this.seqBySignalId.clear();
-    for (const entry of this.envelope.entries) {
-      this.bySeq.set(entry.seq, { key: entry.key, recipientId: entry.recipientId });
+    this.envelope.entries.forEach((entry, idx) => {
+      this.keyIndex.set(entry.key, entry.seq);
+      this.seqIndex.set(entry.seq, idx);
       this.seqBySignalId.set(entry.signal.id, entry.seq);
-    }
+    });
   }
 
-  /** True if this dedup key was already appended (entry, ring or monotone range). */
+  /** True if this dedup key was already appended (an entry, or the recent ring). */
   hasKey(key: string): boolean {
-    for (const entry of this.bySeq.values()) {
-      if (entry.key === key) return true;
-    }
-    if (this.envelope.recentKeys.includes(key)) return true;
-    // Telegram update ids grow monotonically: at or below the newest seen id
-    // means the very same update was observed before. Non-numeric keys
-    // (signal-id fallback) are only deduplicated by the indexes above.
-    if (!/^\d+$/.test(key)) {
-      return false;
-    }
-    return this.envelope.maxUpdateId !== null && !isNewerNumeric(key, this.envelope.maxUpdateId);
+    if (this.keyIndex.has(key)) return true;
+    return this.envelope.recentKeys.includes(key);
   }
 
   /**
-   * Append a user_message signal and make it durable at once. Returns false
-   * when the update was seen before (by update_id or signal id): it must not
-   * be queued, replayed or answered twice.
+   * Append a user_message signal and make it durable at once (review round 2,
+   * finding 8: a failed flush rolls the in-memory admission back and rejects,
+   * so the update is NOT acknowledged as handled).
+   *
+   * Returns false when the update was seen before (by exact dedup key):
+   * it must not be queued, replayed or answered twice.
    */
-  async record(signal: Signal): Promise<boolean> {
-    return this.chain.then(() => this.recordNow(signal));
+  record(signal: Signal, routing?: EntryRouting | null): Promise<boolean> {
+    return this.enqueue(() => this.recordNow(signal, routing ?? null));
   }
 
-  private async recordNow(signal: Signal): Promise<boolean> {
+  private async recordNow(signal: Signal, routing: EntryRouting | null): Promise<boolean> {
     const key = dedupKeyOf(signal);
-    if (this.hasKey(key)) {
-      this.logger.debug({ key, signalId: signal.id }, 'Duplicate inbound update dropped');
+    const existingSeq = this.keyIndex.get(key);
+    if (existingSeq !== undefined) {
+      return this.admitAgain(existingSeq, signal);
+    }
+    // The recent-keys ring: an id a compacted entry once carried (or any
+    // recently observed key) is a duplicate too (findings 5-6: exact keys
+    // govern, no watermark).
+    if (this.envelope.recentKeys.includes(key)) {
+      this.logger.debug({ key }, 'Duplicate inbound update dropped (recent keys)');
       return false;
     }
     const seq = this.envelope.nextSeq;
+    const entry = { seq, key, recipientId: recipientIdOf(signal), routing, signal };
+
+    // Append + index mutations; wiped below if the flush fails.
     this.envelope.nextSeq = seq + 1;
-    const entry = {
-      seq,
-      key,
-      recipientId: recipientIdOf(signal),
-      signal: signal,
-    };
+    const recentLenBefore = this.envelope.recentKeys.length;
     this.envelope.entries.push(entry);
     this.envelope.recentKeys.push(key);
     if (this.envelope.recentKeys.length > this.maxRecentKeys) {
-      this.envelope.recentKeys = this.envelope.recentKeys.slice(-this.maxRecentKeys);
+      this.envelope.recentKeys.splice(0, this.envelope.recentKeys.length - this.maxRecentKeys);
     }
-    if (isNewerNumeric(key, this.envelope.maxUpdateId)) {
-      this.envelope.maxUpdateId = key;
-    }
-    this.bySeq.set(seq, { key, recipientId: entry.recipientId });
+    this.keyIndex.set(key, seq);
+    this.seqIndex.set(seq, this.envelope.entries.length - 1);
     this.seqBySignalId.set(signal.id, seq);
-    await this.persist();
-    this.logger.debug({ seq, recipientId: entry.recipientId }, 'Inbound message logged durably');
+    try {
+      await this.persist();
+    } catch (error) {
+      this.rollbackAppend(seq, signal.id, key, recentLenBefore);
+      throw error;
+    }
+    this.logger.debug(
+      { seq, recipientId: entry.recipientId, routing: entry.routing },
+      'Inbound message logged durably'
+    );
     return true;
+  }
+
+  /**
+   * The entry behind `seq` exists and its key matched again:
+   * - an uncommitted photo receipt is REPLACED by the completed photo
+   *   message in place (still one entry per update) and admits again;
+   * - anything else is a plain duplicate.
+   */
+  private async admitAgain(seq: number, signal: Signal): Promise<boolean> {
+    const idx = this.seqIndex.get(seq);
+    const entry = idx !== undefined ? this.envelope.entries[idx] : undefined;
+    if (entry === undefined || !isPhotoReceipt(entry.signal)) {
+      this.logger.debug({ key: entry?.key ?? seq }, 'Duplicate inbound update dropped');
+      return false;
+    }
+    if (this.isCommitted(seq)) {
+      this.logger.debug({ key: entry.key }, 'Completed photo arrived after its entry committed');
+      return false;
+    }
+    const previousSignal = entry.signal;
+    entry.signal = signal;
+    try {
+      await this.persist();
+    } catch (error) {
+      // The in-place replacement did not become durable: put the receipt
+      // back, so the pending download stays the entry on disk.
+      entry.signal = previousSignal;
+      throw error;
+    }
+    this.seqBySignalId.set(signal.id, seq);
+    this.logger.debug({ seq, key: entry.key }, 'Pending photo receipt completed in place');
+    return true;
+  }
+
+  /** Wipe everything recordNow added when the flush failed (finding 8). */
+  private rollbackAppend(
+    seq: number,
+    signalId: string,
+    key: string,
+    recentLenBefore: number
+  ): void {
+    const idx = this.seqIndex.get(seq);
+    if (idx !== undefined && this.envelope.entries[idx]?.seq === seq) {
+      this.envelope.entries.splice(idx, 1);
+    }
+    this.envelope.nextSeq = Math.min(this.envelope.nextSeq, seq);
+    if (this.envelope.recentKeys.length > recentLenBefore) {
+      this.envelope.recentKeys.length = recentLenBefore;
+    }
+    if (this.keyIndex.get(key) === seq) {
+      this.keyIndex.delete(key);
+    }
+    this.seqIndex.delete(seq);
+    if (this.seqBySignalId.get(signalId) === seq) {
+      this.seqBySignalId.delete(signalId);
+    }
+    this.logger.warn({ seq, key }, 'Inbound append rolled back: the durable flush failed');
   }
 
   /** In-memory seq for a signal id the log holds (or undefined). */
@@ -316,8 +430,9 @@ export class InboundLog {
 
   /** Whether the entry behind this seq is committed for its recipient. */
   isCommitted(seq: number): boolean {
-    const entry = this.bySeq.get(seq);
-    if (!entry) return false;
+    const idx = this.seqIndex.get(seq);
+    const entry = idx !== undefined ? this.envelope.entries[idx] : undefined;
+    if (entry === undefined) return false;
     const progress = this.progressFor(entry.recipientId);
     return seq <= progress.committedThrough || progress.committedBeyond.includes(seq);
   }
@@ -338,7 +453,12 @@ export class InboundLog {
     const out: ReplayEntry[] = [];
     for (const entry of this.envelope.entries) {
       if (!this.isCommitted(entry.seq)) {
-        out.push({ seq: entry.seq, signal: entry.signal });
+        out.push({
+          seq: entry.seq,
+          signal: entry.signal,
+          routing: entry.routing,
+          recipientId: entry.recipientId,
+        });
       }
     }
     return out;
@@ -350,24 +470,27 @@ export class InboundLog {
    * file grows past the bound.
    */
   async commit(seqs: number[]): Promise<void> {
-    return this.chain.then(() => {
-      for (const seq of seqs) {
-        const entry = this.bySeq.get(seq);
-        if (!entry) {
-          this.logger.warn({ seq }, 'Commit asked for an unknown inbound log seq; ignored');
-          continue;
-        }
-        const progress = this.progressFor(entry.recipientId);
-        if (seq <= progress.committedThrough || progress.committedBeyond.includes(seq)) {
-          continue;
-        }
-        if (seq > progress.committedThrough) {
-          progress.committedBeyond.push(seq);
-        }
-        this.advanceProgress(entry.recipientId);
+    return this.enqueue(() => this.commitNow(seqs));
+  }
+
+  private async commitNow(seqs: number[]): Promise<void> {
+    for (const seq of seqs) {
+      const idx = this.seqIndex.get(seq);
+      const entry = idx !== undefined ? this.envelope.entries[idx] : undefined;
+      if (entry === undefined) {
+        this.logger.warn({ seq }, 'Commit asked for an unknown inbound log seq; ignored');
+        continue;
       }
-      return this.persist();
-    });
+      const progress = this.progressFor(entry.recipientId);
+      if (seq <= progress.committedThrough || progress.committedBeyond.includes(seq)) {
+        continue;
+      }
+      if (seq > progress.committedThrough) {
+        progress.committedBeyond.push(seq);
+      }
+      this.advanceProgress(entry.recipientId);
+    }
+    await this.persist();
   }
 
   /** Sort and trim committedBeyond, raising committedThrough as far as possible. */
@@ -414,25 +537,24 @@ export class InboundLog {
   }
 
   private async persist(): Promise<void> {
-    if (this.envelope.entries.length > this.maxEntries) {
-      this.compact();
-    }
     this.envelope.savedAt = new Date().toISOString();
     await this.storage.save(INBOUND_LOG_KEY, encodeDates(this.envelope));
     // createInboundLog() guaranteed a flushing storage: this await is the
     // durability point of every record() and commit().
     await this.storage.flush?.();
+    // Compaction only runs after a SUCCESSFUL flush: its own in-memory
+    // rewrite can then never diverge from what record() will roll back.
+    if (this.envelope.entries.length > this.maxEntries) {
+      this.compact();
+      await this.storage.save(INBOUND_LOG_KEY, encodeDates(this.envelope));
+      await this.storage.flush?.();
+    }
   }
 
-  /** Drop committed entries; keep the dedup index bounded (update ids monotone). */
+  /** Drop committed entries; the recent-keys ring keeps the dedup memory bounded. */
   private compact(): void {
     const before = this.envelope.entries.length;
-    this.envelope.entries = this.envelope.entries.filter((entry) => {
-      const progress = this.progressFor(entry.recipientId);
-      const committed =
-        entry.seq <= progress.committedThrough || progress.committedBeyond.includes(entry.seq);
-      return !committed;
-    });
+    this.envelope.entries = this.envelope.entries.filter((entry) => !this.isCommitted(entry.seq));
     // All remaining entries are uncommitted: hole marks beyond the prefix
     // that point at removed entries are moot.
     const remaining = new Set(this.envelope.entries.map((e) => e.seq));

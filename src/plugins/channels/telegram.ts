@@ -2,7 +2,7 @@ import { Bot, GrammyError } from 'grammy';
 import type { Context } from 'grammy';
 import type { MessageReactionUpdated } from 'grammy/types';
 import type { Logger, Signal } from '../../types/index.js';
-import type { ImageAttachment } from '../../types/signal.js';
+import type { ImageAttachment, UserMessageData } from '../../types/signal.js';
 import { createUserMessageSignal, createMessageReactionSignal } from '../../types/index.js';
 import type { CircuitBreaker } from '../../core/circuit-breaker.js';
 import { createCircuitBreaker } from '../../core/circuit-breaker.js';
@@ -133,6 +133,9 @@ export function splitMessage(text: string, maxLength = TELEGRAM_MAX_LENGTH): str
 
 /** How long stopIntake waits for in-flight inbound handlers (bounded). */
 const IN_FLIGHT_EMIT_DRAIN_MS = 5_000;
+
+/** Photos above this size are refused (handler entry + after download). */
+const PHOTO_MAX_BYTES = 5 * 1024 * 1024; // 5MB
 
 /**
  * Telegram channel using grammY.
@@ -486,107 +489,229 @@ export class TelegramChannel implements Channel {
     // Filter by allowed chat IDs if configured
     const allowedChatIds = this.config.allowedChatIds;
     if (allowedChatIds && allowedChatIds.length > 0 && !allowedChatIds.includes(chatId)) {
-      this.logger?.debug({ chatId }, 'Ignoring photo from non-allowed chat ID');
+      this.logger?.debug({ chatId, allowedChatIds }, 'Ignoring photo from non-allowed chat ID');
       return;
     }
 
-    const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5MB
+    // Get largest photo (grammY sorts ascending by size)
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    if (!photo) return;
 
-    try {
-      // Get largest photo (grammY sorts ascending by size)
-      const photo = ctx.message.photo[ctx.message.photo.length - 1];
-      if (!photo) return;
-
-      // Pre-check size from Telegram metadata (if available)
-      if (photo.file_size && photo.file_size > MAX_PHOTO_BYTES) {
-        this.logger?.warn({ fileSize: photo.file_size }, 'Photo too large, skipping');
-        return;
-      }
-
-      // Download the photo
-      const file = await ctx.api.getFile(photo.file_id);
-      if (!file.file_path) {
-        this.logger?.warn('Photo file_path missing from Telegram API response');
-        return;
-      }
-
-      // Build download URL (not logged — contains bot token)
-      const downloadUrl = `https://api.telegram.org/file/bot${this.config.botToken}/${file.file_path}`;
-      const response = await fetch(downloadUrl);
-
-      if (!response.ok) {
-        this.logger?.warn(
-          { status: response.status, statusText: response.statusText },
-          'Photo download failed'
-        );
-        return;
-      }
-
-      const buffer = await response.arrayBuffer();
-
-      // Post-download size guard
-      if (buffer.byteLength > MAX_PHOTO_BYTES) {
-        this.logger?.warn(
-          { byteLength: buffer.byteLength },
-          'Photo too large after download, skipping'
-        );
-        return;
-      }
-
-      const base64 = Buffer.from(buffer).toString('base64');
-
-      // Determine media type: prefer Content-Type header, fall back to extension
-      let mediaType = response.headers.get('content-type') ?? '';
-      if (!mediaType.startsWith('image/')) {
-        const ext = file.file_path.split('.').pop()?.toLowerCase();
-        mediaType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-      }
-
-      const userId = ctx.from.id.toString();
-      const destination = chatId;
+    // Pre-check size from Telegram metadata (if available)
+    if (photo.file_size && photo.file_size > PHOTO_MAX_BYTES) {
+      this.logger?.warn({ fileSize: photo.file_size }, 'Photo too large, skipping');
+      // Keep the durable receipt uncommitted: a smaller future variant (a
+      // re-sent photo) still completes through replay. The current update
+      // itself must not wedge the log in a never-committed state, so the
+      // caption-only fallback is queued here too.
       const text = ctx.message.caption ?? '[Photo]';
-      const recipientId = this.recipientRegistry.getOrCreate(this.name, destination);
-
-      const image: ImageAttachment = { data: base64, mediaType };
-      const correlationId = ctx.message.message_id.toString();
+      const recipientId = this.recipientRegistry.getOrCreate(this.name, chatId);
       const updateId =
         ctx.update?.update_id !== undefined ? String(ctx.update.update_id) : undefined;
-      const signal = createUserMessageSignal(
+      const fallback = createUserMessageSignal(
+        {
+          text,
+          channel: 'telegram',
+          userId: ctx.from.id.toString(),
+          recipientId,
+          ...(updateId === undefined ? {} : { updateId }),
+        },
+        { correlationId: ctx.message.message_id.toString() }
+      );
+      const span = `photo_${String(ctx.message.message_id)}`;
+      await this.emitSignal(fallback, span);
+      return;
+    }
+
+    const userId = ctx.from.id.toString();
+    const text = ctx.message.caption ?? '[Photo]';
+    const recipientId = this.recipientRegistry.getOrCreate(this.name, chatId);
+    const correlationId = ctx.message.message_id.toString();
+    const updateId = ctx.update?.update_id !== undefined ? String(ctx.update.update_id) : undefined;
+    const span = `photo_${String(ctx.message.message_id)}`;
+
+    // DURABLE RECEIPT at handler entry (review round 2, finding 7): a stop or
+    // kill during getFile/fetch confirms the update without losing the photo -
+    // the receipt is on disk before any network work, and a restart re-fetches
+    // it through completePhotoReceipt().
+    const receipt = createUserMessageSignal(
+      {
+        text,
+        channel: 'telegram',
+        userId,
+        recipientId,
+        pendingPhoto: { fileId: photo.file_id },
+        ...(updateId === undefined ? {} : { updateId }),
+      },
+      { correlationId }
+    );
+    await withTraceContext(createTraceContext(receipt.id, { correlationId, spanId: span }), () => {
+      this.logger?.debug(
+        { signalId: receipt.id, fileName: photo.file_id, recipientId },
+        'Photo received; durable receipt recorded before the download'
+      );
+      return this.emitSignal(receipt, span);
+    });
+
+    let completed: { base64: string; mediaType: string } | null = null;
+    try {
+      completed = await this.downloadPhoto(photo.file_id, PHOTO_MAX_BYTES);
+    } catch (error) {
+      this.logger?.error(
+        { error: error instanceof Error ? error.message : String(error), fileName: photo.file_id },
+        'Failed to download incoming photo; the caption-only fallback is queued'
+      );
+    }
+
+    if (completed === null) {
+      // Deliver the receipt as a plain caption-only message now (rather than
+      // an entry that can never commit): the durable log replaces the receipt
+      // payload with it, so no photo-less duplicate can replay later.
+      const fallback = createUserMessageSignal(
         {
           text,
           channel: 'telegram',
           userId,
           recipientId,
-          images: [image],
-          ...(updateId !== undefined && { updateId }),
+          ...(updateId === undefined ? {} : { updateId }),
         },
         { correlationId }
       );
-
-      // Wrap callback in trace context (same pattern as onMessage; awaited
-      // so the durable inbox flush completes at emit time)
-      const span = `photo_${String(ctx.message.message_id)}`;
-      await withTraceContext(createTraceContext(signal.id, { correlationId, spanId: span }), () => {
-        if (this.signalCallback) {
+      await withTraceContext(
+        createTraceContext(fallback.id, { correlationId, spanId: span }),
+        () => {
           this.logger?.debug(
-            {
-              signalId: signal.id,
-              userId,
-              recipientId,
-              hasCaption: !!ctx.message.caption,
-              imageSize: buffer.byteLength,
-              mediaType,
-            },
-            'Photo received as Signal'
+            { signalId: fallback.id, recipientId },
+            'Photo download unavailable; the caption-only message is queued'
           );
+          return this.emitSignal(fallback, span);
         }
-        return this.emitSignal(signal, span);
-      });
+      );
+      return;
+    }
+
+    const image: ImageAttachment = { data: completed.base64, mediaType: completed.mediaType };
+    const signal = createUserMessageSignal(
+      {
+        text,
+        channel: 'telegram',
+        userId,
+        recipientId,
+        images: [image],
+        ...(updateId === undefined ? {} : { updateId }),
+      },
+      { correlationId }
+    );
+
+    // Wrap callback in trace context (same pattern as onMessage; awaited
+    // so the durable inbox flush completes at emit time)
+    await withTraceContext(createTraceContext(signal.id, { correlationId, spanId: span }), () => {
+      this.logger?.debug(
+        {
+          signalId: signal.id,
+          userId,
+          recipientId,
+          hasCaption: !!ctx.message.caption,
+          mediaType: completed?.mediaType,
+        },
+        'Photo received as Signal'
+      );
+      return this.emitSignal(signal, span);
+    });
+  }
+
+  /**
+   * Download a photo by file_id: getFile for the path, then the file (not
+   * logged - the URL contains the bot token). Returns null when the photo
+   * is unusable (missing path, HTTP error, oversized), throws on transport
+   * errors.
+   */
+  private async downloadPhoto(
+    fileId: string,
+    maxBytes: number
+  ): Promise<{ base64: string; mediaType: string } | null> {
+    const file = await this.bot?.api.getFile(fileId);
+    if (!file?.file_path) {
+      this.logger?.warn('Photo file_path missing from Telegram API response');
+      return null;
+    }
+    // Build download URL (not logged - contains bot token)
+    const downloadUrl = `https://api.telegram.org/file/bot${this.config.botToken}/${file.file_path}`;
+    const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      this.logger?.warn(
+        { status: response.status, statusText: response.statusText },
+        'Photo download failed'
+      );
+      return null;
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      this.logger?.warn(
+        { byteLength: buffer.byteLength },
+        'Photo too large after download, skipping'
+      );
+      return null;
+    }
+    const base64 = Buffer.from(buffer).toString('base64');
+    // Determine media type: prefer Content-Type header, fall back to extension
+    let mediaType = response.headers.get('content-type') ?? '';
+    if (!mediaType.startsWith('image/')) {
+      const ext = file.file_path.split('.').pop()?.toLowerCase();
+      mediaType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+    }
+    return { base64, mediaType };
+  }
+
+  /**
+   * Complete a replayed pendingPhoto receipt after a restart: re-fetch the
+   * file and emit the full photo message through the same awaited callback
+   * (review round 2, finding 7). Returns false when the photo cannot be
+   * fetched; the caller then queues the receipt itself as its caption text.
+   */
+  async completePhotoReceipt(receipt: Signal): Promise<boolean> {
+    const data = receipt.data as
+      | (UserMessageData & { pendingPhoto?: { fileId: string } })
+      | undefined;
+    if (!data?.pendingPhoto || typeof data.pendingPhoto.fileId !== 'string') {
+      return false;
+    }
+    const route = this.recipientRegistry.resolve(data.recipientId ?? '');
+    if (!route) {
+      this.logger?.warn(
+        { signalId: receipt.id },
+        'Cannot complete a photo receipt without its route'
+      );
+      return false;
+    }
+    try {
+      const completed = await this.downloadPhoto(data.pendingPhoto.fileId, PHOTO_MAX_BYTES);
+      if (completed === null) {
+        return false;
+      }
+      const updateId = typeof data.updateId === 'string' ? data.updateId : undefined;
+      const signal = createUserMessageSignal(
+        {
+          text: data.text,
+          channel: 'telegram',
+          ...(data.userId !== undefined && { userId: data.userId }),
+          recipientId: data.recipientId,
+          images: [{ data: completed.base64, mediaType: completed.mediaType }],
+          ...(updateId === undefined ? {} : { updateId }),
+        },
+        { correlationId: receipt.correlationId ?? receipt.id }
+      );
+      await this.emitSignal(signal, 'photo_receipt_complete');
+      return true;
     } catch (error) {
       this.logger?.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to process incoming photo'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          fileName: data.pendingPhoto.fileId,
+        },
+        'Failed to re-fetch a photo receipt'
       );
+      return false;
     }
   }
 

@@ -1051,45 +1051,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     });
   }
 
-  // Replay every uncommitted inbound message (its answer was never
-  // DELIVERED, so the offset did not advance) as signals, in log order.
-  // The entries STAY in the log: a crash before they are processed cannot
-  // lose them - the next start replays them again (lifemodel-ctc.2.1).
-  const replayEntries = inboundLog.replayable();
-  for (const entry of replayEntries) {
-    coreLoop.pushSignal(entry.signal);
-  }
-  if (replayEntries.length > 0) {
-    logger.info(
-      { count: replayEntries.length },
-      'Replayed uncommitted inbound messages from the durable log'
-    );
-  }
-
-  // Restore signals that were accepted but never processed by the previous
-  // run's stop (the pending-signal journal; lifemodel-ctc.1.2 removes it).
-  // A journal signal that is already in the durable log is skipped: it
-  // either replays above (uncommitted) or was answered (committed).
-  const restoredPending = await loadPendingSignals(storage, storagePath, logger);
-  for (const signal of restoredPending) {
-    if (inboundLog.hasKey(dedupKeyOf(signal))) {
-      logger.debug(
-        { signalId: signal.id },
-        'Journal signal already covered by the durable inbound log; skipped'
-      );
-      continue;
-    }
-    coreLoop.pushSignal(signal);
-  }
-  if (restoredPending.length > 0) {
-    logger.info(
-      { count: restoredPending.length },
-      'Restored pending signals from the previous run'
-    );
-  }
-  await clearPendingSignals(storage, logger);
-  await storage.flush();
-
   // Set tool registration callbacks now that layers exist
   pluginLoader.setToolCallbacks(
     (tool) => {
@@ -1171,6 +1132,65 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
     logger.info('Telegram channel configured');
   }
+
+  // Replay every uncommitted inbound message (its answer was never
+  // DELIVERED, so the offset did not advance) as signals, in log order.
+  // The entries STAY in the log: a crash before they are processed cannot
+  // lose them - the next start replays them again (lifemodel-ctc.2.1).
+  const replayEntries = inboundLog.replayable();
+  for (const entry of replayEntries) {
+    // A first message of a new chat can outlive the registry's debounced
+    // save (review round 2, finding 1): replay re-registers the route the
+    // entry carries, deterministically, before anything is queued.
+    if (entry.routing && recipientRegistry.resolve(entry.recipientId) === null) {
+      recipientRegistry.getOrCreate(entry.routing.channel, entry.routing.destination);
+    }
+
+    // A durable photo receipt whose download never finished: the channel
+    // re-fetches it and emits the full signal (finding 7). Without a
+    // completing channel (or on re-fetch failure) the receipt itself is
+    // queued as its caption text.
+    const photoData = entry.signal.data as
+      | { pendingPhoto?: { fileId?: unknown } | undefined }
+      | undefined;
+    if (typeof photoData?.pendingPhoto?.fileId === 'string' && telegramChannel !== null) {
+      const completed = await telegramChannel.completePhotoReceipt(entry.signal);
+      if (completed) {
+        continue;
+      }
+    }
+    coreLoop.pushSignal(entry.signal);
+  }
+  if (replayEntries.length > 0) {
+    logger.info(
+      { count: replayEntries.length },
+      'Replayed uncommitted inbound messages from the durable log'
+    );
+  }
+
+  // Restore signals that were accepted but never processed by the previous
+  // run's stop (the pending-signal journal; lifemodel-ctc.1.2 removes it).
+  // A journal signal that is already in the durable log is skipped: it
+  // either replays above (uncommitted) or was answered (committed).
+  const restoredPending = await loadPendingSignals(storage, storagePath, logger);
+  for (const signal of restoredPending) {
+    if (inboundLog.hasKey(dedupKeyOf(signal))) {
+      logger.debug(
+        { signalId: signal.id },
+        'Journal signal already covered by the durable inbound log; skipped'
+      );
+      continue;
+    }
+    coreLoop.pushSignal(signal);
+  }
+  if (restoredPending.length > 0) {
+    logger.info(
+      { count: restoredPending.length },
+      'Restored pending signals from the previous run'
+    );
+  }
+  await clearPendingSignals(storage, logger);
+  await storage.flush();
 
   // Register components with state manager
   const stateManagerComponents: Parameters<typeof stateManager.registerComponents>[0] = {
