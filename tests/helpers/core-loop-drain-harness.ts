@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import { createCoreLoop, type CoreLoopConfig, type CoreLoopDeps } from '../../src/core/core-loop.js';
 import { createAgent } from '../../src/core/agent.js';
+import { RecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
 import { createLogger } from '../../src/core/logger.js';
@@ -96,10 +97,11 @@ export class FakeCognitionLayer {
     return deferred.promise;
   }
 
-  /** Finish every pending turn (test cleanup). */
-  settleAll(): void {
-    for (const d of this.deferreds) {
-      d.resolve({ confidence: 1, intents: [], response: undefined });
+  /** Finish every pending turn (test cleanup, or with a chosen result). */
+  settleAll(result?: CognitionResult): void {
+    const withResult: CognitionResult = result ?? { confidence: 1, intents: [], response: undefined };
+    for (const d of this.deferreds.splice(0)) {
+      d.resolve(withResult);
     }
   }
 
@@ -174,6 +176,45 @@ export class FakeAggregationLayer {
   }
 }
 
+/**
+ * Channel boundary double that separates intake from full stop the way the
+ * Telegram channel now does: after stopIntake no input arrives but sending
+ * keeps working; stop() releases everything.
+ */
+export class FakeTestChannel {
+  readonly name = 'test';
+  intakeStopped = false;
+  fullyStopped = false;
+  readonly events: string[] = [];
+  readonly sent: { target: string; text: string; messageId: string }[] = [];
+
+  isAvailable(): boolean {
+    return true;
+  }
+
+  async stopIntake(): Promise<void> {
+    this.intakeStopped = true;
+    this.events.push('stopIntake');
+  }
+
+  async stop(): Promise<void> {
+    if (this.fullyStopped) return;
+    this.fullyStopped = true;
+    this.events.push('stop');
+  }
+
+  sendMessage(target: string, text: string): Promise<{ success: boolean; messageId?: string }> {
+    if (this.fullyStopped) {
+      // like the real channel: a full stop releases the client, sends refuse
+      this.events.push('send-refused');
+      return Promise.resolve({ success: false });
+    }
+    this.events.push('send');
+    this.sent.push({ target, text, messageId: 'test-msg-1' });
+    return Promise.resolve({ success: true, messageId: 'test-msg-1' });
+  }
+}
+
 export function thoughtSignal(text: string): Signal {
   return createSignal(
     'thought',
@@ -200,6 +241,8 @@ export interface CoreLoopInstance {
   cognition: FakeCognitionLayer;
   autonomic: FakeAutonomicLayer;
   aggregation: FakeAggregationLayer;
+  channel: FakeTestChannel;
+  recipientId: string;
   logger: Logger;
 }
 
@@ -237,6 +280,8 @@ export async function startInstance(
     tickInterval: opts.tickIntervalMs ?? TEST_TICK_INTERVAL,
     ...(opts.drainTimeoutMs !== undefined && { shutdownDrainTimeoutMs: opts.drainTimeoutMs }),
   };
+  const registry = new RecipientRegistry();
+  const channel = new FakeTestChannel();
   const coreLoop = createCoreLoop(
     agent as never,
     eventBus as never,
@@ -244,8 +289,12 @@ export async function startInstance(
     logger,
     createMetrics(),
     config,
-    {} as CoreLoopDeps
+    {
+      recipientRegistry: registry as never,
+    } as CoreLoopDeps
   );
+  coreLoop.registerChannel(channel as never);
+  const recipientId = registry.getOrCreate('test', 'chat-42');
 
   // ── container start path: restore then clear (container.ts) ──
   const restored = await loadPendingSignals(storage, storagePath, logger);
@@ -258,7 +307,7 @@ export async function startInstance(
   }
 
   coreLoop.start();
-  return { coreLoop, cognition, autonomic, aggregation, logger };
+  return { coreLoop, cognition, autonomic, aggregation, channel, recipientId, logger };
 }
 
 /**
@@ -270,21 +319,16 @@ export async function stopInstance(
   storage: DeferredStorage,
   storagePath: string
 ): Promise<void> {
-  const steps: string[] = [];
-  const channelDoubles: Channel[] = [];
-  const channels = new Map<string, Channel>();
-  void channelDoubles;
   await shutdownSequence({
     logger: instance.logger,
-    channels: [] as never,
+    channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
     storage: storage as never,
     storagePath,
-    stateManager: { shutdown: async () => steps.push('stateManager.shutdown') } as never,
-    recipientRegistry: { flush: async () => steps.push('recipientRegistry.flush') } as never,
-    ackRegistry: { flush: async () => steps.push('ackRegistry.flush') } as never,
+    stateManager: { shutdown: async () => undefined } as never,
+    recipientRegistry: { flush: async () => undefined } as never,
+    ackRegistry: { flush: async () => undefined } as never,
   });
-  void steps;
 }
 
 export async function openStorage(

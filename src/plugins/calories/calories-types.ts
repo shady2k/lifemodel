@@ -414,13 +414,13 @@ export interface CorrectEntryResult {
     canonicalName: string;
     score: number;
   }[];
-  ambiguousEntries?: Array<{
+  ambiguousEntries?: {
     entryId: string;
     mealType?: MealType | undefined;
     portion: Portion;
     timestamp: string;
     localTime?: string | undefined;
-  }>;
+  }[];
   dailySummary?: DailySummary | undefined;
 }
 

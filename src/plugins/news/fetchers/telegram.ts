@@ -316,7 +316,9 @@ export async function probeTelegramHandle(
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 10_000);
 
     let response: Response;
     try {
@@ -336,7 +338,7 @@ export async function probeTelegramHandle(
     const html = await response.text();
 
     // tgme_page_extra contains "N subscribers" for channels, "N members" for groups
-    const extraMatch = html.match(/tgme_page_extra[^>]*>([^<]+)</);
+    const extraMatch = /tgme_page_extra[^>]*>([^<]+)</.exec(html);
     if (extraMatch) {
       const extra = (extraMatch[1] ?? '').toLowerCase();
       if (extra.includes('subscriber')) return 'channel';

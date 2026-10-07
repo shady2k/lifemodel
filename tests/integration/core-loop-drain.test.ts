@@ -13,6 +13,7 @@
  *    fresh start, in order, once.
  */
 import type { Signal } from '../../src/types/signal.js';
+import type { SendMessageIntent } from '../../src/types/intent.js';
 
 import {
   FakeAutonomicLayer,
@@ -151,5 +152,35 @@ describe('shutdown drain (lifemodel-ctc.1.1)', () => {
     await h2.coreLoop.stop();
     h1.cognition.settleAll();
     h2.cognition.settleAll();
+  });
+
+  it('a turn that finishes during the drain delivers its answer through a channel that has stopped intake (sent once, success)', async () => {
+    const { storagePath, logDir } = await freshScratch('ctc-drain-deliver-');
+    const h1 = await startInstance(storagePath, logDir, {
+      cognitionMode: 'hang',
+      drainTimeoutMs: 5_000,
+    });
+    const trigger = thoughtSignal('turn trigger');
+    h1.coreLoop.pushSignal(trigger);
+    await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
+
+    // the turn's answer is a SEND_MESSAGE intent; the turn finishes exactly
+    // once during the stop drain (the resolved turn is consumed either by the
+    // next tick or by the drain - both before the channel's full stop), so the
+    // answer is delivered exactly once through the channel
+    const text = 'the drained turn answer';
+    const send: SendMessageIntent = {
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: h1.recipientId, text },
+    };
+    h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
+
+    await stopInstance(h1, await openStorage(storagePath), storagePath);
+
+    // Intake stopped before the send; sending kept working; full stop after
+    expect(h1.channel.events).toEqual(['stopIntake', 'send', 'stop']);
+    expect(h1.channel.sent).toEqual([
+      { target: 'chat-42', text: expect.stringContaining(text), messageId: 'test-msg-1' },
+    ]);
   });
 });

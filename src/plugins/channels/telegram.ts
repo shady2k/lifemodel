@@ -241,10 +241,26 @@ export class TelegramChannel implements Channel {
   }
 
   /**
-   * Stop the Telegram bot.
+   * Stop intake: end long polling so no new updates are accepted.
+   * Sending keeps working (the bot API stays up) — a cognition turn still in
+   * flight during the shutdown drain must be able to deliver its answer.
+   */
+  async stopIntake(): Promise<void> {
+    if (!this.running || !this.bot) {
+      return;
+    }
+
+    this.running = false;
+    await this.bot.stop();
+    this.logger?.info('Telegram intake stopped (polling stopped, sending kept)');
+  }
+
+  /**
+   * Stop the Telegram bot entirely: intake plus the client (sending refuses
+   * after this).
    */
   async stop(): Promise<void> {
-    if (!this.running || !this.bot) {
+    if (!this.bot) {
       return;
     }
 

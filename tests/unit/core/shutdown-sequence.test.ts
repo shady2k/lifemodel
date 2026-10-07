@@ -51,6 +51,9 @@ function makeDoubles() {
   const steps: string[] = [];
   const channel = {
     name: 'test',
+    stopIntake: async () => {
+      steps.push('channel.stopIntake');
+    },
     stop: async () => {
       steps.push('channel.stop');
     },
@@ -105,12 +108,13 @@ describe('container shutdown sequence', () => {
     });
 
     expect(steps).toEqual([
-      'channel.stop',
+      'channel.stopIntake',
       'coreLoop.stop',
       'takePendingSignals',
       'stateManager.shutdown',
       'recipientRegistry.flush',
       'ackRegistry.flush',
+      'channel.stop',
       'storage.shutdown',
     ]);
 
