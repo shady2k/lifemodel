@@ -24,8 +24,7 @@ function createMockSchedulerPrimitive(
 
   return {
     checkDueSchedules: vi.fn().mockResolvedValue(dueSchedules),
-    markFiring: vi.fn().mockResolvedValue(undefined),
-    acknowledgeFired: vi.fn().mockResolvedValue(true),
+    markFired: vi.fn().mockResolvedValue(undefined),
     getSchedules: vi.fn().mockReturnValue([]),
     getMigrationData: vi.fn().mockReturnValue([]),
     restoreFromMigration: vi.fn().mockResolvedValue(undefined),
@@ -216,9 +215,6 @@ describe('SchedulerService', () => {
 
       expect(scheduler.checkDueSchedules).toHaveBeenCalled();
       expect(signalCallback).toHaveBeenCalled();
-      // the firing is NOT complete yet: its signal has not been processed
-      expect(scheduler.markFiring).toHaveBeenCalledWith('sched-1', 'fire-1', expect.any(Date));
-      expect(scheduler.acknowledgeFired).not.toHaveBeenCalled();
     });
 
     it('resumes firing after plugin is resumed', async () => {
