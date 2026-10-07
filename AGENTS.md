@@ -101,9 +101,11 @@ move the config file: startup reads `data/config/agent.json` before applying
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
   summaries, responses and `contentPreview` are `debug` — set
-  `LOG_LEVEL=debug` to see them (`src/config/config-loader.ts`,
-  `src/llm/provider.ts`); tool messages are logged at `trace` and go to the
-  conversation log instead. The newest 10 non-empty files are kept
+  `LOG_LEVEL=debug` to see them. That shows previews of non-tool messages
+  only: tool results and assistant messages carrying tool calls are logged
+  at `trace`, which `LOG_LEVEL` cannot select — read tool calls and results
+  in the conversation log instead (`src/llm/provider.ts`,
+  `src/config/config-loader.ts`). The newest 10 non-empty files are kept
   (`src/core/logger.ts`)
 - `data/logs/conversation-<timestamp>.log` — the LLM exchanges, formatted,
   not verbatim: role markers and separators, indented content, only the new
