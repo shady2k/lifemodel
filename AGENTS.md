@@ -87,7 +87,7 @@ Motor Cortex agentic runs.
 - All tests live in `tests/` (unit and integration, plus `fixtures/` and
   `helpers/`). Never create test files inside `src/`.
 - Run the suite with `npm run test`.
-- Run one file: `npx vitest run tests/unit/core/energy-management.test.ts`
+- Run one file: `npx vitest run tests/unit/energy-management.test.ts`
   (any path under `tests/`).
 
 ## Data & logs
