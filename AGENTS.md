@@ -33,8 +33,10 @@ tick), Energy & state are physiology. Start with `README.md` and
   queue, intent application, metrics, tracing, the shutdown-drain sequence
   (one overall stop deadline; intake stop first, sends of the drained turn
   awaited, channels released after, storage flushed last) and the
-  pending-signal journal (`pending-signal-journal.ts`), which persists signals
-  accepted but unprocessed at stop and restores them at start
+  pending-signal journal (`pending-signal-journal.ts`) and the durable
+  inbound log (`inbound-log.ts`), which persists inbound user messages on
+  receipt, commits their offsets when answers are delivered, replays
+  uncommitted entries at start and dedups by Telegram update_id
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus

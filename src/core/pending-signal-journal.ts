@@ -13,6 +13,8 @@
  */
 import { join } from 'node:path';
 
+import { encodeDates, decodeDates } from '../utils/json-dates.js';
+
 import type { Signal } from '../types/signal.js';
 import type { Logger } from '../types/logger.js';
 import type { Storage } from '../storage/index.js';
@@ -37,57 +39,6 @@ interface PendingSignalsEnvelope {
 /** The file the journal writes for a state path. */
 export function pendingSignalsPath(storagePath: string): string {
   return join(storagePath, 'core', 'pending_signals.json');
-}
-
-/**
- * Date fields must survive the round trip exactly: JSON.stringify turns them
- * into plain ISO strings otherwise. Dates are encoded as single-key objects
- * before they reach the storage layer and decoded back after load.
- */
-const DATE_TAG = '__date';
-
-function encodeDates(value: unknown): unknown {
-  if (value instanceof Date) {
-    return { [DATE_TAG]: value.toISOString() };
-  }
-  if (Array.isArray(value)) {
-    return value.map(encodeDates);
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value)) {
-      out[key] = encodeDates(v);
-    }
-    return out;
-  }
-  return value;
-}
-
-function isDateTagged(value: unknown): value is { __date: string } {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.keys(value).length === 1 &&
-    DATE_TAG in value &&
-    typeof (value as Record<string, unknown>)[DATE_TAG] === 'string'
-  );
-}
-
-function decodeDates(value: unknown): unknown {
-  if (isDateTagged(value)) {
-    return new Date(value[DATE_TAG]);
-  }
-  if (Array.isArray(value)) {
-    return value.map(decodeDates);
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value)) {
-      out[key] = decodeDates(v);
-    }
-    return out;
-  }
-  return value;
 }
 
 /** True if the object looks like a Signal we can put back into the loop. */
@@ -159,27 +110,24 @@ export async function loadPendingSignals(
     envelope?.version !== ENVELOPE_VERSION ||
     !Array.isArray(envelope.signals)
   ) {
-    throw new Error(
-      `Corrupt pending-signal journal at ${path}: unexpected envelope shape`,
-      { cause: raw instanceof Error ? raw : new Error(JSON.stringify(raw).slice(0, 500)) }
-    );
+    throw new Error(`Corrupt pending-signal journal at ${path}: unexpected envelope shape`, {
+      cause: raw instanceof Error ? raw : new Error(JSON.stringify(raw).slice(0, 500)),
+    });
   }
 
   const signals: Signal[] = [];
   for (const record of envelope.signals) {
     if (typeof record !== 'object' || record === null || typeof record.timestamp !== 'string') {
-      throw new Error(
-        `Corrupt pending-signal journal at ${path}: invalid record envelope`,
-        { cause: new Error(JSON.stringify(record).slice(0, 500)) }
-      );
+      throw new Error(`Corrupt pending-signal journal at ${path}: invalid record envelope`, {
+        cause: new Error(JSON.stringify(record).slice(0, 500)),
+      });
     }
     // decodeDates already ran at the envelope level - validate the signal as is
     const signal = (record as { signal: unknown }).signal;
     if (!isSignalLike(signal)) {
-      throw new Error(
-        `Corrupt pending-signal journal at ${path}: entry is not a valid signal`,
-        { cause: new Error(JSON.stringify(signal).slice(0, 500)) }
-      );
+      throw new Error(`Corrupt pending-signal journal at ${path}: entry is not a valid signal`, {
+        cause: new Error(JSON.stringify(signal).slice(0, 500)),
+      });
     }
     signals.push(signal);
   }

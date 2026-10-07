@@ -63,6 +63,7 @@ import {
   clearPendingSignals,
   persistPendingSignals,
 } from './pending-signal-journal.js';
+import { createInboundLog, dedupKeyOf, type InboundLog } from './inbound-log.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -197,6 +198,8 @@ export interface Container {
   recipientRegistry: IRecipientRegistry | null;
   /** Motor Cortex service for code execution */
   motorCortex: MotorCortex | null;
+  /** Durable inbound log (committed per delivered answer; lifemodel-ctc.2.1) */
+  inboundLog: InboundLog | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -490,6 +493,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   });
   storage.startAutoFlush();
   logger.info({ storagePath }, 'Storage initialized');
+
+  // Create the durable inbound log (lifemodel-ctc.2.1): inbound user
+  // messages are written and flushed HERE at emit time; their entries
+  // commit when the answer is delivered, and a start replays uncommitted
+  // entries (see the replay block below, after the core loop exists).
+  const inboundLog = createInboundLog({ storage, logger, storagePath });
+  await inboundLog.load();
 
   // Create state manager
   const stateManager = createStateManager(storage, logger);
@@ -1022,6 +1032,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     soulProvider,
     storage,
     pluginLoader,
+    inboundLog,
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },
@@ -1040,13 +1051,34 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     });
   }
 
+  // Replay every uncommitted inbound message (its answer was never
+  // DELIVERED, so the offset did not advance) as signals, in log order.
+  // The entries STAY in the log: a crash before they are processed cannot
+  // lose them - the next start replays them again (lifemodel-ctc.2.1).
+  const replayEntries = inboundLog.replayable();
+  for (const entry of replayEntries) {
+    coreLoop.pushSignal(entry.signal);
+  }
+  if (replayEntries.length > 0) {
+    logger.info(
+      { count: replayEntries.length },
+      'Replayed uncommitted inbound messages from the durable log'
+    );
+  }
+
   // Restore signals that were accepted but never processed by the previous
-  // run (persisted at stop). They are pushed before anything can start so the
-  // first tick processes them. The journal is cleared after the push; a crash
-  // before its flush could restore them again - dedup by Telegram update_id
-  // lands with the durable inbox (lifemodel-ctc.2.1).
+  // run's stop (the pending-signal journal; lifemodel-ctc.1.2 removes it).
+  // A journal signal that is already in the durable log is skipped: it
+  // either replays above (uncommitted) or was answered (committed).
   const restoredPending = await loadPendingSignals(storage, storagePath, logger);
   for (const signal of restoredPending) {
+    if (inboundLog.hasKey(dedupKeyOf(signal))) {
+      logger.debug(
+        { signalId: signal.id },
+        'Journal signal already covered by the durable inbound log; skipped'
+      );
+      continue;
+    }
     coreLoop.pushSignal(signal);
   }
   if (restoredPending.length > 0) {
@@ -1130,9 +1162,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     channels.set('telegram', telegramChannel);
     coreLoop.registerChannel(telegramChannel);
 
-    // When telegram receives messages, push as signals
+    // When telegram receives messages, write them to the durable inbound log
+    // FIRST (flushed at emit time through the awaited callback) and queue the
+    // accepted ones; duplicates by update_id are dropped.
     telegramChannel.setSignalCallback((signal) => {
-      coreLoop.pushSignal(signal);
+      return coreLoop.pushInboundSignal(signal);
     });
 
     logger.info('Telegram channel configured');
@@ -1195,6 +1229,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     pluginLoader,
     recipientRegistry,
     motorCortex,
+    inboundLog,
     shutdown,
   };
 }

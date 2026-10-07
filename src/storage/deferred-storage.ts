@@ -194,14 +194,15 @@ export class DeferredStorage implements Storage {
 
   /**
    * Flush all dirty entries to underlying storage.
-   * If called while a flush is in progress, schedules a re-flush after completion
-   * to ensure writes that arrived during the flush are not lost.
+   * If called while a flush is in progress, it first waits for that pass to
+   * finish and then runs its own pass: an AWAITED flush() is a durability
+   * point (the durable inbound log and the journal depend on it), not a
+   * fire-and-forget request.
    */
   async flush(): Promise<void> {
-    if (this.flushing) {
+    while (this.flushing) {
       this.reflushNeeded = true;
-      this.logger.trace('Flush already in progress, will re-flush after completion');
-      return;
+      await this.flushCompletion;
     }
 
     this.flushing = true;
