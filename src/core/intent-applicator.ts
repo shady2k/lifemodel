@@ -87,6 +87,14 @@ export class IntentApplicator {
   private pluginControlChain: Promise<void> = Promise.resolve();
 
   /**
+   * SEND_MESSAGE chains still running. The stop drain awaits these (bounded
+   * by the stop deadline) so the answer of a turn completed during the drain
+   * is delivered before the channels are released; a failed send is logged in
+   * its chain, never silently dropped.
+   */
+  private readonly inFlightSends = new Set<Promise<void>>();
+
+  /**
    * Intensity-to-delta mapping for SET_INTEREST intent.
    */
   private static readonly INTENSITY_DELTAS: Record<InterestIntensity, number> = {
@@ -264,7 +272,7 @@ export class IntentApplicator {
       ...(replyTo && { replyTo }),
       parseMode: 'HTML',
     };
-    Promise.resolve()
+    const sendChain = Promise.resolve()
       .then(async () => {
         // Duplicate detection: skip sending if message is identical to last assistant message
         // This prevents proactive contacts from repeating the same response
@@ -316,15 +324,39 @@ export class IntentApplicator {
         }
       })
       .catch((error: unknown) => {
-        this.deps.logger.error(
-          { error: error instanceof Error ? error.message : String(error), recipientId },
-          'Message send threw an error'
-        );
+        this.deps.logger.error({ err: error, recipientId }, 'Message send threw an error');
         this.deps.metrics.counter('messages_failed', {
           channel: route.channel,
           reason: 'exception',
         });
       });
+
+    // Track the whole chain so the stop drain can await its completion
+    // (bounded by the stop deadline) before the channels are released.
+    const tracked = sendChain.finally(() => {
+      this.inFlightSends.delete(tracked);
+    });
+    this.inFlightSends.add(tracked);
+  }
+
+  /** Number of SEND_MESSAGE chains still running. */
+  pendingSendCount(): number {
+    return this.inFlightSends.size;
+  }
+
+  /**
+   * Await every in-flight send (bounded when a deadline is given; the caller
+   * reports what outlives it). Each chain logs its own failure - 'Message
+   * send returned false' / 'Message send threw an error' - so a failed send
+   * is reported, never silently dropped.
+   */
+  async drainPendingSends(deadlineMs?: number): Promise<void> {
+    while (this.inFlightSends.size > 0) {
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        return;
+      }
+      await Promise.race([...this.inFlightSends]);
+    }
   }
 
   private applyScheduleEvent(intent: ScheduleEventIntent): void {

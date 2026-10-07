@@ -65,29 +65,47 @@ Fixed 1-second tick drives all processing:
 
 ### Graceful stop (SIGINT/SIGTERM)
 
-One fixed order, `shutdownSequence` in `src/core/container.ts`:
+One fixed order, `shutdownSequence` in `src/core/container.ts`, under ONE
+overall deadline (default 90 s from `CoreLoopConfig.shutdownDrainTimeoutMs`,
+settable through the `coreLoop` field of `AppConfig`; the container starts it
+at the shutdown and `coreLoop.stop()` bounds every wait below by it — past the
+deadline the stop continues and what is left is journaled):
 
 1. Channel intake stops first — no new updates are accepted from here on.
    Updates already accepted sit in `pendingSignals`, not in the channel.
-   Sending keeps working: the answer the drained turn computes is delivered.
-2. `coreLoop.stop()` waits for the COGNITION turn in flight up to
-   `coreLoop.shutdownDrainTimeoutMs` (default 90 s; set through the
-   `coreLoop` field of `AppConfig` when the container is created). A turn
-   that finishes within the deadline is applied exactly once. A turn that
-   overruns has its trigger signal requeued.
-3. Signals accepted but never processed (`pendingSignals`, plus a requeued
-   trigger) are written to the pending-signal journal
-   (`data/state/core/pending_signals.json`) through DeferredStorage.
+   Sending keeps working (`stopIntake` only stops polling).
+2. `coreLoop.stop()` waits, each bounded by the deadline: the in-flight tick,
+   the scheduler callback, the COGNITION turn in flight, and the sends that
+   turn scheduled. A turn that finishes within the deadline is applied
+   exactly once and its answer is DELIVERED before the channels are released
+   (in-flight sends are tracked and awaited; a failed send is logged, never
+   silently dropped). A turn that overruns has EVERY signal it owns requeued:
+   all its trigger signals plus the user messages it absorbed mid-loop.
+3. Signals accepted but never processed (the queue, a cut-loose tick's taken
+   batch, and the requeued turn signals) are written to the pending-signal
+   journal (`data/state/core/pending_signals.json`) through DeferredStorage.
 4. State, recipient and ack registries persist.
 5. Channels stop fully (clients released; after this a send refuses).
 6. DeferredStorage flushes last — nothing writes after it.
 
 On start, `createContainerAsync` restores the journal into `pendingSignals`
-and clears it, so the same signal is processed exactly once. A corrupt or
-unreadable journal file fails startup loudly with the file path — it is never
-treated as empty. A crash later in the run could still restore the same
-signals again: durable inbox / update_id dedup closes that
-(lifemodel-ctc.2.1).
+and clears it, so a graceful restart processes the same signal exactly once.
+A corrupt or unreadable journal file fails startup loudly with the file path
+and the original error as `cause` — it is never treated as empty.
+`container.shutdown` is idempotent: every later caller gets the first call's
+promise, so no second run can journal an empty queue over the first one.
+
+Still open until stage 2 (lifemodel-ctc.2.1) or later, named honestly:
+
+- A crash between the restore and the journal's deletion+flush could restore
+  the same signals twice; update_id dedup (stage 2) closes it.
+- A late ASYNC intake handler (e.g. a photo download finishing after
+  `stopIntake`) can still enqueue a signal after the journal snapshot was
+  taken; the durable inbox on receipt (stage 2) closes it.
+- An overrunning turn is abandoned, not aborted: a late SEND intent from it
+  is dropped with a warning (fenced), and its in-loop tool writes land in the
+  deferred cache and are lost at exit. An abort for the turn in flight lands
+  with `dialogue-1`; until then the redo path is the recovery.
 
 ---
 

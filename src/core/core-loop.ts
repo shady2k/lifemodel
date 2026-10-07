@@ -29,6 +29,7 @@ import type {
   Event,
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
+import { awaitWithinDeadline } from './deadline.js';
 import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type {
   AutonomicResult,
@@ -161,8 +162,19 @@ interface PendingCognition {
   tickId: string;
   /** When the operation started */
   startedAt: number;
-  /** Original trigger signal (may be undefined) */
-  triggerSignal: Signal | undefined;
+  /**
+   * ALL trigger signals this turn owns (a wake may bundle several, e.g. two
+   * user messages into one turn). If the turn overruns the stop deadline,
+   * every one of them is requeued for a single redo after the next start.
+   */
+  triggerSignals: Signal[];
+  /** The wake's first trigger (trace/typing/routing) */
+  primaryTrigger: Signal | undefined;
+  /**
+   * User messages this turn absorbed mid-loop through
+   * drainPendingUserMessages() - also requeued on overrun.
+   */
+  absorbedSignals: Signal[];
   /** Trace context captured when cognition started */
   traceContext: TraceContext;
 }
@@ -179,12 +191,23 @@ export class CoreLoop {
   private readonly config: CoreLoopConfig;
 
   private running = false;
-  /** True while the loop is stopping: no new COGNITION turn may start */
-  private stopping = false;
   private tickCount = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
   private tickPromise: Promise<void> | null = null;
+  /**
+   * Signals the in-flight tick has taken off the queue. Cleared when the tick
+   * finishes; while it runs they also belong to takePendingSignals(), so a
+   * tick the stop deadline cut loose never discards a batch it already took.
+   */
+  private tickBatch: Signal[] = [];
+  /**
+   * Set once the stop drain is over: the turn in flight (if it overran) may
+   * not apply further intents through its later immediate callbacks.
+   */
+  private lateEffectsFenced = false;
+  /** TEST-ONLY gates that park the tick / scheduler callback (deadline tests) */
+  private stallForTest: { tickGate?: Promise<void>; schedulerGate?: Promise<void> } = {};
 
   private readonly channels = new Map<string, Channel>();
   private readonly pendingSignals: PendingSignal[] = [];
@@ -355,7 +378,7 @@ export class CoreLoop {
     }
 
     this.running = true;
-    this.stopping = false;
+    this.lateEffectsFenced = false;
 
     // Start system health monitoring
     this.healthMonitor.start();
@@ -373,17 +396,16 @@ export class CoreLoop {
   }
 
   /**
-   * Stop the signal loop.
-   * Waits for any in-flight scheduler tick to complete before returning,
-   * so plugin code does not run after storage/persistence is torn down.
+   * Stop the signal loop. One stop deadline bounds every wait (the in-flight
+   * tick, the scheduler callback, the COGNITION turn, its sends); past it the
+   * stop continues and the unprocessed is journaled.
    */
-  async stop(): Promise<void> {
+  async stop(deadlineMs?: number): Promise<void> {
     if (!this.running) {
       return;
     }
 
     this.running = false;
-    this.stopping = true;
 
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
@@ -399,23 +421,67 @@ export class CoreLoop {
       this.typingSubscriptionId = null;
     }
 
-    // Wait for the in-flight tick so no signal handling races the drain below.
-    if (this.tickPromise) {
-      await this.tickPromise;
-    }
+    const deadline = deadlineMs ?? Date.now() + this.config.shutdownDrainTimeoutMs;
 
-    // Drain in-flight scheduler tick so plugin callbacks complete
-    // before storage/persistence teardown.
-    if (this.schedulerTickPromise) {
-      await this.schedulerTickPromise;
-    }
+    // The in-flight tick and the scheduler callback are waited on here (so no
+    // signal handling races the drain below); each wait is bounded by the ONE
+    // overall stop deadline.
+    await awaitWithinDeadline(
+      Promise.all([this.tickPromise, this.stallForTest.tickGate ?? Promise.resolve()]).then(
+        () => undefined
+      ),
+      deadline,
+      this.logger,
+      'tick in flight'
+    );
+    await awaitWithinDeadline(
+      Promise.all([
+        this.schedulerTickPromise ?? Promise.resolve(),
+        this.stallForTest.schedulerGate ?? Promise.resolve(),
+      ]).then(() => undefined),
+      deadline,
+      this.logger,
+      'scheduler tick'
+    );
 
-    // Wait for the COGNITION turn in flight, up to the drain deadline.
-    // Overruns requeue the turn's trigger signal; the container persists it
-    // together with the rest of takePendingSignals().
-    await this.drainPendingCognition();
+    // Wait for the COGNITION turn in flight, bounded by the same deadline;
+    // on overrun every signal the turn owns is requeued.
+    await this.drainPendingCognition(deadline);
+
+    // Sends the drained turn scheduled must be delivered (or reported failed)
+    // BEFORE the container releases the channels.
+    await this.awaitPendingSends(deadline);
+
+    // The stop is over: the turn in flight (if it overran) may not apply
+    // further intents through its later immediate callbacks.
+    this.lateEffectsFenced = true;
 
     this.logger.info({ tickCount: this.tickCount }, 'Core loop stopped');
+  }
+
+  /**
+   * The stop-drain budget in ms (see shutdownDrainTimeoutMs). The container
+   * starts ONE overall deadline from it, covering intake stop, the tick, the
+   * scheduler callback, the turn in flight and its sends.
+   */
+  getStopDrainTimeoutMs(): number {
+    return this.config.shutdownDrainTimeoutMs;
+  }
+
+  /**
+   * Wait until no SEND_MESSAGE chain is in flight (or the deadline passes);
+   * what remains is logged, and the stop proceeds (the container releases the
+   * channels next).
+   */
+  private async awaitPendingSends(deadline: number): Promise<void> {
+    await this.intentApplicator.drainPendingSends(deadline);
+    const remaining = this.intentApplicator.pendingSendCount();
+    if (remaining > 0) {
+      this.logger.warn(
+        { remaining },
+        'Sends still in flight at the stop deadline; releasing the channels anyway'
+      );
+    }
   }
 
   /**
@@ -423,19 +489,53 @@ export class CoreLoop {
    * Called by the container after stop() to persist what was accepted
    * but never processed (see src/core/pending-signal-journal.ts).
    */
-  takePendingSignals(): Signal[] {
-    return this.pendingSignals.splice(0).map((entry) => entry.signal);
+  /** How many signals are queued (accepted, not yet processed). Observable for tests. */
+  pendingSignalCount(): number {
+    return this.pendingSignals.length;
   }
 
   /**
-   * Await the COGNITION turn in flight up to the configured deadline.
-   * - finished in time: its result intents are applied here (normally the
-   *   next tick does that, but ticks no longer run).
-   * - overran: the trigger signal is requeued for a single redo after the
-   *   next start; the abandoned turn's own result is dropped.
-   * - rejected: logged like the regular tick error path.
+   * TEST-ONLY hooks: how many signals the in-flight tick currently holds, and
+   * gates that park the tick / scheduler callback so a test can observe a stop
+   * against a stalled wait (the deadline must cut it loose).
    */
-  private async drainPendingCognition(): Promise<void> {
+  takenBatchCount(): number {
+    return this.tickBatch.length;
+  }
+
+  setStallForTest(gates: { tickGate?: Promise<void>; schedulerGate?: Promise<void> }): void {
+    this.stallForTest = gates;
+  }
+
+  takePendingSignals(): Signal[] {
+    const seen = new Set<string>();
+    const out: Signal[] = [];
+    const take = (signals: Signal[]) => {
+      for (const signal of signals) {
+        if (seen.has(signal.id)) continue;
+        seen.add(signal.id);
+        out.push(signal);
+      }
+    };
+    take(this.pendingSignals.splice(0).map((entry) => entry.signal));
+    // Whatever the in-flight tick still holds was accepted too: journal it,
+    // never discard it (a stopped tick's taken batch is not lost).
+    take(this.tickBatch);
+    this.tickBatch = [];
+    return out;
+  }
+
+  /**
+   * Await the COGNITION turn in flight, bounded by the overall stop deadline.
+   * - finished in time: its result intents are applied here (normally the
+   *   next tick does that, but ticks no longer run); stop() then awaits its
+   *   sends before the channels are released.
+   * - overran: EVERY signal the turn owns - all trigger signals plus the user
+   *   messages it absorbed mid-loop - is requeued (FIFO) for a single redo
+   *   after the next start; the abandoned turn's own result is dropped.
+   * - rejected: logged like the regular tick error path, with the error.
+   */
+  private async drainPendingCognition(deadline: number): Promise<void> {
     const pending = this.pendingCognition;
     if (!pending) {
       return;
@@ -444,30 +544,35 @@ export class CoreLoop {
     // racing from a tick that is finishing.
     this.pendingCognition = null;
 
-    const timeoutMs = this.config.shutdownDrainTimeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const outcome = await Promise.race([
         pending.promise.then((result) => ({ kind: 'done', result }) as const),
-        new Promise<{ kind: 'drain_timeout' }>((resolve) => {
+        new Promise<{ kind: 'drain_deadline' }>((resolve) => {
           timer = setTimeout(() => {
-            resolve({ kind: 'drain_timeout' });
-          }, timeoutMs);
+            resolve({ kind: 'drain_deadline' });
+          }, Math.max(0, deadline - Date.now()));
         }),
       ]);
 
-      if (outcome.kind === 'drain_timeout') {
+      if (outcome.kind === 'drain_deadline') {
+        const owned = [...pending.triggerSignals, ...pending.absorbedSignals];
         withTraceContext(pending.traceContext, () => {
           this.logger.warn(
-            { tickId: pending.tickId, timeoutMs },
-            'COGNITION turn in flight overran the stop drain deadline; its trigger signal is requeued'
+            {
+              tickId: pending.tickId,
+              requeued: owned.length,
+              deadlineBudgetMs: this.config.shutdownDrainTimeoutMs,
+            },
+            'COGNITION turn in flight overran the stop deadline; the signals it owns are requeued for the next start'
           );
         });
-        if (pending.triggerSignal) {
-          this.pendingSignals.unshift({
-            signal: pending.triggerSignal,
-            timestamp: new Date(),
-          });
+        // Preserve FIFO: triggers arrived before what it absorbed mid-turn.
+        for (let i = owned.length - 1; i >= 0; i--) {
+          const signal = owned[i];
+          if (signal) {
+            this.pendingSignals.unshift({ signal, timestamp: new Date() });
+          }
         }
         return;
       }
@@ -482,7 +587,7 @@ export class CoreLoop {
     } catch (error: unknown) {
       withTraceContext(pending.traceContext, () => {
         this.logger.error(
-          { error: error instanceof Error ? error.message : String(error), tickId: pending.tickId },
+          { err: error, tickId: pending.tickId },
           'COGNITION rejected unexpectedly during the stop drain'
         );
       });
@@ -655,6 +760,8 @@ export class CoreLoop {
 
       // Drain signals (no side effects, no logs)
       const pendingSignals = this.drainPendingSignals();
+      // What this tick holds: journaled too if the stop cuts it loose.
+      this.tickBatch = pendingSignals;
 
       // Normalize each signal under its own trace context
       const incomingSignals: Signal[] = [];
@@ -688,7 +795,7 @@ export class CoreLoop {
       // These signals must wait for COGNITION to be free — otherwise they're consumed and lost
       const deferrableTypes = ['thought', 'message_reaction', 'user_message', 'motor_result'];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
-      const cognitionAvailable = !this.pendingCognition && activeLayers.cognition && !this.stopping;
+      const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
       if (!cognitionAvailable && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
         const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
@@ -748,8 +855,7 @@ export class CoreLoop {
         }
       }
 
-      const shouldWakeCognition =
-        aggregationResult?.wakeCognition && activeLayers.cognition && !this.stopping;
+      const shouldWakeCognition = aggregationResult?.wakeCognition && activeLayers.cognition;
 
       // Start COGNITION if needed (capture trace context from trigger signal)
       if (shouldWakeCognition && aggregationResult && !this.pendingCognition) {
@@ -781,7 +887,12 @@ export class CoreLoop {
           ? createTraceContext(triggerSignal.id, { correlationId: tickId })
           : tickCtx;
 
-        this.startCognitionAsync(cognitionContext, triggerSignal, traceContext);
+        this.startCognitionAsync(
+          cognitionContext,
+          aggregationResult.triggerSignals,
+          triggerSignal,
+          traceContext
+        );
       } else if (this.pendingCognition && shouldWakeCognition) {
         withTraceContext(tickCtx, () => {
           this.logger.debug('COGNITION already processing, waiting for completion');
@@ -957,6 +1068,9 @@ export class CoreLoop {
 
         this.scheduleTick();
       });
+      // The tick is done: its taken batch was either processed or requeued
+      // (deferrals above) - it no longer belongs to the stop journal.
+      this.tickBatch = [];
     } catch (error) {
       const errorDetails =
         error instanceof Error
@@ -966,6 +1080,15 @@ export class CoreLoop {
       withTraceContext(tickCtx, () => {
         this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
       });
+
+      // A tick that failed mid-batch while the process is STOPPING must not
+      // lose the batch either: hand it back to the queue the journal reads.
+      if (!this.running && this.tickBatch.length > 0) {
+        for (const signal of this.tickBatch) {
+          this.pendingSignals.unshift({ signal, timestamp: new Date() });
+        }
+      }
+      this.tickBatch = [];
 
       this.scheduleTick();
     }
@@ -1245,6 +1368,10 @@ export class CoreLoop {
         drained.unshift(signal); // Preserve FIFO order
       }
 
+      // The turn absorbed these from the queue: on an overrun they belong to
+      // its redo, not to a silent loss.
+      this.pendingCognition?.absorbedSignals.push(...drained);
+
       return drained;
     };
   }
@@ -1254,6 +1381,7 @@ export class CoreLoop {
    */
   private startCognitionAsync(
     context: CognitionContext,
+    triggerSignals: Signal[],
     triggerSignal: Signal | undefined,
     traceContext: TraceContext
   ): void {
@@ -1265,7 +1393,9 @@ export class CoreLoop {
       promise,
       tickId: context.tickId,
       startedAt,
-      triggerSignal: triggerSignal ?? context.triggerSignals[0] ?? undefined,
+      triggerSignals,
+      primaryTrigger: triggerSignal ?? context.triggerSignals[0] ?? undefined,
+      absorbedSignals: [],
       traceContext,
     };
 
@@ -1320,7 +1450,7 @@ export class CoreLoop {
 
             // Resend typing indicator (Telegram typing expires after ~5 seconds)
             const recipientId = (
-              pending.triggerSignal?.data as Record<string, unknown> | undefined
+              pending.primaryTrigger?.data as Record<string, unknown> | undefined
             )?.['recipientId'] as string | undefined;
             if (recipientId) {
               const route = this.recipientRegistry?.resolve(recipientId);
@@ -1355,6 +1485,15 @@ export class CoreLoop {
    * during loop execution so subsequent tools can see the data.
    */
   applyImmediateIntent(intent: Intent): void {
+    // The stop drain is over and the turn was abandoned: its further writes
+    // and sends must not happen behind the released channels and the journal.
+    if (this.lateEffectsFenced) {
+      this.logger.warn(
+        { intentType: intent.type },
+        'Late intent from the abandoned COGNITION turn dropped (stop drain overran)'
+      );
+      return;
+    }
     // Only apply data-writing intents immediately so subsequent tools see them
     // SEND_MESSAGE is used for intermediate acknowledgments during tool processing
     // Other intents should wait for normal intent processing

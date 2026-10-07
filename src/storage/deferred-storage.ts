@@ -54,6 +54,9 @@ export class DeferredStorage implements Storage {
   /** Set when a flush is requested while another is in progress */
   private reflushNeeded = false;
 
+  /** Resolves when the current flush pass actually finishes (for shutdown) */
+  private flushCompletion: Promise<void> = Promise.resolve();
+
   constructor(underlying: Storage, logger: Logger, config: Partial<DeferredStorageConfig> = {}) {
     this.underlying = underlying;
     this.logger = logger.child({ component: 'deferred-storage' });
@@ -202,6 +205,12 @@ export class DeferredStorage implements Storage {
     }
 
     this.flushing = true;
+    let complete: (() => void) | undefined;
+    const prev = this.flushCompletion;
+    this.flushCompletion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    void prev;
 
     try {
       // Snapshot dirty entries — capture the data reference so we can detect
@@ -251,6 +260,9 @@ export class DeferredStorage implements Storage {
       }
     } finally {
       this.flushing = false;
+      if (complete) {
+        complete();
+      }
 
       // If a flush was requested while we were flushing, run another pass
       // to pick up writes that arrived during the flush.
@@ -274,10 +286,29 @@ export class DeferredStorage implements Storage {
 
   /**
    * Shutdown - flush and cleanup.
+   *
+   * Loops until no dirty work remains: a flush that was already in progress
+   * (e.g. the periodic auto-flush) must not swallow the writes queued while
+   * it ran - the final journal write reaches the disk HERE, never after.
    */
   async shutdown(): Promise<void> {
     this.stopAutoFlush();
+    // First flush() may return while another flush is still running (it only
+    // sets reflushNeeded). Wait for that pass to actually finish, then flush
+    // again so everything queued up to here is durable before we clear.
+    while (this.flushing) {
+      await this.flushCompletion;
+    }
     await this.flush();
+    let guard = 0;
+    while (this.getDirtyCount() > 0) {
+      if (++guard > 100) {
+        throw new Error(
+          `Deferred storage did not settle on shutdown (${String(this.getDirtyCount())} keys still dirty)`
+        );
+      }
+      await this.flush();
+    }
     this.cache.clear();
     this.deletedKeys.clear();
     this.logger.debug('Deferred storage shutdown complete');
