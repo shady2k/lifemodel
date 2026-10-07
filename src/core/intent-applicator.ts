@@ -70,6 +70,24 @@ export interface IntentApplicatorDeps {
   running: () => boolean;
   storage?: Storage | undefined;
   pluginLoader?: PluginLoader | undefined;
+  /**
+   * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1):
+   * the turn whose committed entries wait for this send's outcome. The
+   * cognition turn's tick id, or the one running when the intent fired.
+   */
+  resolveSendTurnKey?: (intent: SendMessageIntent) => string | undefined;
+  /** A send for that turn is in flight (registered synchronously at apply). */
+  onSendTracked?: (turnKey: string, recipientId: string) => void;
+  /**
+   * A send for that turn settled: `delivered` is a real success. The return
+   * value (the recipient's log commit, when any) is chained into the send
+   * chain so the stop drain awaits the commit's flush too.
+   */
+  onSendOutcome?: (
+    turnKey: string,
+    recipientId: string,
+    delivered: boolean
+  ) => void | Promise<void>;
 }
 
 /**
@@ -272,6 +290,16 @@ export class IntentApplicator {
       ...(replyTo && { replyTo }),
       parseMode: 'HTML',
     };
+
+    // The durable inbound log (lifemodel-ctc.2.1): a send that belongs to a
+    // cognition turn reports its outcome so the turn's log entries are
+    // committed only when the answer was really delivered. Registered
+    // synchronously so a fast turn cannot resolve its evaluation first.
+    const turnKey = this.deps.resolveSendTurnKey?.(intent);
+    let delivered = false;
+    if (turnKey) {
+      this.deps.onSendTracked?.(turnKey, recipientId);
+    }
     const sendChain = Promise.resolve()
       .then(async () => {
         // Duplicate detection: skip sending if message is identical to last assistant message
@@ -292,6 +320,7 @@ export class IntentApplicator {
       })
       .then((result) => {
         if (result.success) {
+          delivered = true;
           this._lastMessageSentAt = Date.now();
           this._lastMessageRecipientId = recipientId;
           this.deps.metrics.counter('messages_sent', { channel: route.channel });
@@ -332,10 +361,18 @@ export class IntentApplicator {
       });
 
     // Track the whole chain so the stop drain can await its completion
-    // (bounded by the stop deadline) before the channels are released.
-    const tracked = sendChain.finally(() => {
-      this.inFlightSends.delete(tracked);
-    });
+    // (bounded by the stop deadline) before the channels are released; the
+    // turn's log commit rides on the same chain, so its flush is awaited too.
+    const tracked = sendChain
+      .then(() => {
+        if (turnKey) {
+          return this.deps.onSendOutcome?.(turnKey, recipientId, delivered);
+        }
+        return undefined;
+      })
+      .finally(() => {
+        this.inFlightSends.delete(tracked);
+      });
     this.inFlightSends.add(tracked);
   }
 
@@ -352,10 +389,34 @@ export class IntentApplicator {
    */
   async drainPendingSends(deadlineMs?: number): Promise<void> {
     while (this.inFlightSends.size > 0) {
-      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+      if (deadlineMs === undefined) {
+        await Promise.race([...this.inFlightSends]);
+        continue;
+      }
+      if (Date.now() >= deadlineMs) {
         return;
       }
-      await Promise.race([...this.inFlightSends]);
+      // A never-settling send must not block the stop forever: race the
+      // current chains against the remaining budget (review finding A).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const cap = new Promise<'deadline'>((resolve) => {
+          timer = setTimeout(
+            () => {
+              resolve('deadline');
+            },
+            Math.max(0, deadlineMs - Date.now())
+          );
+        });
+        const settled = Promise.allSettled([...this.inFlightSends]).then(() => 'settled' as const);
+        if ((await Promise.race([settled, cap])) === 'deadline') {
+          return;
+        }
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
     }
   }
 

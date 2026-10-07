@@ -95,17 +95,47 @@ and the original error as `cause` — it is never treated as empty.
 `container.shutdown` is idempotent: every later caller gets the first call's
 promise, so no second run can journal an empty queue over the first one.
 
-Still open until stage 2 (lifemodel-ctc.2.1) or later, named honestly:
+### Durable inbound log (lifemodel-ctc.2.1)
 
-- A crash between the restore and the journal's deletion+flush could restore
-  the same signals twice; update_id dedup (stage 2) closes it.
-- A late ASYNC intake handler (e.g. a photo download finishing after
-  `stopIntake`) can still enqueue a signal after the journal snapshot was
-  taken; the durable inbox on receipt (stage 2) closes it.
+Inbound user messages are durable beyond the graceful stop. The log lives in
+core (`src/core/inbound-log.ts`, `data/state/core/inbound_log.json` through
+the unified storage path); channels only emit signals through their awaited
+callback:
+
+1. On receipt, the signal is appended to the log and FLUSHED at once; only
+   then is it queued. `stopIntake` gives in-flight intake handlers (photo
+   downloads) a bounded moment so their emit reaches the log before the stop
+   proceeds. A duplicate Telegram `update_id` is dropped instead of queued.
+2. The consumer offset is PER RECIPIENT. A cognition turn owns the log
+   entries of its trigger signals and of the messages it absorbed mid-loop;
+   its entries commit per recipient when the turn settles and every send of
+   that turn to that recipient was DELIVERED (send success) — or when the
+   turn settles with no send at all (a deferral, a message that needs no
+   reply), so replay cannot loop forever. A rejecting or overrunning turn
+   and a failed or hung send never commit.
+3. On start, every uncommitted entry is replayed in order as a signal; the
+   entries STAY in the log until they commit, so a crash after a restore
+   cannot lose a message (the next start replays it again). Committed
+   entries are compacted away; the dedup index survives compaction
+   (Telegram update ids are monotone), so a re-delivered committed update is
+   still answered zero times.
+
+A corrupt or unreadable log file fails startup loudly with its path and the
+original error as `cause`.
+
+Honest remaining windows:
+
+- An answer DELIVERED whose commit is not yet on disk (crash between send
+  success and the commit flush, or a turn overrunning the stop deadline that
+  still delivers late) may be answered TWICE after restart: once by the late
+  delivery, once by the replay. At-most-once delivery is not claimed.
+- A disk failure at the emit-time flush loses the message (the signal is
+  then not queued either); the emit error surfaces through the channel's
+  error handler.
 - An overrunning turn is abandoned, not aborted: a late SEND intent from it
   is dropped with a warning (fenced), and its in-loop tool writes land in the
   deferred cache and are lost at exit. An abort for the turn in flight lands
-  with `dialogue-1`; until then the redo path is the recovery.
+  with `dialogue-1`; until then the replay path is the recovery.
 
 ---
 

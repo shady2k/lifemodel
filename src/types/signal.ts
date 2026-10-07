@@ -191,6 +191,9 @@ export interface UserMessageData {
   /** The message text */
   text: string;
 
+  /** The external update id the channel deduplicates on (e.g. Telegram update_id). */
+  updateId?: string;
+
   /** Opaque recipient identifier */
   recipientId: string;
 

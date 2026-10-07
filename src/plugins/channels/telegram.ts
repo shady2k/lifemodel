@@ -131,6 +131,9 @@ export function splitMessage(text: string, maxLength = TELEGRAM_MAX_LENGTH): str
   return chunks;
 }
 
+/** How long stopIntake waits for in-flight inbound handlers (bounded). */
+const IN_FLIGHT_EMIT_DRAIN_MS = 5_000;
+
 /**
  * Telegram channel using grammY.
  *
@@ -153,7 +156,15 @@ export class TelegramChannel implements Channel {
   private readonly recipientRegistry: IRecipientRegistry;
   private bot: Bot | null = null;
   private running = false;
-  private signalCallback: ((signal: Signal) => void) | null = null;
+  /**
+   * Inbound callbacks may be async: the durable inbound log (lifemodel-ctc.2.1)
+   * writes and flushes the message BEFORE the signal is queued, and awaiting
+   * the callback here is what makes the write happen at emit time.
+   */
+  private signalCallback: ((signal: Signal) => void | Promise<void>) | null = null;
+
+  /** In-flight inbound emits, awaited (bounded) by stopIntake. */
+  private readonly inFlightEmits = new Set<Promise<unknown>>();
 
   constructor(
     config: TelegramConfig,
@@ -187,8 +198,29 @@ export class TelegramChannel implements Channel {
    * Set callback to push signals to CoreLoop (4-layer architecture).
    * When set, incoming messages will be converted to Signals instead of Events.
    */
-  setSignalCallback(callback: (signal: Signal) => void): void {
+  setSignalCallback(callback: (signal: Signal) => void | Promise<void>): void {
     this.signalCallback = callback;
+  }
+
+  /** Run the inbound callback, awaiting it so its durability promise lands
+   * at emit time, and keep it tracked for stopIntake. */
+  private async emitSignal(signal: Signal, span: string): Promise<void> {
+    const emit = (async () => {
+      const result = this.signalCallback?.(signal);
+      if (result instanceof Promise) {
+        await result;
+      }
+    })();
+    this.inFlightEmits.add(emit);
+    try {
+      await emit;
+    } finally {
+      this.inFlightEmits.delete(emit);
+      this.logger?.debug(
+        { signalId: signal.id, span },
+        'Signal emitted (inbound callback settled)'
+      );
+    }
   }
 
   /**
@@ -207,19 +239,19 @@ export class TelegramChannel implements Channel {
 
     this.bot = new Bot(this.config.botToken);
 
-    // Handle text messages
-    this.bot.on('message:text', (ctx) => {
-      this.onMessage(ctx);
+    // Handle text messages (awaited: the durable log flushes at emit time)
+    this.bot.on('message:text', async (ctx) => {
+      await this.onMessage(ctx);
     });
 
-    // Handle photo messages (vision support)
-    this.bot.on('message:photo', (ctx) => {
-      void this.onPhoto(ctx);
+    // Handle photo messages (vision support; awaited through its downloads)
+    this.bot.on('message:photo', async (ctx) => {
+      await this.onPhoto(ctx);
     });
 
     // Handle message reactions (non-verbal feedback)
-    this.bot.on('message_reaction', (ctx: Context) => {
-      this.onReaction(ctx);
+    this.bot.on('message_reaction', async (ctx: Context) => {
+      await this.onReaction(ctx);
     });
 
     // Handle errors
@@ -252,6 +284,29 @@ export class TelegramChannel implements Channel {
 
     this.running = false;
     await this.bot.stop();
+    // An intake handler still running (e.g. a photo download) may not have
+    // emitted yet: give it a bounded moment so its message reaches the
+    // durable inbound log at emit time (the emit itself awaits the flush).
+    const pending = [...this.inFlightEmits];
+    if (pending.length > 0) {
+      const settled = Promise.allSettled(pending).then(() => 'settled' as const);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cap = new Promise<'deadline'>((resolve) => {
+        timer = setTimeout(() => {
+          resolve('deadline');
+        }, IN_FLIGHT_EMIT_DRAIN_MS);
+      });
+      const outcome = await Promise.race([settled, cap]);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (outcome === 'deadline') {
+        this.logger?.warn(
+          { stillInFlight: this.inFlightEmits.size },
+          'Inbound handlers still running at the intake stop deadline; whatever they emit is recoverable from the durable log only after their callback settles'
+        );
+      }
+    }
     this.logger?.info('Telegram intake stopped (polling stopped, sending kept)');
   }
 
@@ -348,11 +403,13 @@ export class TelegramChannel implements Channel {
    * Handle incoming message - convert to Signal and dispatch.
    * Each message gets its own trace context for causal chain tracking.
    */
-  private onMessage(ctx: {
+  private async onMessage(ctx: {
     from?: { id: number; username?: string; first_name?: string; last_name?: string };
     chat: { id: number };
     message: { message_id: number; text?: string };
-  }): void {
+    /** grammY's wrapping update: its update_id is the dedup key (lifemodel-ctc.2.1) */
+    update?: { update_id: number };
+  }): Promise<void> {
     if (!ctx.from || !ctx.message.text) {
       return;
     }
@@ -372,39 +429,36 @@ export class TelegramChannel implements Channel {
     const recipientId = this.recipientRegistry.getOrCreate(this.name, destination);
 
     const correlationId = ctx.message.message_id.toString();
+    const updateId = ctx.update?.update_id !== undefined ? String(ctx.update.update_id) : undefined;
     const signal = createUserMessageSignal(
       {
         text,
         channel: 'telegram',
         userId,
         recipientId,
+        ...(updateId !== undefined && { updateId }),
       },
       { correlationId }
     );
 
-    // Wrap callback in trace context (signal.id as root)
-    withTraceContext(
-      createTraceContext(signal.id, {
-        correlationId,
-        spanId: `msg_${String(ctx.message.message_id)}`,
-      }),
-      () => {
-        if (this.signalCallback) {
-          this.signalCallback(signal);
-
-          this.logger?.debug(
-            {
-              signalId: signal.id,
-              userId,
-              recipientId,
-              textLength: text.length,
-              text: text.slice(0, 200).replace(/\n/g, ' '),
-            },
-            'Message received as Signal'
-          );
-        }
+    // Wrap callback in trace context (signal.id as root). The emit is
+    // awaited: the durable inbox writes+flushes BEFORE the signal is queued.
+    const span = `msg_${String(ctx.message.message_id)}`;
+    await withTraceContext(createTraceContext(signal.id, { correlationId, spanId: span }), () => {
+      if (this.signalCallback) {
+        this.logger?.debug(
+          {
+            signalId: signal.id,
+            userId,
+            recipientId,
+            textLength: text.length,
+            text: text.slice(0, 200).replace(/\n/g, ' '),
+          },
+          'Message received as Signal'
+        );
       }
-    );
+      return this.emitSignal(signal, span);
+    });
   }
 
   /**
@@ -420,6 +474,8 @@ export class TelegramChannel implements Channel {
       caption?: string;
     };
     api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
+    /** grammY's wrapping update: its update_id is the dedup key (lifemodel-ctc.2.1) */
+    update?: { update_id: number };
   }): Promise<void> {
     if (!ctx.from || !ctx.message.photo?.length) {
       return;
@@ -493,6 +549,8 @@ export class TelegramChannel implements Channel {
 
       const image: ImageAttachment = { data: base64, mediaType };
       const correlationId = ctx.message.message_id.toString();
+      const updateId =
+        ctx.update?.update_id !== undefined ? String(ctx.update.update_id) : undefined;
       const signal = createUserMessageSignal(
         {
           text,
@@ -500,34 +558,30 @@ export class TelegramChannel implements Channel {
           userId,
           recipientId,
           images: [image],
+          ...(updateId !== undefined && { updateId }),
         },
         { correlationId }
       );
 
-      // Wrap callback in trace context (same pattern as onMessage)
-      withTraceContext(
-        createTraceContext(signal.id, {
-          correlationId,
-          spanId: `photo_${String(ctx.message.message_id)}`,
-        }),
-        () => {
-          if (this.signalCallback) {
-            this.signalCallback(signal);
-
-            this.logger?.debug(
-              {
-                signalId: signal.id,
-                userId,
-                recipientId,
-                hasCaption: !!ctx.message.caption,
-                imageSize: buffer.byteLength,
-                mediaType,
-              },
-              'Photo received as Signal'
-            );
-          }
+      // Wrap callback in trace context (same pattern as onMessage; awaited
+      // so the durable inbox flush completes at emit time)
+      const span = `photo_${String(ctx.message.message_id)}`;
+      await withTraceContext(createTraceContext(signal.id, { correlationId, spanId: span }), () => {
+        if (this.signalCallback) {
+          this.logger?.debug(
+            {
+              signalId: signal.id,
+              userId,
+              recipientId,
+              hasCaption: !!ctx.message.caption,
+              imageSize: buffer.byteLength,
+              mediaType,
+            },
+            'Photo received as Signal'
+          );
         }
-      );
+        return this.emitSignal(signal, span);
+      });
     } catch (error) {
       this.logger?.error(
         { error: error instanceof Error ? error.message : String(error) },
@@ -539,7 +593,7 @@ export class TelegramChannel implements Channel {
   /**
    * Handle incoming reaction using grammy's ctx.reactions() helper.
    */
-  private onReaction(ctx: Context): void {
+  private async onReaction(ctx: Context): Promise<void> {
     const update: MessageReactionUpdated | undefined = ctx.messageReaction;
     if (!update) return;
 
@@ -557,7 +611,7 @@ export class TelegramChannel implements Channel {
 
     // Process added emoji reactions (custom emoji and paid skipped in MVP)
     for (const emoji of emojiAdded) {
-      this.processReaction(
+      await this.processReaction(
         chatId,
         update.message_id,
         emoji,
@@ -571,13 +625,13 @@ export class TelegramChannel implements Channel {
    * Process a single reaction and emit signal.
    * Each reaction gets its own trace context for causal chain tracking.
    */
-  private processReaction(
+  private async processReaction(
     chatId: string,
     messageId: number,
     emoji: string,
     fromUserId?: number,
     actorChatId?: number
-  ): void {
+  ): Promise<void> {
     const recipientId = this.recipientRegistry.getOrCreate(this.name, chatId);
     const correlationId = messageId.toString();
 
@@ -599,27 +653,23 @@ export class TelegramChannel implements Channel {
 
     const signal = createMessageReactionSignal(signalParams, { correlationId });
 
-    // Wrap callbacks in trace context (signal.id as root)
-    withTraceContext(
-      createTraceContext(signal.id, {
-        correlationId,
-        spanId: `reaction_${String(messageId)}`,
-      }),
-      () => {
-        this.signalCallback?.(signal);
-
-        this.logger?.debug(
-          {
-            signalId: signal.id,
-            emoji,
-            messageId,
-            recipientId,
-            isAnonymous: !fromUserId && !!actorChatId,
-          },
-          'Reaction received as Signal'
-        );
-      }
-    );
+    // Wrap callbacks in trace context (signal.id as root). A reaction is not
+    // written to the durable log, but the emit is still awaited so intake
+    // handlers settle in order (same pattern as onMessage).
+    const span = `reaction_${String(messageId)}`;
+    await withTraceContext(createTraceContext(signal.id, { correlationId, spanId: span }), () => {
+      this.logger?.debug(
+        {
+          signalId: signal.id,
+          emoji,
+          messageId,
+          recipientId,
+          isAnonymous: !fromUserId && !!actorChatId,
+        },
+        'Reaction received as Signal'
+      );
+      return this.emitSignal(signal, span);
+    });
   }
 
   /**
