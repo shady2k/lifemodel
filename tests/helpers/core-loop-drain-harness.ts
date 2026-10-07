@@ -103,9 +103,27 @@ export class FakeCognitionLayer {
     this.calls.push({ context, done: deferred.promise });
     this.deferreds.push(deferred);
     if (this.mode === 'immediate') {
-      deferred.resolve(this.result);
+      deferred.resolve(this.withTurnTrace(this.result, context));
     }
     return deferred.promise;
+  }
+
+  /**
+   * The real intent compiler stamps every SEND_MESSAGE of a turn with the
+   * turn's trace (`{tickId, parentSignalId}`); CoreLoop attributes a send to
+   * its turn through that trace. A fake result without it would look like a
+   * send from nowhere, so the double mirrors the compiler.
+   */
+  private withTurnTrace(result: CognitionResult, context: CognitionContext): CognitionResult {
+    const trigger = context.triggerSignals[0];
+    return {
+      ...result,
+      intents: result.intents.map((intent) =>
+        intent.type === 'SEND_MESSAGE' && intent.trace === undefined
+          ? { ...intent, trace: { tickId: context.tickId, parentSignalId: trigger?.id ?? '' } }
+          : intent
+      ),
+    };
   }
 
   /** Finish every pending turn (test cleanup, or with a chosen result). */

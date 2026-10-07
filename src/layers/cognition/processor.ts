@@ -339,8 +339,8 @@ export class CognitionProcessor implements CognitionLayer {
   async process(context: CognitionContext): Promise<CognitionResult> {
     if (!this.agenticLoop) {
       this.logger.error('Agentic loop not initialized');
-      // No turn ran at all: an error disposition, so no log entry settles
-      // without an answer (finding 4).
+      // No turn ran at all: a FAILED-turn outcome - its messages leave the
+      // log, warned, never retried (owner decision, comment 54).
       return {
         confidence: 0,
         intents: [],
@@ -573,7 +573,8 @@ export class CognitionProcessor implements CognitionLayer {
             ]
           : [];
 
-      // The turn threw: an ERROR, never a deliberate no-reply (finding 4).
+      // The turn threw: an ERROR (a failed outcome), never a deliberate
+      // no-reply.
       return {
         confidence: 0,
         intents: errorIntents,
@@ -636,10 +637,10 @@ export class CognitionProcessor implements CognitionLayer {
           ? 0.8
           : 0.3;
 
-    // How the turn ended, for the durable inbound log (owner decision on
-    // finding 4): the loop's own mark when it made one, else the terminal.
-    // A failed loop NEVER settles an entry - only a delivered answer or a
-    // deliberate no-reply may.
+    // How the turn ended, for the durable inbound log (owner decision,
+    // comment 54): the loop's own mark when it made one, else the terminal.
+    // A failed loop is the FAILED-turn outcome: reported at warn, not
+    // retried.
     const disposition: TurnDisposition = !loopResult.success
       ? 'error'
       : (loopResult.state.disposition ?? terminalDisposition(loopResult.terminal));

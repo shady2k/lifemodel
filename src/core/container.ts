@@ -198,7 +198,7 @@ export interface Container {
   recipientRegistry: IRecipientRegistry | null;
   /** Motor Cortex service for code execution */
   motorCortex: MotorCortex | null;
-  /** Durable inbound log (committed per delivered answer; lifemodel-ctc.2.1) */
+  /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
   inboundLog: InboundLog | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
@@ -495,9 +495,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   logger.info({ storagePath }, 'Storage initialized');
 
   // Create the durable inbound log (lifemodel-ctc.2.1): inbound user
-  // messages are written and flushed HERE at emit time; their entries
-  // commit when the answer is delivered, and a start replays uncommitted
-  // entries (see the replay block below, after the core loop exists).
+  // messages are written and flushed HERE at emit time; an entry leaves the
+  // log when its turn reached a recorded outcome (owner decision, comment
+  // 54), and a start replays the entries whose turn recorded none (see the
+  // replay block below, after the core loop exists).
   const inboundLog = createInboundLog({ storage, logger, storagePath });
   await inboundLog.load();
 

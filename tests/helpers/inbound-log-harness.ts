@@ -139,10 +139,17 @@ export class InboundFakeChannel {
     this.intakeStopped = true;
     const pending = [...this.inFlightEmits];
     if (pending.length > 0) {
-      await Promise.race([
-        Promise.allSettled(pending).then(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-      ]);
+      // Bounded like the real channel: the in-flight handlers get a moment to
+      // reach the log. The bound is CLEARED (no timer outlives the test).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const bound = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 2_000);
+        });
+        await Promise.race([Promise.allSettled(pending).then(() => undefined), bound]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     }
     this.events.push('stopIntake');
   }
@@ -447,25 +454,67 @@ export async function seedAssistantAnswer(
 }
 
 /**
- * Seed DURABLE DELIVERY EVIDENCE for one log entry, as if its answer had been
- * delivered before the crash: the marker the send path writes right after a
- * successful send. Unlike an equal TEXT in the history, this is proof that
- * THIS entry was answered (finding 10). Uses the real InboundLog over the
- * instance's own data dir.
+ * Fence an instance whose process is treated as killed (owner decision
+ * comment 54; review round 3): its timers and subscription stop, its
+ * late effects are dropped, and the work it had in flight (the tick, the
+ * scheduler callback) is joined. After this resolves the instance can write
+ * NOTHING into the data or log directories behind the restart under test -
+ * without it a "killed" instance could keep ticking or flush its cache and
+ * invalidate the restart claims (the reported teardown ENOTEMPTY).
  */
-export async function seedDeliveredEntry(storagePath: string, updateId: string): Promise<void> {
-  const storage = await openStorage(storagePath);
-  const log = createInboundLog({ storage, logger: noopLogger, storagePath });
-  await log.load();
-  const seq = log.seqForKey(updateId);
-  if (seq === undefined) {
-    throw new Error(`delivery-evidence seeding failed: no log entry for ${updateId}`);
+export async function fenceKilledInstance(instance: InboundInstance): Promise<void> {
+  await instance.coreLoop.fenceForTest();
+}
+
+/**
+ * What an instance has observably done, for the "no old-instance activity
+ * after the restart" assertion: a killed instance must show the same numbers
+ * before and after the restart under test.
+ */
+export function activityOf(instance: InboundInstance): {
+  running: boolean;
+  ticks: number;
+  turns: number;
+  sends: number;
+  sendsStarted: number;
+  entries: number;
+} {
+  return {
+    running: instance.coreLoop.isRunning(),
+    ticks: instance.autonomic.ticks(),
+    turns: llmRequests(instance),
+    sends: instance.channel.sent.length,
+    sendsStarted: instance.channel.sendStarted.length,
+    entries: instance.inboundLog.size().total,
+  };
+}
+
+/**
+ * Best-effort teardown: flush the instance's pino transport, so no log write
+ * is still in flight when the test removes its log directory.
+ */
+export async function flushInstanceLogs(instance: InboundInstance): Promise<void> {
+  const logger = instance.logger as unknown as { flush?: (cb?: (err?: Error) => void) => void };
+  if (typeof logger.flush !== 'function') return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        try {
+          logger.flush?.(() => {
+            resolve();
+          });
+        } catch {
+          resolve();
+        }
+      }),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  const marked = await log.markDelivered([seq]);
-  if (!marked) {
-    throw new Error(`delivery-evidence seeding failed for ${updateId} (seq ${seq})`);
-  }
-  await storage.flush();
 }
 
 /** Read the log's size through a FRESH storage handle (what a new process sees). */

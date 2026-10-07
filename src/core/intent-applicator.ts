@@ -72,43 +72,38 @@ export interface IntentApplicatorDeps {
   pluginLoader?: PluginLoader | undefined;
   /**
    * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1):
-   * the turn whose committed entries wait for this send's outcome. The
-   * cognition turn's tick id, or the one running when the intent fired.
+   * the turn whose entries wait for this send before its outcome is decided.
+   * The cognition turn's tick id, or the one running when the intent fired.
    */
   resolveSendTurnKey?: (intent: SendMessageIntent) => string | undefined;
-  /** A send for that turn is in flight (registered synchronously at apply). */
-  onSendTracked?: (turnKey: string, recipientId: string) => void;
   /**
-   * Durable identity of the log entries a send answers (review round 2,
-   * finding 10): their seqs, and whether the log already holds delivery
-   * evidence for them. Absent (or empty seqs) means no durable identity
-   * exists for this send - the caller has no entry to settle, so the legacy
-   * text-only duplicate check stays in force.
+   * A send of that turn settled. The turn's durable-log entries leave the log
+   * when the turn records an outcome and a send's fate is part of it, so the
+   * outcome is reported here - once per SEND_MESSAGE intent, whether the send
+   * ran, was skipped or could not start. It carries NO per-entry identity and
+   * NO delivery evidence. The return value (the commit of the turn's entries,
+   * when any) is chained into the send chain, so the stop drain awaits its
+   * flush too.
    */
-  resolveSendEntryIdentity?: (
-    turnKey: string | undefined,
-    recipientId: string
-  ) => SendEntryIdentity;
-  /**
-   * A send for that turn settled: `delivered` is a real success. The return
-   * value (the recipient's log commit, when any) is chained into the send
-   * chain so the stop drain awaits the commit's flush too.
-   */
-  onSendOutcome?: (
+  onSendSettled?: (
     turnKey: string,
     recipientId: string,
-    delivered: boolean
+    outcome: SendOutcome
   ) => void | Promise<void>;
 }
 
 /**
- * Durable identity of the inbound-log entries one send answers (finding 10).
+ * How one send of a turn ended (lifemodel-ctc.2.1, owner decision comment 54:
+ * the turn's OUTCOME settles its messages, a failed outcome is never retried).
  */
-export interface SendEntryIdentity {
-  /** Log entries this send answers; empty when no durable entry is involved. */
-  seqs: number[];
-  /** The log holds delivery evidence for ALL those entries. */
+export interface SendOutcome {
+  /**
+   * The text reached the chat (or was already there: a send skipped as a
+   * verbatim repeat of the last assistant message is not a failure).
+   */
   delivered: boolean;
+  /** When not delivered: why - reported at warn with the recipient. */
+  reason?: string;
 }
 
 /**
@@ -276,20 +271,25 @@ export class IntentApplicator {
   private applySendMessage(intent: SendMessageIntent): void {
     const { recipientId, text, replyTo, conversationStatus } = intent.payload;
 
-    // A send that cannot start is a FAILED delivery for the durable log
-    // (review round 2, finding 3): the turn's entries must stay uncommitted,
-    // so the send is tracked and reported even when it never runs.
+    // Which durable-log turn this send belongs to (lifemodel-ctc.2.1). Its
+    // entries leave the log when the turn records an outcome, and this send's
+    // fate is part of that outcome.
     const turnKey = this.deps.resolveSendTurnKey?.(intent);
     let delivered = false;
+    let failureReason: string | undefined;
+    const reportSettled = (outcome: SendOutcome): void => {
+      if (!turnKey) return;
+      const settled = this.deps.onSendSettled?.(turnKey, recipientId, outcome);
+      if (settled && typeof settled.then === 'function') {
+        void settled;
+      }
+    };
+    // A send that cannot start never reaches the chat: the turn's outcome is a
+    // FAILED send, which is reported and deliberately NOT retried (owner
+    // decision, comment 54).
     const reportUndeliverable = (reason: string): void => {
       this.deps.metrics.counter('messages_failed', { reason });
-      if (turnKey) {
-        this.deps.onSendTracked?.(turnKey, recipientId);
-        const outcome = this.deps.onSendOutcome?.(turnKey, recipientId, false);
-        if (outcome && typeof outcome.then === 'function') {
-          void outcome;
-        }
-      }
+      reportSettled({ delivered: false, reason });
     };
 
     if (!this.deps.recipientRegistry) {
@@ -325,41 +325,13 @@ export class IntentApplicator {
       parseMode: 'HTML',
     };
 
-    // The durable inbound log (lifemodel-ctc.2.1): a send that belongs to a
-    // cognition turn reports its outcome so the turn's log entries are
-    // committed only when the answer was really delivered. Registered
-    // synchronously so a fast turn cannot resolve its evaluation first.
-    if (turnKey) {
-      this.deps.onSendTracked?.(turnKey, recipientId);
-    }
-    // Durable identity of the log entries this send answers (finding 10),
-    // resolved BEFORE the send: the entries are what the commit settles.
-    const identity = this.deps.resolveSendEntryIdentity?.(turnKey, recipientId) ?? {
-      seqs: [],
-      delivered: false,
-    };
     const sendChain = Promise.resolve()
       .then(async () => {
-        // The entries this send answers were already DELIVERED (durable
-        // evidence written right after the send that carried them): the
-        // message is not sent again, and it is counted as delivered for the
-        // commit. Durability, not an equal text, is the proof.
-        if (identity.seqs.length > 0 && identity.delivered) {
-          this.deps.logger.debug(
-            { recipientId, entries: identity.seqs.length },
-            'Send skipped: the log holds durable delivery evidence for its entries'
-          );
-          this.deps.metrics.counter('messages_skipped', { reason: 'delivery_evidence' });
-          return { success: false, skipped: true, reason: 'delivery_evidence' as const };
-        }
-        // Legacy duplicate detection: only when NO durable entry identity
-        // exists for this send - a proactive contact with no inbound message,
-        // or a deployment without the log. With an identity but no delivery
-        // evidence, identical text proves nothing about THIS entry and the
-        // answer is sent (finding 10: an unrelated earlier answer may read
-        // the same; the entry stays uncommitted when delivery cannot be
-        // established).
-        if (identity.seqs.length === 0 && this.deps.conversationManager) {
+        // The pre-existing duplicate guard: a proactive message that repeats
+        // the last assistant message verbatim is not sent again. A skipped
+        // send is not a failure - the text is already in the chat, so it
+        // counts as delivered for the turn's outcome (no endless replay).
+        if (this.deps.conversationManager) {
           const lastMessage =
             await this.deps.conversationManager.getLastAssistantMessage(recipientId);
           if (lastMessage && lastMessage === text) {
@@ -394,19 +366,15 @@ export class IntentApplicator {
             );
           }
         } else if ('skipped' in result && result.skipped) {
-          // Skipped on purpose, never because a send failed:
-          // - 'delivery_evidence': the log proves these entries were already
-          //   answered, so this is the same answer arriving twice;
-          // - 'identical_text': a proactive message equal to the last
-          //   assistant one (no durable entry identity).
-          // Both count as delivered for the log commit, so the entry settles
-          // instead of replaying forever (review round 2, finding 10).
+          // Skipped on purpose, never because a send failed: the identical
+          // text is already the last assistant message, so the user has it.
           delivered = true;
           this.deps.logger.debug(
             { recipientId, textLength: text.length, reason: result.reason },
-            'Send skipped as a duplicate; counted as delivered for the log commit'
+            'Send skipped as a duplicate; counted as delivered for the turn outcome'
           );
         } else {
+          failureReason = 'returned_false';
           this.deps.logger.warn(
             { recipientId, channel: route.channel, textLength: text.length },
             'Message send returned false'
@@ -418,6 +386,7 @@ export class IntentApplicator {
         }
       })
       .catch((error: unknown) => {
+        failureReason = 'exception';
         this.deps.logger.error({ err: error, recipientId }, 'Message send threw an error');
         this.deps.metrics.counter('messages_failed', {
           channel: route.channel,
@@ -427,13 +396,14 @@ export class IntentApplicator {
 
     // Track the whole chain so the stop drain can await its completion
     // (bounded by the stop deadline) before the channels are released; the
-    // turn's log commit rides on the same chain, so its flush is awaited too.
+    // turn's settlement rides on the same chain, so its flush is awaited too.
     const tracked = sendChain
       .then(() => {
-        if (turnKey) {
-          return this.deps.onSendOutcome?.(turnKey, recipientId, delivered);
-        }
-        return undefined;
+        if (!turnKey) return undefined;
+        const outcome: SendOutcome = delivered
+          ? { delivered: true }
+          : { delivered: false, reason: failureReason ?? 'unknown' };
+        return this.deps.onSendSettled?.(turnKey, recipientId, outcome);
       })
       .finally(() => {
         this.inFlightSends.delete(tracked);
