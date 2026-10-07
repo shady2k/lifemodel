@@ -214,6 +214,9 @@ export class AgenticLoop {
               { attempts: state.forceRespondAttempts, iteration: state.iteration },
               'Model refused to respond after forced attempts — sending error to user'
             );
+            // A forced refusal is an ERROR turn: it must not settle the log
+            // entries of the message it failed to answer (finding 4).
+            state.disposition = 'error';
             const terminal: Terminal = {
               type: 'respond',
               text: 'Извини, произошла техническая ошибка. Попробуй ещё раз через минуту.',
@@ -229,6 +232,7 @@ export class AgenticLoop {
             { attempts: state.forceRespondAttempts, iteration: state.iteration },
             'Model refused to respond after forced attempts - terminating with noAction'
           );
+          state.disposition = 'error';
           const terminal: Terminal = {
             type: 'noAction',
             reason: 'Model refused to generate response after multiple forced attempts',
@@ -386,7 +390,10 @@ export class AgenticLoop {
           messages = validateToolCallPairs(messages, this.logger);
           continue;
         }
-        // Smart model also failed — fall through to handleNaturalCompletion
+        // Smart model also failed — fall through to handleNaturalCompletion,
+        // which must not classify the empty result as a deliberate no-reply
+        // (finding 4: a provider error never settles a log entry).
+        state.disposition = 'error';
         this.logger.error(
           { iteration: state.iteration },
           'Provider error persists after smart escalation'
@@ -419,6 +426,7 @@ export class AgenticLoop {
             );
 
             if (context.triggerSignal.type !== 'user_message') {
+              state.disposition = 'error';
               const terminal: Terminal = {
                 type: 'noAction',
                 reason: 'Malformed LLM response after smart escalation',
@@ -431,6 +439,7 @@ export class AgenticLoop {
             const traceRef = trace
               ? `${trace.traceId.slice(0, 8)}:${trace.spanId ?? 'unknown'}`
               : 'unknown';
+            state.disposition = 'error';
             const terminal: Terminal = {
               type: 'respond',
               text: `Извини, произошла ошибка. Давай повторим? (trace: ${traceRef})`,
@@ -644,7 +653,11 @@ export class AgenticLoop {
         this.logger.debug(
           'Empty response after core.say — accepting (user already received a message)'
         );
-        // Fall through to build a valid noAction terminal
+        // Fall through to build a valid noAction terminal. The user DID get
+        // an answer (core.say sent it during this turn), so this is an
+        // `answer` disposition, not a no-reply: it still needs its send to
+        // have been delivered (finding 4).
+        state.disposition = 'answer';
         const terminal: Terminal = {
           type: 'noAction',
           reason: 'Response already delivered via core.say',

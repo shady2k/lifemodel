@@ -10,7 +10,12 @@
  * - Only activated when AGGREGATION layer determines it's needed
  */
 
-import type { CognitionLayer, CognitionContext, CognitionResult } from '../../types/layers.js';
+import type {
+  CognitionLayer,
+  CognitionContext,
+  CognitionResult,
+  TurnDisposition,
+} from '../../types/layers.js';
 import type { Signal } from '../../types/signal.js';
 import type { Logger } from '../../types/logger.js';
 import {
@@ -20,7 +25,7 @@ import {
 import type { UserModel } from '../../models/user-model.js';
 import type { EventBus } from '../../core/event-bus.js';
 import type { Agent } from '../../core/agent.js';
-import type { LoopConfig } from '../../types/cognition.js';
+import { terminalDisposition, type LoopConfig } from '../../types/cognition.js';
 import { emitTypingIndicator } from '../shared/index.js';
 import { discoverSkills } from '../../runtime/skills/skill-loader.js';
 
@@ -334,9 +339,12 @@ export class CognitionProcessor implements CognitionLayer {
   async process(context: CognitionContext): Promise<CognitionResult> {
     if (!this.agenticLoop) {
       this.logger.error('Agentic loop not initialized');
+      // No turn ran at all: an error disposition, so no log entry settles
+      // without an answer (finding 4).
       return {
         confidence: 0,
         intents: [],
+        disposition: 'error',
       };
     }
 
@@ -348,6 +356,7 @@ export class CognitionProcessor implements CognitionLayer {
       return {
         confidence: 1.0,
         intents: [],
+        disposition: 'error',
       };
     }
 
@@ -564,9 +573,11 @@ export class CognitionProcessor implements CognitionLayer {
             ]
           : [];
 
+      // The turn threw: an ERROR, never a deliberate no-reply (finding 4).
       return {
         confidence: 0,
         intents: errorIntents,
+        disposition: 'error',
       };
     }
 
@@ -625,9 +636,18 @@ export class CognitionProcessor implements CognitionLayer {
           ? 0.8
           : 0.3;
 
+    // How the turn ended, for the durable inbound log (owner decision on
+    // finding 4): the loop's own mark when it made one, else the terminal.
+    // A failed loop NEVER settles an entry - only a delivered answer or a
+    // deliberate no-reply may.
+    const disposition: TurnDisposition = !loopResult.success
+      ? 'error'
+      : (loopResult.state.disposition ?? terminalDisposition(loopResult.terminal));
+
     const result: CognitionResult = {
       confidence,
       intents: loopResult.intents,
+      disposition,
     };
 
     if (loopResult.usedSmartRetry !== undefined) {

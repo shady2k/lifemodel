@@ -18,18 +18,36 @@
  * Commits are tied to cognition turns by CoreLoop: a turn owns the log
  * entries of the recipient it answers (its first trigger) and of the
  * messages it absorbed mid-loop for that recipient; CoreLoop commits them
- * when the turn settles with that recipient's answer delivered - or when
- * the turn settles with no send at all (the owner decision for zero-send
- * resolution is pending, lifemodel-ctc review round 2 finding 4). A
- * rejecting, overrunning turn or a failed/hung/unsent send never commits:
- * the entry stays in the log and is replayed once at the next start.
+ * when the turn settles and either
+ * - the turn delivered an answer (a successful send), or
+ * - the turn ended in a DELIBERATE no-reply: `core.defer` or an explicit
+ *   no-reply/noAction decision of the agent (owner decision, comment 48).
+ * An error, an empty or failed result, a rejected or overrunning turn and a
+ * failed, hung, filtered or unstarted send never commit: the entry stays in
+ * the log and is replayed once at the next start.
+ *
+ * Delivery is proven DURABLY, per entry (`deliveredAt`, review round 2
+ * finding 10): written right after a send succeeded, so a crash between the
+ * send and the commit cannot re-answer on the trust of an equal TEXT. An
+ * equal text of an earlier answer is never proof that THIS entry was
+ * answered. Evidence written by the SAME turn does not suppress its own
+ * later sends (an acknowledgement through core.say, then the real answer);
+ * evidence from another turn - a replay after a crash - does.
  *
  * The file is bounded by compaction: committed entries drop, and the dedup
- * index is a bounded ring of recent keys (review round 2, findings 5-6: no
- * update-id watermark - Telegram may legitimately pick a RANDOM update_id
- * again, smaller than any before it, after a week of silence; exact keys
- * plus the recent ring are the only sound dedup, because Telegram
- * re-delivers only recent unconfirmed updates).
+ * index is the exact keys of the live entries plus a bounded ring of recent
+ * keys (default 1000; review round 2, findings 5-6: no update-id watermark -
+ * Telegram may legitimately pick a RANDOM update_id again, smaller than any
+ * before it, after a week of silence).
+ *
+ * THE DEDUP CONTRACT IS BOUNDED (coordinator decision, comment 49): the ring
+ * is the whole horizon. An update_id that has fallen out of it - more than
+ * `maxRecentKeys` later admissions, or a compaction - is no longer
+ * recognised, and a redelivery of it can be accepted again. This is
+ * deliberate: Telegram re-delivers only unconfirmed updates and keeps them
+ * for at most 24 h, a personal agent does not receive 1000 messages in 24 h,
+ * and what guarantees once-only answering of an ACCEPTED message is the
+ * per-recipient offset below - not the ring. There is no unbounded promise.
  *
  * Each entry also carries the ROUTING data (channel, destination) that the
  * answer needs: a first message of a new chat can outlive the registry's
@@ -80,6 +98,21 @@ export interface InboundLogEntry {
   routing: EntryRouting | null;
   /** The signal as the channel emitted it. */
   signal: Signal;
+  /**
+   * Durable DELIVERY evidence (review round 2, finding 10): the moment this
+   * entry's answer really reached the chat, written right after the send
+   * succeeded. Only this - never an equal TEXT of some earlier answer - may
+   * settle an entry without sending again.
+   */
+  deliveredAt?: string;
+  /**
+   * The turn whose send carried that answer. A LIVE turn that already sent
+   * once may still send again (an acknowledgement through core.say, then the
+   * real answer): evidence from the SAME turn is therefore not a reason to
+   * skip its later sends - only evidence from ANOTHER turn (a replay after a
+   * crash) is.
+   */
+  deliveredTurn?: string;
 }
 
 export interface ReplayEntry {
@@ -111,6 +144,10 @@ interface InboundLogEnvelope {
     routing: EntryRouting | null;
     /** Date-encoded signal (as it is stored in the file). */
     signal: Signal;
+    /** Durable delivery evidence (finding 10); absent until an answer landed. */
+    deliveredAt?: string;
+    /** The turn whose send delivered it (see InboundLogEntry.deliveredTurn). */
+    deliveredTurn?: string;
   }[];
 }
 
@@ -342,9 +379,12 @@ export class InboundLog {
     const seq = this.envelope.nextSeq;
     const entry = { seq, key, recipientId: recipientIdOf(signal), routing, signal };
 
-    // Append + index mutations; wiped below if the flush fails.
+    // Append + index mutations; wiped below if the DURABILITY POINT fails.
     this.envelope.nextSeq = seq + 1;
-    const recentLenBefore = this.envelope.recentKeys.length;
+    // The whole ring is snapshotted, not its length: a full ring EVICTS its
+    // oldest key while keeping the length (finding 8), so a length
+    // comparison cannot restore it.
+    const recentKeysBefore = [...this.envelope.recentKeys];
     this.envelope.entries.push(entry);
     this.envelope.recentKeys.push(key);
     if (this.envelope.recentKeys.length > this.maxRecentKeys) {
@@ -354,15 +394,20 @@ export class InboundLog {
     this.seqIndex.set(seq, this.envelope.entries.length - 1);
     this.seqBySignalId.set(signal.id, seq);
     try {
-      await this.persist();
+      await this.persistDurably();
     } catch (error) {
-      this.rollbackAppend(seq, signal.id, key, recentLenBefore);
+      this.rollbackAppend(seq, signal.id, key, recentKeysBefore);
+      await this.reconcileStorageAfterRollback();
       throw error;
     }
     this.logger.debug(
       { seq, recipientId: entry.recipientId, routing: entry.routing },
       'Inbound message logged durably'
     );
+    // Compaction is a SEPARATE, RECOVERABLE step: it runs after the entry is
+    // durable, so its own failure can never roll a durable append back
+    // (finding A).
+    await this.compactIfNeeded();
     return true;
   }
 
@@ -386,11 +431,12 @@ export class InboundLog {
     const previousSignal = entry.signal;
     entry.signal = signal;
     try {
-      await this.persist();
+      await this.persistDurably();
     } catch (error) {
       // The in-place replacement did not become durable: put the receipt
       // back, so the pending download stays the entry on disk.
       entry.signal = previousSignal;
+      await this.reconcileStorageAfterRollback();
       throw error;
     }
     this.seqBySignalId.set(signal.id, seq);
@@ -398,21 +444,23 @@ export class InboundLog {
     return true;
   }
 
-  /** Wipe everything recordNow added when the flush failed (finding 8). */
+  /**
+   * Wipe everything recordNow added when the durability point failed
+   * (finding 8): the entry, its indexes, nextSeq, and the recent-keys RING
+   * (a full ring evicted its oldest key - restored from the snapshot).
+   */
   private rollbackAppend(
     seq: number,
     signalId: string,
     key: string,
-    recentLenBefore: number
+    recentKeysBefore: string[]
   ): void {
     const idx = this.seqIndex.get(seq);
     if (idx !== undefined && this.envelope.entries[idx]?.seq === seq) {
       this.envelope.entries.splice(idx, 1);
     }
     this.envelope.nextSeq = Math.min(this.envelope.nextSeq, seq);
-    if (this.envelope.recentKeys.length > recentLenBefore) {
-      this.envelope.recentKeys.length = recentLenBefore;
-    }
+    this.envelope.recentKeys.splice(0, this.envelope.recentKeys.length, ...recentKeysBefore);
     if (this.keyIndex.get(key) === seq) {
       this.keyIndex.delete(key);
     }
@@ -423,9 +471,119 @@ export class InboundLog {
     this.logger.warn({ seq, key }, 'Inbound append rolled back: the durable flush failed');
   }
 
+  /**
+   * A rolled-back operation must not be able to reach the disk later: the
+   * storage cache still holds the pre-rollback envelope as a dirty write
+   * (DeferredStorage keeps a failed key dirty), so ANY later flush - an
+   * unrelated save, or the periodic auto-flush - would write the rejected
+   * entry and the next start would replay it (finding B). Re-saving the
+   * rolled-back envelope repairs that cache entry; the flush that follows is
+   * best effort, and a failure here is harmless: the cache now holds the
+   * correct state and the next successful flush writes it.
+   */
+  private async reconcileStorageAfterRollback(): Promise<void> {
+    try {
+      await this.storage.save(INBOUND_LOG_KEY, encodeDates(this.envelope));
+    } catch (error) {
+      this.logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          path: this.path,
+        },
+        'Rolled-back inbound log could not be re-saved; a later flush may write the rejected entry'
+      );
+      return;
+    }
+    try {
+      await this.storage.flush?.();
+    } catch (error) {
+      this.logger.debug(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Rolled-back inbound log not flushed now; the next flush writes the repaired state'
+      );
+    }
+  }
+
   /** In-memory seq for a signal id the log holds (or undefined). */
   seqForSignal(signalId: string): number | undefined {
     return this.seqBySignalId.get(signalId);
+  }
+
+  /** In-memory seq for a dedup key the log holds (or undefined). */
+  seqForKey(key: string): number | undefined {
+    return this.keyIndex.get(key);
+  }
+
+  /**
+   * Durable delivery evidence for these entries (review round 2, finding
+   * 10): every one of them is on record as DELIVERED, so their answer really
+   * reached the chat and must not be sent again. An equal TEXT is not
+   * evidence - an unrelated earlier answer may read the same.
+   */
+  hasDeliveryEvidence(seqs: number[], turnKey?: string): boolean {
+    if (seqs.length === 0) return false;
+    for (const seq of seqs) {
+      const idx = this.seqIndex.get(seq);
+      const entry = idx === undefined ? undefined : this.envelope.entries[idx];
+      if (!entry?.deliveredAt) {
+        return false;
+      }
+      // Evidence written by THIS turn says nothing about a later send of the
+      // same turn: an acknowledgement followed by the answer is not a repeat.
+      if (turnKey !== undefined && entry.deliveredTurn === turnKey) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Record durably that the answer of these entries was DELIVERED. Called
+   * right after a send succeeded, before the turn's commit - the window
+   * between the two is exactly the one a crash re-opened as "identical text"
+   * (finding 10).
+   *
+   * A failure is reported as `false`, never thrown: the send already
+   * happened, and a throw would be misread as a failed delivery. The marker
+   * itself is NOT rolled back on a failed flush - unlike an append, the
+   * in-memory and cached state stay truthful (the answer did land); only the
+   * file lags, and the storage keeps the write dirty for the next flush.
+   * The consequence of a lost marker is a restart that answers again instead
+   * of trusting text equality.
+   */
+  markDelivered(seqs: number[], turnKey?: string): Promise<boolean> {
+    return this.enqueue(() => this.markDeliveredNow(seqs, turnKey));
+  }
+
+  private async markDeliveredNow(seqs: number[], turnKey?: string): Promise<boolean> {
+    const marked: number[] = [];
+    const at = new Date().toISOString();
+    for (const seq of seqs) {
+      const idx = this.seqIndex.get(seq);
+      const entry = idx !== undefined ? this.envelope.entries[idx] : undefined;
+      if (entry === undefined || entry.deliveredAt !== undefined) continue;
+      entry.deliveredAt = at;
+      if (turnKey !== undefined) entry.deliveredTurn = turnKey;
+      marked.push(seq);
+    }
+    if (marked.length === 0) {
+      return false;
+    }
+    try {
+      await this.persistDurably();
+    } catch (error) {
+      this.logger.error(
+        {
+          seqs: marked,
+          path: this.path,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Delivery evidence could not be written to the durable inbound log'
+      );
+      return false;
+    }
+    this.logger.debug({ seqs: marked, at }, 'Inbound log: answers recorded as delivered');
+    return true;
   }
 
   /** Whether the entry behind this seq is committed for its recipient. */
@@ -490,7 +648,8 @@ export class InboundLog {
       }
       this.advanceProgress(entry.recipientId);
     }
-    await this.persist();
+    await this.persistDurably();
+    await this.compactIfNeeded();
   }
 
   /** Sort and trim committedBeyond, raising committedThrough as far as possible. */
@@ -536,18 +695,42 @@ export class InboundLog {
     return created;
   }
 
-  private async persist(): Promise<void> {
+  /**
+   * The durability point of every operation (append, replacement, commit):
+   * the envelope is written and flushed here. A rejection means the state is
+   * NOT on disk, which is what the callers roll back on.
+   */
+  private async persistDurably(): Promise<void> {
     this.envelope.savedAt = new Date().toISOString();
     await this.storage.save(INBOUND_LOG_KEY, encodeDates(this.envelope));
     // createInboundLog() guaranteed a flushing storage: this await is the
     // durability point of every record() and commit().
     await this.storage.flush?.();
-    // Compaction only runs after a SUCCESSFUL flush: its own in-memory
-    // rewrite can then never diverge from what record() will roll back.
-    if (this.envelope.entries.length > this.maxEntries) {
-      this.compact();
-      await this.storage.save(INBOUND_LOG_KEY, encodeDates(this.envelope));
-      await this.storage.flush?.();
+  }
+
+  /**
+   * Compaction is an OPTIMIZATION and runs as its own step AFTER the
+   * durability point (finding A): the caller's operation already succeeded,
+   * so a failing compaction write is logged and contained - never rethrown,
+   * never rolled back. The in-memory rewrite it made is safe either way: it
+   * only drops COMMITTED entries, so the file on disk stays a superset of
+   * what the log holds until the next successful flush.
+   */
+  private async compactIfNeeded(): Promise<void> {
+    if (this.envelope.entries.length <= this.maxEntries) {
+      return;
+    }
+    this.compact();
+    try {
+      await this.persistDurably();
+    } catch (error) {
+      this.logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          path: this.path,
+        },
+        'Inbound log compaction could not be written; the committed entries stay until the next successful flush'
+      );
     }
   }
 

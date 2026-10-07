@@ -18,6 +18,7 @@ import type {
   LLMProvider,
   CompletionRequest,
   CompletionResponse,
+  ToolCall,
 } from '../../src/llm/provider.js';
 import { makeDeferred } from './core-loop-drain-harness.js';
 import type { ScriptedResponse } from './scripted-llm.js';
@@ -67,11 +68,21 @@ export class HangableScriptedLLM implements LLMProvider {
       );
     }
     const scripted = this.script[this.index++]!;
+    // Tool calls pass through like ScriptedLLMProvider does: a scripted turn
+    // can call a real tool (e.g. core.say) and exercise the immediate-send
+    // path (review round 2, finding 9).
+    const toolCalls: ToolCall[] | undefined = scripted.toolCalls?.map((tc, idx) => ({
+      id: `call_${this.requests.length - 1}_${idx}`,
+      type: 'function' as const,
+      function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+    }));
+    const finishReason: CompletionResponse['finishReason'] =
+      scripted.finishReason ?? (toolCalls && toolCalls.length > 0 ? 'tool_calls' : 'stop');
     return {
       content: scripted.content ?? null,
       model: 'hangable-scripted-model',
-      toolCalls: undefined,
-      finishReason: 'stop',
+      toolCalls,
+      finishReason,
       usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
     };
   }

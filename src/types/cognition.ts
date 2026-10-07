@@ -11,6 +11,8 @@
  * - Tool result linking via step IDs
  */
 
+import type { TurnDisposition } from './layers.js';
+
 // ============================================================
 // Schema Version
 // ============================================================
@@ -528,6 +530,23 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   maxOutputTokens: 5000,
 };
 
+/**
+ * How a turn that reached this terminal ended, unless the loop marked a
+ * disposition on the state explicitly (see {@link LoopState.disposition}).
+ * `noAction` is the agent's own (explicit or natural) decision not to reply,
+ * so it is a deliberate no-reply; error turns are marked by the loop.
+ */
+export function terminalDisposition(terminal: Terminal): TurnDisposition {
+  switch (terminal.type) {
+    case 'respond':
+      return 'answer';
+    case 'defer':
+      return 'defer';
+    case 'noAction':
+      return 'no_reply';
+  }
+}
+
 // ============================================================
 // Loop State
 // ============================================================
@@ -607,6 +626,15 @@ export interface LoopState {
 
   /** Whether a non-retryable error retry has already been attempted (meta-provider upstream routing) */
   nonRetryableErrorRetried: boolean;
+
+  /**
+   * How this turn ended, when the loop knows better than its terminal says
+   * (lifemodel-ctc.2.1, owner decision on review round 2 finding 4): a
+   * synthesized error terminal is `error`, a terminal that only reflects an
+   * answer already sent via core.say is `answer`. Undefined means the
+   * terminal speaks for itself (see {@link terminalDisposition}).
+   */
+  disposition?: TurnDisposition;
 }
 
 /**
