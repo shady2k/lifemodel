@@ -110,12 +110,21 @@ export class FakeCognitionLayer {
   }
 
   /**
+   * Whether a settling turn's SEND_MESSAGE gets the turn's trace, the way the
+   * real intent compiler stamps it. A test sets it false to be a producer that
+   * hands back its answer WITHOUT the trace: CoreLoop still attributes the
+   * intents of the turn it resolved (see attributedToTurn).
+   */
+  stampTurnTrace = true;
+
+  /**
    * The real intent compiler stamps every SEND_MESSAGE of a turn with the
    * turn's trace (`{tickId, parentSignalId}`); CoreLoop attributes a send to
    * its turn through that trace. A fake result without it would look like a
    * send from nowhere, so the double mirrors the compiler.
    */
   private withTurnTrace(result: CognitionResult, context: CognitionContext): CognitionResult {
+    if (!this.stampTurnTrace) return result;
     const trigger = context.triggerSignals[0];
     return {
       ...result,

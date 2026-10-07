@@ -776,6 +776,92 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
     expect(h2.channel.sent).toEqual([]);
   });
 
+  it('a result send that carries NO trace is still attributed to its turn (review round 8)', async () => {
+    const storagePath = await fresh('ctc2-notrace-');
+    // A producer that hands back its answer without the turn's trace: CoreLoop
+    // attributes the intents of the turn it resolved, so the send still
+    // reports start and settle and the turn's entry leaves the log through it.
+    const h1 = await startInboundInstance(storagePath, {
+      cognitionMode: 'immediate',
+      drainTimeoutMs: 5_000,
+      recordLogs: true,
+    });
+    instances.push(h1);
+    const fake = h1.cognition as FakeCognitionLayer;
+    fake.stampTurnTrace = false;
+    const send: SendMessageIntent = {
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: h1.recipientId, text: 'an untraced answer' },
+    };
+    fake.result = { confidence: 1, intents: [send], response: undefined };
+
+    await receiveMessage(h1, 'hello there', 'u-1');
+    await waitFor(() => h1.channel.sent.length === 1, 'the untraced answer went out');
+    await waitFor(
+      () => h1.inboundLog.size().uncommitted === 0,
+      'the turn settled through a send that named no turn'
+    );
+    await waitForSettleLogs(h1);
+    expect(settleLogs(h1)[0]?.obj).toMatchObject({
+      recipientId: h1.recipientId,
+      outcome: 'answered',
+    });
+
+    // a graceful stop and a restart replay nothing: it was answered once
+    await stopInboundInstance(h1);
+    const h2 = await startInboundInstance(storagePath, {
+      cognitionMode: 'hang',
+      drainTimeoutMs: DRAIN_DEADLINE_MS,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(0);
+    expect(h2.channel.sent).toEqual([]);
+  });
+
+  it('a THROWN agentic loop: its apology is the outcome, and a graceful restart replays nothing (review round 8)', async () => {
+    const storagePath = await fresh('ctc2-realerror-');
+    // The REAL agentic loop, with a provider that has nothing to say: its
+    // completion throws, and the processor answers with its apology and the
+    // disposition 'error' - a FAILED turn. That apology is a user-facing send
+    // produced by the turn, so the turn's entry must leave the log through it.
+    const h1 = await startInboundInstance(storagePath, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [],
+      drainTimeoutMs: 5_000,
+      recordLogs: true,
+    });
+    instances.push(h1);
+    await receiveMessage(h1, 'are you there?', 'u-1');
+
+    // the apology reached the chat exactly once...
+    await waitFor(() => h1.channel.sent.length === 1, 'the apology went out');
+    expect(sentTexts(h1)[0]).toContain('произошла ошибка');
+    // ...and it IS the turn's outcome: the entry leaves the log as a failure
+    await waitFor(
+      () => h1.inboundLog.size().uncommitted === 0,
+      'the failed turn removed the entry instead of leaving it to replay'
+    );
+    await waitForSettleLogs(h1);
+    const settled = settleLogs(h1);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.obj).toMatchObject({ recipientId: h1.recipientId, outcome: 'failed_turn' });
+
+    // a GRACEFUL stop and a restart: nothing replays, so no second apology
+    await stopInboundInstance(h1);
+    const h2 = await startInboundInstance(storagePath, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(0);
+    expect(h2.channel.sent).toEqual([]);
+  });
+
   it('a FAILED send is an outcome: removed, warned with the reason, never retried', async () => {
     const storagePath = await fresh('ctc2-failsend-');
     const h1 = await startInboundInstance(storagePath, {
