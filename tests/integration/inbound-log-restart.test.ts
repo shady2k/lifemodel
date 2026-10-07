@@ -23,6 +23,7 @@ import type { SendMessageIntent } from '../../src/types/intent.js';
 
 import { FakeCognitionLayer } from '../helpers/core-loop-drain-harness.js';
 import {
+  makeDeferred,
   startInboundInstance,
   stopInboundInstance,
   receiveMessage,
@@ -85,7 +86,6 @@ const instances: InboundInstance[] = [];
  */
 async function die(instance: InboundInstance): Promise<void> {
   await fenceKilledInstance(instance);
-  instances.splice(instances.indexOf(instance), 1);
 }
 
 async function fresh(prefix: string): Promise<{ storagePath: string; logDir: string }> {
@@ -96,8 +96,11 @@ async function fresh(prefix: string): Promise<{ storagePath: string; logDir: str
 
 afterEach(async () => {
   for (const root of scratchRoots.splice(0)) {
-    // Whatever an instance still had in flight is fenced first: no instance
-    // may write into the directories this teardown removes.
+    // EVERY instance of this scratch root - killed, stopped or still running -
+    // is fenced and its logger flushed before the directories go: no instance
+    // may write into them while (or after) they are removed (review round 4,
+    // optional item: stopped instances used to be dropped from the list and
+    // left a live pino transport behind).
     for (const instance of instances.splice(0)) {
       await fenceKilledInstance(instance).catch(() => undefined);
       await flushInstanceLogs(instance).catch(() => undefined);
@@ -345,7 +348,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // a restart also does not re-answer the re-delivered update
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -380,7 +382,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     h1.cognition.hang = false;
     h1.cognition.settleHangingTurn();
     await stopping;
-    instances.pop();
 
     // delivered exactly once, during the drain, before the channels were freed
     expect(sentTexts(h1)).toEqual([expect.stringContaining('the answer of the drained turn')]);
@@ -413,7 +414,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await waitFor(() => llmRequests(h1) === 1, 'turn started (LLM held)');
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     // the turn recorded no outcome: nothing was sent and the entry stays
     expect(h1.channel.sent).toEqual([]);
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
@@ -449,7 +449,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.coreLoop.pendingSignalCount()).toBe(1);
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     // it never got a turn: uncommitted in the log, queued in the journal too
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
@@ -471,6 +470,158 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(sentTexts(h2)).toHaveLength(1);
   });
 
+  // ── the acknowledgement (core.say) and the answer: two sends, two gates
+  //    (review round 4, findings 1 and 3) ──
+
+  it('a held core.say acknowledgement with an empty final response: answered once across a graceful stop (finding 1)', async () => {
+    const { storagePath, logDir } = await fresh('ctc2-sayonly-');
+    const h1 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [
+        // the turn answers ONLY through core.say: that message IS the answer
+        { toolCalls: [{ name: 'core.say', args: { text: 'working on it' } }] },
+        // an empty final response after core.say is a valid answer: disposition
+        // `answer` with NO final SEND_MESSAGE intent (agentic-loop.ts)
+        { content: null },
+      ],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h1);
+    const gate = makeDeferred<void>();
+    h1.channel.sendGate = { promise: gate.promise, release: () => gate.resolve(undefined) };
+    await receiveMessage(h1, 'the message the acknowledgement answers', 'u-1');
+    await waitFor(() => h1.channel.sendStarted.length === 1, 'the acknowledgement started (held)');
+    await waitFor(() => llmRequests(h1) === 2, 'the turn ran to its empty final response');
+    // the turn has resolved with the acknowledgement STILL in flight: the entry
+    // is not settled on a guess
+    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    expect(sentTexts(h1)).toEqual([]);
+    expect(h1.inboundLog.size()).toEqual({ total: 1, uncommitted: 1 });
+
+    const stopping = stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
+    // the held acknowledgement delivers INSIDE the drain: with it the turn's
+    // outcome (answered) is recorded before the channels are released
+    h1.channel.sendGate = null;
+    gate.resolve(undefined);
+    await stopping;
+
+    expect(sentTexts(h1)).toEqual([expect.stringContaining('working on it')]);
+    expect((await readLogSize(storagePath)).uncommitted).toBe(0);
+
+    // a restart does not replay it: the message was answered exactly once
+    const h2 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(0);
+    expect(h2.channel.sent).toEqual([]);
+  });
+
+  it('an acknowledgement that settles first does not answer for a final send still in flight (finding 3)', async () => {
+    const { storagePath, logDir } = await fresh('ctc2-ackthenhang-');
+    const h1 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [
+        { toolCalls: [{ name: 'core.say', args: { text: 'working on it' } }] },
+        { content: 'the answer that never lands' },
+      ],
+      drainTimeoutMs: DRAIN_DEADLINE_MS,
+    });
+    instances.push(h1);
+    // TWO independent gates: the acknowledgement and the answer are held on
+    // their own, so the acknowledgement can settle AFTER the turn resolved and
+    // while the answer is still in flight - the window of finding 3.
+    const ackGate = makeDeferred<void>();
+    const answerGate = makeDeferred<void>();
+    h1.channel.sendGates.set(1, {
+      promise: ackGate.promise,
+      release: () => ackGate.resolve(undefined),
+    });
+    h1.channel.sendGates.set(2, {
+      promise: answerGate.promise,
+      release: () => answerGate.resolve(undefined),
+    });
+    await receiveMessage(h1, 'the message the answer is for', 'u-1');
+    await waitFor(() => h1.channel.sendStarted.length === 2, 'both sends started and held');
+
+    // release ONLY the acknowledgement: it lands while the answer is still in
+    // flight, and the entry must stay (the acknowledgement is not the answer)
+    ackGate.resolve(undefined);
+    await waitFor(() => h1.channel.sent.length === 1, 'the acknowledgement delivered');
+    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    expect(sentTexts(h1)).toEqual([expect.stringContaining('working on it')]);
+    expect(h1.inboundLog.size()).toEqual({ total: 1, uncommitted: 1 });
+
+    // the answer hangs past the stop deadline: still no outcome, so it is kept
+    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    expect(sentTexts(h1)).toEqual([expect.stringContaining('working on it')]);
+    expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
+
+    const h2 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [{ content: 'the redone answer' }],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.channel.sent.length === 1, 'answered once after the restart');
+    expect(h2.channel.sent[0]?.text).toContain('the redone answer');
+    await waitFor(() => h2.inboundLog.size().uncommitted === 0, 'removed by its outcome');
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(1);
+  });
+
+  it('a FAILED final send after a delivered acknowledgement: failed_send, warned, not retried (finding 3)', async () => {
+    const { storagePath, logDir } = await fresh('ctc2-ackthenfail-');
+    const h1 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [
+        { toolCalls: [{ name: 'core.say', args: { text: 'working on it' } }] },
+        { content: 'the answer that fails' },
+      ],
+      drainTimeoutMs: 5_000,
+      recordLogs: true,
+    });
+    instances.push(h1);
+    h1.channel.failSendAt = { index: 2, reason: 'telegram is down' };
+    await receiveMessage(h1, 'the message the answer is for', 'u-1');
+    await waitFor(() => h1.channel.sent.length === 1, 'the acknowledgement delivered');
+    await waitFor(() => h1.channel.failed.length === 1, 'the final send failed');
+    await waitFor(
+      () => h1.inboundLog.size().uncommitted === 0,
+      'the failed FINAL send is the outcome, not the acknowledgement'
+    );
+    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    const settled = settleLogs(h1);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.level).toBe('warn');
+    expect(settled[0]?.obj).toMatchObject({
+      recipientId: h1.recipientId,
+      outcome: 'failed_send',
+      reason: 'returned_false',
+    });
+
+    await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
+    const h2 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [{ content: 'never sent: the outcome was already recorded' }],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(0);
+    expect(h2.channel.sent).toEqual([]);
+  });
+
   // ── the outcome rule: what settles an entry, what is replayed ──
 
   it('a turn that deliberately answers nothing (no_reply) settles its entry: no endless replay', async () => {
@@ -487,7 +638,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.channel.sent).toEqual([]);
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'immediate',
       cognitionResult: { disposition: 'no_reply' },
@@ -533,7 +683,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     ).toHaveLength(1);
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     // HANG the replayed turn: nothing settles, so the replayed entry is
     // observable (a settling turn would remove it within the same tick).
     const h2 = await startInboundInstance(storagePath, logDir, {
@@ -580,7 +729,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // the restart does NOT retry it
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
@@ -619,7 +767,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     });
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -660,7 +807,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     });
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -687,7 +833,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await waitFor(() => h1.channel.sendStarted.length === 1, 'send started (now hung)');
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
     // the send never settled -> no outcome -> the entry is still there
     expect(h1.channel.sent).toEqual([]);
     expect((await readLogSize(storagePath)).uncommitted).toBe(1);
@@ -724,7 +869,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     );
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
 
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
@@ -761,7 +905,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.inboundLog.size()).toEqual({ total: 2, uncommitted: 2 });
 
     await stopInboundInstance(h1, await openStorage(storagePath), storagePath);
-    instances.pop();
 
     const h2 = await startInboundInstance(storagePath, logDir, {
       cognitionMode: 'real-scripted',
@@ -854,7 +997,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // immediately (no-trace immediate send) and delivers
     h1.cognition.settleHangingTurn();
     await stopping;
-    instances.pop();
 
     expect(h1.channel.sent.length).toBe(1);
     await waitFor(
@@ -910,7 +1052,6 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     h1.cognition.hang = false;
     h1.cognition.settleHangingTurn();
     await stopping;
-    instances.pop();
 
     // BOTH sends go out: the acknowledgement does not swallow the answer
     expect(h1.channel.sent.map((s) => s.text)).toEqual([
