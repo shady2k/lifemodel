@@ -30,10 +30,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
 - `src/core/` — the heart: CoreLoop tick, Agent, energy model, scheduler,
   plugin loader and discovery, container (dependency wiring), event bus and
-  queue, intent application, metrics, tracing, the shutdown-drain sequence
-  (one overall stop deadline; intake stop first, sends of the drained turn
-  awaited, channels released after, storage flushed last) and the
-  pending-signal journal (`pending-signal-journal.ts`) and the durable
+  queue, intent application, metrics, tracing, the bounded shutdown-drain
+  sequence (one overall stop deadline; intake stop first, sends of the drained
+  turn awaited, channels released after, storage flushed last) with its hard
+  exit at the deadline (`hard-exit.ts`), and the durable
   inbound log (`inbound-log.ts`), which persists inbound user messages on
   receipt, removes an entry once its turn reached a recorded outcome
   (answered, deliberately silent, failed send, failed turn - a failed outcome
@@ -123,7 +123,7 @@ move the config file: startup reads `data/config/agent.json` before applying
   `src/llm/provider.ts`
 - `data/state/` — persisted state: JSON state files (written through
   DeferredStorage), conversations, `data/state/memory/` (vector store),
-  soul, graph, the pending-signal journal (`core/pending_signals.json`) and its backup/corrupted siblings (written through DeferredStorage); next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
+  soul, graph, the durable inbound log (`core/inbound_log.json`) and its backup/corrupted siblings (written through DeferredStorage); next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
   `data/plugins/`. These logs and `data/state/` hold personal messages and
   tool content: do not paste them outside this machine, and back up
   `data/state/` before cleaning conversation history
@@ -213,10 +213,26 @@ outcome is reported at warn with the recipient and the reason and is NEVER
 retried. Only a message whose turn recorded no outcome is replayed, once, at
 the next start.
 
-- **Graceful restart (SIGINT/SIGTERM) - strict.** The shutdown sequence
-  completes: intake stops, the turn in flight is drained, the sends it
-  scheduled are delivered or reported, storage flushes last. No message and
-  no turn is lost, and none is answered twice.
+The stop (`shutdownSequence` in `src/core/container.ts`) is BOUNDED and BEST
+EFFORT, under ONE deadline (`CoreLoopConfig.shutdownDrainTimeoutMs`, default
+90 s): intake stops first, the turn in flight and the sends it scheduled are
+drained, state and registries persist, the channels are released, the loop is
+closed for durable writes and storage flushes last (so a send that settles
+behind the flush keeps its message in the log for a single replay instead of
+writing where nothing would flush it). Nothing is persisted for the next run:
+internal signals are not durable (the next run's ticks regenerate them) and
+inbound messages are carried by the log above. `src/index.ts` arms a hard exit
+at the same deadline
+(`src/core/hard-exit.ts`, unref'd): whatever still hangs there - a stalled
+intake stop, a stalled tick, a hung send, a stalled flush - is abandoned and
+the process leaves with a non-zero code and one error line naming the step and
+the loop's live work it never finished.
+
+- **Graceful restart (SIGINT/SIGTERM) - strict, while the stop fits its
+  deadline.** When the sequence completes: no message is lost and none is
+  answered twice - an entry removed by a recorded outcome cannot replay, an
+  entry without one replays exactly once at the next start. A stop that hits
+  the deadline is best effort like a crash: the steps after it did not run.
 - **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
   turn recorded no outcome replay once at start.
 
@@ -225,7 +241,8 @@ receipt and the emit-time flush; an answer delivered while its removal is not
 yet on disk (or any outcome recorded only in memory at the crash) - the
 message may be answered twice; a send in flight at the crash - the message
 replays once and the user may get the late send and the replay; a failed send
-or failed turn removes the message for good by decision. `docs/architecture.md`
+or failed turn removes the message for good by decision. The same windows
+cover the stop that hits its deadline. `docs/architecture.md`
 carries the same list in context.
 
 ## Design Principles

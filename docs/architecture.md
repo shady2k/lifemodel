@@ -63,37 +63,64 @@ Fixed 1-second tick drives all processing:
 8. COGNITION layer: (if woken) process with LLM
 9. Apply intents returned by all layers
 
-### Graceful stop (SIGINT/SIGTERM)
+### Stop (SIGINT/SIGTERM) — bounded and best effort
 
 One fixed order, `shutdownSequence` in `src/core/container.ts`, under ONE
 overall deadline (default 90 s from `CoreLoopConfig.shutdownDrainTimeoutMs`,
 settable through the `coreLoop` field of `AppConfig`; the container starts it
-at the shutdown and `coreLoop.stop()` bounds every wait below by it — past the
-deadline the stop continues and what is left is journaled):
+at the shutdown and `coreLoop.stop()` bounds every wait below by it). Each
+step that had a wait (`deps.progress.step`: `intake_stop`, `loop_drain`,
+`state_flush`, `channel_stop`, `storage_flush`, `done`) is recorded as it is
+reached:
 
 1. Channel intake stops first — no new updates are accepted from here on.
-   Updates already accepted sit in `pendingSignals`, not in the channel.
-   Sending keeps working (`stopIntake` only stops polling).
+   Sending keeps working (`stopIntake` only stops polling); the channel gives
+   its in-flight intake handlers a bounded moment so their emit reaches the
+   durable log.
 2. `coreLoop.stop()` waits, each bounded by the deadline: the in-flight tick,
    the scheduler callback, the COGNITION turn in flight, and the sends that
    turn scheduled. A turn that finishes within the deadline is applied
    exactly once and its answer is DELIVERED before the channels are released
    (in-flight sends are tracked and awaited; a failed send is logged, never
-   silently dropped). A turn that overruns has EVERY signal it owns requeued:
-   all its trigger signals plus the user messages it absorbed mid-loop.
-3. Signals accepted but never processed (the queue, a cut-loose tick's taken
-   batch, and the requeued turn signals) are written to the pending-signal
-   journal (`data/state/core/pending_signals.json`) through DeferredStorage.
-4. State, recipient and ack registries persist.
-5. Channels stop fully (clients released; after this a send refuses).
-6. DeferredStorage flushes last — nothing writes after it.
+   silently dropped). A turn that overruns is ABANDONED: its own result and
+   its signals are dropped (its late intents are fenced), and because it
+   recorded no outcome its inbound log entries replay once at the next start.
+3. State, recipient and ack registries persist.
+4. Channels stop fully (clients released; after this a send refuses).
+5. The loop is closed for durable writes (`CoreLoop.closeDurableWrites`) and
+   DeferredStorage flushes last. The fence comes FIRST on purpose: a send that
+   settles behind the flush would commit into a storage that already shut down
+   (a cache nothing flushes again), so its message is kept in the log instead
+   and replays once at the next start — the same window as a crash between the
+   answer and its removal.
 
-On start, `createContainerAsync` restores the journal into `pendingSignals`
-and clears it, so a graceful restart processes the same signal exactly once.
-A corrupt or unreadable journal file fails startup loudly with the file path
-and the original error as `cause` — it is never treated as empty.
+NOTHING is persisted for the next run by the stop itself: internal signals are
+not durable (the ticks of the next run regenerate them) and inbound user
+messages are carried by the durable log below. What is queued but unprocessed
+at the stop is dropped, deliberately.
+
 `container.shutdown` is idempotent: every later caller gets the first call's
-promise, so no second run can journal an empty queue over the first one.
+promise, so the stopped instance is released once.
+
+#### The hard exit at the deadline
+
+`src/index.ts` arms a timer for the same budget when the shutdown starts
+(`armStopDeadlineExit`, `src/core/hard-exit.ts`), UNREF'D, and disarms it when
+`container.shutdown()` resolved. A stop that did not finish within its budget
+is over: whatever still hangs — a stalled intake stop, a stalled tick, a hung
+send, a stalled flush — is abandoned, and the process exits with a non-zero
+code after ONE error line naming what was still pending (the step
+`shutdownSequence` never finished, plus the loop's live work:
+`CoreLoop.stopReport()` — tick in flight, scheduler callback, turn in flight,
+sends outstanding, signals queued). The exit is injectable, so tests prove the
+deadline without killing the test runner (tests/integration/stop-hard-exit.test.ts).
+
+Nothing is lost by leaving: every inbound message is in the log (it flushes on
+receipt and on commit), and the messages whose turn recorded no outcome —
+including the turn the stop abandoned — replay once at the next start. The
+steps AFTER the deadline did not run (`channel_stop` and `storage_flush`
+included), which is the crash-equivalent window listed at the end of this
+section: best effort by the owner's proportionality decision.
 
 ### Durable inbound log (lifemodel-ctc.2.1)
 
@@ -189,15 +216,18 @@ original error as `cause`.
 
 #### The two guarantees (owner decision, comment 54)
 
-- **Graceful restart - strict.** When the shutdown sequence above completes,
-  no turn and no message is lost, and none is answered twice. The stop drains
-  the turn in flight, delivers (or reports) the sends it scheduled, and
-  flushes storage last: an entry removed by a recorded outcome cannot replay,
-  an entry without one replays exactly once at the next start.
-- **Crash (kill -9, OOM, a broken generation) - best effort.** Every message
-  whose turn recorded no outcome replays once at the next start. A message
-  whose turn recorded an outcome can still be LOST if that outcome was a
-  failed send or a failed turn: by decision it is not retried, it is warned.
+- **Graceful restart - strict, while the stop completes within its deadline.**
+  When the stop sequence above runs to its end, no turn and no message is lost,
+  and none is answered twice. The stop drains the turn in flight, delivers (or
+  reports) the sends it scheduled, and flushes storage last: an entry removed
+  by a recorded outcome cannot replay, an entry without one replays exactly
+  once at the next start.
+- **A stop past its deadline, and a crash (kill -9, OOM, a broken generation)
+  - best effort.** Every message whose turn recorded no outcome replays once
+  at the next start. A message whose turn recorded an outcome can still be
+  LOST if that outcome was a failed send or a failed turn: by decision it is
+  not retried, it is warned. A stop that hits the deadline leaves the same
+  way (the hard exit above).
 
 #### Known crash windows (best effort; filed as one debt item, not fixed here)
 
@@ -214,6 +244,10 @@ original error as `cause`.
 - **A failed outcome is not retried:** a failed send and a failed turn remove
   the message for good (warned). This is the owner's decision, not an
   accident of the window above.
+- **A stop that hits its deadline:** the steps after it did not run, so the
+  final storage flush and the full channel release did not happen and a
+  commit in flight is as good as a commit at a crash; the abandoned turn
+  behaves like a crash mid-turn.
 - An overrunning turn is abandoned, not aborted: a late SEND intent from it
   is dropped with a warning (fenced), and its in-loop tool writes land in the
   deferred cache and are lost at exit. An abort for the turn in flight lands

@@ -9,8 +9,7 @@
  *   way the Telegram channel now awaits it (the log flushes at emit time).
  *
  * Start/stop mirror src/core/container.ts:
- * start = load the log, replay uncommitted entries, restore+journal-filter,
- *         clear the journal, start the loop;
+ * start = load the log, replay uncommitted entries, start the loop;
  * stop  = the production shutdownSequence().
  */
 import {
@@ -33,8 +32,7 @@ import {
   type UserMessageData,
 } from '../../src/types/signal.js';
 import type { DeferredStorage } from '../../src/storage/index.js';
-import { createInboundLog, dedupKeyOf, type InboundLog } from '../../src/core/inbound-log.js';
-import { loadPendingSignals, clearPendingSignals } from '../../src/core/pending-signal-journal.js';
+import { createInboundLog, type InboundLog } from '../../src/core/inbound-log.js';
 import { shutdownSequence } from '../../src/core/container.js';
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
@@ -458,8 +456,8 @@ export async function startInboundInstance(
   // creation, before the replay block).
   channel.setSignalCallback((signal) => coreLoop.pushInboundSignal(signal));
 
-  // container start path: replay uncommitted entries, restore the journal
-  // (filtered against the log), clear it, then run (container.ts).
+  // container start path: replay the uncommitted entries, then run
+  // (container.ts). Internal signals are NOT restored: they are not durable.
   opts.onBeforeReplay?.(registry);
   const routesRestoredFromLog: string[] = [];
   const replay = inboundLog.replayable();
@@ -480,12 +478,6 @@ export async function startInboundInstance(
     }
     coreLoop.pushSignal(entry.signal);
   }
-  const restored = await loadPendingSignals(storage, storagePath, logger);
-  for (const signal of restored) {
-    if (inboundLog.hasKey(dedupKeyOf(signal))) continue;
-    coreLoop.pushSignal(signal);
-  }
-  await clearPendingSignals(storage, logger);
   await storage.flush();
 
   coreLoop.start();
@@ -541,7 +533,6 @@ export async function stopInboundInstance(instance: InboundInstance): Promise<vo
     channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
     storage: instance.storage,
-    storagePath: instance.storagePath,
     stateManager: { shutdown: async () => undefined } as never,
     recipientRegistry: { flush: async () => undefined } as never,
     ackRegistry: { flush: async () => undefined } as never,

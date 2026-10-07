@@ -7,6 +7,7 @@
 import 'dotenv/config';
 
 import { createContainerAsync, type Container } from './core/container.js';
+import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
 
 let container: Container | undefined;
 let isShuttingDown = false;
@@ -65,20 +66,45 @@ async function main(): Promise<void> {
   coreLoop.start();
 }
 
-// Handle shutdown gracefully
+/**
+ * Handle a shutdown signal.
+ *
+ * The stop is BOUNDED by one deadline (`shutdownDrainTimeoutMs`, default
+ * 90 s): intake stops, the turn in flight and its sends are drained, state
+ * and storage are flushed, the channels are released. Whatever still hangs at
+ * the deadline - a stalled intake stop, a stalled tick, a hung send, a stalled
+ * flush - is abandoned: the armed hard exit leaves the process with a
+ * non-zero code and one error line naming what was still pending. Nothing is
+ * lost by leaving (the durable inbound log replays unanswered messages; the
+ * next run's ticks regenerate internal signals) - see docs/architecture.md.
+ */
 async function shutdown(reason: string, error?: unknown): Promise<void> {
   if (isShuttingDown) {
     return; // Already shutting down, ignore duplicate signals
   }
   isShuttingDown = true;
 
-  if (container) {
+  let hardExit: ArmedStopDeadlineExit | undefined;
+  const active = container;
+  if (active) {
     if (error) {
-      container.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
+      active.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
     } else {
-      container.logger.info('Shutdown triggered: %s', reason);
+      active.logger.info('Shutdown triggered: %s', reason);
     }
-    await container.shutdown();
+    // Armed BEFORE the stop starts and disarmed when it resolved: the same
+    // budget the container's own stop deadline uses (its deadline starts a
+    // moment later, so this timer can only fire while the stop is unfinished).
+    hardExit = armStopDeadlineExit({
+      logger: active.logger,
+      budgetMs: active.coreLoop.getStopDrainTimeoutMs(),
+      pending: () => ({ step: active.stopProgress(), ...active.coreLoop.stopReport() }),
+    });
+    // A THROWING stop leaves the timer armed on purpose: the process then
+    // still leaves at the deadline (with the exit code of the hard exit)
+    // instead of hanging on a stop that will never finish.
+    await active.shutdown();
+    hardExit.disarm();
   } else {
     // eslint-disable-next-line no-console
     console.error(`Shutdown triggered: ${reason}`, error ?? '');
