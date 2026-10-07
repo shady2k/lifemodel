@@ -569,6 +569,12 @@ export class CognitionProcessor implements CognitionLayer {
                   recipientId,
                   text: 'Извини, произошла ошибка. Попробуй ещё раз.',
                 },
+                // The turn's trace (lifemodel-ctc.2.1, review round 8): this
+                // apology is the turn's own answer, so the turn's inbound entry
+                // must leave the log through it. CoreLoop attributes the
+                // intents of a resolved turn anyway (see attributedToTurn);
+                // naming the turn here keeps the intent honest on its own.
+                trace: { tickId: context.tickId, parentSignalId: triggerSignal.id },
               },
             ]
           : [];

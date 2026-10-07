@@ -477,7 +477,8 @@ export class CoreLoop {
           // (lifemodel-q4f): a send that answers one of them is never a
           // proactive repeat, however it reads.
           answersInbound:
-            state !== undefined && this.ownedSeqs(state.turn, intent.payload.recipientId).length > 0,
+            state !== undefined &&
+            this.ownedSeqs(state.turn, intent.payload.recipientId).length > 0,
         };
       },
       onSendStarted: (turnKey, recipientId, final) => {
@@ -1066,7 +1067,10 @@ export class CoreLoop {
         );
       });
       this.resolveTurnCommit(pending.tickId, outcome.result.disposition, outcome.result.intents);
-      this.applyIntents(outcome.result.intents, pending.traceContext);
+      this.applyIntents(
+        this.attributedToTurn(outcome.result.intents, pending),
+        pending.traceContext
+      );
       // Commit what is decidable now; sends still in flight turn the rest
       // through their outcome callbacks (each flush is chained onto its
       // send chain, so stop()'s awaitPendingSends waits for it too).
@@ -1927,6 +1931,27 @@ export class CoreLoop {
   }
 
   /**
+   * The turn's OWN result intents, attributed to it (lifemodel-ctc.2.1, review
+   * round 8). A producer may hand back a SEND_MESSAGE without the turn's trace
+   * (the cognition processor's apology for a thrown agentic loop did), and by
+   * the time the result is applied the active turn is already cleared - so the
+   * send would belong to NO turn: it would never report start or settle, the
+   * turn would never reach an outcome, and its inbound entry would replay after
+   * a GRACEFUL restart (a second answer). The turn is known HERE, so the trace
+   * is added here, for the intents that carry none; an intent that names its
+   * own turn keeps it.
+   */
+  private attributedToTurn(intents: Intent[], turn: PendingCognition): Intent[] {
+    const tickId = turn.tickId;
+    const parentSignalId = turn.primaryTrigger?.id ?? turn.triggerSignals[0]?.id ?? '';
+    return intents.map((intent) =>
+      intent.trace === undefined
+        ? ({ ...intent, trace: { tickId, parentSignalId } } as Intent)
+        : intent
+    );
+  }
+
+  /**
    * Check if pending COGNITION completed and return result.
    * Returns null if still processing.
    */
@@ -1971,7 +1996,9 @@ export class CoreLoop {
 
       this.resolveTurnCommit(pending.tickId, result.disposition, result.intents);
       this.pendingCognition = null;
-      return result;
+      // The turn is known here and nowhere later (see attributedToTurn): its
+      // own result intents leave with their turn's trace.
+      return { ...result, intents: this.attributedToTurn(result.intents, pending) };
     } catch (error) {
       this.evictTurnCommit(pending.tickId);
       this.pendingCognition = null;
