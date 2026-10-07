@@ -174,9 +174,9 @@ Common issues:
    `src/layers/aggregation/threshold-engine.ts`)
 3. **Signals, Not Events** — Everything is a Signal. One unified model for all
    data flow. (`src/types/signal.ts`)
-4. **Plugin Isolation** — Plugins never import each other and talk to the
-   agent only through the `PluginPrimitives` API (`src/types/plugin.ts`);
-   direct calls between plugins do not exist.
+4. **Plugin Isolation** — Core NEVER imports plugin types. Plugins use ONLY
+   `PluginPrimitives` API. No direct calls between plugins.
+   Known exception, being fixed: `lifemodel-faw`.
 5. **No Backward Compatibility** — Remove dead code. Clean breaks over
    compatibility shims.
 6. **No Attribute Prefix Routing** — Never encode behavior in attribute names

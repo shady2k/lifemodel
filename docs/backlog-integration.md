@@ -83,8 +83,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   dead reference the change made refuses it; older drift is printed and fails
   nothing. The first run (2026-10-07, at `16684b0`) found no dead path and no
   ignore needed: `presentIgnores` is empty. It reported one churn item
-  (`AGENTS.md`, 44 commits under what it names since its last edit), filed as
-  one debt item.
+  (`claude.md`, 44 commits under what it names since its last edit), filed as
+  one debt item. `claude.md` was later replaced by `AGENTS.md`
+  (lifemodel-nwu) and the debt item (lifemodel-9vw) closed as moot.
 - **Work records:** a run's claims, receipts and stops are `br` comments whose
   text starts with `[shady2k-time`. The adapter exports every one raw and
   whole, damaged or not, as `comments: [{ id, at, author, body }]` from beads'
