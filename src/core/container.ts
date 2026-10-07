@@ -102,6 +102,14 @@ export interface AppConfig {
   logLevel?: LoggerConfig['level'];
   /** Enable pretty logging */
   prettyLogs?: boolean;
+  /**
+   * Write log FILES at all (default true: the main log and the conversation
+   * log). Off: console output only, and no log directory is created. A test
+   * that starts the real container turns it off: a pino target writes from a
+   * WORKER THREAD, which cannot be fenced or awaited, so it kept appending
+   * while the test removed its data directory (ENOTEMPTY, review round 7).
+   */
+  logToFile?: boolean;
   /** Agent configuration */
   agent?: {
     /** Agent identity (name, personality, etc.) */
@@ -462,11 +470,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const mergedConfig = await loadConfig(configOverrides.logDir ? undefined : 'data/config');
 
   // Build logger config from merged config
+  const logToFile = configOverrides.logToFile ?? true;
   const loggerConfig: Partial<LoggerConfig> = {
     logDir: configOverrides.logDir ?? mergedConfig.logging.logDir,
     maxFiles: configOverrides.maxLogFiles ?? mergedConfig.logging.maxFiles,
     level: configOverrides.logLevel ?? mergedConfig.logging.level,
     pretty: configOverrides.prettyLogs ?? mergedConfig.logging.pretty,
+    file: logToFile,
   };
 
   // Create logger
@@ -476,7 +486,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
     configOverrides.logDir ?? mergedConfig.logging.logDir,
-    configOverrides.logLevel ?? mergedConfig.logging.level
+    configOverrides.logLevel ?? mergedConfig.logging.level,
+    { file: logToFile }
   );
   setConversationLogger(conversationLogger);
   logger.info('Conversation logger initialized');
