@@ -34,6 +34,12 @@ import {
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
 import { makeIdempotentShutdown, shutdownSequence } from '../../src/core/container.js';
+import { createSchedulerService, type SchedulerService } from '../../src/core/scheduler-service.js';
+import {
+  createSchedulerPrimitive,
+  type SchedulerPrimitiveImpl,
+} from '../../src/core/scheduler-primitive.js';
+import { createStoragePrimitive } from '../../src/core/storage-primitive.js';
 import type { CognitionContext, CognitionResult } from '../../src/types/layers.js';
 import type { Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
@@ -337,6 +343,11 @@ export interface CoreLoopInstance {
   channel: FakeTestChannel;
   recipientId: string;
   logger: Logger;
+  /** The instance's storage (the scheduler shares it). */
+  storage: DeferredStorage;
+  /** Present when the instance was started with a schedulerPluginId. */
+  schedulerService: SchedulerService | null;
+  schedulerPrimitive: SchedulerPrimitiveImpl | null;
 }
 
 export interface HarnessOptions {
@@ -359,6 +370,19 @@ export interface HarnessOptions {
     finishReason?: 'stop' | 'tool_calls' | 'length' | 'error';
   }[];
   tickIntervalMs?: number;
+  /**
+   * Attach a REAL SchedulerService with one plugin scheduler over the
+   * instance's storage, wired the way the container wires it (the signal
+   * callback queues, `onSignalProcessed` acknowledges after processing).
+   * A restart over the same path reloads that scheduler from storage.
+   */
+  schedulerPluginId?: string;
+  /**
+   * Record every signal the loop reports as PROCESSED (the container's hook,
+   * lifemodel-ctc.1.2). Used together with a schedulerPluginId the two are
+   * composed.
+   */
+  onSignalProcessed?: (signal: Signal) => void | Promise<void>;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -405,6 +429,20 @@ export async function startInstance(
   };
   const registry = new RecipientRegistry();
   const channel = new FakeTestChannel();
+
+  // ── optional: a REAL scheduler over the instance's storage ──
+  const schedulerService = opts.schedulerPluginId ? createSchedulerService(logger) : null;
+  let schedulerPrimitive: SchedulerPrimitiveImpl | null = null;
+  if (schedulerService && opts.schedulerPluginId) {
+    schedulerPrimitive = createSchedulerPrimitive(
+      opts.schedulerPluginId,
+      createStoragePrimitive(storage, opts.schedulerPluginId, logger),
+      logger
+    );
+    await schedulerPrimitive.initialize();
+    schedulerService.registerScheduler(opts.schedulerPluginId, schedulerPrimitive);
+  }
+
   const coreLoop = createCoreLoop(
     agent as never,
     eventBus as never,
@@ -415,10 +453,21 @@ export async function startInstance(
     {
       recipientRegistry: registry as never,
       ...cognitionDeps,
+      onSignalProcessed: async (signal: Signal) => {
+        await schedulerService?.acknowledgeProcessed(signal);
+        await opts.onSignalProcessed?.(signal);
+      },
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);
   const recipientId = registry.getOrCreate('test', 'chat-42');
+
+  if (schedulerService) {
+    coreLoop.setSchedulerService(schedulerService);
+    schedulerService.setSignalCallback((signal) => {
+      coreLoop.pushSignal(signal);
+    });
+  }
 
   coreLoop.start();
   return {
@@ -430,6 +479,9 @@ export async function startInstance(
     recipientId,
     recordedLogs,
     logger,
+    storage,
+    schedulerService,
+    schedulerPrimitive,
   };
 }
 

@@ -71,10 +71,16 @@ export interface ArmedStopDeadlineExit {
 }
 
 /**
- * Arm the hard exit `budgetMs` from now, UNREF'D (it never keeps the process
- * alive on its own). At the deadline the timer writes one error line naming
- * what is still pending and calls the exit with a non-zero code, whatever the
- * stop is doing at that moment.
+ * Arm the hard exit `budgetMs` from now. The timer stays REFERENCED until it
+ * is disarmed, and that is the point: it is the only thing that makes a hung
+ * shutdown end. A pending Promise keeps nothing alive, so an UNREF'D timer
+ * lets Node leave with code 0 before the deadline - measured on a real child
+ * process (review round 1, finding 1; tests/fixtures/stop-deadline-child.ts).
+ * The caller disarms it as soon as the stop resolved, so a healthy process is
+ * not held open by it.
+ *
+ * At the deadline the timer writes one error line naming what is still pending
+ * and calls the exit with a non-zero code, whatever the stop is doing then.
  */
 export function armStopDeadlineExit(options: StopDeadlineExitOptions): ArmedStopDeadlineExit {
   const code = options.code ?? STOP_DEADLINE_EXIT_CODE;
@@ -90,7 +96,6 @@ export function armStopDeadlineExit(options: StopDeadlineExitOptions): ArmedStop
     );
     exit(code);
   }, options.budgetMs);
-  timer.unref();
   return {
     disarm: (): void => {
       clearTimeout(timer);

@@ -1,6 +1,6 @@
 import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
-import type { PluginEventData } from '../types/signal.js';
+import type { PluginEventData, Signal } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
 import {
   createLogger,
@@ -1084,6 +1084,20 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     inboundLog,
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
+    },
+    // The queue lives at the source: a source whose event is NOT regenerable
+    // by later ticks moves its "handled" cursor only once a tick really
+    // processed the signal. A signal the stop dropped is never acknowledged,
+    // so the source delivers it again after the next start
+    // (lifemodel-ctc.1.2, review round 1 findings 2 and 3).
+    onSignalProcessed: async (signal: Signal) => {
+      await schedulerService.acknowledgeProcessed(signal);
+      if (signal.type === 'motor_result') {
+        const data = signal.data as { runId?: unknown } | undefined;
+        if (typeof data?.runId === 'string') {
+          await motorCortex?.acknowledgeResultProcessed(data.runId);
+        }
+      }
     },
   });
 
