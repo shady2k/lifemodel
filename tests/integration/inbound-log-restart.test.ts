@@ -111,6 +111,49 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h3.channel.sent).toEqual([]);
   });
 
+  it('kill -9 right after the FIRST message of a NEW chat: the route lives in the entry (finding 1)', async () => {
+    const { storagePath, logDir } = await fresh('ctc2-newchat-');
+    const h1 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: true,
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h1);
+    // a NEW chat's FIRST message: the route is created (as the real telegram
+    // handler does with getOrCreate) but never persisted - the process dies
+    const newRecipient = h1.registry.getOrCreate('test', 'chat-77');
+    await h1.channel.emit(
+      createUserMessageSignal({
+        text: 'first ever message from chat 77',
+        channel: 'telegram',
+        userId: '77',
+        recipientId: newRecipient,
+        updateId: 'u-77-1',
+      })
+    );
+    die(h1);
+    await waitFor(
+      async () => (await readLogSize(storagePath)).uncommitted === 1,
+      'the entry (with its route) is on disk'
+    );
+
+    // restart: NO pre-registered route for chat-77 anywhere - the replay
+    // re-registers it from the entry's routing data and the answer lands
+    const h2 = await startInboundInstance(storagePath, logDir, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [{ content: 'welcome to chat 77' }],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.channel.sent.length === 1, 'answered after restart');
+    expect(h2.channel.sent[0]?.text).toContain('welcome to chat 77');
+    expect(h2.channel.sent[0]?.target).toBe('chat-77');
+    await waitFor(() => h2.inboundLog.size().uncommitted === 0, 'committed once delivered');
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance ran ticks');
+    expect(llmRequests(h2)).toBe(1);
+  });
+
   it('a hung send: nothing commits, the message is answered after restart exactly once', async () => {
     const { storagePath, logDir } = await fresh('ctc2-hungsend-');
     const h1 = await startInboundInstance(storagePath, logDir, {
