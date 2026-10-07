@@ -15,6 +15,13 @@ import type { MotorRun, MotorTool, RunStatus } from './motor-protocol.js';
 const MOTOR_RUNS_KEY = 'motor-runs';
 
 /**
+ * Marker: the result-consumption field (lifemodel-ctc.1.2) was applied to the
+ * runs that predate it. Without it the first start after the change would read
+ * every old terminal run as "result never consumed" and re-deliver them.
+ */
+const RESULT_CONSUMPTION_MIGRATED_KEY = 'motor-result-consumption-migrated';
+
+/**
  * Stored runs structure.
  */
 interface StoredRuns {
@@ -121,6 +128,23 @@ export class MotorStateManager {
         (r) => r.status === 'running' || r.status === 'created' || r.status === 'awaiting_input'
       ) ?? null
     );
+  }
+
+  /**
+   * Whether the result-consumption marker was applied (lifemodel-ctc.1.2).
+   */
+  async isResultConsumptionMigrated(): Promise<boolean> {
+    return (await this.storage.load(RESULT_CONSUMPTION_MIGRATED_KEY)) !== null;
+  }
+
+  /**
+   * Record that the result-consumption field was applied to the runs that
+   * predate it: from here on, a terminal run without it is genuinely
+   * unconsumed.
+   */
+  async markResultConsumptionMigrated(): Promise<void> {
+    await this.storage.save(RESULT_CONSUMPTION_MIGRATED_KEY, { at: new Date().toISOString() });
+    await this.flush();
   }
 
   /**

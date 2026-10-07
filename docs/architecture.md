@@ -94,10 +94,27 @@ reached:
    and replays once at the next start — the same window as a crash between the
    answer and its removal.
 
-NOTHING is persisted for the next run by the stop itself: internal signals are
-not durable (the ticks of the next run regenerate them) and inbound user
-messages are carried by the durable log below. What is queued but unprocessed
-at the stop is dropped, deliberately.
+#### What survives a stop, and what does not
+
+The stop persists NOTHING for the next run: what is queued but unprocessed at
+the stop is dropped, deliberately. Nothing is lost by that, because every
+source that cannot be regenerated acknowledges AFTER processing (the owner's
+rule: the queue lives at the source, the cursor moves after processing;
+coordinator decision, comment 81). A signal the stop dropped was never
+processed, so its source delivers the event again at the next start:
+
+| Source | How it survives a restart |
+| --- | --- |
+| Inbound user messages (Telegram) | the durable inbound log: written and flushed on receipt, the entry leaves it on the turn's recorded outcome, and the entries without one replay once at start (below) |
+| One-shot schedule firings | the schedule is removed and its fire id recorded only once its `plugin_event` signal was PROCESSED (`SchedulerPrimitiveImpl.markFiring` / `acknowledgeFired`); an unprocessed firing is still due and fires again at the next start |
+| Motor Cortex results | a completed/failed run is marked consumed only once its `motor_result` signal was processed (`MotorCortex.acknowledgeResultProcessed`); an unconsumed terminal run is re-emitted once at start (`recoverOnRestart`). Runs from before this marker are treated as consumed at the first start after the change |
+| Pressures, neurons, aggregation | regenerated: the next run's ticks recompute them (pressure from state and memory, neuron signals from their inputs) |
+| Telegram REACTIONS | LOST if the stop dropped one - accepted (owner decision, comment 81): they are external, they are not in the durable log, and nothing re-delivers them |
+
+The pipeline reports a processed signal through `CoreLoopDeps.onSignalProcessed`
+(`src/core/container.ts` routes it to the scheduler service and Motor Cortex);
+a signal the tick DEFERRED back to the queue is not processed and is not
+reported, so it survives too.
 
 `container.shutdown` is idempotent: every later caller gets the first call's
 promise, so the stopped instance is released once.
@@ -105,8 +122,12 @@ promise, so the stopped instance is released once.
 #### The hard exit at the deadline
 
 `src/index.ts` arms a timer for the same budget when the shutdown starts
-(`armStopDeadlineExit`, `src/core/hard-exit.ts`), UNREF'D, and disarms it when
-`container.shutdown()` resolved. A stop that did not finish within its budget
+(`armStopDeadlineExit`, `src/core/hard-exit.ts`) and disarms it when
+`container.shutdown()` resolved. The timer stays REFERENCED until it is
+disarmed, which is what makes a hung stop end: a pending Promise keeps nothing
+alive, so an unref'd timer let a real process leave with code 0 before the
+deadline (measured; tests/fixtures/stop-deadline-child.ts and
+tests/integration/stop-deadline-process.test.ts). A stop that did not finish within its budget
 is over: whatever still hangs — a stalled intake stop, a stalled tick, a hung
 send, a stalled flush — is abandoned, and the process exits with a non-zero
 code after ONE error line naming what was still pending (the step

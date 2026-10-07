@@ -152,6 +152,18 @@ export interface CoreLoopDeps {
    * durability).
    */
   inboundLog?: InboundLog | undefined;
+  /**
+   * Called once a tick has really PROCESSED a signal it took off the queue
+   * (lifemodel-ctc.1.2). The sources whose event is NOT regenerable by later
+   * ticks - a one-shot schedule firing, a Motor Cortex result - move their
+   * "handled" cursor only here, so a signal the stop dropped (never processed)
+   * is delivered again after the next start. A signal the tick DEFERRED back
+   * to the queue is not processed and is not reported.
+   *
+   * The container routes it (scheduler service, Motor Cortex); a rejection is
+   * logged, never fatal to the tick.
+   */
+  onSignalProcessed?: ((signal: Signal) => void | Promise<void>) | undefined;
 }
 
 /**
@@ -291,7 +303,8 @@ export class CoreLoop {
   /**
    * The tick id of the COGNITION turn the stop drain is waiting for (null
    * outside a drain). The turn is CLAIMED (pendingCognition cleared) before
-   * it is awaited, so the stop report needs this to keep naming it.
+   * it is awaited, so the stop report needs this to keep naming it; a turn the
+   * deadline ABANDONED keeps its name there until the process leaves.
    */
   private drainingTurnTickId: string | null = null;
   /**
@@ -348,6 +361,9 @@ export class CoreLoop {
   /** Durable inbound log (see CoreLoopDeps.inboundLog). */
   private readonly inboundLog: InboundLog | undefined;
 
+  /** Sources to acknowledge once a tick processed their signal (see CoreLoopDeps). */
+  private readonly onSignalProcessed: ((signal: Signal) => void | Promise<void>) | undefined;
+
   /**
    * Set by haltForTest(): this object emulates a process that was killed. A
    * killed instance applies and settles NOTHING more, so work already in
@@ -394,6 +410,7 @@ export class CoreLoop {
     this.layers = layers;
     this.logger = logger.child({ component: 'core-loop' });
     this.inboundLog = deps.inboundLog;
+    this.onSignalProcessed = deps.onSignalProcessed;
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.conversationManager = deps.conversationManager;
@@ -858,6 +875,7 @@ export class CoreLoop {
     this.running = true;
     this.lateEffectsFenced = false;
     this.durableWritesClosed = false;
+    this.drainingTurnTickId = null;
 
     // Start system health monitoring
     this.healthMonitor.start();
@@ -1090,6 +1108,7 @@ export class CoreLoop {
     this.pendingCognition = null;
     this.drainingTurnTickId = pending.tickId;
 
+    let abandoned = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const outcome = await Promise.race([
@@ -1109,6 +1128,10 @@ export class CoreLoop {
         // and replay once at the next start. The signals it owned are dropped
         // with it - the next run's ticks regenerate internal ones, and the log
         // replays the user messages.
+        // The turn is ABANDONED, not finished: the stop report keeps naming it
+        // until the process leaves (see stopReport), so the hard exit's error
+        // line tells the truth about a turn that never returned.
+        abandoned = true;
         this.evictTurnCommit(pending.tickId);
         withTraceContext(pending.traceContext, () => {
           this.logger.warn(
@@ -1147,9 +1170,40 @@ export class CoreLoop {
       });
       this.evictTurnCommit(pending.tickId);
     } finally {
-      this.drainingTurnTickId = null;
+      // An abandoned turn keeps its name in the stop report: it is still
+      // running, and the hard exit must be able to say so.
+      if (!abandoned) {
+        this.drainingTurnTickId = null;
+      }
       if (timer !== undefined) {
         clearTimeout(timer);
+      }
+    }
+  }
+
+  /**
+   * Report the signals this tick really processed to their sources
+   * (CoreLoopDeps.onSignalProcessed): a source that cannot regenerate its
+   * event - a one-shot schedule firing, a Motor Cortex result - acknowledges
+   * it here and only here. A deferred signal is still in the queue and is not
+   * reported; a signal the stop dropped was never reported either, which is
+   * what makes its source deliver it again after the next start.
+   *
+   * A source that throws is logged: one broken acknowledgement must not fail
+   * the tick.
+   */
+  private async acknowledgeProcessedSignals(taken: Signal[], deferred: Signal[]): Promise<void> {
+    if (!this.onSignalProcessed || taken.length === 0) return;
+    const deferredIds = new Set(deferred.map((signal) => signal.id));
+    for (const signal of taken) {
+      if (deferredIds.has(signal.id)) continue;
+      try {
+        await this.onSignalProcessed(signal);
+      } catch (error: unknown) {
+        this.logger.warn(
+          { err: error, signalType: signal.type, signalId: signal.id },
+          'Acknowledging a processed signal failed'
+        );
       }
     }
   }
@@ -1319,6 +1373,10 @@ export class CoreLoop {
 
       // Drain signals (no side effects, no logs)
       const pendingSignals = this.drainPendingSignals();
+      // What this tick took off the queue. Whatever was NOT deferred back to
+      // the queue is PROCESSED by the end of this tick, and the sources whose
+      // events are not regenerable are acknowledged then (onSignalProcessed).
+      let deferredSignals: Signal[] = [];
 
       // Normalize each signal under its own trace context
       const incomingSignals: Signal[] = [];
@@ -1356,6 +1414,7 @@ export class CoreLoop {
       if (!cognitionAvailable && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
         const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
+        deferredSignals = toDefer;
 
         const deferReason = this.pendingCognition
           ? 'COGNITION busy'
@@ -1592,6 +1651,13 @@ export class CoreLoop {
         // Settle the durable inbound log entries of a turn that reached its
         // outcome in this tick (its sends settle after, through the applicator).
         await this.evaluateTurnCommits();
+
+        // The tick really processed what it took off the queue (the deferred
+        // ones are back in it): report them to their sources, which move their
+        // "handled" cursor only here (a one-shot schedule firing, a Motor
+        // Cortex result). A signal the stop dropped is never reported, so its
+        // source delivers it again after the next start (lifemodel-ctc.1.2).
+        await this.acknowledgeProcessedSignals(pendingSignals, deferredSignals);
 
         // Periodic maintenance
         if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {

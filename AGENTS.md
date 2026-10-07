@@ -219,14 +219,19 @@ EFFORT, under ONE deadline (`CoreLoopConfig.shutdownDrainTimeoutMs`, default
 drained, state and registries persist, the channels are released, the loop is
 closed for durable writes and storage flushes last (so a send that settles
 behind the flush keeps its message in the log for a single replay instead of
-writing where nothing would flush it). Nothing is persisted for the next run:
-internal signals are not durable (the next run's ticks regenerate them) and
-inbound messages are carried by the log above. `src/index.ts` arms a hard exit
-at the same deadline
-(`src/core/hard-exit.ts`, unref'd): whatever still hangs there - a stalled
-intake stop, a stalled tick, a hung send, a stalled flush - is abandoned and
-the process leaves with a non-zero code and one error line naming the step and
-the loop's live work it never finished.
+writing where nothing would flush it). The stop persists NOTHING for the next
+run: what is queued but unprocessed is dropped. Nothing is lost by that,
+because a source whose event cannot be regenerated acknowledges AFTER
+processing - Telegram through the log above, a one-shot schedule firing, a
+Motor Cortex result - and is delivered again at the next start; the pressures
+and neurons the ticks produce are simply recomputed. Telegram REACTIONS
+pending at a stop are LOST (accepted, comment 81). `src/index.ts` arms a hard
+exit at the same deadline (`src/core/hard-exit.ts`, REFERENCED until it is
+disarmed - an unref'd timer lets a hung process leave with code 0 before the
+deadline): whatever still hangs there - a stalled intake stop, a stalled tick,
+a hung send, a stalled flush - is abandoned and the process leaves with a
+non-zero code and one error line naming the step and the loop's live work it
+never finished.
 
 - **Graceful restart (SIGINT/SIGTERM) - strict, while the stop fits its
   deadline.** When the sequence completes: no message is lost and none is
@@ -234,7 +239,8 @@ the loop's live work it never finished.
   entry without one replays exactly once at the next start. A stop that hits
   the deadline is best effort like a crash: the steps after it did not run.
 - **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
-  turn recorded no outcome replay once at start.
+  turn recorded no outcome replay once at start; an unprocessed one-shot
+  schedule firing and an unconsumed Motor Cortex result are delivered at start.
 
 Known crash windows (named, not fixed; one debt item): an update lost between
 receipt and the emit-time flush; an answer delivered while its removal is not
