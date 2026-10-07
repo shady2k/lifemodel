@@ -185,10 +185,13 @@ the repository's installation, and each person's plugin and hooks are their own.
   2–3 mutations in the changed logic at stage acceptance and records which
   tests went red. A survivor becomes a test or a question to the owner, never
   a pass. A skipped check is recorded as skipped, never as passed.
-- **Reviewer:** `openai-codex/gpt-6-sol` (another model), one round at stage
-  acceptance, through a codex worker session. The fallback is a same-model
-  independent session (a fresh zai/glm-5.3 session), disclosed as the same
-  model. Independent review is required for acceptance.
+- **Reviewer:** `openai-codex/gpt-6-sol` (another model), at stage
+  acceptance, in its own prime-agent session:
+  `prime-agent --provider openai-codex --model gpt-6-sol`. Its brief must
+  explicitly allow writing its report file (told "read-only", it wrote none).
+  The fallback is a same-model independent session (a fresh glm-5.3-flash
+  session), disclosed as the same model. Independent review is required for
+  acceptance.
 - **Parallel execution:** one git worktree per worker (herdr worktrees for
   prime-agent worker sessions), up to the config's `maxWorkers`. Claims are
   atomic and exclusive (`claim_exclusive` in `.beads/config.yaml`) through
@@ -197,6 +200,21 @@ the repository's installation, and each person's plugin and hooks are their own.
   `<harness>-<role>:<person>@<machine>:<branch>#<session>`, never the person.
   Generated files and `package-lock.json` count as collisions. The stage's
   coordinator merges and records `implemented`.
+- **Starting a worker:** `prime-agent --provider shady2k-gateway --model
+  glm-5.3-flash` in the worker's herdr pane, then check the pane footer before
+  dispatching. A bare `--model glm-5.3-flash` resolves to the `opencode`
+  provider, which has no key here, and the worker never starts. A brief says
+  that the owner's rules in `AGENTS.md` are not reworded to fit the code: a
+  violation is filed as a finding and the rule stays (a worker once weakened
+  Plugin Isolation that way).
+- **Run bookkeeping that the gate enforces:** when the coordinator posts its
+  claim record on a feature, it also sets the feature `in_progress` with
+  itself as assignee; otherwise the gate reads the span as ended with no
+  receipt. `submitted` and `implemented` take their comment atomically:
+  `br update <id> --status implemented --transition-comment "implemented: ..."`;
+  a separate comment does not satisfy `.beads/policy.yaml`. A worker's span in
+  prime-agent is closed with `receipt --unknown`: the run script reads Claude
+  Code, Codex and omp transcripts only.
 
 ### Tracker operations
 
