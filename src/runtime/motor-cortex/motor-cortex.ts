@@ -1172,83 +1172,6 @@ export class MotorCortex {
   }
 
   /**
-   * The pipeline PROCESSED this terminal run's motor_result: record it, so a
-   * restart does not deliver the same result a second time (lifemodel-ctc.1.2,
-   * review round 1 finding 3). CoreLoop calls this once a tick really handled
-   * the signal; a result whose signal was only QUEUED (deferred while COGNITION
-   * was busy, or dropped by the stop) stays unconsumed and is re-emitted once
-   * at the next start.
-   */
-  async acknowledgeResultProcessed(runId: string): Promise<void> {
-    const run = await this.stateManager.getRun(runId);
-    if (!run || run.resultConsumedAt !== undefined) return;
-    if (run.status !== 'completed' && run.status !== 'failed') return;
-    run.resultConsumedAt = new Date().toISOString();
-    await this.stateManager.updateRun(run);
-    this.logger.debug(
-      { runId, status: run.status },
-      'Motor run result consumed by the pipeline (not re-emitted after a restart)'
-    );
-  }
-
-  /**
-   * The motor_result signal of a TERMINAL run, rebuilt from its stored record:
-   * what a start delivers for a result the pipeline never consumed
-   * (lifemodel-ctc.1.2). Returns null when the run has no result to deliver.
-   */
-  private buildTerminalResultSignal(run: MotorRun, attempt: MotorAttempt): Signal | null {
-    if (run.status === 'completed') {
-      if (!run.result) return null;
-      return createSignal(
-        'motor_result',
-        'motor.cortex',
-        { value: 1, confidence: 1 },
-        {
-          data: {
-            kind: 'motor_result',
-            runId: run.id,
-            status: 'completed',
-            attemptIndex: attempt.index,
-            result: {
-              ok: run.result.ok,
-              summary: run.result.summary,
-              stats: run.result.stats,
-              ...(run.result.artifacts && { artifacts: run.result.artifacts }),
-              ...(run.result.installedSkills && { installedSkills: run.result.installedSkills }),
-            },
-            ...(run.skill && { skill: run.skill }),
-            ...(run.skillReview && { skillReview: true }),
-            isRecovery: true,
-          },
-        }
-      );
-    }
-    if (run.status === 'failed') {
-      return createSignal(
-        'motor_result',
-        'motor.cortex',
-        { value: 1, confidence: 1 },
-        {
-          data: {
-            kind: 'motor_result',
-            runId: run.id,
-            status: 'failed',
-            attemptIndex: attempt.index,
-            maxAttempts: run.maxAttempts,
-            attemptsRemaining: Math.max(0, run.maxAttempts - (attempt.index + 1)),
-            ...(attempt.failure && { failure: attempt.failure }),
-            error: { message: attempt.failure?.hint ?? 'Model execution failed' },
-            ...(run.skill && { skill: run.skill }),
-            ...(run.skillReview && { skillReview: true }),
-            isRecovery: true,
-          },
-        }
-      );
-    }
-    return null;
-  }
-
-  /**
    * Cancel a run.
    */
   async cancelRun(runId: string): Promise<{
@@ -1638,27 +1561,6 @@ export class MotorCortex {
     let resumed = 0;
     let reEmitted = 0;
 
-    // Runs that predate the result-consumption marker (lifemodel-ctc.1.2): a
-    // missing marker on them is NOT evidence of an unconsumed result - their
-    // signal was delivered by the version that ran them - so they are marked
-    // consumed once, here, instead of being re-delivered at this start.
-    if (!(await this.stateManager.isResultConsumptionMigrated())) {
-      const predating = activeRuns.filter(
-        (run) => (run.status === 'completed' || run.status === 'failed') && !run.resultConsumedAt
-      );
-      for (const run of predating) {
-        run.resultConsumedAt = new Date().toISOString();
-        await this.stateManager.updateRun(run);
-      }
-      await this.stateManager.markResultConsumptionMigrated();
-      if (predating.length > 0) {
-        this.logger.info(
-          { runs: predating.length },
-          'Marked terminal runs from before the result-consumption marker as consumed'
-        );
-      }
-    }
-
     for (const run of activeRuns) {
       const attempt = run.attempts[run.currentAttemptIndex];
       if (!attempt) continue;
@@ -1828,27 +1730,6 @@ export class MotorCortex {
           });
           resumed++;
           break;
-
-        case 'completed':
-        case 'failed': {
-          // A TERMINAL result is not regenerable by later ticks: if the
-          // pipeline never consumed it (its signal was dropped by the stop, or
-          // the process died before a tick processed it), deliver it once now
-          // (lifemodel-ctc.1.2, review round 1 finding 3). The run stays
-          // unconsumed until a tick really processes this signal, so a restart
-          // before that delivers it again - and never twice for one that was
-          // consumed (acknowledgeResultProcessed).
-          if (run.resultConsumedAt) break;
-          const signal = this.buildTerminalResultSignal(run, attempt);
-          if (!signal) break;
-          this.logger.info(
-            { runId: run.id, status: run.status },
-            'Re-emitting a terminal run result the pipeline never consumed'
-          );
-          this.pushSignal(signal);
-          reEmitted++;
-          break;
-        }
       }
     }
 

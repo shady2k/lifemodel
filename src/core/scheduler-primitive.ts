@@ -56,14 +56,6 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   /** In-memory cache of schedules */
   private schedules = new Map<string, ScheduleEntry>();
 
-  /**
-   * One-time firings whose signal was emitted but not yet processed
-   * (scheduleId -> fireId). They stay due, and this marker is what keeps them
-   * from firing twice within one run; a restart clears it, which is exactly
-   * the re-delivery (lifemodel-ctc.1.2).
-   */
-  private readonly pendingOneShots = new Map<string, string>();
-
   /** Track if we've logged warnings */
   private countWarningLogged = false;
 
@@ -337,12 +329,6 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
 
     for (const entry of this.schedules.values()) {
       if (entry.nextFireAt <= now) {
-        // A one-shot whose signal has been EMITTED but not yet processed
-        // (lifemodel-ctc.1.2): it stays due so a stop before the signal was
-        // processed fires it again after the next start, and this in-memory
-        // marker keeps it from firing twice within one run.
-        if (this.pendingOneShots.has(entry.id)) continue;
-
         // Generate fire ID for idempotency
         const fireId = `${entry.id}:${String(entry.nextFireAt.getTime())}`;
 
@@ -368,66 +354,27 @@ export class SchedulerPrimitiveImpl implements SchedulerPrimitive {
   }
 
   /**
-   * Mark a schedule as FIRING, before its signal is emitted.
-   *
-   * - RECURRING: recorded as fired and advanced to its next occurrence here -
-   *   the occurrence is over, and the fire-id dedup covers a restart in the
-   *   middle of it.
-   * - ONE-TIME: NOT recorded and NOT removed. The firing is complete only once
-   *   the plugin_event signal it emits has been PROCESSED, which the pipeline
-   *   reports through {@link acknowledgeFired} ("the queue lives at the source,
-   *   the cursor moves after processing"). Until then the schedule stays due in
-   *   storage, so a stop that drops the unprocessed signal fires it again after
-   *   the next start - the occurrence is not regenerable by later ticks
-   *   (lifemodel-ctc.1.2, review round 1 finding 2).
+   * Mark a schedule as fired and update for next occurrence.
    */
-  async markFiring(scheduleId: string, fireId: string, now: Date): Promise<void> {
+  async markFired(scheduleId: string, fireId: string, now: Date): Promise<void> {
     const entry = this.schedules.get(scheduleId);
     if (!entry) return;
-
-    if (!entry.recurrence) {
-      this.pendingOneShots.set(scheduleId, fireId);
-      this.logger.debug(
-        { scheduleId, fireId },
-        'One-time schedule fired; it stays due until its signal was processed'
-      );
-      return;
-    }
 
     // Record fire ID for deduplication
     await this.recordFired(scheduleId, fireId);
 
     entry.fireCount++;
 
-    // Advance to next occurrence
-    await this.advanceRecurringSchedule(entry, now);
-
-    await this.persistSchedules();
-  }
-
-  /**
-   * The plugin_event signal of a one-time firing was PROCESSED: the firing is
-   * complete, so the fire id is recorded (a crash after this cannot fire it
-   * again) and the schedule is removed.
-   *
-   * @returns true when a pending one-time firing was completed.
-   */
-  async acknowledgeFired(scheduleId: string): Promise<boolean> {
-    const fireId = this.pendingOneShots.get(scheduleId);
-    this.pendingOneShots.delete(scheduleId);
-
-    const entry = this.schedules.get(scheduleId);
-    if (!entry || entry.recurrence) return false;
-
-    if (fireId !== undefined) {
-      await this.recordFired(scheduleId, fireId);
+    if (entry.recurrence) {
+      // Advance to next occurrence
+      await this.advanceRecurringSchedule(entry, now);
+    } else {
+      // One-time schedule - remove after firing
+      this.schedules.delete(scheduleId);
+      this.logger.debug({ scheduleId }, 'One-time schedule completed and removed');
     }
-    entry.fireCount++;
-    this.schedules.delete(scheduleId);
-    await this.persistSchedules();
 
-    this.logger.debug({ scheduleId, fireId }, 'One-time schedule acknowledged and removed');
-    return true;
+    await this.persistSchedules();
   }
 
   /**

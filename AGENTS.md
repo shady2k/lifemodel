@@ -220,12 +220,13 @@ drained, state and registries persist, the channels are released, the loop is
 closed for durable writes and storage flushes last (so a send that settles
 behind the flush keeps its message in the log for a single replay instead of
 writing where nothing would flush it). The stop persists NOTHING for the next
-run: what is queued but unprocessed is dropped. Nothing is lost by that,
-because a source whose event cannot be regenerated acknowledges AFTER
-processing - Telegram through the log above, a one-shot schedule firing, a
-Motor Cortex result - and is delivered again at the next start; the pressures
-and neurons the ticks produce are simply recomputed. Telegram REACTIONS
-pending at a stop are LOST (accepted, comment 81). `src/index.ts` arms a hard
+run: what is queued but unprocessed is dropped. The guarantee covers the TURN
+IN FLIGHT and INBOUND TELEGRAM MESSAGES (the log above); everything else that
+was only queued in memory is LOST on a restart, as before this feature - a
+schedule firing (one-shot or recurring), a Motor Cortex result, a Telegram
+reaction, an internal signal. Reminders and Motor Cortex results become tasks
+with their own durable record and outcome later (`lifemodel-ten`); the
+pressures and neurons the ticks produce are simply recomputed. `src/index.ts` arms a hard
 exit at the same deadline (`src/core/hard-exit.ts`, REFERENCED until it is
 disarmed - an unref'd timer lets a hung process leave with code 0 before the
 deadline): whatever still hangs there - a stalled intake stop, a stalled tick,

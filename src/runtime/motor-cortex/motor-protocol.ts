@@ -412,14 +412,4 @@ export interface MotorRun {
 
   /** Pre-installed dependency info (persisted for resume/retry after restart) */
   preparedDeps?: PreparedDeps | undefined;
-
-  /**
-   * When the pipeline CONSUMED the result signal of this terminal run
-   * (lifemodel-ctc.1.2). A completed/failed run whose result was never consumed
-   * - the stop dropped its queued signal, the process died before a tick
-   * processed it - is re-emitted once at the next start: unlike the pressures
-   * and neurons the ticks produce, a run result is NOT regenerable.
-   * `cancelled` runs never emit a result signal, so they never set this.
-   */
-  resultConsumedAt?: string;
 }

@@ -1,6 +1,6 @@
 import type { Logger } from 'pino';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
-import type { PluginEventData, Signal } from '../types/signal.js';
+import type { PluginEventData } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
 import {
   createLogger,
@@ -287,8 +287,10 @@ export interface StopProgress {
  *    commit behind it).
  *
  * Nothing is persisted for the next run here: internal signals are not durable
- * (the ticks of the next run regenerate them) and inbound user messages are
- * carried by the durable inbound log. Past the deadline this sequence still
+ * (the ticks of the next run regenerate the pressures and neurons; a schedule
+ * firing, a Motor Cortex result and a reaction queued in memory are LOST - see
+ * docs/architecture.md) and inbound user messages are carried by the durable
+ * inbound log. Past the deadline this sequence still
  * continues step by step, but whatever hangs is abandoned: `src/index.ts` arms
  * a hard exit at the same deadline, so the process leaves with a non-zero code
  * and one error line naming the step it never finished.
@@ -1085,20 +1087,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },
-    // The queue lives at the source: a source whose event is NOT regenerable
-    // by later ticks moves its "handled" cursor only once a tick really
-    // processed the signal. A signal the stop dropped is never acknowledged,
-    // so the source delivers it again after the next start
-    // (lifemodel-ctc.1.2, review round 1 findings 2 and 3).
-    onSignalProcessed: async (signal: Signal) => {
-      await schedulerService.acknowledgeProcessed(signal);
-      if (signal.type === 'motor_result') {
-        const data = signal.data as { runId?: unknown } | undefined;
-        if (typeof data?.runId === 'string') {
-          await motorCortex?.acknowledgeResultProcessed(data.runId);
-        }
-      }
-    },
   });
 
   // Wire signal callbacks now that coreLoop exists
@@ -1232,8 +1220,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Nothing else is restored: internal signals are NOT persisted across a stop
-  // (the ticks of this run regenerate them) and every inbound user message is
-  // carried by the durable log replayed above (lifemodel-ctc.1.2).
+  // (the ticks of this run regenerate the pressures and neurons; a schedule
+  // firing, a Motor Cortex result or a reaction that was only queued is lost)
+  // and every inbound user message is carried by the durable log replayed
+  // above (lifemodel-ctc.1.2).
   await storage.flush();
 
   // Register components with state manager

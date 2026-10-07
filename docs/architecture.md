@@ -97,24 +97,25 @@ reached:
 #### What survives a stop, and what does not
 
 The stop persists NOTHING for the next run: what is queued but unprocessed at
-the stop is dropped, deliberately. Nothing is lost by that, because every
-source that cannot be regenerated acknowledges AFTER processing (the owner's
-rule: the queue lives at the source, the cursor moves after processing;
-coordinator decision, comment 81). A signal the stop dropped was never
-processed, so its source delivers the event again at the next start:
+the stop is dropped, deliberately. The restart guarantee covers the TURN IN
+FLIGHT and INBOUND TELEGRAM MESSAGES (the durable inbound log); everything else
+that was only queued in memory is LOST on a restart, exactly as it was before
+this feature (owner decision, comment 83):
 
-| Source | How it survives a restart |
+| Source | On a restart |
 | --- | --- |
 | Inbound user messages (Telegram) | the durable inbound log: written and flushed on receipt, the entry leaves it on the turn's recorded outcome, and the entries without one replay once at start (below) |
-| One-shot schedule firings | the schedule is removed and its fire id recorded only once its `plugin_event` signal was PROCESSED (`SchedulerPrimitiveImpl.markFiring` / `acknowledgeFired`); an unprocessed firing is still due and fires again at the next start |
-| Motor Cortex results | a completed/failed run is marked consumed only once its `motor_result` signal was processed (`MotorCortex.acknowledgeResultProcessed`); an unconsumed terminal run is re-emitted once at start (`recoverOnRestart`). Runs from before this marker are treated as consumed at the first start after the change |
+| The COGNITION turn in flight | drained within the stop deadline, and its inbound log entries settle or replay (see 2 above) |
+| One-shot and recurring schedule firings | LOST if the stop dropped the queued `plugin_event`: the firing is recorded and a one-shot removed as it fires, so the next start sees only the next occurrence. Reminders become TASKS with their own durable record and outcome later (`lifemodel-ten`) |
+| Motor Cortex results | LOST if the stop dropped the queued `motor_result`: `recoverOnRestart` resumes runs that are still running, it does not re-deliver a terminal run's result. Results become tasks later (`lifemodel-ten`) |
+| Telegram REACTIONS | LOST if the stop dropped one - accepted (owner decision, comments 81/83) |
 | Pressures, neurons, aggregation | regenerated: the next run's ticks recompute them (pressure from state and memory, neuron signals from their inputs) |
-| Telegram REACTIONS | LOST if the stop dropped one - accepted (owner decision, comment 81): they are external, they are not in the durable log, and nothing re-delivers them |
 
-The pipeline reports a processed signal through `CoreLoopDeps.onSignalProcessed`
-(`src/core/container.ts` routes it to the scheduler service and Motor Cortex);
-a signal the tick DEFERRED back to the queue is not processed and is not
-reported, so it survives too.
+An earlier attempt in this feature acknowledged schedule firings and Motor
+Cortex results after processing instead; it was rolled back (comment 83): the
+core has no notion of which signals a turn consumed, so per-signal
+acknowledgements there kept opening holes. `lifemodel-ten` carries the durable
+version of those two sources.
 
 `container.shutdown` is idempotent: every later caller gets the first call's
 promise, so the stopped instance is released once.
@@ -136,12 +137,14 @@ code after ONE error line naming what was still pending (the step
 sends outstanding, signals queued). The exit is injectable, so tests prove the
 deadline without killing the test runner (tests/integration/stop-hard-exit.test.ts).
 
-Nothing is lost by leaving: every inbound message is in the log (it flushes on
+What is lost by leaving: every INBOUND MESSAGE is in the log (it flushes on
 receipt and on commit), and the messages whose turn recorded no outcome —
-including the turn the stop abandoned — replay once at the next start. The
-steps AFTER the deadline did not run (`channel_stop` and `storage_flush`
-included), which is the crash-equivalent window listed at the end of this
-section: best effort by the owner's proportionality decision.
+including the turn the stop abandoned — replay once at the next start. Every
+signal that was only queued in memory is lost with the process (see "What
+survives a stop" above). The steps AFTER the deadline did not run
+(`channel_stop` and `storage_flush` included), which is the crash-equivalent
+window listed at the end of this section: best effort by the owner's
+proportionality decision.
 
 ### Durable inbound log (lifemodel-ctc.2.1)
 
@@ -237,12 +240,14 @@ original error as `cause`.
 
 #### The two guarantees (owner decision, comment 54)
 
-- **Graceful restart - strict, while the stop completes within its deadline.**
-  When the stop sequence above runs to its end, no turn and no message is lost,
-  and none is answered twice. The stop drains the turn in flight, delivers (or
-  reports) the sends it scheduled, and flushes storage last: an entry removed
-  by a recorded outcome cannot replay, an entry without one replays exactly
-  once at the next start.
+- **Graceful restart - strict, while the stop completes within its deadline,
+  for the TURN IN FLIGHT and INBOUND MESSAGES.** When the stop sequence above
+  runs to its end, no inbound message is lost and none is answered twice. The
+  stop drains the turn in flight, delivers (or reports) the sends it scheduled,
+  and flushes storage last: an entry removed by a recorded outcome cannot
+  replay, an entry without one replays exactly once at the next start. Signals
+  that were only queued in memory are NOT covered (see "What survives a stop"
+  above).
 - **A stop past its deadline, and a crash (kill -9, OOM, a broken generation)
   - best effort.** Every message whose turn recorded no outcome replays once
   at the next start. A message whose turn recorded an outcome can still be

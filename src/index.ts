@@ -74,9 +74,10 @@ async function main(): Promise<void> {
  * and storage are flushed, the channels are released. Whatever still hangs at
  * the deadline - a stalled intake stop, a stalled tick, a hung send, a stalled
  * flush - is abandoned: the armed hard exit leaves the process with a
- * non-zero code and one error line naming what was still pending. Nothing is
- * lost by leaving (the durable inbound log replays unanswered messages; the
- * next run's ticks regenerate internal signals) - see docs/architecture.md.
+ * non-zero code and one error line naming what was still pending. What is lost
+ * by leaving is what was only queued in memory (a schedule firing, a Motor
+ * Cortex result, a reaction); the durable inbound log still replays unanswered
+ * messages - see docs/architecture.md.
  */
 async function shutdown(reason: string, error?: unknown): Promise<void> {
   if (isShuttingDown) {

@@ -95,23 +95,6 @@ export class SchedulerService {
   }
 
   /**
-   * The pipeline PROCESSED a plugin_event signal this service emitted: a
-   * one-time firing is complete (SchedulerPrimitiveImpl.acknowledgeFired).
-   * CoreLoop calls this once a tick really handled the signal, so a stop that
-   * dropped it leaves the firing due for the next start - the occurrence is not
-   * regenerable by later ticks (lifemodel-ctc.1.2, review round 1 finding 2).
-   */
-  async acknowledgeProcessed(signal: Signal): Promise<void> {
-    if (signal.type !== 'plugin_event') return;
-    const data = signal.data as PluginEventData | undefined;
-    const scheduleId = signal.correlationId;
-    if (!data || typeof data.pluginId !== 'string' || typeof scheduleId !== 'string') return;
-    const scheduler = this.schedulers.get(data.pluginId);
-    if (!scheduler) return;
-    await scheduler.acknowledgeFired(scheduleId);
-  }
-
-  /**
    * Register a scheduler primitive for a plugin.
    * Clears any pending unregistration to prevent stale removal after restart.
    */
@@ -254,7 +237,7 @@ export class SchedulerService {
             break;
           }
 
-          // SNAPSHOT scheduledFor BEFORE markFiring (which advances nextFireAt for recurring)
+          // SNAPSHOT scheduledFor BEFORE markFired (which advances nextFireAt for recurring)
           const scheduledFor = new Date(entry.nextFireAt.getTime());
 
           // Clone payload to prevent cross-mutation between signal and plugin callback
@@ -276,12 +259,10 @@ export class SchedulerService {
           await withTraceContext(
             createTraceContext(crypto.randomUUID(), { correlationId, spanId: `fire_${fireId}` }),
             async () => {
-              // Mark the firing BEFORE emitting: a recurring occurrence is over
-              // here, while a ONE-TIME firing is completed only once its signal
-              // was processed (scheduler.acknowledgeFired, see the primitive).
-              await scheduler.markFiring(entry.id, fireId, now);
+              // IMPORTANT: Record fireId BEFORE emitting for at-most-once semantics
+              await scheduler.markFired(entry.id, fireId, now);
 
-              // CAPTURE firedAt AFTER markFiring
+              // CAPTURE firedAt AFTER markFired
               const firedAt = new Date();
 
               // Build FireContext for plugins
@@ -347,10 +328,6 @@ export class SchedulerService {
                   firedAt
                 );
                 this.signalCallback(signal);
-              } else {
-                // Nothing to deliver: no signal will be processed, so the
-                // one-time firing is complete right here.
-                await scheduler.acknowledgeFired(entry.id);
               }
 
               totalFired++;

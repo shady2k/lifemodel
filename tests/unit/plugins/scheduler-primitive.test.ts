@@ -159,7 +159,7 @@ describe('SchedulerPrimitive', () => {
   });
 
   describe('idempotency', () => {
-    it('should not return a one-time schedule again once its firing was acknowledged', async () => {
+    it('should not return same schedule twice with same fireId', async () => {
       const now = new Date();
       const pastTime = new Date(now.getTime() - 1000);
 
@@ -173,9 +173,8 @@ describe('SchedulerPrimitive', () => {
       const firstCheck = await scheduler.checkDueSchedules(now);
       expect(firstCheck).toHaveLength(1);
 
-      // Mark as firing, then acknowledge it (its signal was processed)
-      await scheduler.markFiring('idem-test', firstCheck[0]!.fireId, now);
-      await scheduler.acknowledgeFired('idem-test');
+      // Mark as fired
+      await scheduler.markFired('idem-test', firstCheck[0]!.fireId, now);
 
       // Second check - should not return same schedule
       const secondCheck = await scheduler.checkDueSchedules(now);
@@ -183,8 +182,8 @@ describe('SchedulerPrimitive', () => {
     });
   });
 
-  describe('markFiring / acknowledgeFired (lifemodel-ctc.1.2)', () => {
-    it('keeps a one-time schedule due until its firing is acknowledged', async () => {
+  describe('markFired', () => {
+    it('should remove one-time schedule after firing', async () => {
       const now = new Date();
       const pastTime = new Date(now.getTime() - 1000);
 
@@ -195,36 +194,10 @@ describe('SchedulerPrimitive', () => {
       });
 
       const dueSchedules = await scheduler.checkDueSchedules(now);
-      await scheduler.markFiring('one-time', dueSchedules[0]!.fireId, now);
+      await scheduler.markFired('one-time', dueSchedules[0]!.fireId, now);
 
-      // NOT removed and NOT recorded as fired: a stop that drops the unprocessed
-      // signal must fire this occurrence again after the next start.
       const schedules = await scheduler.getSchedules();
-      expect(schedules).toHaveLength(1);
-      // and it does not fire twice within the same run either
-      expect(await scheduler.checkDueSchedules(now)).toHaveLength(0);
-
-      // the signal was processed: now the firing is complete
-      await expect(scheduler.acknowledgeFired('one-time')).resolves.toBe(true);
-      expect(await scheduler.getSchedules()).toHaveLength(0);
-      expect(await scheduler.checkDueSchedules(now)).toHaveLength(0);
-    });
-
-    it('removes a one-time schedule whose signal never existed (suppressed)', async () => {
-      const now = new Date();
-      const pastTime = new Date(now.getTime() - 1000);
-
-      await scheduler.schedule({ id: 'one-time', fireAt: pastTime, data: {} });
-      const dueSchedules = await scheduler.checkDueSchedules(now);
-      await scheduler.markFiring('one-time', dueSchedules[0]!.fireId, now);
-
-      // nothing will be processed for this firing
-      await expect(scheduler.acknowledgeFired('one-time')).resolves.toBe(true);
-      expect(await scheduler.getSchedules()).toHaveLength(0);
-    });
-
-    it('ignores an acknowledgement for a schedule it does not hold', async () => {
-      await expect(scheduler.acknowledgeFired('never-scheduled')).resolves.toBe(false);
+      expect(schedules).toHaveLength(0);
     });
 
     it('should advance recurring schedule after firing', async () => {
@@ -244,14 +217,12 @@ describe('SchedulerPrimitive', () => {
       });
 
       const dueSchedules = await scheduler.checkDueSchedules(now);
-      await scheduler.markFiring('recurring', dueSchedules[0]!.fireId, now);
+      await scheduler.markFired('recurring', dueSchedules[0]!.fireId, now);
 
       const schedules = await scheduler.getSchedules();
       expect(schedules).toHaveLength(1);
       // Next fire should be in the future
       expect(schedules[0]?.nextFireAt.getTime()).toBeGreaterThan(now.getTime());
-      // a recurring occurrence is over at markFiring: nothing to acknowledge
-      await expect(scheduler.acknowledgeFired('recurring')).resolves.toBe(false);
     });
   });
 
@@ -267,7 +238,7 @@ describe('SchedulerPrimitive', () => {
 
       // Fire and advance
       const due = await scheduler.checkDueSchedules(now);
-      await scheduler.markFiring('cron-test', due[0]!.fireId, now);
+      await scheduler.markFired('cron-test', due[0]!.fireId, now);
 
       const schedules = scheduler.getSchedules();
       expect(schedules[0]?.nextFireAt.getUTCHours()).toBe(12); // 10:30 → 12:00
@@ -275,14 +246,12 @@ describe('SchedulerPrimitive', () => {
     });
 
     it('throws on invalid cron at creation time', async () => {
-      await expect(
-        scheduler.schedule({
-          id: 'bad-cron',
-          fireAt: new Date(),
-          recurrence: { frequency: 'custom', interval: 1, cron: 'invalid' },
-          data: {},
-        })
-      ).rejects.toThrow();
+      await expect(scheduler.schedule({
+        id: 'bad-cron',
+        fireAt: new Date(),
+        recurrence: { frequency: 'custom', interval: 1, cron: 'invalid' },
+        data: {},
+      })).rejects.toThrow();
     });
 
     it('validates cron field count', () => {
@@ -378,7 +347,7 @@ describe('SchedulerPrimitive', () => {
       // Fire and advance
       const due = await scheduler.checkDueSchedules(fireAt);
       expect(due).toHaveLength(1);
-      await scheduler.markFiring('range-within', due[0]!.fireId, fireAt);
+      await scheduler.markFired('range-within', due[0]!.fireId, fireAt);
 
       const schedules = scheduler.getSchedules();
       expect(schedules).toHaveLength(1);
@@ -410,7 +379,7 @@ describe('SchedulerPrimitive', () => {
       });
 
       const due = await scheduler.checkDueSchedules(fireAt);
-      await scheduler.markFiring('range-end', due[0]!.fireId, fireAt);
+      await scheduler.markFired('range-end', due[0]!.fireId, fireAt);
 
       const schedules = scheduler.getSchedules();
       const nextFire = schedules[0]!.nextFireAt;
@@ -442,7 +411,7 @@ describe('SchedulerPrimitive', () => {
       });
 
       const due = await scheduler.checkDueSchedules(fireAt);
-      await scheduler.markFiring('range-feb', due[0]!.fireId, fireAt);
+      await scheduler.markFired('range-feb', due[0]!.fireId, fireAt);
 
       const schedules = scheduler.getSchedules();
       const nextFire = schedules[0]!.nextFireAt;
