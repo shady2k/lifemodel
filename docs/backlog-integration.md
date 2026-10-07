@@ -9,7 +9,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Scope: team** (owner, 2026-10-07). The hooks ship with the repository and
   `npm run connect` connects them in every clone; CI's `ci-backlog` job enforces
   the backlog gate, the commit-link check and (on pull requests) the
-  present-documents check on everyone's commits. The agent doc (`claude.md`)
+  present-documents check on everyone's commits. The agent doc (`AGENTS.md`)
   carries the install line for people who do not have the plugin yet.
 - **Artifact language:** English (owner, 2026-10-07). The Russian ADRs
   (docs/adr/006..009, on their own branches) stay as they are.
@@ -27,7 +27,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Document resources:** the plugin's `templates/` and `documents.md`, by the
   plugin's path; nothing is copied in until the document gate is installed.
 - **Workflow ownership:** `br` owns task status. The plugin's backlog skills
-  (to-backlog, take-task, close-out) own where work belongs; `claude.md` says
+  (to-backlog, take-task, close-out) own where work belongs; `AGENTS.md` says
   the same. ADRs are the decision records.
 - **Architecture and explorations:** `docs/architecture.md`; explorations are
   not retained as documents unless asked.
@@ -75,7 +75,7 @@ the repository's installation, and each person's plugin and hooks are their own.
   0.82.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.37.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
-- **Present documents:** the config's `presentDocuments` — `claude.md`,
+- **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
   `README.md`, `docs/architecture.md`, `docs/concepts/*.md`,
   `docs/features/**/*.md`, `docs/plugins/*.md`. `npm run present` runs the
   check by hand (base defaults to the merge base with `origin/main`); CI runs
@@ -83,7 +83,7 @@ the repository's installation, and each person's plugin and hooks are their own.
   dead reference the change made refuses it; older drift is printed and fails
   nothing. The first run (2026-10-07, at `16684b0`) found no dead path and no
   ignore needed: `presentIgnores` is empty. It reported one churn item
-  (`claude.md`, 44 commits under what it names since its last edit), filed as
+  (`AGENTS.md`, 44 commits under what it names since its last edit), filed as
   one debt item.
 - **Work records:** a run's claims, receipts and stops are `br` comments whose
   text starts with `[shady2k-time`. The adapter exports every one raw and
@@ -175,7 +175,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Static checks:** `npm run lint`, `npm run format:check` (need
   `node_modules`). The gate's own checks need only node: `npm run backlog`.
 - **Related tests:** `npx vitest run <touched test files>` — tests live in
-  `tests/` (unit, integration), never in `src/` (claude.md).
+  `tests/` (unit, integration), never in `src/` (AGENTS.md).
 - **Full stage checks:** `npm run typecheck && npm run lint && npm run test`
   (needs `node_modules`). Not yet in CI (its own task, filed with the setup
   task).
