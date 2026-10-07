@@ -97,6 +97,13 @@ Motor Cortex agentic runs.
 - Run the suite with `npm run test`.
 - Run one file: `npx vitest run tests/unit/energy-management.test.ts`
   (any path under `tests/`).
+- Tests do not use pino's file transport: it writes from a worker thread that a
+  test cannot stop, and it raced the removal of temp directories. Use a
+  recording or in-memory logger (`tests/helpers/test-logger.ts`), or
+  `logToFile: false` for a real container.
+- An assertion waits for the event it checks (a log line, a settled outcome),
+  never for a tick count or a timer: the tick counter rises when a tick starts,
+  before its work is done.
 
 ## Data & logs
 

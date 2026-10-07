@@ -175,11 +175,16 @@ the repository's installation, and each person's plugin and hooks are their own.
   then).
 - **Static checks:** `npm run lint`, `npm run format:check` (need
   `node_modules`). The gate's own checks need only node: `npm run backlog`.
-- **Related tests:** `npx vitest run <touched test files>` — tests live in
-  `tests/` (unit, integration), never in `src/` (AGENTS.md).
-- **Full stage checks:** `npm run typecheck && npm run lint && npm run test`
-  (needs `node_modules`). Not yet in CI (its own task, filed with the setup
-  task).
+- **Related tests:** `npx vitest run --maxWorkers=2 <touched test files>` —
+  tests live in `tests/` (unit, integration), never in `src/` (AGENTS.md).
+- **Full stage checks:** `npm run typecheck && npm run lint && npx vitest run
+  --maxWorkers=2` (needs `node_modules`). On this machine memory is short
+  (owner, 2026-10-07): every vitest run uses at most 2 workers, and only one
+  vitest process runs at a time; repeated full runs go one after another. Not
+  yet in CI (its own task, filed with the setup task).
+- **`npm ci` in a worktree** re-runs husky's `prepare`, which switches the
+  repository-wide `core.hooksPath` to `.husky/_`: commits in every checkout then
+  run husky's hooks. Run `npm run connect` afterwards to restore `.githooks`.
 - **Mutation checks:** no mutation tool is installed. The agreed alternative
   is the config's `execution.mutationFallback`: the coordinator hand-plants
   2–3 mutations in the changed logic at stage acceptance and records which
@@ -206,7 +211,20 @@ the repository's installation, and each person's plugin and hooks are their own.
   provider, which has no key here, and the worker never starts. A brief says
   that the owner's rules in `AGENTS.md` are not reworded to fit the code: a
   violation is filed as a finding and the rule stays (a worker once weakened
-  Plugin Isolation that way).
+  Plugin Isolation that way). A brief also carries the tracker claim
+  (`br update <id> --claim --actor '<full agent name>'`), not only the run
+  script's claim record: without it the gate reads the span as ended. A leaf
+  set `implemented` must sit under a stage.
+- **One task, one fresh session; one stage, one fresh reviewer.** A worker
+  session that ran several rework rounds degraded around 300k tokens of context
+  (garbled reasoning, tests that did not exercise their scenario); a reviewer
+  session that ran all day reviewed the wrong commits. Start a new worker
+  session for each task and a new reviewer session for each stage.
+- **Watching a worker:** every wait on a worker also watches its session
+  transcript (`~/.prime/agent/sessions/<id>.jsonl`) and wakes the coordinator
+  after about 10 minutes of silence, not only when its report file appears. A
+  worker can end its turn mid-task and sit at its prompt: one stood idle for an
+  hour while the wait polled only for the report.
 - **Run bookkeeping that the gate enforces:** when the coordinator posts its
   claim record on a feature, it also sets the feature `in_progress` with
   itself as assignee; otherwise the gate reads the span as ended with no
