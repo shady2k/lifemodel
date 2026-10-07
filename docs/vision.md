@@ -19,23 +19,23 @@ One owner. lifemodel is the owner's personal companion and agent.
 
 ## Roadmap
 
-Five directions, delivered as milestones in this order. Only the current
-milestone is broken down into work; the next one exists as feature titles;
-the rest lives here. Status comes from the tracker, never from this page.
+The path leads to evolution first: the thinnest end-to-end version in which the
+agent changes itself without a human step, then layers added where real use
+shows they are needed. Only the current milestone is broken down into work; the
+next one exists as feature titles; the rest lives here. Status comes from the
+tracker, never from this page.
 
 | Milestone | What becomes possible | Design |
 |---|---|---|
-| `platform-1` — Lives on a VM | A new version rolls out with one command and a sub-second gap and rolls back in a minute; the owner's controls (panic, limits, autonomy) live outside the agent | ADR-006, stage 1 |
-| `dialogue-1` — Live dialogue | The owner writes during a turn and the agent takes it into account; `/stop` interrupts a turn; messages survive restarts and cutovers | ADR-007 |
-| `hands-1` — Hands without Docker | Agentic tasks run in prime-agent under bubblewrap, network through the allowlist proxy | ADR-006, stage 2 |
-| `memory-1` — Memory with history | Every memory write knows its generation; writes of a bad generation are found and reverted; the tick no longer walks the whole memory | ADR-008, M1–M3 |
-| `evolution-1` — The agent changes itself | Signal recording and replay, the evolution loop, the owner's development process inside the agent; autonomy raised to `full` under a charter | ADR-006, stages 3–4; ADR-009, E1–E3 |
-| `maturity-1` — Maturity | The trusted layer outside evolution (loader, LLM gateway, proxy, memory journal, tracker and checks) consolidated into one platform with one update path; Hindsight as a second memory loop if a benchmark justifies it; owner verdicts and forks | ADR-008, M4; ADR-009, E4 |
+| `self-change-1` — The agent changes itself | The owner asks in Telegram and lifemodel changes its own code, applies it and reports; a broken change reverts itself. Restart without loss, gates, an up-to-date map of the code, a test VM, a revert watchdog and the change-yourself tool | ADR-006 (simplified: git, restart and a watchdog instead of generations and cutover) |
+| `evolution-1` — It decides on its own | Pressure, repeated failures and reflection start a self-change without a request; the owner's development process (tracker, roles, review) runs inside the agent | ADR-006 C; ADR-009 |
+| `memory-1` — Memory behind a port | Our own memory moves behind a port with a tick cache: facts superseded over time, hybrid search, structured records in SQLite | `docs/research/memory-service.md` (option E) |
+| `dialogue-1` — Live dialogue | The owner writes during a turn and the agent takes it into account; `/stop` interrupts a turn; messages survive restarts | ADR-007 |
+| `platform-1` — Hardening, when needed | Generations and a cutover without a pause, an LLM gateway that meters spend, bubblewrap isolation per run — each added when real use hits its limit | ADR-006 B, D, E |
 
-Why this order: without the loader and generations there is nothing to evolve
-and nowhere to roll back to; memory must survive rollbacks before the agent may
-change itself; dialogue gives value on the current deployment and supplies the
-graceful end of a turn that a cutover needs.
+Why this order: evolution is the point, so the first milestone delivers it end
+to end with the least machinery that still makes a change cheap to undo;
+everything else is added where the running agent shows it is missing.
 
 Where the target deployment VM lives is a deployment decision, separate from
 these milestones; milestone checks run in a development test environment.

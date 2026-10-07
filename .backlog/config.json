@@ -1,13 +1,12 @@
 {
   "strength": "block-new",
-  "currentMilestone": "platform-1",
+  "currentMilestone": "self-change-1",
   "milestoneLabels": [
-    "platform-1",
-    "dialogue-1",
-    "hands-1",
-    "memory-1",
+    "self-change-1",
     "evolution-1",
-    "maturity-1"
+    "memory-1",
+    "dialogue-1",
+    "platform-1"
   ],
   "areaLabels": [
     "core",
