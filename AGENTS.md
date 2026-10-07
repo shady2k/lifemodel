@@ -99,8 +99,8 @@ move the config file: startup reads `data/config/agent.json` before applying
 `DATA_PATH` (`src/core/container.ts`, `src/config/config-loader.ts`).
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
-  system events, LLM request summaries, errors. Default level is `info`;
-  request/response details and `contentPreview` are `debug` — set
+  system events, errors. Default level is `info`; the LLM request
+  summaries, responses and `contentPreview` are `debug` — set
   `LOG_LEVEL=debug` to see them (`src/config/config-loader.ts`,
   `src/llm/provider.ts`); tool messages are logged at `trace` and go to the
   conversation log instead. The newest 10 non-empty files are kept
@@ -126,21 +126,27 @@ Verify each step against the logger code (`src/core/logger.ts`,
 below is what that code writes today.
 
 1. Find the newest logs: `ls -t data/logs/agent-*.log | head -3`
-2. Find the tick: search the conversation log for the bad output text and
-   note the `[traceId:spanId]` prefix when it is there. The prefix is
-   written only when trace context reaches the logger; a cognition turn can
-   run outside it, so lines without a prefix are normal. When it is missing,
-   use the timestamp or the response text itself to locate the exchange.
-   When it is there, the span is `tick_<n>` (a CoreLoop tick) or a
-   signal/intent id; the trace id is shortened to its first 8 characters.
-3. Trace the chain: `grep "tick_NNNNN" data/logs/agent-*.log` shows trigger →
-   LLM request → LLM response → post-processing; without a usable prefix,
-   grep the same timestamp window instead.
+2. Find the exchange: search the conversation log for the bad output text,
+   or by timestamp. Conversation lines carry a `[traceId:spanId]` prefix
+   only when trace context reaches the logger — a cognition turn runs
+   outside it, so a prefix is often missing there; the trace id is
+   shortened to its first 8 characters when present.
+3. Trace the chain: with `LOG_LEVEL=debug`, the agent log holds the LLM
+   request summaries, responses and post-processing. Follow the trace id
+   seen in the conversation log, or the tick's id as `correlationId` (a
+   cognition wake is traced from its trigger signal; the tick id links, it
+   does not root), or fall back to the same timestamp window.
 
-Conversation log format (written by `src/llm/provider.ts`):
+Conversation log format (schematic; written by `src/llm/provider.ts`). One
+log entry carries a whole request or response block, so the
+`[timestamp] [traceId:spanId]` prefix is written once, before the block:
 
 ```
-[HH:MM:SS.mmm] [traceId:spanId] ► [N] ROLE:
+[HH:MM:SS.mmm] [traceId:spanId]
+════════════════════════════════════════════
+→ REQUEST [req_N] to provider (model)
+────────────────────────────────────────────
+► [N] ROLE:
   message content
 ────────────────────────────────────────────
 ← RESPONSE [durationMs, tokens tokens, finish_reason] gen:<generationId>
@@ -152,7 +158,7 @@ Key fields in the agent log:
 
 | Field | What it tells you |
 | --- | --- |
-| `traceId` / `spanId` | one processing chain / one tick within it |
+| `traceId` / `spanId` | one processing chain / one span in it (`tick_<n>`, a signal's child span, …) |
 | `triggerType` | what caused the agent to act (`user_message`, `contact_urge`, `thought`, …) |
 | `model` / `provider` | which model produced the output; the role (fast/smart/motor) routes it |
 | `generationId` | OpenRouter generation id for provider-side debugging |
