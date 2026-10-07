@@ -90,13 +90,38 @@ describe('pending-signal journal', () => {
     expect(restored).toEqual([]);
   });
 
-  it('fails loudly naming the file when the persisted file is corrupt', async () => {
+  it('fails loudly naming the file when the persisted file is corrupt, keeping the cause', async () => {
     const path = pendingSignalsPath(storagePath);
     await mkdir(join(storagePath, 'core'), { recursive: true });
     await writeFile(path, 'not json at all', 'utf-8');
 
     const storage = createJSONStorage(storagePath);
-    await expect(loadPendingSignals(storage, storagePath, logger)).rejects.toThrow(path);
+    const error = await loadPendingSignals(storage, storagePath, logger).catch(
+      (e: unknown): Error => e as Error
+    );
+    expect(error.message).toContain(path);
+    // the original failure stays diagnosable through cause
+    expect(error.cause).toBeInstanceOf(Error);
+  });
+
+  it('a failed journal READ keeps the cause and names the file', async () => {
+    const path = pendingSignalsPath(storagePath);
+    await mkdir(join(storagePath, 'core'), { recursive: true });
+    // unreadable file (permissions), not a corrupt one
+    await writeFile(path, '{"version":1,"signals":[]}', 'utf-8');
+    const storage = createJSONStorage(storagePath);
+    const original = { message: 'unreadable file' };
+    const failing = {
+      load: () => Promise.reject(original),
+      save: () => Promise.resolve(),
+      delete: () => Promise.resolve(false),
+      exists: () => Promise.resolve(false),
+    };
+    const error = await loadPendingSignals(failing as never, storagePath, logger).catch(
+      (e: unknown): Error => e as Error
+    );
+    expect(error.message).toContain(path);
+    expect((error.cause as { message: string }).message).toBe('unreadable file');
   });
 
   it('fails loudly when the persisted shape is wrong', async () => {

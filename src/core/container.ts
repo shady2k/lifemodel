@@ -210,6 +210,13 @@ export interface Container {
 export interface ShutdownSequenceDeps {
   /** Application logger */
   logger: Logger;
+  /**
+   * Absolute wall-clock stop deadline (Date.now() ms). ONE deadline covers
+   * intake stop, the loop drain (tick, scheduler callback, turn, sends) and
+   * the final persistence; past it the stop continues and journals what is
+   * left. The container derives it from coreLoop.getStopDrainTimeoutMs().
+   */
+  deadline: number;
   /** Registered channels: stopping them stops intake */
   channels: Iterable<Channel>;
   /** The core loop: stop() drains the turn in flight */
@@ -259,12 +266,18 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   }
   logger.info('Channel intake stopped');
 
-  // 2. Await the turn in flight (or requeue it)
-  await deps.coreLoop.stop();
+  // 2. Await the turn in flight (or requeue every signal it owns). The loop
+  //    gets the SAME overall deadline: it bounds the tick, the scheduler
+  //    callback, the turn and the sends of the drained turn.
+  await deps.coreLoop.stop(deps.deadline);
 
-  // 3. Persist signals accepted but never processed (possibly the overrun
-  //    trigger requeued by coreLoop.stop). Always writes the envelope, so an
-  //    empty list also clears what a previous stop left behind.
+  // 3. Persist signals accepted but never processed (possibly the signals a
+  //    turn overrunning the deadline owns, requeued by coreLoop.stop). Written
+  //    through DeferredStorage; the final storage.shutdown() flush makes it
+  //    durable. takePendingSignals() DRAINS the loop's queue, so a sequence is
+  //    safe to run only once for a stop - makeIdempotentShutdown guarantees
+  //    that for the container; a second sequence would journal an empty queue
+  //    over this one (its caller's bug, not this sequence's).
   const pending = deps.coreLoop.takePendingSignals();
   await persistPendingSignals(deps.storage, logger, pending);
 
@@ -285,6 +298,26 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   await deps.storage.shutdown();
 
   logger.info({ pendingSignalsPersisted: pending.length }, 'Shutdown complete');
+}
+
+/**
+ * Make a shutdown idempotent: the first call runs it; later calls (sequential
+ * or concurrent) return the FIRST call's promise. Re-running a shutdown after
+ * the first one drained the loop would journal an empty pending queue over the
+ * first run's journal - erasing accepted signals. A failed shutdown clears the
+ * memo so a later attempt can retry the sequence.
+ */
+export function makeIdempotentShutdown(run: () => Promise<void>): () => Promise<void> {
+  let shutdownPromise: Promise<void> | null = null;
+  return () => {
+    // ??= : the first caller runs the sequence; the catch clears the memo so
+    // a FAILED shutdown can be retried by a later call.
+    shutdownPromise ??= run().catch((error: unknown) => {
+      shutdownPromise = null;
+      throw error;
+    });
+    return shutdownPromise;
+  };
 }
 
 /**
@@ -1120,9 +1153,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Shutdown function with persistence: the ordered sequence lives in
   // shutdownSequence above (channels first ... storage last) so the order
   // itself is testable.
-  const shutdown = (): Promise<void> =>
-    shutdownSequence({
+  // Idempotent (see makeIdempotentShutdown): the first call wins; a later
+  // caller gets the same promise and can never journal over the first run.
+  const shutdown = makeIdempotentShutdown(() => {
+    const budget = coreLoop.getStopDrainTimeoutMs();
+    return shutdownSequence({
       logger,
+      deadline: Date.now() + budget,
       channels: channels.values(),
       coreLoop,
       storage,
@@ -1131,6 +1168,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       recipientRegistry,
       ackRegistry,
     });
+  });
 
   return {
     logger,

@@ -285,5 +285,35 @@ describe('DeferredStorage', () => {
 
       expect(mockStorage.save).toHaveBeenCalledWith('shutdownKey', { value: 'flush-me' });
     });
+
+    it('writes everything queued up to shutdown even when an auto-flush is in progress', async () => {
+      // The finding: a flush already in progress makes flush() return early;
+      // a shutdown that then cleared the cache discarded the final write.
+      const slow = createMockStorage();
+      const saveCalls: string[] = [];
+      slow.save = async (key: string, value: unknown): Promise<void> => {
+        saveCalls.push(key);
+        if (key === 'first') {
+          await new Promise((r) => setTimeout(r, 50)); // the auto-flush is slow
+        }
+        slow.data.set(key, value);
+      };
+      const ds = new DeferredStorage(slow, mockLogger, { flushIntervalMs: 10 });
+
+      ds.save('first', { n: 1 });
+      // the auto-flush picks 'first' up and is inside its slow write
+      await new Promise((r) => setTimeout(r, 20));
+      // the final journal write arrives while that flush is still running
+      ds.save('core:pending_signals', { version: 1, signals: ['must reach disk'] });
+
+      await ds.shutdown();
+
+      expect(saveCalls).toContain('first');
+      expect(saveCalls).toContain('core:pending_signals');
+      expect(slow.data.get('core:pending_signals')).toEqual({
+        version: 1,
+        signals: ['must reach disk'],
+      });
+    });
   });
 });

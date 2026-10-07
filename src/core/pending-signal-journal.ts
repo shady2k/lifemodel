@@ -144,7 +144,8 @@ export async function loadPendingSignals(
     throw new Error(
       `Failed to read pending-signal journal at ${path}: ${
         error instanceof Error ? error.message : String(error)
-      }`
+      }`,
+      { cause: error }
     );
   }
 
@@ -158,18 +159,27 @@ export async function loadPendingSignals(
     envelope?.version !== ENVELOPE_VERSION ||
     !Array.isArray(envelope.signals)
   ) {
-    throw new Error(`Corrupt pending-signal journal at ${path}: unexpected envelope shape`);
+    throw new Error(
+      `Corrupt pending-signal journal at ${path}: unexpected envelope shape`,
+      { cause: raw instanceof Error ? raw : new Error(JSON.stringify(raw).slice(0, 500)) }
+    );
   }
 
   const signals: Signal[] = [];
   for (const record of envelope.signals) {
     if (typeof record !== 'object' || record === null || typeof record.timestamp !== 'string') {
-      throw new Error(`Corrupt pending-signal journal at ${path}: invalid record envelope`);
+      throw new Error(
+        `Corrupt pending-signal journal at ${path}: invalid record envelope`,
+        { cause: new Error(JSON.stringify(record).slice(0, 500)) }
+      );
     }
     // decodeDates already ran at the envelope level - validate the signal as is
     const signal = (record as { signal: unknown }).signal;
     if (!isSignalLike(signal)) {
-      throw new Error(`Corrupt pending-signal journal at ${path}: entry is not a valid signal`);
+      throw new Error(
+        `Corrupt pending-signal journal at ${path}: entry is not a valid signal`,
+        { cause: new Error(JSON.stringify(signal).slice(0, 500)) }
+      );
     }
     signals.push(signal);
   }

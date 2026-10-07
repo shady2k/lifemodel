@@ -30,9 +30,11 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
 - `src/core/` — the heart: CoreLoop tick, Agent, energy model, scheduler,
   plugin loader and discovery, container (dependency wiring), event bus and
-  queue, intent application, metrics, tracing, the shutdown-drain sequence and
-  the pending-signal journal (`pending-signal-journal.ts`), which persists
-  signals accepted but unprocessed at stop and restores them at start
+  queue, intent application, metrics, tracing, the shutdown-drain sequence
+  (one overall stop deadline; intake stop first, sends of the drained turn
+  awaited, channels released after, storage flushed last) and the
+  pending-signal journal (`pending-signal-journal.ts`), which persists signals
+  accepted but unprocessed at stop and restores them at start
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus

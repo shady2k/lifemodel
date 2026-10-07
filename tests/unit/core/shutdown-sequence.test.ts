@@ -62,6 +62,7 @@ function makeDoubles() {
     stop: async () => {
       steps.push('coreLoop.stop');
     },
+    getStopDrainTimeoutMs: () => 90_000,
     takePendingSignals: (): Signal[] => [],
   };
   const stateManager = { shutdown: async () => steps.push('stateManager.shutdown') };
@@ -77,6 +78,7 @@ describe('container shutdown sequence', () => {
     const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
     const steps = d.steps;
 
+    const deadline = Date.now() + 5_000;
     const storageDouble = {
       load: (key: string) => storage.load(key),
       save: (key: string, data: unknown) => storage.save(key, data),
@@ -92,6 +94,7 @@ describe('container shutdown sequence', () => {
 
     await shutdownSequence({
       logger: noopLogger,
+      deadline,
       channels: [d.channel] as never,
       coreLoop: {
         ...d.coreLoop,
