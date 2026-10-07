@@ -94,18 +94,30 @@ Motor Cortex agentic runs.
 
 Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
+`DATA_PATH` moves the state, logs, plugins and models roots — it does not
+move the config file: startup reads `data/config/agent.json` before applying
+`DATA_PATH` (`src/core/container.ts`, `src/config/config-loader.ts`).
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
-  system events, LLM requests/responses, tool calls, errors; the newest 10
-  non-empty files are kept (`src/core/logger.ts`)
-- `data/logs/conversation-<timestamp>.log` — human-readable: the exact
-  messages to and from the LLM with role markers; the file comes from
-  `src/core/logger.ts`, the entries from `src/llm/provider.ts`
+  system events, LLM request summaries, errors. Default level is `info`;
+  request/response details and `contentPreview` are `debug` — set
+  `LOG_LEVEL=debug` to see them (`src/config/config-loader.ts`,
+  `src/llm/provider.ts`); tool messages are logged at `trace` and go to the
+  conversation log instead. The newest 10 non-empty files are kept
+  (`src/core/logger.ts`)
+- `data/logs/conversation-<timestamp>.log` — the LLM exchanges, formatted,
+  not verbatim: role markers and separators, indented content, only the new
+  messages of each request (history is summarized in one line), tool calls
+  and results pretty-printed, responses unwrapped from their JSON envelope;
+  the file comes from `src/core/logger.ts`, the entries from
+  `src/llm/provider.ts`
 - `data/state/` — persisted state: JSON state files (written through
   DeferredStorage), conversations, `data/state/memory/` (vector store),
   soul, graph; next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
-  `data/plugins/`
-- `data/config/` — local config files read by `src/config/config-loader.ts`
+  `data/plugins/`. These logs and `data/state/` hold personal messages and
+  tool content: do not paste them outside this machine, and back up
+  `data/state/` before cleaning conversation history
+- `data/config/` — the config file read by `src/config/config-loader.ts`
 
 ## Debugging unexpected agent output
 
@@ -114,11 +126,16 @@ Verify each step against the logger code (`src/core/logger.ts`,
 below is what that code writes today.
 
 1. Find the newest logs: `ls -t data/logs/agent-*.log | head -3`
-2. Find the tick: search the conversation log for the bad output text and note
-   the `[traceId:spanId]` prefix. Spans are `tick_<n>` (a CoreLoop tick) or a
-   signal/intent id.
+2. Find the tick: search the conversation log for the bad output text and
+   note the `[traceId:spanId]` prefix when it is there. The prefix is
+   written only when trace context reaches the logger; a cognition turn can
+   run outside it, so lines without a prefix are normal. When it is missing,
+   use the timestamp or the response text itself to locate the exchange.
+   When it is there, the span is `tick_<n>` (a CoreLoop tick) or a
+   signal/intent id; the trace id is shortened to its first 8 characters.
 3. Trace the chain: `grep "tick_NNNNN" data/logs/agent-*.log` shows trigger →
-   LLM request → LLM response → post-processing.
+   LLM request → LLM response → post-processing; without a usable prefix,
+   grep the same timestamp window instead.
 
 Conversation log format (written by `src/llm/provider.ts`):
 
@@ -145,9 +162,12 @@ Key fields in the agent log:
 Common issues:
 
 - **Model echoing instructions:** search the agent log for
-  `"Accepted plain-text response"`. Plain text is accepted only for
-  `user_message` and `motor_result` triggers (`shouldAllowPlainText` in
-  `src/layers/cognition/agentic-loop.ts`); other triggers require the JSON
+  `"Accepted plain-text response"` and for
+  `"Salvaged plain-text response from model that made tool calls"`. Plain
+  text is accepted for `user_message` and `motor_result` triggers, and after
+  any tool call in the tick (the model did real work but skipped the JSON
+  wrapper) — see `shouldAllowPlainText` and the salvage logic in
+  `src/layers/cognition/agentic-loop.ts`. Other triggers require the JSON
   response format. If text still leaked, check the `model` field and whether
   the prompt is clear.
 - **Poisoned history:** a bad response saved into conversation history gets
@@ -205,6 +225,7 @@ These are requirements, not suggestions.
    error means fix the root cause. Don't retry what will always fail.
 4. **Unified Storage Path** — All data through DeferredStorage → JSONStorage
    (atomic writes). Direct file I/O causes race conditions.
+   Known exception, being decided: `lifemodel-ww8`.
 5. **Timestamp Filtering Uses Content Timestamps** —
    `lastFetchedAt = max(item.publishedAt)`, NOT `new Date()`. Using fetch time
    skips items published between content time and fetch time.

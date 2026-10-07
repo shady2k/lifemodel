@@ -41,7 +41,7 @@ Motor Cortex is **not a brain layer** — it's a runtime service invoked by Cogn
 - **Agentic mode**: Async sub-agent loop (max 20 iterations), returns runId immediately
 - **Mutex**: Only one agentic run at a time (including `awaiting_input`)
 - **Energy gated**: 0.05 (oneshot), 0.15 (agentic)
-- **Docker isolation**: Agentic runs execute inside per-run Docker containers with `--read-only`, `--network none`, `--cap-drop ALL`, resource limits (512MB, 1 CPU, 64 PIDs). Falls back to direct execution only with explicit `MOTOR_CORTEX_UNSAFE=true`.
+- **Docker isolation**: Agentic runs execute inside per-run Docker containers with `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, resource limits (512MB, 1 CPU, 64 PIDs by default). Network is off by default (`--network none`); a skill run that declares allowed domains goes through `--network bridge` with an egress proxy. Docker is required — there is no direct-execution fallback.
 - **Dependency pre-installation**: Skills declare npm/pip/apt packages in `policy.json`. A prep container installs them (cache-first, content-addressed Docker named volumes) and mounts them read-only into the runtime container via `NODE_PATH`/`PYTHONPATH`/`PATH`+`LD_LIBRARY_PATH`.
 - **IPC**: Host communicates with container via length-prefixed JSON on stdin/stdout (long-lived tool-server process).
 
