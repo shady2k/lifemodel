@@ -342,6 +342,19 @@ export class FencedStorageHandle {
     return this.track(this.inner.flush());
   }
 
+  /**
+   * The production final flush of this handle (what shutdownSequence calls
+   * last). A FENCED (killed) instance flushes nothing, exactly like a dead
+   * process: the attempt is counted instead (review round 5, optional item).
+   */
+  shutdown(): Promise<void> {
+    if (this.fenced) {
+      this.dropped += 1;
+      return Promise.resolve();
+    }
+    return this.track(this.inner.shutdown());
+  }
+
   /** Remember a write until it settles, so fence() can wait for it. */
   private track<T>(op: Promise<T>): Promise<T> {
     this.inFlight.add(op);
@@ -402,6 +415,9 @@ export interface HarnessOptions {
 }
 
 const TEST_TICK_INTERVAL = 5;
+/** The route the harness registers for its instance (see harnessRecipientId). */
+const HARNESS_CHANNEL = 'test';
+const HARNESS_DESTINATION = 'chat-42';
 /** How many ticks to expect for settlement (5 ms tick interval). */
 export const SETTLE_TICKS = 5;
 
@@ -467,7 +483,7 @@ export async function startInboundInstance(
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);
-  const recipientId = registry.getOrCreate('test', 'chat-42');
+  const recipientId = registry.getOrCreate(HARNESS_CHANNEL, HARNESS_DESTINATION);
 
   // Inbound wiring BEFORE the replay: a completing channel re-fetched
   // during the replay emits its full signal through the same callback path
@@ -535,19 +551,30 @@ export function llmRequests(instance: InboundInstance): number {
   return cognition.calls.length;
 }
 
-/** Stop like the container does: the production shutdown sequence. */
-export async function stopInboundInstance(
-  instance: InboundInstance,
-  storage: DeferredStorage,
-  storagePath: string
-): Promise<void> {
+/**
+ * The recipient the harness registers for its channel+destination, computed
+ * the way the instance computes it (a recipient id is a pure function of the
+ * route): a test can seed state for it BEFORE the instance exists.
+ */
+export function harnessRecipientId(): string {
+  return new RecipientRegistry().getOrCreate(HARNESS_CHANNEL, HARNESS_DESTINATION);
+}
+
+/**
+ * Stop like the container does: the production shutdown sequence, over the
+ * instance's OWN storage handle (what the container passes: the same handle
+ * its log and conversation manager write through), so the final flush covers
+ * everything the instance still holds. A freshly opened handle would flush
+ * only what the disk already has (review round 5, optional item).
+ */
+export async function stopInboundInstance(instance: InboundInstance): Promise<void> {
   await shutdownSequence({
     logger: instance.logger,
     deadline: Date.now() + instance.coreLoop.getStopDrainTimeoutMs(),
     channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
-    storage: storage as never,
-    storagePath,
+    storage: instance.storage,
+    storagePath: instance.storagePath,
     stateManager: { shutdown: async () => undefined } as never,
     recipientRegistry: { flush: async () => undefined } as never,
     ackRegistry: { flush: async () => undefined } as never,
