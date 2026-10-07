@@ -13,17 +13,17 @@ Each outcome is one feature issue labelled `platform-1`. Checks run in a
 development test environment (a disposable test VM is enough); where the
 target VM lives is decided separately, at deployment.
 
-1. **A new version rolls out with one ssh command without losing the
-   conversation.** The new generation starts beside the running one, passes
-   readiness, takes over. *Check:* in the test environment the measured
+1. **A new version replaces the running one without losing the
+   conversation.** On a loader command, the new generation starts beside the
+   running one, passes readiness, takes over. *Check:* in the test environment the measured
    switch gap is at most 2 s, and no Telegram update is lost or handled twice
    across the switch.
-2. **A broken version rolls back by itself, and `rollback N` rolls back on
-   command within a minute, data included.** *Check:* rolling out a
+2. **A broken version rolls back by itself, and a rollback to generation N on
+   a loader command completes within a minute, data included.** *Check:* rolling out a
    generation that crash-loops ends with the loader back on the last
    known-good generation and its data checkpoint.
-3. **`panic` stops everything and nothing comes back on its own**, not even
-   after the VM reboots, until the owner runs `resume`. *Check:* after `panic`
+3. **A panic command to the loader stops everything and nothing comes back on
+   its own**, not even after the VM reboots, until the owner resumes it. *Check:* after `panic`
    and a reboot of the test VM no lifemodel process is running.
 4. **LLM spending cannot exceed the owner's limit.** Only the LLM gateway
    holds provider keys. *Check:* a generation's environment holds no provider
