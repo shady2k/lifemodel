@@ -303,16 +303,16 @@ describe('DeferredStorage', () => {
       ds.save('first', { n: 1 });
       // the auto-flush picks 'first' up and is inside its slow write
       await new Promise((r) => setTimeout(r, 20));
-      // the final journal write arrives while that flush is still running
-      ds.save('core:pending_signals', { version: 1, signals: ['must reach disk'] });
+      // the final write of the stop arrives while that flush is still running
+      ds.save('core:inbound_log', { version: 1, entries: ['must reach disk'] });
 
       await ds.shutdown();
 
       expect(saveCalls).toContain('first');
-      expect(saveCalls).toContain('core:pending_signals');
-      expect(slow.data.get('core:pending_signals')).toEqual({
+      expect(saveCalls).toContain('core:inbound_log');
+      expect(slow.data.get('core:inbound_log')).toEqual({
         version: 1,
-        signals: ['must reach disk'],
+        entries: ['must reach disk'],
       });
     });
   });

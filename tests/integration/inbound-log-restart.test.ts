@@ -480,7 +480,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
     expect(h1.coreLoop.pendingSignalCount()).toBe(1);
 
     await stopInboundInstance(h1);
-    // it never got a turn: uncommitted in the log, queued in the journal too
+    // it never got a turn: still uncommitted in the log (the queue it also sat
+    // in is not durable - internal signals never are)
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
     const h2 = await startInboundInstance(storagePath, {
@@ -490,8 +491,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
       drainTimeoutMs: 5_000,
     });
     instances.push(h2);
-    // the replayed entry and the restored journal signal are the SAME message
-    // (same dedup key): exactly ONE turn, one answer
+    // exactly ONE turn, one answer: the replayed entry is the only copy of the
+    // message (nothing else is restored)
     await waitFor(() => h2.channel.sent.length === 1, 'answered once after the restart');
     expect(h2.channel.sent[0]?.text).toContain('the queued answer');
     await waitFor(() => h2.inboundLog.size().uncommitted === 0, 'removed by its outcome');
@@ -969,6 +970,49 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
     instances.push(h2);
     await waitFor(() => h2.channel.sent.length === 1, 'answered after restart');
     expect(h2.channel.sent[0]?.text).toContain('the redone answer');
+    await waitFor(() => h2.inboundLog.size().uncommitted === 0, 'removed by its outcome');
+    await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
+    expect(llmRequests(h2)).toBe(1);
+  });
+
+  it('a send settling AFTER the stop commits nothing: the entry stays for the redo (lifemodel-ctc.1.2)', async () => {
+    const storagePath = await fresh('ctc2-latesend-');
+    const h1 = await startInboundInstance(storagePath, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [{ content: 'the answer of the stop' }],
+      drainTimeoutMs: DRAIN_DEADLINE_MS,
+      recordLogs: true,
+    });
+    instances.push(h1);
+    // The send is HELD: the stop's drain deadline cuts it loose, and the stop
+    // runs to its final flush with the send still in flight.
+    const gate = makeDeferred<void>();
+    h1.channel.sendGate = { promise: gate.promise, release: () => gate.resolve() };
+    await receiveMessage(h1, 'hello there', 'u-1');
+    await waitFor(() => h1.channel.sendStarted.length === 1, 'send started (now held)');
+
+    await stopInboundInstance(h1);
+    expect(h1.inboundLog.size().uncommitted).toBe(1);
+
+    // NOW the send settles - after the storage flush. It must not write into a
+    // storage that already shut down: the outcome is refused and the message
+    // stays for the next start (the same window as a crash between the answer
+    // and its removal).
+    gate.resolve();
+    await waitForLog(h1, 'nothing is written after it');
+    expect(h1.inboundLog.size().uncommitted).toBe(1);
+    expect((await readLogSize(storagePath)).uncommitted).toBe(1);
+
+    const h2 = await startInboundInstance(storagePath, {
+      cognitionMode: 'real-scripted',
+      hang: false,
+      script: [{ content: 'the answer after the redo' }],
+      drainTimeoutMs: 5_000,
+    });
+    instances.push(h2);
+    await waitFor(() => h2.channel.sent.length === 1, 'answered after restart');
+    expect(h2.channel.sent[0]?.text).toContain('the answer after the redo');
     await waitFor(() => h2.inboundLog.size().uncommitted === 0, 'removed by its outcome');
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
     expect(llmRequests(h2)).toBe(1);

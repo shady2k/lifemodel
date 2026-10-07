@@ -49,12 +49,15 @@ describe('logger file switch (lifemodel-ctc.2.1)', () => {
     const root = await scratchDir('logger-file-');
     const logDir = join(root, 'logs');
 
-    // No line is logged, so the worker thread has nothing to write: only the
-    // directory the file target prepares can be observed here.
+    // No line is logged, so there is nothing to WRITE - but the destination
+    // file is opened by the target's own worker thread, so asserting that the
+    // directory is EMPTY would race that writer (review round 7, optional
+    // item). What this pins is the switch: with `file` unset the file target
+    // is there, and it prepared its directory synchronously, before the
+    // logger was returned.
     createLogger({ logDir, pretty: false, level: 'info' });
 
     expect(existsSync(logDir)).toBe(true);
-    expect(readdirSync(logDir)).toEqual([]);
   });
 
   it('file: false turns the conversation log off too', async () => {

@@ -58,12 +58,7 @@ import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
-import {
-  loadPendingSignals,
-  clearPendingSignals,
-  persistPendingSignals,
-} from './pending-signal-journal.js';
-import { createInboundLog, dedupKeyOf, type InboundLog } from './inbound-log.js';
+import { createInboundLog, type InboundLog } from './inbound-log.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -208,6 +203,12 @@ export interface Container {
   motorCortex: MotorCortex | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
   inboundLog: InboundLog | null;
+  /**
+   * The step the stop reached ('done' while the agent runs). `src/index.ts`
+   * reads it at the stop deadline for the hard exit's error line
+   * (src/core/hard-exit.ts) - together with coreLoop.stopReport().
+   */
+  stopProgress: () => StopStep;
   /** Shutdown function */
   shutdown: () => Promise<void>;
 }
@@ -223,49 +224,86 @@ export interface ShutdownSequenceDeps {
   logger: Logger;
   /**
    * Absolute wall-clock stop deadline (Date.now() ms). ONE deadline covers
-   * intake stop, the loop drain (tick, scheduler callback, turn, sends) and
-   * the final persistence; past it the stop continues and journals what is
-   * left. The container derives it from coreLoop.getStopDrainTimeoutMs().
+   * the WHOLE stop: intake stop, the loop drain (tick, scheduler callback,
+   * turn, sends), state, the full channel stop and the final flush. Each wait
+   * inside is bounded by it and the stop then goes on; what still hangs at it
+   * is abandoned - `src/index.ts` arms a hard exit at the same deadline
+   * (src/core/hard-exit.ts). The container derives it from
+   * coreLoop.getStopDrainTimeoutMs().
    */
   deadline: number;
   /** Registered channels: stopping them stops intake */
   channels: Iterable<Channel>;
   /** The core loop: stop() drains the turn in flight */
-  coreLoop: Pick<CoreLoop, 'stop' | 'takePendingSignals'>;
-  /** Storage (DeferredStorage): pending-signal journal + final flush */
+  coreLoop: Pick<CoreLoop, 'stop' | 'stopReport' | 'closeDurableWrites'>;
+  /** Storage (DeferredStorage): the final flush */
   storage: Storage & { shutdown: () => Promise<void> };
-  /** Base directory of the state storage (for the journal path in logs/errors) */
-  storagePath: string;
   /** State manager (auto-save stop + final state save) */
   stateManager: { shutdown: () => Promise<void> };
   /** Recipient registry (flushes its pending writes) */
   recipientRegistry: { flush: () => Promise<void> };
   /** Ack registry (flushes its pending writes) */
   ackRegistry: { flush: () => Promise<void> };
+  /**
+   * The step the stop reached (mutated here, read by the hard exit).
+   * Optional: a caller that does not arm a stop deadline does not need it.
+   */
+  progress?: StopProgress | undefined;
 }
 
 /**
- * The shutdown order for a graceful stop (lifemodel-ctc.1.1):
+ * How far the stop got. The hard exit names the step that was still pending
+ * when the deadline hit (`StopPendingReport.step`).
+ */
+export type StopStep =
+  | 'intake_stop'
+  | 'loop_drain'
+  | 'state_flush'
+  | 'channel_stop'
+  | 'storage_flush'
+  | 'done';
+
+/** Live progress of one stop (see ShutdownSequenceDeps.progress). */
+export interface StopProgress {
+  step: StopStep;
+}
+
+/**
+ * The shutdown order for a graceful stop (lifemodel-ctc.1.1, bounded by
+ * lifemodel-ctc.1.2):
  *
- * 1. Channel intake stops FIRST (new updates are no longer accepted);
- *    updates already accepted sit in pendingSignals, not in the channel.
+ * 1. Channel intake stops FIRST (new updates are no longer accepted).
  *    Sending keeps working, so the turn drained in step 2 delivers its answer.
- * 2. coreLoop.stop() waits for the COGNITION turn in flight up to
- *    coreLoop.shutdownDrainTimeoutMs (default 90 s) and requeues its
- *    trigger signal past the deadline.
- * 3. Signals accepted but never processed are persisted through
- *    DeferredStorage for the next start to restore.
- * 4. State and registries persist.
- * 5. Channels stop fully (clients released; sending no longer possible).
- * 6. Storage flushes LAST - nothing may write after it.
+ *    A message already accepted is covered by the durable inbound log; the
+ *    channel's own stopIntake gives its in-flight handlers a bounded moment.
+ * 2. coreLoop.stop() waits for the COGNITION turn in flight, its tick, the
+ *    scheduler callback and the sends it scheduled, each bounded by the ONE
+ *    stop deadline. A turn that overruns is abandoned: its inbound log entries
+ *    recorded no outcome, so they replay once at the next start.
+ * 3. State and registries persist.
+ * 4. Channels stop fully (clients released; sending no longer possible).
+ * 5. Storage flushes LAST - nothing may write after it (the loop is closed for
+ *    durable writes just before the flush, so a send settling late cannot
+ *    commit behind it).
+ *
+ * Nothing is persisted for the next run here: internal signals are not durable
+ * (the ticks of the next run regenerate them) and inbound user messages are
+ * carried by the durable inbound log. Past the deadline this sequence still
+ * continues step by step, but whatever hangs is abandoned: `src/index.ts` arms
+ * a hard exit at the same deadline, so the process leaves with a non-zero code
+ * and one error line naming the step it never finished.
+ *
+ * `deps.progress` records the step for that line.
  */
 export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void> {
   const { logger } = deps;
+  const progress = deps.progress;
   logger.info('Shutting down...');
 
   // 1. Stop channel intake first. Channels that separate intake keep sending;
   //    for those that do not, stop() is the only intake stop and they are
-  //    already fully stopped here (never released twice in step 5).
+  //    already fully stopped here (never released twice in step 4).
+  if (progress) progress.step = 'intake_stop';
   const alreadyStopped = new Set<Channel>();
   for (const channel of deps.channels) {
     if (channel.stopIntake) {
@@ -277,46 +315,45 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   }
   logger.info('Channel intake stopped');
 
-  // 2. Await the turn in flight (or requeue every signal it owns). The loop
-  //    gets the SAME overall deadline: it bounds the tick, the scheduler
-  //    callback, the turn and the sends of the drained turn.
+  // 2. Await the turn in flight and the sends it scheduled. The loop gets the
+  //    SAME overall deadline: it bounds the tick, the scheduler callback, the
+  //    turn and the sends of the drained turn.
+  if (progress) progress.step = 'loop_drain';
   await deps.coreLoop.stop(deps.deadline);
 
-  // 3. Persist signals accepted but never processed (possibly the signals a
-  //    turn overrunning the deadline owns, requeued by coreLoop.stop). Written
-  //    through DeferredStorage; the final storage.shutdown() flush makes it
-  //    durable. takePendingSignals() DRAINS the loop's queue, so a sequence is
-  //    safe to run only once for a stop - makeIdempotentShutdown guarantees
-  //    that for the container; a second sequence would journal an empty queue
-  //    over this one (its caller's bug, not this sequence's).
-  const pending = deps.coreLoop.takePendingSignals();
-  await persistPendingSignals(deps.storage, logger, pending);
-
-  // 4. Persist domain state and registries
+  // 3. Persist domain state and registries
+  if (progress) progress.step = 'state_flush';
   await deps.stateManager.shutdown();
   await deps.recipientRegistry.flush();
   await deps.ackRegistry.flush();
 
-  // 5. Channels stop fully (clients released; after this a send refuses).
+  // 4. Channels stop fully (clients released; after this a send refuses).
+  if (progress) progress.step = 'channel_stop';
   for (const channel of deps.channels) {
     if (channel.stop && !alreadyStopped.has(channel)) {
       await channel.stop();
     }
   }
 
-  // 6. Storage last: the deferred writes of steps 3-4 reach disk here, and no
-  //    component writes after this flush.
+  // 5. Storage last: the deferred writes of steps 3-4 reach disk here, and no
+  //    component writes after this flush. The loop is closed for durable
+  //    writes FIRST: a send that settles behind this flush would commit into a
+  //    storage that already shut down (the write would be lost), so it keeps
+  //    its message in the log instead - the entry is on disk and replays once
+  //    at the next start.
+  if (progress) progress.step = 'storage_flush';
+  deps.coreLoop.closeDurableWrites();
   await deps.storage.shutdown();
 
-  logger.info({ pendingSignalsPersisted: pending.length }, 'Shutdown complete');
+  if (progress) progress.step = 'done';
+  logger.info('Shutdown complete');
 }
 
 /**
  * Make a shutdown idempotent: the first call runs it; later calls (sequential
- * or concurrent) return the FIRST call's promise. Re-running a shutdown after
- * the first one drained the loop would journal an empty pending queue over the
- * first run's journal - erasing accepted signals. A failed shutdown clears the
- * memo so a later attempt can retry the sequence.
+ * or concurrent) return the FIRST call's promise (the stopped instance is
+ * released once, and the first caller's outcome is what the process acts on).
+ * A failed shutdown clears the memo so a later attempt can retry the sequence.
  */
 export function makeIdempotentShutdown(run: () => Promise<void>): () => Promise<void> {
   let shutdownPromise: Promise<void> | null = null;
@@ -1180,28 +1217,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     );
   }
 
-  // Restore signals that were accepted but never processed by the previous
-  // run's stop (the pending-signal journal; lifemodel-ctc.1.2 removes it).
-  // A journal signal that is already in the durable log is skipped: it
-  // either replays above (uncommitted) or was answered (committed).
-  const restoredPending = await loadPendingSignals(storage, storagePath, logger);
-  for (const signal of restoredPending) {
-    if (inboundLog.hasKey(dedupKeyOf(signal))) {
-      logger.debug(
-        { signalId: signal.id },
-        'Journal signal already covered by the durable inbound log; skipped'
-      );
-      continue;
-    }
-    coreLoop.pushSignal(signal);
-  }
-  if (restoredPending.length > 0) {
-    logger.info(
-      { count: restoredPending.length },
-      'Restored pending signals from the previous run'
-    );
-  }
-  await clearPendingSignals(storage, logger);
+  // Nothing else is restored: internal signals are NOT persisted across a stop
+  // (the ticks of this run regenerate them) and every inbound user message is
+  // carried by the durable log replayed above (lifemodel-ctc.1.2).
   await storage.flush();
 
   // Register components with state manager
@@ -1220,7 +1238,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // shutdownSequence above (channels first ... storage last) so the order
   // itself is testable.
   // Idempotent (see makeIdempotentShutdown): the first call wins; a later
-  // caller gets the same promise and can never journal over the first run.
+  // caller gets the same promise.
+  const stopProgress: StopProgress = { step: 'done' };
   const shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
     return shutdownSequence({
@@ -1229,10 +1248,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       channels: channels.values(),
       coreLoop,
       storage,
-      storagePath,
       stateManager,
       recipientRegistry,
       ackRegistry,
+      progress: stopProgress,
     });
   });
 
@@ -1262,6 +1281,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     recipientRegistry,
     motorCortex,
     inboundLog,
+    stopProgress: () => stopProgress.step,
     shutdown,
   };
 }

@@ -161,7 +161,7 @@ describe(
       expect(data.images![0]!.mediaType).toBe('image/jpeg');
 
       // and the completed photo is what the loop has QUEUED (not the caption)
-      const queued = container.coreLoop.takePendingSignals();
+      const queued = container.coreLoop.queuedSignalsForTest();
       expect(queued).toHaveLength(1);
       const queuedData = queued[0]!.data as { text: string; images?: unknown[] };
       expect(queuedData.text).toBe('look at this picture');
@@ -192,7 +192,7 @@ describe(
       expect(bot.start).not.toHaveBeenCalled();
 
       // the receipt itself is queued as its caption text: the message is not lost
-      const queued = container.coreLoop.takePendingSignals();
+      const queued = container.coreLoop.queuedSignalsForTest();
       expect(queued).toHaveLength(1);
       const data = queued[0]!.data as { text: string; images?: unknown[]; pendingPhoto?: unknown };
       expect(data.text).toBe('look at this picture');

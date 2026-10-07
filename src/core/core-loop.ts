@@ -174,15 +174,15 @@ interface PendingCognition {
   startedAt: number;
   /**
    * ALL trigger signals this turn owns (a wake may bundle several, e.g. two
-   * user messages into one turn). If the turn overruns the stop deadline,
-   * every one of them is requeued for a single redo after the next start.
+   * user messages into one turn). They are part of the set of owned signals
+   * whose inbound log entries the turn's answer commits.
    */
   triggerSignals: Signal[];
   /** The wake's first trigger (trace/typing/routing) */
   primaryTrigger: Signal | undefined;
   /**
    * User messages this turn absorbed mid-loop through
-   * drainPendingUserMessages() - also requeued on overrun.
+   * drainPendingUserMessages() - owned by it exactly like its triggers.
    */
   absorbedSignals: Signal[];
   /** Trace context captured when cognition started */
@@ -246,7 +246,28 @@ interface PendingTurnCommits {
 }
 
 /**
- * CoreLoop - orchestrates the 4-layer processing pipeline.
+ * What the stop still has in flight (see {@link CoreLoop.stopReport}): the one
+ * object the hard exit logs at the stop deadline, so the error line names what
+ * hung (a stalled tick, a turn that never returned, a hung send) and not only
+ * that something did.
+ */
+export interface StopReport {
+  /** The loop's tick timer is off: no further signal processing starts. */
+  loopStopped: boolean;
+  /** A tick body is still running. */
+  tickInFlight: boolean;
+  /** The scheduler callback is still running. */
+  schedulerInFlight: boolean;
+  /** A COGNITION turn is still awaited (the drain waits for it). */
+  turnInFlight: boolean;
+  /** SEND_MESSAGE chains that have not settled. */
+  sendsOutstanding: number;
+  /** Signals accepted but never processed (dropped at the stop). */
+  queuedSignals: number;
+}
+
+/**
+ * CoreLoop - orchestrates the 4-layer pipeline.
  */
 export class CoreLoop {
   private readonly agent: Agent;
@@ -262,16 +283,30 @@ export class CoreLoop {
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
   private tickPromise: Promise<void> | null = null;
   /**
-   * Signals the in-flight tick has taken off the queue. Cleared when the tick
-   * finishes; while it runs they also belong to takePendingSignals(), so a
-   * tick the stop deadline cut loose never discards a batch it already took.
+   * Tick bodies running right now (normally 0 or 1). The stop report reads
+   * it: a tick the deadline cut loose is exactly the "stalled tick" the hard
+   * exit names (src/core/hard-exit.ts).
    */
-  private tickBatch: Signal[] = [];
+  private tickInFlight = 0;
+  /**
+   * The tick id of the COGNITION turn the stop drain is waiting for (null
+   * outside a drain). The turn is CLAIMED (pendingCognition cleared) before
+   * it is awaited, so the stop report needs this to keep naming it.
+   */
+  private drainingTurnTickId: string | null = null;
   /**
    * Set once the stop drain is over: the turn in flight (if it overran) may
    * not apply further intents through its later immediate callbacks.
    */
   private lateEffectsFenced = false;
+  /**
+   * Set by the container right before the stop's FINAL storage flush: no write
+   * may land after it (a write into a storage that already shut down is lost
+   * silently). A send that settles from here on keeps its message in the
+   * durable log instead of committing behind the flush - the entry is on disk
+   * anyway, so it replays once at the next start.
+   */
+  private durableWritesClosed = false;
   /** TEST-ONLY gates that park the tick / scheduler callback (deadline tests) */
   private stallForTest: { tickGate?: Promise<void>; schedulerGate?: Promise<void> } = {};
 
@@ -661,6 +696,26 @@ export class CoreLoop {
    */
   private async settleTurn(state: PendingTurnCommits): Promise<void> {
     if (state.settled || this.deadForTest) return;
+    if (this.durableWritesClosed) {
+      // The stop ran its final flush: a write made now reaches a storage that
+      // already shut down and would be lost. The entry is on disk, so it
+      // replays once at the next start (lifemodel-ctc.1.2).
+      state.settled = true;
+      const owner = this.answeredRecipientOf(state);
+      const owned = owner === undefined ? [] : this.ownedSeqs(state.turn, owner);
+      this.dropTurnCommit(state);
+      if (owned.length > 0) {
+        this.logger.warn(
+          {
+            recipientId: owner,
+            entries: owned.length,
+            outcome: this.turnOutcome(state) ?? 'none',
+          },
+          'The stop passed its final flush: nothing is written after it, so the message stays in the log and replays once at the next start'
+        );
+      }
+      return;
+    }
     // Nothing is decided on a guess: the outcome exists only once the turn has
     // resolved, EVERY send of it (acknowledgements included) has settled, and
     // the sends its own result produces have really started (review round 4:
@@ -802,6 +857,7 @@ export class CoreLoop {
 
     this.running = true;
     this.lateEffectsFenced = false;
+    this.durableWritesClosed = false;
 
     // Start system health monitoring
     this.healthMonitor.start();
@@ -821,7 +877,10 @@ export class CoreLoop {
   /**
    * Stop the signal loop. One stop deadline bounds every wait (the in-flight
    * tick, the scheduler callback, the COGNITION turn, its sends); past it the
-   * stop continues and the unprocessed is journaled.
+   * stop continues and the process exits hard at that deadline
+   * (src/core/hard-exit.ts). Signals still queued are dropped: they are
+   * internal (regenerated by the next run's ticks) or inbound user messages
+   * carried by the durable inbound log.
    */
   async stop(deadlineMs?: number): Promise<void> {
     if (!this.running) {
@@ -868,7 +927,8 @@ export class CoreLoop {
     );
 
     // Wait for the COGNITION turn in flight, bounded by the same deadline;
-    // on overrun every signal the turn owns is requeued.
+    // a turn that overruns is abandoned (its inbound log entries recorded no
+    // outcome, so they replay once at the next start).
     await this.drainPendingCognition(deadline);
 
     // Sends the drained turn scheduled must be delivered (or reported failed)
@@ -907,23 +967,45 @@ export class CoreLoop {
     }
   }
 
-  /**
-   * Empty the pending-signal queue and return it.
-   * Called by the container after stop() to persist what was accepted
-   * but never processed (see src/core/pending-signal-journal.ts).
-   */
   /** How many signals are queued (accepted, not yet processed). Observable for tests. */
   pendingSignalCount(): number {
     return this.pendingSignals.length;
   }
 
   /**
-   * TEST-ONLY hooks: how many signals the in-flight tick currently holds, and
-   * gates that park the tick / scheduler callback so a test can observe a stop
-   * against a stalled wait (the deadline must cut it loose).
+   * TEST-ONLY: the signals queued right now, without taking them (a channel
+   * test asks what the loop accepted, e.g. a completed photo replay).
    */
-  takenBatchCount(): number {
-    return this.tickBatch.length;
+  queuedSignalsForTest(): Signal[] {
+    return this.pendingSignals.map((entry) => entry.signal);
+  }
+
+  /**
+   * The stop reached its final storage flush, called by the container right
+   * before it (shutdownSequence step 5). From here on NOTHING writes into
+   * storage: a send that settles keeps its message in the durable log for a
+   * single replay at the next start (see {@link settleTurn}), so no commit can
+   * land behind the flush - where it would be written into a cache that is
+   * never flushed again, and lost.
+   */
+  closeDurableWrites(): void {
+    this.durableWritesClosed = true;
+  }
+
+  /**
+   * What the stop still has in flight, read by the hard exit at the stop
+   * deadline so its error line NAMES what hung instead of only saying that
+   * something did (src/index.ts, src/core/hard-exit.ts).
+   */
+  stopReport(): StopReport {
+    return {
+      loopStopped: !this.running,
+      tickInFlight: this.tickInFlight > 0,
+      schedulerInFlight: this.schedulerTickInFlight,
+      turnInFlight: this.pendingCognition !== null || this.drainingTurnTickId !== null,
+      sendsOutstanding: this.intentApplicator.pendingSendCount(),
+      queuedSignals: this.pendingSignals.length,
+    };
   }
 
   /**
@@ -986,32 +1068,15 @@ export class CoreLoop {
     );
   }
 
-  takePendingSignals(): Signal[] {
-    const seen = new Set<string>();
-    const out: Signal[] = [];
-    const take = (signals: Signal[]) => {
-      for (const signal of signals) {
-        if (seen.has(signal.id)) continue;
-        seen.add(signal.id);
-        out.push(signal);
-      }
-    };
-    take(this.pendingSignals.splice(0).map((entry) => entry.signal));
-    // Whatever the in-flight tick still holds was accepted too: journal it,
-    // never discard it (a stopped tick's taken batch is not lost).
-    take(this.tickBatch);
-    this.tickBatch = [];
-    return out;
-  }
-
   /**
    * Await the COGNITION turn in flight, bounded by the overall stop deadline.
    * - finished in time: its result intents are applied here (normally the
    *   next tick does that, but ticks no longer run); stop() then awaits its
    *   sends before the channels are released.
-   * - overran: EVERY signal the turn owns - all trigger signals plus the user
-   *   messages it absorbed mid-loop - is requeued (FIFO) for a single redo
-   *   after the next start; the abandoned turn's own result is dropped.
+   * - overran: the turn is abandoned and its own result is dropped. Every
+   *   signal it owned is dropped with it - an internal signal is regenerated
+   *   by the next run's ticks, and an inbound user message carries no recorded
+   *   outcome, so the durable inbound log replays it once at the next start.
    * - rejected: logged like the regular tick error path, with the error.
    */
   private async drainPendingCognition(deadline: number): Promise<void> {
@@ -1020,8 +1085,10 @@ export class CoreLoop {
       return;
     }
     // No tick will run again, so claim the turn now to prevent any start
-    // racing from a tick that is finishing.
+    // racing from a tick that is finishing. The claim is remembered so the
+    // stop report still names the turn while it is awaited (see stopReport).
     this.pendingCognition = null;
+    this.drainingTurnTickId = pending.tickId;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -1038,25 +1105,21 @@ export class CoreLoop {
       ]);
 
       if (outcome.kind === 'drain_deadline') {
+        // No outcome is recorded for the turn: its inbound log entries stay
+        // and replay once at the next start. The signals it owned are dropped
+        // with it - the next run's ticks regenerate internal ones, and the log
+        // replays the user messages.
         this.evictTurnCommit(pending.tickId);
-        const owned = [...pending.triggerSignals, ...pending.absorbedSignals];
         withTraceContext(pending.traceContext, () => {
           this.logger.warn(
             {
               tickId: pending.tickId,
-              requeued: owned.length,
+              abandonedSignals: pending.triggerSignals.length + pending.absorbedSignals.length,
               deadlineBudgetMs: this.config.shutdownDrainTimeoutMs,
             },
-            'COGNITION turn in flight overran the stop deadline; the signals it owns are requeued for the next start'
+            'COGNITION turn in flight overran the stop deadline; it is abandoned (its inbound log entries replay once at the next start)'
           );
         });
-        // Preserve FIFO: triggers arrived before what it absorbed mid-turn.
-        for (let i = owned.length - 1; i >= 0; i--) {
-          const signal = owned[i];
-          if (signal) {
-            this.pendingSignals.unshift({ signal, timestamp: new Date() });
-          }
-        }
         return;
       }
 
@@ -1084,6 +1147,7 @@ export class CoreLoop {
       });
       this.evictTurnCommit(pending.tickId);
     } finally {
+      this.drainingTurnTickId = null;
       if (timer !== undefined) {
         clearTimeout(timer);
       }
@@ -1177,6 +1241,9 @@ export class CoreLoop {
   private async tick(): Promise<void> {
     if (!this.running) return;
 
+    // The stop report reads this: a tick the deadline cuts loose is the
+    // "stalled tick" the hard exit names.
+    this.tickInFlight++;
     const tickStart = Date.now();
     this.tickCount++;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
@@ -1252,8 +1319,6 @@ export class CoreLoop {
 
       // Drain signals (no side effects, no logs)
       const pendingSignals = this.drainPendingSignals();
-      // What this tick holds: journaled too if the stop cuts it loose.
-      this.tickBatch = pendingSignals;
 
       // Normalize each signal under its own trace context
       const incomingSignals: Signal[] = [];
@@ -1563,9 +1628,6 @@ export class CoreLoop {
 
         this.scheduleTick();
       });
-      // The tick is done: its taken batch was either processed or requeued
-      // (deferrals above) - it no longer belongs to the stop journal.
-      this.tickBatch = [];
     } catch (error) {
       const errorDetails =
         error instanceof Error
@@ -1576,16 +1638,9 @@ export class CoreLoop {
         this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
       });
 
-      // A tick that failed mid-batch while the process is STOPPING must not
-      // lose the batch either: hand it back to the queue the journal reads.
-      if (!this.running && this.tickBatch.length > 0) {
-        for (const signal of this.tickBatch) {
-          this.pendingSignals.unshift({ signal, timestamp: new Date() });
-        }
-      }
-      this.tickBatch = [];
-
       this.scheduleTick();
+    } finally {
+      this.tickInFlight--;
     }
   }
 
@@ -1863,9 +1918,10 @@ export class CoreLoop {
         drained.unshift(signal); // Preserve FIFO order
       }
 
-      // The turn absorbed these from the queue: on an overrun they belong to
-      // its redo, not to a silent loss. The owner is the ACTIVE turn bookkeeping
-      // (finding 9): it survives the stop drain clearing pendingCognition.
+      // The turn absorbed these from the queue: they are part of its set of
+      // owned signals, which the durable inbound log commits with its answer.
+      // The owner is the ACTIVE turn bookkeeping (finding 9): it survives the
+      // stop drain clearing pendingCognition.
       this.activeTurnCommits?.turn.absorbedSignals.push(...drained);
       if (!this.activeTurnCommits && this.pendingCognition) {
         this.pendingCognition.absorbedSignals.push(...drained);
@@ -2016,7 +2072,7 @@ export class CoreLoop {
    */
   applyImmediateIntent(intent: Intent): void {
     // The stop drain is over and the turn was abandoned: its further writes
-    // and sends must not happen behind the released channels and the journal.
+    // and sends must not happen behind the released channels.
     if (this.lateEffectsFenced) {
       this.logger.warn(
         { intentType: intent.type },

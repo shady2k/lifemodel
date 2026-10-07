@@ -2,10 +2,10 @@
  * Stop-deadline helpers.
  *
  * The graceful stop has ONE overall deadline (default 90 s from
- * CoreLoopConfig.shutdownDrainTimeoutMs). Each waiter - channel intake stop,
- * the in-flight tick, the scheduler callback, the COGNITION turn and its
- * sends - is awaited within that deadline; past it the stop continues and
- * whatever is unprocessed is journaled (takePendingSignals()).
+ * CoreLoopConfig.shutdownDrainTimeoutMs). Each waiter - the in-flight tick,
+ * the scheduler callback, the COGNITION turn and its sends - is awaited within
+ * that deadline; past it the stop continues to its remaining steps and the
+ * process exits hard at the deadline (src/core/hard-exit.ts).
  */
 import type { Logger } from '../types/logger.js';
 

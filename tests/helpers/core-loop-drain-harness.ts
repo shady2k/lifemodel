@@ -1,13 +1,14 @@
 /**
  * Harness for shutdown-drain tests: a real CoreLoop wired the way the
  * container wires it (real Agent, EventBus, Metrics, DeferredStorage over
- * JSONStorage, the pending-signal journal and the production shutdown
- * sequence), with doubles only at the boundaries:
+ * JSONStorage and the production shutdown sequence), with doubles only at
+ * the boundaries:
  * - the three layer processors are the processing boundary (no LLM, no network)
  * - the persistence services (state manager, registries) are step recorders
  *
  * Start/stop mirror exactly what src/core/container.ts does on both paths:
- * start = restore the journal, push restored signals, start the loop;
+ * start = start the loop (nothing is restored: internal signals are not
+ *         persisted - the durable inbound log carries the message guarantee);
  * stop  = the production shutdownSequence().
  */
 import { mkdir, rm } from 'node:fs/promises';
@@ -32,12 +33,6 @@ import {
 } from '../../src/storage/index.js';
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
-import {
-  loadPendingSignals,
-  persistPendingSignals,
-  pendingSignalsPath,
-  clearPendingSignals,
-} from '../../src/core/pending-signal-journal.js';
 import { makeIdempotentShutdown, shutdownSequence } from '../../src/core/container.js';
 import type { CognitionContext, CognitionResult } from '../../src/types/layers.js';
 import type { Signal } from '../../src/types/signal.js';
@@ -240,12 +235,18 @@ export class FakeAggregationLayer {
  *
  * `sendDelayMs` makes a send slow enough to expose the release race; a send
  * released before it ran records 'send-refused' (failure), never a delivery.
+ * `intakeStopGate` and `sendGate` HANG the stop, which is what the hard exit
+ * at the stop deadline must cut loose (lifemodel-ctc.1.2).
  */
 export class FakeTestChannel {
   readonly name = 'test';
   intakeStopped = false;
   fullyStopped = false;
   sendDelayMs = 0;
+  /** When set, stopIntake parks on it (a stalled intake stop). */
+  intakeStopGate: Promise<void> | null = null;
+  /** When set, every send parks on it (a hung send). */
+  sendGate: Promise<void> | null = null;
   /** Next sendMessage fails with this reason (a failed send must be reported) */
   failNextSend: string | undefined;
   readonly events: string[] = [];
@@ -257,6 +258,9 @@ export class FakeTestChannel {
   }
 
   async stopIntake(): Promise<void> {
+    if (this.intakeStopGate) {
+      await this.intakeStopGate;
+    }
     this.intakeStopped = true;
     this.events.push('stopIntake');
   }
@@ -271,6 +275,9 @@ export class FakeTestChannel {
     target: string,
     text: string
   ): Promise<{ success: boolean; messageId?: string }> {
+    if (this.sendGate) {
+      await this.sendGate;
+    }
     if (this.sendDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this.sendDelayMs));
     }
@@ -312,7 +319,7 @@ export function thoughtSignal(text: string, recipientId?: string): Signal {
   );
 }
 
-/** A logger that writes nothing (storage/journal plumbing of a test instance). */
+/** A logger that writes nothing (storage plumbing of a test instance). */
 const noopLogger = {
   child: () => noopLogger,
   info: () => {},
@@ -320,7 +327,6 @@ const noopLogger = {
   warn: () => {},
   error: () => {},
 } as unknown as Logger;
-const noopLoggerForJournal = noopLogger;
 
 export interface CoreLoopInstance {
   coreLoop: ReturnType<typeof createCoreLoop>;
@@ -335,6 +341,12 @@ export interface CoreLoopInstance {
 
 export interface HarnessOptions {
   drainTimeoutMs?: number;
+  /**
+   * Use THIS logger for the instance (a recording logger a test also reads
+   * for lines that are not the instance's: the hard exit's). Ignored when
+   * recordLogs is set.
+   */
+  logger?: Logger;
   /** Record log lines on the instance (instance.recordedLogs) */
   recordLogs?: boolean;
   cognitionMode?: 'immediate' | 'hang' | 'real-scripted';
@@ -352,15 +364,16 @@ export interface HarnessOptions {
 const TEST_TICK_INTERVAL = 5;
 
 /**
- * Create one instance of the agent the way container.ts starts it:
- * restore persisted pending signals, push them into the (stopped) loop,
- * clear the journal, then run.
+ * Create one instance of the agent the way container.ts starts it: build the
+ * loop over its storage and run it. Nothing is restored: internal signals are
+ * not persisted across a stop (the durable inbound log carries inbound
+ * messages, and this harness has none).
  */
 export async function startInstance(
   storagePath: string,
   opts: HarnessOptions = {}
 ): Promise<CoreLoopInstance> {
-  const base = createTestLogger('warn');
+  const base = opts.logger ?? createTestLogger('warn');
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
@@ -407,16 +420,6 @@ export async function startInstance(
   coreLoop.registerChannel(channel as never);
   const recipientId = registry.getOrCreate('test', 'chat-42');
 
-  // ── container start path: restore then clear (container.ts) ──
-  const restored = await loadPendingSignals(storage, storagePath, logger);
-  for (const signal of restored) {
-    coreLoop.pushSignal(signal);
-  }
-  await clearPendingSignals(storage, logger);
-  if ('flush' in storage) {
-    await (storage as { flush: () => Promise<void> }).flush();
-  }
-
   coreLoop.start();
   return {
     coreLoop,
@@ -431,18 +434,13 @@ export async function startInstance(
 }
 
 /**
- * Stop an instance the way container.ts shuts down: the production
- * shutdown sequence with the real journal and real DeferredStorage.
- */
-/**
  * A container-shaped memoized shutdown over one instance: the first call runs
- * the sequence, later calls (sequential or concurrent) return the SAME promise
- * - what src/core/container.ts builds internally.
+ * the production shutdownSequence, later calls (sequential or concurrent)
+ * return the SAME promise - what src/core/container.ts builds internally.
  */
 export function makeContainerShutdown(
   instance: CoreLoopInstance,
-  storage: DeferredStorage,
-  storagePath: string
+  storage: DeferredStorage
 ): () => Promise<void> {
   // the SAME memoization the real container wraps its sequence in
   return makeIdempotentShutdown(() =>
@@ -452,7 +450,6 @@ export function makeContainerShutdown(
       channels: [instance.channel] as never,
       coreLoop: instance.coreLoop as never,
       storage: storage as never,
-      storagePath,
       stateManager: { shutdown: async () => undefined } as never,
       recipientRegistry: { flush: async () => undefined } as never,
       ackRegistry: { flush: async () => undefined } as never,
@@ -460,10 +457,10 @@ export function makeContainerShutdown(
   );
 }
 
+/** Stop an instance the way container.ts shuts down: the production sequence. */
 export async function stopInstance(
   instance: CoreLoopInstance,
-  storage: DeferredStorage,
-  storagePath: string
+  storage: DeferredStorage
 ): Promise<void> {
   await shutdownSequence({
     logger: instance.logger,
@@ -471,7 +468,6 @@ export async function stopInstance(
     channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
     storage: storage as never,
-    storagePath,
     stateManager: { shutdown: async () => undefined } as never,
     recipientRegistry: { flush: async () => undefined } as never,
     ackRegistry: { flush: async () => undefined } as never,
@@ -480,20 +476,8 @@ export async function stopInstance(
 
 export async function openStorage(storagePath: string, logger?: Logger): Promise<DeferredStorage> {
   const json = createJSONStorage(storagePath, { logger });
-  return createDeferredStorage(json, logger ?? noopLoggerForJournal, { flushIntervalMs: 60_000 });
+  return createDeferredStorage(json, logger ?? noopLogger, { flushIntervalMs: 60_000 });
 }
-
-/** Read what the journal holds right now, using a fresh storage handle. */
-export async function readJournal(storagePath: string): Promise<Signal[]> {
-  const storage = await openStorage(storagePath);
-  try {
-    return await loadPendingSignals(storage as never, storagePath, noopLoggerForJournal);
-  } finally {
-    await storage.flush();
-  }
-}
-
-export const testPaths = { pendingSignalsPath };
 
 export async function makeScratchDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));

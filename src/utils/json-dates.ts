@@ -5,8 +5,7 @@
  * from such a file is a string, not a Date, and code holding an object shape
  * breaks quietly. Dates are therefore encoded as single-key tagged objects
  * before they reach storage and decoded back after load. Used by everything
- * that persists Signal-shaped payloads (the pending-signal journal, the
- * durable inbound log).
+ * that persists Signal-shaped payloads (the durable inbound log).
  */
 
 /** The single-key tag object a Date is encoded into. */

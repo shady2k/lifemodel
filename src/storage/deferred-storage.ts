@@ -196,8 +196,8 @@ export class DeferredStorage implements Storage {
    * Flush all dirty entries to underlying storage.
    * If called while a flush is in progress, it first waits for that pass to
    * finish and then runs its own pass: an AWAITED flush() is a durability
-   * point (the durable inbound log and the journal depend on it), not a
-   * fire-and-forget request.
+   * point (the durable inbound log and the stop's final flush depend on it),
+   * not a fire-and-forget request.
    */
   async flush(): Promise<void> {
     while (this.flushing) {
@@ -290,7 +290,7 @@ export class DeferredStorage implements Storage {
    *
    * Loops until no dirty work remains: a flush that was already in progress
    * (e.g. the periodic auto-flush) must not swallow the writes queued while
-   * it ran - the final journal write reaches the disk HERE, never after.
+   * it ran - the stop's final writes reach the disk HERE, never after.
    */
   async shutdown(): Promise<void> {
     this.stopAutoFlush();
