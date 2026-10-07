@@ -100,22 +100,44 @@ describe('inbound log', () => {
     void storagePath;
   });
 
-  it('the monotone update-id index survives compaction (committed updates stay seen)', async () => {
+  it('a smaller numeric id after a larger one is ADMITTED (no watermark, finding 6)', async () => {
     const { makeLog } = await makeStorage();
     const log = await makeLog();
-    await log.record(msg('one', '100'));
-    await log.record(msg('two', '101'));
-    await log.record(msg('three', '102'));
+    await expect(log.record(msg('one', '100'))).resolves.toBe(true);
+    await expect(log.record(msg('two', '101'))).resolves.toBe(true);
+    // Telegram may pick a RANDOM smaller update_id again after a week of
+    // silence (https://core.telegram.org/bots/api#update): it must be
+    // admitted, never silently dropped by a numeric high-water mark.
+    await expect(log.record(msg('three', '50'))).resolves.toBe(true);
+  });
 
-    // commit everything and force compaction past the bound
+  it('a re-delivered id inside the ring is dropped across compaction and restart', async () => {
+    const { storagePath, makeLog: makeFreshLog } = await makeStorage();
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const log = createInboundLog({
+      storage,
+      logger: noopLogger,
+      storagePath,
+      config: { maxEntries: 2 },
+    });
+    await log.load();
+    for (const id of ['100', '101', '102']) {
+      await log.record(msg('m', id));
+    }
     await log.commit([1, 2, 3]);
-    expect(log.size()).toEqual({ total: 3, uncommitted: 0 });
+    expect(log.size().uncommitted).toBe(0);
+    await storage.flush();
 
-    // a committed update re-delivered after compaction is still dropped
-    await expect(log.record(msg('one again', '100'))).resolves.toBe(false);
-    await expect(log.record(msg('between', '101'))).resolves.toBe(false);
-    // newer updates pass
-    await expect(log.record(msg('four', '103'))).resolves.toBe(true);
+    // a fresh instance (restart) loads the compacted file; the committed
+    // entries are gone but the recent-keys ring still drops their re-delivery
+    const log2 = await makeFreshLog();
+    expect(log2.size()).toEqual({ total: 0, uncommitted: 0 });
+    await expect(log2.record(msg('m again', '101'))).resolves.toBe(false);
+    await expect(log2.record(msg('m again 2', '100'))).resolves.toBe(false);
+    expect(log2.size()).toEqual({ total: 0, uncommitted: 0 });
+    // a genuinely NEW update passes
+    await expect(log2.record(msg('new', '103'))).resolves.toBe(true);
   });
 
   it('commit advances the per-recipient offset; a hole keeps the earlier entry replayable', async () => {
@@ -154,7 +176,12 @@ describe('inbound log', () => {
     const { storagePath, makeLog } = await makeStorage();
     const json = createJSONStorage(storagePath, { logger: noopLogger });
     const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
-    const log = createInboundLog({ storage, logger: noopLogger, storagePath, config: { maxEntries: 3 } });
+    const log = createInboundLog({
+      storage,
+      logger: noopLogger,
+      storagePath,
+      config: { maxEntries: 3 },
+    });
     await log.load();
     await log.record(msg('one', 'u-1'));
     await log.record(msg('two', 'u-2'));
@@ -205,5 +232,103 @@ describe('inbound log', () => {
     await expect(log.record(signal)).resolves.toBe(false);
     expect(log.hasKey(signal.id)).toBe(true);
     void INBOUND_LOG_KEY;
+  });
+  it('a failed flush rolls back the admission and can be retried (finding 8)', async () => {
+    const { storagePath } = await makeStorage();
+    let flushShouldFail = true;
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const realFlush = storage.flush.bind(storage);
+    (storage as { flush: () => Promise<void> }).flush = () => {
+      if (flushShouldFail) {
+        return Promise.reject(new Error('disk gone'));
+      }
+      return realFlush();
+    };
+    const log = createInboundLog({ storage, logger: noopLogger, storagePath });
+    await log.load();
+
+    await expect(log.record(msg('first', 'u-1'))).rejects.toThrow('disk gone');
+    // NOTHING was admitted in memory: the retry is not a duplicate
+    expect(log.hasKey('u-1')).toBe(false);
+    expect(log.size()).toEqual({ total: 0, uncommitted: 0 });
+
+    // the disk comes back: the same update is admitted then
+    flushShouldFail = false;
+    await expect(log.record(msg('first', 'u-1'))).resolves.toBe(true);
+    const raw = await realFlush().then(async () =>
+      readFile(join(storagePath, 'core', 'inbound_log.json'), 'utf-8')
+    );
+    const doc = JSON.parse(raw) as { entries: { key: string }[] };
+    expect(doc.entries).toHaveLength(1);
+    expect(doc.entries[0]?.key).toBe('u-1');
+  });
+
+  it('concurrent record and commit serialize, and a failed flush does not brick the chain (finding 13)', async () => {
+    const { storagePath } = await makeStorage();
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const realFlush = storage.flush.bind(storage);
+    const log = createInboundLog({ storage, logger: noopLogger, storagePath });
+    await log.load();
+
+    // several CONCURRENT operations: they run one at a time, all succeed,
+    // and the shutdown raced neither of them
+    const first = log.record(msg('a', 'u-a'));
+    const second = log.record(msg('b', 'u-b'));
+    const committed = log.commit([1]);
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+    await expect(committed).resolves.toBeUndefined();
+    expect(log.size()).toEqual({ total: 2, uncommitted: 1 });
+
+    // a failing flush inside one operation must not brick the chain
+    (storage as { flush: () => Promise<void> }).flush = () => {
+      return Promise.reject(new Error('boom'));
+    };
+    await expect(log.record(msg('c', 'u-c'))).rejects.toThrow('boom');
+    (storage as { flush: () => Promise<void> }).flush = realFlush;
+    await expect(log.record(msg('d', 'u-d'))).resolves.toBe(true);
+    expect(log.size()).toEqual({ total: 3, uncommitted: 2 });
+    void storagePath;
+  });
+
+  it('the entry carries routing and replay exposes it (finding 1)', async () => {
+    const { makeLog } = await makeStorage();
+    const log = await makeLog();
+    const signal = msg('hello', 'u-1');
+    await log.record(signal, { channel: 'telegram', destination: '700' });
+    const replay = log.replayable();
+    expect(replay).toHaveLength(1);
+    expect(replay[0]?.routing).toEqual({ channel: 'telegram', destination: '700' });
+    expect(replay[0]?.recipientId).toBe(
+      signal.data && (replay[0]!.signal.data as { recipientId?: string }).recipientId
+    );
+  });
+
+  it('a completed photo message REPLACES its uncommitted receipt, one entry per update (finding 7)', async () => {
+    const { makeLog } = await makeStorage();
+    const log = await makeLog();
+    const receipt = createUserMessageSignal({
+      text: 'See attached',
+      recipientId: 'rec-1',
+      updateId: 'u-9',
+      pendingPhoto: { fileId: 'f1' },
+    });
+    await expect(log.record(receipt)).resolves.toBe(true);
+    expect(log.size().total).toBe(1);
+    // the completed photo (same dedup key) rejoins as its own signal
+    const full = createUserMessageSignal({
+      text: 'See attached',
+      recipientId: 'rec-1',
+      updateId: 'u-9',
+    });
+    await expect(log.record(full)).resolves.toBe(true);
+    expect(log.size()).toEqual({ total: 1, uncommitted: 1 });
+    const replay = log.replayable();
+    expect((replay[0]?.signal.data as { pendingPhoto?: unknown }).pendingPhoto).toBeUndefined();
+    // once the receipt committed, a late duplicate cannot resurrect it
+    await log.commit([1]);
+    await expect(log.record(full)).resolves.toBe(false);
   });
 });

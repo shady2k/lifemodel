@@ -194,6 +194,11 @@ export interface UserMessageData {
   /** The external update id the channel deduplicates on (e.g. Telegram update_id). */
   updateId?: string;
 
+  /** A durable photo receipt: the image is still downloading (lifemodel-ctc.2.1). The
+   * message is logged but not queued; the completed photo replaces this entry and is
+   * queued, or a restart re-fetches the file from fileId. */
+  pendingPhoto?: { fileId: string };
+
   /** Opaque recipient identifier */
   recipientId: string;
 

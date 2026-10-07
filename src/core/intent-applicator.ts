@@ -255,16 +255,32 @@ export class IntentApplicator {
   private applySendMessage(intent: SendMessageIntent): void {
     const { recipientId, text, replyTo, conversationStatus } = intent.payload;
 
+    // A send that cannot start is a FAILED delivery for the durable log
+    // (review round 2, finding 3): the turn's entries must stay uncommitted,
+    // so the send is tracked and reported even when it never runs.
+    const turnKey = this.deps.resolveSendTurnKey?.(intent);
+    let delivered = false;
+    const reportUndeliverable = (reason: string): void => {
+      this.deps.metrics.counter('messages_failed', { reason });
+      if (turnKey) {
+        this.deps.onSendTracked?.(turnKey, recipientId);
+        const outcome = this.deps.onSendOutcome?.(turnKey, recipientId, false);
+        if (outcome && typeof outcome.then === 'function') {
+          void outcome;
+        }
+      }
+    };
+
     if (!this.deps.recipientRegistry) {
       this.deps.logger.error({ recipientId }, 'RecipientRegistry not configured');
-      this.deps.metrics.counter('messages_failed', { reason: 'no_registry' });
+      reportUndeliverable('no_registry');
       return;
     }
 
     const route = this.deps.recipientRegistry.resolve(recipientId);
     if (!route) {
       this.deps.logger.error({ recipientId }, 'Could not resolve recipientId');
-      this.deps.metrics.counter('messages_failed', { reason: 'unresolved_recipient' });
+      reportUndeliverable('unresolved_recipient');
       return;
     }
 
@@ -278,10 +294,7 @@ export class IntentApplicator {
         },
         'Channel not found'
       );
-      this.deps.metrics.counter('messages_failed', {
-        channel: route.channel,
-        reason: 'channel_not_found',
-      });
+      reportUndeliverable('channel_not_found');
       return;
     }
 
@@ -295,8 +308,6 @@ export class IntentApplicator {
     // cognition turn reports its outcome so the turn's log entries are
     // committed only when the answer was really delivered. Registered
     // synchronously so a fast turn cannot resolve its evaluation first.
-    const turnKey = this.deps.resolveSendTurnKey?.(intent);
-    let delivered = false;
     if (turnKey) {
       this.deps.onSendTracked?.(turnKey, recipientId);
     }
@@ -339,8 +350,16 @@ export class IntentApplicator {
             );
           }
         } else if ('skipped' in result && result.skipped) {
-          // Message was intentionally skipped (duplicate detection)
-          // Already logged and tracked in the duplicate check
+          // Message was intentionally skipped (duplicate detection): the
+          // reply is IDENTICAL to the last assistant message in the history,
+          // i.e. that answer already reached the chat before the crash
+          // (review round 2, finding 10) - count it as delivered for the
+          // log commit so the entry settles instead of replaying forever.
+          delivered = true;
+          this.deps.logger.debug(
+            { recipientId, textLength: text.length },
+            'Send skipped as an identical duplicate; counted as delivered for the log commit'
+          );
         } else {
           this.deps.logger.warn(
             { recipientId, channel: route.channel, textLength: text.length },

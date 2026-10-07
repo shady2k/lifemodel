@@ -103,22 +103,42 @@ the unified storage path); channels only emit signals through their awaited
 callback:
 
 1. On receipt, the signal is appended to the log and FLUSHED at once; only
-   then is it queued. `stopIntake` gives in-flight intake handlers (photo
-   downloads) a bounded moment so their emit reaches the log before the stop
-   proceeds. A duplicate Telegram `update_id` is dropped instead of queued.
-2. The consumer offset is PER RECIPIENT. A cognition turn owns the log
-   entries of its trigger signals and of the messages it absorbed mid-loop;
-   its entries commit per recipient when the turn settles and every send of
-   that turn to that recipient was DELIVERED (send success) — or when the
-   turn settles with no send at all (a deferral, a message that needs no
-   reply), so replay cannot loop forever. A rejecting or overrunning turn
-   and a failed or hung send never commit.
-3. On start, every uncommitted entry is replayed in order as a signal; the
+   then is it queued. The entry carries the ROUTING data (channel,
+   destination): a first message of a new chat can outlive the recipient
+   registry's debounced save, and replay re-registers the route from the
+   entry before anything is queued. A failed flush rolls the append back in
+   memory and the error propagates, so the update is not acknowledged as
+   handled. `stopIntake` gives in-flight intake handlers a bounded moment so
+   their emit reaches the log before the stop proceeds. A duplicate Telegram
+   `update_id` is dropped instead of queued (dedup: exact keys of the log
+   entries plus a bounded ring of recent keys - NO numeric watermark, because
+   Telegram may pick a random smaller update_id again after a week of
+   silence).
+2. The consumer offset is PER RECIPIENT. A cognition turn owns ONLY the
+   entries of the recipient it answers (its first trigger - real cognition
+   routes everything through `triggerSignals[0]`) plus the messages it
+   absorbed mid-loop for that recipient; bundled user messages of OTHER
+   recipients are requeued at the wake for their own turns and can never be
+   committed by this one. Its entries commit when the turn settles and every
+   send of that turn to that recipient was DELIVERED (send success) - a send
+   that cannot start (no registry, route or channel) is a FAILED delivery -
+   and, so replay cannot loop forever, when the turn settles with no send at
+   all (a deferral; the owner decision on zero-send resolutions is pending
+   with review round 2, finding 4). A send suppressed as an identical
+   duplicate of the last assistant message in the history counts as
+   delivered: that answer already reached the chat before the crash. A
+   rejecting or overrunning turn and a failed or hung send never commit.
+3. Photos are received as durable receipts BEFORE the download starts
+   (pendingPhoto). The completed photo message replaces the receipt entry in
+   place (still one per update) and is queued; a crash mid-download replays
+   the receipt at the next start, and the channel re-fetches the file (on
+   re-fetch failure the receipt itself is queued as its caption text).
+4. On start, every uncommitted entry is replayed in order as a signal; the
    entries STAY in the log until they commit, so a crash after a restore
-   cannot lose a message (the next start replays it again). Committed
-   entries are compacted away; the dedup index survives compaction
-   (Telegram update ids are monotone), so a re-delivered committed update is
-   still answered zero times.
+   cannot lose a message (the next start replays them again). Committed
+   entries are compacted away; the recent-keys ring keeps the dedup memory
+   across compaction (bounded; very old keys fall out of the ring after its
+   capacity is used).
 
 A corrupt or unreadable log file fails startup loudly with its path and the
 original error as `cause`.

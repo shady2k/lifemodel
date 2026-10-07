@@ -47,7 +47,9 @@ function createMockRecipientRegistry(): IRecipientRegistry {
   return {
     getOrCreate: vi.fn().mockImplementation((channel: string, destination: string) => {
       const key = `${channel}:${destination}`;
-      let id = [...records.keys()].find((k) => key === `${records.get(k)?.channel}:${records.get(k)?.destination}`);
+      let id = [...records.keys()].find(
+        (k) => key === `${records.get(k)?.channel}:${records.get(k)?.destination}`
+      );
       if (!id) {
         id = `rcpt_${destination}`;
         records.set(id, { channel, destination });
