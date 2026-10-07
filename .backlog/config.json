@@ -38,7 +38,7 @@
   "bulkCluster": 20,
   "timeRecordsExempt": [],
   "presentDocuments": [
-    "claude.md",
+    "AGENTS.md",
     "README.md",
     "docs/architecture.md",
     "docs/concepts/*.md",
