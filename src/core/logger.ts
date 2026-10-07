@@ -15,6 +15,14 @@ export interface LoggerConfig {
   level: pino.Level;
   /** Enable pretty printing (development) */
   pretty: boolean;
+  /**
+   * Write the log FILE at all (default true). Off: console output only - no
+   * file target, no log directory created or cleaned. A pino target runs in a
+   * WORKER THREAD, which cannot be fenced or awaited, so a test that starts
+   * the real container must turn the file off: the writer kept appending after
+   * the test removed its directory (ENOTEMPTY on the rmdir, review round 7).
+   */
+  file: boolean;
 }
 
 const DEFAULT_CONFIG: LoggerConfig = {
@@ -22,6 +30,7 @@ const DEFAULT_CONFIG: LoggerConfig = {
   maxFiles: 10,
   level: 'info',
   pretty: process.env['NODE_ENV'] !== 'production',
+  file: true,
 };
 
 /**
@@ -128,16 +137,7 @@ function createTraceMixin(): () => Record<string, unknown> {
  */
 export function createLogger(config: Partial<LoggerConfig> = {}): pino.Logger {
   const finalConfig = { ...DEFAULT_CONFIG, ...config };
-  const { logDir, maxFiles, level, pretty } = finalConfig;
-
-  // Ensure log directory exists
-  ensureLogDir(logDir);
-
-  // Cleanup old and empty logs
-  cleanupOldLogs(logDir, maxFiles);
-
-  // Generate log file path
-  const logFilePath = path.join(logDir, generateLogFilename());
+  const { logDir, maxFiles, level, pretty, file } = finalConfig;
 
   // Build transport targets
   const targets: pino.TransportTargetOptions[] = [];
@@ -159,16 +159,25 @@ export function createLogger(config: Partial<LoggerConfig> = {}): pino.Logger {
     });
   }
 
-  // File output with pino-pretty
-  targets.push({
-    target: 'pino-pretty',
-    level,
-    options: {
-      destination: logFilePath,
-      mkdir: true,
-      colorize: false,
-    },
-  });
+  // File output with pino-pretty (the console target above is all there is
+  // when file logging is off: nothing touches the log directory then)
+  if (file) {
+    // Ensure log directory exists
+    ensureLogDir(logDir);
+
+    // Cleanup old and empty logs
+    cleanupOldLogs(logDir, maxFiles);
+
+    targets.push({
+      target: 'pino-pretty',
+      level,
+      options: {
+        destination: path.join(logDir, generateLogFilename()),
+        mkdir: true,
+        colorize: false,
+      },
+    });
+  }
 
   return pino({
     level,
@@ -197,12 +206,21 @@ function generateConversationLogFilename(): string {
  *
  * @param logDir - Directory for log files
  * @param level - Log level (default: 'info')
+ * @param options.file - Write the conversation log FILE (default true). Off:
+ *   the exchanges are discarded instead of written - what a test that starts
+ *   the real container needs (see LoggerConfig.file).
  * @returns Logger instance for conversation logs
  */
 export function createConversationLogger(
   logDir = './data/logs',
-  level: pino.Level = 'info'
+  level: pino.Level = 'info',
+  options: { file?: boolean } = {}
 ): pino.Logger {
+  if (options.file === false) {
+    // No conversation log file, and no log directory to create or clean.
+    return pino({ level, mixin: createTraceMixin() }, { write: () => undefined });
+  }
+
   // Ensure log directory exists
   ensureLogDir(logDir);
 

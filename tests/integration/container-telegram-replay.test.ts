@@ -113,79 +113,91 @@ async function freshDataPath(prefix: string): Promise<string> {
   return dir;
 }
 
-describe('container start order: telegram photo replay (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
-  it('re-fetches a replayed photo receipt BEFORE the channel polls (finding 7)', async () => {
-    const dataPath = await freshDataPath('ctc2-container-photo-');
-    const fileUrl = 'https://api.telegram.org/file/bottest-token/photos/photo-file-1.jpg';
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(Buffer.from('fake-jpeg-data'), {
-        status: 200,
-        headers: { 'content-type': 'image/jpeg' },
-      })
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    await seedPhotoReceipt(dataPath, 'u-photo-1', 'photo-file-1');
+describe(
+  'container start order: telegram photo replay (lifemodel-ctc.2.1)',
+  { timeout: 30_000 },
+  () => {
+    it('re-fetches a replayed photo receipt BEFORE the channel polls (finding 7)', async () => {
+      const dataPath = await freshDataPath('ctc2-container-photo-');
+      const fileUrl = 'https://api.telegram.org/file/bottest-token/photos/photo-file-1.jpg';
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(Buffer.from('fake-jpeg-data'), {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg' },
+        })
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      await seedPhotoReceipt(dataPath, 'u-photo-1', 'photo-file-1');
 
-    // The container: its replay runs inside createContainerAsync, i.e. while
-    // index.ts has not called start() on the channel yet.
-    const container = await createContainerAsync({
-      logDir: join(dataPath, 'logs'),
-      telegram: { botToken: 'test-token' },
+      // The container: its replay runs inside createContainerAsync, i.e. while
+      // index.ts has not called start() on the channel yet.
+      const container = await createContainerAsync({
+        logDir: join(dataPath, 'logs'),
+        // No log FILE: a pino file target writes from a worker thread, which
+        // cannot be fenced or awaited, so it kept appending while the teardown
+        // removed this data directory (ENOTEMPTY, review round 7).
+        logToFile: false,
+        telegram: { botToken: 'test-token' },
+      });
+      containers.push(container);
+
+      expect(mockBots).toHaveLength(1);
+      const bot = mockBots[0]!;
+      // the download happened, through a client that is NOT polling
+      expect(bot.api.getFile).toHaveBeenCalledWith('photo-file-1');
+      expect(bot.start).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledWith(fileUrl);
+
+      // the receipt was REPLACED in place by the completed photo: still one
+      // entry per update, now carrying the image
+      const entries = container.inboundLog!.replayable();
+      expect(entries).toHaveLength(1);
+      const data = entries[0]!.signal.data as {
+        images?: { mediaType: string }[];
+        pendingPhoto?: unknown;
+      };
+      expect(data.pendingPhoto).toBeUndefined();
+      expect(data.images).toHaveLength(1);
+      expect(data.images![0]!.mediaType).toBe('image/jpeg');
+
+      // and the completed photo is what the loop has QUEUED (not the caption)
+      const queued = container.coreLoop.takePendingSignals();
+      expect(queued).toHaveLength(1);
+      const queuedData = queued[0]!.data as { text: string; images?: unknown[] };
+      expect(queuedData.text).toBe('look at this picture');
+      expect(queuedData.images).toHaveLength(1);
+
+      // nothing committed yet: the answer has not been delivered
+      expect(container.inboundLog!.size()).toEqual({ total: 1, uncommitted: 1 });
     });
-    containers.push(container);
 
-    expect(mockBots).toHaveLength(1);
-    const bot = mockBots[0]!;
-    // the download happened, through a client that is NOT polling
-    expect(bot.api.getFile).toHaveBeenCalledWith('photo-file-1');
-    expect(bot.start).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledWith(fileUrl);
+    it('queues the caption text when the re-fetch fails before start (finding 7 fallback)', async () => {
+      const dataPath = await freshDataPath('ctc2-container-photofail-');
+      // the re-fetch cannot complete: the file download answers 404
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 404 })));
+      await seedPhotoReceipt(dataPath, 'u-photo-2', 'photo-file-2');
 
-    // the receipt was REPLACED in place by the completed photo: still one
-    // entry per update, now carrying the image
-    const entries = container.inboundLog!.replayable();
-    expect(entries).toHaveLength(1);
-    const data = entries[0]!.signal.data as {
-      images?: { mediaType: string }[];
-      pendingPhoto?: unknown;
-    };
-    expect(data.pendingPhoto).toBeUndefined();
-    expect(data.images).toHaveLength(1);
-    expect(data.images![0]!.mediaType).toBe('image/jpeg');
+      const container = await createContainerAsync({
+        logDir: join(dataPath, 'logs'),
+        // No log FILE: a pino file target writes from a worker thread, which
+        // cannot be fenced or awaited, so it kept appending while the teardown
+        // removed this data directory (ENOTEMPTY, review round 7).
+        logToFile: false,
+        telegram: { botToken: 'test-token' },
+      });
+      containers.push(container);
 
-    // and the completed photo is what the loop has QUEUED (not the caption)
-    const queued = container.coreLoop.takePendingSignals();
-    expect(queued).toHaveLength(1);
-    const queuedData = queued[0]!.data as { text: string; images?: unknown[] };
-    expect(queuedData.text).toBe('look at this picture');
-    expect(queuedData.images).toHaveLength(1);
+      const bot = mockBots[0]!;
+      expect(bot.api.getFile).toHaveBeenCalledWith('photo-file-2');
+      expect(bot.start).not.toHaveBeenCalled();
 
-    // nothing committed yet: the answer has not been delivered
-    expect(container.inboundLog!.size()).toEqual({ total: 1, uncommitted: 1 });
-  });
-
-  it('queues the caption text when the re-fetch fails before start (finding 7 fallback)', async () => {
-    const dataPath = await freshDataPath('ctc2-container-photofail-');
-    // the re-fetch cannot complete: the file download answers 404
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 404 })));
-    await seedPhotoReceipt(dataPath, 'u-photo-2', 'photo-file-2');
-
-    const container = await createContainerAsync({
-      logDir: join(dataPath, 'logs'),
-      telegram: { botToken: 'test-token' },
+      // the receipt itself is queued as its caption text: the message is not lost
+      const queued = container.coreLoop.takePendingSignals();
+      expect(queued).toHaveLength(1);
+      const data = queued[0]!.data as { text: string; images?: unknown[]; pendingPhoto?: unknown };
+      expect(data.text).toBe('look at this picture');
+      expect(data.images).toBeUndefined();
+      expect(container.inboundLog!.size()).toEqual({ total: 1, uncommitted: 1 });
     });
-    containers.push(container);
-
-    const bot = mockBots[0]!;
-    expect(bot.api.getFile).toHaveBeenCalledWith('photo-file-2');
-    expect(bot.start).not.toHaveBeenCalled();
-
-    // the receipt itself is queued as its caption text: the message is not lost
-    const queued = container.coreLoop.takePendingSignals();
-    expect(queued).toHaveLength(1);
-    const data = queued[0]!.data as { text: string; images?: unknown[]; pendingPhoto?: unknown };
-    expect(data.text).toBe('look at this picture');
-    expect(data.images).toBeUndefined();
-    expect(container.inboundLog!.size()).toEqual({ total: 1, uncommitted: 1 });
-  });
-});
+  }
+);
