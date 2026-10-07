@@ -69,6 +69,21 @@ export interface AggregationResult {
  * Note: SMART layer merged into COGNITION. Low confidence triggers
  * internal smart model retry, not escalation to separate layer.
  */
+/**
+ * How a cognition turn ended, for the durable inbound log (lifemodel-ctc.2.1,
+ * owner decision on review round 2 finding 4): only a DELIBERATE no-reply
+ * disposition may settle a turn's log entries without a delivered send.
+ *
+ * - `answer`: the turn produced its answer (delivered, or suppressed as an
+ *   already-delivered duplicate).
+ * - `no_reply`: the agent deliberately decided not to answer (`core.defer` or
+ *   an explicit no-reply decision). Counts as handled.
+ * - `error`: the turn failed (provider error, malformed output, exhausted
+ *   retries, forced refusal). Never counts as handled - the message must be
+ *   answered after a restart.
+ */
+export type TurnDisposition = 'answer' | 'no_reply' | 'defer' | 'error';
+
 export interface CognitionResult {
   /** Confidence in the response (0-1). Below 0.6 triggers smart retry. */
   confidence: number;
@@ -81,6 +96,13 @@ export interface CognitionResult {
 
   /** Whether smart model retry was used */
   usedSmartRetry?: boolean;
+
+  /**
+   * How the turn ended (see {@link TurnDisposition}). ABSENT or `answer`
+   * means the log waits for a delivered send: a turn that produced no send
+   * and no explicit disposition never settles its entries.
+   */
+  disposition?: TurnDisposition;
 }
 
 // ============================================================

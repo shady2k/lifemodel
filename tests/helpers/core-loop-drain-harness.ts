@@ -86,6 +86,13 @@ export class FakeCognitionLayer {
     reject: (reason?: unknown) => void;
   }[] = [];
 
+  /**
+   * Result every immediately settling turn resolves with. Override it to say
+   * HOW the turn ended (disposition): only a delivered answer or a deliberate
+   * no-reply settles the turn's inbound log entries (finding 4).
+   */
+  result: CognitionResult = { confidence: 1, intents: [], response: undefined };
+
   constructor(private readonly mode: 'immediate' | 'hang') {}
 
   // CoreLoop calls this on construction (no-op for the fake)
@@ -96,14 +103,14 @@ export class FakeCognitionLayer {
     this.calls.push({ context, done: deferred.promise });
     this.deferreds.push(deferred);
     if (this.mode === 'immediate') {
-      deferred.resolve({ confidence: 1, intents: [], response: undefined });
+      deferred.resolve(this.result);
     }
     return deferred.promise;
   }
 
   /** Finish every pending turn (test cleanup, or with a chosen result). */
   settleAll(result?: CognitionResult): void {
-    const withResult: CognitionResult = result ?? { confidence: 1, intents: [], response: undefined };
+    const withResult: CognitionResult = result ?? this.result;
     for (const d of this.deferreds.splice(0)) {
       d.resolve(withResult);
     }

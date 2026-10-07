@@ -158,6 +158,14 @@ export class TelegramChannel implements Channel {
   private readonly circuitBreaker: CircuitBreaker;
   private readonly recipientRegistry: IRecipientRegistry;
   private bot: Bot | null = null;
+  /**
+   * A download-only client (no handlers, no polling). A photo receipt that is
+   * replayed while the channel has not started yet (the container replays
+   * BEFORE index.ts starts the channels, review round 2 finding 7) is
+   * re-fetched through it; once the channel runs, downloads use the polling
+   * client. Sending still requires a started bot (see sendMessage).
+   */
+  private downloadClient: Bot | null = null;
   private running = false;
   /**
    * Inbound callbacks may be async: the durable inbound log (lifemodel-ctc.2.1)
@@ -325,6 +333,7 @@ export class TelegramChannel implements Channel {
     this.running = false;
     await this.bot.stop();
     this.bot = null;
+    this.downloadClient = null;
     this.logger?.info('Telegram channel stopped');
   }
 
@@ -630,7 +639,8 @@ export class TelegramChannel implements Channel {
     fileId: string,
     maxBytes: number
   ): Promise<{ base64: string; mediaType: string } | null> {
-    const file = await this.bot?.api.getFile(fileId);
+    const client = this.bot ?? (this.downloadClient ??= new Bot(this.config.botToken));
+    const file = await client.api.getFile(fileId);
     if (!file?.file_path) {
       this.logger?.warn('Photo file_path missing from Telegram API response');
       return null;

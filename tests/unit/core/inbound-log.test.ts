@@ -306,6 +306,129 @@ describe('inbound log', () => {
     );
   });
 
+  it('a failed flush restores a FULL recent-keys ring exactly (finding 8)', async () => {
+    const { storagePath } = await makeStorage();
+    let flushShouldFail = false;
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const realFlush = storage.flush.bind(storage);
+    (storage as { flush: () => Promise<void> }).flush = () => {
+      if (flushShouldFail) {
+        return Promise.reject(new Error('disk gone'));
+      }
+      return realFlush();
+    };
+    const log = createInboundLog({
+      storage,
+      logger: noopLogger,
+      storagePath,
+      config: { maxEntries: 1, maxRecentKeys: 2 },
+    });
+    await log.load();
+
+    // u-1 commits, then the next append compacts it away: from now on the
+    // RING is the only thing that remembers it
+    await log.record(msg('one', 'u-1'));
+    await log.commit([1]);
+    await log.record(msg('two', 'u-2'));
+    expect(log.size()).toEqual({ total: 1, uncommitted: 1 });
+    expect(log.hasKey('u-1')).toBe(true);
+
+    // The ring is FULL (u-1, u-2): appending u-3 evicts the oldest key. The
+    // failed flush must undo that eviction too, not only the new key.
+    flushShouldFail = true;
+    await expect(log.record(msg('three', 'u-3'))).rejects.toThrow('disk gone');
+    flushShouldFail = false;
+    expect(log.hasKey('u-3')).toBe(false);
+    expect(log.hasKey('u-1')).toBe(true);
+    expect(log.size()).toEqual({ total: 1, uncommitted: 1 });
+
+    // ...so the retry is admitted, not silently dropped as a duplicate
+    await expect(log.record(msg('three', 'u-3'))).resolves.toBe(true);
+    expect(log.size()).toEqual({ total: 2, uncommitted: 2 });
+  });
+
+  it('a failing compaction flush does not roll back an entry that already reached disk (finding A)', async () => {
+    const { storagePath } = await makeStorage();
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const realFlush = storage.flush.bind(storage);
+    const realSave = storage.save.bind(storage);
+    let saves = 0;
+    let armCompaction = false;
+    let failNextFlush = false;
+    (storage as { save: (k: string, d: unknown) => Promise<void> }).save = (key, data) => {
+      saves += 1;
+      // the compaction pass is the SECOND save of one operation
+      if (armCompaction && saves === 2) {
+        failNextFlush = true;
+      }
+      return realSave(key, data);
+    };
+    (storage as { flush: () => Promise<void> }).flush = () => {
+      if (failNextFlush) {
+        failNextFlush = false;
+        return Promise.reject(new Error('compaction flush failed'));
+      }
+      return realFlush();
+    };
+    const log = createInboundLog({
+      storage,
+      logger: noopLogger,
+      storagePath,
+      config: { maxEntries: 1 },
+    });
+    await log.load();
+    await log.record(msg('one', 'u-1'));
+    await log.commit([1]);
+
+    // The next append is durable at its own flush; the COMPACTION flush that
+    // follows fails. The append is on disk: rolling it back would reuse its
+    // seq while a restart still recovers it from disk.
+    saves = 0;
+    armCompaction = true;
+    await expect(log.record(msg('two', 'u-2'))).resolves.toBe(true);
+    const raw = await readFile(join(storagePath, 'core', 'inbound_log.json'), 'utf-8');
+    const doc = JSON.parse(raw) as { entries: { key: string }[] };
+    expect(doc.entries.map((e) => e.key)).toEqual(['u-1', 'u-2']);
+    // compaction already ran in memory (the committed entry dropped), the
+    // uncommitted one stayed - and nothing was rolled back
+    expect(log.size()).toEqual({ total: 1, uncommitted: 1 });
+    // the seq of the durable append was NOT handed out again
+    await expect(log.record(msg('three', 'u-3'))).resolves.toBe(true);
+    expect(log.replayable().map((e) => e.seq)).toEqual([2, 3]);
+  });
+
+  it('a rejected append cannot reach disk through a later flush of the storage cache (finding B)', async () => {
+    const { storagePath } = await makeStorage();
+    let diskIsDown = true;
+    const json = createJSONStorage(storagePath, { logger: noopLogger });
+    const storage = createDeferredStorage(json, noopLogger, { flushIntervalMs: 60_000 });
+    const realFlush = storage.flush.bind(storage);
+    (storage as { flush: () => Promise<void> }).flush = () => {
+      if (diskIsDown) {
+        return Promise.reject(new Error('disk gone'));
+      }
+      return realFlush();
+    };
+    const log = createInboundLog({ storage, logger: noopLogger, storagePath });
+    await log.load();
+
+    await expect(log.record(msg('first', 'u-1'))).rejects.toThrow('disk gone');
+    expect(log.hasKey('u-1')).toBe(false);
+
+    // the disk comes back; an UNRELATED write flushes the shared cache. The
+    // rejected update must not ride along (DeferredStorage kept its dirty
+    // snapshot) and reappear on disk for the next start to replay.
+    diskIsDown = false;
+    await storage.save('unrelated:key', { touched: true });
+    await storage.flush();
+    const raw = await readFile(join(storagePath, 'core', 'inbound_log.json'), 'utf-8');
+    const doc = JSON.parse(raw) as { entries: { key: string }[] };
+    expect(doc.entries).toEqual([]);
+    expect(log.hasKey('u-1')).toBe(false);
+  });
+
   it('a completed photo message REPLACES its uncommitted receipt, one entry per update (finding 7)', async () => {
     const { makeLog } = await makeStorage();
     const log = await makeLog();

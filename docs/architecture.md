@@ -109,36 +109,59 @@ callback:
    entry before anything is queued. A failed flush rolls the append back in
    memory and the error propagates, so the update is not acknowledged as
    handled. `stopIntake` gives in-flight intake handlers a bounded moment so
-   their emit reaches the log before the stop proceeds. A duplicate Telegram
-   `update_id` is dropped instead of queued (dedup: exact keys of the log
-   entries plus a bounded ring of recent keys - NO numeric watermark, because
+   their emit reaches the log before the stop proceeds.
+
+   Dedup: a duplicate Telegram `update_id` is dropped instead of queued. The
+   index is the exact keys of the live entries plus a bounded ring of recent
+   keys (default `maxRecentKeys` = 1000) - NO numeric watermark, because
    Telegram may pick a random smaller update_id again after a week of
-   silence).
+   silence. THE CONTRACT IS BOUNDED (coordinator decision, comment 49): the
+   ring is the whole dedup horizon, so an `update_id` that fell out of it
+   (more than 1000 later admissions, or a compaction) is no longer recognised
+   and a redelivery of it can be accepted again. That is deliberate: Telegram
+   re-delivers only unconfirmed updates and keeps them for at most 24 h, and a
+   personal agent does not receive 1000 messages in 24 h. What guarantees that
+   an ACCEPTED message is answered once is the per-recipient offset, not the
+   ring. No unbounded dedup is promised.
 2. The consumer offset is PER RECIPIENT. A cognition turn owns ONLY the
    entries of the recipient it answers (its first trigger - real cognition
    routes everything through `triggerSignals[0]`) plus the messages it
    absorbed mid-loop for that recipient; bundled user messages of OTHER
    recipients are requeued at the wake for their own turns and can never be
-   committed by this one. Its entries commit when the turn settles and every
-   send of that turn to that recipient was DELIVERED (send success) - a send
-   that cannot start (no registry, route or channel) is a FAILED delivery -
-   and, so replay cannot loop forever, when the turn settles with no send at
-   all (a deferral; the owner decision on zero-send resolutions is pending
-   with review round 2, finding 4). A send suppressed as an identical
-   duplicate of the last assistant message in the history counts as
-   delivered: that answer already reached the chat before the crash. A
-   rejecting or overrunning turn and a failed or hung send never commit.
+   committed by this one. Its entries commit when the turn settles and either
+   an answer of that turn to that recipient was DELIVERED (send success; a
+   send that cannot start - no registry, route or channel - is a FAILED
+   delivery), or the turn ended in a DELIBERATE no-reply: `core.defer` or an
+   explicit no-reply/noAction decision of the agent (owner decision, comment
+   48; this is what stops a deliberate silence from replaying forever). An
+   error, an empty or failed result, a rejecting or overrunning turn, and a
+   failed, hung, filtered or unstarted send never commit - and a turn that
+   never said how it ended leaves its entries for replay.
+
+   Delivery is proven per entry and durably: a successful send writes
+   `deliveredAt` into the log entry before the commit decides, so a crash
+   between the send and the commit does not re-answer on the trust of an
+   equal TEXT - an equal text of an earlier answer is never proof that THIS
+   entry was answered (review round 2, finding 10). A replayed turn whose
+   entries already carry that evidence from ANOTHER turn does not send again
+   and counts as delivered; evidence written by the same turn does not
+   suppress its own later sends (an acknowledgement, then the answer).
 3. Photos are received as durable receipts BEFORE the download starts
    (pendingPhoto). The completed photo message replaces the receipt entry in
    place (still one per update) and is queued; a crash mid-download replays
-   the receipt at the next start, and the channel re-fetches the file (on
-   re-fetch failure the receipt itself is queued as its caption text).
+   the receipt at the next start, and the channel re-fetches the file. That
+   replay runs BEFORE `index.ts` starts the channel, so the channel keeps a
+   download-capable client of its own for it (created on demand, without
+   handlers or polling; sending still requires a started bot). On re-fetch
+   failure the receipt itself is queued as its caption text, so the message
+   is never lost.
 4. On start, every uncommitted entry is replayed in order as a signal; the
    entries STAY in the log until they commit, so a crash after a restore
    cannot lose a message (the next start replays them again). Committed
-   entries are compacted away; the recent-keys ring keeps the dedup memory
-   across compaction (bounded; very old keys fall out of the ring after its
-   capacity is used).
+   entries are compacted away (default `maxEntries` = 1000) and the
+   recent-keys ring keeps the dedup memory across compaction; both bounds are
+   the ones stated in point 1 - very old keys fall out of the ring once its
+   capacity is used.
 
 A corrupt or unreadable log file fails startup loudly with its path and the
 original error as `cause`.

@@ -27,6 +27,7 @@ import { createMetrics } from '../../src/core/metrics.js';
 import { createLogger } from '../../src/core/logger.js';
 import type { Logger } from '../../src/types/logger.js';
 import type { Channel } from '../../src/types/index.js';
+import type { CognitionResult } from '../../src/types/layers.js';
 import {
   createUserMessageSignal,
   type Signal,
@@ -231,6 +232,12 @@ export interface InboundInstance {
   aggregation: FakeAggregationLayer;
   registry: RecipientRegistry;
   recipientId: string;
+  /**
+   * Recipient ids the replay had to re-register because the fresh registry
+   * did not know them: the route was rebuilt from the log entry's routing
+   * (finding 1).
+   */
+  routesRestoredFromLog: string[];
   recordedLogs: RecordedLog[];
   logger: Logger;
 }
@@ -238,15 +245,27 @@ export interface InboundInstance {
 export interface HarnessOptions {
   drainTimeoutMs?: number;
   cognitionMode?: 'immediate' | 'hang' | 'real-scripted';
+  /**
+   * How an `immediate` fake turn ends (finding 4): its `disposition` decides
+   * whether the turn may settle its inbound log entries without a delivered
+   * send. Default: no disposition, which never settles.
+   */
+  cognitionResult?: Partial<CognitionResult>;
   /** make completePhotoReceipt fail like a broken channel (finding 7 fallback) */
   photoCompletionFails?: boolean;
   hang?: boolean;
   script?: {
     content?: string | null;
+    toolCalls?: { name: string; args: Record<string, unknown> }[];
     finishReason?: 'stop' | 'tool_calls' | 'length' | 'error';
   }[];
   tickIntervalMs?: number;
   recordLogs?: boolean;
+  /**
+   * Runs after the fresh registry exists and BEFORE any replay: the place to
+   * prove the instance really starts without the route under test.
+   */
+  onBeforeReplay?: (registry: RecipientRegistry) => void;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -282,7 +301,11 @@ export async function startInboundInstance(
     cognition = real;
     cognitionDeps = { agent, cognitionLLM: real.adapter };
   } else {
-    cognition = new FakeCognitionLayer(opts.cognitionMode ?? 'immediate');
+    const fake = new FakeCognitionLayer(opts.cognitionMode ?? 'immediate');
+    if (opts.cognitionResult) {
+      fake.result = { ...fake.result, ...opts.cognitionResult };
+    }
+    cognition = fake;
   }
   const layers = { autonomic, aggregation, cognition: cognition as never };
   const config: Partial<CoreLoopConfig> = {
@@ -318,11 +341,14 @@ export async function startInboundInstance(
 
   // container start path: replay uncommitted entries, restore the journal
   // (filtered against the log), clear it, then run (container.ts).
+  opts.onBeforeReplay?.(registry);
+  const routesRestoredFromLog: string[] = [];
   const replay = inboundLog.replayable();
   for (const entry of replay) {
     // same as the container: re-register the route the entry carries
     if (entry.routing && registry.resolve(entry.recipientId) === null) {
       registry.getOrCreate(entry.routing.channel, entry.routing.destination);
+      routesRestoredFromLog.push(entry.recipientId);
     }
     // same as the container: a pending photo receipt is re-fetched by the
     // channel; on re-fetch failure the receipt itself is queued
@@ -353,6 +379,7 @@ export async function startInboundInstance(
     aggregation,
     registry,
     recipientId,
+    routesRestoredFromLog,
     recordedLogs,
     logger,
     storagePath,
@@ -415,6 +442,28 @@ export async function seedAssistantAnswer(
   const last = await manager.getLastAssistantMessage(recipientId);
   if (last !== text) {
     throw new Error(`conversation seeding failed: stored ${String(last)}`);
+  }
+  await storage.flush();
+}
+
+/**
+ * Seed DURABLE DELIVERY EVIDENCE for one log entry, as if its answer had been
+ * delivered before the crash: the marker the send path writes right after a
+ * successful send. Unlike an equal TEXT in the history, this is proof that
+ * THIS entry was answered (finding 10). Uses the real InboundLog over the
+ * instance's own data dir.
+ */
+export async function seedDeliveredEntry(storagePath: string, updateId: string): Promise<void> {
+  const storage = await openStorage(storagePath);
+  const log = createInboundLog({ storage, logger: noopLogger, storagePath });
+  await log.load();
+  const seq = log.seqForKey(updateId);
+  if (seq === undefined) {
+    throw new Error(`delivery-evidence seeding failed: no log entry for ${updateId}`);
+  }
+  const marked = await log.markDelivered([seq]);
+  if (!marked) {
+    throw new Error(`delivery-evidence seeding failed for ${updateId} (seq ${seq})`);
   }
   await storage.flush();
 }

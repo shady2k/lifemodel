@@ -79,6 +79,17 @@ export interface IntentApplicatorDeps {
   /** A send for that turn is in flight (registered synchronously at apply). */
   onSendTracked?: (turnKey: string, recipientId: string) => void;
   /**
+   * Durable identity of the log entries a send answers (review round 2,
+   * finding 10): their seqs, and whether the log already holds delivery
+   * evidence for them. Absent (or empty seqs) means no durable identity
+   * exists for this send - the caller has no entry to settle, so the legacy
+   * text-only duplicate check stays in force.
+   */
+  resolveSendEntryIdentity?: (
+    turnKey: string | undefined,
+    recipientId: string
+  ) => SendEntryIdentity;
+  /**
    * A send for that turn settled: `delivered` is a real success. The return
    * value (the recipient's log commit, when any) is chained into the send
    * chain so the stop drain awaits the commit's flush too.
@@ -88,6 +99,16 @@ export interface IntentApplicatorDeps {
     recipientId: string,
     delivered: boolean
   ) => void | Promise<void>;
+}
+
+/**
+ * Durable identity of the inbound-log entries one send answers (finding 10).
+ */
+export interface SendEntryIdentity {
+  /** Log entries this send answers; empty when no durable entry is involved. */
+  seqs: number[];
+  /** The log holds delivery evidence for ALL those entries. */
+  delivered: boolean;
 }
 
 /**
@@ -311,11 +332,34 @@ export class IntentApplicator {
     if (turnKey) {
       this.deps.onSendTracked?.(turnKey, recipientId);
     }
+    // Durable identity of the log entries this send answers (finding 10),
+    // resolved BEFORE the send: the entries are what the commit settles.
+    const identity = this.deps.resolveSendEntryIdentity?.(turnKey, recipientId) ?? {
+      seqs: [],
+      delivered: false,
+    };
     const sendChain = Promise.resolve()
       .then(async () => {
-        // Duplicate detection: skip sending if message is identical to last assistant message
-        // This prevents proactive contacts from repeating the same response
-        if (this.deps.conversationManager) {
+        // The entries this send answers were already DELIVERED (durable
+        // evidence written right after the send that carried them): the
+        // message is not sent again, and it is counted as delivered for the
+        // commit. Durability, not an equal text, is the proof.
+        if (identity.seqs.length > 0 && identity.delivered) {
+          this.deps.logger.debug(
+            { recipientId, entries: identity.seqs.length },
+            'Send skipped: the log holds durable delivery evidence for its entries'
+          );
+          this.deps.metrics.counter('messages_skipped', { reason: 'delivery_evidence' });
+          return { success: false, skipped: true, reason: 'delivery_evidence' as const };
+        }
+        // Legacy duplicate detection: only when NO durable entry identity
+        // exists for this send - a proactive contact with no inbound message,
+        // or a deployment without the log. With an identity but no delivery
+        // evidence, identical text proves nothing about THIS entry and the
+        // answer is sent (finding 10: an unrelated earlier answer may read
+        // the same; the entry stays uncommitted when delivery cannot be
+        // established).
+        if (identity.seqs.length === 0 && this.deps.conversationManager) {
           const lastMessage =
             await this.deps.conversationManager.getLastAssistantMessage(recipientId);
           if (lastMessage && lastMessage === text) {
@@ -324,7 +368,7 @@ export class IntentApplicator {
               'Skipping duplicate message - identical to last assistant message'
             );
             this.deps.metrics.counter('messages_skipped', { reason: 'duplicate' });
-            return { success: false, skipped: true };
+            return { success: false, skipped: true, reason: 'identical_text' as const };
           }
         }
         return channelImpl.sendMessage(route.destination, htmlText, sendOptions);
@@ -350,15 +394,17 @@ export class IntentApplicator {
             );
           }
         } else if ('skipped' in result && result.skipped) {
-          // Message was intentionally skipped (duplicate detection): the
-          // reply is IDENTICAL to the last assistant message in the history,
-          // i.e. that answer already reached the chat before the crash
-          // (review round 2, finding 10) - count it as delivered for the
-          // log commit so the entry settles instead of replaying forever.
+          // Skipped on purpose, never because a send failed:
+          // - 'delivery_evidence': the log proves these entries were already
+          //   answered, so this is the same answer arriving twice;
+          // - 'identical_text': a proactive message equal to the last
+          //   assistant one (no durable entry identity).
+          // Both count as delivered for the log commit, so the entry settles
+          // instead of replaying forever (review round 2, finding 10).
           delivered = true;
           this.deps.logger.debug(
-            { recipientId, textLength: text.length },
-            'Send skipped as an identical duplicate; counted as delivered for the log commit'
+            { recipientId, textLength: text.length, reason: result.reason },
+            'Send skipped as a duplicate; counted as delivered for the log commit'
           );
         } else {
           this.deps.logger.warn(
