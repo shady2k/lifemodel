@@ -24,18 +24,17 @@ import type { SendMessageIntent } from '../../src/types/intent.js';
 import { FakeCognitionLayer, thoughtSignal } from '../helpers/core-loop-drain-harness.js';
 import {
   makeDeferred,
+  makeScratchDir,
   startInboundInstance,
   stopInboundInstance,
   receiveMessage,
   readLogSize,
-  freshScratch,
   waitFor,
   llmRequests,
   seedAssistantAnswer,
   harnessRecipientId,
   activityOf,
   fenceKilledInstance,
-  flushInstanceLogs,
   SETTLE_TICKS,
   type InboundInstance,
 } from '../helpers/inbound-log-harness.js';
@@ -73,7 +72,30 @@ function settleLogs(
   );
 }
 
-const scratchRoots: { storagePath: string; logDir: string }[] = [];
+/**
+ * Wait for the core's record of a turn outcome (the settle log line). The
+ * line is an EVENT of the turn's settlement; a tick count is not: the tick
+ * counter rises when a tick STARTS, while the settlement it carries happens
+ * later in that same tick, so asserting after `ticks >= SETTLE_TICKS` races
+ * the very line the test reads (measured: 4 of 8 loaded runs, the line landed
+ * 4-22 ms after the tick wait returned).
+ */
+async function waitForSettleLogs(instance: InboundInstance, count = 1): Promise<void> {
+  await waitFor(
+    () => settleLogs(instance).length >= count,
+    `${String(count)} turn outcome(s) recorded`
+  );
+}
+
+/** Wait for a log line the instance recorded (an event, never a tick count). */
+async function waitForLog(instance: InboundInstance, needle: string): Promise<void> {
+  await waitFor(
+    () => instance.recordedLogs.some((l) => typeof l.msg === 'string' && l.msg.includes(needle)),
+    `the instance logged "${needle}"`
+  );
+}
+
+const scratchRoots: string[] = [];
 const instances: InboundInstance[] = [];
 
 /**
@@ -91,36 +113,34 @@ async function die(instance: InboundInstance): Promise<void> {
   await fenceKilledInstance(instance);
 }
 
-async function fresh(prefix: string): Promise<{ storagePath: string; logDir: string }> {
-  const paths = await freshScratch(prefix);
-  scratchRoots.push(paths);
-  return paths;
+async function fresh(prefix: string): Promise<string> {
+  const storagePath = await makeScratchDir(prefix);
+  scratchRoots.push(storagePath);
+  return storagePath;
 }
 
 afterEach(async () => {
   for (const root of scratchRoots.splice(0)) {
     // EVERY instance of this scratch root - killed, stopped or still running -
-    // is fenced and its logger flushed before the directories go: no instance
-    // may write into them while (or after) they are removed (review round 4,
-    // optional item: stopped instances used to be dropped from the list and
-    // left a live pino transport behind).
+    // is fenced before the directory goes: no instance may write into it while
+    // (or after) it is removed. The instance logger needs no teardown of its
+    // own: it has no transport, so it holds no worker thread and creates no
+    // file (see test-logger.ts).
     for (const instance of instances.splice(0)) {
       await fenceKilledInstance(instance).catch(() => undefined);
-      await flushInstanceLogs(instance).catch(() => undefined);
     }
-    await rmDir(root.storagePath);
-    await rmDir(root.logDir);
+    await rmDir(root);
   }
 });
 
-describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
+describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 30_000 }, () => {
   // ── crash (best effort): a killed process is fenced, and the next start
   //    replays the entries whose turn recorded no outcome ──
 
   it('kill -9 right after receipt: the message is answered after restart exactly once', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-kill-');
+    const storagePath = await fresh('ctc2-kill-');
     // the turn hangs forever: this process dies before it answers anything
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -136,7 +156,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.storage.isFenced).toBe(true);
 
     // a fresh container on the SAME data dir replays and answers once
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the recovered answer' }],
@@ -151,8 +171,14 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // the killed instance did nothing behind the restart
     expect(activityOf(h1)).toEqual(killed);
 
-    // a third start: nothing replays - answered exactly once
-    const h3 = await startInboundInstance(storagePath, logDir, {
+    // a third start: nothing replays - answered exactly once. h2 is STOPPED
+    // first, as a real restart does: its commit is in memory before its flush
+    // reaches the disk (commitNow advances the offsets, then persists), so a
+    // third process started beside a LIVE h2 can read the entry back and
+    // answer it again (measured, 2 of 32 loaded runs). A graceful stop flushes
+    // last - exactly the boundary a restart is defined on.
+    await stopInboundInstance(h2);
+    const h3 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -165,8 +191,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('kill -9 right after the FIRST message of a NEW chat: the route lives in the entry (finding 1)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-newchat-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-newchat-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -194,7 +220,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // state is asserted, not assumed (recipient ids are a pure function of
     // channel+destination, so chat-77's id is the same in the new process).
     let routeBeforeReplay: unknown = 'hook did not run';
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'welcome to chat 77' }],
@@ -216,9 +242,9 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('restore then crash before processing: still answered exactly once', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-recrash-');
+    const storagePath = await fresh('ctc2-recrash-');
     // first process: logs the message and dies before answering
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -227,7 +253,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await receiveMessage(h1, 'hello there', 'u-1');
 
     // second process: restores (replays into its queue) and crashes
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -242,7 +268,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
     // a third process: answers exactly once
-    const h3 = await startInboundInstance(storagePath, logDir, {
+    const h3 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'third time is the charm' }],
@@ -258,8 +284,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('kill -9 during a photo download: the receipt replays and the channel re-fetches (finding 7)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-photoreceipt-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-photoreceipt-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -280,7 +306,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // restart: the channel re-fetches the receipt and QUEUES the full photo;
     // the turn answers exactly once and the receipt entry is removed
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'nice picture' }],
@@ -297,8 +323,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a photo receipt whose re-fetch fails is queued as its caption text (finding 7 fallback)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-photofail-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-photofail-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -317,7 +343,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // the channel is broken: re-fetch fails; the caption-only message is
     // queued as a plain message, answered once, and no receipt loops forever
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'plain reply' }],
@@ -334,8 +360,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('the same update_id delivered twice is answered exactly once', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-dup-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-dup-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'only once' }],
@@ -353,7 +379,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // a restart also does not re-answer the re-delivered update
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -370,8 +396,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   //    scripted fake LLM: strict - no message lost, none answered twice ──
 
   it('graceful stop during a turn that finishes: the answer goes out once and the entry is removed', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-graceful-finish-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-graceful-finish-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       script: [{ content: 'the answer of the drained turn' }],
@@ -394,7 +420,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // ... and its outcome removed the entry: the restart replays nothing
     expect((await readLogSize(storagePath)).uncommitted).toBe(0);
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -407,8 +433,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('graceful stop whose turn overruns the deadline: replayed once after the next start', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-graceful-overrun-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-graceful-overrun-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       script: [{ content: 'never reached' }],
@@ -423,7 +449,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.channel.sent).toEqual([]);
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the redone answer' }],
@@ -439,10 +465,10 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a message queued at the stop is handled exactly once after the next start', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-queued-');
+    const storagePath = await fresh('ctc2-queued-');
     // a SLOW tick: the message is durably logged and the stop arrives before
     // any tick could take it (no turn is in flight)
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -457,7 +483,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // it never got a turn: uncommitted in the log, queued in the journal too
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the queued answer' }],
@@ -479,8 +505,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   //    (review round 4, findings 1 and 3) ──
 
   it('a held core.say acknowledgement with an empty final response: answered once across a graceful stop (finding 1)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-sayonly-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-sayonly-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [
@@ -516,7 +542,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect((await readLogSize(storagePath)).uncommitted).toBe(0);
 
     // a restart does not replay it: the message was answered exactly once
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -529,8 +555,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('an acknowledgement that settles first does not answer for a final send still in flight (finding 3)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-ackthenhang-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-ackthenhang-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [
@@ -569,7 +595,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(sentTexts(h1)).toEqual([expect.stringContaining('working on it')]);
     expect(await readLogSize(storagePath)).toEqual({ total: 1, uncommitted: 1 });
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the redone answer' }],
@@ -584,8 +610,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a FAILED final send after a delivered acknowledgement: failed_send, warned, not retried (finding 3)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-ackthenfail-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-ackthenfail-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [
@@ -604,7 +630,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       () => h1.inboundLog.size().uncommitted === 0,
       'the failed FINAL send is the outcome, not the acknowledgement'
     );
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    await waitForSettleLogs(h1);
     const settled = settleLogs(h1);
     expect(settled).toHaveLength(1);
     expect(settled[0]?.level).toBe('warn');
@@ -615,7 +641,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     });
 
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'never sent: the outcome was already recorded' }],
@@ -630,8 +656,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   // ── the outcome rule: what settles an entry, what is replayed ──
 
   it('a turn that deliberately answers nothing (no_reply) settles its entry: no endless replay', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-defer-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-defer-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate', // the fake turn settles with NO intents
       cognitionResult: { disposition: 'no_reply' },
       drainTimeoutMs: 5_000,
@@ -643,7 +669,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.channel.sent).toEqual([]);
 
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate',
       cognitionResult: { disposition: 'no_reply' },
       drainTimeoutMs: 5_000,
@@ -655,8 +681,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a deferring turn (disposition defer) settles its entry: the agent chose to wait', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-defer-disp-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-defer-disp-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate',
       cognitionResult: { disposition: 'defer' },
       drainTimeoutMs: 5_000,
@@ -669,8 +695,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a turn with NO outcome (no send, no disposition) keeps its entry for replay', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-nodisp-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-nodisp-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate', // settles with NO disposition and NO send
       drainTimeoutMs: 5_000,
       recordLogs: true,
@@ -678,7 +704,10 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     instances.push(h1);
     await receiveMessage(h1, 'just so you know', 'u-1');
     await waitFor(() => h1.cognition.calls.length === 1, 'turn ran');
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    // The turn's EVALUATION is the event to wait for, not a tick count: it is
+    // what records "no outcome" (a tick count rises before the settlement the
+    // same tick carries - see waitForSettleLogs).
+    await waitForLog(h1, 'reached no outcome');
     expect(h1.channel.sent).toEqual([]);
     // No send and no deliberate silence: no outcome, so the entry stays for
     // one replay - and the core says so.
@@ -690,7 +719,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     await stopInboundInstance(h1);
     // HANG the replayed turn: nothing settles, so the replayed entry is
     // observable (a settling turn would remove it within the same tick).
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -702,8 +731,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('an ERROR turn is a failed outcome: removed, warned, never retried', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-error-turn-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-error-turn-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate',
       cognitionResult: { disposition: 'error' },
       drainTimeoutMs: 5_000,
@@ -725,8 +754,11 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     };
     await receiveMessage(h1, 'please answer me', 'u-1');
     await waitFor(() => h1.channel.sent.length === 1, 'the error message went out');
-    await waitFor(() => h1.inboundLog.size().uncommitted === 0, 'the failed turn removed the entry');
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    await waitFor(
+      () => h1.inboundLog.size().uncommitted === 0,
+      'the failed turn removed the entry'
+    );
+    await waitForSettleLogs(h1);
     const settled = settleLogs(h1);
     expect(settled).toHaveLength(1);
     expect(settled[0]?.level).toBe('warn');
@@ -734,7 +766,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     // the restart does NOT retry it
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: DRAIN_DEADLINE_MS,
     });
@@ -745,8 +777,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a FAILED send is an outcome: removed, warned with the reason, never retried', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-failsend-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-failsend-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'a doomed answer' }],
@@ -761,8 +793,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       () => h1.inboundLog.size().uncommitted === 0,
       'the failed outcome removed the entry (no automatic retry)'
     );
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
     expect(sentTexts(h1)).toEqual([]);
+    await waitForSettleLogs(h1);
     const settled = settleLogs(h1);
     expect(settled).toHaveLength(1);
     expect(settled[0]?.obj).toMatchObject({
@@ -772,7 +804,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     });
 
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'never sent: the outcome was already recorded' }],
@@ -785,8 +817,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a send that cannot start is a failed outcome: removed, warned with its reason (finding 3)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-nochannel-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-nochannel-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'an undeliverable answer' }],
@@ -802,7 +834,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       () => h1.inboundLog.size().uncommitted === 0,
       'the send that never started is a failed outcome'
     );
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    await waitForSettleLogs(h1);
     const settled = settleLogs(h1);
     expect(settled).toHaveLength(1);
     expect(settled[0]?.obj).toMatchObject({
@@ -812,7 +844,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     });
 
     await stopInboundInstance(h1);
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'never sent' }],
@@ -825,8 +857,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a hung send never records an outcome: nothing is settled and the message replays once', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-hungsend-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-hungsend-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the first answer' }],
@@ -842,7 +874,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(h1.channel.sent).toEqual([]);
     expect((await readLogSize(storagePath)).uncommitted).toBe(1);
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the redone answer' }],
@@ -857,10 +889,10 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a turn that rejects records no outcome: its entry replays once after the restart', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-reject-');
+    const storagePath = await fresh('ctc2-reject-');
     // the fake cognition boundary rejects its turn - the core paths under
     // test (no outcome on rejection, replay once) do not depend on the LLM
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'hang',
       drainTimeoutMs: 5_000,
     });
@@ -875,7 +907,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     await stopInboundInstance(h1);
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'answered on redo' }],
@@ -890,8 +922,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a message absorbed into a turn that never completes is answered after restart', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-absorb-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-absorb-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: DRAIN_DEADLINE_MS,
@@ -911,7 +943,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
 
     await stopInboundInstance(h1);
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'one answer for both' }],
@@ -928,10 +960,10 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a turn owns ONLY the recipient it answers: the bundled other recipient gets its own turn (finding 2)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-two-recv-');
+    const storagePath = await fresh('ctc2-two-recv-');
     // SLOW first tick: both messages are queued (and logged) before the
     // turn starts, so the wake BUNDLES one message per recipient.
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       script: [{ content: 'the answer for the first' }, { content: 'the answer for the second' }],
@@ -966,14 +998,14 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(triggerRecipientOf(h1, 1)).toBe(otherRecipientId);
     await waitFor(() => h1.channel.sent.length === 2, 'both answered');
     await waitFor(() => h1.inboundLog.size().uncommitted === 0, 'both entries removed');
-    await waitFor(() => h1.autonomic.ticks() >= SETTLE_TICKS, 'ticks ran');
+    await waitForSettleLogs(h1, 2);
     const settledRecipients = settleLogs(h1).map((l) => l.obj['recipientId']);
     expect(settledRecipients.sort()).toEqual([h1.recipientId, otherRecipientId].sort());
   });
 
   it('a message absorbed DURING the stop drain keeps its turn; the answer settles it (finding 9)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-drainabsorb-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-drainabsorb-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       script: [{ content: 'the drained answer' }],
@@ -1009,7 +1041,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
       'trigger AND mid-drain absorbed message removed: the immediate send kept the turn attribution'
     );
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -1022,8 +1054,8 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a real core.say send during the stop drain keeps the turn and settles it (finding 9)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-drainsay-');
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const storagePath = await fresh('ctc2-drainsay-');
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       script: [
@@ -1069,7 +1101,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     );
 
     // nothing left to replay: the restart runs no turn and sends nothing
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -1082,9 +1114,9 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a new question whose answer repeats the last one is SENT all the same (lifemodel-q4f)', async () => {
-    const { storagePath, logDir } = await fresh('ctc2-duptext-');
+    const storagePath = await fresh('ctc2-duptext-');
     // the new question is logged; the process dies before answering it
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: true,
       drainTimeoutMs: 5_000,
@@ -1097,7 +1129,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // the same words are the right answer to a question never answered before
     await seedAssistantAnswer(storagePath, 'the very same answer', h1.recipientId);
 
-    const h2 = await startInboundInstance(storagePath, logDir, {
+    const h2 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [{ content: 'the very same answer' }],
@@ -1118,7 +1150,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     // the answer is the last assistant message now, so a graceful restart
     // neither replays the entry nor answers the question twice
     await stopInboundInstance(h2);
-    const h3 = await startInboundInstance(storagePath, logDir, {
+    const h3 = await startInboundInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
       script: [],
@@ -1131,7 +1163,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
   });
 
   it('a proactive repeat of the last assistant message is still suppressed (lifemodel-q4f)', async () => {
-    const { storagePath, logDir } = await fresh('q4f-proactive-');
+    const storagePath = await fresh('q4f-proactive-');
     // the last thing the agent said, in an EARLIER session: a proactive turn
     // that would repeat it verbatim answers no inbound message, so the guard
     // holds - a user must not be told the same thing twice
@@ -1139,7 +1171,7 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     const text = 'the proactive line';
     await seedAssistantAnswer(storagePath, text, recipientId);
 
-    const h1 = await startInboundInstance(storagePath, logDir, {
+    const h1 = await startInboundInstance(storagePath, {
       cognitionMode: 'immediate',
       recordLogs: true,
       drainTimeoutMs: 5_000,
@@ -1179,4 +1211,3 @@ describe('durable inbound log (lifemodel-ctc.2.1)', { timeout: 20_000 }, () => {
     expect(sentTexts(h1)).toEqual([expect.stringContaining('a different proactive line')]);
   });
 });
-

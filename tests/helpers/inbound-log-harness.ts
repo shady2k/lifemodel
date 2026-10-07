@@ -24,7 +24,6 @@ import { createConversationManager } from '../../src/storage/index.js';
 
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
-import { createLogger } from '../../src/core/logger.js';
 import type { Logger } from '../../src/types/logger.js';
 import type { Channel } from '../../src/types/index.js';
 import type { CognitionResult } from '../../src/types/layers.js';
@@ -38,6 +37,7 @@ import { createInboundLog, dedupKeyOf, type InboundLog } from '../../src/core/in
 import { loadPendingSignals, clearPendingSignals } from '../../src/core/pending-signal-journal.js';
 import { shutdownSequence } from '../../src/core/container.js';
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
+import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
 import {
   FakeAutonomicLayer,
   FakeAggregationLayer,
@@ -60,39 +60,6 @@ export {
   rmDir,
   waitFor,
 };
-
-export interface RecordedLog {
-  level: string;
-  obj: Record<string, unknown>;
-  msg: string;
-}
-
-function recordingLogger(base: Logger, calls: RecordedLog[]): Logger {
-  const record = (level: string) => (obj: Record<string, unknown>, msg: string) => {
-    calls.push({ level, obj, msg });
-    base[level](obj, msg);
-  };
-  const wrapper = {
-    child: (bindings: Record<string, unknown>) =>
-      recordingLogger(base.child(bindings as never), calls),
-    info: record('info'),
-    debug: record('debug'),
-    warn: record('warn'),
-    error: record('error'),
-    trace: record('trace'),
-  } as unknown as Logger;
-  // The level reaches the REAL logger: silencing an instance at teardown must
-  // stop its file transport, not a property on this wrapper.
-  Object.defineProperty(wrapper, 'level', {
-    get: () => base.level,
-    set: (value: string) => {
-      base.level = value;
-    },
-    enumerable: true,
-    configurable: true,
-  });
-  return wrapper;
-}
 
 const noopLogger = {
   child: () => noopLogger,
@@ -423,14 +390,14 @@ export const SETTLE_TICKS = 5;
 
 /**
  * Start one instance the way createContainerAsync starts it (with the
- * durable inbound log wired).
+ * durable inbound log wired). Its logger is transport-free (see
+ * test-logger.ts): no worker thread, no log file, nothing to flush.
  */
 export async function startInboundInstance(
   storagePath: string,
-  logDir: string,
   opts: HarnessOptions = {}
 ): Promise<InboundInstance> {
-  const base = createLogger({ logDir, level: 'warn', pretty: false });
+  const base = createTestLogger('warn');
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
@@ -659,45 +626,6 @@ export function activityOf(instance: InboundInstance): {
   };
 }
 
-/**
- * Best-effort teardown: flush the instance's pino transport, so no log write
- * is still in flight when the test removes its log directory.
- */
-export async function flushInstanceLogs(instance: InboundInstance): Promise<void> {
-  const logger = instance.logger as unknown as {
-    level?: string;
-    flush?: (cb?: (err?: Error) => void) => void;
-  };
-  // SILENCE first: a pino transport writes asynchronously, and a killed or
-  // stopped instance must not create or append a log file after this point
-  // (review rounds 4-5: the log directory is removed right after).
-  try {
-    logger.level = 'silent';
-  } catch {
-    // a logger without a settable level is left as it is
-  }
-  if (typeof logger.flush !== 'function') return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        try {
-          logger.flush?.(() => {
-            resolve();
-          });
-        } catch {
-          resolve();
-        }
-      }),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, 1_000);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 /** Read the log's size through a FRESH storage handle (what a new process sees). */
 export async function readLogSize(
   storagePath: string
@@ -710,12 +638,4 @@ export async function readLogSize(
   } finally {
     await storage.flush();
   }
-}
-
-/** Scratch paths for one restart chain. */
-export async function freshScratch(
-  prefix: string
-): Promise<{ storagePath: string; logDir: string }> {
-  const root = await makeScratchDir(prefix);
-  return { storagePath: root, logDir: `${root}-logs` };
 }
