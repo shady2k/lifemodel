@@ -71,11 +71,19 @@ export interface IntentApplicatorDeps {
   storage?: Storage | undefined;
   pluginLoader?: PluginLoader | undefined;
   /**
-   * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1):
-   * the turn whose entries wait for this send before its outcome is decided.
-   * The cognition turn's tick id, or the one running when the intent fired.
+   * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1) -
+   * the turn whose entries wait for this send before its outcome is decided -
+   * and whether the send is one of the turn's FINAL answers (`final`: the
+   * turn already resolved) or an in-loop acknowledgement (core.say) that
+   * cannot speak for the answer (review round 4, findings 1 and 3).
    */
-  resolveSendTurnKey?: (intent: SendMessageIntent) => string | undefined;
+  resolveSendTurn?: (intent: SendMessageIntent) => { turnKey: string; final: boolean } | undefined;
+  /**
+   * A send of that turn started, registered SYNCHRONOUSLY where the intent is
+   * applied, so the turn's outcome can never be decided while a send of it is
+   * still to come.
+   */
+  onSendStarted?: (turnKey: string, recipientId: string, final: boolean) => void;
   /**
    * A send of that turn settled. The turn's durable-log entries leave the log
    * when the turn records an outcome and a send's fate is part of it, so the
@@ -88,6 +96,7 @@ export interface IntentApplicatorDeps {
   onSendSettled?: (
     turnKey: string,
     recipientId: string,
+    final: boolean,
     outcome: SendOutcome
   ) => void | Promise<void>;
 }
@@ -271,19 +280,26 @@ export class IntentApplicator {
   private applySendMessage(intent: SendMessageIntent): void {
     const { recipientId, text, replyTo, conversationStatus } = intent.payload;
 
-    // Which durable-log turn this send belongs to (lifemodel-ctc.2.1). Its
-    // entries leave the log when the turn records an outcome, and this send's
-    // fate is part of that outcome.
-    const turnKey = this.deps.resolveSendTurnKey?.(intent);
+    // Which durable-log turn this send belongs to (lifemodel-ctc.2.1), and
+    // whether it is one of the turn's final answers or an acknowledgement.
+    // Its entries leave the log when the turn records an outcome, and this
+    // send's fate is part of that outcome.
+    const send = this.deps.resolveSendTurn?.(intent);
+    const turnKey = send?.turnKey;
+    const finalSend = send?.final ?? false;
     let delivered = false;
     let failureReason: string | undefined;
     const reportSettled = (outcome: SendOutcome): void => {
       if (!turnKey) return;
-      const settled = this.deps.onSendSettled?.(turnKey, recipientId, outcome);
+      const settled = this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
       if (settled && typeof settled.then === 'function') {
         void settled;
       }
     };
+    // Registered before anything else can fail: the turn waits for this send.
+    if (turnKey) {
+      this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
+    }
     // A send that cannot start never reaches the chat: the turn's outcome is a
     // FAILED send, which is reported and deliberately NOT retried (owner
     // decision, comment 54).
@@ -403,7 +419,7 @@ export class IntentApplicator {
         const outcome: SendOutcome = delivered
           ? { delivered: true }
           : { delivered: false, reason: failureReason ?? 'unknown' };
-        return this.deps.onSendSettled?.(turnKey, recipientId, outcome);
+        return this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
       })
       .finally(() => {
         this.inFlightSends.delete(tracked);

@@ -106,8 +106,22 @@ export class InboundFakeChannel {
   sendDelayMs = 0;
   /** Holds every sendMessage until released (a hung send) */
   sendGate: { promise: Promise<void>; release: () => void } | null = null;
+  /**
+   * The 1-based START ORDER of the first send the gate holds. A turn can send
+   * an acknowledgement through core.say and then its answer: gating from the
+   * second send on lets the acknowledgement settle first (review round 4).
+   */
+  sendGateFrom = 1;
+  /**
+   * Gates by 1-based START ORDER: that send waits for its OWN gate, so a test
+   * can release the acknowledgement while the answer stays held (review round
+   * 4, finding 3).
+   */
+  readonly sendGates = new Map<number, { promise: Promise<void>; release: () => void }>();
   /** Next sendMessage fails with this reason */
   failNextSend: string | undefined;
+  /** The sendMessage with this 1-based start order fails with the reason. */
+  failSendAt: { index: number; reason: string } | null = null;
   readonly events: string[] = [];
   readonly sent: { target: string; text: string; messageId: string }[] = [];
   readonly failed: { target: string; text: string; reason: string }[] = [];
@@ -194,15 +208,25 @@ export class InboundFakeChannel {
     text: string
   ): Promise<{ success: boolean; messageId?: string }> {
     this.sendStarted.push({ target, text });
+    const startOrder = this.sendStarted.length;
     if (this.sendDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this.sendDelayMs));
     }
-    if (this.sendGate) {
+    const gate = this.sendGates.get(startOrder);
+    if (gate) {
+      await gate.promise;
+    } else if (this.sendGate && startOrder >= this.sendGateFrom) {
       await this.sendGate.promise;
     }
     if (this.fullyStopped) {
       this.events.push('send-refused');
       this.failed.push({ target, text, reason: 'channel-released-before-send' });
+      return { success: false };
+    }
+    if (this.failSendAt && startOrder === this.failSendAt.index) {
+      const { reason } = this.failSendAt;
+      this.failSendAt = null;
+      this.failed.push({ target, text, reason });
       return { success: false };
     }
     if (this.failNextSend !== undefined) {

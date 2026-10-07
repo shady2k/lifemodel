@@ -129,27 +129,36 @@ callback:
    `triggerSignals[0]`) plus the messages it absorbed mid-loop for that
    recipient; bundled user messages of OTHER recipients are requeued at the
    wake for their own turns and are never removed by this one. An entry
-   LEAVES the log when its turn reached a recorded OUTCOME:
+   LEAVES the log when its turn reached a recorded OUTCOME. The four are
+   MUTUALLY EXCLUSIVE, and they are decided only once the turn resolved, every
+   send of it (an acknowledgement through `core.say` included) settled, and
+   the sends its own result produces have really started:
 
-   - answered: the turn produced its answer and its send settled - delivered,
-     skipped as a verbatim repeat of the last assistant message, or FAILED;
-   - deliberately silent: `core.defer` or an explicit no-reply/noAction
-     decision of the agent;
-   - failed send: the send never reached the chat (no registry, route or
-     channel, a refusal, an exception);
+   - answered: the turn's FINAL send (the one its own result applies) reached
+     the chat, or was skipped as a verbatim repeat of the last assistant
+     message. A turn that ends with no final send counts as answered when the
+     acknowledgement it did send reached the chat (an empty final response
+     after `core.say` is a valid answer).
+   - deliberately silent: no send is involved - `core.defer` or an explicit
+     no-reply/noAction decision of the agent.
+   - failed send: the turn produced an answer but its FINAL send did not reach
+     the chat (no registry, route or channel, a refusal, an exception). An
+     acknowledgement that landed does not turn this into `answered`.
    - failed turn: an `error` disposition (provider error, malformed output,
-     exhausted retries, forced refusal).
+     exhausted retries, forced refusal), whether or not a message went out.
 
-   A FAILED outcome is never retried: it is logged at warn with the recipient
-   and the reason and the message is gone. That is the owner's proportionality
-   decision: only what breaks a graceful restart or is likely in real use had
-   to be exact. Everything else REPLAYS once at the next start: a crash
-   mid-turn, a rejected turn, a turn that overran the stop deadline, a send
-   that never settled, and a turn that resolved with no send and no
-   disposition (it recorded no outcome). There is NO durable delivery
-   evidence and no per-entry send identity in the log - and therefore no
-   suppression of a send that the log would otherwise prove answered: the
-   OUTCOME is what the turn recorded, nothing per send is kept.
+   An `error` disposition wins over the send outcome; without it the FINAL
+   send decides between answered and failed send. A FAILED outcome is never
+   retried: it is logged at warn with the recipient and the reason and the
+   message is gone. That is the owner's proportionality decision: only what
+   breaks a graceful restart or is likely in real use had to be exact.
+   Everything else REPLAYS once at the next start: a crash mid-turn, a
+   rejected turn, a turn that overran the stop deadline, a send that never
+   settled, and a turn that resolved with no send and no disposition (it
+   recorded no outcome). There is NO durable delivery evidence and no
+   per-entry send identity in the log - and therefore no suppression of a
+   send that the log would otherwise prove answered: the OUTCOME is what the
+   turn recorded, nothing per send is kept.
 
 3. Photos are received as durable receipts BEFORE the download starts
    (pendingPhoto). The completed photo message replaces the receipt entry in

@@ -205,10 +205,13 @@ accident. The durable inbound log (`src/core/inbound-log.ts`) is the boundary
 that makes the distinction, and it is deliberately simple: the entry is
 written and flushed on receipt, and it LEAVES the log when its turn recorded
 an OUTCOME - answered, deliberately silent (`core.defer` / explicit
-no-reply), failed send, failed turn (`error` disposition). A failed outcome
-is reported at warn with the recipient and the reason and is NEVER retried.
-Only a message whose turn recorded no outcome is replayed, once, at the next
-start.
+no-reply), failed send, failed turn (`error` disposition). The four are
+mutually exclusive: an `error` disposition wins, otherwise the turn's FINAL
+send decides answered against failed send (an acknowledgement through
+`core.say` counts only when the turn ends with no further message). A failed
+outcome is reported at warn with the recipient and the reason and is NEVER
+retried. Only a message whose turn recorded no outcome is replayed, once, at
+the next start.
 
 - **Graceful restart (SIGINT/SIGTERM) - strict.** The shutdown sequence
   completes: intake stops, the turn in flight is drained, the sends it

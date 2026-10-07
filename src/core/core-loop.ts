@@ -209,16 +209,32 @@ interface PendingTurnCommits {
   /** True once the turn settled with a result (its sends still settle after). */
   resolved: boolean;
   /**
-   * SEND_MESSAGE intents the turn applies to the recipient it answers - the
-   * one thing the outcome waits for. This is NOT delivery evidence: it is
-   * counted off the turn's own result, carries no per-entry identity, and
-   * only orders the decision after the sends.
+   * Sends of the turn that started and have not settled. ALL of them count,
+   * the in-loop acknowledgements (core.say) included (review round 4,
+   * finding 3): the outcome cannot be decided while any of them is still to
+   * come.
    */
   sendsOutstanding: number;
-  /** At least one of those sends reached the chat. */
-  answerDelivered: boolean;
+  /**
+   * SEND_MESSAGE intents the turn's own result will apply to the recipient it
+   * answers (counted at resolution) and the ones that really started; the
+   * outcome waits for the second to reach the first.
+   */
+  finalSendsExpected: number;
+  finalSendsStarted: number;
+  /**
+   * A FINAL send (one that started after the turn resolved) reached the chat.
+   * An acknowledgement never sets this: it says nothing about the answer
+   * (review round 4, findings 1 and 3).
+   */
+  finalDelivered: boolean;
+  /**
+   * A send of the turn reached the chat, acknowledgements included - what
+   * makes a turn whose only message WAS the acknowledgement answered.
+   */
+  anyDelivered: boolean;
   /** Why a send that did not reach the chat failed (the warn names it). */
-  sendFailureReason?: string | undefined;
+  failureReason?: string | undefined;
   /**
    * How the turn ended (see {@link TurnDisposition}): `error` is a failed
    * turn, `no_reply`/`defer` a deliberate silence. Undefined means the turn
@@ -441,15 +457,25 @@ export class CoreLoop {
       running: () => this.running,
       storage: deps.storage,
       pluginLoader: deps.pluginLoader,
-      resolveSendTurnKey: (intent) => {
+      resolveSendTurn: (intent) => {
         // A cognition turn's answer carries the turn's tick id in its trace;
-        // an in-loop immediate send (no trace) belongs to the turn running.
+        // an in-loop immediate send (no trace, e.g. core.say) belongs to the
+        // turn running. `final` says which of the two this send is (review
+        // round 4): a send that starts while the turn is still running is an
+        // acknowledgment, one that starts after it resolved is an answer.
         const tickId = intent.trace?.tickId;
-        if (tickId && this.turnCommits.has(tickId)) return tickId;
-        return this.activeTurnCommits?.tickId ?? this.pendingCognition?.tickId;
+        const turnKey =
+          tickId && this.turnCommits.has(tickId)
+            ? tickId
+            : (this.activeTurnCommits?.tickId ?? this.pendingCognition?.tickId);
+        if (turnKey === undefined) return undefined;
+        return { turnKey, final: this.turnCommits.get(turnKey)?.resolved ?? false };
       },
-      onSendSettled: (turnKey, recipientId, outcome) => {
-        return this.onTurnSendSettled(turnKey, recipientId, outcome);
+      onSendStarted: (turnKey, recipientId, final) => {
+        this.onTurnSendStarted(turnKey, recipientId, final);
+      },
+      onSendSettled: (turnKey, recipientId, final, outcome) => {
+        return this.onTurnSendSettled(turnKey, recipientId, final, outcome);
       },
     });
   }
@@ -544,17 +570,39 @@ export class CoreLoop {
 
   /**
    * The outcome a resolved turn recorded for its entries, or undefined while
-   * it has none (owner decision, comment 54). A send still in flight means the
-   * outcome does not exist yet: nothing is settled on a guess.
+   * it has none (owner decision, comment 54). The four outcomes are mutually
+   * exclusive; the FINAL send decides between the first and the third, an
+   * acknowledgement never does.
    */
   private turnOutcome(state: PendingTurnCommits): TurnLogOutcome | undefined {
     if (state.disposition === 'error') return 'failed_turn';
-    if (state.answerDelivered) return 'answered';
-    if (state.sendFailureReason !== undefined) return 'failed_send';
+    if (state.finalSendsStarted > 0) {
+      return state.finalDelivered ? 'answered' : 'failed_send';
+    }
+    // The turn ends with no final send: only an acknowledgement went out (an
+    // empty final response after core.say is a valid answer).
+    if (state.anyDelivered) return 'answered';
+    if (state.failureReason !== undefined) return 'failed_send';
     if (state.disposition === 'no_reply' || state.disposition === 'defer') {
       return 'deliberate_no_reply';
     }
     return undefined;
+  }
+
+  /**
+   * A send of the turn started (see IntentApplicatorDeps.onSendStarted).
+   * Registered synchronously, so the outcome is never decided while a send is
+   * still to come; a send that starts after the turn resolved is one of its
+   * FINAL answers (review round 4, findings 1 and 3).
+   */
+  private onTurnSendStarted(turnKey: string, recipientId: string, final: boolean): void {
+    const state = this.turnCommits.get(turnKey);
+    if (!state) return;
+    if (recipientId !== this.answeredRecipientOf(state)) return;
+    state.sendsOutstanding += 1;
+    if (final) {
+      state.finalSendsStarted += 1;
+    }
   }
 
   /**
@@ -567,6 +615,7 @@ export class CoreLoop {
   private async onTurnSendSettled(
     turnKey: string,
     recipientId: string,
+    final: boolean,
     outcome: SendOutcome
   ): Promise<void> {
     const state = this.turnCommits.get(turnKey);
@@ -582,9 +631,12 @@ export class CoreLoop {
     }
     state.sendsOutstanding = Math.max(0, state.sendsOutstanding - 1);
     if (outcome.delivered) {
-      state.answerDelivered = true;
+      state.anyDelivered = true;
+      if (final) {
+        state.finalDelivered = true;
+      }
     } else {
-      state.sendFailureReason ??= outcome.reason ?? 'unknown';
+      state.failureReason ??= outcome.reason ?? 'unknown';
     }
     await this.settleTurn(state);
   }
@@ -600,8 +652,11 @@ export class CoreLoop {
   private async settleTurn(state: PendingTurnCommits): Promise<void> {
     if (state.settled || this.deadForTest) return;
     // Nothing is decided on a guess: the outcome exists only once the turn has
-    // resolved and its sends have settled.
+    // resolved, EVERY send of it (acknowledgements included) has settled, and
+    // the sends its own result produces have really started (review round 4:
+    // the window between the resolution and the application of its intents).
     if (!state.resolved || state.sendsOutstanding > 0) return;
+    if (state.finalSendsStarted < state.finalSendsExpected) return;
     state.settled = true;
     const recipientId = this.answeredRecipientOf(state);
     const seqs = recipientId === undefined ? [] : this.ownedSeqs(state.turn, recipientId);
@@ -621,7 +676,7 @@ export class CoreLoop {
           recipientId,
           entries: seqs.length,
           outcome,
-          reason: state.sendFailureReason ?? null,
+          reason: state.failureReason ?? null,
           disposition: state.disposition ?? null,
         },
         'Inbound messages settled by a FAILED outcome; they are not retried'
@@ -652,7 +707,10 @@ export class CoreLoop {
       turn,
       resolved: false,
       sendsOutstanding: 0,
-      answerDelivered: false,
+      finalSendsExpected: 0,
+      finalSendsStarted: 0,
+      finalDelivered: false,
+      anyDelivered: false,
       settled: false,
     };
     this.turnCommits.set(tickId, state);
@@ -686,8 +744,9 @@ export class CoreLoop {
   }
 
   /**
-   * Turn resolved with a result: its disposition is recorded and the sends it
-   * will apply are counted, so the outcome is decided once they settle.
+   * Turn resolved with a result: its disposition is recorded and the FINAL
+   * sends its own result will apply are counted, so the outcome is decided
+   * once they - and every acknowledgement still in flight - have settled.
    */
   private resolveTurnCommit(
     tickId: string,
@@ -700,7 +759,7 @@ export class CoreLoop {
     state.disposition = disposition;
     const answered = this.answeredRecipientOf(state);
     if (answered !== undefined) {
-      state.sendsOutstanding = intents.filter(
+      state.finalSendsExpected = intents.filter(
         (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
       ).length;
     }
