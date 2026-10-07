@@ -72,7 +72,7 @@ function recordingLogger(base: Logger, calls: RecordedLog[]): Logger {
     calls.push({ level, obj, msg });
     base[level](obj, msg);
   };
-  return {
+  const wrapper = {
     child: (bindings: Record<string, unknown>) =>
       recordingLogger(base.child(bindings as never), calls),
     info: record('info'),
@@ -81,6 +81,17 @@ function recordingLogger(base: Logger, calls: RecordedLog[]): Logger {
     error: record('error'),
     trace: record('trace'),
   } as unknown as Logger;
+  // The level reaches the REAL logger: silencing an instance at teardown must
+  // stop its file transport, not a property on this wrapper.
+  Object.defineProperty(wrapper, 'level', {
+    get: () => base.level,
+    set: (value: string) => {
+      base.level = value;
+    },
+    enumerable: true,
+    configurable: true,
+  });
+  return wrapper;
 }
 
 const noopLogger = {
@@ -253,9 +264,100 @@ export function userMessage(text: string, recipientId: string, updateId?: string
   });
 }
 
+/**
+ * The instance's storage handle, FENCEABLE (review round 5): a "killed"
+ * instance must not reach the filesystem any more, exactly like a dead
+ * process. After fence() every write and every flush is dropped and COUNTED
+ * (droppedWrites) instead of reaching the JSONStorage underneath - a late
+ * conversation save from work that was already in flight can no longer create
+ * or rename a file while the teardown removes the directory.
+ *
+ * Reads pass through: the test still inspects what the instance holds.
+ */
+export class FencedStorageHandle {
+  private fenced = false;
+  private dropped = 0;
+  /** Writes already inside the underlying storage (a flush, a save). */
+  private readonly inFlight = new Set<Promise<unknown>>();
+
+  constructor(private readonly inner: DeferredStorage) {}
+
+  /**
+   * Close the handle: no later write or flush of it reaches the disk, and the
+   * ones ALREADY inside it are awaited first. That second half matters: a
+   * flush that started before the fence keeps renaming its temporary file, so
+   * a caller that awaits this fence can remove the data directory without
+   * racing a write in flight (review round 5: ENOTEMPTY on the rmdir and
+   * ENOENT on a conversation rename).
+   */
+  async fence(): Promise<void> {
+    this.fenced = true;
+    while (this.inFlight.size > 0) {
+      await Promise.allSettled([...this.inFlight]);
+    }
+  }
+
+  get isFenced(): boolean {
+    return this.fenced;
+  }
+
+  /** Write/flush attempts the fence swallowed (observable for tests). */
+  get droppedWrites(): number {
+    return this.dropped;
+  }
+
+  load(key: string): Promise<unknown> {
+    return this.inner.load(key);
+  }
+
+  save(key: string, data: unknown): Promise<void> {
+    if (this.fenced) {
+      this.dropped += 1;
+      return Promise.resolve();
+    }
+    return this.track(this.inner.save(key, data));
+  }
+
+  delete(key: string): Promise<boolean> {
+    if (this.fenced) {
+      this.dropped += 1;
+      return Promise.resolve(false);
+    }
+    return this.track(this.inner.delete(key));
+  }
+
+  exists(key: string): Promise<boolean> {
+    return this.inner.exists(key);
+  }
+
+  keys(pattern?: string): Promise<string[]> {
+    return this.inner.keys(pattern);
+  }
+
+  flush(): Promise<void> {
+    if (this.fenced) {
+      this.dropped += 1;
+      return Promise.resolve();
+    }
+    return this.track(this.inner.flush());
+  }
+
+  /** Remember a write until it settles, so fence() can wait for it. */
+  private track<T>(op: Promise<T>): Promise<T> {
+    this.inFlight.add(op);
+    const done = (): void => {
+      this.inFlight.delete(op);
+    };
+    void op.then(done, done);
+    return op;
+  }
+}
+
 export interface InboundInstance {
   coreLoop: ReturnType<typeof createCoreLoop>;
   inboundLog: InboundLog;
+  /** The instance's own storage handle; fence() stops it writing (see above). */
+  storage: FencedStorageHandle;
   storagePath: string;
   channel: InboundFakeChannel;
   cognition: FakeCognitionLayer | RealCognitionFacade;
@@ -316,7 +418,10 @@ export async function startInboundInstance(
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
-  const storage = await openStorage(storagePath, logger);
+  // The instance's ONE storage handle, fenceable: everything it holds
+  // (inbound log, conversation manager, intent applicator) writes through it,
+  // so fencing it makes a killed instance unable to touch the disk.
+  const storage = new FencedStorageHandle(await openStorage(storagePath, logger));
   const inboundLog = createInboundLog({ storage, logger, storagePath });
   await inboundLog.load();
 
@@ -404,6 +509,7 @@ export async function startInboundInstance(
   return {
     coreLoop,
     inboundLog,
+    storage,
     channel,
     cognition,
     autonomic,
@@ -479,14 +585,24 @@ export async function seedAssistantAnswer(
 
 /**
  * Fence an instance whose process is treated as killed (owner decision
- * comment 54; review round 3): its timers and subscription stop, its
- * late effects are dropped, and the work it had in flight (the tick, the
- * scheduler callback) is joined. After this resolves the instance can write
- * NOTHING into the data or log directories behind the restart under test -
- * without it a "killed" instance could keep ticking or flush its cache and
- * invalidate the restart claims (the reported teardown ENOTEMPTY).
+ * comment 54; review rounds 3 and 5): its STORAGE is closed first, so nothing
+ * it still runs can reach the data directory (every later write is dropped and
+ * counted, and the writes already inside it are awaited); then its timers and
+ * subscription stop, its late effects are dropped and the work it had in
+ * flight (the tick, the scheduler callback) is joined. After this resolves the
+ * instance writes NOTHING behind the restart under test - without it a
+ * "killed" instance kept ticking, saved conversation state and raced the
+ * teardown's rmdir (the reported ENOTEMPTY / ENOENT).
  */
 export async function fenceKilledInstance(instance: InboundInstance): Promise<void> {
+  // The STORAGE goes first: work already in flight (a conversation save of a
+  // send chain, a log flush) can still be running, and a killed process would
+  // not let it write. Every later write is dropped and counted instead, and
+  // the writes ALREADY inside the storage are awaited here - the caller can
+  // remove the data directory right after this resolves without racing a
+  // rename in flight (review round 5: ENOTEMPTY on the rmdir, ENOENT on a
+  // conversation rename).
+  await instance.storage.fence();
   await instance.coreLoop.fenceForTest();
 }
 
@@ -502,6 +618,8 @@ export function activityOf(instance: InboundInstance): {
   sends: number;
   sendsStarted: number;
   entries: number;
+  /** Write attempts the fence swallowed (a killed instance must not write). */
+  droppedWrites: number;
 } {
   return {
     running: instance.coreLoop.isRunning(),
@@ -510,6 +628,7 @@ export function activityOf(instance: InboundInstance): {
     sends: instance.channel.sent.length,
     sendsStarted: instance.channel.sendStarted.length,
     entries: instance.inboundLog.size().total,
+    droppedWrites: instance.storage.droppedWrites,
   };
 }
 
@@ -518,7 +637,18 @@ export function activityOf(instance: InboundInstance): {
  * is still in flight when the test removes its log directory.
  */
 export async function flushInstanceLogs(instance: InboundInstance): Promise<void> {
-  const logger = instance.logger as unknown as { flush?: (cb?: (err?: Error) => void) => void };
+  const logger = instance.logger as unknown as {
+    level?: string;
+    flush?: (cb?: (err?: Error) => void) => void;
+  };
+  // SILENCE first: a pino transport writes asynchronously, and a killed or
+  // stopped instance must not create or append a log file after this point
+  // (review rounds 4-5: the log directory is removed right after).
+  try {
+    logger.level = 'silent';
+  } catch {
+    // a logger without a settable level is left as it is
+  }
   if (typeof logger.flush !== 'function') return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
