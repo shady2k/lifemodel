@@ -58,6 +58,11 @@ import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
+import {
+  loadPendingSignals,
+  clearPendingSignals,
+  persistPendingSignals,
+} from './pending-signal-journal.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -194,6 +199,77 @@ export interface Container {
   motorCortex: MotorCortex | null;
   /** Shutdown function */
   shutdown: () => Promise<void>;
+}
+
+/**
+ * Dependencies the shutdown sequence needs.
+ *
+ * Narrowly typed so unit tests can double each collaborator; the container
+ * itself passes the real ones.
+ */
+export interface ShutdownSequenceDeps {
+  /** Application logger */
+  logger: Logger;
+  /** Registered channels: stopping them stops intake */
+  channels: Iterable<Channel>;
+  /** The core loop: stop() drains the turn in flight */
+  coreLoop: Pick<CoreLoop, 'stop' | 'takePendingSignals'>;
+  /** Storage (DeferredStorage): pending-signal journal + final flush */
+  storage: Storage & { shutdown: () => Promise<void> };
+  /** Base directory of the state storage (for the journal path in logs/errors) */
+  storagePath: string;
+  /** State manager (auto-save stop + final state save) */
+  stateManager: { shutdown: () => Promise<void> };
+  /** Recipient registry (flushes its pending writes) */
+  recipientRegistry: { flush: () => Promise<void> };
+  /** Ack registry (flushes its pending writes) */
+  ackRegistry: { flush: () => Promise<void> };
+}
+
+/**
+ * The shutdown order for a graceful stop (lifemodel-ctc.1.1):
+ *
+ * 1. Channel intake stops FIRST (new updates are no longer accepted);
+ *    updates already accepted sit in pendingSignals, not in the channel.
+ * 2. coreLoop.stop() waits for the COGNITION turn in flight up to
+ *    coreLoop.shutdownDrainTimeoutMs (default 90 s) and requeues its
+ *    trigger signal past the deadline.
+ * 3. Signals accepted but never processed are persisted through
+ *    DeferredStorage for the next start to restore.
+ * 4. State and registries persist.
+ * 5. Storage flushes LAST - nothing may write after it.
+ */
+export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void> {
+  const { logger } = deps;
+  logger.info('Shutting down...');
+
+  // 1. Stop channel intake first
+  for (const channel of deps.channels) {
+    if (channel.stop) {
+      await channel.stop();
+    }
+  }
+  logger.info('Channel intake stopped');
+
+  // 2. Await the turn in flight (or requeue it)
+  await deps.coreLoop.stop();
+
+  // 3. Persist signals accepted but never processed (possibly the overrun
+  //    trigger requeued by coreLoop.stop). Always writes the envelope, so an
+  //    empty list also clears what a previous stop left behind.
+  const pending = deps.coreLoop.takePendingSignals();
+  await persistPendingSignals(deps.storage, logger, pending);
+
+  // 4. Persist domain state and registries
+  await deps.stateManager.shutdown();
+  await deps.recipientRegistry.flush();
+  await deps.ackRegistry.flush();
+
+  // 5. Storage last: the deferred writes of steps 3-4 reach disk here, and no
+  //    component writes after this flush.
+  await deps.storage.shutdown();
+
+  logger.info({ pendingSignalsPersisted: pending.length }, 'Shutdown complete');
 }
 
 /**
@@ -916,6 +992,24 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     });
   }
 
+  // Restore signals that were accepted but never processed by the previous
+  // run (persisted at stop). They are pushed before anything can start so the
+  // first tick processes them. The journal is cleared after the push; a crash
+  // before its flush could restore them again - dedup by Telegram update_id
+  // lands with the durable inbox (lifemodel-ctc.2.1).
+  const restoredPending = await loadPendingSignals(storage, storagePath, logger);
+  for (const signal of restoredPending) {
+    coreLoop.pushSignal(signal);
+  }
+  if (restoredPending.length > 0) {
+    logger.info(
+      { count: restoredPending.length },
+      'Restored pending signals from the previous run'
+    );
+  }
+  await clearPendingSignals(storage, logger);
+  await storage.flush();
+
   // Set tool registration callbacks now that layers exist
   pluginLoader.setToolCallbacks(
     (tool) => {
@@ -1008,32 +1102,20 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Start auto-save
   stateManager.startAutoSave();
 
-  // Shutdown function with persistence
-  const shutdown = async (): Promise<void> => {
-    logger.info('Shutting down...');
-    await coreLoop.stop();
-
-    // Save state
-    await stateManager.shutdown();
-
-    // Flush recipient registry
-    await recipientRegistry.flush();
-
-    // Flush ack registry
-    await ackRegistry.flush();
-
-    // Flush deferred storage (ensures all pending writes are persisted)
-    await storage.shutdown();
-
-    // Stop all channels
-    for (const channel of channels.values()) {
-      if (channel.stop) {
-        await channel.stop();
-      }
-    }
-
-    logger.info('Shutdown complete');
-  };
+  // Shutdown function with persistence: the ordered sequence lives in
+  // shutdownSequence above (channels first ... storage last) so the order
+  // itself is testable.
+  const shutdown = (): Promise<void> =>
+    shutdownSequence({
+      logger,
+      channels: channels.values(),
+      coreLoop,
+      storage,
+      storagePath,
+      stateManager,
+      recipientRegistry,
+      ackRegistry,
+    });
 
   return {
     logger,
