@@ -137,10 +137,12 @@ code after ONE error line naming what was still pending (the step
 sends outstanding, signals queued). The exit is injectable, so tests prove the
 deadline without killing the test runner (tests/integration/stop-hard-exit.test.ts).
 
-What is lost by leaving: every INBOUND MESSAGE is in the log (it flushes on
-receipt and on commit), and the messages whose turn recorded no outcome —
-including the turn the stop abandoned — replay once at the next start. Every
-signal that was only queued in memory is lost with the process (see "What
+What is lost by leaving: an inbound message is in the log (it flushes on
+receipt and on commit), so the messages whose turn recorded no outcome —
+including the turn the stop abandoned — replay once at the next start. The one
+exception is the named window between receipt and that emit-time flush (see
+"Known crash windows" below): such an update is lost and was never queued.
+Every signal that was only queued in memory is lost with the process (see "What
 survives a stop" above). The steps AFTER the deadline did not run
 (`channel_stop` and `storage_flush` included), which is the crash-equivalent
 window listed at the end of this section: best effort by the owner's
