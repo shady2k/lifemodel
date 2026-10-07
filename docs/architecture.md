@@ -63,6 +63,31 @@ Fixed 1-second tick drives all processing:
 8. COGNITION layer: (if woken) process with LLM
 9. Apply intents returned by all layers
 
+### Graceful stop (SIGINT/SIGTERM)
+
+One fixed order, `shutdownSequence` in `src/core/container.ts`:
+
+1. Channel intake stops first — no new updates are accepted from here on.
+   Updates already accepted sit in `pendingSignals`, not in the channel.
+2. `coreLoop.stop()` waits for the COGNITION turn in flight up to
+   `coreLoop.shutdownDrainTimeoutMs` (default 90 s; set through the
+   `coreLoop` field of `AppConfig` when the container is created). A turn
+   that finishes within
+   the deadline is applied exactly once. A turn that overruns has its trigger
+   signal requeued.
+3. Signals accepted but never processed (`pendingSignals`, plus a requeued
+   trigger) are written to the pending-signal journal
+   (`data/state/core/pending_signals.json`) through DeferredStorage.
+4. State, recipient and ack registries persist.
+5. DeferredStorage flushes last — nothing writes after it.
+
+On start, `createContainerAsync` restores the journal into `pendingSignals`
+and clears it, so the same signal is processed exactly once. A corrupt or
+unreadable journal file fails startup loudly with the file path — it is never
+treated as empty. A crash later in the run could still restore the same
+signals again: durable inbox / update_id dedup closes that
+(lifemodel-ctc.2.1).
+
 ---
 
 ## COGNITION Agentic Loop

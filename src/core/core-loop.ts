@@ -76,6 +76,13 @@ export interface CoreLoopConfig {
   /** Fixed tick interval in ms (default: 1000) */
   tickInterval: number;
 
+  /**
+   * How long the stop drain waits for the COGNITION turn in flight
+   * (default: 90_000 = 90 s). If it overruns, its trigger signal is requeued
+   * and processed again exactly once after the next start.
+   */
+  shutdownDrainTimeoutMs: number;
+
   /** Maximum signals to process per tick (default: 100) */
   maxSignalsPerTick: number;
 
@@ -96,6 +103,7 @@ const DEFAULT_CONFIG: CoreLoopConfig = {
   tickInterval: 1000, // Fixed 1-second tick
   maxSignalsPerTick: 100,
   pruneInterval: 10,
+  shutdownDrainTimeoutMs: 90_000, // 90 s drain deadline for the turn in flight
 };
 
 /**
@@ -171,8 +179,12 @@ export class CoreLoop {
   private readonly config: CoreLoopConfig;
 
   private running = false;
+  /** True while the loop is stopping: no new COGNITION turn may start */
+  private stopping = false;
   private tickCount = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** Promise for the in-flight tick (so stop() can wait for it to settle) */
+  private tickPromise: Promise<void> | null = null;
 
   private readonly channels = new Map<string, Channel>();
   private readonly pendingSignals: PendingSignal[] = [];
@@ -343,6 +355,7 @@ export class CoreLoop {
     }
 
     this.running = true;
+    this.stopping = false;
 
     // Start system health monitoring
     this.healthMonitor.start();
@@ -370,6 +383,7 @@ export class CoreLoop {
     }
 
     this.running = false;
+    this.stopping = true;
 
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
@@ -385,13 +399,98 @@ export class CoreLoop {
       this.typingSubscriptionId = null;
     }
 
+    // Wait for the in-flight tick so no signal handling races the drain below.
+    if (this.tickPromise) {
+      await this.tickPromise;
+    }
+
     // Drain in-flight scheduler tick so plugin callbacks complete
     // before storage/persistence teardown.
     if (this.schedulerTickPromise) {
       await this.schedulerTickPromise;
     }
 
+    // Wait for the COGNITION turn in flight, up to the drain deadline.
+    // Overruns requeue the turn's trigger signal; the container persists it
+    // together with the rest of takePendingSignals().
+    await this.drainPendingCognition();
+
     this.logger.info({ tickCount: this.tickCount }, 'Core loop stopped');
+  }
+
+  /**
+   * Empty the pending-signal queue and return it.
+   * Called by the container after stop() to persist what was accepted
+   * but never processed (see src/core/pending-signal-journal.ts).
+   */
+  takePendingSignals(): Signal[] {
+    return this.pendingSignals.splice(0).map((entry) => entry.signal);
+  }
+
+  /**
+   * Await the COGNITION turn in flight up to the configured deadline.
+   * - finished in time: its result intents are applied here (normally the
+   *   next tick does that, but ticks no longer run).
+   * - overran: the trigger signal is requeued for a single redo after the
+   *   next start; the abandoned turn's own result is dropped.
+   * - rejected: logged like the regular tick error path.
+   */
+  private async drainPendingCognition(): Promise<void> {
+    const pending = this.pendingCognition;
+    if (!pending) {
+      return;
+    }
+    // No tick will run again, so claim the turn now to prevent any start
+    // racing from a tick that is finishing.
+    this.pendingCognition = null;
+
+    const timeoutMs = this.config.shutdownDrainTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        pending.promise.then((result) => ({ kind: 'done', result }) as const),
+        new Promise<{ kind: 'drain_timeout' }>((resolve) => {
+          timer = setTimeout(() => {
+            resolve({ kind: 'drain_timeout' });
+          }, timeoutMs);
+        }),
+      ]);
+
+      if (outcome.kind === 'drain_timeout') {
+        withTraceContext(pending.traceContext, () => {
+          this.logger.warn(
+            { tickId: pending.tickId, timeoutMs },
+            'COGNITION turn in flight overran the stop drain deadline; its trigger signal is requeued'
+          );
+        });
+        if (pending.triggerSignal) {
+          this.pendingSignals.unshift({
+            signal: pending.triggerSignal,
+            timestamp: new Date(),
+          });
+        }
+        return;
+      }
+
+      withTraceContext(pending.traceContext, () => {
+        this.logger.info(
+          { tickId: pending.tickId, duration: Date.now() - pending.startedAt },
+          'COGNITION turn in flight completed during the stop drain'
+        );
+      });
+      this.applyIntents(outcome.result.intents, pending.traceContext);
+    } catch (error: unknown) {
+      withTraceContext(pending.traceContext, () => {
+        this.logger.error(
+          { error: error instanceof Error ? error.message : String(error), tickId: pending.tickId },
+          'COGNITION rejected unexpectedly during the stop drain'
+        );
+      });
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /**
@@ -469,7 +568,9 @@ export class CoreLoop {
     if (!this.running) return;
 
     this.tickTimeout = setTimeout(() => {
-      void this.tick();
+      // tick() never rejects: its body is a try/catch. Assigned so stop()
+      // can wait for the in-flight tick before draining COGNITION.
+      this.tickPromise = this.tick();
     }, this.config.tickInterval);
   }
 
@@ -587,7 +688,7 @@ export class CoreLoop {
       // These signals must wait for COGNITION to be free — otherwise they're consumed and lost
       const deferrableTypes = ['thought', 'message_reaction', 'user_message', 'motor_result'];
       const hasDeferrableSignals = allSignals.some((s) => deferrableTypes.includes(s.type));
-      const cognitionAvailable = !this.pendingCognition && activeLayers.cognition;
+      const cognitionAvailable = !this.pendingCognition && activeLayers.cognition && !this.stopping;
       if (!cognitionAvailable && hasDeferrableSignals) {
         const toDefer = allSignals.filter((s) => deferrableTypes.includes(s.type));
         const otherSignals = allSignals.filter((s) => !deferrableTypes.includes(s.type));
@@ -647,7 +748,8 @@ export class CoreLoop {
         }
       }
 
-      const shouldWakeCognition = aggregationResult?.wakeCognition && activeLayers.cognition;
+      const shouldWakeCognition =
+        aggregationResult?.wakeCognition && activeLayers.cognition && !this.stopping;
 
       // Start COGNITION if needed (capture trace context from trigger signal)
       if (shouldWakeCognition && aggregationResult && !this.pendingCognition) {

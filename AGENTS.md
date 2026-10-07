@@ -30,7 +30,9 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
 - `src/core/` — the heart: CoreLoop tick, Agent, energy model, scheduler,
   plugin loader and discovery, container (dependency wiring), event bus and
-  queue, intent application, metrics, tracing
+  queue, intent application, metrics, tracing, the shutdown-drain sequence and
+  the pending-signal journal (`pending-signal-journal.ts`), which persists
+  signals accepted but unprocessed at stop and restores them at start
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus
@@ -115,7 +117,7 @@ move the config file: startup reads `data/config/agent.json` before applying
   `src/llm/provider.ts`
 - `data/state/` — persisted state: JSON state files (written through
   DeferredStorage), conversations, `data/state/memory/` (vector store),
-  soul, graph; next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
+  soul, graph, the pending-signal journal (`core/pending_signals.json`) and its backup/corrupted siblings (written through DeferredStorage); next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
   `data/plugins/`. These logs and `data/state/` hold personal messages and
   tool content: do not paste them outside this machine, and back up
   `data/state/` before cleaning conversation history
