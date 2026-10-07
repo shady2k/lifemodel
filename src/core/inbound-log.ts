@@ -1,38 +1,29 @@
 /**
  * Durable inbound log (Kafka-like, in-process) - lifemodel-ctc.2.1.
  *
- * Every inbound user message is appended here at emit time and flushed at
- * once through the unified storage path (DeferredStorage -> JSONStorage,
- * AGENTS.md lesson 4). An entry only leaves the log when its answer is
- * DELIVERED: the consumer offset advances per recipient in commit(), and a
- * start replays every uncommitted entry in order as signals. A re-delivered
- * Telegram update_id is dropped instead of appended, so the same external
- * message never produces a second turn.
+ * The simple form the owner chose (decision, comment 54): every inbound user
+ * message is appended here at emit time and flushed at once through the
+ * unified storage path (DeferredStorage -> JSONStorage, AGENTS.md lesson 4).
+ * An entry is REMOVED when its turn reached a recorded OUTCOME - answered,
+ * deliberately silent (core.defer / explicit no-reply), failed send, failed
+ * turn (error disposition) - and NOTHING ELSE removes it: a failed outcome is
+ * never retried, it is reported at warn with the recipient and the reason,
+ * and only a message whose turn recorded no outcome at all (a crash mid-turn,
+ * a rejected turn, a turn overrunning the stop deadline) is replayed once at
+ * the next start. What a graceful restart guarantees is therefore strict (no
+ * message lost, none answered twice); a crash is best effort, with the
+ * windows named in docs/architecture.md.
  *
  * Offset decision (see the stage report): the offset is PER RECIPIENT, not
- * global. With a global offset one slow or failed send to chat A would hold
- * back chat B's commits; after a restart B's already-answered messages would
- * replay and be answered twice. Per-recipient offsets make a failure visible
- * only to the recipient whose answer was not delivered.
+ * global. With a global offset one unresolved entry for chat A would hold
+ * back chat B's reports; per-recipient offsets keep a turn's outcome visible
+ * to the recipient it answers.
  *
- * Commits are tied to cognition turns by CoreLoop: a turn owns the log
- * entries of the recipient it answers (its first trigger) and of the
- * messages it absorbed mid-loop for that recipient; CoreLoop commits them
- * when the turn settles and either
- * - the turn delivered an answer (a successful send), or
- * - the turn ended in a DELIBERATE no-reply: `core.defer` or an explicit
- *   no-reply/noAction decision of the agent (owner decision, comment 48).
- * An error, an empty or failed result, a rejected or overrunning turn and a
- * failed, hung, filtered or unstarted send never commit: the entry stays in
- * the log and is replayed once at the next start.
- *
- * Delivery is proven DURABLY, per entry (`deliveredAt`, review round 2
- * finding 10): written right after a send succeeded, so a crash between the
- * send and the commit cannot re-answer on the trust of an equal TEXT. An
- * equal text of an earlier answer is never proof that THIS entry was
- * answered. Evidence written by the SAME turn does not suppress its own
- * later sends (an acknowledgement through core.say, then the real answer);
- * evidence from another turn - a replay after a crash - does.
+ * Turns are tied to entries by CoreLoop: a turn owns the log entries of the
+ * recipient it answers (its first trigger) and of the messages it absorbed
+ * mid-loop for that recipient; bundled messages of OTHER recipients are not
+ * owned and are requeued for their own turn. CoreLoop removes the owned
+ * entries when the turn reached one of the outcomes above.
  *
  * The file is bounded by compaction: committed entries drop, and the dedup
  * index is the exact keys of the live entries plus a bounded ring of recent
@@ -98,21 +89,6 @@ export interface InboundLogEntry {
   routing: EntryRouting | null;
   /** The signal as the channel emitted it. */
   signal: Signal;
-  /**
-   * Durable DELIVERY evidence (review round 2, finding 10): the moment this
-   * entry's answer really reached the chat, written right after the send
-   * succeeded. Only this - never an equal TEXT of some earlier answer - may
-   * settle an entry without sending again.
-   */
-  deliveredAt?: string;
-  /**
-   * The turn whose send carried that answer. A LIVE turn that already sent
-   * once may still send again (an acknowledgement through core.say, then the
-   * real answer): evidence from the SAME turn is therefore not a reason to
-   * skip its later sends - only evidence from ANOTHER turn (a replay after a
-   * crash) is.
-   */
-  deliveredTurn?: string;
 }
 
 export interface ReplayEntry {
@@ -144,10 +120,6 @@ interface InboundLogEnvelope {
     routing: EntryRouting | null;
     /** Date-encoded signal (as it is stored in the file). */
     signal: Signal;
-    /** Durable delivery evidence (finding 10); absent until an answer landed. */
-    deliveredAt?: string;
-    /** The turn whose send delivered it (see InboundLogEntry.deliveredTurn). */
-    deliveredTurn?: string;
   }[];
 }
 
@@ -320,6 +292,8 @@ export class InboundLog {
         });
       }
     }
+    // Entries are rebuilt field by field: what this version does not know is
+    // dropped, never carried into the next save.
     this.envelope = {
       version: ENVELOPE_VERSION,
       savedAt: typeof decoded.savedAt === 'string' ? decoded.savedAt : new Date().toISOString(),
@@ -328,7 +302,13 @@ export class InboundLog {
         ? decoded.recentKeys.filter((k): k is string => typeof k === 'string')
         : [],
       recipients: decoded.recipients,
-      entries: decoded.entries,
+      entries: decoded.entries.map((entry) => ({
+        seq: entry.seq,
+        key: entry.key,
+        recipientId: entry.recipientId,
+        routing: entry.routing,
+        signal: entry.signal,
+      })),
     };
     this.indexEnvelope();
   }
@@ -514,78 +494,6 @@ export class InboundLog {
     return this.keyIndex.get(key);
   }
 
-  /**
-   * Durable delivery evidence for these entries (review round 2, finding
-   * 10): every one of them is on record as DELIVERED, so their answer really
-   * reached the chat and must not be sent again. An equal TEXT is not
-   * evidence - an unrelated earlier answer may read the same.
-   */
-  hasDeliveryEvidence(seqs: number[], turnKey?: string): boolean {
-    if (seqs.length === 0) return false;
-    for (const seq of seqs) {
-      const idx = this.seqIndex.get(seq);
-      const entry = idx === undefined ? undefined : this.envelope.entries[idx];
-      if (!entry?.deliveredAt) {
-        return false;
-      }
-      // Evidence written by THIS turn says nothing about a later send of the
-      // same turn: an acknowledgement followed by the answer is not a repeat.
-      if (turnKey !== undefined && entry.deliveredTurn === turnKey) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Record durably that the answer of these entries was DELIVERED. Called
-   * right after a send succeeded, before the turn's commit - the window
-   * between the two is exactly the one a crash re-opened as "identical text"
-   * (finding 10).
-   *
-   * A failure is reported as `false`, never thrown: the send already
-   * happened, and a throw would be misread as a failed delivery. The marker
-   * itself is NOT rolled back on a failed flush - unlike an append, the
-   * in-memory and cached state stay truthful (the answer did land); only the
-   * file lags, and the storage keeps the write dirty for the next flush.
-   * The consequence of a lost marker is a restart that answers again instead
-   * of trusting text equality.
-   */
-  markDelivered(seqs: number[], turnKey?: string): Promise<boolean> {
-    return this.enqueue(() => this.markDeliveredNow(seqs, turnKey));
-  }
-
-  private async markDeliveredNow(seqs: number[], turnKey?: string): Promise<boolean> {
-    const marked: number[] = [];
-    const at = new Date().toISOString();
-    for (const seq of seqs) {
-      const idx = this.seqIndex.get(seq);
-      const entry = idx !== undefined ? this.envelope.entries[idx] : undefined;
-      if (entry === undefined || entry.deliveredAt !== undefined) continue;
-      entry.deliveredAt = at;
-      if (turnKey !== undefined) entry.deliveredTurn = turnKey;
-      marked.push(seq);
-    }
-    if (marked.length === 0) {
-      return false;
-    }
-    try {
-      await this.persistDurably();
-    } catch (error) {
-      this.logger.error(
-        {
-          seqs: marked,
-          path: this.path,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'Delivery evidence could not be written to the durable inbound log'
-      );
-      return false;
-    }
-    this.logger.debug({ seqs: marked, at }, 'Inbound log: answers recorded as delivered');
-    return true;
-  }
-
   /** Whether the entry behind this seq is committed for its recipient. */
   isCommitted(seq: number): boolean {
     const idx = this.seqIndex.get(seq);
@@ -623,9 +531,10 @@ export class InboundLog {
   }
 
   /**
-   * Commit entries by seq (idempotent). Advances each touched recipient's
-   * offset, flushes at once, and compacts committed entries away when the
-   * file grows past the bound.
+   * Commit entries by seq (idempotent): their turn reached an outcome, so
+   * they leave the log. Advances each touched recipient's offset, flushes at
+   * once, and compacts committed entries away when the file grows past the
+   * bound.
    */
   async commit(seqs: number[]): Promise<void> {
     return this.enqueue(() => this.commitNow(seqs));

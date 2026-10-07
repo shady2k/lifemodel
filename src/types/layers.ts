@@ -71,16 +71,18 @@ export interface AggregationResult {
  */
 /**
  * How a cognition turn ended, for the durable inbound log (lifemodel-ctc.2.1,
- * owner decision on review round 2 finding 4): only a DELIBERATE no-reply
- * disposition may settle a turn's log entries without a delivered send.
+ * owner decision comment 54): the turn's OUTCOME decides whether its messages
+ * leave the log, and a failed outcome is reported, never retried.
  *
- * - `answer`: the turn produced its answer (delivered, or suppressed as an
- *   already-delivered duplicate).
+ * - `answer`: the turn produced its answer. The messages leave the log once
+ *   the send settled, whether it reached the chat or failed.
  * - `no_reply`: the agent deliberately decided not to answer (`core.defer` or
- *   an explicit no-reply decision). Counts as handled.
- * - `error`: the turn failed (provider error, malformed output, exhausted
- *   retries, forced refusal). Never counts as handled - the message must be
- *   answered after a restart.
+ *   an explicit no-reply decision). Counts as handled: the messages leave the
+ *   log without an answer.
+ * - `defer`: same, the agent chose to speak later.
+ * - `error`: the turn FAILED (provider error, malformed output, exhausted
+ *   retries, forced refusal): a failed outcome. The messages leave the log
+ *   with a warning - they are not answered after a restart.
  */
 export type TurnDisposition = 'answer' | 'no_reply' | 'defer' | 'error';
 
@@ -98,9 +100,10 @@ export interface CognitionResult {
   usedSmartRetry?: boolean;
 
   /**
-   * How the turn ended (see {@link TurnDisposition}). ABSENT or `answer`
-   * means the log waits for a delivered send: a turn that produced no send
-   * and no explicit disposition never settles its entries.
+   * How the turn ended (see {@link TurnDisposition}). ABSENT means the turn
+   * never said; such a turn settles its messages only through a send it
+   * produced, and a turn that produced no send at all records no outcome, so
+   * its messages stay in the log for one replay.
    */
   disposition?: TurnDisposition;
 }

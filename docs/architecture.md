@@ -120,32 +120,37 @@ callback:
    (more than 1000 later admissions, or a compaction) is no longer recognised
    and a redelivery of it can be accepted again. That is deliberate: Telegram
    re-delivers only unconfirmed updates and keeps them for at most 24 h, and a
-   personal agent does not receive 1000 messages in 24 h. What guarantees that
-   an ACCEPTED message is answered once is the per-recipient offset, not the
-   ring. No unbounded dedup is promised.
-2. The consumer offset is PER RECIPIENT. A cognition turn owns ONLY the
-   entries of the recipient it answers (its first trigger - real cognition
-   routes everything through `triggerSignals[0]`) plus the messages it
-   absorbed mid-loop for that recipient; bundled user messages of OTHER
-   recipients are requeued at the wake for their own turns and can never be
-   committed by this one. Its entries commit when the turn settles and either
-   an answer of that turn to that recipient was DELIVERED (send success; a
-   send that cannot start - no registry, route or channel - is a FAILED
-   delivery), or the turn ended in a DELIBERATE no-reply: `core.defer` or an
-   explicit no-reply/noAction decision of the agent (owner decision, comment
-   48; this is what stops a deliberate silence from replaying forever). An
-   error, an empty or failed result, a rejecting or overrunning turn, and a
-   failed, hung, filtered or unstarted send never commit - and a turn that
-   never said how it ended leaves its entries for replay.
+   personal agent does not receive 1000 messages in 24 h. What keeps an
+   ACCEPTED message from being replayed (and so answered twice) is the
+   per-recipient offset, not the ring. No unbounded dedup is promised.
+2. The outcome rule (owner decision, comment 54). The consumer offset is PER
+   RECIPIENT. A cognition turn owns ONLY the entries of the recipient it
+   answers (its first trigger - real cognition routes everything through
+   `triggerSignals[0]`) plus the messages it absorbed mid-loop for that
+   recipient; bundled user messages of OTHER recipients are requeued at the
+   wake for their own turns and are never removed by this one. An entry
+   LEAVES the log when its turn reached a recorded OUTCOME:
 
-   Delivery is proven per entry and durably: a successful send writes
-   `deliveredAt` into the log entry before the commit decides, so a crash
-   between the send and the commit does not re-answer on the trust of an
-   equal TEXT - an equal text of an earlier answer is never proof that THIS
-   entry was answered (review round 2, finding 10). A replayed turn whose
-   entries already carry that evidence from ANOTHER turn does not send again
-   and counts as delivered; evidence written by the same turn does not
-   suppress its own later sends (an acknowledgement, then the answer).
+   - answered: the turn produced its answer and its send settled - delivered,
+     skipped as a verbatim repeat of the last assistant message, or FAILED;
+   - deliberately silent: `core.defer` or an explicit no-reply/noAction
+     decision of the agent;
+   - failed send: the send never reached the chat (no registry, route or
+     channel, a refusal, an exception);
+   - failed turn: an `error` disposition (provider error, malformed output,
+     exhausted retries, forced refusal).
+
+   A FAILED outcome is never retried: it is logged at warn with the recipient
+   and the reason and the message is gone. That is the owner's proportionality
+   decision: only what breaks a graceful restart or is likely in real use had
+   to be exact. Everything else REPLAYS once at the next start: a crash
+   mid-turn, a rejected turn, a turn that overran the stop deadline, a send
+   that never settled, and a turn that resolved with no send and no
+   disposition (it recorded no outcome). There is NO durable delivery
+   evidence and no per-entry send identity in the log - and therefore no
+   suppression of a send that the log would otherwise prove answered: the
+   OUTCOME is what the turn recorded, nothing per send is kept.
+
 3. Photos are received as durable receipts BEFORE the download starts
    (pendingPhoto). The completed photo message replaces the receipt entry in
    place (still one per update) and is queued; a crash mid-download replays
@@ -166,15 +171,33 @@ callback:
 A corrupt or unreadable log file fails startup loudly with its path and the
 original error as `cause`.
 
-Honest remaining windows:
+#### The two guarantees (owner decision, comment 54)
 
-- An answer DELIVERED whose commit is not yet on disk (crash between send
-  success and the commit flush, or a turn overrunning the stop deadline that
-  still delivers late) may be answered TWICE after restart: once by the late
-  delivery, once by the replay. At-most-once delivery is not claimed.
-- A disk failure at the emit-time flush loses the message (the signal is
-  then not queued either); the emit error surfaces through the channel's
+- **Graceful restart - strict.** When the shutdown sequence above completes,
+  no turn and no message is lost, and none is answered twice. The stop drains
+  the turn in flight, delivers (or reports) the sends it scheduled, and
+  flushes storage last: an entry removed by a recorded outcome cannot replay,
+  an entry without one replays exactly once at the next start.
+- **Crash (kill -9, OOM, a broken generation) - best effort.** Every message
+  whose turn recorded no outcome replays once at the next start. A message
+  whose turn recorded an outcome can still be LOST if that outcome was a
+  failed send or a failed turn: by decision it is not retried, it is warned.
+
+#### Known crash windows (best effort; filed as one debt item, not fixed here)
+
+- **Between receipt and the emit-time flush:** the update is lost and the
+  signal is not queued either; the emit error surfaces through the channel's
   error handler.
+- **An answer delivered while the removal is not yet on disk:** the message is
+  answered TWICE after the restart - once by the delivery that did happen,
+  once by the replay. The same window covers every outcome recorded only in
+  memory when the crash hits (deliberate silence, failed send, failed turn).
+- **A send in flight at the crash:** it is not a recorded outcome, so the
+  message replays once; the user may receive the late send AND the replayed
+  answer.
+- **A failed outcome is not retried:** a failed send and a failed turn remove
+  the message for good (warned). This is the owner's decision, not an
+  accident of the window above.
 - An overrunning turn is abandoned, not aborted: a late SEND intent from it
   is dropped with a warning (fenced), and its in-loop tool writes land in the
   deferred cache and are lost at exit. An abort for the turn in flight lands

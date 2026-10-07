@@ -35,8 +35,10 @@ tick), Energy & state are physiology. Start with `README.md` and
   awaited, channels released after, storage flushed last) and the
   pending-signal journal (`pending-signal-journal.ts`) and the durable
   inbound log (`inbound-log.ts`), which persists inbound user messages on
-  receipt, commits their offsets when answers are delivered, replays
-  uncommitted entries at start and dedups by Telegram update_id
+  receipt, removes an entry once its turn reached a recorded outcome
+  (answered, deliberately silent, failed send, failed turn - a failed outcome
+  is never retried), replays the entries whose turn recorded none at start
+  and dedups by Telegram update_id
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus
@@ -195,6 +197,33 @@ Common issues:
   Motor Cortex containers; stale ones are pruned on restart (older than 5
   minutes). Docker is required for agentic runs — without it they fail with
   "Docker required for Motor Cortex isolation".
+
+## Restart guarantees
+
+A restart is never allowed to lose a turn or to answer a message twice by
+accident. The durable inbound log (`src/core/inbound-log.ts`) is the boundary
+that makes the distinction, and it is deliberately simple: the entry is
+written and flushed on receipt, and it LEAVES the log when its turn recorded
+an OUTCOME - answered, deliberately silent (`core.defer` / explicit
+no-reply), failed send, failed turn (`error` disposition). A failed outcome
+is reported at warn with the recipient and the reason and is NEVER retried.
+Only a message whose turn recorded no outcome is replayed, once, at the next
+start.
+
+- **Graceful restart (SIGINT/SIGTERM) - strict.** The shutdown sequence
+  completes: intake stops, the turn in flight is drained, the sends it
+  scheduled are delivered or reported, storage flushes last. No message and
+  no turn is lost, and none is answered twice.
+- **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
+  turn recorded no outcome replay once at start.
+
+Known crash windows (named, not fixed; one debt item): an update lost between
+receipt and the emit-time flush; an answer delivered while its removal is not
+yet on disk (or any outcome recorded only in memory at the crash) - the
+message may be answered twice; a send in flight at the crash - the message
+replays once and the user may get the late send and the replay; a failed send
+or failed turn removes the message for good by decision. `docs/architecture.md`
+carries the same list in context.
 
 ## Design Principles
 

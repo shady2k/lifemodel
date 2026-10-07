@@ -66,7 +66,7 @@ import { runSleepMaintenance } from '../layers/cognition/soul/sleep-maintenance.
 import { setPrimaryRecipientId } from './globals.js';
 import { StatusUpdateService } from './status-update-service.js';
 import { DomainTrackerService } from './domain-trackers.js';
-import { IntentApplicator } from './intent-applicator.js';
+import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
@@ -146,9 +146,10 @@ export interface CoreLoopDeps {
   pluginManager?: { listStatuses(): PluginStatus[] } | undefined;
   /**
    * Durable inbound log (lifemodel-ctc.2.1): inbound user messages are
-   * appended here at emit time and flushed at once; their entries commit
-   * per recipient when the turn's answer is delivered. Optional - without
-   * it inbound user messages behave as before (no durability).
+   * appended here at emit time and flushed at once; an entry is removed once
+   * its turn reached a recorded outcome (owner decision, comment 54).
+   * Optional - without it inbound user messages behave as before (no
+   * durability).
    */
   inboundLog?: InboundLog | undefined;
 }
@@ -189,6 +190,15 @@ interface PendingCognition {
 }
 
 /**
+ * The outcome a cognition turn recorded for its durable inbound log entries
+ * (owner decision, comment 54). The entry LEAVES the log on any of them, and
+ * a failed outcome is never retried; only a turn with NO recorded outcome -
+ * a crash mid-turn, a rejected turn, a turn overrunning the stop deadline -
+ * leaves its entries for a single replay at the next start.
+ */
+type TurnLogOutcome = 'answered' | 'deliberate_no_reply' | 'failed_send' | 'failed_turn';
+
+/**
  * Commit bookkeeping for one cognition turn (the durable inbound log).
  */
 interface PendingTurnCommits {
@@ -196,17 +206,27 @@ interface PendingTurnCommits {
   tickId: string;
   /** The turn this bookkeeping belongs to (it owns the inbound log entries). */
   turn: PendingCognition;
-  /** True once the turn settled with a result (sends still settle after). */
+  /** True once the turn settled with a result (its sends still settle after). */
   resolved: boolean;
-  /** Per recipient: sends in flight for the turn, how many were delivered, any failure, decided flag. */
-  sends: Map<string, { pending: number; failed: boolean; decided: boolean; delivered: number }>;
   /**
-   * How the turn ended (owner decision on review round 2, finding 4): only a
-   * delivered answer or a DELIBERATE no-reply (`no_reply`/`defer`) may settle
-   * the turn's log entries. Undefined means the turn never said - treated as
-   * non-deliberate, so nothing settles without a delivered send.
+   * SEND_MESSAGE intents the turn applies to the recipient it answers - the
+   * one thing the outcome waits for. This is NOT delivery evidence: it is
+   * counted off the turn's own result, carries no per-entry identity, and
+   * only orders the decision after the sends.
+   */
+  sendsOutstanding: number;
+  /** At least one of those sends reached the chat. */
+  answerDelivered: boolean;
+  /** Why a send that did not reach the chat failed (the warn names it). */
+  sendFailureReason?: string | undefined;
+  /**
+   * How the turn ended (see {@link TurnDisposition}): `error` is a failed
+   * turn, `no_reply`/`defer` a deliberate silence. Undefined means the turn
+   * never said how it ended.
    */
   disposition?: TurnDisposition | undefined;
+  /** Its entries were settled (guards a second commit from a later send). */
+  settled: boolean;
 }
 
 /**
@@ -276,6 +296,14 @@ export class CoreLoop {
 
   /** Durable inbound log (see CoreLoopDeps.inboundLog). */
   private readonly inboundLog: InboundLog | undefined;
+
+  /**
+   * Set by haltForTest(): this object emulates a process that was killed. A
+   * killed instance applies and settles NOTHING more, so work already in
+   * flight cannot write into the data or log directories behind a restart
+   * under test.
+   */
+  private deadForTest = false;
 
   /** Scheduler service for plugin timers */
   private schedulerService: SchedulerService | null = null;
@@ -420,34 +448,8 @@ export class CoreLoop {
         if (tickId && this.turnCommits.has(tickId)) return tickId;
         return this.activeTurnCommits?.tickId ?? this.pendingCognition?.tickId;
       },
-      onSendTracked: (turnKey, recipientId) => {
-        const state = this.turnCommits.get(turnKey);
-        if (!state) return;
-        if (recipientId !== this.answeredRecipientOf(state)) return;
-        const entry = state.sends.get(recipientId) ?? {
-          pending: 0,
-          failed: false,
-          decided: false,
-          delivered: 0,
-        };
-        entry.pending += 1;
-        state.sends.set(recipientId, entry);
-      },
-      resolveSendEntryIdentity: (turnKey, recipientId) => {
-        const turn = turnKey
-          ? this.turnCommits.get(turnKey)?.turn
-          : (this.activeTurnCommits ?? this.turnCommits.get(this.pendingCognition?.tickId ?? ''))
-              ?.turn;
-        if (!this.inboundLog || !turn) {
-          return { seqs: [], delivered: false };
-        }
-        const seqs = this.ownedSeqs(turn, recipientId);
-        // Evidence from ANOTHER turn only: the live turn may send more than
-        // once (an acknowledgement, then the answer).
-        return { seqs, delivered: this.inboundLog.hasDeliveryEvidence(seqs, turnKey) };
-      },
-      onSendOutcome: (turnKey, recipientId, delivered) => {
-        return this.onTurnSendOutcome(turnKey, recipientId, delivered);
+      onSendSettled: (turnKey, recipientId, outcome) => {
+        return this.onTurnSendSettled(turnKey, recipientId, outcome);
       },
     });
   }
@@ -469,6 +471,10 @@ export class CoreLoop {
    * by the next start, which completes (or re-fetches) the download (review
    * round 2, finding 7). A failed durable append throws - the update is not
    * acknowledged as handled (finding 8).
+   *
+   * The entry stays in the log until its turn records an OUTCOME (answered,
+   * deliberately silent, failed send, failed turn) - see settleTurn(). A
+   * crash before that replays it once at the next start.
    */
   async pushInboundSignal(signal: Signal): Promise<void> {
     if (!this.inboundLog || signal.type !== 'user_message') {
@@ -537,110 +543,118 @@ export class CoreLoop {
   }
 
   /**
-   * A send of the turn settled. When it was the turn's last open send for the
-   * recipient and the turn has resolved, decide the recipient's commit now;
-   * the promise is chained into the send chain so the stop drain awaits the
+   * The outcome a resolved turn recorded for its entries, or undefined while
+   * it has none (owner decision, comment 54). A send still in flight means the
+   * outcome does not exist yet: nothing is settled on a guess.
+   */
+  private turnOutcome(state: PendingTurnCommits): TurnLogOutcome | undefined {
+    if (state.disposition === 'error') return 'failed_turn';
+    if (state.answerDelivered) return 'answered';
+    if (state.sendFailureReason !== undefined) return 'failed_send';
+    if (state.disposition === 'no_reply' || state.disposition === 'defer') {
+      return 'deliberate_no_reply';
+    }
+    return undefined;
+  }
+
+  /**
+   * A send of the turn settled (see IntentApplicatorDeps.onSendSettled). The
+   * turn's entries leave the log once the turn has a recorded outcome; a
+   * failed send is part of that outcome and is never retried. The returned
+   * promise is chained into the send chain, so the stop drain awaits the
    * commit's flush too.
    */
-  private async onTurnSendOutcome(
+  private async onTurnSendSettled(
     turnKey: string,
     recipientId: string,
-    delivered: boolean
+    outcome: SendOutcome
   ): Promise<void> {
     const state = this.turnCommits.get(turnKey);
     if (!state) {
-      // The turn was evicted (rejected/overrun): its entries stay
-      // uncommitted and the next start replays them once.
+      // The turn is gone (evicted, or already settled): a later send of it
+      // settles nothing.
       return;
     }
-    const entry = state.sends.get(recipientId);
-    if (!entry) {
-      this.logger.warn(
-        { turnKey, recipientId },
-        'Send outcome for a recipient the turn did not track; ignored'
-      );
+    if (recipientId !== this.answeredRecipientOf(state)) {
+      // Only the recipient a turn answers owns entries (finding 2); a send to
+      // anybody else was never served by this turn's messages.
       return;
     }
-    entry.pending = Math.max(0, entry.pending - 1);
-    if (delivered) {
-      entry.delivered += 1;
+    state.sendsOutstanding = Math.max(0, state.sendsOutstanding - 1);
+    if (outcome.delivered) {
+      state.answerDelivered = true;
     } else {
-      entry.failed = true;
+      state.sendFailureReason ??= outcome.reason ?? 'unknown';
     }
-    if (delivered && this.inboundLog) {
-      // Durable delivery evidence, written BEFORE the commit decides
-      // (finding 10): the answer really reached the chat, so a crash in the
-      // window until the commit must not re-answer it on trust of text.
-      const seqs = this.ownedSeqs(state.turn, recipientId);
-      if (seqs.length > 0) {
-        await this.inboundLog.markDelivered(seqs, turnKey);
-      }
-    }
-    if (state.resolved && entry.pending === 0 && !entry.decided) {
-      await this.commitTurnRecipient(state, recipientId);
-    }
+    await this.settleTurn(state);
   }
 
-  /** Commit (or record as failed) a resolved turn's log entries for one recipient. */
-  private async commitTurnRecipient(state: PendingTurnCommits, recipientId: string): Promise<void> {
-    const entry = state.sends.get(recipientId);
-    if (entry) {
-      entry.decided = true;
-    }
-    // Only the answered recipient (finding 2): anything else was never
-    // served by this turn and stays queued/uncommitted for its own turn.
-    if (this.answeredRecipientOf(state) !== recipientId) {
-      return;
-    }
-    const seqs = this.ownedSeqs(state.turn, recipientId);
-    if (seqs.length === 0) {
-      return;
-    }
-    if (entry?.failed) {
-      // The answer was not delivered: the entries stay uncommitted so the
-      // next start replays them - the message is answered after restart
-      // exactly once, never silently dropped (review findings E/3: a send
-      // that could not start is a FAILED delivery, not a no-send).
+  /**
+   * Settle a turn that reached an outcome: its entries are REMOVED from the
+   * durable log, so it is never replayed. A failed outcome - a failed turn
+   * (error disposition) or a send that did not reach the chat - is never
+   * retried; it is reported at warn with the recipient and the reason (owner
+   * decision, comment 54). A resolved turn with NO outcome leaves its entries
+   * in the log for a single replay at the next start.
+   */
+  private async settleTurn(state: PendingTurnCommits): Promise<void> {
+    if (state.settled || this.deadForTest) return;
+    // Nothing is decided on a guess: the outcome exists only once the turn has
+    // resolved and its sends have settled.
+    if (!state.resolved || state.sendsOutstanding > 0) return;
+    state.settled = true;
+    const recipientId = this.answeredRecipientOf(state);
+    const seqs = recipientId === undefined ? [] : this.ownedSeqs(state.turn, recipientId);
+    const outcome = this.turnOutcome(state);
+    this.dropTurnCommit(state);
+    if (recipientId === undefined || seqs.length === 0) return;
+    if (outcome === undefined) {
       this.logger.warn(
-        { recipientId, entries: seqs.length },
-        'Turn settled but its answer was not delivered; inbound log entries stay uncommitted for replay'
+        { recipientId, entries: seqs.length, disposition: state.disposition ?? 'none' },
+        'Turn reached no outcome (no answer sent, no deliberate silence); its inbound messages stay in the log and replay once after a restart'
       );
       return;
     }
-    // Owner decision (review round 2, finding 4): a turn settles its entries
-    // ONLY with a delivered answer or with a DELIBERATE no-reply (core.defer,
-    // an explicit noAction). An error, a rejected turn, a failed send or a
-    // turn that never said how it ended leaves the entries for replay.
-    const disposition = state.disposition;
-    const deliberateNoReply = disposition === 'no_reply' || disposition === 'defer';
-    const delivered = entry?.delivered ?? 0;
-    if (delivered === 0 && !deliberateNoReply) {
+    if (outcome === 'failed_turn' || outcome === 'failed_send') {
       this.logger.warn(
-        { recipientId, entries: seqs.length, disposition: disposition ?? 'unknown' },
-        'Turn settled without a delivered answer and without a deliberate no-reply; inbound log entries stay uncommitted for replay'
+        {
+          recipientId,
+          entries: seqs.length,
+          outcome,
+          reason: state.sendFailureReason ?? null,
+          disposition: state.disposition ?? null,
+        },
+        'Inbound messages settled by a FAILED outcome; they are not retried'
       );
-      return;
+    } else {
+      this.logger.info(
+        { recipientId, entries: seqs.length, outcome },
+        "Inbound messages settled by the turn's outcome"
+      );
     }
     if (this.inboundLog) {
       await this.inboundLog.commit(seqs);
-      this.logger.info(
-        { recipientId, entries: seqs.length, delivered, disposition: disposition ?? 'unknown' },
-        'Inbound log entries committed (answer delivered or deliberate no-reply)'
-      );
+    }
+  }
+
+  /** The turn is over: its bookkeeping goes (a settled/undecided turn waits on nothing). */
+  private dropTurnCommit(state: PendingTurnCommits): void {
+    this.turnCommits.delete(state.tickId);
+    if (this.activeTurnCommits?.tickId === state.tickId) {
+      this.activeTurnCommits = null;
     }
   }
 
   /** Turn-production-time hook: only the ANSWERED recipient is owned (finding 2). */
   private registerTurnCommit(tickId: string, turn: PendingCognition): void {
-    const sends = new Map<
-      string,
-      { pending: number; failed: boolean; decided: boolean; delivered: number }
-    >();
-    const state: PendingTurnCommits = { tickId, turn, resolved: false, sends };
-    const answered = this.answeredRecipientOf(state);
-    if (answered !== undefined) {
-      state.sends.set(answered, { pending: 0, failed: false, decided: false, delivered: 0 });
-    }
+    const state: PendingTurnCommits = {
+      tickId,
+      turn,
+      resolved: false,
+      sendsOutstanding: 0,
+      answerDelivered: false,
+      settled: false,
+    };
     this.turnCommits.set(tickId, state);
     this.activeTurnCommits = state;
     this.requeueUnownedTriggers(state);
@@ -671,42 +685,40 @@ export class CoreLoop {
     }
   }
 
-  /** Turn resolved with a result: its recipients commit (send outcome permitting). */
-  private resolveTurnCommit(tickId: string, disposition?: TurnDisposition): void {
+  /**
+   * Turn resolved with a result: its disposition is recorded and the sends it
+   * will apply are counted, so the outcome is decided once they settle.
+   */
+  private resolveTurnCommit(
+    tickId: string,
+    disposition: TurnDisposition | undefined,
+    intents: Intent[]
+  ): void {
     const state = this.turnCommits.get(tickId);
-    if (state) {
-      state.resolved = true;
-      state.disposition = disposition;
-      // The turn's loop is finished: no more mid-loop absorption can land.
-      if (this.activeTurnCommits?.tickId === tickId) {
-        this.activeTurnCommits = null;
-      }
+    if (!state) return;
+    state.resolved = true;
+    state.disposition = disposition;
+    const answered = this.answeredRecipientOf(state);
+    if (answered !== undefined) {
+      state.sendsOutstanding = intents.filter(
+        (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
+      ).length;
+    }
+    // The turn's loop is finished: no more mid-loop absorption can land.
+    if (this.activeTurnCommits?.tickId === tickId) {
+      this.activeTurnCommits = null;
     }
   }
 
   /**
-   * After a resolved turn's intents were applied, commit everything that is
-   * already decidable; sends still in flight leave their recipients to the
-   * onSendOutcome callback. Called with await so the flushes settle before
-   * the stop goes on (bounded by the send chains inside).
+   * Settle every turn whose outcome is recorded. Called after a resolved
+   * turn's intents were applied (which starts its sends) and again from a
+   * send that settled; awaited so the commit's flush lands before the stop
+   * goes on.
    */
   private async evaluateTurnCommits(): Promise<void> {
-    for (const [key, state] of [...this.turnCommits.entries()]) {
-      if (!state.resolved) continue;
-      const answered = this.answeredRecipientOf(state);
-      if (answered !== undefined) {
-        const entry = state.sends.get(answered);
-        if (!entry || (entry.pending === 0 && !entry.decided)) {
-          await this.commitTurnRecipient(state, answered);
-        }
-      }
-      const sendEntries = [...state.sends.entries()];
-      if (sendEntries.length === 0 || sendEntries.every(([, e]) => e.decided)) {
-        this.turnCommits.delete(key);
-        if (this.activeTurnCommits?.tickId === key) {
-          this.activeTurnCommits = null;
-        }
-      }
+    for (const state of [...this.turnCommits.values()]) {
+      await this.settleTurn(state);
     }
   }
 
@@ -861,14 +873,17 @@ export class CoreLoop {
 
   /**
    * TEST-ONLY: emulate a kill -9 on a loop under test. The timer and the
-   * health monitor stop and the loop is no longer running, but NOTHING is
-   * drained, applied or committed - the instance is as dead as a killed
-   * process. A crashed instance must not keep ticking behind the restart
-   * under test: one leaked 5ms timer per killed instance made the photo
-   * restart test load-dependent (review round 2, item 10).
+   * health monitor stop, the loop is no longer running, work already in
+   * flight is fenced (late intents are dropped, nothing settles), and
+   * NOTHING is drained, applied or committed - the instance is as dead as a
+   * killed process. A crashed instance must not keep ticking or writing
+   * behind the restart under test: one leaked 5ms timer per killed instance
+   * made the photo restart test load-dependent (review round 2, item 10).
    */
   haltForTest(): void {
     this.running = false;
+    this.deadForTest = true;
+    this.lateEffectsFenced = true;
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
       this.tickTimeout = null;
@@ -878,6 +893,28 @@ export class CoreLoop {
       this.eventBus.unsubscribe(this.typingSubscriptionId);
       this.typingSubscriptionId = null;
     }
+  }
+
+  /**
+   * TEST-ONLY: join the work a killed instance still had in flight (the tick
+   * and the scheduler callback it had taken), so that after this resolves the
+   * instance can write nothing more. Fences first (haltForTest), so the
+   * joined work cannot apply intents or settle log entries on its way out.
+   */
+  async fenceForTest(deadlineMs = 1_000): Promise<void> {
+    this.haltForTest();
+    const deadline = Date.now() + deadlineMs;
+    await awaitWithinDeadline(
+      Promise.all([
+        this.tickPromise,
+        this.schedulerTickPromise ?? Promise.resolve(),
+        this.stallForTest.tickGate ?? Promise.resolve(),
+        this.stallForTest.schedulerGate ?? Promise.resolve(),
+      ]).then(() => undefined),
+      deadline,
+      this.logger,
+      'fenced test instance work'
+    );
   }
 
   takePendingSignals(): Signal[] {
@@ -960,7 +997,7 @@ export class CoreLoop {
           'COGNITION turn in flight completed during the stop drain'
         );
       });
-      this.resolveTurnCommit(pending.tickId, outcome.result.disposition);
+      this.resolveTurnCommit(pending.tickId, outcome.result.disposition, outcome.result.intents);
       this.applyIntents(outcome.result.intents, pending.traceContext);
       // Commit what is decidable now; sends still in flight turn the rest
       // through their outcome callbacks (each flush is chained onto its
@@ -1415,8 +1452,8 @@ export class CoreLoop {
 
         // Apply all intents (per-intent context handled inside)
         this.applyIntents(allIntents, tickCtx);
-        // Commit the durable inbound log entries of a turn that resolved in
-        // this tick (answer delivered or nothing to send).
+        // Settle the durable inbound log entries of a turn that reached its
+        // outcome in this tick (its sends settle after, through the applicator).
         await this.evaluateTurnCommits();
 
         // Periodic maintenance
@@ -1815,8 +1852,8 @@ export class CoreLoop {
         if (this.pendingCognition?.tickId === context.tickId) {
           this.pendingCognition = null;
         }
-        // A rejected turn's entries stay uncommitted: the durable log
-        // replays them once at the next start (review finding G).
+        // A rejected turn recorded no outcome: its entries stay in the log
+        // and replay once at the next start (review finding G).
         this.evictTurnCommit(context.tickId);
       });
   }
@@ -1864,7 +1901,7 @@ export class CoreLoop {
         return null;
       }
 
-      this.resolveTurnCommit(pending.tickId, result.disposition);
+      this.resolveTurnCommit(pending.tickId, result.disposition, result.intents);
       this.pendingCognition = null;
       return result;
     } catch (error) {
