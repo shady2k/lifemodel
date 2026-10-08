@@ -90,8 +90,9 @@
 			}
 		}
 
-		# vault.<host>: Agent Vault's own interface (stage 2; until it exists
-		# this host answers that nothing is there yet).
+		# vault.<host>: Agent Vault's own interface, at the ROOT of its host
+		# (its UI uses absolute /v1 paths, so it cannot sit under a subpath).
+		# The loader starts it and the loader's own session opens it.
 		handle @vault {
 			import loader_check
 			reverse_proxy 127.0.0.1:14321

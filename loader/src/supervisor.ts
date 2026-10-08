@@ -76,6 +76,13 @@ export interface SupervisorDeps {
   config: LoaderConfig;
   /** The root-only panic flag on the volume. */
   isPanicSet: () => Promise<boolean>;
+  /**
+   * What lifemodel's process gets for Agent Vault's proxy - its agent token
+   * and the broker's address, and nothing else (Agent Vault owns them). Empty
+   * while the vault is not up. This is the ONLY part of the trusted layer that
+   * reaches lifemodel's process.
+   */
+  proxyEnvironment?: () => NodeJS.ProcessEnv;
 }
 
 export interface Supervisor {
@@ -88,8 +95,8 @@ export interface Supervisor {
 }
 
 /** The environment lifemodel runs in: its data on the volume, a home it may write. */
-function childEnvironment(config: LoaderConfig): NodeJS.ProcessEnv {
-  return { ...process.env, DATA_PATH: config.dataDir, HOME: config.dataDir };
+function childEnvironment(config: LoaderConfig, proxy: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...process.env, DATA_PATH: config.dataDir, HOME: config.dataDir, ...proxy };
 }
 
 interface ExitSignal {
@@ -107,6 +114,7 @@ function exitSignal(): ExitSignal {
 
 export function createSupervisor(deps: SupervisorDeps): Supervisor {
   const { launcher, logger, clock, config, isPanicSet } = deps;
+  const proxyEnvironment = deps.proxyEnvironment ?? ((): NodeJS.ProcessEnv => ({}));
 
   let state: LifemodelProcessState = 'stopped';
   let child: SpawnedProcess | null = null;
@@ -133,7 +141,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   function spawnOptions(): SpawnOptions {
     const options: SpawnOptions = {
       cwd: config.volumeRoot,
-      env: childEnvironment(config),
+      env: childEnvironment(config, proxyEnvironment()),
     };
     if (config.privileged) {
       options.uid = config.lifemodel.uid;

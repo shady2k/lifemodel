@@ -12,6 +12,8 @@
  * the container's main process.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
@@ -58,6 +60,54 @@ trap 'exit 0' TERM
 while true; do sleep 0.1; done
 `;
 
+/**
+ * The stand-in for Agent Vault. Its server answers the loader's readiness
+ * probe and leaves on SIGTERM, and its CLI answers what the loader's
+ * provisioning asks it - including the session file that proves the account
+ * can act for the loader.
+ */
+const AGENT_VAULT_SOURCE = `#!/usr/bin/env node
+const { createServer } = require('node:http');
+const { mkdirSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
+
+const args = process.argv.slice(2);
+const flag = (name) => args[args.indexOf(name) + 1];
+const cliDir = join(process.env.HOME, '.agent-vault');
+
+if (args[0] === 'server') {
+  const port = Number(flag('--port'));
+  const server = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"status":"ok"}');
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  server.listen(port, '127.0.0.1', () => {
+    process.stdout.write('agent-vault stand-in listening on 127.0.0.1:' + port + '\\n');
+  });
+  process.on('SIGTERM', () => {
+    server.close(() => process.exit(0));
+  });
+} else if (args[0] === 'auth') {
+  mkdirSync(cliDir, { recursive: true });
+  writeFileSync(join(cliDir, 'session.json'), '{"token":"the-stand-in"}');
+  process.stdout.write('Login successful.\\n');
+} else if (args[0] === 'vault') {
+  process.stdout.write('Credential store: builtin\\n');
+} else if (args[0] === 'agent') {
+  process.stdout.write('av_agt_the-stand-in-token\\n');
+} else if (args[0] === 'ca') {
+  process.stdout.write('-----BEGIN CERTIFICATE-----\\nMIIBthe-stand-in\\n-----END CERTIFICATE-----\\n');
+} else {
+  process.stdout.write('the stand-in knows only the server and the provisioning commands\\n');
+  process.exit(2);
+}
+`;
+
 interface StandIn {
   root: string;
   repo: string;
@@ -94,19 +144,32 @@ function makeStandInVolume(): StandIn {
   return { root, repo, entry: join(repo, 'dist', 'index.js'), marker, commit };
 }
 
+/** A free port of this test's own: where the stand-in Agent Vault listens. */
+async function freePort(): Promise<number> {
+  const server = createServer(() => undefined);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
 describe('the loader as the container main process', () => {
   it('forwards SIGTERM, waits for lifemodel to drain, and leaves with 0', async () => {
     const standIn = makeStandInVolume();
+    const vaultApiPort = await freePort();
     const config = loadConfig({
       LIFEMODEL_VOLUME_ROOT: standIn.root,
       LIFEMODEL_HTTP_PORT: '0',
       LIFEMODEL_SEED_BUNDLE: join(standIn.root, 'no-bundle-needed.bundle'),
       LIFEMODEL_CADDY_BINARY: join(standIn.root, 'caddy'),
       LIFEMODEL_CADDY_CONFIG: join(standIn.root, 'Caddyfile'),
+      LIFEMODEL_AGENT_VAULT_BINARY: join(standIn.root, 'agent-vault'),
+      LIFEMODEL_AGENT_VAULT_API_PORT: String(vaultApiPort),
       LIFEMODEL_DRAIN_WAIT_MS: '4000',
     });
     writeFileSync(config.caddy.binary, CADDY_SOURCE, { mode: 0o755 });
     writeFileSync(config.caddy.config, ':80 {\n}\n');
+    writeFileSync(config.agentVault.binary, AGENT_VAULT_SOURCE, { mode: 0o755 });
     const fs = createNodeFileSystem();
     const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
     await state.ensureLayout();
@@ -123,6 +186,8 @@ describe('the loader as the container main process', () => {
         LIFEMODEL_SEED_BUNDLE: join(standIn.root, 'no-bundle-needed.bundle'),
         LIFEMODEL_CADDY_BINARY: config.caddy.binary,
         LIFEMODEL_CADDY_CONFIG: config.caddy.config,
+        LIFEMODEL_AGENT_VAULT_BINARY: config.agentVault.binary,
+        LIFEMODEL_AGENT_VAULT_API_PORT: String(vaultApiPort),
         LIFEMODEL_DRAIN_WAIT_MS: '4000',
         LIFEMODEL_MARKER: standIn.marker,
       },

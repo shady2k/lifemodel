@@ -14,6 +14,7 @@
  * page's resume button, or `lifemodel resume`) as the way on (rework 1:
  * decision 11, the interface runs always; it is the way out).
  */
+import { createAgentVault, type AgentVault, type HealthProbe } from './agent-vault.js';
 import { createBootstrap, type Bootstrap } from './bootstrap.js';
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
@@ -36,6 +37,11 @@ export interface LoaderAppDeps {
   clock: Clock;
   /** Leave the process with this code (injected: a test must not exit vitest). */
   exit(code: number): void;
+  /**
+   * A test says whether Agent Vault is up without a real server; the image
+   * gets the server's own `/health` route.
+   */
+  agentVaultProbe?: HealthProbe;
 }
 
 export interface LoaderApp {
@@ -50,6 +56,7 @@ export interface LoaderApp {
   supervisor: Supervisor;
   bootstrap: Bootstrap;
   frontDoor: FrontDoor;
+  agentVault: AgentVault;
 }
 
 export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
@@ -60,12 +67,23 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   };
 
   const state = createLoaderState({ fs, config, logger });
+  const agentVault = createAgentVault({
+    launcher,
+    runner,
+    fs,
+    logger,
+    clock,
+    config,
+    ...(deps.agentVaultProbe === undefined ? {} : { probeHealth: deps.agentVaultProbe }),
+  });
   const supervisor = createSupervisor({
     launcher,
     logger,
     clock,
     config,
     isPanicSet: () => state.isPanicSet(),
+    // lifemodel's proxy credential comes from the vault, and only from it.
+    proxyEnvironment: () => agentVault.lifemodelEnvironment(),
   });
   const bootstrap = createBootstrap({ fs, runner, logger, config, state, supervisor, clock });
   const frontDoor = createFrontDoor({ launcher, fs, logger, clock, config });
@@ -99,6 +117,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     supervisor,
     bootstrap,
     frontDoor,
+    agentVault,
 
     port: () => {
       const address = http?.server.address();
@@ -117,6 +136,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         // The front door first: it is what the owner reaches, and it must be
         // up while lifemodel is still being seeded, built or panicked.
         await frontDoor.start();
+        // Agent Vault next, and before lifemodel: lifemodel's proxy credential
+        // comes from the vault the loader creates here, and the vault must be
+        // ready to answer before the process that uses it runs.
+        await agentVault.start();
         http = createLoaderHttp({ state, supervisor, bootstrap, logger, clock });
         await listen();
         http.server.on('error', (error) => {
@@ -177,6 +200,11 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       // the code below is what the container leaves with.
       const outcome = await supervisor.stop('shutdown', left());
       if (outcome.pending !== null) pending.push(outcome.pending);
+      // Then Agent Vault: lifemodel's drain may still be talking through its
+      // proxy, so the proxy outlives it. Both share what is left of the one
+      // deadline.
+      const vaultLeft = await agentVault.stop(left());
+      if (!vaultLeft) pending.push('Agent Vault (not reaped after SIGKILL by the stop deadline)');
       // Last: the front door stays open while lifemodel drains, so a person
       // watching the page sees the stop rather than a connection error.
       const caddyLeft = await frontDoor.stop(left());

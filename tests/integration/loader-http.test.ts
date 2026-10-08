@@ -19,6 +19,7 @@ import {
   scriptRepository,
   settle,
   shutdownLoader,
+  vaultSpawn,
   waitUntil,
 } from '../helpers/loader-doubles.js';
 
@@ -146,7 +147,11 @@ describe('first start through the browser', () => {
     expect(setCookie).toContain('Path=/');
 
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
-    expect(world.runner.lines()).toEqual([
+    // Agent Vault's own CLI ran before any of this (the loader brought it up
+    // first); what the instance's seed and build ran is what this asserts.
+    expect(
+      world.runner.lines().filter((line) => !line.startsWith(world.config.agentVault.binary))
+    ).toEqual([
       `git clone ${world.config.seedBundle} ${world.config.repoDir}`,
       'git remote',
       'git remote rename origin upstream',
@@ -659,8 +664,10 @@ describe('panic holds across a restart of the container', () => {
     const second = await createRunningLoader(world);
     await settle(8);
 
-    expect(world.launcher.spawns.length).toBe(spawnsSoFar + 1); // only caddy
+    // The trusted layer only: the front door and Agent Vault.
+    expect(world.launcher.spawns.length).toBe(spawnsSoFar + 2);
     expect(caddySpawn(world)?.command).toBe(world.config.caddy.binary);
+    expect(vaultSpawn(world)?.command).toBe(world.config.agentVault.binary);
     const status = await second.app.bootstrap.status();
     expect(status.panic).toBe(true);
     expect(status.lifemodel).toBe('stopped');

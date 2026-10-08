@@ -24,6 +24,7 @@ import {
   scriptRepository,
   settle,
   shutdownLoader,
+  testLoaderApp,
   waitUntil,
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
@@ -50,15 +51,7 @@ function makeApp(
 ): AppUnderTest {
   roots.push(world.root);
   const fs = createNodeFileSystem();
-  const app = createLoaderApp({
-    config: world.config,
-    fs,
-    runner: world.runner,
-    launcher: world.launcher,
-    logger: createRecordingLogger(lines),
-    clock: world.clock,
-    exit: (code) => exits.push(code),
-  });
+  const app = testLoaderApp(world, { fs, lines, exits });
   return { app, world, lines, exits, fs };
 }
 
@@ -315,15 +308,7 @@ describe('the loader says what it is missing', () => {
     const config = { ...world.config, seedBundle: join(world.root, 'not-there.bundle') };
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
-    const app = createLoaderApp({
-      config,
-      fs: createNodeFileSystem(),
-      runner: world.runner,
-      launcher: world.launcher,
-      logger: createRecordingLogger(lines),
-      clock: world.clock,
-      exit: (code) => exits.push(code),
-    });
+    const app = testLoaderApp(world, { config, lines, exits });
     roots.push(world.root);
 
     await app.start();
@@ -348,14 +333,10 @@ describe('the loader says what it is missing', () => {
     writeFileSync(blocker, 'a file where the volume should be\n');
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
-    const app = createLoaderApp({
+    const app = testLoaderApp(world, {
       config: { ...world.config, volumeRoot: blocker, loaderDir: join(blocker, 'loader') },
-      fs: createNodeFileSystem(),
-      runner: world.runner,
-      launcher: world.launcher,
-      logger: createRecordingLogger(lines),
-      clock: world.clock,
-      exit: (code) => exits.push(code),
+      lines,
+      exits,
     });
     roots.push(world.root);
 
@@ -382,14 +363,10 @@ describe('the loader says what it is missing', () => {
 
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
-    const app = createLoaderApp({
+    const app = testLoaderApp(world, {
       config: { ...world.config, httpPort: taken },
-      fs: createNodeFileSystem(),
-      runner: world.runner,
-      launcher: world.launcher,
-      logger: createRecordingLogger(lines),
-      clock: world.clock,
-      exit: (code) => exits.push(code),
+      lines,
+      exits,
     });
     roots.push(world.root);
 
@@ -414,7 +391,11 @@ describe('the loader waits before it has a password', () => {
     await app.start();
     await settle();
 
-    expect(world.runner.lines()).toEqual([]);
+    // Agent Vault's own CLI is the only command run, and it seeds nothing:
+    // this start makes the store and the vault, and no repository or build.
+    expect(
+      world.runner.lines().filter((line) => !line.startsWith(world.config.agentVault.binary))
+    ).toEqual([]);
     expect(lifemodelSpawn(world)).toBeUndefined();
     expect(lines.some((line) => line.message.includes('no password is set'))).toBe(true);
     await shutdownLoader(world, app);
