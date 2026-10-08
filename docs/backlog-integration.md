@@ -97,23 +97,39 @@ the repository's installation, and each person's plugin and hooks are their own.
   flight.
 - **Tracker layout:** the store is `br` (beads_rust 0.7): one SQLite database
   per machine under the main checkout's `.beads/`, which `br` resolves from
-  every worktree; its JSONL export `.beads/issues.jsonl` is a tracked file
-  committed **on `main` only**. The pre-commit hook refuses it staged on any
-  other branch — with one carve-out: the seeding commit of the installation
-  itself (a tree whose HEAD has no `.backlog/config.json` yet) may carry it,
-  because before it lands, `main` has no tracker file at all. **Publishing is
-  suspended** (owner, 2026-10-08): it used to be `br sync --flush-only` and a
-  commit naming the task it records on `main`, and `main` now takes changes
-  only through pull requests with green required checks — no direct commit by
-  anyone, admins included. How the export is published under that is part of
-  the installation's tracker layout and is being redone through
-  `setup-shady2k-skills`; until that lands, tracker writes stay in `br`'s local
-  database and nothing is committed from them. The tracker at a code revision
-  is the export as committed at it (`adapter.mjs --at <rev>`); on a branch that
-  does not carry the export, the newest snapshot the history reaches is the
-  honest answer (that is what the pre-push hook and CI use). `br sync --merge`
-  is never used to catch up: it tombstones what the export lacks;
+  every worktree; its JSONL export `.beads/issues.jsonl` is a tracked file.
+  `main` is protected (owner, 2026-10-08): it takes changes only through pull
+  requests with green `changes`, `ci-product` and `ci-backlog`, admins
+  included, so nothing is pushed to it directly. The export reaches `main`
+  only on a session's **landing branch**, `land/<name>`, cut from
+  `origin/main`, which carries the session's bookkeeping (the export, lessons,
+  document edits; never product code) and lands by one pull request at the
+  session's end, merged by the owner. The pre-commit hook refuses the export
+  staged on any other branch but `main` (a commit there cannot be pushed) -
+  with one carve-out: the seeding commit of the installation itself (a tree
+  whose HEAD has no `.backlog/config.json` yet) may carry it, because before
+  it lands, `main` has no tracker file at all. The tracker at a code revision
+  is the export as committed at it (`adapter.mjs --at <rev>`); on a branch
+  that does not carry the export, the newest snapshot the history reaches is
+  the honest answer (that is what the pre-push hook and CI use). `br sync
+  --merge` is never used to catch up: it tombstones what the export lacks;
   `br sync --import-only` builds a fresh clone's database from the export.
+- **Landing a session:** `br sync --flush-only` writes the database to the
+  **main checkout's** export (br resolves it from every worktree); copy that
+  file into the landing worktree, run the gate there (`npm run backlog`),
+  commit naming the task it records, push the branch and open one pull request
+  (its CI is `changes` and `ci-backlog`, seconds; `ci-product` is skipped for
+  the export and documents). After the owner merges, bring the main checkout to
+  the merge without letting `br` import an older export: in one command, copy
+  `.beads/issues.jsonl` aside, `git checkout -- .beads/issues.jsonl`,
+  `git pull --ff-only`, copy it back (the database is newer than any merged
+  snapshot).
+- **Run script inputs in a worktree:** a worktree's own `.beads/issues.jsonl`
+  is the snapshot of its branch, not the tracker; a worker reads the tracker
+  for `runs.mjs` as `node .backlog/adapter.mjs --jsonl
+  /home/dev/repos/lifemodel/.beads/issues.jsonl` (the main checkout's export,
+  which br keeps flushed), refreshed after its own br writes. A stale export
+  made a worker's receipt miss its own claim (lifemodel-ggc run).
 - **Document gate: not installed yet.** Its task is "Install the document
   gate: specs and acceptance evidence checked at each transition"
   (filed beside the setup task, milestone `platform-1`). Until it lands,
@@ -292,7 +308,7 @@ what this protocol adds is listed.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented` |
 | children | `br show <id>` lists them, every status; or the adapter's export filtered on `parent` |
 | search / show | `br search`, `br show <id>`, `br list -l <area>` |
-| publish | suspended (owner, 2026-10-08): `main` takes changes only through pull requests with green required checks, and the scheme that publishes the export under that is being redone through `setup-shady2k-skills`; until then writes stay in br's local database |
+| publish | at the session's end, on `land/<name>` from `origin/main`: `br sync --flush-only`, copy the main checkout's export in, gate clean, commit naming the task it records, push, one pull request the owner merges; then fast-forward the main checkout as **Landing a session** says |
 
 When a skill reports the installation is out of date, run `setup-shady2k-skills`. An explicit
 setup invocation rechecks everything even if its recorded version matches.

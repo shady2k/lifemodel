@@ -28,20 +28,29 @@ for f in check.mjs time-format.mjs; do
 done
 
 # --- 1. the tracker layout --------------------------------------------------
-# The tracker is one state for every branch: .beads/issues.jsonl is committed on
-# main only. A feature branch that carries it would land every other run's
-# states with its own. The one exception is the seeding commit of the
-# installation itself: the branch that first lands .backlog/ also lands the
-# export, because before it main has no tracker file at all.
+# The tracker is one state for every branch: .beads/issues.jsonl reaches main
+# only through a session's landing branch, land/<name>, and its one pull request
+# (main is protected: nothing is pushed to it directly, owner 2026-10-08). A
+# feature branch that carried it would land every other run's states with its
+# own, so every other branch refuses it. main itself is let through: a commit
+# there cannot be pushed anyway. The one other exception is the seeding commit
+# of the installation itself: the branch that first lands .backlog/ also lands
+# the export, because before it main has no tracker file at all.
 if git diff --cached --name-only -- .beads/issues.jsonl | grep -q .; then
     branch=$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")
-    if [ "$branch" != "main" ] && git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
-        printf 'TRACKER: the tracker export is staged on %s:\n' "$branch" >&2
-        git diff --cached --name-only -- .beads/issues.jsonl | sed 's/^/         /' >&2
-        printf '         The tracker is shared by every branch; its export is committed on main only.\n' >&2
-        printf '         Unstage it and commit the rest: git restore --staged .beads/issues.jsonl\n' >&2
-        exit 1
-    fi
+    case "$branch" in
+        main|land/*) ;;
+        *)
+            if git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
+                printf 'TRACKER: the tracker export is staged on %s:\n' "$branch" >&2
+                git diff --cached --name-only -- .beads/issues.jsonl | sed 's/^/         /' >&2
+                printf '         The tracker is shared by every branch; its export lands only through a\n' >&2
+                printf '         session landing branch (land/<name>) and its pull request.\n' >&2
+                printf '         Unstage it and commit the rest: git restore --staged .beads/issues.jsonl\n' >&2
+                exit 1
+            fi
+            ;;
+    esac
 fi
 
 # --- 2. the backlog gate ----------------------------------------------------

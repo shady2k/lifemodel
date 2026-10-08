@@ -33,7 +33,7 @@ while IFS= read -r line; do
         continue
     fi
     # The export the checked commits resolve tasks against: the newest snapshot
-    # this history reaches (branches do not carry the export; main does).
+    # this history reaches (feature branches do not carry the export; main and land/* branches do).
     export_at=$(git rev-list -1 HEAD -- .beads/issues.jsonl 2>/dev/null || true)
     before_args=""
     if [ "$remote_sha" != "0000000000000000000000000000000000000000" ] &&
