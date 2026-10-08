@@ -5,15 +5,21 @@ npx vitest run
 
 
 # --- BEGIN LIFEMODEL BACKLOG GATE ---
-# Managed by scripts/connect-clone.sh. The tracker export is committed on main
-# only; refuse it staged on any other branch (the seeding commit of the
-# installation itself is the exception).
+# Managed by scripts/connect-clone.sh. The tracker export lands only through a
+# session landing branch (land/<name>) and its pull request; refuse it staged on
+# any other branch but main (the seeding commit of the installation itself is
+# the exception).
 if git diff --cached --name-only -- .beads/issues.jsonl 2>/dev/null | grep -q .; then
     _branch=$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")
-    if [ "$_branch" != "main" ] && git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
-        printf "TRACKER: the tracker export is staged on %s; it is committed on main only. Unstage it: git restore --staged .beads/issues.jsonl\n" "$_branch" >&2
-        exit 1
-    fi
+    case "$_branch" in
+        main|land/*) ;;
+        *)
+            if git rev-parse -q --verify HEAD:.backlog/config.json >/dev/null 2>&1; then
+                printf "TRACKER: the tracker export is staged on %s; it lands only through a land/<name> branch and its pull request. Unstage it: git restore --staged .beads/issues.jsonl\n" "$_branch" >&2
+                exit 1
+            fi
+            ;;
+    esac
 fi
 node .backlog/gate.mjs || exit 1
 # --- END LIFEMODEL BACKLOG GATE ---
