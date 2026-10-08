@@ -9,6 +9,10 @@
  *     brought back while panic is set either;
  *   - a lifemodel that dies on its own is started again, after a growing
  *     backoff, so a crash loop does not become a busy loop;
+ *   - a lifemodel that saved its settings and left with the code that asks for
+ *     a restart is started again AT ONCE: the request is logged at info, no
+ *     backoff is counted, and the run is not held against it
+ *     (lifemodel-q4x.4.1);
  *   - SIGTERM is FORWARDED and its exit is awaited for the length of
  *     lifemodel's own drain (95 s against a 90 s drain), so `docker stop`
  *     gives the instance its restart guarantee instead of killing it; a stop
@@ -31,6 +35,15 @@ import type { ProcessLauncher, SpawnOptions, SpawnedProcess } from './exec.js';
 import type { LoaderLogger } from './logger.js';
 import { describe } from './state.js';
 
+/**
+ * The exit code lifemodel leaves with when it saved its settings and asks to be
+ * started again (lifemodel-q4x.4.1; the same number in `src/settings/restart.ts`
+ * and documented in docs/features/instance/settings.md). It is the ONLY code
+ * the loader treats as a request: every other exit is a death and gets the
+ * backoff.
+ */
+export const LIFEMODEL_RESTART_EXIT_CODE = 75;
+
 export type LifemodelProcessState = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
 
 export interface LifemodelExit {
@@ -46,7 +59,7 @@ export interface LifemodelStatus {
   pid: number | null;
   /** Every start since the loader came up, including the restarts. */
   starts: number;
-  /** How many of those were restarts after a death. */
+  /** How many starts were restarts: after a death, or one lifemodel asked for. */
   restarts: number;
   startedAt: number | null;
   lastExit: LifemodelExit | null;
@@ -161,9 +174,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const signal_ = exit;
     exit = null;
     signal_?.resolve();
-    // An exit the loader asked for (panic, shutdown) is the expected end of a
-    // stop; warn is kept for an exit nobody asked for.
-    const log = stopping ? logger.info.bind(logger) : logger.warn.bind(logger);
+    // A stop the loader asked for (panic, shutdown) is the expected end of a
+    // stop and is logged at info whatever code it leaves with; so is the exit
+    // lifemodel uses to ASK for a restart (below). Warn is kept for an exit
+    // nobody asked for.
+    const asked = code === LIFEMODEL_RESTART_EXIT_CODE;
+    const log = stopping || asked ? logger.info.bind(logger) : logger.warn.bind(logger);
     log(
       { code, signal, ranMs },
       code === null && signal === null
@@ -171,7 +187,32 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         : `lifemodel exited (code ${String(code ?? signal)})`
     );
     if (stopping) return; // the stop is waiting for exactly this
+    // lifemodel saved its settings and left with the code that asks for a
+    // restart: it is started again AT ONCE - no backoff, and the request is
+    // not counted as a failure, because it is not one (lifemodel-q4x.4.1).
+    if (asked) {
+      restartRequested();
+      return;
+    }
     scheduleRestart(ranMs);
+  }
+
+  /**
+   * lifemodel asked to be restarted (it left with the documented code): the
+   * start is made now, without the backoff a death gets and without counting a
+   * failure. The request is lifemodel's own - only its settings save makes it -
+   * and it is logged at info, because nothing went wrong. The usual guards
+   * still hold: a stop (panic) wins over it, and once the loader is leaving
+   * nothing is started.
+   */
+  function restartRequested(): void {
+    restarts += 1;
+    const scheduledEpoch = epoch;
+    logger.info({}, 'lifemodel asked to be restarted: it is started again at once');
+    void (async () => {
+      if (scheduledEpoch !== epoch || stopping || closed) return;
+      await start();
+    })();
   }
 
   function scheduleRestart(ranMs: number): void {
