@@ -17,6 +17,11 @@
  * REAL loader (taken from this checkout's working tree, so the branch's own
  * loader is what is run) and the instance is never handed a stub: everything
  * it asserts is what a person gets from `docker run` and `docker exec`.
+ *
+ * LIFEMODEL_TEST_IMAGE=<image:tag> boots an image that is already built
+ * instead of building one: CI's image job sets it to the image it has just
+ * built, so the image that is walked is the image that was built (rework 3,
+ * review round 2 finding 3). The test then neither builds nor removes it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -28,6 +33,9 @@ import { fileURLToPath } from 'node:url';
 
 /** Set LIFEMODEL_DOCKER_TESTS=1 to run these; nothing here is cheap. */
 const enabled = process.env.LIFEMODEL_DOCKER_TESTS === '1';
+
+/** An image already built (CI's own); unset, the test builds one from this checkout. */
+const prebuiltImage = process.env.LIFEMODEL_TEST_IMAGE ?? '';
 
 /** This checkout, whose loader, Dockerfile and build script are under test. */
 const checkout = fileURLToPath(new URL('../..', import.meta.url));
@@ -73,6 +81,7 @@ function docker(args: string[], opts: Parameters<typeof run>[2] = {}): string {
 interface Reply {
   status: number;
   body: string;
+  location?: string | undefined;
 }
 
 /** One request the way a browser makes it: the host is a header, not a DNS name. */
@@ -105,7 +114,9 @@ function fetchThroughFrontDoor(
         let answer = '';
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => (answer += chunk));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: answer }));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: answer, location: res.headers.location })
+        );
       }
     );
     req.on('error', reject);
@@ -147,7 +158,21 @@ function loaderLine(pattern: RegExp): string | undefined {
 }
 
 describe.skipIf(!enabled)('a first start in the real container', () => {
-  beforeAll(async () => {
+  beforeAll(
+    async () => {
+      if (prebuiltImage !== '') {
+        image = prebuiltImage;
+      } else {
+        buildImage();
+      }
+      startContainer();
+      await afterStart();
+    },
+    FIRST_START_TIMEOUT_MS + 25 * 60_000
+  );
+
+  /** The image from this checkout, as build-image.sh makes it. */
+  function buildImage(): void {
     // A real clone with real history: build-image.sh refuses a shallow
     // checkout, and the seed bundle it makes must carry that history.
     buildDir = mkdtempSync(join(tmpdir(), 'lifemodel-first-start-'));
@@ -167,7 +192,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       timeoutMs: 20 * 60_000,
     });
     image = `lifemodel-first-start:${tag}`;
+  }
 
+  function startContainer(): void {
     container = `lifemodel-first-start-${process.pid}`;
     volume = `${container}-volume`;
     // An empty volume and the documented command's shape: the port published on
@@ -195,7 +222,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       throw new Error(`docker port printed no port for ${container}: ${published}`);
     }
     port = Number(match.groups.port);
+  }
 
+  async function afterStart(): Promise<void> {
     // The loader's own line is the event: it is up before anything is asked.
     await waitForLogLine(/"msg":"the loader is up"/, 60_000);
 
@@ -211,7 +240,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     // The loader says lifemodel runs. Never a timer: the first npm ci inside
     // the container takes minutes, so the ceiling is generous.
     await waitForLogLine(/"msg":"the instance is ready".*"started":true/, FIRST_START_TIMEOUT_MS);
-  }, 25 * 60_000);
+  }
 
   afterAll(() => {
     if (container !== '') {
@@ -220,7 +249,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     if (volume !== '') {
       run('docker', ['volume', 'rm', '--force', volume]);
     }
-    if (image !== '') {
+    if (image !== '' && prebuiltImage === '') {
       run('docker', ['rmi', '--force', image]);
     }
     if (buildDir !== '') {
@@ -261,6 +290,22 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(logs).not.toContain('dubious ownership');
     expect(logs).not.toContain('has no readable commit');
     expect(logs).not.toContain('the instance did not come up');
+  });
+
+  it('sends a browser that opens any host without a session to the login (rework 3)', async () => {
+    // What README tells a person to open, and the two other hosts: a page, not
+    // a bare 401, and the way back carried along.
+    const boot = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/');
+    expect(boot.status).toBe(303);
+    expect(boot.location).toBe(
+      `http://boot.localhost:${String(port)}/login?next=${encodeURIComponent(`http://boot.localhost:${String(port)}/`)}`
+    );
+    const root = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/');
+    expect(root.status).toBe(303);
+    expect(root.location).toContain(`http://boot.localhost:${String(port)}/login?next=`);
+    const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login');
+    expect(login.status).toBe(200);
+    expect(login.body).toContain('Log in');
   });
 
   it('holds panic and resumes, from the command line in the container', () => {

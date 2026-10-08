@@ -71,6 +71,9 @@ describe('the image jobs of CI', () => {
     expect(runs).toContain('scripts/build-image.sh');
     expect(runs).toContain('LIFEMODEL_DOCKER_TESTS=1');
     expect(runs).toContain('tests/integration/instance-first-start.test.ts');
+    // The walk boots the image this job built, not a second build (rework 3).
+    expect(runs).toContain('LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA"');
+    expect(runs).toContain('scripts/build-image.sh "ci-$SHA"');
     // It needs the repository's own node_modules for that test.
     expect(runs).toContain('npm ci');
     // And it is bounded: the walk builds an image and starts an instance.

@@ -343,14 +343,18 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          # The tag is this run's own: nothing is pushed, and the walk below
-          # builds its own image from this checkout anyway.
+          # The tag is this run's own: nothing is pushed.
           scripts/build-image.sh "ci-$SHA"
 
+      # The walk boots THE image built above, not a second build of its own
+      # (rework 3, review round 2 finding 3).
       - name: A real first start inside the image
+        env:
+          SHA: ${{ github.sha }}
         run: |
           set -eu
-          LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
+          LIFEMODEL_DOCKER_TESTS=1 LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA" \
+            npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
 
   # Publishing, on a push to main. It is the only job that asks for
   # `packages: write`, and the only one that logs in to ghcr.io.

@@ -50,7 +50,8 @@ domain is not part of this stage: it comes with the outside-access idea
 (lifemodel-sd2).
 
 Every request on every host goes through `forward_auth` to the loader's
-`GET /_auth/verify` (2xx with the session cookie, 401 without it; the auth
+`GET /_auth/verify` (2xx with the session cookie; without it a browser opening
+a page is redirected to the loader's login and anything else gets 401; the auth
 request carries the original `Host` plus `X-Forwarded-Host`, `-Method` and
 `-Uri`). The only paths that reach a backend without the cookie are the
 loader's own pages on `boot.<host>`: `/login`, `/login/*`, `/setup`,
@@ -75,7 +76,8 @@ build.
 
 **Two CI jobs, and only one of them may write.** `ci-image` runs on a pull
 request that owes the product checks: it builds the image with that same script
-and then walks a REAL first start inside it (the test below), with the
+and then walks a REAL first start inside THAT image (the test below, given the
+built tag as `LIFEMODEL_TEST_IMAGE`, so no second image is built), with the
 workflow's own `contents: read`, a checkout that keeps no credential, and no
 login anywhere - so nothing a pull request runs holds a write token.
 `ci-image-publish` runs on a push to `main` and is the only job with
@@ -97,12 +99,15 @@ LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instanc
 It builds from a throwaway clone with `tests/fixtures/stub-loader/` in place of
 the real loader, so the image can be checked on its own; the stub is never part
 of an image anyone runs. `tests/unit/build-image.test.ts` covers the script's
-two refusals — a shallow checkout, a missing `loader/` — without docker.
+three refusals — a shallow checkout, a missing `loader/`, a `.docker-context`
+that is already there — without docker.
 
 `tests/integration/instance-first-start.test.ts` is the same gated walk with the
 REAL loader: an empty volume, `POST /setup` on `boot.localhost`, the loader's
 own line that lifemodel is running, `lifemodel status` on a 40-hex commit, and
-the lifemodel process running as uid 1000. It is what CI's `ci-image` job runs
-(`LIFEMODEL_DOCKER_TESTS=1`), because a loader that builds but cannot complete a
+the lifemodel process running as uid 1000. Run locally it builds its own image
+from the checkout; with `LIFEMODEL_TEST_IMAGE=<image:tag>` it boots that image
+instead and neither builds nor removes it. It is what CI's `ci-image` job runs
+(`LIFEMODEL_DOCKER_TESTS=1`, on the image the job built), because a loader that builds but cannot complete a
 first start used to pass that job: the image check has to prove boot, not just
 the build. Locally it takes about four minutes from a warm layer cache.
