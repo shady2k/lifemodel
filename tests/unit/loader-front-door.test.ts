@@ -81,11 +81,13 @@ describe('caddy, the front door the loader owns', () => {
     await settle();
     expect(world.clock.sleeps).toEqual([1_000]);
     world.clock.resolveAll();
-    await settle();
-
-    expect(
-      world.launcher.spawns.filter((s) => s.command === world.config.caddy.binary)
-    ).toHaveLength(2);
+    // The restart checks Caddy's files on the real disk first: wait for the
+    // spawn itself, never for a number of ticks.
+    await waitUntil(
+      () =>
+        world.launcher.spawns.filter((s) => s.command === world.config.caddy.binary).length === 2,
+      'caddy is started again'
+    );
     expect(app.frontDoor.status().restarts).toBe(1);
 
     await shutdownLoader(world, app);
@@ -156,8 +158,10 @@ describe('caddy, the front door the loader owns', () => {
 
     expect(await leaving).toBe(1);
     expect(caddySpawn(world)?.child.signals).toEqual(['SIGTERM', 'SIGKILL']);
-    const pending = lines.find((line) => line.message.startsWith('the stop deadline ran out'));
-    expect(pending?.message).toContain('caddy (not reaped after SIGKILL)');
+    const pending = lines.find((line) =>
+      line.message.startsWith('the loader is leaving with work still pending')
+    );
+    expect(pending?.message).toContain('caddy (not reaped after SIGKILL by the stop deadline)');
   });
 
   it('is stopped last: lifemodel drains first, the front door closes after', async () => {

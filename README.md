@@ -214,11 +214,13 @@ The rest of the command: the volume `lifemodel` holds the instance (its
 repository and its data — `docker rm -f` and the same `docker run` bring the
 same instance back), and `--stop-timeout 120` gives the whole stop room: the
 loader's own stop has one 110-second deadline, counted from the moment the
-signal arrives, for lifemodel's 90-second drain and for Caddy leaving. At that
-deadline the loader stops waiting and leaves with a non-zero code, naming what
-was still pending, before Docker's own kill at 120 seconds. A process the
-kernel will not let go of even after SIGKILL is the one case where the loader
-leaves without having reaped it. `--cap-add NET_ADMIN` is for the **next** stage: when lifemodel's traffic
+signal arrives, for lifemodel's 90-second drain and for Caddy leaving. No step
+of the stop waits past that deadline (some have shorter caps of their own), so
+the loader leaves before Docker's own kill at 120 seconds; when a step could
+not finish, it leaves with a non-zero code and one line naming what was still
+pending and which bound it hit. A process the kernel will not let go of even
+after SIGKILL is the one case where the loader leaves without having reaped
+it. `--cap-add NET_ADMIN` is for the **next** stage: when lifemodel's traffic
 goes through Agent Vault (lifemodel-q4x.3), the loader installs the kernel rule
 that confines its egress and needs that capability to do it. **No such rule is
 installed today** — lifemodel can still reach the network directly — so the

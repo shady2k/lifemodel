@@ -198,7 +198,7 @@ export function loginLocation(forwardedHost: string, forwardedUri: string): stri
 
 /**
  * The `next` of a login, or null when it is not an address of this instance.
- * Only an http(s) URL on a pinned browser host AND on the port the login was
+ * Only an http URL on a pinned browser host AND on the port the login was
  * reached on is followed, so the login page is never an open redirect to
  * somewhere else, not even another local service.
  */
@@ -210,7 +210,10 @@ export function vettedNext(next: string | undefined, requestHost: string): strin
   } catch {
     return null;
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  // http only: the login itself is served over http in this stage, and an
+  // https URL on the same host has another default port - another service
+  // (rework 3, review round 4 finding 2). HTTPS comes with lifemodel-sd2.
+  if (url.protocol !== 'http:') return null;
   if (url.username !== '' || url.password !== '') return null;
   if (!isBrowserHost(url.hostname.toLowerCase())) return null;
   // The same port as the login itself: cookies are not scoped by port, so a
