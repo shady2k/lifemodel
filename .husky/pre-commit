@@ -1,5 +1,9 @@
 set -e
 npx lint-staged
+# lint-staged needs the hook's GIT_* to see the staged files; nothing after it
+# may inherit them: a test that runs git would act on THIS repository
+# (lifemodel-q4x.4.2).
+for _var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$_var"; done
 npx tsc --noEmit
 npx vitest run
 
