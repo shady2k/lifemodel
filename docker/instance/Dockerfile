@@ -56,13 +56,13 @@ LABEL org.opencontainers.image.title="lifemodel" \
 # git is how the loader seeds the instance's repository from the bundle and how
 # the instance keeps its own history.
 #
-# iptables and netbase are carried FOR lifemodel-q4x.3.2, where the loader will
-# install the owner rule that sends lifemodel's traffic through Agent Vault and
-# confines its egress; that task is what needs the documented `--cap-add
-# NET_ADMIN`, and netbase's /etc/protocols is what iptables reads.
-# NO SUCH RULE EXISTS YET: nothing in loader/ invokes iptables, so lifemodel can
-# reach the network directly today and the capability is carried, not used. Do
-# not read this image as confined until that task lands and is probed.
+# iptables and netbase are what the loader's egress rule is made of
+# (lifemodel-q4x.3.2): before lifemodel starts, the loader fills its own chain
+# with "uid 1000 reaches 127.0.0.1, everything else is REJECTed", so lifemodel
+# leaves through Agent Vault's proxy or not at all. netbase's /etc/protocols is
+# what iptables reads; making the rule needs the documented `--cap-add
+# NET_ADMIN`, and a container without it does not start lifemodel (the loader
+# says so in one line and leaves with a non-zero code).
 #
 # curl is there for the documented checks and for looking at the container from
 # inside it.

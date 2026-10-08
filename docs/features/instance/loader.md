@@ -27,26 +27,36 @@ are part of `npm run check`.
    lifemodel: a passwordless store on the volume, the vault lifemodel uses and
    the agent token that is lifemodel's proxy credential (below). It is kept up
    like Caddy and stopped after lifemodel.
-3. **Serves its own interface** on `127.0.0.1:7000`, always, independent of
+3. **Confines lifemodel's egress**, as root and before lifemodel ever runs: an
+   iptables owner rule that lets uid 1000 reach `127.0.0.1` (Agent Vault's
+   proxy, the loader's own port, the container's resolver) and REJECTs
+   everything else, so a bypass fails at once instead of hanging. The
+   container needs the `iptables` the image carries and the documented
+   `--cap-add NET_ADMIN`; without either, the loader says so in one line and
+   leaves (below). The rule is the loader's own chain, refilled on every
+   start, so a restart of the container cannot stack rules.
+4. **Serves its own interface** on `127.0.0.1:7000`, always, independent of
    lifemodel.
-4. **First start.** On a volume with no password it asks for one at
+5. **First start.** On a volume with no password it asks for one at
    `boot.<host>` (`/setup`). Once the password is set it seeds the instance's
    git repository from the code the image carries, builds it, and starts
    lifemodel.
-5. **Every start after that** reuses the repository that is on the volume: a
+6. **Every start after that** reuses the repository that is on the volume: a
    commit that was built is not built again, and the repository is never
-   overwritten by a newer image.
-6. **A failure of the instance does not stop it.** Seeding, building or
+   overwritten by a newer image. A build runs as lifemodel's user, which the
+   rule confines, so the build is handed the same proxy environment and leaves
+   through Agent Vault too.
+7. **A failure of the instance does not stop it.** Seeding, building or
    starting lifemodel that fails leaves the loader up with Caddy, its login and
    its interface; its state says `failed` with the reason, and the owner retries
    from the page or with `lifemodel resume`. Only the inputs the loader itself
    needs to come up end the process (below).
-7. **Supervises lifemodel** as an unprivileged child (uid/gid 1000), restarts
+8. **Supervises lifemodel** as an unprivileged child (uid/gid 1000), restarts
    it with a growing backoff when it dies, and refuses to start it at all
    while panic is set.
-8. **Holds panic**, a root-only flag on the volume. It survives a restart of
+9. **Holds panic**, a root-only flag on the volume. It survives a restart of
    the container and of the Docker daemon until `lifemodel resume` clears it.
-9. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
+10. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
    lifemodel's own drain is 90 s. The whole stop is ONE deadline of 110 s
    (`LIFEMODEL_STOP_BUDGET_MS`), counted from the moment the stop signal
    arrives: closing the loader's own server (at most 5 s), lifemodel's drain,
@@ -62,7 +72,7 @@ are part of `npm run check`.
    leaves with code 1 - before Docker's own kill at the documented
    `--stop-timeout 120`. A process the kernel does not release even after
    SIGKILL is left behind in that case rather than waited for.
-10. **A stop meets a start safely.** A stop that arrives while lifemodel is
+11. **A stop meets a start safely.** A stop that arrives while lifemodel is
    being started (the panic flag being read, or the OS not yet having said the
    process runs) waits for that start and then stops what it started, and once
    the loader is leaving nothing is started at all - not a resume, not the
@@ -186,13 +196,45 @@ it and only re-reads the CA, so `docker restart`, a new container on the same
 volume and a store that was replaced each end with exactly one vault, one agent
 and one token. The store itself is made only when the volume holds none.
 
-**What lifemodel's process is given** is that token and nothing else - the proxy
-credential, in `lifemodelEnvironment()` in `loader/src/agent-vault.ts`, which is
-also the ONE place lifemodel-q4x.3.2 adds the proxy variables (`HTTPS_PROXY`,
-`HTTP_PROXY`, `NODE_USE_ENV_PROXY`, the CA above) and beside which the loader
-installs the kernel rule that confines its egress. lifemodel's process gets no
-key, no admin credential and no path into the store. The token never appears in
-a log line.
+**What lifemodel's process is given** is that token and the standard proxy
+environment around it, built in `lifemodelEnvironment()` in
+`loader/src/agent-vault.ts` - the ONE place that decides it:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `HTTPS_PROXY`, `HTTP_PROXY` | `http://<agent token>:lifemodel@127.0.0.1:14322` | every standard client routes through the vault's listener; the token is the proxy credential and the vault is the password, exactly as Agent Vault's own `vault run` builds it |
+| `NO_PROXY` | `localhost,127.0.0.1` | loopback traffic (the vault's control plane, the loader, the container's resolver) does not go through the proxy |
+| `NODE_USE_ENV_PROXY` | `1` | Node 24's `fetch` honours the environment's proxy only with it |
+| `NODE_EXTRA_CA_CERTS` | `vault-ca.pem` above | the certificates the proxy re-signs with validate |
+| `AGENT_VAULT_ADDR`, `AGENT_VAULT_TOKEN`, `AGENT_VAULT_VAULT` | the broker, the token, the vault | the vault's own protocol |
+
+The names are the ones a client already honours, and the values the loader sets
+win over the container's own (`docker run` passes a client's `HTTP_PROXY` into a
+container by default; a stale one must not decide where lifemodel's traffic
+goes). lifemodel's process gets no key, no admin credential and no path into the
+store: an unmatched host passes through the vault, a host with a service gets
+its credential attached on the way out. The token never appears in a log line.
+
+**The owner's way into Agent Vault.** Agent Vault 0.40.0 has no login but its
+own accounts, and the first registered user is the instance owner - the account
+the loader registered to provision the vault. So the loader's own page shows
+that account's e-mail and password, read from `loader/vault-owner.json`, with a
+link to `vault.<the same host and port>`: the owner signs in there and adds the
+keys (decisions 12 and 18, story S3). Both values are HTML-escaped into the
+page, the page is `no-store`, and neither ever reaches a log line. An account
+that cannot be read is SAID on the page, with its reason - the page is the way
+back - rather than left blank.
+
+**What the proxy will dial.** Agent Vault's own netguard refuses private and
+reserved destinations - RFC-1918, loopback, link-local, the CGN range, IPv6
+ULA - unless the operator opens them: `AGENT_VAULT_ALLOW_PRIVATE_RANGES=true`
+in the CONTAINER's environment, which the loader passes on to the vault as it
+passes every other variable of the container (it drops only the two it owns,
+above). Cloud metadata endpoints (`169.254.169.254` and its IPv6 twin) are
+blocked either way. The documented `docker run` does not set it, so lifemodel
+reaches the public internet through the proxy and nothing private; an instance
+whose endpoint is a model server on the owner's own network - or a test's stub
+beside the container - needs that variable.
 
 **A pid file left in the store is removed before a start.** Agent Vault refuses
 to start when the pid in `vault/.agent-vault/agent-vault.pid` belongs to a live
@@ -202,6 +244,35 @@ is stale by construction there - the loader is the only thing that starts a
 server on this volume, and it has none running at that moment - so the loader
 removes it, logs one line, and starts.
 
+## lifemodel's egress
+
+**The rule.** Before lifemodel starts, the loader installs one iptables rule in
+its own chain (`LIFEMODEL_EGRESS`): packets owned by uid 1000 to `127.0.0.1` are
+accepted, everything else from that uid is REJECTed with
+`icmp-port-unreachable`, which a client sees at once as "connection refused".
+Every other uid - root, and so the loader, Caddy and Agent Vault - is untouched
+and keeps the container's own network. The chain is FLUSHED and refilled on
+every install and the jump from `OUTPUT` into it is added only when it is not
+there, so a container that is restarted ends with one copy of the rule and not
+a stack of them. The rule is what makes the proxy environment more than a
+suggestion: a process that unsets `HTTPS_PROXY` and opens a socket itself meets
+the kernel, and gets a refusal instead of a connection.
+
+**The rule is IPv4, and that is the whole of the container's reach.** The
+container on Docker's default network has one IPv4 address and, over IPv6,
+nothing but `::1`: no global address and no route out (the gated walk checks
+both inside the container), so there is no other address for a bypass to use.
+An instance whose Docker network has IPv6 enabled is not covered by this
+stage's rule.
+
+**The same environment is what a build runs with.** The instance's code is
+built as lifemodel's user (uid 1000), and that is the user the kernel rule
+confines: a build without the proxy could not reach the npm registry at all.
+So `buildEnvironment()` in `loader/src/repo.ts` adds the same variables to what
+`npm ci` and `npm run build` run with - npm reads `HTTPS_PROXY`/`HTTP_PROXY`/
+`NO_PROXY`, Node reads `NODE_EXTRA_CA_CERTS`, and the registry (no service in
+the vault) passes straight through the proxy.
+
 ## The ports and the hosts
 
 | Address | What answers |
@@ -210,7 +281,7 @@ removes it, logs one line, and starts.
 | Caddy `:80` | the only published port; the documented command publishes it as `-p 127.0.0.1:8080:80` |
 | `127.0.0.1:7100` | lifemodel's own interface, behind the root host |
 | `127.0.0.1:14321` | Agent Vault's own interface and API, behind `vault.<host>` |
-| `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's traffic will leave through it (lifemodel-q4x.3.2) |
+| `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's traffic leaves through it, and (with `HTTP_PROXY` set for it too) the instance's own build of its code |
 
 Caddy routes by host: `boot.<host>` to the loader, `<host>` to lifemodel,
 `vault.<host>` to Agent Vault's own interface at the ROOT of that host (its UI
@@ -318,7 +389,13 @@ back and failing, with that line in `docker logs`:
   loader's line names the store;
 - the vault or the agent could not be created, or the CA could not be read:
   without them lifemodel would have no proxy credential, and a start without
-  one is not a fallback.
+  one is not a fallback;
+- the egress rule could not be installed: `iptables` could not be run (the
+  image carries it; a container that was built without it says so), or it
+  refused the rule - which in practice is the missing capability, so that line
+  names it: `the container needs the NET_ADMIN capability - --cap-add
+  NET_ADMIN`. lifemodel is never started in that case: it would run with its
+  egress open.
 
 **A failure of the instance, after the loader is up.** Seeding, building or
 starting lifemodel that fails does NOT end the loader: it stays up with Caddy
@@ -360,12 +437,21 @@ root - chowning to its own identity, which the kernel allows - and records
 every path that was given away, because what a test cannot observe (ownership)
 is exactly the rule: an existing `data/` that is a symlink to the volume root
 leaves the loader's files alone.
+`tests/unit/loader-egress.test.ts` is the kernel rule's, driven through the
+same app: the chain made and filled before lifemodel is started (the egress
+line in the log comes before the start's), the two rules confined to the one
+uid with a REJECT, a chain left by an earlier start emptied and its jump not
+added twice, the jump added once when it is missing, and the two missing inputs
+- no `iptables` to run, and an `iptables` that refuses - each ending in one
+error line and a non-zero exit with lifemodel never started.
 `tests/unit/loader-agent-vault.test.ts` is Agent Vault's: the start before
 lifemodel with the empty password line and the store as its `HOME`, the vault
 and the token created once and reused, a lost token rotated instead of a second
 agent, the CA's mode, a stale pid file removed, the stop after lifemodel, and
-the token in no log line. Its CLI answers and its readiness are the two
-boundaries the test doubles; the store, its modes and the files are real.
+the token in no log line, and the proxy environment lifemodel's own process is
+given (a value the container itself was handed cannot win over the vault's).
+Its CLI answers and its readiness are the two boundaries the test doubles; the
+store, its modes and the files are real.
 `tests/integration/loader-*.test.ts` add the parts that need the real thing: a
 real `git bundle` cloned with the real git, a real child process that traps
 SIGTERM and drains before leaving under a real loader process, and - through
@@ -374,8 +460,19 @@ the loader's HTTP interface - a first start whose build fails.
 `tests/integration/instance-first-start.test.ts` is the end-to-end one, with
 the real loader and the real image: an empty volume, `POST /setup`, and then
 what a person gets - `lifemodel status` running on a 40-hex commit, lifemodel
-itself running as uid 1000. It needs docker and the first `npm ci` inside the
-container, so it is off unless `LIFEMODEL_DOCKER_TESTS=1`:
+itself running as uid 1000. It walks the egress rule and the key too: the stub
+endpoint is a second container on the container's own Docker network, its host
+carries a service in lifemodel's vault (bearer auth from a made-up credential,
+and a Telegram-shaped path with the token substituted into it), and a probe as
+uid 1000 - run with the very environment `/proc/<lifemodel pid>/environ` holds
+- reaches the stub through the proxy with `Authorization: Bearer <the
+credential>` and the path substituted, while the same probe without a proxy is
+refused at once (outside, and to the stub next door), root still reaches the
+stub directly, the credential is in neither lifemodel's environment, its data
+nor the container's log, and the loader's page hands over the Agent Vault
+account that Agent Vault's own login API then answers. It needs docker and the
+first `npm ci` inside the container, so it is off unless
+`LIFEMODEL_DOCKER_TESTS=1`:
 
 ```
 LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
