@@ -65,7 +65,11 @@ are part of `npm run check`.
    once - as `failed` with its reason when a process was spawned (it is
    killed, and killed again should the OS confirm it later; it is never
    owned) - so nothing waits on it, status says why, and a resume makes a
-   fresh start. A resume asked for while a panic stop is still draining waits
+   fresh start. Should the OS confirm the start in the very moment the stop
+   gives up, the start owns a running child and the stop drains it as any
+   other. A panic whose stop could not finish says so: an error line naming
+   what is pending, and `lifemodel panic` exits 1 with that reason (panic
+   stays set). A resume asked for while a panic stop is still draining waits
    for that drain and then starts lifemodel if panic is off by then, so
    `resume` never reports a start that did not happen. An exit the
    loader asked for is logged at info; one nobody asked for at warn.
@@ -203,7 +207,9 @@ docker exec <container> lifemodel resume   # clear panic, start lifemodel
 Each of them prints the state - `running`, `stopped`, or `failed` when the
 instance did not come up - then `commit <sha>`, `panic on|off` and, while it is
 failed, one more line `failed: <reason>`. A failed request exits 1 with one
-line saying why. `status` and `panic` exit 0 whenever the loader answered;
+line saying why - a panic whose stop could not finish is answered that way.
+`status` exits 0 whenever the loader answered, and `panic` whenever its stop
+finished;
 `resume` exits 1 when the instance did not come up (its reason was printed).
 `panic` stops lifemodel with its drain, `resume` starts it again (building this
 commit first if it was never built) - and it is the retry after a failed build,

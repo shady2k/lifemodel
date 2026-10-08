@@ -473,6 +473,29 @@ describe('a start the stop cannot wait for (rework 3, review rounds 3 and 4)', (
     );
   });
 
+  it('drains a start the OS confirms in the same turn the stop gives up on it (review round 5)', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    world.launcher.holdSpawns();
+
+    const starting = supervisor.start();
+    await settle();
+    const child = world.launcher.spawns[0]?.child;
+    const stopping = supervisor.stop('shutdown', 3_000);
+    await settle();
+    // The cap runs out and the verdict arrives before either side has run on.
+    world.clock.resolveAll();
+    child?.confirmSpawn();
+
+    expect(await starting).toEqual({ started: true, reason: 'started' });
+    await settle();
+    // The stop owns what the start made and drains it, like any other child.
+    expect(child?.signals).toEqual(['SIGTERM']);
+    child?.exit(0, null);
+    expect(await stopping).toEqual({ stopped: true, drainTimedOut: false, pending: null });
+    expect(supervisor.status().state).toBe('stopped');
+  });
+
   it('lets a resume after a given-up start make a fresh one that runs', async () => {
     const rig = makeSupervisor(createLoaderWorld());
     const { supervisor, world, panic } = rig;
