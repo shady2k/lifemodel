@@ -52,9 +52,17 @@ LABEL org.opencontainers.image.title="lifemodel" \
 # tini is PID 1: it reaps what the loader leaves behind and passes SIGTERM on,
 # so `docker stop` reaches the loader and lifemodel's drain through it.
 # git is how the loader seeds the instance's repository from the bundle and how
-# the instance keeps its own history; iptables is how the loader confines
-# lifemodel's egress (it needs --cap-add NET_ADMIN for that, and nothing else
-# beyond the defaults); netbase carries /etc/protocols, which iptables reads.
+# the instance keeps its own history.
+#
+# iptables and netbase are carried FOR THE AGENT VAULT STAGE (lifemodel-q4x.3),
+# where the loader will install the owner rule that sends lifemodel's traffic
+# through Agent Vault and confines its egress; that stage is what needs the
+# documented `--cap-add NET_ADMIN`, and netbase's /etc/protocols is what
+# iptables reads. NO SUCH RULE EXISTS YET: nothing in loader/ invokes iptables,
+# so lifemodel can reach the network directly today and the capability is
+# carried, not used. Do not read this image as confined until that stage lands
+# and is probed.
+#
 # curl is there for the documented checks and for looking at the container from
 # inside it.
 #

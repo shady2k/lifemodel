@@ -41,10 +41,20 @@ if [ ! -d loader ]; then
 fi
 
 # The bundle is written into the build context because a docker build can read
-# nothing else; .dockerignore keeps the rest of the repository out of it, and
-# it is removed on the way out whatever happens.
+# nothing else; .dockerignore keeps the rest of the repository out of it, and it
+# is removed on the way out whatever happens.
+#
+# The context directory is THIS RUN's own: a directory that is already there was
+# not made by this script, so it is refused by name rather than deleted. Before
+# that rule, `mkdir -p` plus an unconditional `rm -rf` meant a stale - or a
+# person's own - .docker-context was removed by a build (rework 2, finding 8).
 context=.docker-context
-mkdir -p "$context"
+if [ -e "$context" ]; then
+    printf '%s\n' \
+        "build-image: $root/$context already exists, and this script only removes a build context it made itself; it is not this run's, so nothing was deleted - remove it yourself if it is a stale one" >&2
+    exit 2
+fi
+mkdir "$context"
 trap 'rm -rf "$context"' EXIT INT TERM
 
 commit=$(git rev-parse HEAD)
