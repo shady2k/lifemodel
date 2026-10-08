@@ -156,6 +156,33 @@ async function waitForLogLine(pattern: RegExp, timeoutMs: number): Promise<strin
   }
 }
 
+/** How many times the container logged one line. */
+function logCount(pattern: RegExp): number {
+  return docker(['logs', container])
+    .split('\n')
+    .filter((candidate) => pattern.test(candidate)).length;
+}
+
+/** The event of a start: the loader's own line, the second time (or later). */
+async function waitForStarts(target: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (logCount(/"msg":"lifemodel started"/) < target) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the loader never started lifemodel ${String(target)} times:\n${docker(['logs', container])}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/** The container's log lines, from one line onwards (the rest is history). */
+function logFrom(first: string): string[] {
+  const lines = docker(['logs', container]).split('\n');
+  const start = lines.findIndex((line) => line.includes(first));
+  return start === -1 ? lines : lines.slice(start);
+}
+
 /** The loader's own status line for lifemodel, as the container printed it. */
 function loaderLine(pattern: RegExp): string | undefined {
   return docker(['logs', container])
@@ -436,7 +463,528 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(created).toHaveLength(2); // the vault and the agent, once, on the first start
     }, 300_000);
   });
+  it("serves lifemodel's settings at the root host, and a save restarts it with them", async () => {
+    // The owner logs in once (the loader's cookie covers every host) and opens
+    // the root host: lifemodel's own interface, which needs no auth of its own.
+    const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login', {
+      form: { password: 'first-start-pass' },
+      origin: `http://boot.localhost:${String(port)}`,
+    });
+    expect(login.status).toBe(303);
+    const cookie = cookieOf(login);
+    expect(cookie).toContain('lm_session=');
 
+    // lifemodel is still building its container for a moment after the loader
+    // says it started: the event is its own line that the interface is up, not
+    // a timer (the root host answers 502 until then).
+    await waitForLogLine(/"msg":"lifemodel's settings interface is up"/, 120_000);
+
+    const before = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
+    expect(before.status).toBe(200);
+    expect(before.body).toContain('Save and restart lifemodel');
+    // The first start of an instance has no config at all, and the page says so
+    // instead of lifemodel crash-looping on it.
+    expect(before.body).toContain('No model endpoint is configured yet');
+    expect(before.body).toContain('value="__telegram_bot_token__"');
+    // The link to the loader for keys and panic, on the port the browser used.
+    expect(before.body).toContain(`http://boot.localhost:${String(port)}/`);
+
+    const startsBefore = logCount(/"msg":"lifemodel started"/);
+
+    const save = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/settings', {
+      cookie,
+      origin: `http://localhost:${String(port)}`,
+      form: {
+        endpointBaseUrl: 'http://127.0.0.1:9/v1',
+        fastModel: 'test-fast',
+        smartModel: 'test-smart',
+        motorModel: 'test-motor',
+        telegramChatId: '4242',
+        telegramBotToken: '__telegram_bot_token__',
+      },
+    });
+    expect(save.status).toBe(200);
+    expect(save.body).toContain('Saved.');
+
+    // The save wrote lifemodel's config file, at the path the instance uses.
+    const written = docker([
+      'exec',
+      container,
+      'cat',
+      '/var/lib/lifemodel/data/config/agent.json',
+    ]);
+    expect(written).toContain('http://127.0.0.1:9/v1');
+    expect(written).toContain('test-smart');
+
+    // And the loader restarted it AT ONCE - its own line, no backoff.
+    await waitForLogLine(/"msg":"lifemodel asked to be restarted"/, 60_000);
+    await waitForStarts(startsBefore + 1, 120_000);
+    const afterSave = logFrom('"msg":"lifemodel asked to be restarted"');
+    expect(afterSave.some((line) => line.includes('after a backoff'))).toBe(false);
+
+    // The running lifemodel reads the new settings: the page shows them.
+    const after = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
+    expect(after.status).toBe(200);
+    expect(after.body).toContain('value="http://127.0.0.1:9/v1"');
+    expect(after.body).toContain('value="test-fast"');
+    expect(after.body).toContain('value="4242"');
+    expect(after.body).not.toContain('No model endpoint is configured yet');
+  }, 300_000);
+
+<<<<<<< HEAD
+=======
+  describe("lifemodel's traffic, and the key on the way out (lifemodel-q4x.3.2)", () => {
+    /** The made-up credential values the stub's services use: no real key. */
+    const MODEL_KEY = 'q4x32-made-up-model-key-0001';
+    const BOT_TOKEN = 'q4x32-made-up-bot-token-0002';
+
+    /**
+     * The services of the stub's host: the model endpoint with bearer auth,
+     * and a Telegram-shaped path with the token substituted into the path.
+     * Written as the YAML the CLI takes (`substitutions` are file-only).
+     */
+    const servicesYaml = `services:
+  - name: q4x32-model
+    host: q4x32-stub.local:8080/v1/*
+    auth:
+      type: bearer
+      token: Q4X32_MODEL_KEY
+  - name: q4x32-telegram
+    host: q4x32-stub.local:8080/bot/*
+    auth:
+      type: api-key
+      key: Q4X32_BOT_TOKEN
+      header: X-Q4X32-Bot
+    substitutions:
+      - key: Q4X32_BOT_TOKEN
+        placeholder: __bot_token__
+        in: [path]
+`;
+
+    interface StubRecord {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body: string;
+    }
+
+    /** The loader's page, fetched as the owner: the session every host shares. */
+    async function loaderPage(): Promise<{ cookie: string; body: string }> {
+      const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login', {
+        form: { password: 'first-start-pass' },
+      });
+      if (login.status !== 303) throw new Error(`POST /login answered ${String(login.status)}`);
+      const cookie = cookieOf(login);
+      const page = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/', {
+        cookie,
+      });
+      if (page.status !== 200) throw new Error(`GET / answered ${String(page.status)}`);
+      return { cookie, body: page.body };
+    }
+
+    /** The account Agent Vault's own interface needs, as the loader page shows it. */
+    function accountFromPage(body: string): { email: string; password: string } {
+      const email = /<dt>owner<\/dt><dd>([^<]*)<\/dd>/.exec(body)?.[1];
+      const password = /<dt>password<\/dt><dd>([^<]*)<\/dd>/.exec(body)?.[1];
+      if (email === undefined || password === undefined) {
+        throw new Error(`the loader page showed no Agent Vault account:\n${body}`);
+      }
+      return { email, password };
+    }
+
+    /** One Agent Vault CLI call inside the container, with the store's own HOME. */
+    function vaultCli(args: string[], input?: string): string {
+      return runOk(
+        'docker',
+        ['exec', '-i', '-e', 'HOME=/var/lib/lifemodel/vault', container, 'agent-vault', ...args],
+        input === undefined ? {} : { input }
+      );
+    }
+
+    /**
+     * lifemodel's own environment, read from its own process: the variables
+     * the probe below is run with are exactly these, not a test's guess.
+     */
+    function lifemodelEnvironment(): Record<string, string> {
+      const started = docker(['logs', container])
+        .split('\n')
+        .filter((line) => /"msg":"lifemodel started","pid":\d+/.test(line))
+        .at(-1);
+      const pid = /"pid":(?<pid>\d+)/.exec(started ?? '')?.groups?.pid;
+      if (pid === undefined) throw new Error('the loader never said lifemodel started');
+      // Read as lifemodel's OWN user: root without CAP_SYS_PTRACE may not read
+      // another user's environ, and this is the environment the criterion is
+      // about anyway.
+      const raw = docker(['exec', '-u', '1000', container, 'cat', `/proc/${pid}/environ`]);
+      const environment: Record<string, string> = {};
+      for (const entry of raw.split('\u0000')) {
+        const separator = entry.indexOf('=');
+        if (separator > 0) environment[entry.slice(0, separator)] = entry.slice(separator + 1);
+      }
+      return environment;
+    }
+
+    /** The proxy environment lifemodel really has, and nothing else. */
+    const PROXY_NAMES = [
+      'HTTP_PROXY',
+      'HTTPS_PROXY',
+      'NO_PROXY',
+      'NODE_USE_ENV_PROXY',
+      'NODE_EXTRA_CA_CERTS',
+    ];
+
+    /**
+     * One request as lifemodel's user, through the proxy lifemodel was given:
+     * the probe runs with the environment its own process holds. `--proxy`
+     * names that value explicitly because curl takes the LOWER-case name for
+     * an `http://` target, while lifemodel's environment carries the standard
+     * `HTTP_PROXY`/`HTTPS_PROXY` that Node and npm read - one value, two
+     * spellings. The stub speaks plain HTTP, which is the forward-proxy path
+     * of Agent Vault's listener (an https upstream goes through CONNECT and a
+     * certificate the proxy re-signs; the injection is the same code).
+     */
+    function probeAsLifemodel(url: string, env: Record<string, string>, extra: string[] = []): Run {
+      const args = ['exec', '-u', '1000'];
+      for (const name of PROXY_NAMES) {
+        const value = env[name];
+        if (value !== undefined) args.push('-e', `${name}=${value}`);
+      }
+      args.push(
+        container,
+        'curl',
+        '-sS',
+        '-m',
+        '15',
+        '--proxy',
+        env['HTTPS_PROXY'] ?? '',
+        ...extra,
+        url
+      );
+      return run('docker', args, { timeoutMs: 60_000 });
+    }
+
+    /**
+     * One request as lifemodel's user with NO proxy in the environment: what a
+     * bypass looks like. The container's own variables are cleared, so a
+     * machine that passes its own proxy into containers cannot decide this.
+     */
+    function directAsLifemodel(url: string): { result: Run; ms: number } {
+      const started = Date.now();
+      const result = run(
+        'docker',
+        [
+          'exec',
+          '-u',
+          '1000',
+          '-e',
+          'HTTP_PROXY=',
+          '-e',
+          'HTTPS_PROXY=',
+          '-e',
+          'http_proxy=',
+          '-e',
+          'https_proxy=',
+          container,
+          'curl',
+          '-sS',
+          '-m',
+          '10',
+          '-o',
+          '/dev/null',
+          url,
+        ],
+        { timeoutMs: 30_000 }
+      );
+      return { result, ms: Date.now() - started };
+    }
+
+    /** Every request the stub has recorded so far. */
+    function stubRecords(): StubRecord[] {
+      const raw = run('docker', ['exec', stubContainer, 'cat', '/tmp/q4x32-requests.jsonl']);
+      if (raw.status !== 0) return [];
+      return raw.out
+        .split('\n')
+        .filter((line) => line.trim() !== '')
+        .map((line) => JSON.parse(line) as StubRecord);
+    }
+
+    /** The stub's record of one request: the event, waited for, never a timer. */
+    async function stubRequestFor(urlPart: string, since: number): Promise<StubRecord> {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const records = stubRecords();
+        const found = records.slice(since).find((record) => record.url.includes(urlPart));
+        if (found !== undefined) return found;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `the stub recorded no request for ${urlPart}: ${JSON.stringify(records.slice(since))}`
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+
+    /** One request through the front door, on Agent Vault's own host. */
+    function vaultApi(
+      path: string,
+      cookie: string,
+      body: unknown
+    ): Promise<Reply> {
+      return new Promise((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = request(
+          {
+            host: '127.0.0.1',
+            port,
+            path,
+            method: 'POST',
+            headers: {
+              Host: `vault.localhost:${String(port)}`,
+              'content-type': 'application/json',
+              'content-length': String(Buffer.byteLength(payload)),
+              cookie,
+            },
+          },
+          (res) => {
+            let answer = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => (answer += chunk));
+            res.on('end', () =>
+              resolve({ status: res.statusCode ?? 0, body: answer, setCookie: res.headers['set-cookie'] })
+            );
+          }
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+    }
+
+    /**
+     * The fixture: the stub's host carries a service with the model key
+     * (bearer) and the Telegram-shaped path, set up as the OWNER would set
+     * them up (decision 12, story S3) - with the account the loader's own page
+     * hands over, and the CLI session the loader's store keeps.
+     */
+    beforeAll(async () => {
+      // A restart of the container re-publishes the front door on a NEW host
+      // port (the documented command asks Docker for one), so the port the
+      // tests above used is not the port this describe talks to.
+      port = publishedPort();
+      const page = await loaderPage();
+      const account = accountFromPage(page.body);
+      vaultCli(
+        [
+          'auth',
+          'login',
+          '--address',
+          'http://127.0.0.1:14321',
+          '--email',
+          account.email,
+          '--password-stdin',
+        ],
+        `${account.password}\n`
+      );
+      vaultCli([
+        'vault',
+        'credential',
+        'set',
+        `Q4X32_MODEL_KEY=${MODEL_KEY}`,
+        `Q4X32_BOT_TOKEN=${BOT_TOKEN}`,
+        '--vault',
+        'lifemodel',
+      ]);
+      // `substitutions` are file-only in Agent Vault's CLI: this is the file.
+      const services = join(stubDir, 'services.yaml');
+      writeFileSync(services, servicesYaml);
+      docker(['cp', services, `${container}:/tmp/q4x32-services.yaml`]);
+      vaultCli([
+        'vault',
+        'service',
+        'add',
+        '-f',
+        '/tmp/q4x32-services.yaml',
+        '--vault',
+        'lifemodel',
+      ]);
+    }, 240_000);
+
+    it('shows the instance owner account on the loader page, and Agent Vault logs in with it', async () => {
+      const page = await loaderPage();
+      const account = accountFromPage(page.body);
+      // Decision 18: the page carries the account and the way to use it, and
+      // the page is never cached (a password is on it).
+      expect(page.body).toContain('owner@lifemodel.local');
+      expect(page.body).toContain(`<a href="http://vault.localhost:${String(port)}">`);
+      const vaultPage = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/', {
+        cookie: page.cookie,
+      });
+      expect(vaultPage.status).toBe(200);
+
+      // Agent Vault's own login API, through the front door on its own host,
+      // with the loader's session and the account the page showed: it answers
+      // a session token, which is the owner signing in to add keys there.
+      const login = await vaultApi('/v1/auth/login', page.cookie, {
+        email: account.email,
+        password: account.password,
+      });
+      expect(login.status).toBe(200);
+      expect(String((JSON.parse(login.body) as { token?: string }).token)).toMatch(/^av_/);
+    }, 120_000);
+
+    it("carries lifemodel's request to the stub with its key injected, path placeholder and all", async () => {
+      const env = lifemodelEnvironment();
+      // The proxy environment lifemodel's own process has, built in ONE place:
+      // the vault's proxy with the agent token, loopback out of the proxy, the
+      // proxy understood by fetch, and the vault's CA.
+      const token = (
+        JSON.parse(docker(['exec', container, 'cat', '/var/lib/lifemodel/loader/vault-proxy.json'])) as {
+          token: string;
+        }
+      ).token;
+      expect(env['HTTPS_PROXY']).toBe(`http://${token}:lifemodel@127.0.0.1:14322`);
+      expect(env['HTTP_PROXY']).toBe(env['HTTPS_PROXY']);
+      expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
+      expect(env['NODE_USE_ENV_PROXY']).toBe('1');
+      expect(env['NODE_EXTRA_CA_CERTS']).toBe('/var/lib/lifemodel/vault-ca.pem');
+
+      // The stub's host is NOT loopback: this only arrives if the request left
+      // through the proxy, with the vault's own key attached on the way.
+      const before = stubRecords().length;
+      const model = probeAsLifemodel(
+        `http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`,
+        env,
+        [
+          '-X',
+          'POST',
+          '-H',
+          'content-type: application/json',
+          '-d',
+          '{"model":"q4x32-stub","messages":[]}',
+        ]
+      );
+      expect(model.status).toBe(0);
+      expect(model.out).toContain('a fixed completion from the stub');
+      const modelRecord = await stubRequestFor('/v1/chat/completions', before);
+      expect(modelRecord.method).toBe('POST');
+      expect(modelRecord.headers['authorization']).toBe(`Bearer ${MODEL_KEY}`);
+      // The proxy's own credential is the broker's business, not the
+      // upstream's: it does not travel on.
+      expect(modelRecord.headers['proxy-authorization']).toBeUndefined();
+      expect(modelRecord.body).toContain('q4x32-stub');
+
+      // The Telegram shape: the token lives in the PATH, and Agent Vault
+      // substitutes it there (placeholders are declared in the service).
+      const beforeBot = stubRecords().length;
+      const bot = probeAsLifemodel(
+        `http://${STUB_HOST}:${String(STUB_PORT)}/bot/__bot_token__/sendMessage`,
+        env,
+        ['-X', 'POST', '-d', 'chat_id=1&text=hello']
+      );
+      expect(bot.status).toBe(0);
+      const botRecord = await stubRequestFor('/sendMessage', beforeBot);
+      expect(botRecord.url).toBe(`/bot/${BOT_TOKEN}/sendMessage`);
+      expect(botRecord.headers['x-q4x32-bot']).toBe(BOT_TOKEN);
+      expect(JSON.stringify(botRecord)).not.toContain('__bot_token__');
+    }, 180_000);
+
+    it('refuses a direct connection from lifemodel to anywhere but loopback, at once', () => {
+      // The kernel rule, not the environment: no proxy is set on this request.
+      const outside = directAsLifemodel('http://1.1.1.1/');
+      expect(outside.result.status).not.toBe(0);
+      // A REJECT, not a DROP: it fails now and says so - a hang would be the
+      // failure this rule exists to avoid.
+      expect(outside.ms).toBeLessThan(3_000);
+      expect(outside.result.out).not.toMatch(/timed out|Timeout/i);
+
+      // And the stub, which root reaches, is out of lifemodel's reach too.
+      const neighbour = directAsLifemodel(`http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`);
+      expect(neighbour.result.status).not.toBe(0);
+      expect(neighbour.ms).toBeLessThan(3_000);
+
+      // Loopback is still lifemodel's: the loader's own port answers it.
+      const loopback = run('docker', [
+        'exec',
+        '-u',
+        '1000',
+        container,
+        'curl',
+        '-sS',
+        '-m',
+        '5',
+        '-o',
+        '/dev/null',
+        '-w',
+        '%{http_code}',
+        'http://127.0.0.1:7000/login',
+      ]);
+      expect(loopback.out.trim()).toBe('200');
+    }, 120_000);
+
+    it('leaves root untouched, and the key on the way out comes from the vault, not from the caller', async () => {
+      // Root is not named by the rule: it reaches the stub directly, with no
+      // proxy and no key - which is what makes the injected header above the
+      // VAULT's doing and not the caller's.
+      const before = stubRecords().length;
+      const direct = runOk(
+        'docker',
+        [
+          'exec',
+          container,
+          'curl',
+          '-sS',
+          '-m',
+          '15',
+          '-X',
+          'POST',
+          '-H',
+          'content-type: application/json',
+          '-d',
+          '{}',
+          `http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`,
+        ],
+        { timeoutMs: 60_000 }
+      );
+      expect(direct).toContain('a fixed completion from the stub');
+      const record = await stubRequestFor('/v1/chat/completions', before);
+      expect(record.headers['authorization']).toBeUndefined();
+    }, 120_000);
+
+    it('leaves no IPv6 way out for the rule to miss', () => {
+      // The rule is IPv4, the family Docker's default network gives the
+      // container. Its ONLY IPv6 address is the loopback one, and there is no
+      // IPv6 route out, so a bypass has no other address to use. An instance
+      // on an IPv6-enabled Docker network is not covered by this stage.
+      const addresses = docker(['exec', container, 'cat', '/proc/net/if_inet6'])
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '');
+      expect(addresses).toHaveLength(1);
+      expect(addresses[0]).toMatch(/ lo$/);
+    }, 60_000);
+
+    it("keeps the made-up key out of lifemodel's environment, config and logs", () => {
+      const env = lifemodelEnvironment();
+      // lifemodel holds its proxy credential (that is how it reaches the
+      // vault) and NOT the key the vault attaches for it.
+      expect(env['AGENT_VAULT_TOKEN']).toBeDefined();
+      expect(JSON.stringify(env)).not.toContain(MODEL_KEY);
+      expect(JSON.stringify(env)).not.toContain(BOT_TOKEN);
+      // Its configuration: the data on the volume, where its own settings live.
+      const inData = run('docker', ['exec', container, 'grep', '-rl', MODEL_KEY, '/var/lib/lifemodel/data']);
+      expect(inData.status).toBe(1); // grep's own "found nothing"
+      // And the container's log, the loader's lines included.
+      const logs = docker(['logs', container]);
+      expect(logs).not.toContain(MODEL_KEY);
+      expect(logs).not.toContain(BOT_TOKEN);
+      // The key IS in the vault: the stub saw it arrive, which is the point.
+      expect(stubRecords().some((record) => record.headers['authorization'] === `Bearer ${MODEL_KEY}`)).toBe(
+        true
+      );
+    }, 120_000);
+  });
+
+>>>>>>> dbb6934 (fixup! Create the config directory on the first save and stop intake before the restart (lifemodel-q4x.4.1))
   it('holds panic and resumes, from the command line in the container', () => {
     const panicked = docker(['exec', container, 'lifemodel', 'panic'], { timeoutMs: 180_000 });
     expect(panicked).toContain('panic on');
