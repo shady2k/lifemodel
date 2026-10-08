@@ -173,7 +173,8 @@ Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM):
 ## 🐳 Run your own instance
 
 The published image runs a whole instance in one container: the **loader**
-(the password, first start, panic), **Caddy** as the only web entrance, and
+(the password, first start, panic), **Caddy** as the only web entrance,
+**Agent Vault** (the layer that holds the keys, so lifemodel holds none), and
 lifemodel itself as an unprivileged user whose code is a git repository on the
 volume — so it can change itself and keep the change across restarts.
 
@@ -197,7 +198,7 @@ you for a model key at this point.
 | --- | --- |
 | `boot.localhost:8080` | the loader: its password, panic and resume |
 | `localhost:8080` | lifemodel's own interface |
-| `vault.localhost:8080` | Agent Vault: the keys, injected into lifemodel's requests |
+| `vault.localhost:8080` | Agent Vault: its own interface — the vault, the keys and the services |
 
 `localhost` is the machine's own name and the others are its subdomains. On a
 VPS, reach them through an SSH tunnel and keep them unpublished:
@@ -206,8 +207,9 @@ VPS, reach them through an SSH tunnel and keep them unpublished:
 ssh -N -L 8080:127.0.0.1:8080 you@your-vps
 ```
 
-The root host and `vault.` answer that nothing is there yet until those parts
-of the instance are built. The port is published on the host's loopback only
+`vault.` reaches Agent Vault's own interface, behind the same login; the root
+host answers that nothing is there yet until lifemodel's own interface is built
+(lifemodel-q4x.4). The port is published on the host's loopback only
 (`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
 HTTPS proxy in front when you want that.
 
@@ -215,17 +217,21 @@ The rest of the command: the volume `lifemodel` holds the instance (its
 repository and its data — `docker rm -f` and the same `docker run` bring the
 same instance back), and `--stop-timeout 120` gives the whole stop room: the
 loader's own stop has one 110-second deadline, counted from the moment the
-signal arrives, for lifemodel's 90-second drain and for Caddy leaving. No step
+signal arrives, for lifemodel's 90-second drain, for Agent Vault leaving after
+it and for Caddy leaving last. No step
 of the stop waits past that deadline (some have shorter caps of their own), so
 the loader leaves before Docker's own kill at 120 seconds; when a step could
 not finish, it leaves with a non-zero code and one line naming what was still
 pending and which bound it hit. A process the kernel will not let go of even
 after SIGKILL is the one case where the loader leaves without having reaped
-it. `--cap-add NET_ADMIN` is for the **next** stage: when lifemodel's traffic
-goes through Agent Vault (lifemodel-q4x.3), the loader installs the kernel rule
-that confines its egress and needs that capability to do it. **No such rule is
-installed today** — lifemodel can still reach the network directly — so the
-flag is carried, not yet used.
+it. `--cap-add NET_ADMIN` is for the **next** task: when lifemodel's traffic is
+confined to Agent Vault's proxy (lifemodel-q4x.3.2), the loader installs the
+kernel rule that does it and needs that capability. **No such rule is installed today**
+— lifemodel can still reach the network directly — so the flag is carried, not
+yet used. Agent Vault itself is already in the image and running:
+it holds a passwordless store in `/var/lib/lifemodel/vault` (root-only), and
+the loader creates the vault `lifemodel` and an agent token for it and gives
+that token to lifemodel's process as its proxy credential.
 
 From the command line, inside the container:
 
@@ -234,7 +240,7 @@ docker exec lifemodel lifemodel status   # running|stopped|failed, the commit, p
                                          # (failed adds a line: failed: <the reason>)
 docker exec lifemodel lifemodel panic    # stop lifemodel and keep it down
 docker exec lifemodel lifemodel resume   # clear panic and start it again
-docker logs -f lifemodel                 # the loader's and Caddy's lines
+docker logs -f lifemodel                 # the loader's, Caddy's and Agent Vault's lines
 ```
 
 Build the image yourself with `scripts/build-image.sh`: it makes the seed

@@ -125,14 +125,20 @@ interface ProxyRecord {
   token: string;
 }
 
-/** One line of a command that failed, for a log line that has to stay one line. */
+/**
+ * The command's own reason, in one line. Agent Vault's CLI is a cobra program:
+ * a failure prints `Error: <reason>`, then its usage block, and finally the
+ * reason on its own - so the LAST non-empty line is the reason, and a command
+ * that failed without one falls back to the first line it did print.
+ */
 function firstLine(result: { stdout: string; stderr: string }, fallback: string): string {
   for (const stream of [result.stderr, result.stdout]) {
-    for (const line of stream.split('\n')) {
-      const text = line.trim();
-      if (text === '' || text.startsWith('Usage:') || text.startsWith('Error: ')) continue;
-      return text;
-    }
+    const lines = stream
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    const last = lines[lines.length - 1];
+    if (last !== undefined) return last;
   }
   return fallback;
 }

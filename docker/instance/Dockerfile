@@ -9,6 +9,8 @@
 #   /usr/bin/caddy              the front door (decision 13), started by the
 #                               loader
 #   /etc/lifemodel/Caddyfile    the front door's routing, root-owned
+#   /usr/local/bin/agent-vault  Agent Vault (decisions 4 and 12), the credential
+#                               proxy that holds the keys; the loader starts it
 #   /usr/local/bin/lifemodel    the loader's CLI: status, panic, resume
 #   /opt/lifemodel/seed.bundle  the repository's history at this image's
 #                               commit; the loader clones the instance's
@@ -54,14 +56,13 @@ LABEL org.opencontainers.image.title="lifemodel" \
 # git is how the loader seeds the instance's repository from the bundle and how
 # the instance keeps its own history.
 #
-# iptables and netbase are carried FOR THE AGENT VAULT STAGE (lifemodel-q4x.3),
-# where the loader will install the owner rule that sends lifemodel's traffic
-# through Agent Vault and confines its egress; that stage is what needs the
-# documented `--cap-add NET_ADMIN`, and netbase's /etc/protocols is what
-# iptables reads. NO SUCH RULE EXISTS YET: nothing in loader/ invokes iptables,
-# so lifemodel can reach the network directly today and the capability is
-# carried, not used. Do not read this image as confined until that stage lands
-# and is probed.
+# iptables and netbase are carried FOR lifemodel-q4x.3.2, where the loader will
+# install the owner rule that sends lifemodel's traffic through Agent Vault and
+# confines its egress; that task is what needs the documented `--cap-add
+# NET_ADMIN`, and netbase's /etc/protocols is what iptables reads.
+# NO SUCH RULE EXISTS YET: nothing in loader/ invokes iptables, so lifemodel can
+# reach the network directly today and the capability is carried, not used. Do
+# not read this image as confined until that task lands and is probed.
 #
 # curl is there for the documented checks and for looking at the container from
 # inside it.
@@ -80,6 +81,30 @@ RUN set -eux; \
       netbase \
       tini; \
     rm -rf /var/lib/apt/lists/*
+
+# Agent Vault, pinned by version and checked against the checksums the release
+# publishes (lifemodel-q4x.3.1, decisions 4 and 12): the loader starts it as it
+# starts Caddy, and it is the layer that holds the keys. The build either
+# carries the published binary of THIS version or fails - a drifted or
+# unverified download is not a trusted layer. Moving the pin is a change of its
+# own, because Agent Vault's API is still changing.
+ARG AGENT_VAULT_VERSION=0.40.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64|arm64) ;; \
+      *) printf '%s\n' "the Agent Vault release carries no binary for $arch" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/Infisical/agent-vault/releases/download/v${AGENT_VAULT_VERSION}"; \
+    archive="agent-vault_${AGENT_VAULT_VERSION}_linux_${arch}.tar.gz"; \
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "/tmp/${archive}" "${base}/${archive}"; \
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o /tmp/agent-vault-checksums.txt "${base}/checksums.txt"; \
+    awk -v archive="${archive}" '$2 == archive { print }' /tmp/agent-vault-checksums.txt > /tmp/agent-vault-checksum; \
+    test "$(wc -l < /tmp/agent-vault-checksum)" -eq 1; \
+    (cd /tmp && sha256sum -c agent-vault-checksum); \
+    tar -xzf "/tmp/${archive}" -C /tmp agent-vault; \
+    install -m 0755 /tmp/agent-vault /usr/local/bin/agent-vault; \
+    rm -f "/tmp/${archive}" /tmp/agent-vault-checksums.txt /tmp/agent-vault-checksum /tmp/agent-vault
 
 # The front door: the binary, and the routing the loader starts it with. Both
 # are root-owned; lifemodel can read them and cannot write them.
