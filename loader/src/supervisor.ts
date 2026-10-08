@@ -61,8 +61,10 @@ export interface StartOutcome {
 }
 
 export interface StopOutcome {
-  /** False only when lifemodel had not exited even after SIGKILL when the budget ran out. */
+  /** False when the stop ended with lifemodel's process not accounted for (see `pending`). */
   stopped: boolean;
+  /** What the stop could not finish, in words for the loader's last line; null when nothing. */
+  pending: string | null;
   /** lifemodel was still running when its drain ran out and was killed. */
   drainTimedOut: boolean;
 }
@@ -123,13 +125,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   let closed = false;
   /** The start being made now; a stop waits for it before it looks for a child. */
   let startInFlight: Promise<StartOutcome> | null = null;
-  /** The process of that start, from `spawn` returning until it is owned or refused. */
-  let pendingSpawn: SpawnedProcess | null = null;
   /** The stop being made now; a start (a resume) waits for it, then decides. */
   let stopInFlight: Promise<StopOutcome> | null = null;
-  /** Numbers the starts; a stop that gave up on one names it here. */
-  let attemptSeq = 0;
-  let abandonedAttempt = -1;
+  /** Gives up the start in flight: a stop that will not wait for it any longer calls it. */
+  let abandonStart: (() => void) | null = null;
 
   function spawnOptions(): SpawnOptions {
     const options: SpawnOptions = {
@@ -224,10 +223,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     if (state === 'running' || state === 'starting' || startInFlight !== null) {
       return { started: false, reason: 'already-running' };
     }
-    attemptSeq += 1;
-    const attempt = startOnce(attemptSeq).finally(() => {
+    const attempt = startOnce().finally(() => {
       startInFlight = null;
-      pendingSpawn = null;
+      abandonStart = null;
     });
     startInFlight = attempt;
     return attempt;
@@ -239,15 +237,26 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { started: false, reason: 'stopping' };
   }
 
-  async function startOnce(attempt: number): Promise<StartOutcome> {
+  async function startOnce(): Promise<StartOutcome> {
     if (closed || stopping) return notStartedStopping();
-    if (await isPanicSet()) {
+    // A stop that will not wait for this start any longer gives it up through
+    // this signal, and the start then SETTLES at once (rework 3, review round
+    // 4 finding 1): it is retired, a later resume makes a fresh one, and no
+    // caller waits on a verdict that may never come.
+    const abandoned = new Promise<'abandoned'>((resolve) => {
+      abandonStart = () => {
+        resolve('abandoned');
+      };
+    });
+    const panicSet = await Promise.race([isPanicSet(), abandoned]);
+    if (panicSet === 'abandoned') return notStartedStopping();
+    if (panicSet) {
       logger.info({}, 'lifemodel is not started: panic is set');
       return { started: false, reason: 'panic' };
     }
     // The panic read above is asynchronous: a stop can begin while it is
-    // pending (or give up waiting for it), and then nothing may be spawned.
-    if (closed || stopping || abandonedAttempt === attempt) return notStartedStopping();
+    // pending, and then nothing may be spawned.
+    if (closed || stopping) return notStartedStopping();
     state = 'starting';
     let spawned: SpawnedProcess;
     try {
@@ -257,22 +266,27 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     // The verdict is awaited BEFORE the child is owned. A stop that arrives
     // meanwhile waits for this whole start (`startInFlight`, bounded) and then
-    // finds the child below; a stop that gave up waiting has already killed
-    // `pendingSpawn` and named this attempt, so it is not owned at all.
-    pendingSpawn = spawned;
-    const outcome = await spawnOutcome(spawned);
+    // finds the child below; a stop that gives up waiting abandons it here.
+    const outcome = await Promise.race([spawnOutcome(spawned), abandoned]);
+    if (outcome === 'abandoned') {
+      // Never owned: killed now, and killed again should the OS confirm it
+      // later. The start counts as failed, so status says so and a resume
+      // retries it with a fresh process.
+      spawned.kill('SIGKILL');
+      spawned.onSpawn(() => {
+        spawned.kill('SIGKILL');
+        logger.error(
+          { pid: spawned.pid ?? null },
+          'lifemodel was spawned after its start was given up: it is killed'
+        );
+      });
+      return refusedStart(
+        `the OS did not confirm the start of lifemodel within ${String(config.killWaitMs)} ms of a stop`
+      );
+    }
     if (outcome instanceof Error) {
       // It never ran, so nothing is running to stop and nothing is retried.
       return refusedStart(describe(outcome));
-    }
-    if (abandonedAttempt === attempt) {
-      spawned.kill('SIGKILL');
-      state = 'stopped';
-      logger.error(
-        { pid: spawned.pid ?? null },
-        'lifemodel was spawned after its stop gave up waiting for the start: it is killed'
-      );
-      return { started: false, reason: 'stopping' };
     }
     child = spawned;
     exit = exitSignal();
@@ -332,14 +346,20 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         clock.sleep(Math.min(left(), config.killWaitMs)).then(() => false),
       ]);
       if (!settled) {
-        abandonedAttempt = attemptSeq;
-        pendingSpawn?.kill('SIGKILL');
+        // Not the stop's deadline: its own cap on a start that should take
+        // milliseconds. The start is given up and settles at once.
+        abandonStart?.();
+        await inFlight;
         stopping = false;
         logger.error(
-          { reason },
-          'a start of lifemodel was still in flight when the stop gave up waiting for it'
+          { reason, waitedMs: config.killWaitMs },
+          `a start of lifemodel was still unconfirmed after ${String(config.killWaitMs)} ms: the stop gave it up`
         );
-        return { stopped: false, drainTimedOut: true };
+        return {
+          stopped: false,
+          drainTimedOut: false,
+          pending: `lifemodel's start (unconfirmed after ${String(config.killWaitMs)} ms, given up)`,
+        };
       }
     }
     const current = child;
@@ -348,7 +368,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       stopping = false;
       state = 'stopped';
       logger.info({ reason }, 'lifemodel is not running');
-      return { stopped: true, drainTimedOut: false };
+      return { stopped: true, drainTimedOut: false, pending: null };
     }
     const waitMs = Math.min(config.drainWaitMs, Math.max(0, left() - config.killWaitMs));
     state = 'stopping';
@@ -378,13 +398,17 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
           { pid },
           'lifemodel had not exited after SIGKILL when the stop deadline ran out'
         );
-        return { stopped: false, drainTimedOut: true };
+        return {
+          stopped: false,
+          drainTimedOut: true,
+          pending: 'lifemodel (not reaped after SIGKILL by the stop deadline)',
+        };
       }
     }
     stopping = false;
     state = 'stopped';
     logger.info({ reason, drainTimedOut }, 'lifemodel stopped');
-    return { stopped: true, drainTimedOut };
+    return { stopped: true, drainTimedOut, pending: null };
   }
 
   return {

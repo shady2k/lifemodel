@@ -172,19 +172,21 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         closing.then(() => true),
         clock.sleep(closeWaitMs).then(() => false),
       ]);
-      if (!closed) pending.push("the loader's own server (connections still open)");
+      if (!closed) pending.push("the loader's own server (connections still open after its share)");
       // The supervisor already said it in one line when the drain ran out;
       // the code below is what the container leaves with.
       const outcome = await supervisor.stop('shutdown', left());
-      if (!outcome.stopped) pending.push('lifemodel (not reaped after SIGKILL)');
+      if (outcome.pending !== null) pending.push(outcome.pending);
       // Last: the front door stays open while lifemodel drains, so a person
       // watching the page sees the stop rather than a connection error.
       const caddyLeft = await frontDoor.stop(left());
-      if (!caddyLeft) pending.push('caddy (not reaped after SIGKILL)');
+      if (!caddyLeft) pending.push('caddy (not reaped after SIGKILL by the stop deadline)');
       if (pending.length > 0) {
+        // Each entry says which bound it hit: the shared deadline, or a step's
+        // own shorter cap (rework 3, review round 4 finding 3).
         logger.error(
           { pending, budgetMs: config.stopBudgetMs },
-          `the stop deadline ran out with work still pending: ${pending.join(', ')}`
+          `the loader is leaving with work still pending: ${pending.join('; ')}`
         );
         return 1;
       }

@@ -201,7 +201,7 @@ describe('the supervisor with a real child', () => {
 
       const outcome = await supervisor.stop('shutdown');
 
-      expect(outcome).toEqual({ stopped: true, drainTimedOut: false });
+      expect(outcome).toEqual({ stopped: true, drainTimedOut: false, pending: null });
       expect(readFileSync(standIn.marker, 'utf8')).toBe('drained and left\n');
       // It left by itself: a killed process would have no exit code.
       expect(supervisor.status().lastExit?.code).toBe(0);

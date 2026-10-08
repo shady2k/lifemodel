@@ -48,21 +48,26 @@ are part of `npm run check`.
    arrives: closing the loader's own server (at most 5 s), lifemodel's drain,
    the wait after a SIGKILL and Caddy's exit all spend it, and each step keeps
    5 s (`LIFEMODEL_KILL_WAIT_MS`) for a killed process to be reaped. No step
-   waits past the deadline: when it runs out the loader logs one error line
-   naming what is still pending (`the stop deadline ran out with work still
-   pending: ...`) and leaves with code 1 - before Docker's own kill at the
-   documented `--stop-timeout 120`. A process the kernel does not release even
-   after SIGKILL is left behind in that case rather than waited for.
+   waits past the deadline, and some stop sooner at a cap of their own (the
+   server close, a start in flight - below). When a step could not finish,
+   the loader logs one error line naming each thing still pending and the
+   bound it hit (`the loader is leaving with work still pending: ...`) and
+   leaves with code 1 - before Docker's own kill at the documented
+   `--stop-timeout 120`. A process the kernel does not release even after
+   SIGKILL is left behind in that case rather than waited for.
 9. **A stop meets a start safely.** A stop that arrives while lifemodel is
    being started (the panic flag being read, or the OS not yet having said the
    process runs) waits for that start and then stops what it started, and once
    the loader is leaving nothing is started at all - not a resume, not the
    restart of a death. The stop waits for such a start at most 5 s (the kill
-   room): a panic read or a spawn verdict that does not come by then is given
-   up on - a spawned process is killed, and one the OS confirms later is
-   killed rather than owned. A resume asked for while a panic stop is still
-   draining waits for that drain and then starts lifemodel if panic is off by
-   then, so `resume` never reports a start that did not happen. An exit the
+   room, its own cap - not the stop's deadline): a panic read or a spawn
+   verdict that does not come by then is given up on. The start settles at
+   once - as `failed` with its reason when a process was spawned (it is
+   killed, and killed again should the OS confirm it later; it is never
+   owned) - so nothing waits on it, status says why, and a resume makes a
+   fresh start. A resume asked for while a panic stop is still draining waits
+   for that drain and then starts lifemodel if panic is off by then, so
+   `resume` never reports a start that did not happen. An exit the
    loader asked for is logged at info; one nobody asked for at warn.
 
 ## The volume
@@ -131,8 +136,10 @@ browser OPENING a page (`GET` or `HEAD`, from Caddy's `X-Forwarded-Method`) is
 sent with `303` to `http://boot.<host>[:port]/login?next=<where it was going>`
 - built from the pinned names, only the port taken from the request - and
 every other request gets `401 no session`, so nothing that changes state is
-ever redirected. The login page keeps `next` only when it is an `http(s)` URL
-on one of the pinned browser hosts (no open redirect) and returns there after
+ever redirected. The login page keeps `next` only when it is an `http` URL
+on one of the pinned browser hosts and on the port the login was reached on
+(no open redirect, and no other local service: cookies are not scoped by
+port) and returns there after
 the password; without a password yet, `/login` sends on to `/setup`. The login
 and password-setting routes (`/login`, `/setup`) are the only ones a request
 reaches without that check. The CSS of those pages is

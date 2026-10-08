@@ -270,6 +270,8 @@ describe('one login, three hosts', () => {
       '//evil.example/',
       // Another local port: cookies are not scoped by port (review round 3, finding 3).
       'http://localhost:9999/',
+      // Another scheme, so another default port (review round 4, finding 2).
+      'https://localhost/',
     ]) {
       const refused = await ask(port, 'GET', `/login?next=${encodeURIComponent(foreign)}`, {
         host: 'boot.localhost',
@@ -292,6 +294,11 @@ describe('one login, three hosts', () => {
       form: { password: 'right', next: 'http://localhost:9999/' },
     });
     expect(otherPort.headers['location']).toBe('/');
+    const otherScheme = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right', next: 'https://localhost/' },
+    });
+    expect(otherScheme.headers['location']).toBe('/');
 
     await shutdownLoader(world, app);
   });
