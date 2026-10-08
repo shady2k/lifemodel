@@ -222,9 +222,10 @@ the repository's installation, and each person's plugin and hooks are their own.
   `ci-image-publish` runs on every push to `main` — no classifier gate, so a
   documents-only push publishes too — builds and pushes
   `ghcr.io/shady2k/lifemodel:main` and `:<sha>` with `github.token`, and is the
-  only job that asks for `packages: write`. **`ci-image` is to be required at
-  merge** (the coordinator adds it to branch protection then); until that is
-  done, a green `ci-product` is not the whole verdict for a product change.
+  only job that asks for `packages: write`. **`ci-image` is not a required
+  check** (owner, 2026-10-09): it runs on every product pull request and its
+  result is seen there, but a red one does not block the merge by itself -
+  read it before merging a product change.
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before
   and after, and pass them to `check.mjs` (the gate will grow that wiring
