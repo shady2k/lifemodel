@@ -20,6 +20,14 @@ export interface RunOptions {
   uid?: number;
   gid?: number;
   timeoutMs?: number;
+  /**
+   * One line written to the command's standard input, which is then closed.
+   * Agent Vault's CLI takes its master password (and the password of the
+   * owner account the loader registers) through `--password-stdin` and
+   * nothing else, so a command that needs one is handed it here - and a
+   * command with no input behaves exactly as before.
+   */
+  stdin?: string;
 }
 
 export interface CommandRunner {
@@ -31,6 +39,15 @@ export interface SpawnOptions {
   env: NodeJS.ProcessEnv;
   uid?: number;
   gid?: number;
+  /**
+   * One line written to the child's standard input, which is then closed.
+   * Agent Vault's server takes the password that protects its store through
+   * `--password-stdin`: an EMPTY line is the passwordless store the instance
+   * runs (decision 4 - the store is protected by the directory's permissions,
+   * not by a password). Without this the server would wait for a terminal
+   * that a container does not have.
+   */
+  stdin?: string;
 }
 
 export interface SpawnedProcess {
@@ -60,8 +77,17 @@ export function createNodeRunner(): CommandRunner {
           env: options.env,
           uid: options.uid,
           gid: options.gid,
-          stdio: ['ignore', 'pipe', 'pipe'],
+          // Input is always a pipe that is closed at once, so a command
+          // reading nothing sees end-of-input exactly as it did before, and a
+          // command that needs a line (`--password-stdin`) gets it here.
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
+        // The command may exit before it reads - a refused password, a server
+        // that is not up yet - and then the pipe breaks under the write. That
+        // is the command's own answer, reported through its exit code below,
+        // not an error of the loader's.
+        child.stdin.on('error', () => undefined);
+        child.stdin.end(options.stdin ?? '');
         let stdout = '';
         let stderr = '';
         let timedOut = false;
@@ -98,8 +124,14 @@ export function createNodeLauncher(): ProcessLauncher {
         env: options.env,
         uid: options.uid,
         gid: options.gid,
-        stdio: 'inherit',
+        // Only a child that is handed a line gets a pipe for its input; every
+        // other one keeps the container's own stdio, untouched.
+        stdio: options.stdin === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
       });
+      if (options.stdin !== undefined && child.stdin !== null) {
+        child.stdin.on('error', () => undefined);
+        child.stdin.end(options.stdin);
+      }
       return {
         pid: child.pid,
         onSpawn: (listener) => {

@@ -15,6 +15,7 @@ import {
   scriptRepository,
   settle,
   shutdownLoader,
+  vaultSpawn,
   waitUntil,
 } from '../helpers/loader-doubles.js';
 
@@ -35,6 +36,7 @@ describe('caddy, the front door the loader owns', () => {
 
     expect(world.launcher.spawns.map((spawn) => spawn.command)).toEqual([
       world.config.caddy.binary,
+      world.config.agentVault.binary,
       'node',
     ]);
     const caddy = caddySpawn(world);
@@ -125,14 +127,17 @@ describe('caddy, the front door the loader owns', () => {
     );
     // Four of the stop's six seconds pass while lifemodel drains; what is left
     // of the same deadline, less the room kept for SIGKILL (1 s), is what
-    // Caddy gets - not its own wait.
+    // Agent Vault and then Caddy get - not their own waits.
     world.clock.advance(4_500);
     lifemodelSpawn(world)?.child.exit(0, null);
+    await waitUntil(() => vaultSpawn(world)?.child.signals.length === 1, 'Agent Vault is stopped');
+    vaultSpawn(world)?.child.exit(0, null);
     await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
 
     // The loader's own server close (bounded by the kill room), the drain,
-    // then Caddy's share.
-    expect(world.clock.sleeps).toEqual([1_000, world.config.drainWaitMs, 500]);
+    // then Agent Vault's share and Caddy's - each 500 ms, what one and a half
+    // seconds of the deadline leaves after the room kept for a kill.
+    expect(world.clock.sleeps).toEqual([1_000, world.config.drainWaitMs, 500, 500]);
     caddySpawn(world)?.child.exit(0, null);
 
     expect(await leaving).toBe(0);
@@ -151,6 +156,8 @@ describe('caddy, the front door the loader owns', () => {
       'lifemodel is asked to stop'
     );
     lifemodelSpawn(world)?.child.exit(0, null);
+    await waitUntil(() => vaultSpawn(world)?.child.signals.length === 1, 'Agent Vault is stopped');
+    vaultSpawn(world)?.child.exit(0, null);
     await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
     world.clock.resolveAll(); // Caddy's wait runs out: SIGKILL
     await waitUntil(() => caddySpawn(world)?.child.signals.length === 2, 'caddy is killed');
@@ -178,6 +185,8 @@ describe('caddy, the front door the loader owns', () => {
     );
     expect(caddySpawn(world)?.child.signals).toEqual([]);
     lifemodelSpawn(world)?.child.exit(0, null);
+    await waitUntil(() => vaultSpawn(world)?.child.signals.length === 1, 'Agent Vault is stopped');
+    vaultSpawn(world)?.child.exit(0, null);
 
     await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
     caddySpawn(world)?.child.exit(0, null);

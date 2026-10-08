@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { HealthProbe } from '../../loader/src/agent-vault.js';
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import type { Clock } from '../../loader/src/clock.js';
@@ -244,6 +245,40 @@ export async function settle(times = 4): Promise<void> {
 }
 
 /** A loader that is up, with the two children it owns doubled. */
+/**
+ * A loader for a test that drives it itself: the same wiring as
+ * `createRunningLoader`, with Agent Vault's CLI answers and its readiness
+ * doubled, so nothing here needs the real binary or a real server.
+ */
+export function testLoaderApp(
+  world: LoaderWorld,
+  options: {
+    fs?: FileSystem;
+    lines: RecordedLine[];
+    exits?: number[];
+    exit?: (code: number) => void;
+    /** A world whose configuration the test moved (another port, no bundle, ...). */
+    config?: LoaderConfig;
+  }
+): ReturnType<typeof createLoaderApp> {
+  scriptAgentVault(world);
+  const exits = options.exits;
+  return createLoaderApp({
+    config: options.config ?? world.config,
+    fs: options.fs ?? createNodeFileSystem(),
+    runner: world.runner,
+    launcher: world.launcher,
+    logger: createRecordingLogger(options.lines),
+    clock: world.clock,
+    exit:
+      options.exit ??
+      ((code: number): void => {
+        exits?.push(code);
+      }),
+    agentVaultProbe: (): Promise<boolean> => Promise.resolve(true),
+  });
+}
+
 export interface RunningLoader {
   app: ReturnType<typeof createLoaderApp>;
   lines: RecordedLine[];
@@ -256,10 +291,22 @@ export interface RunningLoader {
  */
 export async function createRunningLoader(
   world: LoaderWorld,
-  options: { password?: string | null; fs?: FileSystem } = {}
+  options: {
+    password?: string | null;
+    fs?: FileSystem;
+    /**
+     * What Agent Vault's CLI answers. Scripted by default: a loader that comes
+     * up now includes the vault it provisioned, and only the tests that are
+     * about that provisioning answer for it themselves.
+     */
+    vault?: boolean;
+    /** Say whether Agent Vault is up, instead of asking a real server. */
+    agentVaultProbe?: HealthProbe;
+  } = {}
 ): Promise<RunningLoader> {
   const password = options.password === undefined ? 'right' : options.password;
   const fs = options.fs ?? createNodeFileSystem();
+  if (options.vault !== false) scriptAgentVault(world);
   const state = createLoaderState({ fs, config: world.config, logger: createRecordingLogger([]) });
   await state.ensureLayout();
   if (password !== null) await state.writeAuth(await hashPassword(password));
@@ -273,10 +320,13 @@ export async function createRunningLoader(
     logger: createRecordingLogger(lines),
     clock: world.clock,
     exit: (code) => exits.push(code),
+    // The real probe asks the server's own `/health`; here the vault is a
+    // doubled process, so the test says what it answers.
+    agentVaultProbe: options.agentVaultProbe ?? ((): Promise<boolean> => Promise.resolve(true)),
   });
   await app.start();
   await waitUntil(
-    () => caddySpawn(world) !== undefined || exits.length > 0,
+    () => vaultSpawn(world) !== undefined || exits.length > 0,
     'the loader is up (or left with a reason)'
   );
   return { app, lines, exits };
@@ -305,6 +355,13 @@ export function caddySpawn(world: LoaderWorld): SpawnedFake | undefined {
   return world.launcher.spawns.findLast((spawn) => spawn.command === world.config.caddy.binary);
 }
 
+/** The child the loader started for Agent Vault (the server, not its CLI). */
+export function vaultSpawn(world: LoaderWorld): SpawnedFake | undefined {
+  return world.launcher.spawns.findLast(
+    (spawn) => spawn.command === world.config.agentVault.binary && spawn.args[0] === 'server'
+  );
+}
+
 /**
  * Stop the loader the way the container does, and let the front door leave:
  * a test that never stops Caddy would hang on the loader's own shutdown.
@@ -319,6 +376,12 @@ export async function shutdownLoader(
   if (lifemodel !== undefined) {
     await waitUntil(() => lifemodel.child.signals.length > 0, 'lifemodel is asked to stop');
     lifemodel.child.exit(0, null);
+  }
+  // Agent Vault leaves after lifemodel, and inside the same one deadline.
+  const vault = vaultSpawn(world);
+  if (vault !== undefined) {
+    await waitUntil(() => vault.child.signals.length > 0, 'Agent Vault is asked to stop');
+    vault.child.exit(0, null);
   }
   const caddy = caddySpawn(world);
   if (caddy !== undefined) {
@@ -403,6 +466,14 @@ export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld
       config: join(root, 'Caddyfile'),
       stopWaitMs: 1_000,
     },
+    agentVault: {
+      ...loadConfig({}).agentVault,
+      binary: join(root, 'agent-vault'),
+      storeDir: join(root, 'vault'),
+      caPath: join(root, 'vault-ca.pem'),
+      startWaitMs: 1_000,
+      stopWaitMs: 1_000,
+    },
     httpPort: 0,
     privileged: options.privileged ?? false,
     lifemodel: identity,
@@ -416,6 +487,9 @@ export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld
   // volume holds the two files it needs.
   writeFileSync(config.caddy.binary, '#!/bin/sh\n# caddy, the only web entrance\n');
   writeFileSync(config.caddy.config, ':80 {\n\trespond "the front door"\n}\n');
+  // And Agent Vault's binary, which the loader starts as it starts Caddy. The
+  // store is NOT made here: making it is the loader's own first act.
+  writeFileSync(config.agentVault.binary, '#!/bin/sh\n# agent-vault, the keys\n');
   return {
     root,
     config,
@@ -451,4 +525,44 @@ export function scriptRepository(
 
 function mkdirp(path: string): void {
   mkdirSync(path, { recursive: true });
+}
+
+/** Where Agent Vault's CLI keeps the session it saves when it logs in. */
+export function vaultSessionPath(world: LoaderWorld): string {
+  return join(world.config.agentVault.storeDir, '.agent-vault', 'session.json');
+}
+
+/**
+ * What Agent Vault's own CLI answers (lifemodel-q4x.3.1), so a loader test
+ * needs no real binary: a store that already holds the loader's account, the
+ * vault `lifemodel` and the agent `lifemodel`, and the CA the proxy publishes.
+ * A test that wants the first-start path leaves the store empty by scripting
+ * the commands itself (see `scriptAgentVaultFirstStart`).
+ */
+export function scriptAgentVault(world: LoaderWorld, token = 'av_agt_a-test-token'): void {
+  const { runner, config } = world;
+  const binary = config.agentVault.binary;
+  runner.on(`${binary} auth login`, () => {
+    // The real CLI writes the session file, and the loader treats its absence
+    // as "that account cannot act for me".
+    mkdirp(join(config.agentVault.storeDir, '.agent-vault'));
+    writeFileSync(vaultSessionPath(world), '{"token":"a-cli-session"}');
+    return { code: 0, stdout: '✓ Login successful.\n', stderr: '' };
+  });
+  runner.on(`${binary} vault credential-store show`, () => ({
+    code: 0,
+    stdout: `Vault: ${config.agentVault.vaultName}\nCredential store: builtin\n`,
+    stderr: '',
+  }));
+  runner.on(`${binary} agent info`, () => ({
+    code: 0,
+    stdout: `Agent: ${config.agentVault.agentName}\nStatus:      active\n`,
+    stderr: '',
+  }));
+  runner.on(`${binary} agent rotate`, () => ({ code: 0, stdout: `${token}\n`, stderr: '' }));
+  runner.on(`${binary} ca fetch`, () => ({
+    code: 0,
+    stdout: '-----BEGIN CERTIFICATE-----\nMIIBthe-proxy-ca\n-----END CERTIFICATE-----\n',
+    stderr: '',
+  }));
 }

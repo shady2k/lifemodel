@@ -30,6 +30,7 @@ import {
   lifemodelSpawn,
   scriptRepository,
   shutdownLoader,
+  testLoaderApp,
   waitUntil,
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
@@ -54,15 +55,7 @@ function makeApp(world: LoaderWorld): Rig {
   const lines: RecordedLine[] = [];
   const exits: number[] = [];
   const recording = createRecordingFileSystem();
-  const app = createLoaderApp({
-    config: world.config,
-    fs: recording,
-    runner: world.runner,
-    launcher: world.launcher,
-    logger: createRecordingLogger(lines),
-    clock: world.clock,
-    exit: (code) => exits.push(code),
-  });
+  const app = testLoaderApp(world, { fs: recording, lines, exits });
   return { world, lines, exits, recording, app };
 }
 

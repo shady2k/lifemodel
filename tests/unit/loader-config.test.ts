@@ -33,6 +33,21 @@ describe('the contract with the image', () => {
       config: '/etc/lifemodel/Caddyfile',
       stopWaitMs: 10_000,
     });
+    // Agent Vault: the binary the image pins, the store and the CA on the
+    // volume, the two loopback ports, and the vault and agent it makes for
+    // lifemodel (lifemodel-q4x.3.1, decision 12).
+    expect(config.agentVault).toEqual({
+      binary: '/usr/local/bin/agent-vault',
+      storeDir: '/var/lib/lifemodel/vault',
+      caPath: '/var/lib/lifemodel/vault-ca.pem',
+      apiPort: 14_321,
+      proxyPort: 14_322,
+      vaultName: 'lifemodel',
+      agentName: 'lifemodel',
+      ownerEmail: 'owner@lifemodel.local',
+      startWaitMs: 15_000,
+      stopWaitMs: 10_000,
+    });
     expect(SESSION_COOKIE_NAME).toBe('lm_session');
     // A test is not root; the image's loader is, and that is what sets this.
     expect(config.privileged).toBe(false);

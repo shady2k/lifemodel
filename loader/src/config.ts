@@ -34,6 +34,38 @@ export interface CaddyConfig {
   stopWaitMs: number;
 }
 
+/**
+ * Agent Vault (lifemodel-q4x.3.1, decisions 4 and 12): the trusted layer that
+ * holds the keys, started by the loader beside Caddy and stopped after
+ * lifemodel.
+ */
+export interface AgentVaultConfig {
+  /** The Agent Vault binary the image carries, pinned by version at build time. */
+  binary: string;
+  /**
+   * The store: Agent Vault's `HOME`, so its database, its CA and the CLI's own
+   * session land in `<storeDir>/.agent-vault/`. Root-only (0700): decision 4
+   * protects a passwordless store by the directory's permissions.
+   */
+  storeDir: string;
+  /** The transparent proxy's root CA, written where lifemodel can READ it. */
+  caPath: string;
+  /** Its management interface and API, behind `vault.<host>`. */
+  apiPort: number;
+  /** The transparent proxy lifemodel's traffic leaves through. */
+  proxyPort: number;
+  /** The vault the loader creates for lifemodel. */
+  vaultName: string;
+  /** The agent the loader creates in it; its token is lifemodel's proxy credential. */
+  agentName: string;
+  /** The instance owner account the loader registers; its password stays root-only. */
+  ownerEmail: string;
+  /** How long Agent Vault may take to answer `/health` before the loader gives up. */
+  startWaitMs: number;
+  /** How long Agent Vault may take to leave before it is killed. */
+  stopWaitMs: number;
+}
+
 export interface LoaderConfig {
   /** The volume: everything the instance owns. */
   volumeRoot: string;
@@ -55,6 +87,8 @@ export interface LoaderConfig {
   lifemodelEntry: string;
   /** The front door the loader owns: Caddy, the only web entrance. */
   caddy: CaddyConfig;
+  /** Agent Vault: the keys, the proxy and the vault lifemodel uses. */
+  agentVault: AgentVaultConfig;
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
   /**
@@ -85,6 +119,11 @@ const DEFAULTS = {
   caddyBinary: '/usr/bin/caddy',
   caddyConfig: '/etc/lifemodel/Caddyfile',
   caddyStopWaitMs: 10_000,
+  agentVaultBinary: '/usr/local/bin/agent-vault',
+  agentVaultStartWaitMs: 15_000,
+  agentVaultStopWaitMs: 10_000,
+  agentVaultApiPort: 14_321,
+  agentVaultProxyPort: 14_322,
   drainWaitMs: 95_000,
   killWaitMs: 5_000,
   stopBudgetMs: 110_000,
@@ -122,6 +161,22 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
       binary: env['LIFEMODEL_CADDY_BINARY'] ?? DEFAULTS.caddyBinary,
       config: env['LIFEMODEL_CADDY_CONFIG'] ?? DEFAULTS.caddyConfig,
       stopWaitMs: readInt(env, 'LIFEMODEL_CADDY_STOP_WAIT_MS', DEFAULTS.caddyStopWaitMs),
+    },
+    agentVault: {
+      binary: env['LIFEMODEL_AGENT_VAULT_BINARY'] ?? DEFAULTS.agentVaultBinary,
+      storeDir: env['LIFEMODEL_AGENT_VAULT_STORE'] ?? join(volumeRoot, 'vault'),
+      caPath: env['LIFEMODEL_AGENT_VAULT_CA'] ?? join(volumeRoot, 'vault-ca.pem'),
+      apiPort: readInt(env, 'LIFEMODEL_AGENT_VAULT_API_PORT', DEFAULTS.agentVaultApiPort),
+      proxyPort: readInt(env, 'LIFEMODEL_AGENT_VAULT_PROXY_PORT', DEFAULTS.agentVaultProxyPort),
+      vaultName: env['LIFEMODEL_AGENT_VAULT_NAME'] ?? 'lifemodel',
+      agentName: env['LIFEMODEL_AGENT_AGENT_NAME'] ?? 'lifemodel',
+      ownerEmail: env['LIFEMODEL_AGENT_VAULT_OWNER_EMAIL'] ?? 'owner@lifemodel.local',
+      startWaitMs: readInt(
+        env,
+        'LIFEMODEL_AGENT_VAULT_START_WAIT_MS',
+        DEFAULTS.agentVaultStartWaitMs
+      ),
+      stopWaitMs: readInt(env, 'LIFEMODEL_AGENT_VAULT_STOP_WAIT_MS', DEFAULTS.agentVaultStopWaitMs),
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
     killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),
