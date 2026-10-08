@@ -57,6 +57,12 @@ export interface LoaderConfig {
   caddy: CaddyConfig;
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
+  /**
+   * The whole stop, from the first SIGTERM to the last child gone: lifemodel's
+   * drain and Caddy's exit share this one deadline, and the documented
+   * `--stop-timeout 120` leaves room for it (rework 2, finding 10).
+   */
+  stopBudgetMs: number;
   /** A build (npm ci && npm run build) may take minutes; this is its ceiling. */
   buildTimeoutMs: number;
   restart: RestartPolicy;
@@ -75,6 +81,7 @@ const DEFAULTS = {
   caddyConfig: '/etc/lifemodel/Caddyfile',
   caddyStopWaitMs: 10_000,
   drainWaitMs: 95_000,
+  stopBudgetMs: 110_000,
   buildTimeoutMs: 20 * 60_000,
   restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
 } as const;
@@ -111,6 +118,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
       stopWaitMs: readInt(env, 'LIFEMODEL_CADDY_STOP_WAIT_MS', DEFAULTS.caddyStopWaitMs),
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
+    stopBudgetMs: readInt(env, 'LIFEMODEL_STOP_BUDGET_MS', DEFAULTS.stopBudgetMs),
     buildTimeoutMs: readInt(env, 'LIFEMODEL_BUILD_TIMEOUT_MS', DEFAULTS.buildTimeoutMs),
     restart: DEFAULTS.restart,
     privileged: typeof process.getuid === 'function' && process.getuid() === 0,

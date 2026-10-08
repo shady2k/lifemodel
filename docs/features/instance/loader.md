@@ -43,8 +43,13 @@ are part of `npm run check`.
 7. **Holds panic**, a root-only flag on the volume. It survives a restart of
    the container and of the Docker daemon until `lifemodel resume` clears it.
 8. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
-   lifemodel's own drain is 90 s, and the documented command stops the
-   container at 100 s.
+   lifemodel's own drain is 90 s. The whole stop is ONE deadline of 110 s
+   (`LIFEMODEL_STOP_BUDGET_MS`): lifemodel drains first, Caddy gets what is
+   left of the same budget (at most its own 10 s, and nothing at all if the
+   budget is gone), so the sequence always fits the documented
+   `--stop-timeout 120`. Before that deadline was shared, lifemodel could take
+   95 s and Caddy 10 s more against a 100 s stop timeout, and Docker could kill
+   the loader in the middle of its last step.
 
 ## The volume
 
@@ -65,6 +70,23 @@ carries the code as `/opt/lifemodel/seed.bundle`, a `git bundle` with history;
 the first start clones it, renames the bundle remote to `upstream`, points
 `upstream` at `https://github.com/shady2k/lifemodel.git` and gives the
 repository to lifemodel.
+
+**What the loader is allowed to give away.** Only two things, and only when
+this start is what made them:
+
+- a `data/` this start created - the directory itself, given to uid 1000;
+- the `repo/` clone the seed just made - that whole fresh tree, given to uid
+  1000 once.
+
+An existing `data/` or `repo/` tree is left exactly as it is. The loader never
+walks a tree that was already on the volume: that traversal is what a review
+found dangerous, because a uid-1000 tree can be changed between the moment it
+is listed and the moment it is recursed into - a child directory swapped for a
+symlink to the volume root would have given `loader/auth.json`, `cli-token` and
+`panic.json` to lifemodel. The one tree that is walked is the clone this
+process just made and owns, it is walked without following a link (the entries
+come from the directory's own descriptor and every one is `lchown`ed), and the
+walk refuses a tree that belongs to somebody else.
 
 The loader runs as root and `repo/` belongs to uid 1000, and git refuses a
 repository whose owner is not the caller:
@@ -95,16 +117,48 @@ without it). The login and password-setting routes (`/login`, `/setup`) are the
 only ones a request reaches without that check. The CSS of those pages is
 inline, so they need no asset route.
 
+**The hosts are pinned.** Caddy matches only `localhost`, `boot.localhost` and
+`vault.localhost` (`:80` with a host matcher; anything else is answered with
+one line saying so), and the loader itself answers on those three names, with
+any port, plus the loopback literal `127.0.0.1` its own command line uses. Any
+other `Host` is refused with `400` before a route is looked at, and no cookie
+`Domain` is ever derived from a name a request supplied - so a login through a
+crafted `boot.<some-other-domain>` cannot mint a cookie scoped to that domain.
+A configured domain is not part of this stage; it comes with the
+outside-access idea (lifemodel-sd2).
+
 ## The login
 
 One cookie, `lm_session`, `HttpOnly; SameSite=Lax; Path=/`, with `Domain` set
 to the host every host of the instance shares: the loader answers on
 `boot.<host>`, so it strips that one label - `boot.localhost` and
-`vault.localhost` are both covered by a cookie on `localhost`. The token
-carries its own expiry and a signature with a secret in `loader/auth.json`, so
-the loader needs no session store and a restart does not log the owner out.
-A wrong password is answered with `401` and logged once at warn with the host
-and the remote address - never the password.
+`vault.localhost` are both covered by a cookie on `localhost`. The domain is
+taken from a VETTED host only (see above). The token carries its own expiry and
+a signature with a secret in `loader/auth.json`, so the loader needs no session
+store and a restart does not log the owner out. A wrong password is answered
+with `401` and logged once at warn with the host and the remote address - never
+the password.
+
+**Every state change is checked twice.** The session cookie is an ambient
+credential: a browser sends it on a form posted from ANY page of the instance's
+parent site, and lifemodel - which controls the root host - can serve such a
+page. So a request that changes something must also come from a page on the
+host it was sent to (`Origin`, or `Referer` when a browser sends none) AND, for
+everything but `/setup` and `/login`, carry the anti-CSRF token of the loader's
+own forms:
+
+| Route | What it needs |
+| --- | --- |
+| `POST /setup` | `Origin`/`Referer` of the boot host. No session exists yet, so there is nothing to bind a token to |
+| `POST /login` | the same, and the password |
+| `POST /panic`, `POST /resume`, `POST /logout` | the session cookie, an `Origin`/`Referer` of the same host, and the `csrf` field of the form |
+
+The token is a signature with the loader's secret over the session token
+(`csrfToken` in `loader/src/auth.ts`), so it belongs to exactly one session and
+only the loader can make it. It is a hidden field of every form on the page.
+A refused state change is one warn line saying what was asked, from where, and
+why - and nothing is changed. `POST /` is not a resume alias: the two actions
+have their own addresses, and a POST there is answered `405`.
 
 ## The command line
 
@@ -152,10 +206,21 @@ retry, and a failed build waits for the owner instead of looping. The cases:
 the repository is there but is not one (a file, not a directory); the git
 clone, the `upstream` remote or the chown into uid 1000 failed; `npm ci` or
 `npm run build` failed, or the build wrote no `dist/index.js`; the repository
-has no readable commit; lifemodel could not be started. Once it has started,
-lifemodel dying is the supervisor's business: it is started again with a
-growing backoff (1 s, 2 s, 4 s ... up to 30 s, reset after a run of 60 s or
+has no readable commit; a start the OS refused (see below). Once it has
+started, lifemodel dying is the supervisor's business: it is started again with
+a growing backoff (1 s, 2 s, 4 s ... up to 30 s, reset after a run of 60 s or
 more), and panic holds it down.
+
+**A start the OS refused is a failed start, not a death.** `spawn` returning is
+not the process running: the OS reports a refused start as an error, and it can
+arrive after the call returned. The loader waits for the child's own `spawn`
+before it calls a start a success - so "the instance is ready" is only ever
+logged for a start that really happened - and a refused start is recorded as
+`failed` with the reason, exactly like a failed build. It is NOT retried: the
+same input fails the same way every time (AGENTS.md, lesson 3), so the owner is
+told instead of watching a backoff loop. `lifemodel status` prints
+`failed` with that reason and `lifemodel resume` exits 1; the retry is the
+owner's, after fixing what was wrong.
 
 Everything else the loader logs is one line per event, JSON with
 `component=loader`, so a person reading `docker logs` can tell its lines from
@@ -167,6 +232,11 @@ lifemodel's. No secret - a password, a token - ever appears in one.
 doubles only at the two boundaries a test cannot cross unprivileged: starting
 lifemodel as uid 1000, and running git and npm. The volume is a real
 directory, the files are really written and the HTTP server really listens.
+`tests/unit/loader-volume.test.ts` runs the loader the only way a test can as
+root - chowning to its own identity, which the kernel allows - and records
+every path that was given away, because what a test cannot observe (ownership)
+is exactly the rule: an existing `data/` that is a symlink to the volume root
+leaves the loader's files alone.
 `tests/integration/loader-*.test.ts` add the parts that need the real thing: a
 real `git bundle` cloned with the real git, a real child process that traps
 SIGTERM and drains before leaving under a real loader process, and - through

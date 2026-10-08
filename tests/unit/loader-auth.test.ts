@@ -10,11 +10,15 @@ import { describe, expect, it } from 'vitest';
 import {
   clearSessionCookie,
   createSession,
+  csrfToken,
   hashPassword,
+  isAllowedHost,
   parentDomain,
   parseCookies,
+  sameOrigin,
   SESSION_COOKIE_NAME,
   sessionCookie,
+  verifyCsrf,
   verifyPassword,
   verifySession,
 } from '../../loader/src/auth.js';
@@ -91,10 +95,31 @@ describe('the session cookie', () => {
     expect(parentDomain('boot.localhost:8080')).toBe('localhost');
     expect(parentDomain('localhost')).toBe('localhost');
     expect(parentDomain('vault.localhost')).toBe('localhost');
-    expect(parentDomain('boot.example.com')).toBe('example.com');
-    expect(parentDomain('vault.example.com')).toBe('example.com');
-    expect(parentDomain('example.com')).toBe('example.com');
-    expect(parentDomain('lifemodel.example.com:443')).toBe('lifemodel.example.com');
+    // The loopback literal the command line uses: itself, never `0.0.1`.
+    expect(parentDomain('127.0.0.1:7000')).toBe('127.0.0.1');
+  });
+
+  it('derives no domain at all from a host it does not answer on', () => {
+    // A name out of a request never becomes a cookie's Domain (rework 2,
+    // finding 7): only the instance's own hosts are vetted.
+    expect(parentDomain('boot.example.com')).toBeNull();
+    expect(parentDomain('vault.example.com')).toBeNull();
+    expect(parentDomain('example.com')).toBeNull();
+    expect(parentDomain('lifemodel.example.com:443')).toBeNull();
+    expect(parentDomain('evil.localhost.attacker.test')).toBeNull();
+    expect(() => sessionCookie('a.b', 'boot.example.com')).toThrow(/does not answer on/);
+    expect(() => clearSessionCookie('example.com')).toThrow(/does not answer on/);
+  });
+
+  it('answers on its own hosts, with or without a port, and on nothing else', () => {
+    expect(isAllowedHost('localhost')).toBe(true);
+    expect(isAllowedHost('boot.localhost:8080')).toBe(true);
+    expect(isAllowedHost('BOOT.Localhost')).toBe(true);
+    expect(isAllowedHost('vault.localhost')).toBe(true);
+    expect(isAllowedHost('127.0.0.1:7000')).toBe(true);
+    expect(isAllowedHost('example.com')).toBe(false);
+    expect(isAllowedHost('boot.localhost.attacker.test')).toBe(false);
+    expect(isAllowedHost(undefined)).toBe(false);
   });
 
   it('clears the cookie the same way it was set', () => {
@@ -115,5 +140,46 @@ describe('the Cookie request header', () => {
     });
     expect(parseCookies(undefined)).toEqual({});
     expect(parseCookies('')).toEqual({});
+  });
+});
+
+describe('the anti-CSRF token of a form', () => {
+  it('is the token of exactly one session, and junk is refused', async () => {
+    const record = await hashPassword('right');
+    const token = createSession(record, NOW, TTL_MS);
+    const other = createSession(record, NOW + 1, TTL_MS);
+    const csrf = csrfToken(record, token);
+
+    expect(verifyCsrf(csrf, record, token)).toBe(true);
+    expect(verifyCsrf(csrf, record, other)).toBe(false);
+    expect(verifyCsrf('', record, token)).toBe(false);
+    expect(verifyCsrf(csrf.slice(0, -1), record, token)).toBe(false);
+    // Another loader's secret makes no token of this one.
+    const foreign = await hashPassword('right');
+    expect(verifyCsrf(csrfToken(foreign, token), record, token)).toBe(false);
+  });
+});
+
+describe('the Origin of a state-changing request', () => {
+  it('must name the host the request was sent to', () => {
+    expect(sameOrigin('http://boot.localhost:8080', undefined, 'boot.localhost:8080')).toBe(true);
+    expect(sameOrigin('http://BOOT.localhost', undefined, 'boot.localhost')).toBe(true);
+    // The root host's page is another origin: this is the attack (finding 5).
+    expect(sameOrigin('http://localhost:8080', undefined, 'boot.localhost:8080')).toBe(false);
+    expect(sameOrigin('https://attacker.test', undefined, 'boot.localhost:8080')).toBe(false);
+    expect(sameOrigin(undefined, undefined, 'boot.localhost:8080')).toBe(false);
+    expect(sameOrigin('null', undefined, 'boot.localhost:8080')).toBe(false);
+  });
+
+  it('falls back to the Referer, and only to its host', () => {
+    expect(
+      sameOrigin(undefined, 'http://boot.localhost:8080/panic?x=1', 'boot.localhost:8080')
+    ).toBe(true);
+    expect(sameOrigin(undefined, 'http://localhost:8080/', 'boot.localhost:8080')).toBe(false);
+    expect(sameOrigin(undefined, 'not a url', 'boot.localhost:8080')).toBe(false);
+    // Origin wins over Referer when both are there.
+    expect(
+      sameOrigin('http://localhost:8080', 'http://boot.localhost:8080/', 'boot.localhost:8080')
+    ).toBe(false);
   });
 });

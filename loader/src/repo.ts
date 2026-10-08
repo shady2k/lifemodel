@@ -187,7 +187,9 @@ export async function seedRepositoryIfMissing(deps: RepositoryDeps): Promise<boo
 
   if (config.privileged) {
     try {
-      await fs.chownRecursive(config.repoDir, config.lifemodel.uid, config.lifemodel.gid);
+      // The clone this seed just made is this process's own tree: only a tree
+      // nobody else could have touched is walked (rework 2, finding 1).
+      await fs.chownFreshTree(config.repoDir, config.lifemodel.uid, config.lifemodel.gid);
     } catch (error) {
       throw new LoaderFatalError(
         `cannot give ${config.repoDir} to uid ${String(config.lifemodel.uid)}: ${describe(error)}`,

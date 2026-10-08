@@ -12,6 +12,8 @@
  */
 import { createHmac, randomBytes, scrypt as scryptKdf, timingSafeEqual } from 'node:crypto';
 
+import { LoaderFatalError } from './errors.js';
+
 /** The name of the one session cookie every host of the instance shares. */
 export const SESSION_COOKIE_NAME = 'lm_session';
 
@@ -118,23 +120,60 @@ export function verifySession(token: string, record: PasswordRecord, nowMs: numb
   return equalDigests(presented, sign(record.sessionSecret, expiresAt));
 }
 
-/** The labels the front door puts in front of the instance's own host. */
-const APP_PREFIXES = ['boot', 'vault', 'app'];
+/**
+ * The hosts the loader answers on, and the only ones a cookie may ever be
+ * scoped to (rework 2, finding 7). The loader listens on the container's
+ * loopback and the only names that reach it are the instance's own: the root
+ * host, `boot.` (the loader) and `vault.` (Agent Vault), all under `localhost`
+ * today. `127.0.0.1` is the loopback literal `docker exec <c> lifemodel ...`
+ * talks to; no browser ever uses it, and no cookie is ever set on it.
+ *
+ * A configured domain is not part of this stage: it comes with the
+ * outside-access idea (lifemodel-sd2), and it will be a configured, vetted
+ * value - never a name taken from a request.
+ */
+export const ALLOWED_HOSTS = [
+  'localhost',
+  'boot.localhost',
+  'vault.localhost',
+  '127.0.0.1',
+] as const;
+
+/** The name part of a Host header (or of any `host:port` string), lowercased. */
+export function hostName(host: string): string {
+  return (host.split(':')[0] ?? host).trim().toLowerCase();
+}
+
+/** Is this a Host the loader answers on at all? */
+export function isAllowedHost(host: string | undefined): boolean {
+  return host !== undefined && (ALLOWED_HOSTS as readonly string[]).includes(hostName(host));
+}
 
 /**
- * The host every host of the instance shares: `boot.localhost` and
- * `vault.localhost` are both covered by a cookie on `localhost`. The loader's
- * own interface is reached as `boot.<host>`, which is what makes this
- * derivation from the request alone safe.
+ * The host every host of the instance shares, or null for a Host the loader
+ * does not answer on. `boot.localhost` and `vault.localhost` are both covered
+ * by a cookie on `localhost`, which is why the front door's one label is taken
+ * off here - but only for a host that is vetted first: a name out of a request
+ * never becomes a cookie's Domain.
  */
-export function parentDomain(host: string): string {
-  const name = host.split(':')[0]?.toLowerCase() ?? host.toLowerCase();
-  const labels = name.split('.');
-  const first = labels[0];
-  if (labels.length > 1 && first !== undefined && APP_PREFIXES.includes(first)) {
-    return labels.slice(1).join('.');
+export function parentDomain(host: string): string | null {
+  if (!isAllowedHost(host)) return null;
+  const name = hostName(host);
+  for (const label of ['boot.', 'vault.']) {
+    if (name.startsWith(label)) return name.slice(label.length);
   }
   return name;
+}
+
+/** The cookie domain of a vetted host; an unvetted one is a programming error. */
+function cookieDomain(host: string): string {
+  const domain = parentDomain(host);
+  if (domain === null) {
+    throw new LoaderFatalError(
+      `the loader does not answer on ${host}: its session cookie is only ever set on ${ALLOWED_HOSTS.join(', ')}`
+    );
+  }
+  return domain;
 }
 
 /** The Set-Cookie header of a fresh login. */
@@ -146,7 +185,7 @@ export function sessionCookie(
   return [
     `${SESSION_COOKIE_NAME}=${token}`,
     'Path=/',
-    `Domain=${parentDomain(host)}`,
+    `Domain=${cookieDomain(host)}`,
     `Max-Age=${String(Math.floor(ttlMs / 1000))}`,
     'HttpOnly',
     'SameSite=Lax',
@@ -158,11 +197,65 @@ export function clearSessionCookie(host: string): string {
   return [
     `${SESSION_COOKIE_NAME}=`,
     'Path=/',
-    `Domain=${parentDomain(host)}`,
+    `Domain=${cookieDomain(host)}`,
     'Max-Age=0',
     'HttpOnly',
     'SameSite=Lax',
   ].join('; ');
+}
+
+/**
+ * The anti-CSRF token of the loader's own forms (rework 2, finding 5).
+ *
+ * A session cookie is an ambient credential: a browser sends it on a form
+ * posted from ANY page of the instance's parent site, and lifemodel - which
+ * controls the root host - can serve such a page. So a state-changing form
+ * carries this token as well, and it is bound to the session it acts with: it
+ * is a signature with the loader's own secret over the session token, so only
+ * the loader can make it and only for the session that is logged in.
+ */
+export function csrfToken(record: PasswordRecord, sessionToken: string): string {
+  return sign(record.sessionSecret, `csrf:${sessionToken}`).toString('base64url');
+}
+
+/** Is this the token of exactly this session? Timing-safe, and false for junk. */
+export function verifyCsrf(
+  presented: string,
+  record: PasswordRecord,
+  sessionToken: string
+): boolean {
+  const expected = Buffer.from(csrfToken(record, sessionToken));
+  const given = Buffer.from(presented);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+/** The host an Origin or Referer header names, or null when it names none. */
+function originHost(source: string | undefined): string | null {
+  if (source === undefined || source === '') return null;
+  try {
+    return new URL(source).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did this request come from a page ON THE HOST IT WAS SENT TO?
+ *
+ * The browser's `Origin` (a form post always carries one; `Referer` is the
+ * fallback) is compared with the request's own Host header, so a form served by
+ * the root host - or by any other page on the parent site - cannot drive the
+ * loader's own routes. A request that names neither is refused: the loader's
+ * forms always come with one.
+ */
+export function sameOrigin(
+  origin: string | undefined,
+  referer: string | undefined,
+  host: string | undefined
+): boolean {
+  if (host === undefined || host === '') return false;
+  const named = originHost(origin) ?? originHost(referer);
+  return named !== null && named === host.trim().toLowerCase();
 }
 
 /** The cookies of one request header, by name. */

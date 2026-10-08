@@ -23,8 +23,11 @@ describe('the contract with the image', () => {
     expect(config.httpPort).toBe(7000);
     expect(config.lifemodel).toEqual({ uid: 1000, gid: 1000 });
     expect(config.lifemodelEntry).toBe('/var/lib/lifemodel/repo/dist/index.js');
-    // lifemodel's own drain is 90 s; the documented command stops at 100 s.
+    // lifemodel's own drain is 90 s; the whole stop - that drain and Caddy's
+    // exit together - shares one deadline, inside the documented 120 s stop.
     expect(config.drainWaitMs).toBe(95_000);
+    expect(config.stopBudgetMs).toBe(110_000);
+    expect(config.stopBudgetMs).toBeGreaterThan(config.drainWaitMs);
     expect(config.caddy).toEqual({
       binary: '/usr/bin/caddy',
       config: '/etc/lifemodel/Caddyfile',
@@ -43,6 +46,7 @@ describe('the contract with the image', () => {
       LIFEMODEL_UID: '1234',
       LIFEMODEL_GID: '1235',
       LIFEMODEL_DRAIN_WAIT_MS: '5000',
+      LIFEMODEL_STOP_BUDGET_MS: '6000',
     });
 
     expect(moved.volumeRoot).toBe('/tmp/elsewhere');
@@ -52,6 +56,7 @@ describe('the contract with the image', () => {
     expect(moved.httpPort).toBe(7100);
     expect(moved.lifemodel).toEqual({ uid: 1234, gid: 1235 });
     expect(moved.drainWaitMs).toBe(5000);
+    expect(moved.stopBudgetMs).toBe(6000);
 
     expect(() => loadConfig({ LIFEMODEL_HTTP_PORT: 'soon' })).toThrow(
       /LIFEMODEL_HTTP_PORT must be a whole number/

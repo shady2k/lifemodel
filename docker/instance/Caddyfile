@@ -24,6 +24,12 @@
 # the `-p 127.0.0.1:8080:80` of the documented `docker run`, not this file.
 # Access from outside (a domain, certificates) is added here later
 # (lifemodel-sd2).
+#
+# THE HOSTS ARE PINNED: only localhost, boot.localhost and vault.localhost are
+# routed at all, and any other Host gets one line saying so. A name a request
+# supplies must never reach a backend or decide a cookie (rework 2, finding 7);
+# the loader refuses the same hosts with 400 as its own second line of defence,
+# because it also listens where lifemodel can reach it.
 {
 	# The admin API would let a request rewrite this configuration, and
 	# lifemodel runs in this container.
@@ -34,6 +40,12 @@
 # cookie.
 (loader_own_pages) {
 	@loader_own_pages path /login /login/* /setup /setup/* /assets/* /favicon.ico
+}
+
+# The only hosts this instance answers on, in this stage. Everything else is
+# refused below, before any routing or forward_auth.
+(instance_hosts) {
+	@instance_hosts host localhost boot.localhost vault.localhost
 }
 
 # Everything else: the loader decides, and a 2xx lets the request continue to
@@ -59,32 +71,42 @@
 		}
 	}
 
-	@boot host boot.*
-	@vault host vault.*
+	import instance_hosts
 
-	# boot.<host>: the loader's interface, the login included.
-	handle @boot {
-		import loader_own_pages
-		handle @loader_own_pages {
-			reverse_proxy 127.0.0.1:7000
+	# The three hosts of the instance, and nothing else.
+	handle @instance_hosts {
+		@boot host boot.*
+		@vault host vault.*
+
+		# boot.<host>: the loader's interface, the login included.
+		handle @boot {
+			import loader_own_pages
+			handle @loader_own_pages {
+				reverse_proxy 127.0.0.1:7000
+			}
+			handle {
+				import loader_check
+				reverse_proxy 127.0.0.1:7000
+			}
 		}
+
+		# vault.<host>: Agent Vault's own interface (stage 2; until it exists
+		# this host answers that nothing is there yet).
+		handle @vault {
+			import loader_check
+			reverse_proxy 127.0.0.1:14321
+		}
+
+		# <host>: lifemodel's own interface (stage 3; the same until it exists).
 		handle {
 			import loader_check
-			reverse_proxy 127.0.0.1:7000
+			reverse_proxy 127.0.0.1:7100
 		}
 	}
 
-	# vault.<host>: Agent Vault's own interface (stage 2; until it exists this
-	# host answers that nothing is there yet).
-	handle @vault {
-		import loader_check
-		reverse_proxy 127.0.0.1:14321
-	}
-
-	# <host>: lifemodel's own interface (stage 3; the same until it exists).
+	# Any other Host: one plain line, and nothing is routed.
 	handle {
-		import loader_check
-		reverse_proxy 127.0.0.1:7100
+		respond "This instance answers on localhost, boot.localhost and vault.localhost, and on no other name.\n" 400
 	}
 
 	# A backend that is not up yet answers one plain line instead of an empty

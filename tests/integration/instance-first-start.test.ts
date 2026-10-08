@@ -80,13 +80,15 @@ function fetchThroughFrontDoor(
   port: number,
   host: string,
   path: string,
-  opts: { cookie?: string; form?: Record<string, string> } = {}
+  opts: { cookie?: string; form?: Record<string, string>; origin?: string } = {}
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { Host: host };
+    // A browser sends the page it came from on a form post, and the loader
+    // refuses a state change without it (rework 2, finding 5).
+    if (opts.form !== undefined) headers.Origin = opts.origin ?? `http://${host}`;
     if (opts.cookie !== undefined) headers.Cookie = opts.cookie;
-    const body =
-      opts.form === undefined ? undefined : new URLSearchParams(opts.form).toString();
+    const body = opts.form === undefined ? undefined : new URLSearchParams(opts.form).toString();
     if (body !== undefined) {
       headers['Content-Type'] = 'application/x-www-form-urlencoded';
       headers['Content-Length'] = String(Buffer.byteLength(body));
@@ -169,8 +171,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     container = `lifemodel-first-start-${process.pid}`;
     volume = `${container}-volume`;
     // An empty volume and the documented command's shape: the port published on
-    // loopback only, the one capability the egress rule needs, a stop timeout
-    // longer than lifemodel's 90 s drain.
+    // loopback only, the one capability the Agent Vault stage needs, and the
+    // stop timeout the documented command gives the whole stop (the loader
+    // spends at most 110 s of it on lifemodel's drain and on Caddy).
     docker([
       'run',
       '--detach',
@@ -181,7 +184,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       '--cap-add',
       'NET_ADMIN',
       '--stop-timeout',
-      '100',
+      '120',
       '--mount',
       `source=${volume},target=/var/lib/lifemodel`,
       image,
@@ -207,10 +210,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
 
     // The loader says lifemodel runs. Never a timer: the first npm ci inside
     // the container takes minutes, so the ceiling is generous.
-    await waitForLogLine(
-      /"msg":"the instance is ready".*"started":true/,
-      FIRST_START_TIMEOUT_MS
-    );
+    await waitForLogLine(/"msg":"the instance is ready".*"started":true/, FIRST_START_TIMEOUT_MS);
   }, 25 * 60_000);
 
   afterAll(() => {
@@ -249,9 +249,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     );
     // And the instance's repository belongs to it, which is why git needed the
     // safe-directory: the commit above could not have been read otherwise.
-    expect(
-      docker(['exec', container, 'stat', '-c', '%u', '/var/lib/lifemodel/repo']).trim()
-    ).toBe('1000');
+    expect(docker(['exec', container, 'stat', '-c', '%u', '/var/lib/lifemodel/repo']).trim()).toBe(
+      '1000'
+    );
   });
 
   it('lets the loader read that repository as root, with git', () => {

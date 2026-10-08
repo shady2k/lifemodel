@@ -182,7 +182,11 @@ describe('the loader first start', () => {
     let failing = true;
     world.runner.on('npm ci', () =>
       failing
-        ? { code: 1, stdout: '', stderr: 'npm error code EUSAGE\nnpm error the lockfile is not there\n' }
+        ? {
+            code: 1,
+            stdout: '',
+            stderr: 'npm error code EUSAGE\nnpm error the lockfile is not there\n',
+          }
         : { code: 0, stdout: 'added 1 package\n', stderr: '' }
     );
     const { app, lines } = makeApp(world);
@@ -210,6 +214,71 @@ describe('the loader first start', () => {
     expect(ready.lastError).toBeNull();
     expect(ready.lifemodel).toBe('running');
     expect(lifemodelSpawn(world)).toBeDefined();
+  });
+
+  it('a spawn the launcher refuses is a failed start, and readiness is never announced', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    // The launcher cannot even ask the OS: `spawn` throws (rework 2, finding 6).
+    world.launcher.refuseSpawns(new Error('spawn node EPERM: the identity is refused'));
+    const { app, lines } = makeApp(world);
+
+    await app.bootstrap.ensureReady('setup');
+
+    const status = await app.bootstrap.status();
+    expect(status.phase).toBe('failed');
+    expect(status.failed).toBe(true);
+    expect(status.lifemodel).toBe('failed');
+    expect(status.lastError).toContain('spawn node EPERM');
+    // Readiness is announced only for a start that really happened.
+    expect(lines.some((line) => line.message.includes('the instance is ready'))).toBe(false);
+    // One error line from the supervisor, one from the bootstrap, and the
+    // reason in both.
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors.map((line) => line.message)).toEqual([
+      'lifemodel could not be started',
+      expect.stringContaining('the instance did not come up'),
+    ]);
+    // The same input fails the same way: nothing is retried.
+    expect(world.clock.pending()).toBe(0);
+  });
+
+  it('a spawn error the OS emits after the call is a failed start too', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    // `spawn` returned, and the OS then said it never started the process.
+    world.launcher.failSpawns(new Error('spawn node ENOENT'));
+    const { app, lines } = makeApp(world);
+
+    await app.bootstrap.ensureReady('startup');
+
+    const status = await app.bootstrap.status();
+    expect(status.phase).toBe('failed');
+    expect(status.failed).toBe(true);
+    expect(status.lastError).toContain('spawn node ENOENT');
+    expect(lines.some((line) => line.message.includes('the instance is ready'))).toBe(false);
+    expect(world.clock.pending()).toBe(0);
+  });
+
+  it('a start held down by panic is not readiness and not a failure', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    const { app, lines } = makeApp(world);
+    await app.state.setPanic('a test');
+
+    await app.bootstrap.ensureReady('startup');
+
+    const status = await app.bootstrap.status();
+    expect(status.phase).toBe('idle');
+    expect(status.failed).toBe(false);
+    expect(status.panic).toBe(true);
+    expect(status.lifemodel).toBe('stopped');
+    expect(lines.some((line) => line.message.includes('the instance is ready'))).toBe(false);
+    expect(lines.some((line) => line.message.includes('the instance is not started'))).toBe(true);
+    expect(lifemodelSpawn(world)).toBeUndefined();
   });
 
   it('a start that fails is recorded too, and lifemodel is not left running', async () => {
@@ -334,7 +403,6 @@ describe('the loader says what it is missing', () => {
     await shutdownLoader(world, app);
     blocker.close();
   });
-
 });
 
 describe('the loader waits before it has a password', () => {

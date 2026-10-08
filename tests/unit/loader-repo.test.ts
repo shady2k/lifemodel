@@ -82,9 +82,7 @@ describe('git and the instance repository', () => {
     const deps = repositoryDeps(world);
 
     expect(await readHeadCommit(deps)).toBe('c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff');
-    expect(world.runner.rawLines()).toEqual([
-      `git ${safety(world)} rev-parse HEAD`,
-    ]);
+    expect(world.runner.rawLines()).toEqual([`git ${safety(world)} rev-parse HEAD`]);
     // Never `*`: nothing else on the volume becomes trusted by accident.
     for (const line of world.runner.rawLines()) {
       expect(line).not.toContain('safe.directory=*');
@@ -149,7 +147,9 @@ describe('git and the instance repository', () => {
     const message = failure instanceof Error ? failure.message : String(failure);
 
     expect(message).toContain('has no readable commit');
-    expect(message).toContain("fatal: detected dubious ownership in repository at '/var/lib/lifemodel/repo'");
+    expect(message).toContain(
+      "fatal: detected dubious ownership in repository at '/var/lib/lifemodel/repo'"
+    );
     // The hint is a suggestion, not the reason.
     expect(message).not.toContain('git config --global --add');
   });

@@ -170,6 +170,25 @@ describe('the drain', () => {
     expect(errorLines(rig.lines)).toEqual([]);
   });
 
+  it('waits no longer than the budget the caller has left (rework 2, finding 10)', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+
+    const stopping = supervisor.stop('shutdown', 3_000);
+    await settle();
+
+    // The stop's own deadline wins over lifemodel's 95 s drain.
+    expect(world.clock.sleeps).toEqual([3_000]);
+    world.clock.resolveAll();
+    await settle();
+    world.launcher.spawns[0]?.child.exit(null, 'SIGKILL');
+
+    expect(await stopping).toEqual({ stopped: true, drainTimedOut: true });
+    const errors = errorLines(rig.lines);
+    expect(errors[0]?.message).toContain('3000 ms drain');
+  });
+
   it('waits exactly the drain the contract gives lifemodel', async () => {
     const rig = makeSupervisor(createLoaderWorld());
     const { supervisor, world } = rig;

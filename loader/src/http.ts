@@ -12,17 +12,36 @@
  *   - Caddy: GET /_auth/verify, 2xx with the cookie and 401 without it;
  *   - the command line inside the container: /_api/status|panic|resume, which
  *     asks for the root-only token file instead of a session.
+ *
+ * Two rules stand in front of all of it (rework 2, findings 5 and 7):
+ *
+ *   - the loader answers on ITS OWN hosts only. A Host it does not know is
+ *     refused with 400 before anything else happens, so no cookie Domain is
+ *     ever derived from a name a request supplied;
+ *   - a request that CHANGES something must come from a page on the host it was
+ *     sent to (Origin, or Referer) and, wherever a session exists, carry the
+ *     session-bound anti-CSRF token of the form. The session cookie is ambient:
+ *     lifemodel controls the root host, and a form it serves would otherwise be
+ *     sent with the owner's cookie and could panic or resume the instance. The
+ *     two routes without a session yet - /setup and /login - are the only ones
+ *     that rest on the Origin check alone, and they say so here.
  */
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import {
+  ALLOWED_HOSTS,
   clearSessionCookie,
   createSession,
+  csrfToken,
   hashPassword,
+  isAllowedHost,
   parseCookies,
+  type PasswordRecord,
+  sameOrigin,
   SESSION_COOKIE_NAME,
   sessionCookie,
+  verifyCsrf,
   verifyPassword,
   verifySession,
 } from './auth.js';
@@ -172,8 +191,20 @@ ${message === undefined ? '' : `<p class="bad">${escapeHtml(message)}</p>`}
   );
 }
 
-function dashboardPage(status: InstanceStatus): string {
-  const failed = status.phase === 'failed';
+function refusalPage(reason: string): string {
+  return page(
+    'lifemodel loader',
+    `<p class="bad">Refused: ${escapeHtml(reason)}</p><p><a href="/">Back to the loader</a></p>`
+  );
+}
+
+/**
+ * The loader's page. Every form on it carries the session-bound anti-CSRF
+ * token, so a form served by another page of the instance (lifemodel's own
+ * root host) cannot drive panic, resume or logout with the owner's cookie.
+ */
+function dashboardPage(status: InstanceStatus, csrf: string): string {
+  const failed = status.failed;
   const state = failed ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped';
   return page(
     'lifemodel loader',
@@ -185,22 +216,33 @@ function dashboardPage(status: InstanceStatus): string {
   <dt>restarts</dt><dd>${String(status.restarts)}</dd>
 </dl>
 ${status.lastError === null ? '' : `<p class="bad">failed: ${escapeHtml(status.lastError)}</p>`}
-<form method="post" action="/panic"><button type="submit">Panic: stop lifemodel</button></form>
-<form method="post" action="/resume"><button type="submit">Resume: start lifemodel</button></form>
+<form method="post" action="/panic"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Panic: stop lifemodel</button></form>
+<form method="post" action="/resume"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Resume: start lifemodel</button></form>
 <p class="note">Panic keeps lifemodel down across a restart of the container until you resume it.</p>
-<form method="post" action="/logout"><button type="submit">Log out</button></form>`
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Log out</button></form>`
   );
 }
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, supervisor, bootstrap, logger, clock } = deps;
 
+  /** One request header, as a string (a repeated one is not a value here). */
+  function header(req: IncomingMessage, name: string): string | undefined {
+    const value = req.headers[name];
+    return typeof value === 'string' ? value : undefined;
+  }
+
+  /** The session this request carries, or null when it carries none that holds. */
+  function sessionToken(req: IncomingMessage, record: PasswordRecord): string | null {
+    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
+    if (token === undefined) return null;
+    return verifySession(token, record, clock.now()) ? token : null;
+  }
+
   async function hasSession(req: IncomingMessage): Promise<boolean> {
     const record = await state.readAuth();
     if (record === null) return false;
-    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
-    if (token === undefined) return false;
-    return verifySession(token, record, clock.now());
+    return sessionToken(req, record) !== null;
   }
 
   async function hasCliToken(req: IncomingMessage): Promise<boolean> {
@@ -218,6 +260,40 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     );
   }
 
+  /**
+   * Why a state-changing request is refused, or null when it may go ahead. Both
+   * halves are needed: the Origin/Referer check says WHICH PAGE sent it, the
+   * token says WHICH SESSION it acts with (rework 2, finding 5).
+   */
+  function refusalFor(
+    req: IncomingMessage,
+    record: PasswordRecord | null,
+    token: string | null,
+    form: Record<string, string>
+  ): string | null {
+    if (!sameOrigin(header(req, 'origin'), header(req, 'referer'), header(req, 'host'))) {
+      return 'the request did not come from a page on this host (Origin or Referer names another one)';
+    }
+    if (record === null || token === null) return null;
+    if (!verifyCsrf(form['csrf'] ?? '', record, token)) {
+      return 'the form carried no anti-CSRF token of this session';
+    }
+    return null;
+  }
+
+  /** One warn line for a refused state change, with the reason and no secret. */
+  function refusedChange(req: IncomingMessage, reason: string): void {
+    logger.warn(
+      {
+        host: req.headers.host ?? 'unknown',
+        path: req.url ?? '',
+        remote: req.socket.remoteAddress ?? 'unknown',
+        reason,
+      },
+      `a state-changing request was refused: ${reason}`
+    );
+  }
+
   async function handleSetup(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const existing = await state.readAuth();
     if (existing !== null) {
@@ -230,6 +306,18 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     if (req.method === 'GET') {
       sendHtml(res, 200, setupPage());
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendText(res, 405, 'the loader takes GET or POST here');
+      return;
+    }
+    // No session exists yet, so this is the one route that rests on the Origin
+    // check alone: the page that asks for the password is the loader's own.
+    const refusal = refusalFor(req, null, null, {});
+    if (refusal !== null) {
+      refusedChange(req, refusal);
+      sendHtml(res, 403, refusalPage(refusal));
       return;
     }
     const form = await readForm(req);
@@ -259,6 +347,18 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       sendHtml(res, 200, loginPage());
       return;
     }
+    if (req.method !== 'POST') {
+      sendText(res, 405, 'the loader takes GET or POST here');
+      return;
+    }
+    // As /setup: there is no session to bind a token to yet, so the login page
+    // is protected by the Origin check (and by the Host pinning above).
+    const refusal = refusalFor(req, null, null, {});
+    if (refusal !== null) {
+      refusedChange(req, refusal);
+      sendHtml(res, 403, refusalPage(refusal));
+      return;
+    }
     const form = await readForm(req);
     const password = form['password'] ?? '';
     if (!(await verifyPassword(password, record))) {
@@ -271,36 +371,71 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
   }
 
+  /** Not logged in: the same answer the page gives, and no state changed. */
+  function notLoggedIn(res: ServerResponse): void {
+    sendHtml(
+      res,
+      401,
+      page(
+        'lifemodel loader',
+        '<p class="bad">Not logged in.</p><p><a href="/login">Log in</a></p>'
+      )
+    );
+  }
+
   async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!(await hasSession(req))) {
-      sendHtml(
-        res,
-        401,
-        page(
-          'lifemodel loader',
-          '<p class="bad">Not logged in.</p><p><a href="/login">Log in</a></p>'
-        )
+    const record = await state.readAuth();
+    const token = record === null ? null : sessionToken(req, record);
+    if (record === null || token === null) {
+      notLoggedIn(res);
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendHtml(res, 200, dashboardPage(await bootstrap.status(), csrfToken(record, token)));
+      return;
+    }
+    const form = await readForm(req);
+    const refusal = refusalFor(req, record, token, form);
+    if (refusal !== null) {
+      refusedChange(req, refusal);
+      sendHtml(res, 403, refusalPage(refusal));
+      return;
+    }
+    // Only /panic and /resume act: a POST to / is not a resume alias.
+    const action = (req.url ?? '').split('?')[0] === '/panic' ? 'panic' : 'resume';
+    if (action === 'panic') {
+      await state.setPanic('the loader page');
+      const outcome = await supervisor.stop('panic');
+      logger.warn(
+        { drainTimedOut: outcome.drainTimedOut },
+        'panic set from the loader page: lifemodel is stopped'
       );
+    } else {
+      await state.clearPanic();
+      logger.info({}, 'panic cleared from the loader page: starting lifemodel');
+      void bootstrap.ensureReady('resume');
+    }
+    redirect(res, '/');
+  }
+
+  async function handleLogout(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const record = await state.readAuth();
+    const token = record === null ? null : sessionToken(req, record);
+    if (record === null || token === null) {
+      notLoggedIn(res);
       return;
     }
-    if (req.method === 'POST') {
-      const action = req.url === '/panic' ? 'panic' : 'resume';
-      if (action === 'panic') {
-        await state.setPanic('the loader page');
-        const outcome = await supervisor.stop('panic');
-        logger.warn(
-          { drainTimedOut: outcome.drainTimedOut },
-          'panic set from the loader page: lifemodel is stopped'
-        );
-      } else {
-        await state.clearPanic();
-        logger.info({}, 'panic cleared from the loader page: starting lifemodel');
-        void bootstrap.ensureReady('resume');
-      }
-      redirect(res, '/');
+    const form = await readForm(req);
+    const refusal = refusalFor(req, record, token, form);
+    if (refusal !== null) {
+      refusedChange(req, refusal);
+      sendHtml(res, 403, refusalPage(refusal));
       return;
     }
-    sendHtml(res, 200, dashboardPage(await bootstrap.status()));
+    logger.info({}, 'the owner logged out');
+    redirect(res, '/login', {
+      'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
+    });
   }
 
   async function handleCli(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -341,6 +476,18 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     const method = req.method ?? 'GET';
 
+    // The loader answers on its own hosts and on nothing else (rework 2,
+    // finding 7): this runs before any route, so no cookie domain and no page
+    // is ever derived from a name a request supplied.
+    if (!isAllowedHost(req.headers.host)) {
+      logger.warn(
+        { host: req.headers.host ?? 'none', path },
+        'request refused: the loader does not answer on that host'
+      );
+      sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      return;
+    }
+
     if (path === '/_auth/verify') {
       // Caddy's forward_auth: 2xx for a logged-in browser, 401 for everyone else.
       if (await hasSession(req)) sendText(res, 200, 'ok');
@@ -359,16 +506,26 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       await handleCli(req, res);
       return;
     }
-    if (path === '/logout' && method === 'POST') {
-      if (await hasSession(req)) {
-        logger.info({}, 'the owner logged out');
+    if (path === '/logout') {
+      if (method !== 'POST') {
+        sendText(res, 405, 'logging out is a POST from the loader page');
+        return;
       }
-      redirect(res, '/login', {
-        'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
-      });
+      await handleLogout(req, res);
       return;
     }
-    if (path === '/' || path === '/panic' || path === '/resume') {
+    if (path === '/') {
+      if (method === 'POST') {
+        // A POST to / is not a resume alias: the two actions have their own
+        // addresses, and nothing else changes state (rework 2, finding 5).
+        logger.warn({ path }, 'request refused: there is no action at /');
+        sendText(res, 405, 'there is no action at /: panic and resume have their own addresses');
+        return;
+      }
+      await handleDashboard(req, res);
+      return;
+    }
+    if (path === '/panic' || path === '/resume') {
       await handleDashboard(req, res);
       return;
     }

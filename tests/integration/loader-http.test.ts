@@ -39,6 +39,13 @@ interface RequestOptions {
   cookie?: string;
   form?: Record<string, string>;
   headers?: Record<string, string>;
+  /**
+   * The page the request comes from. A browser sends one for a form post, and
+   * the default here is what the loader's own page sends: the host the request
+   * goes to. `null` sends none, which is what an attack page cannot avoid and a
+   * test can (rework 2, finding 5).
+   */
+  origin?: string | null;
 }
 
 /** One request the way a browser or Caddy makes it: its own Host, its cookie. */
@@ -50,11 +57,14 @@ function ask(
 ): Promise<Answer> {
   const form =
     options.form === undefined ? undefined : new URLSearchParams(options.form).toString();
+  const host = options.host ?? 'localhost';
   const headers: Record<string, string> = {
-    host: options.host ?? 'localhost',
+    host,
     connection: 'close',
     ...options.headers,
   };
+  const origin = options.origin === undefined ? `http://${host}` : options.origin;
+  if (origin !== null) headers['origin'] = origin;
   if (options.cookie !== undefined) headers['cookie'] = options.cookie;
   if (form !== undefined) headers['content-type'] = 'application/x-www-form-urlencoded';
   return new Promise((resolve, reject) => {
@@ -88,6 +98,19 @@ async function cli(
     fetchImpl: fetch,
   });
   return { code, out, err };
+}
+
+/**
+ * The anti-CSRF token of the loader's own page, taken from the form the way a
+ * browser takes it (rework 2, finding 5).
+ */
+async function csrfOf(port: number, host: string, cookie: string): Promise<string> {
+  const dashboard = await ask(port, 'GET', '/', { host, cookie });
+  const match = /name="csrf" value="(?<csrf>[^"]+)"/.exec(dashboard.body);
+  if (match?.groups?.csrf === undefined) {
+    throw new Error(`the loader page carried no anti-CSRF token:\n${dashboard.body}`);
+  }
+  return match.groups.csrf;
 }
 
 /** The one cookie of a Set-Cookie header, as a browser would send it back. */
@@ -245,7 +268,12 @@ describe('one login, three hosts', () => {
     });
     const cookie = cookieOf(login.headers);
 
-    const out = await ask(port, 'POST', '/logout', { host: 'boot.localhost', cookie });
+    const csrf = await csrfOf(port, 'boot.localhost', cookie);
+    const out = await ask(port, 'POST', '/logout', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
 
     expect(out.status).toBe(303);
     expect(out.headers['location']).toBe('/login');
@@ -322,6 +350,36 @@ describe('the command line inside the container', () => {
     const missing = await cli(app, []);
     expect(missing.code).toBe(1);
     expect(missing.err[0]).toContain('usage: lifemodel');
+
+    await shutdownLoader(world, app);
+  });
+
+  it('reports a start the OS refused, and resume exits 1 with the reason', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    // The OS cannot start lifemodel (rework 2, finding 6); Caddy is fine.
+    world.launcher.refuseSpawns(new Error('spawn node EPERM'), 'node');
+    const { app, lines } = await createRunningLoader(world);
+    await waitUntil(
+      () => lines.some((line) => line.message.includes('the instance did not come up')),
+      'the loader says the instance did not come up'
+    );
+
+    const status = await cli(app, ['status']);
+    expect(status.code).toBe(0);
+    expect(status.out).toEqual([
+      'failed',
+      'commit c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff',
+      'panic off',
+      'failed: spawn node EPERM',
+    ]);
+
+    // Resume is the retry, and it says the same: the instance did not come up.
+    const resumed = await cli(app, ['resume']);
+    expect(resumed.code).toBe(1);
+    expect(resumed.out[0]).toBe('failed');
+    expect(resumed.out[3]).toContain('spawn node EPERM');
 
     await shutdownLoader(world, app);
   });
@@ -477,8 +535,13 @@ describe('the loader page drives panic and resume', () => {
       form: { password: 'right' },
     });
     const cookie = cookieOf(login.headers);
+    const csrf = await csrfOf(port, 'boot.localhost', cookie);
 
-    const panicking = ask(port, 'POST', '/panic', { host: 'boot.localhost', cookie });
+    const panicking = ask(port, 'POST', '/panic', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
     await waitUntil(
       () => lifemodelSpawn(world)?.child.signals.length === 1,
       'lifemodel is stopped'
@@ -490,7 +553,11 @@ describe('the loader page drives panic and resume', () => {
     expect(status.panic).toBe(true);
     expect(status.lifemodel).toBe('stopped');
 
-    const resuming = ask(port, 'POST', '/resume', { host: 'boot.localhost', cookie });
+    const resuming = ask(port, 'POST', '/resume', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
     const resumed = await resuming;
     expect(resumed.status).toBe(303);
     await waitUntil(
@@ -498,6 +565,168 @@ describe('the loader page drives panic and resume', () => {
         world.launcher.spawns.filter((s) => s.args[0] === world.config.lifemodelEntry).length === 2,
       'lifemodel is started again'
     );
+
+    await shutdownLoader(world, app);
+  });
+});
+
+describe("a state change must come from the loader's own page (rework 2, finding 5)", () => {
+  /** A logged-in browser: its cookie, and the token of the page it is on. */
+  async function loggedIn(port: number): Promise<{ cookie: string; csrf: string }> {
+    const login = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right' },
+    });
+    const cookie = cookieOf(login.headers);
+    return { cookie, csrf: await csrfOf(port, 'boot.localhost', cookie) };
+  }
+
+  it('refuses panic and resume with a valid cookie but no token or a foreign Origin', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, lines } = await createRunningLoader(world);
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+    const port = app.port();
+    const { cookie, csrf } = await loggedIn(port);
+
+    // The attack: a form served by the root host (or any other page of the
+    // parent site) posting to boot.localhost with the owner's cookie.
+    const foreign = await ask(port, 'POST', '/resume', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+      origin: 'http://localhost:8080',
+    });
+    expect(foreign.status).toBe(403);
+    // A request that names no page at all is refused too.
+    const nameless = await ask(port, 'POST', '/panic', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+      origin: null,
+    });
+    expect(nameless.status).toBe(403);
+    // And the token is the session's: no token, a foreign one, or one of
+    // another session all fail, whatever the Origin says.
+    for (const form of [{}, { csrf: 'not-a-token' }]) {
+      const forged = await ask(port, 'POST', '/panic', { host: 'boot.localhost', cookie, form });
+      expect({ form, status: forged.status }).toEqual({ form, status: 403 });
+    }
+    expect(await app.state.isPanicSet()).toBe(false);
+    expect(lifemodelSpawn(world)?.child.signals).toEqual([]);
+    expect(
+      lines.filter((line) => line.message.includes('a state-changing request was refused'))
+    ).not.toHaveLength(0);
+
+    // The form the loader itself serves does pass: the same cookie, the same
+    // Origin, and the token out of its own page. The answer comes after the
+    // stop, so the child is let go first (as the test above does).
+    const own = ask(port, 'POST', '/panic', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
+    await waitUntil(
+      () => lifemodelSpawn(world)?.child.signals.length === 1,
+      'lifemodel is stopped'
+    );
+    lifemodelSpawn(world)?.child.exit(0, null);
+    expect((await own).status).toBe(303);
+    expect(await app.state.isPanicSet()).toBe(true);
+
+    await shutdownLoader(world, app);
+  });
+
+  it('refuses a POST to / : the two actions have their own addresses', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+    const port = app.port();
+    const { cookie, csrf } = await loggedIn(port);
+
+    // Everything a resume alias would need, sent to / instead: refused.
+    const atRoot = await ask(port, 'POST', '/', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
+
+    expect(atRoot.status).toBe(405);
+    expect(atRoot.body).toContain('there is no action at /');
+    expect(await app.state.isPanicSet()).toBe(false);
+    expect(
+      world.launcher.spawns.filter((s) => s.args[0] === world.config.lifemodelEntry)
+    ).toHaveLength(1); // nothing was started again
+
+    await shutdownLoader(world, app);
+  });
+
+  it('refuses a password set and a login driven from another page of the site', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world, { password: null });
+    const port = app.port();
+
+    // The root host's page cannot claim the instance by setting its password.
+    const claim = await ask(port, 'POST', '/setup', {
+      host: 'boot.localhost',
+      form: { password: 'the attacker picks this' },
+      origin: 'http://localhost:8080',
+    });
+    expect(claim.status).toBe(403);
+    expect(await app.state.readAuth()).toBeNull();
+
+    // Nor can it log itself in with the owner's password.
+    const set = await ask(port, 'POST', '/setup', {
+      host: 'boot.localhost',
+      form: { password: "the owner's password" },
+    });
+    expect(set.status).toBe(303);
+    const login = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: "the owner's password" },
+      origin: 'http://vault.localhost:8080',
+    });
+    expect(login.status).toBe(403);
+    expect(login.headers['set-cookie']).toBeUndefined();
+
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+    await shutdownLoader(world, app);
+  });
+});
+
+describe('the loader answers on its own hosts only (rework 2, finding 7)', () => {
+  it('refuses any other Host, on every route, and derives no cookie from one', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, lines } = await createRunningLoader(world, { password: null });
+    const port = app.port();
+
+    for (const path of ['/', '/setup', '/login', '/_auth/verify', '/_api/status']) {
+      const refused = await ask(port, 'GET', path, { host: 'boot.example.com' });
+      expect({ path, status: refused.status }).toEqual({ path, status: 400 });
+      expect(refused.body).toContain('the loader answers only');
+    }
+    // A login through a crafted boot.<attacker domain> cannot mint a cookie
+    // scoped to that domain.
+    const crafted = await ask(port, 'POST', '/login', {
+      host: 'boot.attacker.test',
+      form: { password: 'right' },
+    });
+    expect(crafted.status).toBe(400);
+    expect(crafted.headers['set-cookie']).toBeUndefined();
+    expect(
+      lines.filter((line) => line.message.includes('does not answer on that host')).length
+    ).toBeGreaterThan(0);
+
+    // The instance's own hosts still answer, port or no port.
+    expect((await ask(port, 'GET', '/setup', { host: 'boot.localhost:8080' })).status).toBe(200);
+    expect((await ask(port, 'GET', '/_auth/verify', { host: 'vault.localhost' })).status).toBe(401);
 
     await shutdownLoader(world, app);
   });
@@ -514,6 +743,7 @@ async function second_status(port: number, cookie: string): Promise<InstanceStat
     pid: null,
     restarts: 0,
     phase: 'idle',
+    failed: false,
     lastError: null,
   };
 }
