@@ -230,6 +230,36 @@ describe('Agent Vault, the layer that holds the keys', () => {
     await shutdownLoader(found, app);
   });
 
+  it('hands lifemodel the proxy environment, and a value the container was given cannot win', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    // Docker passes the client's own proxy variables into the container by
+    // default: the vault's values must be the ones lifemodel runs with, or
+    // lifemodel would try to reach a proxy the kernel rule forbids.
+    setEnv('HTTPS_PROXY', 'http://corp-proxy:3128');
+    setEnv('HTTP_PROXY', 'http://corp-proxy:3128');
+    const { app } = await start(found);
+
+    await waitUntil(() => lifemodelSpawn(found) !== undefined, 'lifemodel is started');
+    const env = lifemodelSpawn(found)?.options.env ?? {};
+    // One URL for both: the same listener takes CONNECT and absolute-form
+    // requests. The agent token is the proxy credential, and it is the only
+    // secret in there - no key, no vault admin credential, no store.
+    const proxy = `http://${TOKEN}:lifemodel@127.0.0.1:${String(found.config.agentVault.proxyPort)}`;
+    expect(env['HTTPS_PROXY']).toBe(proxy);
+    expect(env['HTTP_PROXY']).toBe(proxy);
+    expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
+    expect(env['NODE_USE_ENV_PROXY']).toBe('1');
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(found.config.agentVault.caPath);
+    const owner = JSON.parse(
+      readFileSync(join(found.config.loaderDir, 'vault-owner.json'), 'utf8')
+    ) as { email: string; password: string };
+    expect(JSON.stringify(env)).not.toContain(owner.email);
+    expect(JSON.stringify(env)).not.toContain(owner.password);
+
+    await shutdownLoader(found, app);
+  });
+
   it('reuses the store and the token on the next start: nothing is created twice', async () => {
     const found = world();
     scriptFirstStart(found);

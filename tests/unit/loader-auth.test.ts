@@ -21,6 +21,7 @@ import {
   verifyCsrf,
   verifyPassword,
   verifySession,
+  vaultLocation,
 } from '../../loader/src/auth.js';
 
 const NOW = Date.UTC(2026, 9, 8, 12, 0, 0);
@@ -181,5 +182,22 @@ describe('the Origin of a state-changing request', () => {
     expect(
       sameOrigin('http://localhost:8080', 'http://boot.localhost:8080/', 'boot.localhost:8080')
     ).toBe(false);
+  });
+});
+
+describe('where the owner signs in to Agent Vault (lifemodel-q4x.3.2)', () => {
+  it('is vault. on the same host and port the loader was reached on', () => {
+    expect(vaultLocation('boot.localhost')).toBe('http://vault.localhost');
+    expect(vaultLocation('boot.localhost:8080')).toBe('http://vault.localhost:8080');
+    expect(vaultLocation('localhost:8080')).toBe('http://vault.localhost:8080');
+    expect(vaultLocation('vault.localhost')).toBe('http://vault.localhost');
+  });
+
+  it('is nothing for a host no browser uses: the loopback literal and a name from a request', () => {
+    // The command line talks to 127.0.0.1 and reads no page; and a name a
+    // request supplied never becomes an address on the page.
+    expect(vaultLocation('127.0.0.1:7000')).toBeNull();
+    expect(vaultLocation('boot.attacker.test')).toBeNull();
+    expect(vaultLocation('')).toBeNull();
   });
 });

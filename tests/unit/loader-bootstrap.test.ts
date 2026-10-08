@@ -20,6 +20,7 @@ import { createRecordingLogger, type RecordedLine } from '../../loader/src/logge
 import {
   caddySpawn,
   createLoaderWorld,
+  createRunningLoader,
   lifemodelSpawn,
   scriptRepository,
   settle,
@@ -108,6 +109,36 @@ describe('the loader first start', () => {
     expect(status.commit).toBe('c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff');
     expect(status.panic).toBe(false);
     expect(status.restarts).toBe(0);
+  });
+
+  it("builds it as lifemodel's user through the same proxy lifemodel runs with", async () => {
+    // The image's loader is root and starts the build as lifemodel's user;
+    // here that identity is the test's own, which is what makes a real chown
+    // and a real uid on the command possible.
+    const world = createLoaderWorld({ privileged: true });
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    await waitUntil(() => world.runner.lines().includes('npm ci'), 'the build ran');
+
+    // The build runs as uid 1000, and the loader's rule lets that uid reach
+    // loopback only: the registry is reached through Agent Vault's proxy, with
+    // the same credential and CA lifemodel's own process is given
+    // (lifemodel-q4x.3.2). Nothing else of the loader's account is there.
+    const install = world.runner.calls.find(
+      (call) => call.command === 'npm' && call.args[0] === 'ci'
+    );
+    const env = install?.options.env ?? {};
+    expect(install?.options.uid).toBe(world.config.lifemodel.uid);
+    expect(env['HTTPS_PROXY']).toBe(
+      `http://av_agt_a-test-token:lifemodel@127.0.0.1:${String(world.config.agentVault.proxyPort)}`
+    );
+    expect(env['HTTP_PROXY']).toBe(env['HTTPS_PROXY']);
+    expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
+    expect(env['NODE_USE_ENV_PROXY']).toBe('1');
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(world.config.agentVault.caPath);
+    expect(JSON.stringify(env)).not.toContain(world.config.agentVault.ownerEmail);
+
+    await shutdownLoader(world, app);
   });
 
   it('a second start reuses the repository on the volume: no second seed, no second build', async () => {
