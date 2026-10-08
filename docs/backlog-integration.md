@@ -150,8 +150,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   never do), and `.githooks` needs only `node` and `git`. The product checks
   stay where the project put them (`.husky/pre-commit`, needing `node_modules`)
   and run when husky is active; until then the hook says they were skipped and
-  CI is their home ("Run typecheck, lint and tests in CI", filed with the
-  setup task).
+  CI runs them: the `ci-product` job runs `npm run check` (node 24, `npm ci`)
+  for a change whose paths include product code, and is skipped for one that
+  cannot touch it.
 - **Connecting a clone:** `npm run connect` (`scripts/connect-clone.sh`). It
   checks `git`, `node`, `br`, the four hooks, the gate's files and a readable
   `.backlog/config.json`, reports everything missing in one run and connects
@@ -168,20 +169,32 @@ the repository's installation, and each person's plugin and hooks are their own.
   commit range is merge base..PR head on a pull request (never GitHub's
   synthetic merge; an empty range is an error) and `commits.mjs --introduced`
   on a push. The present-documents check runs on pull requests only. Tasks
-  resolve from the newest export the checked history reaches.
+  resolve from the newest export the checked history reaches. `ci-product` is
+  the product checks and needs the `changes` job in front of it: `changes` runs
+  `scripts/ci-product-paths.sh` (with its test,
+  `tests/unit/ci-product-paths.test.ts`) over the change's paths — merge
+  base..head on a pull request, `before..after` on a push, and a `before` this
+  checkout cannot read means every path is product — and answers
+  `product=true|false`; `ci-product` runs on `true` only, on ubuntu-latest with
+  node 24 and the npm cache, `npm ci` and `npm run check`, and is skipped for a
+  draft pull request. A skipped job reports as success to a required check, so
+  branch protection may require it.
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before
   and after, and pass them to `check.mjs` (the gate will grow that wiring
   then).
-- **Static checks:** `npm run lint`, `npm run format:check` (need
+- **Static checks:** `npm run check` runs them together with the suite:
+  typecheck, lint (`npm run lint`), the format check (`npm run format:check`),
+  then `vitest run --maxWorkers=2`, stopping at the first failure (needs
   `node_modules`). The gate's own checks need only node: `npm run backlog`.
 - **Related tests:** `npx vitest run --maxWorkers=2 <touched test files>` —
   tests live in `tests/` (unit, integration), never in `src/` (AGENTS.md).
-- **Full stage checks:** `npm run typecheck && npm run lint && npx vitest run
-  --maxWorkers=2` (needs `node_modules`). On this machine memory is short
-  (owner, 2026-10-07): every vitest run uses at most 2 workers, and only one
-  vitest process runs at a time; repeated full runs go one after another. Not
-  yet in CI (its own task, filed with the setup task).
+- **Full stage checks:** `npm run check` — typecheck, lint, the format check
+  and `vitest run --maxWorkers=2`, stopping at the first failure (needs
+  `node_modules`). It is the command CI's `ci-product` job runs, so a green
+  local run and a green CI run are the same check. On this machine memory is
+  short (owner, 2026-10-07): every vitest run uses at most 2 workers, and only
+  one vitest process runs at a time; repeated full runs go one after another.
 - **`npm ci` in a worktree** re-runs husky's `prepare`, which switches the
   repository-wide `core.hooksPath` to `.husky/_`: commits in every checkout then
   run husky's hooks. Run `npm run connect` afterwards to restore `.githooks`.

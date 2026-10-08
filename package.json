@@ -18,6 +18,7 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run format:check && vitest run --maxWorkers=2",
     "prepare": "husky",
     "browser:auth": "tsx cli/browser-auth.ts",
     "connect": "sh scripts/connect-clone.sh",

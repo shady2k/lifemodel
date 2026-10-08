@@ -1,12 +1,25 @@
-# CI — the backlog gate for lifemodel.
+# CI — the checks every change to lifemodel passes.
 #
-# One job, no npm install, seconds: the tracker is checked on every pull
-# request and every push to main, for everyone. The product checks
-# (typecheck, lint, test) are NOT here yet — "Run typecheck, lint and tests in
-# CI" (filed with the setup task) adds them.
+# Three jobs, and what a change owes is decided by the paths it touches
+# (scripts/ci-product-paths.sh, lifemodel-cup):
 #
-# The three steps mirror the local hooks (.githooks/pre-commit,
-# .githooks/commit-msg), which a push is one --no-verify away from skipping:
+#   1. changes: does this change touch product code? It reads the change's
+#      diff — the merge base with the branch being merged into on a pull
+#      request, the commit main was at before the push on a push — through the
+#      classifier, which answers product=true or product=false;
+#   2. ci-product: typecheck, lint, the format check and the test suite, which
+#      is exactly what `npm run check` runs by hand, with node 24 and `npm ci`,
+#      when the answer is product=true and the pull request is not a draft;
+#   3. ci-backlog: the backlog gate below, on every change, for everyone.
+#
+# A skipped job reports as a success to a required check on GitHub, so a change
+# that does not owe the product checks passes under branch protection that
+# requires them: the skip is what "not owed" looks like there, not a failure
+# somebody has to override.
+#
+# ci-backlog needs node and a full history and nothing else. Its three steps
+# mirror the local hooks (.githooks/pre-commit, .githooks/commit-msg), which a
+# push is one --no-verify away from skipping:
 #
 #   1. the backlog gate: the export at the head of the change judged against
 #      the export at its baseline, under the config's strength (block-new),
@@ -16,8 +29,6 @@
 #   3. the present-documents check, on pull requests only: the documents the
 #      config lists as describing the present may not be left naming a path
 #      the change removed.
-#
-# Node and a full history are the whole toolchain.
 
 name: CI
 
@@ -32,6 +43,92 @@ permissions:
   contents: read
 
 jobs:
+  # Which checks a change owes is decided by what it changes. A path that
+  # cannot change what the product does — the tracker's export, the documents,
+  # the backlog gate's own files, the git hooks, connect-clone.sh — owes the
+  # backlog checks, not typecheck, lint and the suite; everything else,
+  # .github/ and the scripts included, owes them. The classifier is a script
+  # with tests of its own (scripts/ci-product-paths.sh,
+  # tests/unit/ci-product-paths.test.ts) rather than shell inlined here, so the
+  # same answer can be run and checked locally.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      product: ${{ steps.classify.outputs.product }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Both ends of the diff are revisions of this history: a shallow
+          # clone has neither.
+          fetch-depth: 0
+
+      - name: Does this change touch product code
+        id: classify
+        env:
+          # Through the environment rather than into the script: an expression
+          # interpolated into a shell line is a shell line somebody else can
+          # write.
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -eu
+          # The changed paths, one per line, written to a file so that a range
+          # this checkout cannot read leaves the classifier an empty input —
+          # which is what such a range has to mean: every path counts.
+          paths="$RUNNER_TEMP/changed-paths.txt"
+          : > "$paths"
+          if [ "$EVENT" = pull_request ]; then
+            # The merge base with the branch being merged into, not GitHub's
+            # synthetic merge: the change is what the branch added, not what
+            # main did meanwhile.
+            base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA" || true)
+            if [ -n "$base" ]; then
+              echo "range: $base...$HEAD_SHA"
+              git diff --name-only "$base...$HEAD_SHA" > "$paths"
+            else
+              echo "no merge base of origin/$BASE_REF and $HEAD_SHA in this checkout: no diff to read, so every path counts as product" >&2
+            fi
+          elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null 2>&1; then
+            echo "range: $BEFORE..$AFTER"
+            git diff --name-only "$BEFORE..$AFTER" > "$paths"
+          else
+            # A first push, a forced update or a shallow surprise leaves no
+            # revision to diff against. What it changed is then unknowable, so
+            # every path counts as product instead of none — and the reason is
+            # said out loud, because this is the answer that runs everything.
+            echo "BEFORE ${BEFORE:-<empty>} is not a commit in this checkout: no diff to read, so every path counts as product" >&2
+          fi
+          # The classifier prints the paths it read and answers on its last
+          # line, which is exactly what GitHub wants in $GITHUB_OUTPUT.
+          scripts/ci-product-paths.sh < "$paths" | tee "$RUNNER_TEMP/classification.txt"
+          tail -n 1 "$RUNNER_TEMP/classification.txt" >> "$GITHUB_OUTPUT"
+
+  # The product checks, as the one command a person runs before pushing. It is
+  # skipped for a change that cannot touch product code and while a pull
+  # request is a draft. A skipped job reports as a success to a required check
+  # on GitHub, so requiring this job in branch protection does not block a
+  # change that does not owe it.
+  ci-product:
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install what the checks run on
+        run: npm ci
+
+      - name: Typecheck, lint, the format check and the suite
+        run: npm run check
+
   ci-backlog:
     runs-on: ubuntu-latest
     steps:
