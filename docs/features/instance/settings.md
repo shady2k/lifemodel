@@ -95,7 +95,14 @@ supervises its child and reads that code as the request
 - every other exit is a death and keeps the growing backoff.
 
 The usual guards still hold: a stop (panic, the container leaving) wins over
-the request, and once the loader is closing nothing is started. A lifemodel
+the request, and once the loader is closing nothing is started.
+
+A token the Telegram API refuses does not end lifemodel: the channel logs the
+cause at error and the agent runs without Telegram (the placeholder is refused
+until Agent Vault substitutes the real token on the way out,
+lifemodel-q4x.3.*). It used to reject inside `bot.start()` and take the process
+down, which turned one saved placeholder into a crash loop with the settings
+page unreachable - the gated Docker walk is what found it. A lifemodel
 that asked for a restart and then asks again immediately is started again
 immediately: the code is a request, and only lifemodel's own settings save
 makes it.
