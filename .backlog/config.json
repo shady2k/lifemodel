@@ -1,8 +1,9 @@
 {
   "strength": "block-new",
-  "currentMilestone": "self-change-1",
+  "currentMilestone": "instance-1",
   "milestoneLabels": [
-    "self-change-1",
+    "instance-1",
+    "upstream-1",
     "evolution-1",
     "memory-1",
     "dialogue-1",
