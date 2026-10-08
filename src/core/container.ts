@@ -42,7 +42,13 @@ import {
   createConversationManager,
   migrateToHierarchical,
 } from '../storage/index.js';
-import { type MergedConfig, loadConfig } from '../config/index.js';
+import {
+  type MergedConfig,
+  loadConfig,
+  endpointGaps,
+  type EndpointRole,
+  type ModelEndpoint,
+} from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
 import { JsonMemoryProvider } from '../storage/memory-provider.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
@@ -135,16 +141,16 @@ export interface AppConfig {
     fastModel?: string;
     /** Smart model for composition via OpenRouter (expensive) */
     smartModel?: string;
-    /** Local model configuration (OpenAI-compatible API) */
-    local?: {
-      /** Base URL of the local server (e.g., http://localhost:1234) */
+    /** The OpenAI-compatible endpoint, with a model per role (no key) */
+    endpoint?: {
+      /** Base URL of the endpoint (e.g., http://localhost:1234/v1) */
       baseUrl?: string;
-      /** Model name to use */
-      model?: string;
-      /** Use local model for fast role */
-      useForFast?: boolean;
-      /** Use local model for smart role */
-      useForSmart?: boolean;
+      /** The fast role's model */
+      fastModel?: string;
+      /** The smart role's model */
+      smartModel?: string;
+      /** The motor role's model */
+      motorModel?: string;
     };
   };
 }
@@ -394,40 +400,43 @@ function createLayers(logger: Logger, builtinSkillsDir?: string): CoreLoopLayers
 /**
  * LLM provider config type that allows undefined values.
  */
-interface LLMProviderConfig {
+export interface LLMProviderConfig {
   openRouterApiKey?: string | null | undefined;
+  /** OpenRouter's models (used only while no endpoint names the role). */
   fastModel?: string | undefined;
   smartModel?: string | undefined;
   motorModel?: string | undefined;
   appName?: string | undefined;
   siteUrl?: string | null | undefined;
-  local?:
+  /** The OpenAI-compatible endpoint, with a model per role (lifemodel-q4x.4.1). */
+  endpoint?:
     | {
         baseUrl?: string | null | undefined;
-        model?: string | null | undefined;
-        useForFast?: boolean | undefined;
-        useForSmart?: boolean | undefined;
-        useForMotor?: boolean | undefined;
+        fastModel?: string | null | undefined;
+        smartModel?: string | null | undefined;
+        motorModel?: string | null | undefined;
       }
     | undefined;
 }
 
 /**
- * Create LLM provider from config.
+ * Create the LLM provider from config (the public entry `src/index.ts` and the
+ * container use; unit-tested on its own in
+ * tests/unit/llm/model-endpoint.test.ts).
+ *
+ * The model configuration is ONE OpenAI-compatible endpoint with a model per
+ * role, and no key (lifemodel-q4x.4.1). OpenRouter stays reachable as one more
+ * OpenAI-compatible endpoint: its key comes from outside the image
+ * (OPENROUTER_API_KEY), and it serves a role the endpoint does not name - or
+ * every role while no endpoint is configured. A role neither of them can serve
+ * is left without a provider and is answered with an error naming the role,
+ * never with another role's model.
  */
-function createLLMProvider(
+export function createLLMProvider(
   config: LLMProviderConfig | undefined,
   logger: Logger
 ): LLMProvider | null {
   const openRouterApiKey = config?.openRouterApiKey ?? process.env['OPENROUTER_API_KEY'] ?? '';
-  const localBaseUrl = config?.local?.baseUrl ?? process.env['LLM_LOCAL_BASE_URL'];
-  const localModel = config?.local?.model ?? process.env['LLM_LOCAL_MODEL'];
-  const useLocalForFast =
-    config?.local?.useForFast ?? process.env['LLM_LOCAL_USE_FOR_FAST'] === 'true';
-  const useLocalForSmart =
-    config?.local?.useForSmart ?? process.env['LLM_LOCAL_USE_FOR_SMART'] === 'true';
-  const useLocalForMotor =
-    config?.local?.useForMotor ?? process.env['LLM_LOCAL_USE_FOR_MOTOR'] === 'true';
 
   const fastModel = config?.fastModel ?? process.env['LLM_FAST_MODEL'];
   const smartModel = config?.smartModel ?? process.env['LLM_SMART_MODEL'];
@@ -435,8 +444,40 @@ function createLLMProvider(
   const appName = config?.appName ?? process.env['LLM_APP_NAME'];
   const siteUrl = config?.siteUrl ?? process.env['LLM_SITE_URL'];
 
+  const endpoint: ModelEndpoint = {
+    baseUrl: config?.endpoint?.baseUrl ?? null,
+    fastModel: config?.endpoint?.fastModel ?? null,
+    smartModel: config?.endpoint?.smartModel ?? null,
+    motorModel: config?.endpoint?.motorModel ?? null,
+  };
+
+  // Create the endpoint provider if an endpoint is configured - that is, if it
+  // has a base URL and at least one model. The settings interface refuses to
+  // save a half-written endpoint; a config file written by hand may still hold
+  // one, and then the roles it does not name are reported and are served by
+  // OpenRouter (below), not guessed at.
+  let endpointProvider: LLMProvider | null = null;
+  if (endpoint.baseUrl && (endpoint.fastModel ?? endpoint.smartModel ?? endpoint.motorModel)) {
+    const gaps = endpointGaps(endpoint);
+    if (gaps.length > 0) {
+      logger.warn(
+        { missing: gaps.map((gap) => gap.label) },
+        'The model endpoint names no model for every role: those roles are served by OpenRouter when its key is set'
+      );
+    }
+    endpointProvider = createVercelAIProvider(
+      {
+        baseUrl: endpoint.baseUrl,
+        ...(endpoint.fastModel && { fastModel: endpoint.fastModel }),
+        ...(endpoint.smartModel && { smartModel: endpoint.smartModel }),
+        ...(endpoint.motorModel && { motorModel: endpoint.motorModel }),
+      },
+      logger
+    );
+  }
+
   // Create OpenRouter provider if configured
-  let openRouterProvider = null;
+  let openRouterProvider: LLMProvider | null = null;
   if (openRouterApiKey) {
     openRouterProvider = createVercelAIProvider(
       {
@@ -451,41 +492,31 @@ function createLLMProvider(
     );
   }
 
-  // Create local provider if configured
-  let localProvider = null;
-  if (localBaseUrl && localModel) {
-    localProvider = createVercelAIProvider(
-      {
-        baseUrl: localBaseUrl,
-        model: localModel,
-      },
-      logger
-    );
-  }
-
-  // Create multi-provider if we have both, or use single provider
-  if (localProvider && openRouterProvider) {
+  if (endpointProvider && openRouterProvider) {
+    // Per role: the endpoint names the role's model, or OpenRouter serves it.
+    const providerFor = (role: EndpointRole): LLMProvider | undefined =>
+      endpoint[`${role}Model`] ? endpointProvider : (openRouterProvider ?? undefined);
     const multiProvider = createMultiProvider(
       {
-        fast: useLocalForFast ? localProvider : openRouterProvider,
-        smart: useLocalForSmart ? localProvider : openRouterProvider,
-        motor: useLocalForMotor ? localProvider : openRouterProvider,
-        default: openRouterProvider,
+        fast: providerFor('fast'),
+        smart: providerFor('smart'),
+        motor: providerFor('motor'),
+        default: endpointProvider,
       },
       logger
     );
     logger.info(
       {
-        fastProvider: useLocalForFast ? 'local' : 'openrouter',
-        smartProvider: useLocalForSmart ? 'local' : 'openrouter',
-        motorProvider: useLocalForMotor ? 'local' : 'openrouter',
+        fastProvider: providerFor('fast')?.name,
+        smartProvider: providerFor('smart')?.name,
+        motorProvider: providerFor('motor')?.name,
       },
-      'MultiProvider configured'
+      'MultiProvider configured: the endpoint names the role, OpenRouter serves the rest'
     );
     return multiProvider;
-  } else if (localProvider) {
-    logger.info('Local LLM provider configured');
-    return localProvider;
+  } else if (endpointProvider) {
+    logger.info({ baseUrl: endpoint.baseUrl }, 'Model endpoint configured');
+    return endpointProvider;
   } else if (openRouterProvider) {
     logger.info('OpenRouter LLM provider configured');
     return openRouterProvider;
@@ -664,7 +695,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     motorModel: mergedConfig.llm.motorModel,
     appName: mergedConfig.llm.appName,
     siteUrl: mergedConfig.llm.siteUrl,
-    local: configOverrides.llm?.local ?? mergedConfig.llm.local,
+    endpoint: configOverrides.llm?.endpoint ?? mergedConfig.llm.endpoint,
   };
   const llmProvider = createLLMProvider(llmConfig, logger);
 

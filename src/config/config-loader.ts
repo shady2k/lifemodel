@@ -152,6 +152,21 @@ export class ConfigLoader {
       if (file.llm.motorModel) {
         config.llm.motorModel = file.llm.motorModel;
       }
+      // The endpoint: each field on its own, so a half-written one is visible
+      // as half-written rather than merged away (lifemodel-q4x.4.1).
+      if (file.llm.endpoint) {
+        const endpoint = file.llm.endpoint;
+        if (endpoint.baseUrl !== undefined) config.llm.endpoint.baseUrl = endpoint.baseUrl;
+        if (endpoint.fastModel !== undefined) config.llm.endpoint.fastModel = endpoint.fastModel;
+        if (endpoint.smartModel !== undefined) config.llm.endpoint.smartModel = endpoint.smartModel;
+        if (endpoint.motorModel !== undefined) config.llm.endpoint.motorModel = endpoint.motorModel;
+      }
+    }
+
+    // Telegram bot token: the config file carries the Agent Vault PLACEHOLDER
+    // (`__telegram_bot_token__`), never the token (lifemodel-q4x.3.*).
+    if (file.telegram?.botToken) {
+      config.telegramBotToken = file.telegram.botToken;
     }
 
     // Logging
@@ -218,30 +233,26 @@ export class ConfigLoader {
       config.llm.motorModel = motorModel;
     }
 
-    // Local model configuration
-    const localBaseUrl = process.env['LLM_LOCAL_BASE_URL'];
-    if (localBaseUrl) {
-      config.llm.local.baseUrl = localBaseUrl;
+    // The endpoint (each field on its own: an environment variable names one
+    // field, and a half-written endpoint stays visible as one)
+    const endpointBaseUrl = process.env['LLM_ENDPOINT_BASE_URL'];
+    if (endpointBaseUrl !== undefined) {
+      config.llm.endpoint.baseUrl = endpointBaseUrl;
     }
 
-    const localModel = process.env['LLM_LOCAL_MODEL'];
-    if (localModel) {
-      config.llm.local.model = localModel;
+    const endpointFastModel = process.env['LLM_ENDPOINT_FAST_MODEL'];
+    if (endpointFastModel !== undefined) {
+      config.llm.endpoint.fastModel = endpointFastModel;
     }
 
-    const localUseForFast = process.env['LLM_LOCAL_USE_FOR_FAST'];
-    if (localUseForFast !== undefined) {
-      config.llm.local.useForFast = localUseForFast === 'true';
+    const endpointSmartModel = process.env['LLM_ENDPOINT_SMART_MODEL'];
+    if (endpointSmartModel !== undefined) {
+      config.llm.endpoint.smartModel = endpointSmartModel;
     }
 
-    const localUseForSmart = process.env['LLM_LOCAL_USE_FOR_SMART'];
-    if (localUseForSmart !== undefined) {
-      config.llm.local.useForSmart = localUseForSmart === 'true';
-    }
-
-    const localUseForMotor = process.env['LLM_LOCAL_USE_FOR_MOTOR'];
-    if (localUseForMotor !== undefined) {
-      config.llm.local.useForMotor = localUseForMotor === 'true';
+    const endpointMotorModel = process.env['LLM_ENDPOINT_MOTOR_MODEL'];
+    if (endpointMotorModel !== undefined) {
+      config.llm.endpoint.motorModel = endpointMotorModel;
     }
 
     // Log level
