@@ -476,8 +476,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
 
     // lifemodel is still building its container for a moment after the loader
     // says it started: the event is its own line that the interface is up, not
-    // a timer (the root host answers 502 until then).
-    await waitForLogLine(/"msg":"lifemodel's settings interface is up"/, 120_000);
+    // a timer (the root host answers 502 until then). lifemodel's own lines are
+    // pino-pretty, the loader's are JSON.
+    await waitForLogLine(/settings interface is up/, 120_000);
 
     const before = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
     expect(before.status).toBe(200);
@@ -517,7 +518,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(written).toContain('test-smart');
 
     // And the loader restarted it AT ONCE - its own line, no backoff.
-    await waitForLogLine(/"msg":"lifemodel asked to be restarted"/, 60_000);
+    await waitForLogLine(/lifemodel asked to be restarted/, 60_000);
     await waitForStarts(startsBefore + 1, 120_000);
     const afterSave = logFrom('"msg":"lifemodel asked to be restarted"');
     expect(afterSave.some((line) => line.includes('after a backoff'))).toBe(false);
