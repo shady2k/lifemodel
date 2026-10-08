@@ -1,0 +1,17 @@
+# The build context is the repository root, and the image carries three things
+# out of it: the loader's sources (loader/), the front door's configuration
+# (docker/instance/) and the seed bundle scripts/build-image.sh writes to
+# .docker-context/ before the build. Everything else is kept out, so the
+# context stays small and a file that changes cannot change the image.
+#
+# The instance's own code does not come through the context at all: it reaches
+# the image as the history inside the seed bundle.
+*
+!docker
+docker/*
+!docker/instance
+!docker/instance/**
+!loader
+!loader/**
+!.docker-context
+!.docker-context/**
