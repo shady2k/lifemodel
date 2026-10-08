@@ -45,6 +45,7 @@ import {
 import {
   type MergedConfig,
   loadConfig,
+  resolveConfigDir,
   endpointGaps,
   type EndpointRole,
   type ModelEndpoint,
@@ -97,6 +98,8 @@ import {
 export interface AppConfig {
   /** Log directory */
   logDir?: string;
+  /** The config file's directory (default: DATA_PATH/config, else data/config) */
+  configDir?: string;
   /** Maximum log files to keep */
   maxLogFiles?: number;
   /** Log level */
@@ -536,8 +539,11 @@ export function createLLMProvider(
  * - Sets up auto-save and shutdown hooks
  */
 export async function createContainerAsync(configOverrides: AppConfig = {}): Promise<Container> {
-  // Load configuration from file and environment
-  const mergedConfig = await loadConfig(configOverrides.logDir ? undefined : 'data/config');
+  // Load configuration from file and environment. The config file's directory
+  // is resolved HERE, before anything else applies: a path is an input, not a
+  // value the config itself decides (lifemodel-q4x.4.1).
+  const configDir = configOverrides.configDir ?? resolveConfigDir();
+  const mergedConfig = await loadConfig(configDir);
 
   // Build logger config from merged config
   const logToFile = configOverrides.logToFile ?? true;

@@ -1,7 +1,22 @@
-import { readFile, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, access, rename, open as openFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
+
+/**
+ * Where lifemodel's config file lives (lifemodel-q4x.4.1).
+ *
+ * `DATA_PATH` moves the config with the rest of the instance's data: the loader
+ * gives lifemodel `DATA_PATH=<volume>/data`, so the file is
+ * `<volume>/data/config/agent.json` - the path the volume layout names. Without
+ * `DATA_PATH` (a checkout, a test) it is the working directory's `data/config`.
+ * One function, so the reader at startup and the writer of lifemodel's settings
+ * interface can never disagree about which file it is.
+ */
+export function resolveConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  const dataPath = env['DATA_PATH'];
+  return dataPath ? join(dataPath, 'config') : 'data/config';
+}
 
 /**
  * ConfigLoader - loads and merges configuration from multiple sources.
@@ -45,6 +60,56 @@ export class ConfigLoader {
    */
   getLoadedConfigFile(): AgentConfigFile | null {
     return this.loadedConfig;
+  }
+
+  /**
+   * The file this loader reads: `<configPath>/agent.json`.
+   */
+  get filePath(): string {
+    return join(this.configPath, 'agent.json');
+  }
+
+  /**
+   * Read the config file as it is on disk, without merging anything:
+   * lifemodel's settings interface renders what the owner saved.
+   */
+  async readFile(): Promise<AgentConfigFile | null> {
+    return await this.loadConfigFile();
+  }
+
+  /**
+   * Write the config file - the SAME file `load()` reads at startup.
+   *
+   * It is written atomically (a temporary file in the same directory, fsynced,
+   * renamed over the target), so a crash mid-write can never leave half a
+   * config behind: the file is either the old one or the new one. This file is
+   * the config loader's own (its name and its shape are the loader's), which is
+   * why it is not written through JSONStorage: that writes sanitized keys under
+   * the state root, and neither its name nor its shape would survive it.
+   */
+  async writeFile(file: AgentConfigFile): Promise<void> {
+    const target = this.filePath;
+    const temporary = `${target}.tmp-${String(process.pid)}`;
+    const handle = await openFile(temporary, 'w');
+    try {
+      await handle.writeFile(`${JSON.stringify(file, null, 2)}\n`, 'utf-8');
+      // On disk before the rename: a rename is atomic, but a power loss could
+      // still publish an empty file if the data behind it was not flushed.
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, target);
+    // The directory entry itself: without this the rename can be lost too.
+    const directory = await openFile(dirname(target), 'r');
+    try {
+      await directory.sync();
+    } catch {
+      // A directory that cannot be synced is not a reason to lose the write:
+      // the file is in place and readable.
+    } finally {
+      await directory.close();
+    }
   }
 
   /**
