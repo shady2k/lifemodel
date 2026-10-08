@@ -14,7 +14,11 @@ import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
-import { createSupervisor, type Supervisor } from '../../loader/src/supervisor.js';
+import {
+  createSupervisor,
+  LIFEMODEL_RESTART_EXIT_CODE,
+  type Supervisor,
+} from '../../loader/src/supervisor.js';
 import {
   caddySpawn,
   createLoaderWorld,
@@ -574,6 +578,88 @@ describe('a resume during a panic drain (rework 3, review round 3 finding 2)', (
     world.launcher.spawns[0]?.child.exit(0, null);
     await stopping;
     expect(await waiting).toEqual({ started: false, reason: 'panic' });
+    expect(world.launcher.spawns).toHaveLength(1);
+  });
+});
+
+describe('a lifemodel that asks to be restarted (lifemodel-q4x.4.1)', () => {
+  it('is started again at once: no backoff, logged at info, not counted as a failure', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world, lines } = rig;
+    await supervisor.start();
+
+    // lifemodel saved its settings and left with the documented code.
+    world.launcher.spawns[0]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);
+    await waitUntil(() => world.launcher.spawns.length === 2, 'the requested restart');
+
+    // Not one backoff was waited for - the start was made in the same turn.
+    expect(world.clock.sleeps).toEqual([]);
+    expect(world.clock.pending()).toBe(0);
+    expect(supervisor.status().state).toBe('running');
+    expect(supervisor.status().restarts).toBe(1);
+
+    const asked = lines.find((line) => line.message.includes('asked to be restarted'));
+    expect(asked?.level).toBe('info');
+    expect(asked?.message).toContain('at once');
+    // A request is not a fault: no warn and no error line, for the exit or the start.
+    expect(errorLines(lines)).toEqual([]);
+    expect(lines.filter((line) => line.level === 'warn')).toEqual([]);
+  });
+
+  it('is not held against a later death: the backoff still starts at its first delay', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+
+    // Three requested restarts in a row, each one short (a run under the
+    // healthy mark): if they counted as failures, the next backoff would be
+    // 4 s instead of the first delay.
+    for (let round = 1; round <= 3; round += 1) {
+      world.launcher.spawns[round - 1]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);
+      await waitUntil(() => world.launcher.spawns.length === round + 1, `restart ${String(round)}`);
+    }
+    expect(world.clock.sleeps).toEqual([]);
+
+    // Now a death nobody asked for.
+    world.launcher.spawns[3]?.child.exit(1, null);
+    await settle();
+    expect(world.clock.sleeps).toEqual([1_000]);
+  });
+
+  it('is not restarted while panic is set, or once the loader is leaving', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world, panic } = rig;
+    await supervisor.start();
+
+    panic.set = true;
+    world.launcher.spawns[0]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);
+    await settle();
+    expect(world.launcher.spawns).toHaveLength(1);
+    expect(rig.lines.some((line) => line.message.includes('panic is set'))).toBe(true);
+
+    // The loader is leaving: the request starts nothing either.
+    panic.set = false;
+    const second = makeSupervisor(createLoaderWorld());
+    roots.push(second.world.root);
+    await second.supervisor.start();
+    second.supervisor.close();
+    second.world.launcher.spawns[0]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);
+    await settle();
+    expect(second.world.launcher.spawns).toHaveLength(1);
+  });
+
+  it('is not a stop: a stop that arrives first keeps the exit to itself', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+
+    // Panic stops lifemodel; the stop owns the exit, so the code does not
+    // start anything (nothing may be started while the loader stops).
+    const stopping = supervisor.stop('panic');
+    await settle();
+    world.launcher.spawns[0]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);
+    expect(await stopping).toEqual({ stopped: true, drainTimedOut: false, pending: null });
+    await settle();
     expect(world.launcher.spawns).toHaveLength(1);
   });
 });
