@@ -28,7 +28,12 @@ export interface FrontDoorDeps {
 export interface FrontDoor {
   /** Bring Caddy up. A missing binary or configuration is a fatal input. */
   start(): Promise<void>;
-  stop(): Promise<void>;
+  /**
+   * Stop Caddy, and never wait longer than the budget the caller has left of
+   * the stop's own deadline (rework 2, finding 10). At zero the front door is
+   * killed rather than waited for: the container is leaving.
+   */
+  stop(budgetMs?: number): Promise<void>;
   status(): { running: boolean; pid: number | null; restarts: number };
 }
 
@@ -97,7 +102,7 @@ export function createFrontDoor(deps: FrontDoorDeps): FrontDoor {
     })();
   }
 
-  async function stop(): Promise<void> {
+  async function stop(budgetMs: number = config.caddy.stopWaitMs): Promise<void> {
     epoch += 1;
     stopping = true;
     const current = child;
@@ -105,6 +110,7 @@ export function createFrontDoor(deps: FrontDoorDeps): FrontDoor {
       stopping = false;
       return;
     }
+    const waitMs = Math.min(config.caddy.stopWaitMs, Math.max(0, budgetMs));
     logger.info({ pid }, 'stopping caddy');
     const exited = new Promise<boolean>((resolve) => {
       current.onExit(() => {
@@ -112,15 +118,9 @@ export function createFrontDoor(deps: FrontDoorDeps): FrontDoor {
       });
     });
     current.kill('SIGTERM');
-    const left = await Promise.race([
-      exited,
-      clock.sleep(config.caddy.stopWaitMs).then(() => false),
-    ]);
+    const left = await Promise.race([exited, clock.sleep(waitMs).then(() => false)]);
     if (!left) {
-      logger.warn(
-        { pid },
-        `caddy did not leave within ${String(config.caddy.stopWaitMs)} ms: it is killed`
-      );
+      logger.warn({ pid }, `caddy did not leave within ${String(waitMs)} ms: it is killed`);
       current.kill('SIGKILL');
       await exited;
     }

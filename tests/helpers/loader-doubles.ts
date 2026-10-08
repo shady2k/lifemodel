@@ -14,7 +14,7 @@ import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import type { Clock } from '../../loader/src/clock.js';
 import { loadConfig, type LoaderConfig } from '../../loader/src/config.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import { createNodeFileSystem, type FileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import type {
@@ -82,7 +82,9 @@ export class FakeRunner implements CommandRunner {
 
   /** Every command line run so far, as one string per call. */
   lines(): string[] {
-    return this.calls.map((call) => `${call.command} ${withoutGitSafetyOptions(call.args).join(' ')}`);
+    return this.calls.map(
+      (call) => `${call.command} ${withoutGitSafetyOptions(call.args).join(' ')}`
+    );
   }
 
   /** The same lines with every argument as it was passed, git's options included. */
@@ -96,6 +98,8 @@ export interface FakeChild extends SpawnedProcess {
   readonly exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[];
   /** The test decides when the child dies. */
   exit(code: number | null, signal?: NodeJS.Signals | null): void;
+  /** The test decides that the OS could not start it at all. */
+  fail(error: Error): void;
 }
 
 export interface SpawnedFake {
@@ -105,13 +109,50 @@ export interface SpawnedFake {
   child: FakeChild;
 }
 
-/** A launcher whose children only die when the test says so. */
+/**
+ * A launcher whose children only die when the test says so.
+ *
+ * A real spawn answers asynchronously: `spawn` returning is not the process
+ * running, and the failure of a spawn arrives as an `error` event afterwards.
+ * The fake keeps that shape - a child is "spawned" a microtask later, so the
+ * loader's own wait for it is what a test exercises (rework 2, finding 6) - and
+ * `failSpawns`/`refuseSpawns` are the two ways a start can be refused.
+ */
 export class FakeLauncher implements ProcessLauncher {
   readonly spawns: SpawnedFake[] = [];
+  /** Every spawn of `command` (all of them when it is omitted) reports this. */
+  private failError: { error: Error; command?: string } | null = null;
+  /** Every spawn of `command` (all of them when it is omitted) throws this. */
+  private refuseError: { error: Error; command?: string } | null = null;
+
+  /** The OS cannot start the process: the error arrives after `spawn`. */
+  failSpawns(error: Error, command?: string): void {
+    this.failError = { error, ...(command === undefined ? {} : { command }) };
+  }
+
+  /** `spawn` itself throws: the launcher cannot even ask the OS. */
+  refuseSpawns(error: Error, command?: string): void {
+    this.refuseError = { error, ...(command === undefined ? {} : { command }) };
+  }
+
+  private appliesTo(
+    refusal: { error: Error; command?: string } | null,
+    command: string
+  ): Error | null {
+    if (refusal === null) return null;
+    if (refusal.command !== undefined && refusal.command !== command) return null;
+    return refusal.error;
+  }
 
   spawn(command: string, args: string[], options: SpawnOptions): SpawnedProcess {
+    const refused = this.appliesTo(this.refuseError, command);
+    if (refused !== null) throw refused;
+    const failing = this.appliesTo(this.failError, command);
+    const spawnListeners: (() => void)[] = [];
     const exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
     const errorListeners: ((error: Error) => void)[] = [];
+    let spawned = failing === null;
+    let failure: Error | null = null;
     const child: FakeChild = {
       pid: 4000 + this.spawns.length,
       signals: [],
@@ -119,17 +160,33 @@ export class FakeLauncher implements ProcessLauncher {
       kill: (signal) => {
         child.signals.push(signal);
       },
+      onSpawn: (listener) => {
+        if (spawned) queueMicrotask(listener);
+        else spawnListeners.push(listener);
+      },
       onExit: (listener) => {
         exitListeners.push(listener);
       },
       onError: (listener) => {
-        errorListeners.push(listener);
+        if (failure !== null) queueMicrotask(() => listener(failure as Error));
+        else errorListeners.push(listener);
       },
       exit: (code, signal = null) => {
         for (const listener of exitListeners) listener(code, signal);
       },
+      fail: (error) => {
+        failure = error;
+        for (const listener of errorListeners.splice(0)) listener(error);
+      },
     };
     this.spawns.push({ command, args, options, child });
+    if (failing !== null) {
+      // After the caller has had its chance to listen, as the real one does.
+      queueMicrotask(() => {
+        spawned = false;
+        child.fail(failing);
+      });
+    }
     return child;
   }
 }
@@ -186,10 +243,10 @@ export interface RunningLoader {
  */
 export async function createRunningLoader(
   world: LoaderWorld,
-  options: { password?: string | null } = {}
+  options: { password?: string | null; fs?: FileSystem } = {}
 ): Promise<RunningLoader> {
   const password = options.password === undefined ? 'right' : options.password;
-  const fs = createNodeFileSystem();
+  const fs = options.fs ?? createNodeFileSystem();
   const state = createLoaderState({ fs, config: world.config, logger: createRecordingLogger([]) });
   await state.ensureLayout();
   if (password !== null) await state.writeAuth(await hashPassword(password));
@@ -267,11 +324,59 @@ export interface LoaderWorld {
 }
 
 /**
+ * A FileSystem that records every identity change and does the real thing.
+ *
+ * Giving a path to lifemodel is what a test cannot observe when the test IS
+ * lifemodel's user (uid 1000 here), so the paths are recorded instead: the test
+ * asserts on WHAT was given away, which is the rule (rework 2, finding 1).
+ */
+export interface RecordingFileSystem extends FileSystem {
+  /** Paths given to an identity as they are: a directory, a file, a symlink. */
+  readonly chowns: string[];
+  /** Paths whose whole tree was given to an identity. */
+  readonly freshTrees: string[];
+}
+
+export function createRecordingFileSystem(
+  inner: FileSystem = createNodeFileSystem()
+): RecordingFileSystem {
+  const chowns: string[] = [];
+  const freshTrees: string[] = [];
+  return {
+    ...inner,
+    chowns,
+    freshTrees,
+    chown: (path, uid, gid) => {
+      chowns.push(path);
+      return inner.chown(path, uid, gid);
+    },
+    chownFreshTree: (path, uid, gid) => {
+      freshTrees.push(path);
+      return inner.chownFreshTree(path, uid, gid);
+    },
+  };
+}
+
+export interface LoaderWorldOptions {
+  /**
+   * Run as root, the way the image's loader does. A test is not root, so it can
+   * only really chown to ITS OWN identity: `identity` defaults to the test's
+   * own uid and gid, which is what makes a real chown succeed here.
+   */
+  privileged?: boolean;
+  identity?: { uid: number; gid: number };
+}
+
+/**
  * A volume of its own in /tmp: the same layout the image gives the loader, on
  * a filesystem a test may really write to.
  */
-export function createLoaderWorld(): LoaderWorld {
+export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld {
   const root = mkdtempSync(join(tmpdir(), 'loader-test-'));
+  const identity = options.identity ?? {
+    uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
+    gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
+  };
   const config: LoaderConfig = {
     ...loadConfig({}),
     volumeRoot: root,
@@ -286,8 +391,10 @@ export function createLoaderWorld(): LoaderWorld {
       stopWaitMs: 1_000,
     },
     httpPort: 0,
-    privileged: false,
+    privileged: options.privileged ?? false,
+    lifemodel: identity,
     drainWaitMs: 5_000,
+    stopBudgetMs: 6_000,
     restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
   };
   writeFileSync(config.seedBundle, 'a git bundle the image carries\n');

@@ -109,6 +109,30 @@ describe('caddy, the front door the loader owns', () => {
     expect(lifemodelSpawn(world)).toBeUndefined();
   });
 
+  it('stops inside the ONE deadline of the whole stop (rework 2, finding 10)', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+
+    const leaving = app.shutdown('SIGTERM');
+    await waitUntil(
+      () => lifemodelSpawn(world)?.child.signals.length === 1,
+      'lifemodel is asked to stop'
+    );
+    // Five of the stop's six seconds pass while lifemodel drains; what is left
+    // of the same deadline is what Caddy gets, not its own ten.
+    world.clock.advance(5_500);
+    lifemodelSpawn(world)?.child.exit(0, null);
+    await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
+
+    expect(world.clock.sleeps).toEqual([world.config.drainWaitMs, 500]);
+    caddySpawn(world)?.child.exit(0, null);
+
+    expect(await leaving).toBe(0);
+  });
+
   it('is stopped last: lifemodel drains first, the front door closes after', async () => {
     const world = createLoaderWorld();
     roots.push(world.root);

@@ -157,8 +157,8 @@ describe.skipIf(!enabled)('the instance image', () => {
 
     container = `lifemodel-image-${process.pid}`;
     // The documented command's shape: the port published on loopback only, the
-    // one capability the egress rule needs, a stop timeout longer than
-    // lifemodel's 90 s drain.
+    // one capability the Agent Vault stage needs, and the documented stop
+    // timeout for the whole stop.
     docker([
       'run',
       '--detach',
@@ -169,7 +169,7 @@ describe.skipIf(!enabled)('the instance image', () => {
       '--cap-add',
       'NET_ADMIN',
       '--stop-timeout',
-      '100',
+      '120',
       image,
     ]);
     const published = docker(['port', container, '80/tcp']).trim();
@@ -261,6 +261,20 @@ describe.skipIf(!enabled)('the instance image', () => {
     const root = await fetchThroughFrontDoor(port, 'localhost', '/', { cookie: SESSION });
     expect(root.status).toBe(200);
     expect(root.body).toContain('stub-lifemodel');
+  });
+
+  it("routes only the instance's own hosts and refuses any other name", async () => {
+    // The hosts are pinned in the Caddyfile as well as in the loader (rework 2,
+    // finding 7): a name a request supplies reaches no backend at all.
+    for (const host of ['boot.example.com', 'attacker.test', 'example.com']) {
+      const refused = await fetchThroughFrontDoor(port, host, '/', { cookie: SESSION });
+      expect({ host, status: refused.status }).toEqual({ host, status: 400 });
+      expect(refused.body).toContain('and on no other name');
+    }
+    // The instance's own three names still answer.
+    expect((await fetchThroughFrontDoor(port, 'localhost', '/', { cookie: SESSION })).status).toBe(
+      200
+    );
   });
 
   it('answers one plain line for a host whose backend is not up yet', async () => {

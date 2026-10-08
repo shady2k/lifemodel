@@ -36,12 +36,10 @@ export interface CliDeps {
  * the page and from here alike).
  */
 function printStatus(out: (line: string) => void, status: InstanceStatus): void {
-  out(
-    status.phase === 'failed' ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped'
-  );
+  out(status.failed ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped');
   out(`commit ${status.commit ?? 'none'}`);
   out(`panic ${status.panic ? 'on' : 'off'}`);
-  if (status.phase === 'failed') out(`failed: ${status.lastError ?? 'unknown'}`);
+  if (status.failed) out(`failed: ${status.lastError ?? 'unknown'}`);
 }
 
 async function request(
@@ -95,10 +93,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         return 0;
       case 'resume': {
         // The loader answered; whether the instance came up is what resume
-        // reports, in the status it prints and in its exit code.
+        // reports, in the status it prints and in its exit code - a start the
+        // OS refused included (rework 2, finding 6).
         const resumed = await request(deps, '/_api/resume', 'POST');
         printStatus(out, resumed);
-        return resumed.phase === 'failed' ? 1 : 0;
+        return resumed.failed ? 1 : 0;
       }
       default:
         err(`unknown command: ${command}`);

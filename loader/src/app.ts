@@ -154,12 +154,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     shutdown: async (reason: string) => {
       logger.info({ reason }, 'the loader is stopping');
       await http?.close();
+      // ONE deadline for the whole stop (rework 2, finding 10): lifemodel gets
+      // its drain first and the front door gets what is left of the same
+      // budget, so the stop cannot run past it and be killed by Docker in the
+      // middle of its last step. The documented `--stop-timeout 120` is longer
+      // than this budget, which is why the sequence finishes.
+      const deadline = clock.now() + config.stopBudgetMs;
+      const left = (): number => Math.max(0, deadline - clock.now());
       // The supervisor already said it in one line when the drain ran out;
       // the code below is what the container leaves with, not a second line.
-      const outcome = await supervisor.stop('shutdown');
+      const outcome = await supervisor.stop('shutdown', left());
       // Last: the front door stays open while lifemodel drains, so a person
       // watching the page sees the stop rather than a connection error.
-      await frontDoor.stop();
+      await frontDoor.stop(left());
       return outcome.drainTimedOut ? 1 : 0;
     },
   };

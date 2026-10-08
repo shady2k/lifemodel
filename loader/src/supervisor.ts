@@ -11,7 +11,11 @@
  *     backoff, so a crash loop does not become a busy loop;
  *   - SIGTERM is FORWARDED and its exit is awaited for the length of
  *     lifemodel's own drain (95 s against a 90 s drain), so `docker stop`
- *     gives the instance its restart guarantee instead of killing it.
+ *     gives the instance its restart guarantee instead of killing it;
+ *   - a start that the OPERATING SYSTEM refused - `spawn` threw, or the child
+ *     emitted `error` before it ever ran - is reported as failed and is NOT
+ *     retried: the same input fails the same way every time, so the owner is
+ *     told instead of watching a backoff loop (rework 2, finding 6).
  */
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
@@ -65,7 +69,8 @@ export interface SupervisorDeps {
 
 export interface Supervisor {
   start(): Promise<StartOutcome>;
-  stop(reason: string): Promise<StopOutcome>;
+  /** Stop lifemodel; `budgetMs` caps the wait for its drain (the stop's deadline). */
+  stop(reason: string, budgetMs?: number): Promise<StopOutcome>;
   status(): LifemodelStatus;
 }
 
@@ -161,6 +166,30 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     })();
   }
 
+  /** A start the OS refused: one line, the reason kept, and no retry. */
+  function refusedStart(reason: string): StartOutcome {
+    state = 'failed';
+    lastError = reason;
+    logger.error({ error: reason }, 'lifemodel could not be started');
+    return { started: false, reason: 'failed' };
+  }
+
+  /**
+   * The launcher's own verdict on a spawn: `spawn` when the OS started the
+   * process, the error when it could not. Both are attached before the answer
+   * is awaited, because the error can arrive first.
+   */
+  function spawnOutcome(spawned: SpawnedProcess): Promise<'spawned' | Error> {
+    return new Promise((resolve) => {
+      spawned.onSpawn(() => {
+        resolve('spawned');
+      });
+      spawned.onError((error) => {
+        resolve(error);
+      });
+    });
+  }
+
   async function start(): Promise<StartOutcome> {
     if (state === 'running' || state === 'starting') {
       return { started: false, reason: 'already-running' };
@@ -174,10 +203,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       spawned = launcher.spawn('node', [config.lifemodelEntry], spawnOptions());
     } catch (error) {
-      state = 'failed';
-      lastError = describe(error);
-      logger.error({ error: lastError }, 'lifemodel could not be started');
-      return { started: false, reason: 'failed' };
+      return refusedStart(describe(error));
+    }
+    const outcome = await spawnOutcome(spawned);
+    if (outcome instanceof Error) {
+      // It never ran, so nothing is running to stop and nothing is retried.
+      return refusedStart(describe(outcome));
     }
     child = spawned;
     exit = exitSignal();
@@ -185,10 +216,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     startedAt = clock.now();
     starts += 1;
     state = 'running';
+    lastError = null; // this start worked: the reason of an older failure is gone
     spawned.onExit((code, signal) => {
       settle(spawned, code, signal);
     });
     spawned.onError((error) => {
+      // It had started and then failed: it is not running any more, so this is
+      // a death the backoff owns, not a refused start.
       lastError = describe(error);
       logger.error({ error: lastError }, 'lifemodel could not be started');
       settle(spawned, null, null);
@@ -197,7 +231,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { started: true, reason: 'started' };
   }
 
-  async function stop(reason: string): Promise<StopOutcome> {
+  /**
+   * Stop lifemodel: SIGTERM, then its drain - never longer than the budget the
+   * caller has left. `docker stop` gives the whole stop one deadline, and the
+   * front door has to leave inside the same one (rework 2, finding 10), so the
+   * drain is the smaller of lifemodel's own 95 s and what is left of it.
+   */
+  async function stop(reason: string, budgetMs: number = config.drainWaitMs): Promise<StopOutcome> {
     epoch += 1; // a restart scheduled before this stop never starts anything
     stopping = true;
     const current = child;
@@ -208,19 +248,20 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       logger.info({ reason }, 'lifemodel is not running');
       return { stopped: true, drainTimedOut: false };
     }
+    const waitMs = Math.min(config.drainWaitMs, Math.max(0, budgetMs));
     state = 'stopping';
     logger.info({ reason, pid }, 'stopping lifemodel: SIGTERM, then its drain');
     current.kill('SIGTERM');
     const exited = await Promise.race([
       currentExit.promise.then(() => true),
-      clock.sleep(config.drainWaitMs).then(() => false),
+      clock.sleep(waitMs).then(() => false),
     ]);
     let drainTimedOut = false;
     if (!exited) {
       drainTimedOut = true;
       logger.error(
-        { pid, drainWaitMs: config.drainWaitMs },
-        `lifemodel did not exit within its ${String(config.drainWaitMs)} ms drain: it is killed`
+        { pid, drainWaitMs: waitMs },
+        `lifemodel did not exit within its ${String(waitMs)} ms drain: it is killed`
       );
       current.kill('SIGKILL');
       await currentExit.promise;

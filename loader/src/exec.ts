@@ -35,6 +35,13 @@ export interface SpawnOptions {
 
 export interface SpawnedProcess {
   readonly pid: number | undefined;
+  /**
+   * The operating system really started this process. `spawn` returning is not
+   * that fact: a spawn that fails (no such binary, a setuid the kernel refuses)
+   * reports it asynchronously, so a caller that must not announce a start that
+   * never happened waits for this (rework 2, finding 6).
+   */
+  onSpawn(listener: () => void): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
   onError(listener: (error: Error) => void): void;
   kill(signal: NodeJS.Signals): void;
@@ -95,6 +102,9 @@ export function createNodeLauncher(): ProcessLauncher {
       });
       return {
         pid: child.pid,
+        onSpawn: (listener) => {
+          child.on('spawn', listener);
+        },
         onExit: (listener) => {
           child.on('exit', (code, signal) => {
             listener(code, signal);

@@ -18,6 +18,7 @@
  */
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
+import { LoaderFatalError } from './errors.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import type { LoaderLogger } from './logger.js';
@@ -41,6 +42,12 @@ export interface InstanceStatus {
   pid: number | null;
   restarts: number;
   phase: BootstrapPhase;
+  /**
+   * The instance did not come up, whatever the reason and whoever found it:
+   * this bootstrap's own failure, or a start the OS refused (rework 2,
+   * finding 6). The page and the command line read this one flag.
+   */
+  failed: boolean;
   lastError: string | null;
 }
 
@@ -91,15 +98,25 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
 
     phase = 'starting';
     const started = await supervisor.start();
+    if (started.reason === 'failed') {
+      // The OS refused the start: the loader keeps the reason (rework 2,
+      // finding 6) instead of announcing an instance that never came up.
+      throw new LoaderFatalError(supervisor.status().lastError ?? 'lifemodel could not be started');
+    }
 
     phase = 'idle';
+    if (!started.started) {
+      // Panic holds it down, or it was already running: neither is readiness,
+      // and neither is a failure.
+      logger.info({ source, reason: started.reason }, 'the instance is not started');
+      return;
+    }
     logger.info(
       {
         source,
         seeded,
         built: build.built,
-        started: started.started,
-        reason: started.reason,
+        started: true,
         commit,
       },
       'the instance is ready'
@@ -146,7 +163,8 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
         pid: process_.pid,
         restarts: process_.restarts,
         phase,
-        lastError: process_.lastError ?? lastError,
+        failed: phase === 'failed' || process_.state === 'failed',
+        lastError: lastError ?? process_.lastError,
       };
     },
   };

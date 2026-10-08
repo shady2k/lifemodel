@@ -96,22 +96,26 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
     paths: () => ({ auth: authPath, panic: panicPath, cliToken: cliTokenPath, state: statePath }),
 
     ensureLayout: async () => {
+      let madeDataDir = false;
       try {
         await fs.ensureDir(config.volumeRoot, VOLUME_DIR_MODE);
         await fs.ensureDir(config.loaderDir, LOADER_DIR_MODE);
         await fs.chmod(config.loaderDir, LOADER_DIR_MODE);
-        await fs.ensureDir(config.dataDir, VOLUME_DIR_MODE);
+        madeDataDir = await fs.createDirIfMissing(config.dataDir, VOLUME_DIR_MODE);
       } catch (error) {
         throw new LoaderFatalError(
           `cannot prepare the volume at ${config.volumeRoot}: ${describe(error)}`,
           { cause: error }
         );
       }
-      if (config.privileged) {
-        // The instance's own directories belong to the instance's user; the
-        // loader's directory stays root-only.
+      if (madeDataDir && config.privileged) {
+        // ONLY a data/ this start made is given to the instance's user, and only
+        // the directory itself: an existing tree on the volume belongs to
+        // whoever put it there and is left exactly as it is. Traversing one to
+        // chown it is what let a uid-1000 tree hand the loader's own files to
+        // lifemodel (rework 2, finding 1).
         try {
-          await fs.chownRecursive(config.dataDir, config.lifemodel.uid, config.lifemodel.gid);
+          await fs.chown(config.dataDir, config.lifemodel.uid, config.lifemodel.gid);
         } catch (error) {
           throw new LoaderFatalError(
             `cannot give ${config.dataDir} to uid ${String(config.lifemodel.uid)}: ${describe(error)}`,
@@ -121,7 +125,10 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
       }
       // The command line needs the token before lifemodel ever starts.
       await ensureCliToken();
-      logger.info({ volume: config.volumeRoot, loaderDir: config.loaderDir }, 'volume ready');
+      logger.info(
+        { volume: config.volumeRoot, loaderDir: config.loaderDir, madeDataDir },
+        'volume ready'
+      );
     },
 
     readAuth: async () => {
