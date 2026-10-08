@@ -124,6 +124,9 @@ npm run build
 npm start
 ```
 
+To run a whole instance instead — the loader, the login and lifemodel as a
+service on its own volume — see [Run your own instance](#-run-your-own-instance).
+
 ### Configuration
 
 lifemodel is configured via a `.env` file. The essentials:
@@ -164,6 +167,70 @@ Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM):
 | `SEARCH_PROVIDER_PRIORITY` | Provider fallback order |
 
 </details>
+
+---
+
+## 🐳 Run your own instance
+
+The published image runs a whole instance in one container: the **loader**
+(the password, first start, panic), **Caddy** as the only web entrance, and
+lifemodel itself as an unprivileged user whose code is a git repository on the
+volume — so it can change itself and keep the change across restarts.
+
+```bash
+docker run -d \
+  --name lifemodel \
+  --restart unless-stopped \
+  --stop-timeout 100 \
+  --cap-add NET_ADMIN \
+  -v lifemodel:/var/lib/lifemodel \
+  -p 127.0.0.1:8080:80 \
+  ghcr.io/shady2k/lifemodel:main
+```
+
+Then open **http://boot.localhost:8080**: the loader asks you to set its
+password, and after that it creates the instance's repository on the volume
+from the code the image carries, builds it and starts lifemodel. Nothing asks
+you for a model key at this point.
+
+| Address | What it is |
+| --- | --- |
+| `boot.localhost:8080` | the loader: its password, panic and resume |
+| `localhost:8080` | lifemodel's own interface |
+| `vault.localhost:8080` | Agent Vault: the keys, injected into lifemodel's requests |
+
+`localhost` is the machine's own name and the others are its subdomains. On a
+VPS, reach them through an SSH tunnel and keep them unpublished:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 you@your-vps
+```
+
+The root host and `vault.` answer that nothing is there yet until those parts
+of the instance are built. The port is published on the host's loopback only
+(`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
+HTTPS proxy in front when you want that.
+
+The rest of the command: the volume `lifemodel` holds the instance (its
+repository and its data — `docker rm -f` and the same `docker run` bring the
+same instance back), `--stop-timeout 100` gives lifemodel its 90-second drain
+on `docker stop`, and `--cap-add NET_ADMIN` is what lets the loader confine
+lifemodel's outbound traffic to Agent Vault.
+
+From the command line, inside the container:
+
+```bash
+docker exec lifemodel lifemodel status   # running|stopped, the commit, panic on|off
+docker exec lifemodel lifemodel panic    # stop lifemodel and keep it down
+docker exec lifemodel lifemodel resume   # clear panic and start it again
+docker logs -f lifemodel                 # the loader's and Caddy's lines
+```
+
+Build the image yourself with `scripts/build-image.sh`: it makes the seed
+bundle from your checkout first (a full clone — a shallow one is refused by
+name) and then runs the `docker build`. What the image holds and how the front
+door routes the three hosts is in
+[`docs/features/instance/image.md`](docs/features/instance/image.md).
 
 ---
 

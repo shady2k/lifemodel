@@ -225,7 +225,13 @@ the repository's installation, and each person's plugin and hooks are their own.
   pull request and for a cancelled run. A skipped job reports as success to a required check, so branch
   protection requires **`changes`, `ci-product` and `ci-backlog`**: requiring
   `changes` is what makes a failed `changes` job a red check rather than a
-  quiet skip.
+  quiet skip. `ci-image` builds the instance image (story S9) with
+  `scripts/build-image.sh` for the changes that owe `ci-product` — the image
+  carries the product — with `fetch-depth: 0`, because the seed bundle it makes
+  is the history the instance's repository is cloned from; on a push to `main`
+  it also logs in to ghcr.io with `github.token` and publishes
+  `ghcr.io/shady2k/lifemodel:main` and `:<sha>`, which is why that job alone
+  asks for `packages: write`. It is not a required check yet.
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before
   and after, and pass them to `check.mjs` (the gate will grow that wiring

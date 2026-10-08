@@ -1,6 +1,6 @@
 # CI — the checks every change to lifemodel passes.
 #
-# Three jobs, and what a change owes is decided by the paths it touches
+# Four jobs, and what a change owes is decided by the paths it touches
 # (scripts/ci-changed-paths.sh, scripts/ci-product-paths.sh, lifemodel-cup):
 #
 #   1. changes: does this change touch product code? It reads the change's
@@ -14,7 +14,15 @@
 #      checks and the suite never run in this checkout, when the answer is
 #      product=true (or when the `changes` job did not succeed, see its
 #      comment) and the pull request is not a draft;
-#   3. ci-backlog: the backlog gate below, on every change, for everyone.
+#   3. ci-backlog: the backlog gate below, on every change, for everyone;
+#   4. ci-image: the instance image (story S9) — scripts/build-image.sh, the one
+#      command that makes the seed bundle and runs the docker build — for the
+#      same changes that owe ci-product, and on a push to main it logs in to
+#      ghcr.io and publishes the image as ghcr.io/shady2k/lifemodel:main and
+#      :<sha>. A pull request builds and tags it and pushes nothing. It is not
+#      a required check today: branch protection requires `changes`,
+#      `ci-product` and `ci-backlog`, and the coordinator adds this one when
+#      the image's own checks should gate a merge.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
@@ -276,3 +284,70 @@ jobs:
           base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
           echo "base: $base"
           node "$gate/rules/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
+
+  # The instance image (story S9): the runtime, the loader, Caddy and the code
+  # the image carries as a git bundle at this commit. It is built for the
+  # changes that owe ci-product — the image carries the product — by the same
+  # one command a person runs, and published on a push to main.
+  #
+  # The full history is an input, not a convenience: scripts/build-image.sh
+  # makes the seed bundle the instance's repository is cloned from, and it
+  # refuses a shallow checkout by name rather than shipping one whose history
+  # could never be merged with upstream.
+  #
+  # Publishing is what needs packages: write, and this job alone asks for it,
+  # with contents: read beside it; every other job keeps the workflow's
+  # contents: read. A pull request builds and tags the image and pushes
+  # nothing, so the credentials of a fork's pull request reach nothing.
+  ci-image:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The seed bundle carries this history; a shallow clone has none.
+          fetch-depth: 0
+
+      - name: Log in to ghcr.io
+        if: ${{ github.event_name == 'push' }}
+        env:
+          # Through the environment rather than into a shell line, as in the
+          # jobs above.
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build the image
+        env:
+          # Through the environment rather than into a script: an expression
+          # interpolated into a shell line is a shell line somebody else can
+          # write.
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          # A push to main publishes main and the commit; a pull request builds
+          # and tags the image and pushes nothing. The tag is what `docker
+          # push` below names, so the two steps agree by construction.
+          if [ "$EVENT" = push ]; then
+            tags="main $SHA"
+          else
+            tags="ci-$SHA"
+          fi
+          # shellcheck disable=SC2086 # tags is a list of tags, on purpose
+          scripts/build-image.sh $tags
+
+      - name: Publish the image
+        if: ${{ github.event_name == 'push' }}
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docker push "ghcr.io/shady2k/lifemodel:main"
+          docker push "ghcr.io/shady2k/lifemodel:$SHA"
