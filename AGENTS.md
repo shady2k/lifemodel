@@ -77,6 +77,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm start` | run the build (`dist/index.js`) |
 | `npm run test` | run the whole test suite (vitest) |
 | `npm run test:watch` | vitest in watch mode |
+| `npm run check` | every product check in one command — typecheck, lint, the format check, then `vitest run --maxWorkers=2`, stopping at the first failure; the same command CI's product job runs |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` |
@@ -86,7 +87,8 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run ready` | open leaves ready to claim |
 | `npm run browser:auth` | browser authentication (`cli/browser-auth.ts`) |
 
-`dev`, `build`, `test`, `typecheck` and `lint` need `node_modules` (`npm ci`).
+`dev`, `build`, `test`, `check`, `typecheck` and `lint` need `node_modules`
+(`npm ci`).
 The backlog gate and the present check need only `node`. Docker is required for
 Motor Cortex agentic runs.
 
@@ -95,6 +97,10 @@ Motor Cortex agentic runs.
 - All tests live in `tests/` (unit and integration, plus `fixtures/` and
   `helpers/`). Never create test files inside `src/`.
 - Run the suite with `npm run test`.
+- `npm run check` is the one command with CI's verdict: typecheck, lint, the
+  format check and the suite (at most 2 workers), stopping at the first
+  failure. CI's `ci-product` job runs exactly it, for a change whose paths
+  include product code.
 - Run one file: `npx vitest run tests/unit/energy-management.test.ts`
   (any path under `tests/`).
 - Tests do not use pino's file transport: it writes from a worker thread that a
