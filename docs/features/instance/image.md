@@ -1,8 +1,8 @@
 # The instance image
 
 One container runs a whole instance: the loader, Caddy as its only web
-entrance, and lifemodel as an unprivileged user whose code is a git repository
-on a volume. A person starts it with one `docker run` (README, "Run your own
+entrance, Agent Vault as the layer that holds the keys, and lifemodel as an
+unprivileged user whose code is a git repository on a volume. A person starts it with one `docker run` (README, "Run your own
 instance").
 
 ## What the image carries
@@ -11,6 +11,7 @@ instance").
 | --- | --- |
 | `/opt/lifemodel/loader/` | the loader, built from `loader/` (its `dist/main.js` is the ENTRYPOINT's process, its `dist/cli.js` is the `lifemodel` command) |
 | `/usr/bin/caddy` | Caddy 2.11.7, copied from the pinned official image |
+| `/usr/local/bin/agent-vault` | Agent Vault 0.40.0, the credential proxy (decision 4 and 12): downloaded from its release at build time and checked against the release's `checksums.txt` before it is unpacked |
 | `/etc/lifemodel/Caddyfile` | the front door's routing, root-owned |
 | `/usr/local/bin/lifemodel` | `node /opt/lifemodel/loader/dist/cli.js "$@"` — `status`, `panic`, `resume` |
 | `/opt/lifemodel/seed.bundle` | a `git bundle` of the repository with its history at the commit the image was built from |
@@ -32,13 +33,16 @@ Caddy listens on `:80` inside the container; the documented `docker run`
 publishes it as `127.0.0.1:8080` (the container's loopback is not reachable
 through a published port, so "localhost only" is the `-p` flag). The loader
 starts Caddy (`/usr/bin/caddy run --config /etc/lifemodel/Caddyfile --adapter
-caddyfile`) and keeps it up while lifemodel is stopped.
+caddyfile`) and keeps it up while lifemodel is stopped. It starts Agent Vault
+the same way (`agent-vault server --host 127.0.0.1 --port 14321 --mitm-port
+14322 --password-stdin`) and keeps it up too; both are stopped only when the
+container itself stops, Agent Vault after lifemodel and Caddy last.
 
 | Host | Backend |
 | --- | --- |
 | `boot.<host>` | the loader, `127.0.0.1:7000` |
 | `<host>` (the root host) | lifemodel's own interface, `127.0.0.1:7100` |
-| `vault.<host>` | Agent Vault, `127.0.0.1:14321` |
+| `vault.<host>` | Agent Vault's own interface, `127.0.0.1:14321` (its proxy is on `127.0.0.1:14322`; neither port is published) |
 
 **The hosts are pinned, and only these three are routed.** The Caddyfile matches
 `localhost`, `boot.localhost` and `vault.localhost` and nothing else; any other
@@ -105,7 +109,11 @@ that is already there — without docker.
 `tests/integration/instance-first-start.test.ts` is the same gated walk with the
 REAL loader: an empty volume, `POST /setup` on `boot.localhost`, the loader's
 own line that lifemodel is running, `lifemodel status` on a 40-hex commit, and
-the lifemodel process running as uid 1000. Run locally it builds its own image
+the lifemodel process running as uid 1000. It walks Agent Vault too: the store
+is root `0700` and the CA lifemodel must read is root `0644`, both listeners
+answer inside the container, `vault.localhost` shows Agent Vault's own
+interface behind the loader's login (and is redirected to that login without
+it), and a `docker restart` reuses the same store and the same token. Run locally it builds its own image
 from the checkout; with `LIFEMODEL_TEST_IMAGE=<image:tag>` it boots that image
 instead and neither builds nor removes it. It is what CI's `ci-image` job runs
 (`LIFEMODEL_DOCKER_TESTS=1`, on the image the job built), because a loader that builds but cannot complete a

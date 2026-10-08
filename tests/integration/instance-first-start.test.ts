@@ -82,6 +82,7 @@ interface Reply {
   status: number;
   body: string;
   location?: string | undefined;
+  setCookie?: string[] | undefined;
 }
 
 /** One request the way a browser makes it: the host is a header, not a DNS name. */
@@ -115,7 +116,12 @@ function fetchThroughFrontDoor(
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => (answer += chunk));
         res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body: answer, location: res.headers.location })
+          resolve({
+            status: res.statusCode ?? 0,
+            body: answer,
+            location: res.headers.location,
+            setCookie: res.headers['set-cookie'],
+          })
         );
       }
     );
@@ -155,6 +161,42 @@ function loaderLine(pattern: RegExp): string | undefined {
   return docker(['logs', container])
     .split('\n')
     .find((candidate) => pattern.test(candidate));
+}
+
+/**
+ * Wait until the container has logged `pattern` at least `count` times. A
+ * restart appends to the same log, so a line from the FIRST run must not
+ * answer a wait for the second one.
+ */
+async function waitForLogLines(
+  pattern: RegExp,
+  count: number,
+  timeoutMs: number
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const lines = docker(['logs', container])
+      .split('\n')
+      .filter((candidate) => pattern.test(candidate));
+    if (lines.length >= count) return lines;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the container never logged ${String(pattern)} ${String(count)} times. Its log was:\n${docker(['logs', container])}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/** The one cookie a reply set, as a browser would send it back. */
+function cookieOf(reply: Reply): string {
+  const header = reply.setCookie?.[0] ?? '';
+  return header.split(';')[0] ?? '';
+}
+
+/** One file's owner and mode inside the container, as `stat` prints them. */
+function ownership(path: string): string {
+  return docker(['exec', container, 'stat', '-c', '%U %a', path]).trim();
 }
 
 describe.skipIf(!enabled)('a first start in the real container', () => {
@@ -306,6 +348,93 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login');
     expect(login.status).toBe(200);
     expect(login.body).toContain('Log in');
+  });
+
+  describe('Agent Vault, the layer that holds the keys (lifemodel-q4x.3.1)', () => {
+    it('keeps its passwordless store on the volume, root-only, and a CA lifemodel can read', () => {
+      // Decision 4: the store is passwordless, so the directory's permissions
+      // ARE its protection, and lifemodel's user can read none of it.
+      expect(ownership('/var/lib/lifemodel/vault')).toBe('root 700');
+      expect(docker(['exec', container, 'ls', '/var/lib/lifemodel/vault/.agent-vault'])).toContain(
+        'agent-vault.db'
+      );
+      // The loader's own two records: the instance owner account and the token
+      // lifemodel's process is given.
+      expect(ownership('/var/lib/lifemodel/loader/vault-owner.json')).toBe('root 600');
+      expect(ownership('/var/lib/lifemodel/loader/vault-proxy.json')).toBe('root 600');
+      // The CA is the one thing of the vault lifemodel must read, and it must
+      // not be able to write it.
+      expect(ownership('/var/lib/lifemodel/vault-ca.pem')).toBe('root 644');
+      expect(
+        docker(['exec', container, 'head', '-1', '/var/lib/lifemodel/vault-ca.pem'])
+      ).toContain('-----BEGIN CERTIFICATE-----');
+      // The vault is up on both loopback listeners, and nothing is published
+      // for them: the proxy answers as a forward proxy, its API answers health.
+      expect(
+        docker([
+          'exec',
+          container,
+          'curl',
+          '-sS',
+          '-m',
+          '5',
+          '-o',
+          '/dev/null',
+          '-w',
+          '%{http_code}',
+          'http://127.0.0.1:14321/health',
+        ]).trim()
+      ).toBe('200');
+      expect(
+        docker(['exec', container, 'curl', '-sS', '-m', '5', 'http://127.0.0.1:14322/'])
+      ).toContain('HTTP forward proxy');
+    }, 120_000);
+
+    it('shows Agent Vault at vault.localhost, and only behind the loader login', async () => {
+      // Without the loader's session, the browser is sent to the login on the
+      // boot host - Agent Vault is never reached (story S2).
+      const without = await fetchThroughFrontDoor(port, `vault.localhost:${String(port)}`, '/');
+      expect(without.status).toBe(303);
+      expect(without.location).toContain(`http://boot.localhost:${String(port)}/login?next=`);
+
+      const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login', {
+        form: { password: 'first-start-pass' },
+      });
+      expect(login.status).toBe(303);
+      const cookie = cookieOf(login);
+      expect(cookie).toContain('lm_session=');
+
+      // With it: Agent Vault's OWN interface, at the root of its host (its UI
+      // uses absolute /v1 paths, so it cannot live under a subpath).
+      const vault = await fetchThroughFrontDoor(port, `vault.localhost:${String(port)}`, '/', {
+        cookie,
+      });
+      expect(vault.status).toBe(200);
+      expect(vault.body).toContain('<title>Agent Vault</title>');
+      expect(vault.body).toContain('/assets/');
+    }, 120_000);
+
+    it('reuses the store and the token when the container starts again', async () => {
+      const tokenPath = '/var/lib/lifemodel/loader/vault-proxy.json';
+      const caPath = '/var/lib/lifemodel/vault-ca.pem';
+      const before = docker(['exec', container, 'cat', tokenPath]);
+      const caBefore = docker(['exec', container, 'cat', caPath]);
+
+      // `docker restart`: the loader comes up again on the same volume.
+      docker(['restart', container], { timeoutMs: 180_000 });
+      // The second run's own line, not the first one's (the log is appended).
+      await waitForLogLines(/"msg":"Agent Vault is up:/, 2, 60_000);
+
+      expect(docker(['exec', container, 'cat', tokenPath])).toBe(before);
+      expect(docker(['exec', container, 'cat', caPath])).toBe(caBefore);
+      expect(ownership('/var/lib/lifemodel/vault')).toBe('root 700');
+      // Nothing was created a second time: the vault and the agent are the
+      // first start's.
+      const created = docker(['logs', container])
+        .split('\n')
+        .filter((line) => line.includes('is created'));
+      expect(created).toHaveLength(2); // the vault and the agent, once, on the first start
+    }, 300_000);
   });
 
   it('holds panic and resumes, from the command line in the container', () => {

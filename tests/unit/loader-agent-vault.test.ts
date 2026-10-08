@@ -262,6 +262,48 @@ describe('Agent Vault, the layer that holds the keys', () => {
     await shutdownLoader(found, second.app);
   });
 
+  it('says why in one line when the vault could not be created', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    // The CLI's own failure shape: the reason, then its usage block, then the
+    // reason again on the last line.
+    found.runner.on(`${found.config.agentVault.binary} vault create`, () => ({
+      code: 1,
+      stdout: '',
+      stderr:
+        'Error: Vault "lifemodel" already exists\nUsage:\n  agent-vault vault create <name> [flags]\n\nVault "lifemodel" already exists\n',
+    }));
+
+    const { exits, lines } = await startExpectingFailure(found);
+    expect(exits).toEqual([1]);
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('Vault "lifemodel" already exists');
+    expect(errors[0]?.message).not.toContain('Usage:');
+    expect(lifemodelSpawn(found)).toBeUndefined();
+  });
+
+  it('says why in one line when the account cannot act for the loader', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    // Registration answered politely and created nothing that can act (an
+    // address already taken, or an account still waiting for a code).
+    found.runner.on(`${found.config.agentVault.binary} auth register`, () => ({
+      code: 0,
+      stdout:
+        "✓ If this email is not already registered, a verification code has been sent.\nUse 'agent-vault verify' to complete verification.\n",
+      stderr: '',
+    }));
+    rmSync(vaultSessionPath(found), { force: true });
+
+    const { exits, lines } = await startExpectingFailure(found);
+    expect(exits).toEqual([1]);
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('verification code');
+    expect(lifemodelSpawn(found)).toBeUndefined();
+  });
+
   it('a missing Agent Vault binary is a missing input: one line with the cause, non-zero exit', async () => {
     const found = world();
     // The image carries no agent-vault.
