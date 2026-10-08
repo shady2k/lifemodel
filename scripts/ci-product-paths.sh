@@ -4,9 +4,11 @@
 # Reads the changed paths of one change on stdin, one path per line, exactly as
 # `git diff --name-only` prints them, and prints on its last line
 # "product=true" (the product checks are owed) or "product=false" (they are
-# not). CI copies that last line into $GITHUB_OUTPUT (lifemodel-cup). The paths
-# it read are printed above it, so a surprising verdict can be read back
-# against the diff it came from.
+# not). CI runs it into a file and reads that last line with
+# scripts/ci-verdict.sh, which refuses any output that is not exactly one
+# verdict on the last line, and writes it to $GITHUB_OUTPUT (lifemodel-cup).
+# The paths it read are printed above it, so a surprising verdict can be read
+# back against the diff it came from.
 #
 # A path that cannot change what the product does owes the backlog checks, not
 # typecheck, lint, the format check and the suite:

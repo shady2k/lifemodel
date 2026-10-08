@@ -1,21 +1,38 @@
 # CI — the checks every change to lifemodel passes.
 #
 # Three jobs, and what a change owes is decided by the paths it touches
-# (scripts/ci-product-paths.sh, lifemodel-cup):
+# (scripts/ci-changed-paths.sh, scripts/ci-product-paths.sh, lifemodel-cup):
 #
 #   1. changes: does this change touch product code? It reads the change's
-#      diff — the merge base with the branch being merged into on a pull
-#      request, the commit main was at before the push on a push — through the
-#      classifier, which answers product=true or product=false;
+#      paths — the merge base with the branch being merged into on a pull
+#      request, the commit main was at before the push on a push — with
+#      `git diff --no-renames` and passes them to the classifier, which answers
+#      product=true or product=false;
 #   2. ci-product: typecheck, lint, the format check and the test suite, which
-#      is exactly what `npm run check` runs by hand, with node 24 and `npm ci`,
-#      when the answer is product=true and the pull request is not a draft;
+#      is exactly what `npm run check` runs by hand, on node 24 after `npm ci`
+#      from the committed lockfile, when the answer is product=true (or when
+#      the `changes` job did not succeed, see its comment) and the pull request
+#      is not a draft;
 #   3. ci-backlog: the backlog gate below, on every change, for everyone.
+#
+# `--no-renames` in the first job is not a detail: `git diff --name-only`
+# reports a detected rename by its destination alone, so moving product code
+# into a document tree would reach the classifier as one document path and come
+# back product=false — a deletion that breaks imports could then merge without
+# typecheck, lint or the suite.
 #
 # A skipped job reports as a success to a required check on GitHub, so a change
 # that does not owe the product checks passes under branch protection that
 # requires them: the skip is what "not owed" looks like there, not a failure
-# somebody has to override.
+# somebody has to override. Branch protection on main requires `changes`,
+# `ci-product` and `ci-backlog` (docs/backlog-integration.md).
+#
+# `npm run check` and this job run the same checks, but the environments differ:
+# the verdict holds for node 24 and the dependencies of the committed lockfile,
+# which is what `npm ci` installs here. A local green run on another node
+# version, or with other installed dependencies, is not this verdict — and a
+# manifest that disagrees with `package-lock.json` can pass every local check
+# and fail here at `npm ci` before `npm run check` starts.
 #
 # ci-backlog needs node and a full history and nothing else. Its three steps
 # mirror the local hooks (.githooks/pre-commit, .githooks/commit-msg), which a
@@ -47,10 +64,11 @@ jobs:
   # cannot change what the product does — the tracker's export, the documents,
   # the backlog gate's own files, the git hooks, connect-clone.sh — owes the
   # backlog checks, not typecheck, lint and the suite; everything else,
-  # .github/ and the scripts included, owes them. The classifier is a script
-  # with tests of its own (scripts/ci-product-paths.sh,
-  # tests/unit/ci-product-paths.test.ts) rather than shell inlined here, so the
-  # same answer can be run and checked locally.
+  # .github/ and the scripts included, owes them. Reading the change, the
+  # classifier and the verdict are scripts with tests of their own
+  # (scripts/ci-changed-paths.sh, scripts/ci-product-paths.sh,
+  # scripts/ci-verdict.sh, tests/unit/ci-product-paths.test.ts) rather than
+  # shell inlined here, so the same commands can be run and checked locally.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -75,25 +93,23 @@ jobs:
           AFTER: ${{ github.sha }}
         run: |
           set -eu
-          # The changed paths, one per line, written to a file so that a range
-          # this checkout cannot read leaves the classifier an empty input —
-          # which is what such a range has to mean: every path counts.
-          paths="$RUNNER_TEMP/changed-paths.txt"
-          : > "$paths"
+          # The change's range, or none: a range this checkout cannot read is
+          # not a diff, and the classifier reads an empty path list as "every
+          # path counts as product".
+          out="$RUNNER_TEMP/classification.txt"
+          range=""
           if [ "$EVENT" = pull_request ]; then
             # The merge base with the branch being merged into, not GitHub's
             # synthetic merge: the change is what the branch added, not what
             # main did meanwhile.
             base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA" || true)
             if [ -n "$base" ]; then
-              echo "range: $base...$HEAD_SHA"
-              git diff --name-only "$base...$HEAD_SHA" > "$paths"
+              range="$base...$HEAD_SHA"
             else
               echo "no merge base of origin/$BASE_REF and $HEAD_SHA in this checkout: no diff to read, so every path counts as product" >&2
             fi
           elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null 2>&1; then
-            echo "range: $BEFORE..$AFTER"
-            git diff --name-only "$BEFORE..$AFTER" > "$paths"
+            range="$BEFORE..$AFTER"
           else
             # A first push, a forced update or a shallow surprise leaves no
             # revision to diff against. What it changed is then unknowable, so
@@ -101,19 +117,44 @@ jobs:
             # said out loud, because this is the answer that runs everything.
             echo "BEFORE ${BEFORE:-<empty>} is not a commit in this checkout: no diff to read, so every path counts as product" >&2
           fi
-          # The classifier prints the paths it read and answers on its last
-          # line, which is exactly what GitHub wants in $GITHUB_OUTPUT.
-          scripts/ci-product-paths.sh < "$paths" | tee "$RUNNER_TEMP/classification.txt"
-          tail -n 1 "$RUNNER_TEMP/classification.txt" >> "$GITHUB_OUTPUT"
+          # One diff, one classifier, each on its own with its exit status read:
+          # never a pipe, which would swallow a failure of either and let this
+          # job pass with no answer at all.
+          if [ -n "$range" ]; then
+            echo "range: $range"
+            scripts/ci-changed-paths.sh "$range" > "$out"
+          else
+            scripts/ci-product-paths.sh < /dev/null > "$out"
+          fi
+          cat "$out"
+          # The verdict, checked to be exactly one and the last line, is what
+          # GitHub wants in $GITHUB_OUTPUT. Anything else fails this step with
+          # the reason: an output nobody set would skip ci-product as if the
+          # change owed nothing.
+          verdict=$(scripts/ci-verdict.sh "$out")
+          echo "product output: $verdict"
+          echo "$verdict" >> "$GITHUB_OUTPUT"
 
   # The product checks, as the one command a person runs before pushing. It is
   # skipped for a change that cannot touch product code and while a pull
   # request is a draft. A skipped job reports as a success to a required check
   # on GitHub, so requiring this job in branch protection does not block a
   # change that does not owe it.
+  #
+  # It is also fail-safe: it runs whenever the `changes` job did not succeed,
+  # whatever that job may have answered. A failed `changes` job has no `product`
+  # output, and a job skipped for a missing output reports the same success as a
+  # change that owes nothing — an independent green `ci-backlog` could then let
+  # a change merge that never ran typecheck, lint or the suite. Running the
+  # checks is the safe reading of a missing answer, and it also means the
+  # workflow cannot be made to skip them by breaking the classifier.
+  # `!cancelled()` keeps a cancelled run from starting them, and a draft pull
+  # request still skips them: that is this workflow's own decision, not a
+  # missing answer. Branch protection requiring `changes` too is the other half
+  # of the guarantee: a failed `changes` job is then a red required check.
   ci-product:
     needs: changes
-    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
