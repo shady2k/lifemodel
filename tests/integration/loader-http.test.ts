@@ -264,7 +264,13 @@ describe('one login, three hosts', () => {
     });
     expect(page.body).toContain(`name="next" value="${next}"`);
     // ...and nothing else: no open redirect.
-    for (const foreign of ['http://evil.example/', 'javascript:alert(1)', '//evil.example/']) {
+    for (const foreign of [
+      'http://evil.example/',
+      'javascript:alert(1)',
+      '//evil.example/',
+      // Another local port: cookies are not scoped by port (review round 3, finding 3).
+      'http://localhost:9999/',
+    ]) {
       const refused = await ask(port, 'GET', `/login?next=${encodeURIComponent(foreign)}`, {
         host: 'boot.localhost',
       });
@@ -281,6 +287,11 @@ describe('one login, three hosts', () => {
       form: { password: 'right', next: 'http://evil.example/' },
     });
     expect(foreignLogin.headers['location']).toBe('/');
+    const otherPort = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost:8080',
+      form: { password: 'right', next: 'http://localhost:9999/' },
+    });
+    expect(otherPort.headers['location']).toBe('/');
 
     await shutdownLoader(world, app);
   });

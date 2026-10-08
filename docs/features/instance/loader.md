@@ -57,8 +57,13 @@ are part of `npm run check`.
    being started (the panic flag being read, or the OS not yet having said the
    process runs) waits for that start and then stops what it started, and once
    the loader is leaving nothing is started at all - not a resume, not the
-   restart of a death. An exit the loader asked for is logged at info; one
-   nobody asked for at warn.
+   restart of a death. The stop waits for such a start at most 5 s (the kill
+   room): a panic read or a spawn verdict that does not come by then is given
+   up on - a spawned process is killed, and one the OS confirms later is
+   killed rather than owned. A resume asked for while a panic stop is still
+   draining waits for that drain and then starts lifemodel if panic is off by
+   then, so `resume` never reports a start that did not happen. An exit the
+   loader asked for is logged at info; one nobody asked for at warn.
 
 ## The volume
 
@@ -183,7 +188,7 @@ inside the container. It talks to the loader on loopback and proves itself with
 the token in `loader/cli-token`, which lifemodel's user cannot read.
 
 ```
-docker exec <container> lifemodel status   # running|stopped, the commit, panic on|off
+docker exec <container> lifemodel status   # running|stopped|failed, the commit, panic on|off
 docker exec <container> lifemodel panic    # stop lifemodel, hold it down
 docker exec <container> lifemodel resume   # clear panic, start lifemodel
 ```

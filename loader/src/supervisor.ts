@@ -123,6 +123,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   let closed = false;
   /** The start being made now; a stop waits for it before it looks for a child. */
   let startInFlight: Promise<StartOutcome> | null = null;
+  /** The process of that start, from `spawn` returning until it is owned or refused. */
+  let pendingSpawn: SpawnedProcess | null = null;
+  /** The stop being made now; a start (a resume) waits for it, then decides. */
+  let stopInFlight: Promise<StopOutcome> | null = null;
+  /** Numbers the starts; a stop that gave up on one names it here. */
+  let attemptSeq = 0;
+  let abandonedAttempt = -1;
 
   function spawnOptions(): SpawnOptions {
     const options: SpawnOptions = {
@@ -208,12 +215,19 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     });
   }
 
-  function start(): Promise<StartOutcome> {
+  async function start(): Promise<StartOutcome> {
+    // A start asked for while a stop is draining lifemodel (a resume right
+    // after a panic) waits for that stop and then decides on the panic flag as
+    // it is THEN: the later intent wins, and a resume is never answered as if
+    // it had started something it did not (rework 3, review round 3 finding 2).
+    while (stopInFlight !== null && !closed) await stopInFlight;
     if (state === 'running' || state === 'starting' || startInFlight !== null) {
-      return Promise.resolve({ started: false, reason: 'already-running' });
+      return { started: false, reason: 'already-running' };
     }
-    const attempt = startOnce().finally(() => {
+    attemptSeq += 1;
+    const attempt = startOnce(attemptSeq).finally(() => {
       startInFlight = null;
+      pendingSpawn = null;
     });
     startInFlight = attempt;
     return attempt;
@@ -225,15 +239,15 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { started: false, reason: 'stopping' };
   }
 
-  async function startOnce(): Promise<StartOutcome> {
+  async function startOnce(attempt: number): Promise<StartOutcome> {
     if (closed || stopping) return notStartedStopping();
     if (await isPanicSet()) {
       logger.info({}, 'lifemodel is not started: panic is set');
       return { started: false, reason: 'panic' };
     }
     // The panic read above is asynchronous: a stop can begin while it is
-    // pending, and then nothing may be spawned.
-    if (closed || stopping) return notStartedStopping();
+    // pending (or give up waiting for it), and then nothing may be spawned.
+    if (closed || stopping || abandonedAttempt === attempt) return notStartedStopping();
     state = 'starting';
     let spawned: SpawnedProcess;
     try {
@@ -241,13 +255,24 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     } catch (error) {
       return refusedStart(describe(error));
     }
-    // The verdict is awaited BEFORE the child is owned, but the stop that may
-    // arrive meanwhile waits for this whole start (`startInFlight`) and then
-    // finds the child below: nothing spawned here escapes a stop.
+    // The verdict is awaited BEFORE the child is owned. A stop that arrives
+    // meanwhile waits for this whole start (`startInFlight`, bounded) and then
+    // finds the child below; a stop that gave up waiting has already killed
+    // `pendingSpawn` and named this attempt, so it is not owned at all.
+    pendingSpawn = spawned;
     const outcome = await spawnOutcome(spawned);
     if (outcome instanceof Error) {
       // It never ran, so nothing is running to stop and nothing is retried.
       return refusedStart(describe(outcome));
+    }
+    if (abandonedAttempt === attempt) {
+      spawned.kill('SIGKILL');
+      state = 'stopped';
+      logger.error(
+        { pid: spawned.pid ?? null },
+        'lifemodel was spawned after its stop gave up waiting for the start: it is killed'
+      );
+      return { started: false, reason: 'stopping' };
     }
     child = spawned;
     exit = exitSignal();
@@ -278,19 +303,45 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
    * the room kept for SIGKILL to be reaped; and the wait after SIGKILL ends at
    * the budget too (a child stuck in the kernel is not waited for past it).
    */
-  async function stop(
+  function stop(
     reason: string,
     budgetMs: number = config.drainWaitMs + config.killWaitMs
   ): Promise<StopOutcome> {
+    const run = stopOnce(reason, budgetMs).finally(() => {
+      if (stopInFlight === run) stopInFlight = null;
+    });
+    stopInFlight = run;
+    return run;
+  }
+
+  async function stopOnce(reason: string, budgetMs: number): Promise<StopOutcome> {
     const deadline = clock.now() + Math.max(0, budgetMs);
     const left = (): number => Math.max(0, deadline - clock.now());
     epoch += 1; // a restart scheduled before this stop never starts anything
     stopping = true;
     // A start being made now is waited for: either it sees the stop and spawns
     // nothing, or it spawned and its child is stopped below. Its own waits are
-    // the panic read and the OS's spawn verdict, both prompt.
+    // the panic read and the OS's spawn verdict, both prompt - but neither is
+    // trusted past the room kept for a kill, so a stalled read or a verdict
+    // that never comes cannot hold the stop past its deadline (rework 3,
+    // review round 3 finding 1).
     const inFlight = startInFlight;
-    if (inFlight !== null) await inFlight;
+    if (inFlight !== null) {
+      const settled = await Promise.race([
+        inFlight.then(() => true),
+        clock.sleep(Math.min(left(), config.killWaitMs)).then(() => false),
+      ]);
+      if (!settled) {
+        abandonedAttempt = attemptSeq;
+        pendingSpawn?.kill('SIGKILL');
+        stopping = false;
+        logger.error(
+          { reason },
+          'a start of lifemodel was still in flight when the stop gave up waiting for it'
+        );
+        return { stopped: false, drainTimedOut: true };
+      }
+    }
     const current = child;
     const currentExit = exit;
     if (current === null || currentExit === null) {

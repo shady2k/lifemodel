@@ -80,8 +80,8 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run test:watch` | explicitly unsupported: the launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is refused by the entrypoint policy — run `node scripts/test-isolated.mjs test -- <path>` instead |
 | `npm run check` | every product check in one command — typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm run lint` | ESLint over `src/` (`lint:fix` to auto-fix) |
-| `npm run format` / `format:check` | Prettier over `src/**/*.ts` |
+| `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
+| `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
 | `npm run connect` | connect this clone: git hooks, backlog import, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
