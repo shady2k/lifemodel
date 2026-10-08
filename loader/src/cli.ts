@@ -5,6 +5,10 @@
  * The command line is what the owner has when the browser is not at hand. It
  * talks to the loader over loopback and proves itself with the token file only
  * root can read, so lifemodel's own user cannot reach the same endpoints.
+ *
+ * It also works while the instance is down and failed - that is when it is
+ * worth most - so the loopback request fails only when the loader itself is
+ * unreachable or the token is wrong.
  */
 import { pathToFileURL } from 'node:url';
 
@@ -25,11 +29,19 @@ export interface CliDeps {
   fetchImpl: typeof fetch;
 }
 
-/** The three lines `status` prints: the state, the commit, whether panic is set. */
+/**
+ * The lines every command prints: the state, the commit, whether panic is set
+ * - and, when the instance did not come up, one more line with the reason
+ * (rework 1: a failed build or start is the state the owner has to see, from
+ * the page and from here alike).
+ */
 function printStatus(out: (line: string) => void, status: InstanceStatus): void {
-  out(status.lifemodel === 'running' ? 'running' : 'stopped');
+  out(
+    status.phase === 'failed' ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped'
+  );
   out(`commit ${status.commit ?? 'none'}`);
   out(`panic ${status.panic ? 'on' : 'off'}`);
+  if (status.phase === 'failed') out(`failed: ${status.lastError ?? 'unknown'}`);
 }
 
 async function request(
@@ -81,9 +93,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       case 'panic':
         printStatus(out, await request(deps, '/_api/panic', 'POST'));
         return 0;
-      case 'resume':
-        printStatus(out, await request(deps, '/_api/resume', 'POST'));
-        return 0;
+      case 'resume': {
+        // The loader answered; whether the instance came up is what resume
+        // reports, in the status it prints and in its exit code.
+        const resumed = await request(deps, '/_api/resume', 'POST');
+        printStatus(out, resumed);
+        return resumed.phase === 'failed' ? 1 : 0;
+      }
       default:
         err(`unknown command: ${command}`);
         err(USAGE);

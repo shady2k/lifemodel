@@ -78,3 +78,8 @@ It builds from a throwaway clone with `tests/fixtures/stub-loader/` in place of
 the real loader, so the image can be checked on its own; the stub is never part
 of an image anyone runs. `tests/unit/build-image.test.ts` covers the script's
 two refusals — a shallow checkout, a missing `loader/` — without docker.
+
+`tests/integration/instance-first-start.test.ts` is the same gated walk with the
+REAL loader: an empty volume, `POST /setup` on `boot.localhost`, the loader's
+own line that lifemodel is running, `lifemodel status` on a 40-hex commit, and
+the lifemodel process running as uid 1000.

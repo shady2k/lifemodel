@@ -18,11 +18,15 @@ import type { FileSystem } from './fs.js';
 import type { LoaderLogger } from './logger.js';
 import { describe } from './state.js';
 
-export interface RepositoryDeps {
+/** Where the instance's repository is: everything the loader needs to look at it. */
+export interface RepositoryLocation {
   fs: FileSystem;
+  config: LoaderConfig;
+}
+
+export interface RepositoryDeps extends RepositoryLocation {
   runner: CommandRunner;
   logger: LoaderLogger;
-  config: LoaderConfig;
   /** Which commit is already built (the loader's own state on the volume). */
   builtCommit: () => Promise<string | null>;
   recordBuiltCommit: (commit: string) => Promise<void>;
@@ -42,23 +46,78 @@ function lastLine(text: string): string {
   return lines[lines.length - 1] ?? 'no output';
 }
 
-/** The commit the instance's repository is on, or null when there is none. */
+/**
+ * git's own message about a failure: its FIRST line says what went wrong
+ * ("fatal: detected dubious ownership in repository at ..."), and the lines
+ * after it are git's advice about it. The advice is not the reason, so it must
+ * not take the reason's place in a log line (rework 1: the walk's log line
+ * said "git config --global --add safe.directory ..." and nothing else).
+ */
+function gitFailure(text: string): string {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  return lines[0] ?? 'no output';
+}
+
+/**
+ * The instance's repository belongs to lifemodel (uid 1000) and the loader runs
+ * as root, and git REFUSES a repository whose owner is not the caller:
+ *
+ *   fatal: detected dubious ownership in repository at '/var/lib/lifemodel/repo'
+ *
+ * (rework 1: the walk reached exactly this, and the loader then claimed the
+ * volume held no checkout). Every git call the loader makes on that repository
+ * therefore names it as a safe directory - that ONE path, never `*`, so
+ * nothing else on the volume becomes trusted by accident.
+ */
+function gitArgs(config: LoaderConfig, args: string[]): string[] {
+  return ['-c', `safe.directory=${config.repoDir}`, ...args];
+}
+
+/**
+ * The commit the instance's repository is on, or null when the volume holds no
+ * repository yet (a first start, before seeding: not an error). A repository
+ * that cannot be READ is an error, said with git's own message.
+ */
 export async function readHeadCommit(deps: RepositoryDeps): Promise<string | null> {
   const { runner, config } = deps;
   if (!(await isRepository(deps))) return null;
-  const result = await runner.run('git', ['rev-parse', 'HEAD'], { cwd: config.repoDir });
+  const result = await runner.run('git', gitArgs(config, ['rev-parse', 'HEAD']), {
+    cwd: config.repoDir,
+  });
   if (result.code !== 0) {
-    deps.logger.warn(
-      { commit: 'unknown', reason: lastLine(result.stderr) },
-      'the instance repository has no readable commit'
+    throw new LoaderFatalError(
+      `the instance repository at ${config.repoDir} has no readable commit: ${gitFailure(result.stderr)}`
     );
-    return null;
   }
   return result.stdout.trim();
 }
 
-async function isRepository({ fs, config }: RepositoryDeps): Promise<boolean> {
+async function isRepository({ fs, config }: RepositoryLocation): Promise<boolean> {
   return fs.isDirectory(join(config.repoDir, '.git'));
+}
+
+/** The code the image carries. Without it no first start can seed an instance. */
+async function requireSeedBundle({ fs, config }: RepositoryLocation): Promise<void> {
+  if (await fs.exists(config.seedBundle)) return;
+  throw new LoaderFatalError(
+    `the seed bundle is missing at ${config.seedBundle}: the image must carry the code this instance is seeded from`
+  );
+}
+
+/**
+ * The loader's own input check for a volume that holds no repository yet: the
+ * image must carry the code, or this instance can never be seeded. It runs
+ * before the loader opens its interface, so a missing input is said once and
+ * the loader leaves - unlike a failure to seed, build or start, which leaves
+ * the loader up with the reason in its state (rework 1). A volume that already
+ * holds the instance's repository needs no bundle, so it is not asked for one.
+ */
+export async function requireSeedBundleForFirstStart(location: RepositoryLocation): Promise<void> {
+  if (await isRepository(location)) return;
+  await requireSeedBundle(location);
 }
 
 /**
@@ -77,47 +136,52 @@ export async function seedRepositoryIfMissing(deps: RepositoryDeps): Promise<boo
       `${config.repoDir} exists but is not a git repository: refusing to seed over it`
     );
   }
-  if (!(await fs.exists(config.seedBundle))) {
-    throw new LoaderFatalError(
-      `the seed bundle is missing at ${config.seedBundle}: the image must carry the code this instance is seeded from`
-    );
-  }
+  await requireSeedBundle({ fs, config });
 
   logger.info({ seed: config.seedBundle, repo: config.repoDir }, 'seeding the instance repository');
-  const clone = await runner.run('git', ['clone', config.seedBundle, config.repoDir]);
+  const clone = await runner.run(
+    'git',
+    gitArgs(config, ['clone', config.seedBundle, config.repoDir])
+  );
   if (clone.code !== 0) {
-    throw new LoaderFatalError(`git clone of the seed bundle failed: ${lastLine(clone.stderr)}`);
+    throw new LoaderFatalError(`git clone of the seed bundle failed: ${gitFailure(clone.stderr)}`);
   }
 
-  const remotes = await runner.run('git', ['remote'], { cwd: config.repoDir });
+  const remotes = await runner.run('git', gitArgs(config, ['remote']), { cwd: config.repoDir });
   const names = remotes.stdout.split('\n').map((name) => name.trim());
   if (names.includes('origin')) {
     // The clone named the bundle `origin`; the instance's upstream takes that
     // place. A rename keeps the branch's tracking configuration with it.
-    const renamed = await runner.run('git', ['remote', 'rename', 'origin', 'upstream'], {
-      cwd: config.repoDir,
-    });
+    const renamed = await runner.run(
+      'git',
+      gitArgs(config, ['remote', 'rename', 'origin', 'upstream']),
+      { cwd: config.repoDir }
+    );
     if (renamed.code !== 0) {
       throw new LoaderFatalError(
-        `could not give the instance its upstream remote: ${lastLine(renamed.stderr)}`
+        `could not give the instance its upstream remote: ${gitFailure(renamed.stderr)}`
       );
     }
   } else {
-    const added = await runner.run('git', ['remote', 'add', 'upstream', config.upstreamUrl], {
-      cwd: config.repoDir,
-    });
+    const added = await runner.run(
+      'git',
+      gitArgs(config, ['remote', 'add', 'upstream', config.upstreamUrl]),
+      { cwd: config.repoDir }
+    );
     if (added.code !== 0) {
       throw new LoaderFatalError(
-        `could not give the instance its upstream remote: ${lastLine(added.stderr)}`
+        `could not give the instance its upstream remote: ${gitFailure(added.stderr)}`
       );
     }
   }
-  const pointed = await runner.run('git', ['remote', 'set-url', 'upstream', config.upstreamUrl], {
-    cwd: config.repoDir,
-  });
+  const pointed = await runner.run(
+    'git',
+    gitArgs(config, ['remote', 'set-url', 'upstream', config.upstreamUrl]),
+    { cwd: config.repoDir }
+  );
   if (pointed.code !== 0) {
     throw new LoaderFatalError(
-      `could not point the upstream remote at ${config.upstreamUrl}: ${lastLine(pointed.stderr)}`
+      `could not point the upstream remote at ${config.upstreamUrl}: ${gitFailure(pointed.stderr)}`
     );
   }
 
@@ -162,7 +226,7 @@ export async function buildIfNeeded(
   const { fs, runner, logger, config } = deps;
   if (commit === null) {
     throw new LoaderFatalError(
-      `the instance repository at ${config.repoDir} has no commit to build: it is not a checkout of the code`
+      `nothing to build: ${config.repoDir} holds no git repository, so no code of this instance is on the volume`
     );
   }
   if ((await fs.exists(config.lifemodelEntry)) && (await deps.builtCommit()) === commit) {

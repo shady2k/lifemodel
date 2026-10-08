@@ -32,6 +32,28 @@ export interface RecordedCommand {
   options: RunOptions;
 }
 
+/**
+ * git's own safety options for the instance's repository - `-c
+ * safe.directory=<the repository>` - taken out of a command line: they say HOW
+ * the loader made git trust the repository, not WHICH command it ran, so the
+ * matching and `lines()` leave them out. `rawLines()` and the recorded `args`
+ * keep every argument, and one test asserts on them (rework 1: git refuses a
+ * repository its caller does not own).
+ */
+function withoutGitSafetyOptions(args: string[]): string[] {
+  const kept: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const next = args[index + 1];
+    if (argument === '-c' && next !== undefined && next.startsWith('safe.directory=')) {
+      index += 1; // the option and its value belong together
+      continue;
+    }
+    if (argument !== undefined) kept.push(argument);
+  }
+  return kept;
+}
+
 /** A command runner whose answers a test writes: `git clone`, `npm ci`, ... */
 export class FakeRunner implements CommandRunner {
   readonly calls: RecordedCommand[] = [];
@@ -51,7 +73,7 @@ export class FakeRunner implements CommandRunner {
   async run(command: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
     const call: RecordedCommand = { command, args, options };
     this.calls.push(call);
-    const line = `${command} ${args.join(' ')}`;
+    const line = `${command} ${withoutGitSafetyOptions(args).join(' ')}`;
     for (const handler of this.handlers) {
       if (line.startsWith(handler.prefix)) return handler.handle(call);
     }
@@ -60,6 +82,11 @@ export class FakeRunner implements CommandRunner {
 
   /** Every command line run so far, as one string per call. */
   lines(): string[] {
+    return this.calls.map((call) => `${call.command} ${withoutGitSafetyOptions(call.args).join(' ')}`);
+  }
+
+  /** The same lines with every argument as it was passed, git's options included. */
+  rawLines(): string[] {
     return this.calls.map((call) => `${call.command} ${call.args.join(' ')}`);
   }
 }
