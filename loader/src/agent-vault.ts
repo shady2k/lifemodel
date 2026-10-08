@@ -487,6 +487,9 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
 
   async function start(): Promise<void> {
     if (child !== null) return;
+    // The stop-free interval this start belongs to: a stop bumps the epoch,
+    // and then nothing this start makes may outlive that stop's answer.
+    const startEpoch = epoch;
     if (!(await fs.exists(vaultConfig.binary))) {
       throw new LoaderFatalError(
         `Agent Vault is missing: there is no agent-vault at ${vaultConfig.binary}, so no key could be held for lifemodel`
@@ -494,6 +497,11 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     }
     await prepareStore();
     await removeStalePidFile();
+    // A stop can begin during the awaits above (the loader's own signals are
+    // wired before it starts, so a `docker stop` right after `docker run` runs
+    // its shutdown beside this start): then this start makes nothing at all,
+    // and the stop's answer - nothing was running - stays true.
+    if (stoppedSince(startEpoch)) return;
     const spawned = launcher.spawn(vaultConfig.binary, serverArgs(), {
       cwd: config.volumeRoot,
       env: storeEnvironment(),
@@ -520,13 +528,24 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
       await waitUntilUp(spawned);
       credential ??= await provision();
       await exportCa();
+      if (stoppedSince(startEpoch)) {
+        giveUpAfterStop(spawned);
+        return;
+      }
     } catch (error) {
+      stopped();
+      spawned.kill('SIGKILL');
+      if (stoppedSince(startEpoch)) {
+        // The stop is what ended this start (it stopped the child this start
+        // had already made): the loader is leaving, and this is not a missing
+        // input to leave with.
+        logger.info({}, 'Agent Vault did not finish starting: the loader is stopping');
+        return;
+      }
       // The start failed as a missing input of the loader's own: the child is
       // given up on here - the loader is about to leave with the reason, and a
       // restart loop of a server that cannot open its store would only hide it.
       epoch += 1;
-      stopped();
-      spawned.kill('SIGKILL');
       throw error;
     }
     logger.info(
@@ -547,6 +566,32 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     child = null;
     pid = null;
     startedAt = null;
+  }
+
+  /**
+   * Whether a stop began after this start did. Every stop bumps the epoch, so
+   * this is true for a stop that is still running AND for one that has already
+   * answered - which is the case that matters: a stop that found no child
+   * answered "nothing is running", and a start that then spawned one would
+   * make that answer false.
+   */
+  function stoppedSince(startEpoch: number): boolean {
+    return stopping || epoch !== startEpoch;
+  }
+
+  /**
+   * A stop began while this start was still making the vault: what this start
+   * made is given up rather than left running behind a stop that already
+   * answered. The loader is leaving in that case - the stop is the container's
+   * own - so the start says one line and returns instead of failing.
+   */
+  function giveUpAfterStop(spawned: SpawnedProcess): void {
+    stopped();
+    spawned.kill('SIGTERM');
+    logger.info(
+      { pid: spawned.pid ?? null },
+      'Agent Vault was started while the loader was stopping: it is stopped again'
+    );
   }
 
   async function stop(
