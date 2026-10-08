@@ -82,6 +82,7 @@ interface Reply {
   status: number;
   body: string;
   location?: string | undefined;
+  setCookie?: string | undefined;
 }
 
 /** One request the way a browser makes it: the host is a header, not a DNS name. */
@@ -115,7 +116,12 @@ function fetchThroughFrontDoor(
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => (answer += chunk));
         res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body: answer, location: res.headers.location })
+          resolve({
+            status: res.statusCode ?? 0,
+            body: answer,
+            location: res.headers.location,
+            setCookie: res.headers['set-cookie']?.[0],
+          })
         );
       }
     );
@@ -148,6 +154,34 @@ async function waitForLogLine(pattern: RegExp, timeoutMs: number): Promise<strin
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+}
+
+
+/** How many times the container logged one line. */
+function logCount(pattern: RegExp): number {
+  return docker(['logs', container])
+    .split('\n')
+    .filter((candidate) => pattern.test(candidate)).length;
+}
+
+/** The event of a start: the loader's own line, the second time (or later). */
+async function waitForStarts(target: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (logCount(/"msg":"lifemodel started"/) < target) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the loader never started lifemodel ${String(target)} times:\n${docker(['logs', container])}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/** The container's log lines, from one line onwards (the rest is history). */
+function logFrom(first: string): string[] {
+  const lines = docker(['logs', container]).split('\n');
+  const start = lines.findIndex((line) => line.includes(first));
+  return start === -1 ? lines : lines.slice(start);
 }
 
 /** The loader's own status line for lifemodel, as the container printed it. */
@@ -307,6 +341,74 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(login.status).toBe(200);
     expect(login.body).toContain('Log in');
   });
+
+  it("serves lifemodel's settings at the root host, and a save restarts it with them", async () => {
+    // The owner logs in once (the loader's cookie covers every host) and opens
+    // the root host: lifemodel's own interface, which needs no auth of its own.
+    const login = await fetchThroughFrontDoor(port, `boot.localhost:${String(port)}`, '/login', {
+      form: { password: 'first-start-pass' },
+      origin: `http://boot.localhost:${String(port)}`,
+    });
+    expect(login.status).toBe(303);
+    const cookie = login.setCookie?.split(';')[0] ?? '';
+    expect(cookie).toContain('lm_session=');
+
+    // lifemodel is still building its container for a moment after the loader
+    // says it started: the event is its own line that the interface is up, not
+    // a timer (the root host answers 502 until then).
+    await waitForLogLine(/"msg":"lifemodel's settings interface is up"/, 120_000);
+
+    const before = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
+    expect(before.status).toBe(200);
+    expect(before.body).toContain('Save and restart lifemodel');
+    // The first start of an instance has no config at all, and the page says so
+    // instead of lifemodel crash-looping on it.
+    expect(before.body).toContain('No model endpoint is configured yet');
+    expect(before.body).toContain('value="__telegram_bot_token__"');
+    // The link to the loader for keys and panic, on the port the browser used.
+    expect(before.body).toContain(`http://boot.localhost:${String(port)}/`);
+
+    const startsBefore = logCount(/"msg":"lifemodel started"/);
+
+    const save = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/settings', {
+      cookie,
+      origin: `http://localhost:${String(port)}`,
+      form: {
+        endpointBaseUrl: 'http://127.0.0.1:9/v1',
+        fastModel: 'test-fast',
+        smartModel: 'test-smart',
+        motorModel: 'test-motor',
+        telegramChatId: '4242',
+        telegramBotToken: '__telegram_bot_token__',
+      },
+    });
+    expect(save.status).toBe(200);
+    expect(save.body).toContain('Saved.');
+
+    // The save wrote lifemodel's config file, at the path the instance uses.
+    const written = docker([
+      'exec',
+      container,
+      'cat',
+      '/var/lib/lifemodel/data/config/agent.json',
+    ]);
+    expect(written).toContain('http://127.0.0.1:9/v1');
+    expect(written).toContain('test-smart');
+
+    // And the loader restarted it AT ONCE - its own line, no backoff.
+    await waitForLogLine(/"msg":"lifemodel asked to be restarted"/, 60_000);
+    await waitForStarts(startsBefore + 1, 120_000);
+    const afterSave = logFrom('"msg":"lifemodel asked to be restarted"');
+    expect(afterSave.some((line) => line.includes('after a backoff'))).toBe(false);
+
+    // The running lifemodel reads the new settings: the page shows them.
+    const after = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
+    expect(after.status).toBe(200);
+    expect(after.body).toContain('value="http://127.0.0.1:9/v1"');
+    expect(after.body).toContain('value="test-fast"');
+    expect(after.body).toContain('value="4242"');
+    expect(after.body).not.toContain('No model endpoint is configured yet');
+  }, 300_000);
 
   it('holds panic and resumes, from the command line in the container', () => {
     const panicked = docker(['exec', container, 'lifemodel', 'panic'], { timeoutMs: 180_000 });

@@ -9,10 +9,11 @@ import 'dotenv/config';
 import { createContainerAsync, type Container } from './core/container.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
 import { createConfigLoader, resolveConfigDir } from './config/index.js';
-import { createSettingsServer } from './settings/server.js';
+import { createSettingsServer, type SettingsServer } from './settings/server.js';
 import { RESTART_EXIT_CODE } from './settings/restart.js';
 
 let container: Container | undefined;
+let settingsServer: SettingsServer | undefined;
 let isShuttingDown = false;
 
 async function main(): Promise<void> {
@@ -94,6 +95,7 @@ async function startSettingsInterface(logger: Container['logger']): Promise<void
       void restartAfterSettingsSaved();
     },
   });
+  settingsServer = server;
   try {
     await server.listen();
     logger.info({ address: server.address() }, "lifemodel's settings interface is up");
@@ -146,6 +148,14 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
     return; // Already shutting down, ignore duplicate signals
   }
   isShuttingDown = true;
+
+  // Intake stops FIRST, as in the loader's own stop: no new settings save is
+  // accepted while lifemodel is draining (a save that arrived now would write
+  // a config the exiting process would never apply, and the restart it asks
+  // for would be swallowed by the stop already running). The answer to the
+  // save that started THIS stop has already gone out.
+  await settingsServer?.close();
+  settingsServer = undefined;
 
   let hardExit: ArmedStopDeadlineExit | undefined;
   const active = container;

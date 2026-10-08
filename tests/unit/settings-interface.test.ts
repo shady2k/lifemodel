@@ -10,7 +10,7 @@
  * server calls once the answer has gone out).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -278,14 +278,18 @@ describe("lifemodel's settings interface", () => {
   });
 
   it('does not restart when the config file cannot be written', async () => {
-    // The directory is gone, so the atomic write fails: the settings are NOT
-    // applied, and lifemodel is not restarted onto a config that is not there.
-    await rm(configDir, { recursive: true, force: true });
-
-    const answer = await request('/settings', { form: VALID });
-    expect(answer.status).toBe(500);
-    expect(answer.body).toContain('could not be written');
-    expect(saved).toBe(0);
+    // A directory nobody may write in: the atomic write fails, so the settings
+    // are NOT applied, and lifemodel is not restarted onto a config that is not
+    // there. The owner is told instead.
+    await chmod(configDir, 0o500);
+    try {
+      const answer = await request('/settings', { form: VALID });
+      expect(answer.status).toBe(500);
+      expect(answer.body).toContain('could not be written');
+      expect(saved).toBe(0);
+    } finally {
+      await chmod(configDir, 0o700);
+    }
   });
 
   it('resolves the config file the instance reads: DATA_PATH moves it', () => {
@@ -296,5 +300,60 @@ describe("lifemodel's settings interface", () => {
       '/var/lib/lifemodel/data/config'
     );
     expect(resolveConfigDir({})).toBe('data/config');
+  });
+
+  it('creates the config directory on the first save (a first start has none)', async () => {
+    // The container's first start: the loader makes `data/`, nothing makes
+    // `data/config/`, and the first save is what creates both the directory and
+    // the file. Found by the gated Docker walk, which got a 500 for ENOENT.
+    const root = await mkdtemp(join(tmpdir(), 'lifemodel-settings-fresh-'));
+    scratch.push(root);
+    const fresh = join(root, 'config');
+    const freshServer = createSettingsServer({
+      config: createConfigLoader(fresh),
+      logger: createTestLogger('silent'),
+      port: 0,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await freshServer.listen();
+    try {
+      const address = freshServer.address();
+      const port = Number(address.slice(address.lastIndexOf(':') + 1));
+      const body = new URLSearchParams(VALID).toString();
+      const answer = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/settings',
+            method: 'POST',
+            headers: {
+              Host: 'localhost:8080',
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': String(Buffer.byteLength(body)),
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+      expect(answer).toBe(200);
+      const written = JSON.parse(await readFile(join(fresh, 'agent.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      expect(written['llm']).toMatchObject({
+        endpoint: { baseUrl: 'http://127.0.0.1:1234/v1' },
+      });
+    } finally {
+      await freshServer.close();
+    }
   });
 });

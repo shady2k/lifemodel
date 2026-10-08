@@ -1,4 +1,4 @@
-import { readFile, access, rename, open as openFile } from 'node:fs/promises';
+import { readFile, access, mkdir, rename, open as openFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
@@ -89,6 +89,11 @@ export class ConfigLoader {
    */
   async writeFile(file: AgentConfigFile): Promise<void> {
     const target = this.filePath;
+    // The config DIRECTORY may not exist yet: a first start has no
+    // `data/config/` at all (the loader makes `data/`, not its subdirectories),
+    // and the first save is what creates the file. Created here, by lifemodel's
+    // own user, inside the data directory it owns.
+    await mkdir(dirname(target), { recursive: true });
     const temporary = `${target}.tmp-${String(process.pid)}`;
     const handle = await openFile(temporary, 'w');
     try {
