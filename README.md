@@ -230,6 +230,13 @@ is published on the host's loopback only
 (`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
 HTTPS proxy in front when you want that.
 
+The loader's own page (`boot.localhost:8080`, behind its password) also shows
+the **Agent Vault account** it registered for this instance — the e-mail and
+the password, with the link to `vault.` — because Agent Vault's only login is
+its own accounts and that one is the instance owner's. Sign in there and add
+the model key for your endpoint, plus a service for that endpoint's host. No
+model key is ever shown on the loader's page, and lifemodel never holds one.
+
 The rest of the command: the volume `lifemodel` holds the instance (its
 repository and its data — `docker rm -f` and the same `docker run` bring the
 same instance back), and `--stop-timeout 120` gives the whole stop room: the
@@ -241,14 +248,30 @@ the loader leaves before Docker's own kill at 120 seconds; when a step could
 not finish, it leaves with a non-zero code and one line naming what was still
 pending and which bound it hit. A process the kernel will not let go of even
 after SIGKILL is the one case where the loader leaves without having reaped
-it. `--cap-add NET_ADMIN` is for the **next** task: when lifemodel's traffic is
-confined to Agent Vault's proxy (lifemodel-q4x.3.2), the loader installs the
-kernel rule that does it and needs that capability. **No such rule is installed today**
-— lifemodel can still reach the network directly — so the flag is carried, not
-yet used. Agent Vault itself is already in the image and running:
-it holds a passwordless store in `/var/lib/lifemodel/vault` (root-only), and
-the loader creates the vault `lifemodel` and an agent token for it and gives
-that token to lifemodel's process as its proxy credential.
+it. `--cap-add NET_ADMIN` is what the loader's **egress rule** needs
+(lifemodel-q4x.3.2): before
+lifemodel starts, it installs an iptables rule that lets lifemodel's user
+(uid 1000) reach `127.0.0.1` — Agent Vault's proxy and the instance's local
+services — and REJECTs everything else, so a bypass fails at once and shows up
+as a connection error instead of a hang. Root (the loader, Caddy and Agent
+Vault itself) is untouched. A container without the capability, or without
+`iptables`, does not start lifemodel: the loader leaves with a non-zero code and
+one line carrying the cause, and a rule the kernel refused names
+`--cap-add NET_ADMIN`.
+
+Agent Vault itself holds a passwordless store in `/var/lib/lifemodel/vault`
+(root-only), and the loader creates the vault `lifemodel` and an agent token
+for it. lifemodel's process gets that token as its proxy credential, with
+`HTTPS_PROXY`/`HTTP_PROXY` pointing at Agent Vault's proxy, `NO_PROXY` for
+loopback, `NODE_USE_ENV_PROXY=1` (Node 24's `fetch` honours the proxy only with
+it) and `NODE_EXTRA_CA_CERTS` pointing at the CA the loader exported to
+`/var/lib/lifemodel/vault-ca.pem`. lifemodel's vault is **not** strict: a host
+with a service gets its credential attached on the way out, any other host
+(news, the open web) passes through the proxy unchanged. The proxy dials
+public addresses only unless you open the private ones — add
+`-e AGENT_VAULT_ALLOW_PRIVATE_RANGES=true` to the `docker run` when your model
+server is on your own machine or network (Agent Vault's netguard; cloud
+metadata endpoints stay blocked either way).
 
 From the command line, inside the container:
 

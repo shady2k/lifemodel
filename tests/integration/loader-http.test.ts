@@ -6,7 +6,9 @@
  * cookie that opens boot., the root host and vault., the forward_auth answer
  * Caddy asks for, and the command line's status|panic|resume.
  */
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runCli } from '../../loader/src/cli.js';
@@ -147,10 +149,17 @@ describe('first start through the browser', () => {
     expect(setCookie).toContain('Path=/');
 
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
-    // Agent Vault's own CLI ran before any of this (the loader brought it up
-    // first); what the instance's seed and build ran is what this asserts.
+    // Agent Vault's own CLI and the egress rule ran before any of this (the
+    // loader brought them up first); what the instance's seed and build ran is
+    // what this asserts.
     expect(
-      world.runner.lines().filter((line) => !line.startsWith(world.config.agentVault.binary))
+      world.runner
+        .lines()
+        .filter(
+          (line) =>
+            !line.startsWith(world.config.agentVault.binary) &&
+            !line.startsWith(world.config.egress.binary)
+        )
     ).toEqual([
       `git clone ${world.config.seedBundle} ${world.config.repoDir}`,
       'git remote',
@@ -888,6 +897,103 @@ describe('the loader answers on its own hosts only (rework 2, finding 7)', () =>
     expect((await ask(port, 'GET', '/setup', { host: 'boot.localhost:8080' })).status).toBe(200);
     expect((await ask(port, 'GET', '/_auth/verify', { host: 'vault.localhost' })).status).toBe(401);
 
+    await shutdownLoader(world, app);
+  });
+});
+
+describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", () => {
+  /** The loader page a logged-in owner gets. */
+  async function dashboardOf(world: ReturnType<typeof createLoaderWorld>, host = 'boot.localhost') {
+    const { app, lines } = await createRunningLoader(world);
+    const port = app.port();
+    const login = await ask(port, 'POST', '/login', { host, form: { password: 'right' } });
+    expect(login.status).toBe(303);
+    const page = await ask(port, 'GET', '/', { host, cookie: cookieOf(login.headers) });
+    return { app, lines, page, port };
+  }
+
+  it('shows the instance owner account, and where to sign in with it', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, lines, page } = await dashboardOf(world);
+
+    // The account the loader registered in Agent Vault: the only login that
+    // interface has, and nothing else holds the password (decision 18).
+    const owner = JSON.parse(
+      readFileSync(join(world.config.loaderDir, 'vault-owner.json'), 'utf8')
+    ) as { email: string; password: string };
+    expect(page.body).toContain(owner.email);
+    expect(page.body).toContain(owner.password);
+    // And the way to use it: Agent Vault's own interface on the same host.
+    expect(page.body).toContain('<a href="http://vault.localhost">http://vault.localhost</a>');
+    // A page carrying a password is never cached.
+    expect(page.headers['cache-control']).toBe('no-store');
+    // And it reaches no log line - the loader's own included.
+    const logged = lines.map((line) => JSON.stringify(line)).join('\n');
+    expect(logged).not.toContain(owner.password);
+    expect(logged).not.toContain(owner.email);
+
+    await shutdownLoader(world, app);
+  });
+
+  it('shows it to nobody who has not logged in', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    const owner = JSON.parse(
+      readFileSync(join(world.config.loaderDir, 'vault-owner.json'), 'utf8')
+    ) as { password: string };
+
+    const without = await ask(app.port(), 'GET', '/', { host: 'boot.localhost' });
+
+    expect(without.status).toBe(401);
+    expect(without.body).not.toContain(owner.password);
+    await shutdownLoader(world, app);
+  });
+
+  it('escapes the account, so a password can never become markup', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    // A record the loader did not generate (an older one, or a hand-made one):
+    // it is still shown, and it is still shown as TEXT.
+    mkdirSync(world.config.loaderDir, { recursive: true });
+    const nasty = '<script>alert("the-owner")</script>';
+    writeFileSync(
+      join(world.config.loaderDir, 'vault-owner.json'),
+      `${JSON.stringify({ version: 1, email: 'owner@lifemodel.local', password: nasty })}\n`
+    );
+    const { app, page } = await dashboardOf(world);
+
+    expect(page.body).not.toContain(nasty);
+    expect(page.body).toContain('&lt;script&gt;');
+    await shutdownLoader(world, app);
+  });
+
+  it('says why in the page when the account cannot be read', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, page: before } = await dashboardOf(world);
+    expect(before.body).toContain('owner@lifemodel.local');
+    // The record is damaged while the loader runs: the page is the way back,
+    // so it says so instead of failing or showing nothing.
+    writeFileSync(join(world.config.loaderDir, 'vault-owner.json'), '{ not json\n');
+
+    const login = await ask(app.port(), 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right' },
+    });
+    const page = await ask(app.port(), 'GET', '/', {
+      host: 'boot.localhost',
+      cookie: cookieOf(login.headers),
+    });
+
+    expect(page.status).toBe(200);
+    expect(page.body).toContain('the instance owner account could not be read');
+    expect(page.body).toContain('vault-owner.json');
     await shutdownLoader(world, app);
   });
 });

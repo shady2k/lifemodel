@@ -21,11 +21,19 @@ repository the loader makes on the volume from that bundle, so a newer image
 never overwrites it. The runtime is node 24 on `node:24-bookworm-slim` with
 `tini`, `git`, `ca-certificates`, `iptables`, `netbase` and `curl`; the native
 dependencies (onnxruntime, LanceDB, sharp) need nothing beyond the libraries
-that base image already has.
+that base image already has. `iptables` is what the loader's egress rule is
+made of (lifemodel-q4x.3.2): before lifemodel starts, the loader fills its own
+chain with "uid 1000 reaches `127.0.0.1`, everything else is REJECTed", so
+lifemodel leaves through Agent Vault's proxy or not at all. Making that rule
+needs `--cap-add NET_ADMIN`; `netbase`'s `/etc/protocols` is what iptables
+reads, and a container without the capability does not start lifemodel - the
+loader says so in one line and leaves with a non-zero code.
 
 `ENTRYPOINT` is `["/usr/bin/tini","--","node","/opt/lifemodel/loader/dist/main.js"]`
 with no `USER`: the loader is root, lifemodel is uid/gid 1000 (`lifemodel`).
-`DATA_PATH` is the loader's to set for lifemodel, not the image's.
+`DATA_PATH` is the loader's to set for lifemodel, not the image's. The one
+capability the image needs beyond Docker's defaults is `NET_ADMIN`, for the
+egress rule the loader installs (the documented `docker run` carries it).
 
 ## The front door
 
@@ -36,7 +44,10 @@ starts Caddy (`/usr/bin/caddy run --config /etc/lifemodel/Caddyfile --adapter
 caddyfile`) and keeps it up while lifemodel is stopped. It starts Agent Vault
 the same way (`agent-vault server --host 127.0.0.1 --port 14321 --mitm-port
 14322 --password-stdin`) and keeps it up too; both are stopped only when the
-container itself stops, Agent Vault after lifemodel and Caddy last.
+container itself stops, Agent Vault after lifemodel and Caddy last. Between
+Agent Vault and lifemodel's own start it also installs the kernel rule that
+confines lifemodel's egress to Agent Vault's proxy, and it hands lifemodel's
+process (and its build) the proxy environment that points at it.
 
 | Host | Backend |
 | --- | --- |
@@ -113,7 +124,14 @@ the lifemodel process running as uid 1000. It walks Agent Vault too: the store
 is root `0700` and the CA lifemodel must read is root `0644`, both listeners
 answer inside the container, `vault.localhost` shows Agent Vault's own
 interface behind the loader's login (and is redirected to that login without
-it), and a `docker restart` reuses the same store and the same token. Run locally it builds its own image
+it), and a `docker restart` reuses the same store and the same token. And it
+walks the key on the way out (lifemodel-q4x.3.2): a stub OpenAI-compatible
+endpoint runs as a second container on the container's own Docker network, its
+host has a service in lifemodel's vault, and a probe as uid 1000 - run with the
+environment `/proc/<lifemodel pid>/environ` holds - reaches the stub through
+the proxy with the credential attached and the path placeholder substituted,
+while the same probe without a proxy is refused at once and root still reaches
+the stub directly. Run locally it builds its own image
 from the checkout; with `LIFEMODEL_TEST_IMAGE=<image:tag>` it boots that image
 instead and neither builds nor removes it. It is what CI's `ci-image` job runs
 (`LIFEMODEL_DOCKER_TESTS=1`, on the image the job built), because a loader that builds but cannot complete a
