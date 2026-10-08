@@ -68,8 +68,9 @@ are part of `npm run check`.
    fresh start. Should the OS confirm the start in the very moment the stop
    gives up, the start owns a running child and the stop drains it as any
    other. A panic whose stop could not finish says so: an error line naming
-   what is pending, and `lifemodel panic` exits 1 with that reason (panic
-   stays set). A resume asked for while a panic stop is still draining waits
+   what is pending, `lifemodel panic` exits 1 with that reason and the page's
+   panic button answers with it (panic stays set); the page shows the
+   process state as it is - `stopping` while a stop has not finished. A resume asked for while a panic stop is still draining waits
    for that drain and then starts lifemodel if panic is off by then, so
    `resume` never reports a start that did not happen. An exit the
    loader asked for is logged at info; one nobody asked for at warn.
