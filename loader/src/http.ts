@@ -207,7 +207,9 @@ function refusalPage(reason: string): string {
  */
 function dashboardPage(status: InstanceStatus, csrf: string): string {
   const failed = status.failed;
-  const state = failed ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped';
+  // The process state as it is - `stopping` included, so a stop that has not
+  // finished is never shown as stopped (review round 6).
+  const state = failed ? 'failed' : status.lifemodel;
   return page(
     'lifemodel loader',
     `<h2>lifemodel</h2>
@@ -431,6 +433,19 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       await state.setPanic('the loader page');
       const outcome = await supervisor.stop('panic');
       panicLine('the loader page', outcome);
+      if (outcome.pending !== null) {
+        // Panic is set, but the stop did not finish: the owner who pressed the
+        // button is told so, not sent back as if it had worked.
+        sendHtml(
+          res,
+          500,
+          page(
+            'lifemodel loader',
+            `<p class="bad">Panic is set, but the stop did not finish: ${escapeHtml(outcome.pending)}</p><p><a href="/">Back to the loader</a></p>`
+          )
+        );
+        return;
+      }
     } else {
       await state.clearPanic();
       logger.info({}, 'panic cleared from the loader page: starting lifemodel');

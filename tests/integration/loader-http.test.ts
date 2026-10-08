@@ -520,6 +520,46 @@ describe('a panic whose stop could not finish (review round 5)', () => {
   });
 });
 
+describe('a panic from the page whose stop could not finish (review round 6)', () => {
+  it('answers with the pending reason, and the page shows the stop unfinished', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    const port = app.port();
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+    const login = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right' },
+    });
+    const cookie = cookieOf(login.headers);
+    const csrf = await csrfOf(port, 'boot.localhost', cookie);
+
+    const panicking = ask(port, 'POST', '/panic', {
+      host: 'boot.localhost',
+      cookie,
+      form: { csrf },
+    });
+    await waitUntil(
+      () => lifemodelSpawn(world)?.child.signals.length === 1,
+      'lifemodel is asked to stop'
+    );
+    // lifemodel never leaves: not after its drain, not after SIGKILL.
+    world.clock.resolveAll();
+    await waitUntil(() => lifemodelSpawn(world)?.child.signals.length === 2, 'lifemodel is killed');
+    world.clock.resolveAll();
+    const panicked = await panicking;
+
+    expect(panicked.status).toBe(500);
+    expect(panicked.body).toContain('Panic is set, but the stop did not finish');
+    const dashboard = await ask(port, 'GET', '/', { host: 'boot.localhost', cookie });
+    expect(dashboard.body).toContain('<dt>state</dt><dd>stopping');
+    expect(dashboard.body).toContain('panic</dt><dd>on');
+    lifemodelSpawn(world)?.child.exit(null, 'SIGKILL');
+    await shutdownLoader(world, app);
+  });
+});
+
 describe('a failed first start (rework 1)', () => {
   it('leaves the loader serving, its state failed with the reason, and panic and resume working', async () => {
     const world = createLoaderWorld();
