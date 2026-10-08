@@ -31,7 +31,7 @@ interface Refusal {
  * the image files as this branch has them (a clone carries the committed
  * state, not the working tree) and a stand-in docker first in PATH.
  */
-function runInClone(options: { shallow?: boolean } = {}): Refusal {
+function runInClone(options: { shallow?: boolean; withoutLoader?: boolean } = {}): Refusal {
   const workdir = mkdtempSync(join(tmpdir(), 'lifemodel-build-image-'));
   try {
     const clone = join(workdir, 'repo');
@@ -45,6 +45,9 @@ function runInClone(options: { shallow?: boolean } = {}): Refusal {
     cpSync(join(checkout, 'docker/instance'), join(clone, 'docker/instance'), { recursive: true });
     cpSync(join(checkout, '.dockerignore'), join(clone, '.dockerignore'));
     cpSync(script, join(clone, 'scripts/build-image.sh'));
+    if (options.withoutLoader === true) {
+      rmSync(join(clone, 'loader'), { recursive: true, force: true });
+    }
 
     // The stand-in docker: it records the call and fails, so a script that got
     // as far as building would be visible in both places.
@@ -91,12 +94,11 @@ describe('scripts/build-image.sh', () => {
   }, 60_000);
 
   it('refuses a checkout without loader/, naming the cause, and builds nothing', () => {
-    const refusal = runInClone();
+    const refusal = runInClone({ withoutLoader: true });
 
     expect(refusal.status).toBe(2);
     expect(refusal.output).toContain('build-image:');
-    expect(refusal.output).toContain('loader/');
-    expect(refusal.output).toContain('lifemodel-q4x.2.1');
+    expect(refusal.output).toContain('no loader/');
     expect(refusal.dockerCalls).toBe('');
   }, 60_000);
 });
