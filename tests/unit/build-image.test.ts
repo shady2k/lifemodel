@@ -10,7 +10,16 @@
  */
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +33,8 @@ interface Refusal {
   output: string;
   /** What the stand-in docker was asked to do, empty when it never ran. */
   dockerCalls: string;
+  /** What is left in the clone's build context after the run, one name per line. */
+  contextFiles: string;
 }
 
 /**
@@ -31,7 +42,9 @@ interface Refusal {
  * the image files as this branch has them (a clone carries the committed
  * state, not the working tree) and a stand-in docker first in PATH.
  */
-function runInClone(options: { shallow?: boolean; withoutLoader?: boolean } = {}): Refusal {
+function runInClone(
+  options: { shallow?: boolean; withoutLoader?: boolean; withContext?: boolean } = {}
+): Refusal {
   const workdir = mkdtempSync(join(tmpdir(), 'lifemodel-build-image-'));
   try {
     const clone = join(workdir, 'repo');
@@ -47,6 +60,11 @@ function runInClone(options: { shallow?: boolean; withoutLoader?: boolean } = {}
     cpSync(script, join(clone, 'scripts/build-image.sh'));
     if (options.withoutLoader === true) {
       rmSync(join(clone, 'loader'), { recursive: true, force: true });
+    }
+    if (options.withContext === true) {
+      // A build context that is already there: a stale one, or a person's own.
+      mkdirSync(join(clone, '.docker-context'), { recursive: true });
+      writeFileSync(join(clone, '.docker-context/seed.bundle'), "a person's own file\n");
     }
 
     // The stand-in docker: it records the call and fails, so a script that got
@@ -72,10 +90,12 @@ function runInClone(options: { shallow?: boolean; withoutLoader?: boolean } = {}
       status = failure.status ?? -1;
       output = `${failure.stdout ?? ''}${failure.stderr ?? ''}`;
     }
+    const context = join(clone, '.docker-context');
     return {
       status,
       output,
       dockerCalls: existsSync(calls) ? readFileSync(calls, 'utf8') : '',
+      contextFiles: existsSync(context) ? readdirSync(context).join('\n') : '',
     };
   } finally {
     rmSync(workdir, { recursive: true, force: true });
@@ -100,5 +120,29 @@ describe('scripts/build-image.sh', () => {
     expect(refusal.output).toContain('build-image:');
     expect(refusal.output).toContain('no loader/');
     expect(refusal.dockerCalls).toBe('');
+  }, 60_000);
+
+  it('refuses a build context that is already there, and deletes nothing in it', () => {
+    // The script removes only what it made itself (rework 2, finding 8): a
+    // `.docker-context` that existed before the run is refused by name and left
+    // exactly as it was, and no build starts.
+    const refusal = runInClone({ withContext: true });
+
+    expect(refusal.status).toBe(2);
+    expect(refusal.output).toContain('build-image:');
+    expect(refusal.output).toContain('.docker-context already exists');
+    expect(refusal.output).toContain('nothing was deleted');
+    expect(refusal.dockerCalls).toBe('');
+    expect(refusal.contextFiles).toBe('seed.bundle');
+  }, 60_000);
+
+  it('removes the context it made itself, and nothing else', () => {
+    // The other half: a run that gets as far as the build removes its own
+    // context on the way out (the stand-in docker fails, so nothing is built).
+    const refusal = runInClone();
+
+    expect(refusal.status).not.toBe(0);
+    expect(refusal.dockerCalls).toContain('build');
+    expect(refusal.contextFiles).toBe('');
   }, 60_000);
 });

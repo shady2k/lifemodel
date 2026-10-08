@@ -40,6 +40,15 @@ caddyfile`) and keeps it up while lifemodel is stopped.
 | `<host>` (the root host) | lifemodel's own interface, `127.0.0.1:7100` |
 | `vault.<host>` | Agent Vault, `127.0.0.1:14321` |
 
+**The hosts are pinned, and only these three are routed.** The Caddyfile matches
+`localhost`, `boot.localhost` and `vault.localhost` and nothing else; any other
+`Host` is answered with one plain line and reaches no backend and no
+forward_auth. The loader refuses the same names with `400` as its own second
+line of defence, because it also listens where lifemodel can reach it, and it
+never derives a cookie `Domain` from a name a request supplied. A configured
+domain is not part of this stage: it comes with the outside-access idea
+(lifemodel-sd2).
+
 Every request on every host goes through `forward_auth` to the loader's
 `GET /_auth/verify` (2xx with the session cookie, 401 without it; the auth
 request carries the original `Host` plus `X-Forwarded-Host`, `-Method` and
@@ -59,9 +68,20 @@ arguments (`local` by default) and the image name is `LIFEMODEL_IMAGE`
 (`ghcr.io/shady2k/lifemodel`). `.dockerignore` lets exactly three things into
 the build context: `loader/`, `docker/instance/` and the bundle.
 
-CI's `ci-image` job runs that same script for the changes that owe the product
-checks, with full history, and on a push to `main` publishes
-`ghcr.io/shady2k/lifemodel:main` and `:<sha>`.
+The build context is the run's own: a `.docker-context` that is already there
+was not made by this script, so the script refuses it by name and deletes
+nothing. Before that rule a stale - or a person's own - context was removed by a
+build.
+
+**Two CI jobs, and only one of them may write.** `ci-image` runs on a pull
+request that owes the product checks: it builds the image with that same script
+and then walks a REAL first start inside it (the test below), with the
+workflow's own `contents: read`, a checkout that keeps no credential, and no
+login anywhere - so nothing a pull request runs holds a write token.
+`ci-image-publish` runs on a push to `main` and is the only job with
+`packages: write`: it builds and publishes `ghcr.io/shady2k/lifemodel:main` and
+`:<sha>`. It has no classifier gate, so EVERY push to main publishes - a
+documents-only push included, which is what story S9 asks for.
 
 ## Testing it
 
@@ -82,4 +102,7 @@ two refusals — a shallow checkout, a missing `loader/` — without docker.
 `tests/integration/instance-first-start.test.ts` is the same gated walk with the
 REAL loader: an empty volume, `POST /setup` on `boot.localhost`, the loader's
 own line that lifemodel is running, `lifemodel status` on a 40-hex commit, and
-the lifemodel process running as uid 1000.
+the lifemodel process running as uid 1000. It is what CI's `ci-image` job runs
+(`LIFEMODEL_DOCKER_TESTS=1`), because a loader that builds but cannot complete a
+first start used to pass that job: the image check has to prove boot, not just
+the build. Locally it takes about four minutes from a warm layer cache.

@@ -181,7 +181,7 @@ volume — so it can change itself and keep the change across restarts.
 docker run -d \
   --name lifemodel \
   --restart unless-stopped \
-  --stop-timeout 100 \
+  --stop-timeout 120 \
   --cap-add NET_ADMIN \
   -v lifemodel:/var/lib/lifemodel \
   -p 127.0.0.1:8080:80 \
@@ -213,9 +213,14 @@ HTTPS proxy in front when you want that.
 
 The rest of the command: the volume `lifemodel` holds the instance (its
 repository and its data — `docker rm -f` and the same `docker run` bring the
-same instance back), `--stop-timeout 100` gives lifemodel its 90-second drain
-on `docker stop`, and `--cap-add NET_ADMIN` is what lets the loader confine
-lifemodel's outbound traffic to Agent Vault.
+same instance back), and `--stop-timeout 120` gives the whole stop room — the
+loader spends at most 110 seconds of it on lifemodel's 90-second drain and on
+Caddy leaving, so `docker stop` never kills the container in the middle of
+that. `--cap-add NET_ADMIN` is for the **next** stage: when lifemodel's traffic
+goes through Agent Vault (lifemodel-q4x.3), the loader installs the kernel rule
+that confines its egress and needs that capability to do it. **No such rule is
+installed today** — lifemodel can still reach the network directly — so the
+flag is carried, not yet used.
 
 From the command line, inside the container:
 
