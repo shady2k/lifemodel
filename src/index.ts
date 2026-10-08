@@ -8,8 +8,12 @@ import 'dotenv/config';
 
 import { createContainerAsync, type Container } from './core/container.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
+import { createConfigLoader, resolveConfigDir } from './config/index.js';
+import { createSettingsServer, type SettingsServer } from './settings/server.js';
+import { RESTART_EXIT_CODE } from './settings/restart.js';
 
 let container: Container | undefined;
+let settingsServer: SettingsServer | undefined;
 let isShuttingDown = false;
 
 async function main(): Promise<void> {
@@ -26,6 +30,12 @@ async function main(): Promise<void> {
     primaryUserChatId,
     stateManager,
   } = container;
+
+  // lifemodel's own settings interface, on the port Caddy's root host reaches
+  // (127.0.0.1:7100). It is started BEFORE the loop, so the instance is
+  // configurable even when nothing else works yet - on the first start of an
+  // instance the config file is empty, and this page is how it gets filled.
+  await startSettingsInterface(logger);
 
   logger.info('Lifemodel starting...');
   logger.info(
@@ -67,6 +77,48 @@ async function main(): Promise<void> {
 }
 
 /**
+ * Start lifemodel's settings interface (lifemodel-q4x.4.1).
+ *
+ * A port that cannot be taken is NOT fatal: lifemodel keeps running and says so
+ * at error level, because exiting here would turn one bad input into a restart
+ * loop the loader would count as deaths (AGENTS.md, lesson 3: the same input
+ * fails the same way every time - the owner is told instead).
+ */
+async function startSettingsInterface(logger: Container['logger']): Promise<void> {
+  const server = createSettingsServer({
+    // The same config file the container loaded its configuration from: one
+    // resolution (resolveConfigDir), so the interface writes where the next
+    // start reads.
+    config: createConfigLoader(resolveConfigDir()),
+    logger,
+    onSaved: () => {
+      void restartAfterSettingsSaved();
+    },
+  });
+  settingsServer = server;
+  try {
+    await server.listen();
+    logger.info({ address: server.address() }, "lifemodel's settings interface is up");
+  } catch (error) {
+    logger.error(
+      { address: server.address(), error: error instanceof Error ? error.message : String(error) },
+      "lifemodel's settings interface could not listen: the instance runs, but its settings page does not"
+    );
+  }
+}
+
+/**
+ * lifemodel's settings were saved: stop as on any other stop (the turn in
+ * flight is drained, state and storage are flushed, the channels are released),
+ * then leave with the code the loader restarts on - see src/settings/restart.ts
+ * and loader/src/supervisor.ts. Nothing is reconfigured underneath a running
+ * turn: the next start reads the new config.
+ */
+async function restartAfterSettingsSaved(): Promise<void> {
+  await stopAndLeave('settings saved: restarting lifemodel', RESTART_EXIT_CODE);
+}
+
+/**
  * Handle a shutdown signal.
  *
  * The stop is BOUNDED by one deadline (`shutdownDrainTimeoutMs`, default
@@ -80,10 +132,30 @@ async function main(): Promise<void> {
  * messages - see docs/architecture.md.
  */
 async function shutdown(reason: string, error?: unknown): Promise<void> {
+  await stopAndLeave(reason, error ? 1 : 0, error);
+}
+
+/**
+ * The stop itself, with the code the process leaves with.
+ *
+ * `code` 0 is an ordinary end, 1 a failure, and `RESTART_EXIT_CODE` the restart
+ * a saved settings page asks for - the loader answers that one by starting
+ * lifemodel again at once. ONE stop runs here whatever asks for it: a signal, a
+ * crash, or the settings page, and later callers get the first one's outcome.
+ */
+async function stopAndLeave(reason: string, code: number, error?: unknown): Promise<void> {
   if (isShuttingDown) {
     return; // Already shutting down, ignore duplicate signals
   }
   isShuttingDown = true;
+
+  // Intake stops FIRST, as in the loader's own stop: no new settings save is
+  // accepted while lifemodel is draining (a save that arrived now would write
+  // a config the exiting process would never apply, and the restart it asks
+  // for would be swallowed by the stop already running). The answer to the
+  // save that started THIS stop has already gone out.
+  await settingsServer?.close();
+  settingsServer = undefined;
 
   let hardExit: ArmedStopDeadlineExit | undefined;
   const active = container;
@@ -110,7 +182,7 @@ async function shutdown(reason: string, error?: unknown): Promise<void> {
     // eslint-disable-next-line no-console
     console.error(`Shutdown triggered: ${reason}`, error ?? '');
   }
-  process.exit(error ? 1 : 0);
+  process.exit(code);
 }
 
 process.on('SIGINT', () => {

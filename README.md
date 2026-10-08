@@ -142,17 +142,25 @@ lifemodel is configured via a `.env` file. The essentials:
 | `LOG_LEVEL` | `info`, `debug`, … |
 
 <details>
-<summary><b>Optional: run on local / self-hosted models</b></summary>
+<summary><b>Optional: run on your own OpenAI-compatible endpoint</b></summary>
 
-Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM):
+Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM), and the
+endpoint carries no key of its own — a server that needs one is reached through
+Agent Vault, which injects it. The endpoint and its models are lifemodel's own
+settings: on an **instance** they are set in lifemodel's interface at the root
+host (`docs/features/instance/settings.md`), and in a checkout with these
+environment variables, which name the same fields:
 
 | Variable | Description |
 |----------|-------------|
-| `LLM_LOCAL_BASE_URL` | Base URL of your OpenAI-compatible server |
-| `LLM_LOCAL_MODEL` | Local model name |
-| `LLM_LOCAL_USE_FOR_FAST` | Use the local model for the *fast* role |
-| `LLM_LOCAL_USE_FOR_SMART` | Use the local model for the *smart* role (usually keep cloud) |
-| `LLM_LOCAL_USE_FOR_MOTOR` | Use the local model for the *motor* role |
+| `LLM_ENDPOINT_BASE_URL` | Base URL of the endpoint (e.g. `http://localhost:1234/v1`) |
+| `LLM_ENDPOINT_FAST_MODEL` | The model for the *fast* role (classification) |
+| `LLM_ENDPOINT_SMART_MODEL` | The model for the *smart* role (reasoning, composition) |
+| `LLM_ENDPOINT_MOTOR_MODEL` | The model for the *motor* role (Motor Cortex) |
+
+A role the endpoint does not name is served by OpenRouter, whose key comes from
+`OPENROUTER_API_KEY`; with no endpoint configured at all, OpenRouter serves
+every role.
 
 </details>
 
@@ -206,9 +214,19 @@ VPS, reach them through an SSH tunnel and keep them unpublished:
 ssh -N -L 8080:127.0.0.1:8080 you@your-vps
 ```
 
-`vault.` reaches Agent Vault's own interface, behind the same login; the root
-host answers that nothing is there yet until lifemodel's own interface is built
-(lifemodel-q4x.4). The port is published on the host's loopback only
+**The root host is lifemodel's own settings page**: the OpenAI-compatible
+endpoint, the model for each role (fast, smart, motor) and the Telegram fields
+(chat id, and the bot token as an Agent Vault placeholder — the token itself
+belongs in Agent Vault, never here). Saving writes the instance's config and
+restarts lifemodel through the loader, which starts it again at once; on a
+first start the page says which fields are still missing and lifemodel runs
+anyway. The page needs no login of its own: the loader checks every request
+before it arrives, and a link to the loader (`boot.`) is on it for the keys and
+for panic. How it works is in
+[`docs/features/instance/settings.md`](docs/features/instance/settings.md).
+
+`vault.` reaches Agent Vault's own interface, behind the same login. The port
+is published on the host's loopback only
 (`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
 HTTPS proxy in front when you want that.
 

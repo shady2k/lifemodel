@@ -64,7 +64,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('applies parallel_tool_calls for local providers', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const request: CompletionRequest = {
       messages: [],
       parallelToolCalls: false,
@@ -82,7 +82,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('uses tool_name fallback when tool_calls are not present in history', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const messages: Message[] = [
       {
         role: 'tool',
@@ -101,7 +101,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('uses provider-specific cache control key for user messages', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const messages = [
       {
         role: 'user',
@@ -125,7 +125,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('converts system message array content to string with message-level providerOptions', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const messages = [
       {
         role: 'system',
@@ -152,7 +152,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('local provider uses .chat() not .responses()', async () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
 
     (generateText as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
       text: 'ok',
@@ -244,7 +244,7 @@ describe('VercelAIProvider', () => {
     });
 
     it('Local: tools passed to generateText have schemas intact', async () => {
-      const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+      const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
       (generateText as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(
         successResponse
       );
@@ -284,7 +284,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('strips Harmony tokens from local provider responses', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', model: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const strip = (
       provider as unknown as { stripHarmonyTokens: (s: string) => string }
     ).stripHarmonyTokens.bind(provider);

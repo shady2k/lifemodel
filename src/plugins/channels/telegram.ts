@@ -273,12 +273,27 @@ export class TelegramChannel implements Channel {
     // Start polling (non-blocking)
     // CRITICAL: Enable message_reaction in allowed_updates for reaction events
     this.running = true;
-    void this.bot.start({
-      allowed_updates: ['message', 'message_reaction'],
-      onStart: () => {
-        this.logger?.info('Telegram channel started');
-      },
-    });
+    void this.bot
+      .start({
+        allowed_updates: ['message', 'message_reaction'],
+        onStart: () => {
+          this.logger?.info('Telegram channel started');
+        },
+      })
+      // Polling that cannot start is an ERROR WITH ITS CAUSE, and it is not a
+      // reason to end the process: a token the API refuses (a wrong one, or the
+      // Agent Vault placeholder before the vault substitutes it) would otherwise
+      // reject here and take lifemodel down - an unhandled rejection ends it,
+      // the loader restarts it, and the instance crash-loops with its settings
+      // page unreachable (found by the gated Docker walk of lifemodel-q4x.4.1).
+      // The agent keeps running without Telegram, and the log says why.
+      .catch((error: unknown) => {
+        this.running = false;
+        this.logger?.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Telegram polling did not start: the agent runs without the Telegram channel'
+        );
+      });
 
     return Promise.resolve();
   }
