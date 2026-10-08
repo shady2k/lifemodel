@@ -39,7 +39,12 @@ are part of `npm run check`.
    needs to come up end the process (below).
 6. **Supervises lifemodel** as an unprivileged child (uid/gid 1000), restarts
    it with a growing backoff when it dies, and refuses to start it at all
-   while panic is set.
+   while panic is set. A lifemodel that left with the code that ASKS for a
+   restart - 75, what its settings save leaves with
+   (docs/features/instance/settings.md) - is started again at once instead:
+   no backoff is counted, the exit and the start are logged at info, and the
+   request is not held against it. A stop (panic, the container leaving) wins
+   over the request, and once the loader is closing nothing is started.
 7. **Holds panic**, a root-only flag on the volume. It survives a restart of
    the container and of the Docker daemon until `lifemodel resume` clears it.
 8. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
@@ -246,7 +251,9 @@ clone, the `upstream` remote or the chown into uid 1000 failed; `npm ci` or
 has no readable commit; a start the OS refused (see below). Once it has
 started, lifemodel dying is the supervisor's business: it is started again with
 a growing backoff (1 s, 2 s, 4 s ... up to 30 s, reset after a run of 60 s or
-more), and panic holds it down.
+more), and panic holds it down. The one exit that is not a death is the restart
+code 75 lifemodel's own settings save leaves with: that one starts lifemodel
+again at once, and it is logged at info - a request, not a fault.
 
 **A start the OS refused is a failed start, not a death.** `spawn` returning is
 not the process running: the OS reports a refused start as an error, and it can
