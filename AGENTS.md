@@ -77,10 +77,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm start` | run the build (`dist/index.js`) |
 | `npm run test` | run the whole test suite (vitest) |
 | `npm run test:watch` | vitest in watch mode |
-| `npm run check` | every product check in one command — typecheck, lint, the format check, then `vitest run --maxWorkers=2`, stopping at the first failure; the exact command CI's product job runs |
+| `npm run check` | every product check in one command — typecheck, the loader's typecheck, lint, the format check, then `vitest run --maxWorkers=2`, stopping at the first failure; the exact command CI's product job runs |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm run lint` | ESLint over `src/` (`lint:fix` to auto-fix) |
-| `npm run format` / `format:check` | Prettier over `src/**/*.ts` |
+| `npm run lint` | ESLint over `src/` and `loader/` (`lint:fix` to auto-fix) |
+| `npm run format` / `format:check` | Prettier over `src/**/*.ts` and `loader/**/*.ts` |
 | `npm run connect` | connect this clone: git hooks, backlog import, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
@@ -98,8 +98,9 @@ Motor Cortex agentic runs.
   `helpers/`). Never create test files inside `src/`.
 - Run the suite with `npm run test`.
 - `npm run check` is the one command with CI's verdict — on node 24 with the
-  dependencies of the committed lockfile: typecheck, lint, the format check and
-  the suite (at most 2 workers), stopping at the first failure. CI's
+  dependencies of the committed lockfile: typecheck (`src/` and `loader/`),
+  lint, the format check and the suite (at most 2 workers), stopping at the
+  first failure. CI's
   `ci-product` job runs exactly it, for a change whose paths include product
   code. A green run on another node version, or with other installed
   dependencies, is not that verdict; CI also fails at its own `npm ci` when

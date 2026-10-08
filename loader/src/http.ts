@@ -349,7 +349,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       // Where the browser was going before it was sent here; only an address
       // of this instance is kept (no open redirect).
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-      sendHtml(res, 200, loginPage(undefined, vettedNext(query.get('next') ?? undefined)));
+      const next = vettedNext(query.get('next') ?? undefined, header(req, 'host') ?? '');
+      sendHtml(res, 200, loginPage(undefined, next));
       return;
     }
     if (req.method !== 'POST') {
@@ -366,7 +367,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     const form = await readForm(req);
     const password = form['password'] ?? '';
-    const next = vettedNext(form['next']);
+    const next = vettedNext(form['next'], header(req, 'host') ?? '');
     if (!(await verifyPassword(password, record))) {
       refusedLogin(req);
       sendHtml(res, 401, loginPage('That password does not match.', next));

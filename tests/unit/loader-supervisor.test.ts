@@ -431,3 +431,98 @@ describe('the wait after SIGKILL (rework 3, review round 2 finding 2)', () => {
     expect(pending?.message).not.toContain('caddy');
   });
 });
+
+describe('a start the stop cannot wait for (rework 3, review round 3 finding 1)', () => {
+  it('gives up on a spawn whose verdict never comes, kills it, and never owns it later', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    world.launcher.holdSpawns();
+
+    const starting = supervisor.start();
+    await settle();
+    const child = world.launcher.spawns[0]?.child;
+    const stopping = supervisor.stop('shutdown', 3_000);
+    await settle();
+    // The wait for the start is bounded by the room kept for a kill (1 s here).
+    expect(world.clock.sleeps).toEqual([1_000]);
+    world.clock.resolveAll();
+
+    expect(await stopping).toEqual({ stopped: false, drainTimedOut: true });
+    expect(child?.signals).toEqual(['SIGKILL']);
+    // The verdict arrives after all: the child is killed, not owned.
+    child?.confirmSpawn();
+    expect(await starting).toEqual({ started: false, reason: 'stopping' });
+    expect(child?.signals).toEqual(['SIGKILL', 'SIGKILL']);
+    expect(supervisor.status().state).toBe('stopped');
+    expect(errorLines(rig.lines).map((line) => line.message)).toEqual([
+      'a start of lifemodel was still in flight when the stop gave up waiting for it',
+      'lifemodel was spawned after its stop gave up waiting for the start: it is killed',
+    ]);
+  });
+
+  it('gives up on a panic read that never answers, and spawns nothing when it does', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    const lines: RecordedLine[] = [];
+    let answerPanic: (set: boolean) => void = () => undefined;
+    const supervisor = createSupervisor({
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      config: world.config,
+      isPanicSet: () =>
+        new Promise<boolean>((resolve) => {
+          answerPanic = resolve;
+        }),
+    });
+
+    const starting = supervisor.start();
+    await settle();
+    const stopping = supervisor.stop('panic');
+    await settle();
+    world.clock.resolveAll();
+    expect(await stopping).toEqual({ stopped: false, drainTimedOut: true });
+
+    answerPanic(false);
+    expect(await starting).toEqual({ started: false, reason: 'stopping' });
+    expect(world.launcher.spawns).toHaveLength(0);
+  });
+});
+
+describe('a resume during a panic drain (rework 3, review round 3 finding 2)', () => {
+  it('waits for the drain and then starts lifemodel, because panic was cleared', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world, panic } = rig;
+    await supervisor.start();
+
+    panic.set = true;
+    const stopping = supervisor.stop('panic');
+    await settle();
+    expect(world.launcher.spawns[0]?.child.signals).toEqual(['SIGTERM']);
+
+    panic.set = false; // `lifemodel resume` while the old lifemodel still drains
+    const resuming = supervisor.start();
+    await settle();
+    expect(world.launcher.spawns).toHaveLength(1); // nothing until the drain ends
+
+    world.launcher.spawns[0]?.child.exit(0, null);
+    await stopping;
+    expect(await resuming).toEqual({ started: true, reason: 'started' });
+    expect(world.launcher.spawns).toHaveLength(2);
+    expect(supervisor.status().state).toBe('running');
+  });
+
+  it('starts nothing when panic is still set once the drain ends', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world, panic } = rig;
+    await supervisor.start();
+    panic.set = true;
+    const stopping = supervisor.stop('panic');
+    await settle();
+    const waiting = supervisor.start();
+    world.launcher.spawns[0]?.child.exit(0, null);
+    await stopping;
+    expect(await waiting).toEqual({ started: false, reason: 'panic' });
+    expect(world.launcher.spawns).toHaveLength(1);
+  });
+});

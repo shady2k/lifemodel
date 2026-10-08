@@ -43,7 +43,7 @@ caddyfile`) and keeps it up while lifemodel is stopped.
 **The hosts are pinned, and only these three are routed.** The Caddyfile matches
 `localhost`, `boot.localhost` and `vault.localhost` and nothing else; any other
 `Host` is answered with one plain line and reaches no backend and no
-forward_auth. The loader refuses the same names with `400` as its own second
+forward_auth. The loader likewise refuses every other name with `400` as its own second
 line of defence, because it also listens where lifemodel can reach it, and it
 never derives a cookie `Domain` from a name a request supplied. A configured
 domain is not part of this stage: it comes with the outside-access idea

@@ -230,13 +230,15 @@ the repository's installation, and each person's plugin and hooks are their own.
   and after, and pass them to `check.mjs` (the gate will grow that wiring
   then).
 - **Static checks:** `npm run check` runs them together with the suite:
-  typecheck, lint (`npm run lint`), the format check (`npm run format:check`),
+  typecheck, the loader's typecheck (`npm run typecheck:loader`), lint
+  (`npm run lint`, `src/` and `loader/`), the format check
+  (`npm run format:check`, both trees),
   then `vitest run --maxWorkers=2`, stopping at the first failure (needs
   `node_modules`). The gate's own checks need only node: `npm run backlog`.
 - **Related tests:** `npx vitest run --maxWorkers=2 <touched test files>` —
   tests live in `tests/` (unit, integration), never in `src/` (AGENTS.md).
-- **Full stage checks:** `npm run check` — typecheck, lint, the format check
-  and `vitest run --maxWorkers=2`, stopping at the first failure (needs
+- **Full stage checks:** `npm run check` — typecheck, the loader's
+  typecheck, lint, the format check and `vitest run --maxWorkers=2`, stopping at the first failure (needs
   `node_modules`). It is exactly the command CI's `ci-product` job runs, and the
   verdict it gives is CI's on **node 24 with the dependencies of the committed
   lockfile** (`npm ci`); on another node version, or with other installed

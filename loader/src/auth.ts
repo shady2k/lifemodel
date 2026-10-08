@@ -198,10 +198,11 @@ export function loginLocation(forwardedHost: string, forwardedUri: string): stri
 
 /**
  * The `next` of a login, or null when it is not an address of this instance.
- * Only an http(s) URL on a pinned browser host is followed, so the login page
- * is never an open redirect to somewhere else.
+ * Only an http(s) URL on a pinned browser host AND on the port the login was
+ * reached on is followed, so the login page is never an open redirect to
+ * somewhere else, not even another local service.
  */
-export function vettedNext(next: string | undefined): string | null {
+export function vettedNext(next: string | undefined, requestHost: string): string | null {
   if (next === undefined || next === '') return null;
   let url: URL;
   try {
@@ -212,6 +213,10 @@ export function vettedNext(next: string | undefined): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.username !== '' || url.password !== '') return null;
   if (!isBrowserHost(url.hostname.toLowerCase())) return null;
+  // The same port as the login itself: cookies are not scoped by port, so a
+  // `next` on another local port would hand the fresh session to whatever
+  // listens there (rework 3, review round 3 finding 3).
+  if (url.port !== hostPort(requestHost)) return null;
   return url.href;
 }
 
