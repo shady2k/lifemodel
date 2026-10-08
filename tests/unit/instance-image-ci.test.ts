@@ -108,23 +108,27 @@ describe('the image jobs of CI', () => {
   });
 });
 
-describe('what the image says about confining lifemodel today', () => {
-  it('claims no egress confinement, and names the stage that will bring it', () => {
-    // The rule does not exist yet: no loader source installs one (rework 2,
-    // finding 3). The day that changes, this test is the reminder that the
-    // present-state documents have to change with it.
+describe('what the image says about confining lifemodel (lifemodel-q4x.3.2)', () => {
+  it('claims the egress rule in the present tense, and the source installs one', () => {
+    // The rule exists now: the loader installs it before lifemodel starts, so
+    // the present-state documents say so in the present tense (this test used
+    // to assert the opposite, with the day it changes named as its reminder).
+    expect(read('loader/src/egress.ts')).toContain('--uid-owner');
+    expect(read('loader/src/app.ts')).toContain('await egress.install()');
+    // The supervisor does not touch the kernel: the rule is the loader's own.
     expect(read('loader/src/supervisor.ts')).not.toContain('iptables');
-    expect(read('loader/src/app.ts')).not.toContain('iptables');
 
     const readme = read('README.md');
-    expect(readme).toContain('lifemodel-q4x.3');
+    expect(readme).toContain('lifemodel-q4x.3.2');
     expect(readme).toContain('NET_ADMIN');
-    // Present tense: the flag is carried for that stage, not used by it.
-    expect(readme).toMatch(/No such rule is\s+installed today/);
-    expect(readme).not.toContain('is what lets the loader confine');
+    // Present tense: lifemodel's traffic IS confined by the rule the loader
+    // installs, and the flag IS what that rule needs.
+    expect(readme).toContain('egress rule');
+    expect(readme).not.toMatch(/No such rule is\s+installed today/);
+    expect(readme).not.toMatch(/carried, not\s+yet used/);
 
     const dockerfile = read('docker/instance/Dockerfile');
-    expect(dockerfile).toContain('lifemodel-q4x.3');
-    expect(dockerfile).toContain('NO SUCH RULE EXISTS YET');
+    expect(dockerfile).toContain('lifemodel-q4x.3.2');
+    expect(dockerfile).not.toContain('NO SUCH RULE EXISTS YET');
   });
 });

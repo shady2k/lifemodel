@@ -25,7 +25,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +43,57 @@ const checkout = fileURLToPath(new URL('../..', import.meta.url));
 /** The first start builds the instance inside the container: this is its ceiling. */
 const FIRST_START_TIMEOUT_MS = 15 * 60_000;
 
+/**
+ * The stub OpenAI-compatible endpoint (lifemodel-q4x.3.2): a second container
+ * on the same Docker network as the instance, so lifemodel's user can reach it
+ * only through Agent Vault's proxy. It answers a fixed completion and appends
+ * every request it gets - method, URL, headers, body - to a file in its own
+ * /tmp, which the test reads with `docker exec`.
+ */
+const STUB_PORT = 8080;
+
+/** The name the stub is reachable under, inside the container network. */
+const STUB_HOST = 'q4x32-stub.local';
+
+const STUB_SCRIPT = `import { appendFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+
+createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (chunk) => chunks.push(chunk));
+  req.on('end', () => {
+    appendFileSync(
+      '/tmp/q4x32-requests.jsonl',
+      JSON.stringify({
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }) + '\\n'
+    );
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        id: 'chatcmpl-q4x32',
+        object: 'chat.completion',
+        created: 0,
+        model: 'q4x32-stub',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'a fixed completion from the stub' },
+            finish_reason: 'stop',
+          },
+        ],
+      })
+    );
+  });
+}).listen(${String(STUB_PORT)}, '0.0.0.0', () => {
+  // One line of its own, so a stub that cannot listen is not a silent wait.
+  console.log('q4x32 stub listening on ${String(STUB_PORT)}');
+});
+`;
+
 interface Run {
   status: number;
   out: string;
@@ -51,7 +102,13 @@ interface Run {
 function run(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
+  opts: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    /** One line on the command's standard input (Agent Vault's `--password-stdin`). */
+    input?: string;
+  } = {}
 ): Run {
   const result = spawnSync(cmd, args, {
     cwd: opts.cwd,
@@ -59,6 +116,7 @@ function run(
     encoding: 'utf8',
     timeout: opts.timeoutMs ?? 120_000,
     maxBuffer: 64 * 1024 * 1024,
+    ...(opts.input === undefined ? {} : { input: opts.input }),
   });
   if (result.error) {
     throw result.error;
@@ -136,6 +194,10 @@ let image = '';
 let container = '';
 let volume = '';
 let port = 0;
+/** The stub, its own directory and the network the instance shares with it. */
+let stubDir = '';
+let stubContainer = '';
+let network = '';
 
 /**
  * Waits for the event, never for a timer: the line the container logged. The
@@ -247,6 +309,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       } else {
         buildImage();
       }
+      await startStub();
       startContainer();
       await afterStart();
     },
@@ -276,6 +339,57 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     image = `lifemodel-first-start:${tag}`;
   }
 
+  /**
+   * The stub endpoint, as a second container from the same image on a network
+   * of its own. `docker create` + `docker cp` + `docker start`: the image
+   * carries no test fixture, and the container is the stub's own home.
+   */
+  async function startStub(): Promise<void> {
+    network = `q4x32-first-start-net-${process.pid}`;
+    stubContainer = `q4x32-stub-${process.pid}`;
+    stubDir = mkdtempSync(join(tmpdir(), 'q4x32-stub-'));
+    const script = join(stubDir, 'stub.mjs');
+    writeFileSync(script, STUB_SCRIPT);
+    docker(['network', 'create', network]);
+    docker([
+      'create',
+      '--name',
+      stubContainer,
+      '--network',
+      network,
+      // A service host in Agent Vault must be a real hostname (one dot at
+      // least, a letters-only TLD), so the stub answers to this one name.
+      '--network-alias',
+      STUB_HOST,
+      '--entrypoint',
+      'node',
+      image,
+      '/tmp/q4x32-stub.mjs',
+    ]);
+    docker(['cp', script, `${stubContainer}:/tmp/q4x32-stub.mjs`]);
+    docker(['start', stubContainer]);
+    // The stub's own line is the event: it is listening before anything asks.
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if (docker(['logs', stubContainer]).includes('q4x32 stub listening')) return;
+      if (Date.now() > deadline) {
+        throw new Error(`the stub never listened: ${docker(['logs', stubContainer])}`);
+      }
+      // A bounded wait, never a timer of its own: the stub's line is the event.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  /** The port Docker gave the published front door, read when it is needed. */
+  function publishedPort(): number {
+    const published = docker(['port', container, '80/tcp']).trim();
+    const match = /:(?<port>\d+)$/.exec(published);
+    if (match?.groups?.port === undefined) {
+      throw new Error(`docker port printed no port for ${container}: ${published}`);
+    }
+    return Number(match.groups.port);
+  }
+
   function startContainer(): void {
     container = `lifemodel-first-start-${process.pid}`;
     volume = `${container}-volume`;
@@ -288,6 +402,16 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       '--detach',
       '--name',
       container,
+      '--network',
+      network,
+      // The stub is a container on this network, so it has a private address
+      // (172.x), and Agent Vault's proxy refuses private ranges by default.
+      // `AGENT_VAULT_ALLOW_PRIVATE_RANGES` is the documented way to open them
+      // for an instance whose endpoint is on the owner's own network - which
+      // is exactly what a local model server or this stub is. Cloud metadata
+      // endpoints stay blocked either way.
+      '--env',
+      'AGENT_VAULT_ALLOW_PRIVATE_RANGES=true',
       '--publish',
       '127.0.0.1::80',
       '--cap-add',
@@ -298,12 +422,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       `source=${volume},target=/var/lib/lifemodel`,
       image,
     ]);
-    const published = docker(['port', container, '80/tcp']).trim();
-    const match = /:(?<port>\d+)$/.exec(published);
-    if (match?.groups?.port === undefined) {
-      throw new Error(`docker port printed no port for ${container}: ${published}`);
-    }
-    port = Number(match.groups.port);
+    port = publishedPort();
   }
 
   async function afterStart(): Promise<void> {
@@ -325,8 +444,17 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
   }
 
   afterAll(() => {
+    if (stubContainer !== '') {
+      run('docker', ['rm', '--force', stubContainer]);
+    }
+    if (stubDir !== '') {
+      rmSync(stubDir, { recursive: true, force: true });
+    }
     if (container !== '') {
       run('docker', ['rm', '--force', '--volumes', container]);
+    }
+    if (network !== '') {
+      run('docker', ['network', 'rm', '--force', network]);
     }
     if (volume !== '') {
       run('docker', ['volume', 'rm', '--force', volume]);
@@ -551,8 +679,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(after.body).not.toContain('No model endpoint is configured yet');
   }, 300_000);
 
-<<<<<<< HEAD
-=======
+
   describe("lifemodel's traffic, and the key on the way out (lifemodel-q4x.3.2)", () => {
     /** The made-up credential values the stub's services use: no real key. */
     const MODEL_KEY = 'q4x32-made-up-model-key-0001';
@@ -1004,8 +1131,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     }, 120_000);
   });
 
->>>>>>> dbb6934 (fixup! Create the config directory on the first save and stop intake before the restart (lifemodel-q4x.4.1))
-  it('holds panic and resumes, from the command line in the container', () => {
+  it(''holds panic and resumes, from the command line in the container', () => {
     const panicked = docker(['exec', container, 'lifemodel', 'panic'], { timeoutMs: 180_000 });
     expect(panicked).toContain('panic on');
     expect(panicked).toMatch(/^stopped\n/);

@@ -61,6 +61,24 @@ while true; do sleep 0.1; done
 `;
 
 /**
+ * The stand-in for iptables (lifemodel-q4x.3.2): the real loader runs as an
+ * ordinary user here, so it cannot install a kernel rule - and what this test
+ * is about is the loader's own sequencing, not the kernel. Every command line
+ * is written down, which is also how the test sees that the rule was installed
+ * before lifemodel was started.
+ */
+const IPTABLES_SOURCE = `#!/bin/sh
+printf '%s\\n' "$*" >> "$LIFEMODEL_EGRESS_LOG"
+# A fresh container: the chain and the jump into it are not there yet, and
+# those two questions are answered by the failure itself (the -L and -C calls).
+case "$*" in
+  "-L LIFEMODEL_EGRESS -n") exit 1 ;;
+  "-C OUTPUT -j LIFEMODEL_EGRESS") exit 1 ;;
+esac
+exit 0
+`;
+
+/**
  * The stand-in for Agent Vault. Its server answers the loader's readiness
  * probe and leaves on SIGTERM, and its CLI answers what the loader's
  * provisioning asks it - including the session file that proves the account
@@ -170,6 +188,9 @@ describe('the loader as the container main process', () => {
     writeFileSync(config.caddy.binary, CADDY_SOURCE, { mode: 0o755 });
     writeFileSync(config.caddy.config, ':80 {\n}\n');
     writeFileSync(config.agentVault.binary, AGENT_VAULT_SOURCE, { mode: 0o755 });
+    const iptables = join(standIn.root, 'iptables');
+    const egressLog = join(standIn.root, 'egress.log');
+    writeFileSync(iptables, IPTABLES_SOURCE, { mode: 0o755 });
     const fs = createNodeFileSystem();
     const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
     await state.ensureLayout();
@@ -190,6 +211,8 @@ describe('the loader as the container main process', () => {
         LIFEMODEL_AGENT_VAULT_API_PORT: String(vaultApiPort),
         LIFEMODEL_DRAIN_WAIT_MS: '4000',
         LIFEMODEL_MARKER: standIn.marker,
+        LIFEMODEL_EGRESS_IPTABLES: iptables,
+        LIFEMODEL_EGRESS_LOG: egressLog,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams;
@@ -213,6 +236,17 @@ describe('the loader as the container main process', () => {
         20_000
       );
       expect(output.some((line) => line.includes('caddy is up'))).toBe(true);
+      // The kernel rule was installed by the loader's own process, before it
+      // started lifemodel: one acceptance for lifemodel's uid to loopback, and
+      // a REJECT for everything else from that uid.
+      expect(readFileSync(egressLog, 'utf8').trim().split('\n')).toEqual([
+        '-L LIFEMODEL_EGRESS -n',
+        '-N LIFEMODEL_EGRESS',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -d 127.0.0.1 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
+        '-C OUTPUT -j LIFEMODEL_EGRESS',
+        '-A OUTPUT -j LIFEMODEL_EGRESS',
+      ]);
       await waitUntil(() => existsSync(`${standIn.marker}.up`), 'the stand-in for lifemodel is up');
 
       const exit = new Promise<number | null>((resolve) => {
