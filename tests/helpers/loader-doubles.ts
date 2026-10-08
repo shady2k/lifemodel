@@ -100,6 +100,8 @@ export interface FakeChild extends SpawnedProcess {
   exit(code: number | null, signal?: NodeJS.Signals | null): void;
   /** The test decides that the OS could not start it at all. */
   fail(error: Error): void;
+  /** The OS's verdict on a held spawn (`holdSpawns`): the process runs now. */
+  confirmSpawn(): void;
 }
 
 export interface SpawnedFake {
@@ -124,6 +126,13 @@ export class FakeLauncher implements ProcessLauncher {
   private failError: { error: Error; command?: string } | null = null;
   /** Every spawn of `command` (all of them when it is omitted) throws this. */
   private refuseError: { error: Error; command?: string } | null = null;
+  /** Spawns wait for the test's `confirmSpawn` before the OS says they run. */
+  private holding = false;
+
+  /** The OS's verdict on every later spawn waits until the test confirms it. */
+  holdSpawns(): void {
+    this.holding = true;
+  }
 
   /** The OS cannot start the process: the error arrives after `spawn`. */
   failSpawns(error: Error, command?: string): void {
@@ -151,7 +160,7 @@ export class FakeLauncher implements ProcessLauncher {
     const spawnListeners: (() => void)[] = [];
     const exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
     const errorListeners: ((error: Error) => void)[] = [];
-    let spawned = failing === null;
+    let spawned = failing === null && !this.holding;
     let failure: Error | null = null;
     const child: FakeChild = {
       pid: 4000 + this.spawns.length,
@@ -177,6 +186,10 @@ export class FakeLauncher implements ProcessLauncher {
       fail: (error) => {
         failure = error;
         for (const listener of errorListeners.splice(0)) listener(error);
+      },
+      confirmSpawn: () => {
+        spawned = true;
+        for (const listener of spawnListeners.splice(0)) listener();
       },
     };
     this.spawns.push({ command, args, options, child });
@@ -394,6 +407,7 @@ export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld
     privileged: options.privileged ?? false,
     lifemodel: identity,
     drainWaitMs: 5_000,
+    killWaitMs: 1_000,
     stopBudgetMs: 6_000,
     restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
   };

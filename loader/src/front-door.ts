@@ -30,10 +30,12 @@ export interface FrontDoor {
   start(): Promise<void>;
   /**
    * Stop Caddy, and never wait longer than the budget the caller has left of
-   * the stop's own deadline (rework 2, finding 10). At zero the front door is
-   * killed rather than waited for: the container is leaving.
+   * the stop's own deadline (rework 2, finding 10), the wait after SIGKILL
+   * included (rework 3). At zero the front door is killed rather than waited
+   * for: the container is leaving. False when Caddy had not exited even after
+   * SIGKILL when the budget ran out.
    */
-  stop(budgetMs?: number): Promise<void>;
+  stop(budgetMs?: number): Promise<boolean>;
   status(): { running: boolean; pid: number | null; restarts: number };
 }
 
@@ -102,15 +104,19 @@ export function createFrontDoor(deps: FrontDoorDeps): FrontDoor {
     })();
   }
 
-  async function stop(budgetMs: number = config.caddy.stopWaitMs): Promise<void> {
+  async function stop(
+    budgetMs: number = config.caddy.stopWaitMs + config.killWaitMs
+  ): Promise<boolean> {
+    const deadline = clock.now() + Math.max(0, budgetMs);
+    const remaining = (): number => Math.max(0, deadline - clock.now());
     epoch += 1;
     stopping = true;
     const current = child;
     if (current === null) {
       stopping = false;
-      return;
+      return true;
     }
-    const waitMs = Math.min(config.caddy.stopWaitMs, Math.max(0, budgetMs));
+    const waitMs = Math.min(config.caddy.stopWaitMs, Math.max(0, remaining() - config.killWaitMs));
     logger.info({ pid }, 'stopping caddy');
     const exited = new Promise<boolean>((resolve) => {
       current.onExit(() => {
@@ -122,11 +128,17 @@ export function createFrontDoor(deps: FrontDoorDeps): FrontDoor {
     if (!left) {
       logger.warn({ pid }, `caddy did not leave within ${String(waitMs)} ms: it is killed`);
       current.kill('SIGKILL');
-      await exited;
+      const reaped = await Promise.race([exited, clock.sleep(remaining()).then(() => false)]);
+      if (!reaped) {
+        logger.error({ pid }, 'caddy had not exited after SIGKILL when the stop deadline ran out');
+        stopping = false;
+        return false;
+      }
     }
     child = null;
     pid = null;
     stopping = false;
+    return true;
   }
 
   return {

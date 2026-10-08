@@ -178,15 +178,16 @@ describe('the drain', () => {
     const stopping = supervisor.stop('shutdown', 3_000);
     await settle();
 
-    // The stop's own deadline wins over lifemodel's 95 s drain.
-    expect(world.clock.sleeps).toEqual([3_000]);
+    // The stop's own deadline wins over lifemodel's 95 s drain, and it keeps
+    // the room SIGKILL needs to be reaped (killWaitMs, 1 s here).
+    expect(world.clock.sleeps).toEqual([2_000]);
     world.clock.resolveAll();
     await settle();
     world.launcher.spawns[0]?.child.exit(null, 'SIGKILL');
 
     expect(await stopping).toEqual({ stopped: true, drainTimedOut: true });
     const errors = errorLines(rig.lines);
-    expect(errors[0]?.message).toContain('3000 ms drain');
+    expect(errors[0]?.message).toContain('2000 ms drain');
   });
 
   it('waits exactly the drain the contract gives lifemodel', async () => {
@@ -275,5 +276,158 @@ describe('docker stop, end to end through the loader', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.message).toContain('did not exit within its');
     expect(errors[0]?.message).toContain('it is killed');
+  });
+});
+
+describe('a stop that meets a start in flight (rework 3, review round 2 finding 1)', () => {
+  it('spawns nothing when the stop arrives while the panic flag is being read', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    const lines: RecordedLine[] = [];
+    let answerPanic: (set: boolean) => void = () => undefined;
+    const supervisor = createSupervisor({
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      config: world.config,
+      isPanicSet: () =>
+        new Promise<boolean>((resolve) => {
+          answerPanic = resolve;
+        }),
+    });
+
+    const starting = supervisor.start();
+    await settle();
+    const stopping = supervisor.stop('shutdown');
+    await settle();
+    answerPanic(false);
+
+    expect(await starting).toEqual({ started: false, reason: 'stopping' });
+    expect(await stopping).toEqual({ stopped: true, drainTimedOut: false });
+    expect(world.launcher.spawns).toHaveLength(0);
+    expect(supervisor.status().state).toBe('stopped');
+  });
+
+  it('drains the child of a spawn the OS had not confirmed yet when the stop arrived', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    world.launcher.holdSpawns();
+
+    const starting = supervisor.start();
+    await settle();
+    expect(world.launcher.spawns).toHaveLength(1);
+    const child = world.launcher.spawns[0]?.child;
+
+    const stopping = supervisor.stop('shutdown');
+    await settle();
+    child?.confirmSpawn();
+    await starting;
+    await settle();
+    // The stop found the child the start made and gave it its drain.
+    expect(child?.signals).toEqual(['SIGTERM']);
+    child?.exit(0, null);
+
+    expect(await stopping).toEqual({ stopped: true, drainTimedOut: false });
+    expect(supervisor.status().state).toBe('stopped');
+    world.clock.resolveAll();
+    await settle();
+    expect(world.launcher.spawns).toHaveLength(1);
+  });
+
+  it('starts nothing once the loader is closing, not even the restart of a death', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+
+    supervisor.close();
+    world.launcher.spawns[0]?.child.exit(1, null);
+    await settle();
+    world.clock.resolveAll();
+    await settle();
+
+    expect(world.launcher.spawns).toHaveLength(1);
+    expect(await supervisor.start()).toEqual({ started: false, reason: 'stopping' });
+    expect(world.launcher.spawns).toHaveLength(1);
+  });
+});
+
+describe('the wait after SIGKILL (rework 3, review round 2 finding 2)', () => {
+  it('ends at the budget when the child is not reaped, and says so', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+
+    const stopping = supervisor.stop('shutdown', 3_000);
+    await settle();
+    world.clock.resolveAll(); // the drain runs out
+    await settle();
+    world.clock.resolveAll(); // and so does the room kept for SIGKILL
+    await settle();
+
+    expect(await stopping).toEqual({ stopped: false, drainTimedOut: true });
+    expect(world.launcher.spawns[0]?.child.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(errorLines(rig.lines).map((line) => line.message)).toContain(
+      'lifemodel had not exited after SIGKILL when the stop deadline ran out'
+    );
+  });
+
+  it('logs an exit the loader asked for at info, and one nobody asked for at warn', async () => {
+    const rig = makeSupervisor(createLoaderWorld());
+    const { supervisor, world } = rig;
+    await supervisor.start();
+    const stopping = supervisor.stop('panic');
+    await settle();
+    world.launcher.spawns[0]?.child.exit(0, null);
+    await stopping;
+    const asked = rig.lines.find((line) => line.message === 'lifemodel exited (code 0)');
+    expect(asked?.level).toBe('info');
+
+    await supervisor.start();
+    world.launcher.spawns[1]?.child.exit(1, null);
+    await settle();
+    const unasked = rig.lines.find((line) => line.message === 'lifemodel exited (code 1)');
+    expect(unasked?.level).toBe('warn');
+  });
+
+  it('makes the loader leave with 1 and one line naming what is still pending', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    const fs = createNodeFileSystem();
+    const state = createLoaderState({
+      fs,
+      config: world.config,
+      logger: createRecordingLogger([]),
+    });
+    await state.ensureLayout();
+    await state.writeAuth(await hashPassword('right'));
+    const lines: RecordedLine[] = [];
+    const app = createLoaderApp({
+      config: world.config,
+      fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => undefined,
+    });
+    roots.push(world.root);
+    await app.start();
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+
+    const leaving = app.shutdown('SIGTERM');
+    await settle();
+    // lifemodel never leaves, not even after SIGKILL; Caddy does.
+    world.clock.resolveAll();
+    await settle();
+    world.clock.resolveAll();
+    await settle();
+    caddySpawn(world)?.child.exit(0, null);
+
+    expect(await leaving).toBe(1);
+    const pending = errorLines(lines).find((line) =>
+      line.message.startsWith('the stop deadline ran out')
+    );
+    expect(pending?.message).toContain('lifemodel (not reaped after SIGKILL)');
+    expect(pending?.message).not.toContain('caddy');
   });
 });

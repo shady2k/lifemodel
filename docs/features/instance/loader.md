@@ -44,12 +44,21 @@ are part of `npm run check`.
    the container and of the Docker daemon until `lifemodel resume` clears it.
 8. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
    lifemodel's own drain is 90 s. The whole stop is ONE deadline of 110 s
-   (`LIFEMODEL_STOP_BUDGET_MS`): lifemodel drains first, Caddy gets what is
-   left of the same budget (at most its own 10 s, and nothing at all if the
-   budget is gone), so the sequence always fits the documented
-   `--stop-timeout 120`. Before that deadline was shared, lifemodel could take
-   95 s and Caddy 10 s more against a 100 s stop timeout, and Docker could kill
-   the loader in the middle of its last step.
+   (`LIFEMODEL_STOP_BUDGET_MS`), counted from the moment the stop signal
+   arrives: closing the loader's own server (at most 5 s), lifemodel's drain,
+   the wait after a SIGKILL and Caddy's exit all spend it, and each step keeps
+   5 s (`LIFEMODEL_KILL_WAIT_MS`) for a killed process to be reaped. No step
+   waits past the deadline: when it runs out the loader logs one error line
+   naming what is still pending (`the stop deadline ran out with work still
+   pending: ...`) and leaves with code 1 - before Docker's own kill at the
+   documented `--stop-timeout 120`. A process the kernel does not release even
+   after SIGKILL is left behind in that case rather than waited for.
+9. **A stop meets a start safely.** A stop that arrives while lifemodel is
+   being started (the panic flag being read, or the OS not yet having said the
+   process runs) waits for that start and then stops what it started, and once
+   the loader is leaving nothing is started at all - not a resume, not the
+   restart of a death. An exit the loader asked for is logged at info; one
+   nobody asked for at warn.
 
 ## The volume
 
@@ -112,9 +121,16 @@ under it.
 
 Caddy routes by host: `boot.<host>` to the loader, `<host>` to lifemodel,
 `vault.<host>` to Agent Vault, and asks the loader about every request
-(`GET /_auth/verify`: `200 ok` with the session cookie, `401 no session`
-without it). The login and password-setting routes (`/login`, `/setup`) are the
-only ones a request reaches without that check. The CSS of those pages is
+(`GET /_auth/verify`: `200 ok` with the session cookie). Without one, a
+browser OPENING a page (`GET` or `HEAD`, from Caddy's `X-Forwarded-Method`) is
+sent with `303` to `http://boot.<host>[:port]/login?next=<where it was going>`
+- built from the pinned names, only the port taken from the request - and
+every other request gets `401 no session`, so nothing that changes state is
+ever redirected. The login page keeps `next` only when it is an `http(s)` URL
+on one of the pinned browser hosts (no open redirect) and returns there after
+the password; without a password yet, `/login` sends on to `/setup`. The login
+and password-setting routes (`/login`, `/setup`) are the only ones a request
+reaches without that check. The CSS of those pages is
 inline, so they need no asset route.
 
 **The hosts are pinned.** Caddy matches only `localhost`, `boot.localhost` and

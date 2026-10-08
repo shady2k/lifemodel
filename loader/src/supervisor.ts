@@ -11,7 +11,15 @@
  *     backoff, so a crash loop does not become a busy loop;
  *   - SIGTERM is FORWARDED and its exit is awaited for the length of
  *     lifemodel's own drain (95 s against a 90 s drain), so `docker stop`
- *     gives the instance its restart guarantee instead of killing it;
+ *     gives the instance its restart guarantee instead of killing it; a stop
+ *     never waits past the budget it is given, the wait after SIGKILL included
+ *     (rework 3, review round 2 finding 2);
+ *   - a stop that arrives while a start is IN FLIGHT (reading the panic flag,
+ *     or waiting for the OS to say the process runs) waits for that start and
+ *     then stops what it started, and once the loader is closing no start
+ *     happens at all (rework 3, review round 2 finding 1: a stop used to see
+ *     no child there, say it had stopped, and the start then ran lifemodel
+ *     with nothing left to drain it);
  *   - a start that the OPERATING SYSTEM refused - `spawn` threw, or the child
  *     emitted `error` before it ever ran - is reported as failed and is NOT
  *     retried: the same input fails the same way every time, so the owner is
@@ -45,7 +53,7 @@ export interface LifemodelStatus {
   lastError: string | null;
 }
 
-export type StartReason = 'started' | 'already-running' | 'panic' | 'failed';
+export type StartReason = 'started' | 'already-running' | 'panic' | 'failed' | 'stopping';
 
 export interface StartOutcome {
   started: boolean;
@@ -53,6 +61,7 @@ export interface StartOutcome {
 }
 
 export interface StopOutcome {
+  /** False only when lifemodel had not exited even after SIGKILL when the budget ran out. */
   stopped: boolean;
   /** lifemodel was still running when its drain ran out and was killed. */
   drainTimedOut: boolean;
@@ -69,6 +78,8 @@ export interface SupervisorDeps {
 
 export interface Supervisor {
   start(): Promise<StartOutcome>;
+  /** The loader is leaving: from now on no start happens, a restart included. */
+  close(): void;
   /** Stop lifemodel; `budgetMs` caps the wait for its drain (the stop's deadline). */
   stop(reason: string, budgetMs?: number): Promise<StopOutcome>;
   status(): LifemodelStatus;
@@ -108,6 +119,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   /** Bumped by every stop: a restart scheduled for an older epoch is dropped. */
   let epoch = 0;
   let stopping = false;
+  /** Set once by `close()`: the loader is leaving and nothing starts again. */
+  let closed = false;
+  /** The start being made now; a stop waits for it before it looks for a child. */
+  let startInFlight: Promise<StartOutcome> | null = null;
 
   function spawnOptions(): SpawnOptions {
     const options: SpawnOptions = {
@@ -132,7 +147,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const signal_ = exit;
     exit = null;
     signal_?.resolve();
-    logger.warn(
+    // An exit the loader asked for (panic, shutdown) is the expected end of a
+    // stop; warn is kept for an exit nobody asked for.
+    const log = stopping ? logger.info.bind(logger) : logger.warn.bind(logger);
+    log(
       { code, signal, ranMs },
       code === null && signal === null
         ? 'lifemodel did not start'
@@ -157,7 +175,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     );
     void (async () => {
       await clock.sleep(delay);
-      if (scheduledEpoch !== epoch || stopping) return;
+      if (scheduledEpoch !== epoch || stopping || closed) return;
       if (await isPanicSet()) {
         logger.info({}, 'lifemodel is not restarted: panic is set');
         return;
@@ -190,14 +208,32 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     });
   }
 
-  async function start(): Promise<StartOutcome> {
-    if (state === 'running' || state === 'starting') {
-      return { started: false, reason: 'already-running' };
+  function start(): Promise<StartOutcome> {
+    if (state === 'running' || state === 'starting' || startInFlight !== null) {
+      return Promise.resolve({ started: false, reason: 'already-running' });
     }
+    const attempt = startOnce().finally(() => {
+      startInFlight = null;
+    });
+    startInFlight = attempt;
+    return attempt;
+  }
+
+  /** Not started: the loader is closing, or a stop began while this start was being made. */
+  function notStartedStopping(): StartOutcome {
+    logger.info({}, 'lifemodel is not started: it is being stopped');
+    return { started: false, reason: 'stopping' };
+  }
+
+  async function startOnce(): Promise<StartOutcome> {
+    if (closed || stopping) return notStartedStopping();
     if (await isPanicSet()) {
       logger.info({}, 'lifemodel is not started: panic is set');
       return { started: false, reason: 'panic' };
     }
+    // The panic read above is asynchronous: a stop can begin while it is
+    // pending, and then nothing may be spawned.
+    if (closed || stopping) return notStartedStopping();
     state = 'starting';
     let spawned: SpawnedProcess;
     try {
@@ -205,6 +241,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     } catch (error) {
       return refusedStart(describe(error));
     }
+    // The verdict is awaited BEFORE the child is owned, but the stop that may
+    // arrive meanwhile waits for this whole start (`startInFlight`) and then
+    // finds the child below: nothing spawned here escapes a stop.
     const outcome = await spawnOutcome(spawned);
     if (outcome instanceof Error) {
       // It never ran, so nothing is running to stop and nothing is retried.
@@ -235,11 +274,23 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
    * Stop lifemodel: SIGTERM, then its drain - never longer than the budget the
    * caller has left. `docker stop` gives the whole stop one deadline, and the
    * front door has to leave inside the same one (rework 2, finding 10), so the
-   * drain is the smaller of lifemodel's own 95 s and what is left of it.
+   * drain is the smaller of lifemodel's own 95 s and what is left of it, less
+   * the room kept for SIGKILL to be reaped; and the wait after SIGKILL ends at
+   * the budget too (a child stuck in the kernel is not waited for past it).
    */
-  async function stop(reason: string, budgetMs: number = config.drainWaitMs): Promise<StopOutcome> {
+  async function stop(
+    reason: string,
+    budgetMs: number = config.drainWaitMs + config.killWaitMs
+  ): Promise<StopOutcome> {
+    const deadline = clock.now() + Math.max(0, budgetMs);
+    const left = (): number => Math.max(0, deadline - clock.now());
     epoch += 1; // a restart scheduled before this stop never starts anything
     stopping = true;
+    // A start being made now is waited for: either it sees the stop and spawns
+    // nothing, or it spawned and its child is stopped below. Its own waits are
+    // the panic read and the OS's spawn verdict, both prompt.
+    const inFlight = startInFlight;
+    if (inFlight !== null) await inFlight;
     const current = child;
     const currentExit = exit;
     if (current === null || currentExit === null) {
@@ -248,7 +299,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       logger.info({ reason }, 'lifemodel is not running');
       return { stopped: true, drainTimedOut: false };
     }
-    const waitMs = Math.min(config.drainWaitMs, Math.max(0, budgetMs));
+    const waitMs = Math.min(config.drainWaitMs, Math.max(0, left() - config.killWaitMs));
     state = 'stopping';
     logger.info({ reason, pid }, 'stopping lifemodel: SIGTERM, then its drain');
     current.kill('SIGTERM');
@@ -264,7 +315,20 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         `lifemodel did not exit within its ${String(waitMs)} ms drain: it is killed`
       );
       current.kill('SIGKILL');
-      await currentExit.promise;
+      const reaped = await Promise.race([
+        currentExit.promise.then(() => true),
+        clock.sleep(left()).then(() => false),
+      ]);
+      if (!reaped) {
+        // The budget is spent: the stop does not wait any longer for a child
+        // the kernel has not let go of. The caller leaves with a failure.
+        stopping = false;
+        logger.error(
+          { pid },
+          'lifemodel had not exited after SIGKILL when the stop deadline ran out'
+        );
+        return { stopped: false, drainTimedOut: true };
+      }
     }
     stopping = false;
     state = 'stopped';
@@ -274,6 +338,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
   return {
     start,
+    close: () => {
+      closed = true;
+    },
     stop,
     status: () => ({ state, pid, starts, restarts, startedAt, lastExit, lastError }),
   };

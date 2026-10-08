@@ -121,16 +121,43 @@ describe('caddy, the front door the loader owns', () => {
       () => lifemodelSpawn(world)?.child.signals.length === 1,
       'lifemodel is asked to stop'
     );
-    // Five of the stop's six seconds pass while lifemodel drains; what is left
-    // of the same deadline is what Caddy gets, not its own ten.
-    world.clock.advance(5_500);
+    // Four of the stop's six seconds pass while lifemodel drains; what is left
+    // of the same deadline, less the room kept for SIGKILL (1 s), is what
+    // Caddy gets - not its own wait.
+    world.clock.advance(4_500);
     lifemodelSpawn(world)?.child.exit(0, null);
     await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
 
-    expect(world.clock.sleeps).toEqual([world.config.drainWaitMs, 500]);
+    // The loader's own server close (bounded by the kill room), the drain,
+    // then Caddy's share.
+    expect(world.clock.sleeps).toEqual([1_000, world.config.drainWaitMs, 500]);
     caddySpawn(world)?.child.exit(0, null);
 
     expect(await leaving).toBe(0);
+  });
+
+  it('gives up on a Caddy that is not reaped after SIGKILL at the deadline (rework 3)', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, lines } = await createRunningLoader(world);
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+
+    const leaving = app.shutdown('SIGTERM');
+    await waitUntil(
+      () => lifemodelSpawn(world)?.child.signals.length === 1,
+      'lifemodel is asked to stop'
+    );
+    lifemodelSpawn(world)?.child.exit(0, null);
+    await waitUntil(() => caddySpawn(world)?.child.signals.length === 1, 'caddy is asked to stop');
+    world.clock.resolveAll(); // Caddy's wait runs out: SIGKILL
+    await waitUntil(() => caddySpawn(world)?.child.signals.length === 2, 'caddy is killed');
+    world.clock.resolveAll(); // and it is still not reaped at the deadline
+
+    expect(await leaving).toBe(1);
+    expect(caddySpawn(world)?.child.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    const pending = lines.find((line) => line.message.startsWith('the stop deadline ran out'));
+    expect(pending?.message).toContain('caddy (not reaped after SIGKILL)');
   });
 
   it('is stopped last: lifemodel drains first, the front door closes after', async () => {
