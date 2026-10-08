@@ -43,8 +43,6 @@ export interface LoaderHttpDeps {
   bootstrap: Bootstrap;
   logger: LoaderLogger;
   clock: Clock;
-  /** The loader cannot go on: log it once, then leave with a non-zero code. */
-  fatal(error: unknown): void;
 }
 
 export interface LoaderHttp {
@@ -175,17 +173,18 @@ ${message === undefined ? '' : `<p class="bad">${escapeHtml(message)}</p>`}
 }
 
 function dashboardPage(status: InstanceStatus): string {
-  const running = status.lifemodel === 'running';
+  const failed = status.phase === 'failed';
+  const state = failed ? 'failed' : status.lifemodel === 'running' ? 'running' : 'stopped';
   return page(
     'lifemodel loader',
     `<h2>lifemodel</h2>
 <dl>
-  <dt>state</dt><dd>${running ? 'running' : 'stopped'}${status.phase === 'idle' ? '' : ` (${status.phase})`}</dd>
+  <dt>state</dt><dd>${state}${failed || status.phase === 'idle' ? '' : ` (${status.phase})`}</dd>
   <dt>commit</dt><dd>${status.commit === null ? 'none' : escapeHtml(status.commit)}</dd>
   <dt>panic</dt><dd>${status.panic ? 'on' : 'off'}</dd>
   <dt>restarts</dt><dd>${String(status.restarts)}</dd>
 </dl>
-${status.lastError === null ? '' : `<p class="bad">${escapeHtml(status.lastError)}</p>`}
+${status.lastError === null ? '' : `<p class="bad">failed: ${escapeHtml(status.lastError)}</p>`}
 <form method="post" action="/panic"><button type="submit">Panic: stop lifemodel</button></form>
 <form method="post" action="/resume"><button type="submit">Resume: start lifemodel</button></form>
 <p class="note">Panic keeps lifemodel down across a restart of the container until you resume it.</p>
@@ -195,10 +194,6 @@ ${status.lastError === null ? '' : `<p class="bad">${escapeHtml(status.lastError
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   const { state, supervisor, bootstrap, logger, clock } = deps;
-  // Bound: the loader's way out, not a value to hand around.
-  const fatal = (error: unknown): void => {
-    deps.fatal(error);
-  };
 
   async function hasSession(req: IncomingMessage): Promise<boolean> {
     const record = await state.readAuth();
@@ -248,8 +243,9 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     const host = req.headers.host ?? 'localhost';
     logger.info({ host }, "the loader's password is set: seeding and starting the instance");
     // The browser is answered at once; the first start takes minutes and the
-    // loader's own page reports where it is.
-    void bootstrap.ensureReady('setup').catch(fatal);
+    // loader's own page reports where it is - a failure among them included
+    // (rework 1: it is recorded in the state, it does not end the loader).
+    void bootstrap.ensureReady('setup');
     redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
   }
 
@@ -299,7 +295,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       } else {
         await state.clearPanic();
         logger.info({}, 'panic cleared from the loader page: starting lifemodel');
-        void bootstrap.ensureReady('resume').catch(fatal);
+        void bootstrap.ensureReady('resume');
       }
       redirect(res, '/');
       return;

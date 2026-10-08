@@ -1,10 +1,18 @@
 /**
  * The loader, wired (lifemodel-q4x.2.1).
  *
- * One place decides what a fatal failure is: an input the loader needs and
- * does not have (the seed bundle, a writable volume, its port) is said in one
- * line, with its cause, and then the loader leaves with a non-zero code. It
- * never falls back to something else quietly.
+ * One place decides what ends the process: the inputs the loader itself needs
+ * to COME UP - a volume it can prepare, its own port, the front door it starts
+ * and, while the volume holds no repository yet, the code the image carries -
+ * are checked before it serves, said in one line with their cause, and then
+ * the loader leaves with a non-zero code. It never falls back to something
+ * else quietly.
+ *
+ * Everything that fails AFTER that - seeding the repository, building the
+ * commit, starting lifemodel - leaves the loader UP with Caddy and its
+ * interface, its state failed with the reason, and the owner's retry (the
+ * page's resume button, or `lifemodel resume`) as the way on (rework 1:
+ * decision 11, the interface runs always; it is the way out).
  */
 import { createBootstrap, type Bootstrap } from './bootstrap.js';
 import type { Clock } from './clock.js';
@@ -16,6 +24,7 @@ import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
+import { requireSeedBundleForFirstStart } from './repo.js';
 import { createSupervisor, type Supervisor } from './supervisor.js';
 
 export interface LoaderAppDeps {
@@ -101,10 +110,14 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     start: async () => {
       try {
         await state.ensureLayout();
+        // The code the image carries, for a volume that holds no repository
+        // yet: without it this instance can never be seeded, so it is one of
+        // the loader's own inputs and is checked before it serves.
+        await requireSeedBundleForFirstStart({ fs, config });
         // The front door first: it is what the owner reaches, and it must be
         // up while lifemodel is still being seeded, built or panicked.
         await frontDoor.start();
-        http = createLoaderHttp({ state, supervisor, bootstrap, logger, clock, fatal });
+        http = createLoaderHttp({ state, supervisor, bootstrap, logger, clock });
         await listen();
         http.server.on('error', (error) => {
           fatal(
@@ -124,7 +137,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         }
         // A password is set, so this start continues where the last one left
         // off: seed if the volume is empty, build if needed, start lifemodel.
-        void bootstrap.ensureReady('startup').catch(fatal);
+        // A failure here is the instance's state, not the loader's exit.
+        void bootstrap.ensureReady('startup');
       } catch (error) {
         fatal(
           error instanceof LoaderFatalError

@@ -32,12 +32,17 @@ are part of `npm run check`.
 4. **Every start after that** reuses the repository that is on the volume: a
    commit that was built is not built again, and the repository is never
    overwritten by a newer image.
-5. **Supervises lifemodel** as an unprivileged child (uid/gid 1000), restarts
+5. **A failure of the instance does not stop it.** Seeding, building or
+   starting lifemodel that fails leaves the loader up with Caddy, its login and
+   its interface; its state says `failed` with the reason, and the owner retries
+   from the page or with `lifemodel resume`. Only the inputs the loader itself
+   needs to come up end the process (below).
+6. **Supervises lifemodel** as an unprivileged child (uid/gid 1000), restarts
    it with a growing backoff when it dies, and refuses to start it at all
    while panic is set.
-6. **Holds panic**, a root-only flag on the volume. It survives a restart of
+7. **Holds panic**, a root-only flag on the volume. It survives a restart of
    the container and of the Docker daemon until `lifemodel resume` clears it.
-7. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
+8. **Forwards SIGTERM** to lifemodel and waits up to 95 s for it to leave -
    lifemodel's own drain is 90 s, and the documented command stops the
    container at 100 s.
 
@@ -60,6 +65,19 @@ carries the code as `/opt/lifemodel/seed.bundle`, a `git bundle` with history;
 the first start clones it, renames the bundle remote to `upstream`, points
 `upstream` at `https://github.com/shady2k/lifemodel.git` and gives the
 repository to lifemodel.
+
+The loader runs as root and `repo/` belongs to uid 1000, and git refuses a
+repository whose owner is not the caller:
+
+```
+fatal: detected dubious ownership in repository at '/var/lib/lifemodel/repo'
+```
+
+Every git call the loader makes on that repository therefore names that one
+path as a safe directory (`git -c safe.directory=/var/lib/lifemodel/repo ...`)
+- never `*`, so nothing else on the volume becomes trusted by accident. A git
+call that fails is reported with git's own first line, not with the advice
+under it.
 
 ## The ports and the hosts
 
@@ -100,21 +118,44 @@ docker exec <container> lifemodel panic    # stop lifemodel, hold it down
 docker exec <container> lifemodel resume   # clear panic, start lifemodel
 ```
 
-Each of them prints three lines - the state, `commit <sha>`, `panic on|off` -
-and exits 0; a failed request exits 1 with one line saying why. `panic` stops
-lifemodel with its drain, `resume` starts it again (building this commit first
-if it was never built).
+Each of them prints the state - `running`, `stopped`, or `failed` when the
+instance did not come up - then `commit <sha>`, `panic on|off` and, while it is
+failed, one more line `failed: <reason>`. A failed request exits 1 with one
+line saying why. `status` and `panic` exit 0 whenever the loader answered;
+`resume` exits 1 when the instance did not come up (its reason was printed).
+`panic` stops lifemodel with its drain, `resume` starts it again (building this
+commit first if it was never built) - and it is the retry after a failed build,
+whether or not panic was ever set.
 
 ## What the loader says when it cannot go on
 
-An input the loader needs and does not have is never worked around. It writes
-one JSON line to stdout saying what is missing and why, and leaves with a
-non-zero code:
+An input is never worked around, and what happens to the loader depends on
+whose input it was.
 
-- the seed bundle is missing (the image carries no code to seed from);
+**The loader's own inputs, checked before it serves.** It writes one JSON line
+to stdout saying what is missing and why, and leaves with a non-zero code - the
+container's restart policy then shows the owner a container that keeps coming
+back and failing, with that line in `docker logs`:
+
 - the volume cannot be prepared (it is not a writable directory);
+- the seed bundle is missing **and the volume holds no repository yet**: the
+  image carries no code to seed an instance from, and this instance has none;
 - `127.0.0.1:7000` is taken;
 - Caddy is missing, or has no configuration to route with.
+
+**A failure of the instance, after the loader is up.** Seeding, building or
+starting lifemodel that fails does NOT end the loader: it stays up with Caddy
+and its interface, and its state says `failed` with the reason - on its page,
+in the JSON of `/_api/status` and in `lifemodel status` (which prints
+`failed: <reason>`). Login, panic and resume keep working: `resume` is the
+retry, and a failed build waits for the owner instead of looping. The cases:
+the repository is there but is not one (a file, not a directory); the git
+clone, the `upstream` remote or the chown into uid 1000 failed; `npm ci` or
+`npm run build` failed, or the build wrote no `dist/index.js`; the repository
+has no readable commit; lifemodel could not be started. Once it has started,
+lifemodel dying is the supervisor's business: it is started again with a
+growing backoff (1 s, 2 s, 4 s ... up to 30 s, reset after a run of 60 s or
+more), and panic holds it down.
 
 Everything else the loader logs is one line per event, JSON with
 `component=loader`, so a person reading `docker logs` can tell its lines from
@@ -127,5 +168,16 @@ doubles only at the two boundaries a test cannot cross unprivileged: starting
 lifemodel as uid 1000, and running git and npm. The volume is a real
 directory, the files are really written and the HTTP server really listens.
 `tests/integration/loader-*.test.ts` add the parts that need the real thing: a
-real `git bundle` cloned with the real git, and a real child process that
-traps SIGTERM and drains before leaving, under a real loader process.
+real `git bundle` cloned with the real git, a real child process that traps
+SIGTERM and drains before leaving under a real loader process, and - through
+the loader's HTTP interface - a first start whose build fails.
+
+`tests/integration/instance-first-start.test.ts` is the end-to-end one, with
+the real loader and the real image: an empty volume, `POST /setup`, and then
+what a person gets - `lifemodel status` running on a 40-hex commit, lifemodel
+itself running as uid 1000. It needs docker and the first `npm ci` inside the
+container, so it is off unless `LIFEMODEL_DOCKER_TESTS=1`:
+
+```
+LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
+```

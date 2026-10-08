@@ -7,6 +7,14 @@
  * that is already built is not built again - and it is single-flight, so the
  * browser and the command line can ask for it at the same time without two
  * builds running.
+ *
+ * A failure here does NOT end the loader (rework 1: the walk's build failure
+ * restart-looped the container instead of showing the owner what was wrong).
+ * It is recorded in the status - phase `failed`, with the reason - and said
+ * once in one error line; the loader keeps serving its interface, and the
+ * owner's next `lifemodel resume` (or the page's resume button) is the retry.
+ * `ensureReady` therefore never rejects; a caller reads the outcome from
+ * `status()`.
  */
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
@@ -47,7 +55,10 @@ export interface BootstrapDeps {
 }
 
 export interface Bootstrap {
-  /** Seed, build and start, once. Concurrent callers share the one run. */
+  /**
+   * Seed, build and start, once. Concurrent callers share the one run, and it
+   * never rejects: a failure is the instance's state, not the caller's error.
+   */
   ensureReady(source: string): Promise<void>;
   status(): Promise<InstanceStatus>;
 }
@@ -68,6 +79,9 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
   let inFlight: Promise<void> | null = null;
 
   async function run(source: string): Promise<void> {
+    // A new attempt clears the failure it is retrying: the page says where the
+    // instance is now (seeding, building, starting), not where it was.
+    lastError = null;
     phase = 'seeding';
     const seeded = await seedRepositoryIfMissing(repository);
 
@@ -97,12 +111,28 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
     const promise = run(source).catch((error: unknown) => {
       phase = 'failed';
       lastError = describe(error);
-      throw error;
+      // One line, what and why. The loader stays up: its page, `lifemodel
+      // status` and the JSON all report failed with this reason, and login,
+      // panic and resume keep working.
+      logger.error({ source, error: lastError }, `the instance did not come up: ${lastError}`);
     });
     inFlight = promise.finally(() => {
       inFlight = null;
     });
     return inFlight;
+  }
+
+  /**
+   * The commit, or null when the repository cannot be read. A status answers
+   * in every state the instance can be in - it is how the owner finds out -
+   * and `phase` with `lastError` carries the reason a read failed.
+   */
+  async function commitOrNull(): Promise<string | null> {
+    try {
+      return await readHeadCommit(repository);
+    } catch {
+      return null;
+    }
   }
 
   return {
@@ -111,7 +141,7 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
       const process_ = supervisor.status();
       return {
         lifemodel: process_.state,
-        commit: await readHeadCommit(repository),
+        commit: await commitOrNull(),
         panic: await state.isPanicSet(),
         pid: process_.pid,
         restarts: process_.restarts,

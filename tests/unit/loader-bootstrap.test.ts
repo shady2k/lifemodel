@@ -18,6 +18,7 @@ import { createLoaderState } from '../../loader/src/state.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
+  caddySpawn,
   createLoaderWorld,
   lifemodelSpawn,
   scriptRepository,
@@ -154,7 +155,7 @@ describe('the loader first start', () => {
     expect((await app.bootstrap.status()).commit).toBe(moved);
   });
 
-  it('refuses to seed over a directory that is not a repository', async () => {
+  it('refuses to seed over a directory that is not a repository, and records it as the failure', async () => {
     const world = createLoaderWorld();
     scriptRepository(world);
     await setPassword(world);
@@ -162,16 +163,82 @@ describe('the loader first start', () => {
     writeFileSync(join(world.config.repoDir, 'a-file-of-the-owner'), 'mine\n');
     const { app } = makeApp(world);
 
-    await expect(app.bootstrap.ensureReady('setup')).rejects.toThrow(
-      /exists but is not a git repository/
-    );
+    // A failure to seed is the instance's state, not an error thrown at the
+    // caller, and it is not fatal to the loader (rework 1).
+    await app.bootstrap.ensureReady('setup');
+
+    const status = await app.bootstrap.status();
+    expect(status.phase).toBe('failed');
+    expect(status.lastError).toMatch(/exists but is not a git repository/);
+    expect(status.lifemodel).toBe('stopped');
     expect(world.runner.lines()).toEqual([]);
     expect(readFileSync(join(world.config.repoDir, 'a-file-of-the-owner'), 'utf8')).toBe('mine\n');
+  });
+
+  it('a build that fails is recorded with its reason, and the next try builds it', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    let failing = true;
+    world.runner.on('npm ci', () =>
+      failing
+        ? { code: 1, stdout: '', stderr: 'npm error code EUSAGE\nnpm error the lockfile is not there\n' }
+        : { code: 0, stdout: 'added 1 package\n', stderr: '' }
+    );
+    const { app, lines } = makeApp(world);
+
+    await app.bootstrap.ensureReady('setup');
+
+    const failed = await app.bootstrap.status();
+    expect(failed.phase).toBe('failed');
+    expect(failed.lastError).toContain('npm ci failed');
+    expect(failed.lastError).toContain('npm error the lockfile is not there');
+    expect(failed.lifemodel).toBe('stopped');
+    expect(lifemodelSpawn(world)).toBeUndefined();
+    // One line, what and why.
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('the instance did not come up');
+    expect(errors[0]?.message).toContain('npm ci failed');
+
+    // The owner fixes what was wrong and asks again: resume retries the build.
+    failing = false;
+    await app.bootstrap.ensureReady('resume');
+
+    const ready = await app.bootstrap.status();
+    expect(ready.phase).toBe('idle');
+    expect(ready.lastError).toBeNull();
+    expect(ready.lifemodel).toBe('running');
+    expect(lifemodelSpawn(world)).toBeDefined();
+  });
+
+  it('a start that fails is recorded too, and lifemodel is not left running', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    const { app } = makeApp(world);
+
+    await app.bootstrap.ensureReady('setup');
+    expect((await app.bootstrap.status()).lifemodel).toBe('running');
+
+    // The instance was built, and lifemodel dies at once on every start.
+    lifemodelSpawn(world)?.child.exit(1, null);
+    await settle();
+    lifemodelSpawn(world)?.child.exit(1, null);
+    await settle();
+
+    const status = await app.bootstrap.status();
+    expect(status.restarts).toBeGreaterThan(0);
+    expect(status.lifemodel).toBe('stopped');
   });
 });
 
 describe('the loader says what it is missing', () => {
   it('a missing seed bundle: one line with the cause, then a non-zero exit', async () => {
+    // The bundle is one of the loader's OWN inputs, checked before it opens
+    // its interface: while the volume holds no repository, an instance can
+    // never be seeded from an image that carries no code, so the loader leaves
+    // rather than serving a page it cannot act on (rework 1).
     const world = createLoaderWorld();
     scriptRepository(world);
     await setPassword(world);
@@ -200,6 +267,7 @@ describe('the loader says what it is missing', () => {
     expect(errors[0]?.message).toContain('seed bundle is missing');
     expect(world.runner.lines()).toEqual([]);
     expect(lifemodelSpawn(world)).toBeUndefined();
+    expect(caddySpawn(world)).toBeUndefined(); // checked before the front door opens
   });
 
   it('a volume it cannot write: one line with the cause, then a non-zero exit', async () => {

@@ -73,6 +73,23 @@ function ask(
   });
 }
 
+/** The command line the way `docker exec <c> lifemodel ...` runs it. */
+async function cli(
+  app: Awaited<ReturnType<typeof createRunningLoader>>['app'],
+  argv: string[]
+): Promise<{ code: number; out: string[]; err: string[] }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runCli(argv, {
+    baseUrl: `http://127.0.0.1:${app.port()}`,
+    readCliToken: () => app.state.readCliToken(),
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+    fetchImpl: fetch,
+  });
+  return { code, out, err };
+}
+
 /** The one cookie of a Set-Cookie header, as a browser would send it back. */
 function cookieOf(headers: IncomingHttpHeaders): string {
   const setCookie = headers['set-cookie']?.[0];
@@ -238,19 +255,6 @@ describe('one login, three hosts', () => {
 });
 
 describe('the command line inside the container', () => {
-  async function cli(app: Awaited<ReturnType<typeof createRunningLoader>>['app'], argv: string[]) {
-    const out: string[] = [];
-    const err: string[] = [];
-    const code = await runCli(argv, {
-      baseUrl: `http://127.0.0.1:${app.port()}`,
-      readCliToken: () => app.state.readCliToken(),
-      out: (line) => out.push(line),
-      err: (line) => err.push(line),
-      fetchImpl: fetch,
-    });
-    return { code, out, err };
-  }
-
   it('reports the state, the commit and panic; panic stops lifemodel, resume starts it', async () => {
     const world = createLoaderWorld();
     roots.push(world.root);
@@ -342,6 +346,85 @@ describe('the command line inside the container', () => {
 
     expect(code).toBe(1);
     expect(err[0]).toContain('the loader is not reachable');
+  });
+});
+
+describe('a failed first start (rework 1)', () => {
+  it('leaves the loader serving, its state failed with the reason, and panic and resume working', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    // The build fails the way the owner's own repository can: a real npm ci
+    // error. The loader is up and has a password, so it tries at startup.
+    let failing = true;
+    world.runner.on('npm ci', () =>
+      failing
+        ? {
+            code: 1,
+            stdout: '',
+            stderr: 'npm error code EUSAGE\nnpm error the lockfile is not there\n',
+          }
+        : { code: 0, stdout: 'added 1 package\n', stderr: '' }
+    );
+    const { app, lines, exits } = await createRunningLoader(world);
+    const port = app.port();
+
+    // The event the test waits for is the loader's own line, not a timer.
+    await waitUntil(
+      () => lines.some((line) => line.message.includes('the instance did not come up')),
+      'the loader says the instance did not come up'
+    );
+    expect(exits).toEqual([]); // the loader is still here
+    expect(lifemodelSpawn(world)).toBeUndefined();
+
+    // Its interface answers, and says failed with the reason.
+    const login = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right' },
+    });
+    const cookie = cookieOf(login.headers);
+    const page = await ask(port, 'GET', '/', { host: 'boot.localhost', cookie });
+    expect(page.status).toBe(200);
+    expect(page.body).toContain('<dt>state</dt><dd>failed</dd>');
+    expect(page.body).toContain('failed: npm ci failed');
+    expect(page.body).toContain('npm error the lockfile is not there');
+    // The two buttons are still there: panic and resume keep working.
+    expect(page.body).toContain('action="/panic"');
+    expect(page.body).toContain('action="/resume"');
+
+    // `lifemodel status` says the same, and reports rather than fails.
+    const status = await cli(app, ['status']);
+    expect(status.code).toBe(0);
+    expect(status.out).toEqual([
+      'failed',
+      'commit c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff',
+      'panic off',
+      'failed: npm ci failed in ' + world.config.repoDir + ': npm error the lockfile is not there',
+    ]);
+
+    const panicking = await cli(app, ['panic']);
+    expect(panicking.code).toBe(0);
+    expect(panicking.out[2]).toBe('panic on');
+
+    // Resume is the retry: while the build still fails, it says so and exits 1.
+    const stillFailing = await cli(app, ['resume']);
+    expect(stillFailing.code).toBe(1);
+    expect(stillFailing.out[0]).toBe('failed');
+    expect(stillFailing.out[3]).toContain('failed: npm ci failed');
+
+    // The owner fixes what was wrong; the same command now brings it up.
+    failing = false;
+    const resumed = await cli(app, ['resume']);
+    expect(resumed.code).toBe(0);
+    expect(resumed.out).toEqual([
+      'running',
+      'commit c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff',
+      'panic off',
+    ]);
+    expect(lifemodelSpawn(world)).toBeDefined();
+    expect(exits).toEqual([]);
+
+    await shutdownLoader(world, app);
   });
 });
 
