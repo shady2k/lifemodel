@@ -36,7 +36,7 @@ if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
 fi
 if [ ! -d loader ]; then
     printf '%s\n' \
-        "build-image: no loader/ in $root: the image builds the loader from the repository (lifemodel-q4x.2.1) and this checkout does not carry it" >&2
+        "build-image: no loader/ in $root: the image builds the loader from the repository and this checkout does not carry it" >&2
     exit 2
 fi
 
