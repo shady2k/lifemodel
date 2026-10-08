@@ -66,6 +66,19 @@ export interface AgentVaultConfig {
   stopWaitMs: number;
 }
 
+/**
+ * The kernel rule that confines lifemodel's egress (lifemodel-q4x.3.2, story
+ * S5): uid 1000 reaches loopback and nothing else, installed by the loader
+ * before lifemodel starts. The chain is the loader's own, so a start replaces
+ * what an earlier one left instead of stacking on it.
+ */
+export interface EgressConfig {
+  /** The iptables the image carries; a container without it is a missing input. */
+  binary: string;
+  /** The chain the loader owns and fills with the one rule. */
+  chain: string;
+}
+
 export interface LoaderConfig {
   /** The volume: everything the instance owns. */
   volumeRoot: string;
@@ -89,6 +102,8 @@ export interface LoaderConfig {
   caddy: CaddyConfig;
   /** Agent Vault: the keys, the proxy and the vault lifemodel uses. */
   agentVault: AgentVaultConfig;
+  /** The rule that confines lifemodel's egress to the proxy. */
+  egress: EgressConfig;
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
   /**
@@ -122,6 +137,8 @@ const DEFAULTS = {
   agentVaultBinary: '/usr/local/bin/agent-vault',
   agentVaultStartWaitMs: 15_000,
   agentVaultStopWaitMs: 10_000,
+  egressBinary: 'iptables',
+  egressChain: 'LIFEMODEL_EGRESS',
   agentVaultApiPort: 14_321,
   agentVaultProxyPort: 14_322,
   drainWaitMs: 95_000,
@@ -177,6 +194,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
         DEFAULTS.agentVaultStartWaitMs
       ),
       stopWaitMs: readInt(env, 'LIFEMODEL_AGENT_VAULT_STOP_WAIT_MS', DEFAULTS.agentVaultStopWaitMs),
+    },
+    egress: {
+      binary: env['LIFEMODEL_EGRESS_IPTABLES'] ?? DEFAULTS.egressBinary,
+      chain: env['LIFEMODEL_EGRESS_CHAIN'] ?? DEFAULTS.egressChain,
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
     killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),

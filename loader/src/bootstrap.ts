@@ -59,6 +59,8 @@ export interface BootstrapDeps {
   state: LoaderState;
   supervisor: Supervisor;
   clock: Clock;
+  /** What a build of the instance's code is given to leave through the proxy. */
+  proxyEnvironment?: () => NodeJS.ProcessEnv;
 }
 
 export interface Bootstrap {
@@ -79,6 +81,7 @@ export function createBootstrap(deps: BootstrapDeps): Bootstrap {
     config,
     builtCommit: () => state.readBuiltCommit(),
     recordBuiltCommit: (commit) => state.writeBuiltCommit(commit),
+    ...(deps.proxyEnvironment === undefined ? {} : { proxyEnvironment: deps.proxyEnvironment }),
   };
 
   let phase: BootstrapPhase = 'idle';

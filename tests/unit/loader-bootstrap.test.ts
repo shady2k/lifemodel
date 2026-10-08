@@ -391,10 +391,17 @@ describe('the loader waits before it has a password', () => {
     await app.start();
     await settle();
 
-    // Agent Vault's own CLI is the only command run, and it seeds nothing:
-    // this start makes the store and the vault, and no repository or build.
+    // The loader's own bring-up - Agent Vault's CLI, then the egress rule - is
+    // the only thing run, and neither seeds anything: this start makes the
+    // store, the vault and the rule, and no repository or build.
     expect(
-      world.runner.lines().filter((line) => !line.startsWith(world.config.agentVault.binary))
+      world.runner
+        .lines()
+        .filter(
+          (line) =>
+            !line.startsWith(world.config.agentVault.binary) &&
+            !line.startsWith(world.config.egress.binary)
+        )
     ).toEqual([]);
     expect(lifemodelSpawn(world)).toBeUndefined();
     expect(lines.some((line) => line.message.includes('no password is set'))).toBe(true);
