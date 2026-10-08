@@ -101,21 +101,27 @@ the repository's installation, and each person's plugin and hooks are their own.
   committed **on `main` only**. The pre-commit hook refuses it staged on any
   other branch — with one carve-out: the seeding commit of the installation
   itself (a tree whose HEAD has no `.backlog/config.json` yet) may carry it,
-  because before it lands, `main` has no tracker file at all. Publishing is
-  `br sync --flush-only` and a commit on `main` naming the task it records.
-  The tracker at a code revision is the export as committed at it
-  (`adapter.mjs --at <rev>`); on a branch that does not carry the export, the
-  newest snapshot the history reaches is the honest answer (that is what the
-  pre-push hook and CI use). `br sync --merge` is never used to catch up: it
-  tombstones what the export lacks; `br sync --import-only` builds a fresh
-  clone's database from the export.
+  because before it lands, `main` has no tracker file at all. **Publishing is
+  suspended** (owner, 2026-10-08): it used to be `br sync --flush-only` and a
+  commit naming the task it records on `main`, and `main` now takes changes
+  only through pull requests with green required checks — no direct commit by
+  anyone, admins included. How the export is published under that is part of
+  the installation's tracker layout and is being redone through
+  `setup-shady2k-skills`; until that lands, tracker writes stay in `br`'s local
+  database and nothing is committed from them. The tracker at a code revision
+  is the export as committed at it (`adapter.mjs --at <rev>`); on a branch that
+  does not carry the export, the newest snapshot the history reaches is the
+  honest answer (that is what the pre-push hook and CI use). `br sync --merge`
+  is never used to catch up: it tombstones what the export lacks;
+  `br sync --import-only` builds a fresh clone's database from the export.
 - **Document gate: not installed yet.** Its task is "Install the document
   gate: specs and acceptance evidence checked at each transition"
   (filed beside the setup task, milestone `platform-1`). Until it lands,
   document readiness is checked by reading, and every report says the
   automatic check did not run. Evidence level when installed: **records**
-  (the owner may push to `main` directly, so no protected CI can verify
-  receipts).
+  (a receipt reports a run of work, not a change to a revision, so no check on
+  the change can verify it — `main` takes changes only through pull requests
+  with green required checks).
 - **Backlog gate:** `npm run backlog` (`node .backlog/gate.mjs --worktree`) by
   hand; in the pre-commit hook it judges the **staged** export
   (`--at :0`) against `HEAD` (`--base <rev>` to override), each judged by the
@@ -151,8 +157,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   stay where the project put them (`.husky/pre-commit`, needing `node_modules`)
   and run when husky is active; until then the hook says they were skipped and
   CI runs them: the `ci-product` job runs `npm run check` (node 24, `npm ci`)
-  for a change whose paths include product code, and is skipped for one that
-  cannot touch it.
+  for a change whose paths include product code — and when the `changes` job
+  that decides that did not succeed — and is skipped for one that cannot touch
+  it.
 - **Connecting a clone:** `npm run connect` (`scripts/connect-clone.sh`). It
   checks `git`, `node`, `br`, the four hooks, the gate's files and a readable
   `.backlog/config.json`, reports everything missing in one run and connects
@@ -170,15 +177,24 @@ the repository's installation, and each person's plugin and hooks are their own.
   synthetic merge; an empty range is an error) and `commits.mjs --introduced`
   on a push. The present-documents check runs on pull requests only. Tasks
   resolve from the newest export the checked history reaches. `ci-product` is
-  the product checks and needs the `changes` job in front of it: `changes` runs
-  `scripts/ci-product-paths.sh` (with its test,
-  `tests/unit/ci-product-paths.test.ts`) over the change's paths — merge
-  base..head on a pull request, `before..after` on a push, and a `before` this
-  checkout cannot read means every path is product — and answers
-  `product=true|false`; `ci-product` runs on `true` only, on ubuntu-latest with
-  node 24 and the npm cache, `npm ci` and `npm run check`, and is skipped for a
-  draft pull request. A skipped job reports as success to a required check, so
-  branch protection may require it.
+  the product checks and needs the `changes` job in front of it: `changes` reads
+  the change's paths with `git diff --no-renames` for range merge base...head on
+  a pull request or `before..after` on a push (a `before` this checkout cannot
+  read means every path is product, and so does an empty list), runs
+  `scripts/ci-product-paths.sh` over them (with its tests,
+  `tests/unit/ci-product-paths.test.ts`) and answers `product=true|false`
+  through `scripts/ci-verdict.sh`, which refuses any output that is not exactly
+  one verdict on the last line — a classifier that fails or prints nothing
+  fails the job instead of leaving the answer unset. `--no-renames` is
+  deliberate: without it a move of product code into `docs/` would be read by
+  its destination only and answer `false`. `ci-product` runs on `true` — and
+  also when `changes` did not succeed, so a broken `changes` job cannot skip it
+  — on ubuntu-latest with node 24 and the npm cache, `npm ci` and
+  `npm run check`; it is skipped for a draft pull request and for a cancelled
+  run. A skipped job reports as success to a required check, so branch
+  protection requires **`changes`, `ci-product` and `ci-backlog`**: requiring
+  `changes` is what makes a failed `changes` job a red check rather than a
+  quiet skip.
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before
   and after, and pass them to `check.mjs` (the gate will grow that wiring
@@ -191,10 +207,15 @@ the repository's installation, and each person's plugin and hooks are their own.
   tests live in `tests/` (unit, integration), never in `src/` (AGENTS.md).
 - **Full stage checks:** `npm run check` — typecheck, lint, the format check
   and `vitest run --maxWorkers=2`, stopping at the first failure (needs
-  `node_modules`). It is the command CI's `ci-product` job runs, so a green
-  local run and a green CI run are the same check. On this machine memory is
-  short (owner, 2026-10-07): every vitest run uses at most 2 workers, and only
-  one vitest process runs at a time; repeated full runs go one after another.
+  `node_modules`). It is exactly the command CI's `ci-product` job runs, and the
+  verdict it gives is CI's on **node 24 with the dependencies of the committed
+  lockfile** (`npm ci`); on another node version, or with other installed
+  dependencies, the same green run is not that verdict. CI can also fail where
+  the local command passed: `npm ci` refuses a `package.json` that disagrees
+  with `package-lock.json`, before `npm run check` starts. On this machine
+  memory is short (owner, 2026-10-07): every vitest run uses at most 2 workers,
+  and only one vitest process runs at a time; repeated full runs go one after
+  another.
 - **`npm ci` in a worktree** re-runs husky's `prepare`, which switches the
   repository-wide `core.hooksPath` to `.husky/_`: commits in every checkout then
   run husky's hooks. Run `npm run connect` afterwards to restore `.githooks`.
@@ -270,7 +291,7 @@ what this protocol adds is listed.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented` |
 | children | `br show <id>` lists them, every status; or the adapter's export filtered on `parent` |
 | search / show | `br search`, `br show <id>`, `br list -l <area>` |
-| publish | on `main`, after the gate is clean: `br sync --flush-only`, commit `.beads/issues.jsonl` naming the task it records, push |
+| publish | suspended (owner, 2026-10-08): `main` takes changes only through pull requests with green required checks, and the scheme that publishes the export under that is being redone through `setup-shady2k-skills`; until then writes stay in br's local database |
 
 When a skill reports the installation is out of date, run `setup-shady2k-skills`. An explicit
 setup invocation rechecks everything even if its recorded version matches.
