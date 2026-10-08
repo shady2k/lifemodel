@@ -95,7 +95,7 @@ export class DomainTrackerService {
     } catch (error) {
       this.logger.trace(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to update thought pressure',
+        'Failed to update thought pressure'
       );
       return {};
     }
@@ -114,7 +114,7 @@ export class DomainTrackerService {
 
     try {
       const activeDesires = await withCaller('updateDesirePressure', () =>
-        this.mp.findByKind('desire', { state: 'active', limit: 20 }),
+        this.mp.findByKind('desire', { state: 'active', limit: 20 })
       );
 
       if (activeDesires.length === 0) {
@@ -134,7 +134,7 @@ export class DomainTrackerService {
     } catch (error) {
       this.logger.trace(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to update desire pressure',
+        'Failed to update desire pressure'
       );
       return {};
     }
@@ -153,7 +153,7 @@ export class DomainTrackerService {
 
     try {
       const activeCommitments = await withCaller('checkOverdueCommitments', () =>
-        this.mp.findByKind('commitment', { state: 'active', limit: 50 }),
+        this.mp.findByKind('commitment', { state: 'active', limit: 50 })
       );
 
       const signals: Signal[] = [];
@@ -171,13 +171,13 @@ export class DomainTrackerService {
 
         // Stage 1: commitment:due
         if (!this.signaledDueCommitments.has(entry.id)) {
-          signals.push(this.createCommitmentSignal(
-            'commitment:due', entry, recipientId, dueAtStr, now,
-          ));
+          signals.push(
+            this.createCommitmentSignal('commitment:due', entry, recipientId, dueAtStr, now)
+          );
           this.signaledDueCommitments.add(entry.id);
           this.logger.info(
             { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
-            'Commitment due, signal emitted',
+            'Commitment due, signal emitted'
           );
           continue; // Don't emit overdue in same scan
         }
@@ -187,13 +187,13 @@ export class DomainTrackerService {
           msSinceDue >= COMMITMENT_GRACE_PERIOD_MS &&
           !this.signaledOverdueCommitments.has(entry.id)
         ) {
-          signals.push(this.createCommitmentSignal(
-            'commitment:overdue', entry, recipientId, dueAtStr, now,
-          ));
+          signals.push(
+            this.createCommitmentSignal('commitment:overdue', entry, recipientId, dueAtStr, now)
+          );
           this.signaledOverdueCommitments.add(entry.id);
           this.logger.info(
             { commitmentId: entry.id, dueAt: dueAtStr, text: entry.content.slice(0, 50) },
-            'Overdue commitment detected, signal emitted',
+            'Overdue commitment detected, signal emitted'
           );
         }
       }
@@ -202,7 +202,7 @@ export class DomainTrackerService {
     } catch (error) {
       this.logger.trace(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to check overdue commitments',
+        'Failed to check overdue commitments'
       );
       return [];
     }
@@ -221,7 +221,7 @@ export class DomainTrackerService {
 
     try {
       const pendingPredictions = await withCaller('checkOverduePredictions', () =>
-        this.mp.findByKind('prediction', { state: 'pending', limit: 50 }),
+        this.mp.findByKind('prediction', { state: 'pending', limit: 50 })
       );
 
       const signals: Signal[] = [];
@@ -254,14 +254,14 @@ export class DomainTrackerService {
             'plugin_event',
             'plugin.perspective' as SignalSource,
             { value: 1, confidence: 1 },
-            { data: signalData },
-          ),
+            { data: signalData }
+          )
         );
         this.signaledDuePredictions.add(entry.id);
 
         this.logger.info(
           { predictionId: entry.id, horizonAt: horizonAtStr, claim: entry.content.slice(0, 50) },
-          'Overdue prediction detected, signal emitted',
+          'Overdue prediction detected, signal emitted'
         );
       }
 
@@ -269,7 +269,7 @@ export class DomainTrackerService {
     } catch (error) {
       this.logger.trace(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to check overdue predictions',
+        'Failed to check overdue predictions'
       );
       return [];
     }
@@ -309,7 +309,7 @@ export class DomainTrackerService {
             this.signaledOverdueCommitments.size +
             this.signaledDuePredictions.size,
         },
-        'Pruned stale entries from dedup sets',
+        'Pruned stale entries from dedup sets'
       );
     }
 
@@ -323,7 +323,7 @@ export class DomainTrackerService {
     entry: MemoryEntry,
     recipientId: string,
     dueAtStr: string,
-    now: number,
+    now: number
   ): Signal {
     const prefix = eventKind === 'commitment:due' ? 'due' : 'overdue';
     const signalData: PluginEventData = {
@@ -344,7 +344,7 @@ export class DomainTrackerService {
       'plugin_event',
       'plugin.commitment' as SignalSource,
       { value: 1, confidence: 1 },
-      { priority: Priority.HIGH, data: signalData },
+      { priority: Priority.HIGH, data: signalData }
     );
   }
 }

@@ -34,9 +34,7 @@ export class StatusUpdateService {
   private readonly logger: Logger;
   private readonly soulProvider: SoulProvider | undefined;
   private readonly conversationManager: ConversationManager | undefined;
-  private readonly enqueueThought:
-    | ((data: ThoughtData, source: string) => void)
-    | undefined;
+  private readonly enqueueThought: ((data: ThoughtData, source: string) => void) | undefined;
 
   constructor(deps: StatusUpdateDeps) {
     this.mp = deps.memoryProvider;
@@ -55,7 +53,7 @@ export class StatusUpdateService {
   async updatePredictionStatus(
     predictionId: string,
     outcome: 'confirmed' | 'missed' | 'mixed',
-    signaledDuePredictions: Set<string>,
+    signaledDuePredictions: Set<string>
   ): Promise<void> {
     try {
       const prediction = await this.mp.getById(predictionId);
@@ -86,17 +84,17 @@ export class StatusUpdateService {
             depth: 0,
             rootThoughtId: `pred_missed_${predictionId}`,
           },
-          'cognition.thought',
+          'cognition.thought'
         );
         this.logger.info(
           { predictionId, claim },
-          'Reflection thought enqueued for missed prediction',
+          'Reflection thought enqueued for missed prediction'
         );
       }
     } catch (err) {
       this.logger.error(
         { predictionId, outcome, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update prediction status',
+        'Failed to update prediction status'
       );
     }
   }
@@ -113,7 +111,7 @@ export class StatusUpdateService {
   async updateOpinionStatus(
     opinionId: string,
     newStance?: string,
-    newConfidence?: number,
+    newConfidence?: number
   ): Promise<void> {
     try {
       const opinion = await this.mp.getById(opinionId);
@@ -123,9 +121,7 @@ export class StatusUpdateService {
       }
 
       const oldConfidence =
-        typeof opinion.metadata?.['confidence'] === 'number'
-          ? opinion.metadata['confidence']
-          : 0.5;
+        typeof opinion.metadata?.['confidence'] === 'number' ? opinion.metadata['confidence'] : 0.5;
       const oldValidationCount =
         typeof opinion.metadata?.['validationCount'] === 'number'
           ? opinion.metadata['validationCount']
@@ -170,17 +166,14 @@ export class StatusUpdateService {
         this.soulProvider
       ) {
         const rationale =
-          typeof opinion.metadata?.['rationale'] === 'string'
-            ? opinion.metadata['rationale']
-            : '';
+          typeof opinion.metadata?.['rationale'] === 'string' ? opinion.metadata['rationale'] : '';
 
         const precedent: Precedent = {
           id: `prec_${opinionId}`,
           situation: `Forming a view on: ${topic}`,
           choice: stance,
           reasoning:
-            rationale ||
-            `Validated ${String(newValidationCount)} times through experience`,
+            rationale || `Validated ${String(newValidationCount)} times through experience`,
           valuesPrioritized: ['honesty', 'informed_judgment'],
           outcome: 'helped',
           binding: false,
@@ -197,13 +190,13 @@ export class StatusUpdateService {
             validationCount: newValidationCount,
             precedentId: precedent.id,
           },
-          'Opinion promoted to soul precedent (case law)',
+          'Opinion promoted to soul precedent (case law)'
         );
       }
     } catch (err) {
       this.logger.error(
         { opinionId, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update opinion status',
+        'Failed to update opinion status'
       );
     }
   }
@@ -216,7 +209,7 @@ export class StatusUpdateService {
   async updateDesireStatus(
     desireId: string,
     status: 'active' | 'satisfied' | 'stale' | 'dropped',
-    newIntensity?: number,
+    newIntensity?: number
   ): Promise<void> {
     try {
       const desire = await this.mp.getById(desireId);
@@ -236,7 +229,7 @@ export class StatusUpdateService {
     } catch (err) {
       this.logger.error(
         { desireId, status, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update desire status',
+        'Failed to update desire status'
       );
     }
   }
@@ -252,7 +245,7 @@ export class StatusUpdateService {
     signaledDueCommitments: Set<string>,
     signaledOverdueCommitments: Set<string>,
     recipientId?: string,
-    repairNote?: string,
+    repairNote?: string
   ): Promise<void> {
     try {
       const commitment = await this.mp.getById(commitmentId);
@@ -275,25 +268,21 @@ export class StatusUpdateService {
       signaledOverdueCommitments.delete(commitmentId);
 
       // Record completed action for kept/repaired
-      if (
-        recipientId &&
-        this.conversationManager &&
-        (status === 'kept' || status === 'repaired')
-      ) {
+      if (recipientId && this.conversationManager && (status === 'kept' || status === 'repaired')) {
         const summary = `commitment ${status}: "${commitment.content.slice(0, 30)}..."`;
         this.conversationManager
           .addCompletedAction(recipientId, { tool: 'core.commitment', summary })
           .catch((err: unknown) => {
             this.logger.warn(
               { error: err instanceof Error ? err.message : String(err) },
-              'Failed to record completed action for commitment update',
+              'Failed to record completed action for commitment update'
             );
           });
       }
     } catch (err) {
       this.logger.error(
         { commitmentId, status, error: err instanceof Error ? err.message : String(err) },
-        'Failed to update commitment status',
+        'Failed to update commitment status'
       );
     }
   }
@@ -307,7 +296,7 @@ export class StatusUpdateService {
   private replaceStateTag(
     entry: MemoryEntry,
     newState: string,
-    extraMetadata: Record<string, unknown>,
+    extraMetadata: Record<string, unknown>
   ): MemoryEntry {
     const oldTags = entry.tags ?? [];
     const newTags = oldTags.filter((t) => !t.startsWith('state:'));
