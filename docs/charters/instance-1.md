@@ -45,10 +45,12 @@ development test environment, never on somebody's real instance.
 4. **A person starts their own instance with one command.** *Check:* on a
    clean test machine with Docker, one command starts the image from CI; the
    owner sets the loader's password, puts the model key into Agent Vault
-   through the loader, sets the endpoint, models and Telegram in lifemodel's
-   own web interface, and lifemodel answers in Telegram; recreating the
-   container keeps the code and the data; panic keeps it down across a restart
-   of the container and of Docker until it is resumed.
+   through the loader, sets the endpoint and models in lifemodel's own web
+   interface; lifemodel's model request reaches the endpoint with the key
+   injected by Agent Vault while no key is in lifemodel's process (the test
+   environment uses a stub endpoint and a made-up key; owner, 2026-10-08);
+   recreating the container keeps the code and the data; panic keeps it down
+   across a restart of the container and of Docker until it is resumed.
 5. **A broken version reverts itself, and the owner can boot any
    generation.** *Check:* a generation that never becomes healthy is replaced,
    without the owner, by the previous healthy one with a report; in the
