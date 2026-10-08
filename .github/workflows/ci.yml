@@ -46,8 +46,8 @@
 # that does not owe the product checks passes under branch protection that
 # requires them: the skip is what "not owed" looks like there, not a failure
 # somebody has to override. Branch protection on main requires `changes`,
-# `ci-product` and `ci-backlog`, and `ci-image` is to be required at merge
-# (docs/backlog-integration.md).
+# `ci-product` and `ci-backlog`; `ci-image` runs on product pull requests but
+# is not required (owner, 2026-10-09; docs/backlog-integration.md).
 #
 # `npm run check` and this job run the same checks through the same launcher
 # command, on node 24, with no `npm ci` on the host in either place: the
