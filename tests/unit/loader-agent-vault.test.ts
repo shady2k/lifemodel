@@ -12,10 +12,19 @@
  * boundaries are doubled (the launcher, the runner) and the readiness probe is
  * the test's own; the volume, its modes and the files are real.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { createAgentVault } from '../../loader/src/agent-vault.js';
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
@@ -362,6 +371,21 @@ describe('Agent Vault, the layer that holds the keys', () => {
     await shutdownLoader(found, app);
   });
 
+  it('puts the store back to 0700 when a start finds a looser mode on it', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const first = await start(found);
+    await shutdownLoader(found, first.app);
+    // An operator, or an older start, left the passwordless store readable.
+    chmodSync(found.config.agentVault.storeDir, 0o755);
+    expect(storeMode(found)).toBe(0o755);
+
+    const second = await start(found);
+    expect(storeMode(found)).toBe(0o700);
+
+    await shutdownLoader(found, second.app);
+  });
+
   it('removes a pid file a killed server left in the store before the next start', async () => {
     const found = world();
     scriptFirstStart(found);
@@ -395,6 +419,133 @@ describe('Agent Vault, the layer that holds the keys', () => {
     caddySpawn(found)?.child.exit(0, null);
 
     expect(await leaving).toBe(0);
+  });
+
+  it('makes nothing at all when a stop arrives before it starts anything', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const lines: RecordedLine[] = [];
+    const inner = createNodeFileSystem();
+    // The start is held in the middle of preparing the store, which is where
+    // the container's own stop can arrive (its signals are wired before the
+    // loader starts).
+    let release: (() => void) | null = null;
+    const fs = {
+      ...inner,
+      chmod: async (path: string, mode: number): Promise<void> => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await inner.chmod(path, mode);
+      },
+    };
+    const vault = createAgentVault({
+      launcher: found.launcher,
+      runner: found.runner,
+      fs,
+      logger: createRecordingLogger(lines),
+      clock: found.clock,
+      config: found.config,
+      probeHealth: () => Promise.resolve(true),
+    });
+    const starting = vault.start();
+    await waitUntil(() => release !== null, 'the start reached the store');
+
+    expect(await vault.stop()).toBe(true); // nothing was running
+    (release as unknown as () => void)();
+    await starting;
+
+    expect(vaultSpawn(found)).toBeUndefined();
+    expect(vault.status().running).toBe(false);
+    expect(lines.filter((line) => line.level === 'error')).toEqual([]);
+  });
+
+  it('gives up what it started when a stop arrives while it is still starting', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const lines: RecordedLine[] = [];
+    // The server does not answer at first: that start is still in flight.
+    let up = false;
+    const vault = createAgentVault({
+      launcher: found.launcher,
+      runner: found.runner,
+      fs: createNodeFileSystem(),
+      logger: createRecordingLogger(lines),
+      clock: found.clock,
+      config: found.config,
+      probeHealth: () => Promise.resolve(up),
+    });
+    const starting = vault.start();
+    await waitUntil(() => vaultSpawn(found) !== undefined, 'the server is spawned');
+
+    // The container's own stop arrives now. The child this start already made
+    // is the stop's to reach, and the start itself does not fail: the loader
+    // is leaving.
+    const stopping = vault.stop();
+    found.clock.resolveAll();
+    vaultSpawn(found)?.child.exit(0, null);
+    expect(await stopping).toBe(true);
+    await expect(starting).resolves.toBeUndefined();
+    expect(vault.status().running).toBe(false);
+    expect(lines.filter((line) => line.level === 'error')).toEqual([]);
+
+    // And the module is usable after that stop: the next start is a real one.
+    up = true;
+    await vault.start();
+    expect(vault.status().running).toBe(true);
+  });
+
+  it('gives up a child it made when the stop lands in the middle of provisioning', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const lines: RecordedLine[] = [];
+    // The first CLI call of the provisioning is held: the start is between its
+    // readiness wait and the vault it was about to create.
+    const inner = found.runner;
+    let release: (() => void) | null = null;
+    let held = false;
+    const runner = {
+      run: async (
+        command: string,
+        args: string[],
+        options: Parameters<typeof inner.run>[2]
+      ): Promise<{ code: number; stdout: string; stderr: string }> => {
+        if (args[0] === 'auth' && !held) {
+          held = true;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        return inner.run(command, args, options);
+      },
+    };
+    const vault = createAgentVault({
+      launcher: found.launcher,
+      runner,
+      fs: createNodeFileSystem(),
+      logger: createRecordingLogger(lines),
+      clock: found.clock,
+      config: found.config,
+      probeHealth: () => Promise.resolve(true),
+    });
+    const starting = vault.start();
+    await waitUntil(() => release !== null, 'the start reached the provisioning');
+
+    const stopping = vault.stop();
+    vaultSpawn(found)?.child.exit(0, null);
+    expect(await stopping).toBe(true);
+    (release as unknown as () => void)();
+    await starting;
+
+    expect(vault.status().running).toBe(false);
+    expect(vaultSpawn(found)?.child.signals).toContain('SIGTERM');
+    // The start gave its child up instead of finishing: it never announced a
+    // vault that is up, and it said what it did.
+    expect(lines.some((line) => line.message.includes('Agent Vault is up'))).toBe(false);
+    expect(
+      lines.some((line) => line.message.includes('was started while the loader was stopping'))
+    ).toBe(true);
+    expect(lines.filter((line) => line.level === 'error')).toEqual([]);
   });
 
   it('never writes the token in a log line', async () => {
