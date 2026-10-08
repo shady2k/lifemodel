@@ -197,6 +197,22 @@ export function loginLocation(forwardedHost: string, forwardedUri: string): stri
 }
 
 /**
+ * Where the owner signs in to Agent Vault's own interface (lifemodel-q4x.3.2,
+ * decision 18): `vault.` on the same host and port the loader was reached on,
+ * built from the pinned names only - never from a name a request supplied.
+ * Null for a host no browser uses (the loopback literal the command line
+ * talks to), where there is no such page to point at.
+ */
+export function vaultLocation(requestHost: string): string | null {
+  const name = hostName(requestHost);
+  if (!isBrowserHost(name)) return null;
+  const domain = parentDomain(requestHost);
+  if (domain === null) return null;
+  const port = hostPort(requestHost);
+  return `http://vault.${domain}${port === '' ? '' : `:${port}`}`;
+}
+
+/**
  * The `next` of a login, or null when it is not an address of this instance.
  * Only an http URL on a pinned browser host AND on the port the login was
  * reached on is followed, so the login page is never an open redirect to

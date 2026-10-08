@@ -58,6 +58,10 @@ const SECRET_MODE = 0o600;
 const CA_MODE = 0o644;
 /** The line the server reads for `--password-stdin`: empty means passwordless. */
 const PASSWORDLESS_LINE = '\n';
+/** The proxy listens on loopback, and lifemodel reaches it there. */
+const PROXY_HOST = '127.0.0.1';
+/** Loopback traffic skips the proxy: lifemodel's own calls to local services. */
+const NO_PROXY = 'localhost,127.0.0.1';
 /** How often the loader asks whether the server is up, until its bound. */
 const HEALTH_INTERVAL_MS = 200;
 
@@ -67,6 +71,12 @@ export interface VaultCredential {
   agent: string;
   /** The agent token: a secret. It is never logged, and never written outside the volume. */
   token: string;
+}
+
+/** The instance owner account the loader registered in Agent Vault. */
+export interface VaultOwnerAccount {
+  email: string;
+  password: string;
 }
 
 export interface AgentVaultStatus {
@@ -86,16 +96,26 @@ export interface AgentVault {
   stop(budgetMs?: number): Promise<boolean>;
   status(): AgentVaultStatus;
   /**
-   * What lifemodel's own process is given for the proxy: its agent token and
-   * the address of the broker, and NOTHING else - no key, no admin
-   * credential, no store. Empty until the vault is up.
+   * What lifemodel's own process is given for the proxy: the address of the
+   * broker, its agent token and the vault, the standard proxy environment
+   * that sends its traffic there, and the CA that makes the proxy's own
+   * certificates validate - and NOTHING else: no key, no admin credential, no
+   * store. Empty until the vault is up.
    *
-   * lifemodel-q4x.3.2 adds the proxy variables (HTTPS_PROXY, HTTP_PROXY,
-   * NODE_USE_ENV_PROXY and the CA at config.agentVault.caPath) HERE: this is
-   * the one place that builds lifemodel's proxy environment, and the kernel
-   * rule that confines its egress is installed by the loader beside it.
+   * This is the ONE place lifemodel's proxy environment is built
+   * (lifemodel-q4x.3.2): the kernel rule that confines its egress is installed
+   * by the loader beside it, and the loader's own build of the instance's code
+   * - which runs as the same uid - is handed the same environment.
    */
   lifemodelEnvironment(): NodeJS.ProcessEnv;
+  /**
+   * The instance owner account the loader registered, as the loader's own page
+   * hands it to the owner (decision 18), or null when the loader has not made
+   * one yet. The password is a secret: it belongs on that page, behind the
+   * loader's login, and nowhere else - not in a log line, and not in
+   * lifemodel's environment.
+   */
+  ownerAccount(): Promise<VaultOwnerAccount | null>;
 }
 
 /** Asking the server whether it is up; the one boundary a test doubles. */
@@ -633,6 +653,18 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     return true;
   }
 
+  /**
+   * The proxy URL a standard client is pointed at: the agent token as the
+   * user and the vault as the password, exactly as Agent Vault's own `vault
+   * run` builds it. Both halves are URL-encoded (RFC 3986 userinfo), so a
+   * token with a reserved character still arrives intact.
+   */
+  function proxyUrl(current: VaultCredential): string {
+    const user = encodeURIComponent(current.token);
+    const password = encodeURIComponent(current.vault);
+    return `http://${user}:${password}@${PROXY_HOST}:${String(vaultConfig.proxyPort)}`;
+  }
+
   return {
     start,
     stop,
@@ -640,11 +672,28 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     lifemodelEnvironment: () => {
       const current = credential;
       if (current === null) return {};
+      const proxy = proxyUrl(current);
       return {
         AGENT_VAULT_ADDR: apiAddress(),
         AGENT_VAULT_TOKEN: current.token,
         AGENT_VAULT_VAULT: current.vault,
+        // Every one of these is a standard name a client already honours:
+        // HTTPS_PROXY for https upstreams, HTTP_PROXY for plain http ones (the
+        // same listener answers both), NO_PROXY so loopback calls and the
+        // broker's own control plane skip the proxy, NODE_USE_ENV_PROXY so
+        // Node 24's fetch uses the environment's proxy at all, and the CA so
+        // the certificates the proxy re-signs with validate.
+        HTTPS_PROXY: proxy,
+        HTTP_PROXY: proxy,
+        NO_PROXY,
+        NODE_USE_ENV_PROXY: '1',
+        NODE_EXTRA_CA_CERTS: vaultConfig.caPath,
       };
+    },
+    ownerAccount: async () => {
+      const known = await readRecord<OwnerRecord>(ownerPath);
+      if (known === null || known.email === '' || known.password === '') return null;
+      return { email: known.email, password: known.password };
     },
   };
 }

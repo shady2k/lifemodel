@@ -147,10 +147,17 @@ describe('first start through the browser', () => {
     expect(setCookie).toContain('Path=/');
 
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
-    // Agent Vault's own CLI ran before any of this (the loader brought it up
-    // first); what the instance's seed and build ran is what this asserts.
+    // Agent Vault's own CLI and the egress rule ran before any of this (the
+    // loader brought them up first); what the instance's seed and build ran is
+    // what this asserts.
     expect(
-      world.runner.lines().filter((line) => !line.startsWith(world.config.agentVault.binary))
+      world.runner
+        .lines()
+        .filter(
+          (line) =>
+            !line.startsWith(world.config.agentVault.binary) &&
+            !line.startsWith(world.config.egress.binary)
+        )
     ).toEqual([
       `git clone ${world.config.seedBundle} ${world.config.repoDir}`,
       'git remote',

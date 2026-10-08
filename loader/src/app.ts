@@ -20,6 +20,7 @@ import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
 import { LoaderFatalError } from './errors.js';
 import type { CommandRunner, ProcessLauncher } from './exec.js';
+import { createEgress, type Egress } from './egress.js';
 import { createFrontDoor, type FrontDoor } from './front-door.js';
 import type { FileSystem } from './fs.js';
 import { createLoaderHttp, type LoaderHttp } from './http.js';
@@ -57,6 +58,7 @@ export interface LoaderApp {
   bootstrap: Bootstrap;
   frontDoor: FrontDoor;
   agentVault: AgentVault;
+  egress: Egress;
 }
 
 export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
@@ -85,8 +87,21 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     // lifemodel's proxy credential comes from the vault, and only from it.
     proxyEnvironment: () => agentVault.lifemodelEnvironment(),
   });
-  const bootstrap = createBootstrap({ fs, runner, logger, config, state, supervisor, clock });
+  const bootstrap = createBootstrap({
+    fs,
+    runner,
+    logger,
+    config,
+    state,
+    supervisor,
+    clock,
+    // The instance's own code is built as lifemodel's user, and that user may
+    // reach loopback only: the build leaves through the same proxy (an
+    // unconfined npm ci would be the one hole in the rule).
+    proxyEnvironment: () => agentVault.lifemodelEnvironment(),
+  });
   const frontDoor = createFrontDoor({ launcher, fs, logger, clock, config });
+  const egress = createEgress({ runner, logger, config });
 
   function fatal(error: unknown): void {
     const message =
@@ -118,6 +133,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     bootstrap,
     frontDoor,
     agentVault,
+    egress,
 
     port: () => {
       const address = http?.server.address();
@@ -140,7 +156,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         // comes from the vault the loader creates here, and the vault must be
         // ready to answer before the process that uses it runs.
         await agentVault.start();
-        http = createLoaderHttp({ state, supervisor, bootstrap, logger, clock });
+        // Then the kernel rule: uid 1000 may reach loopback and nothing else,
+        // so the proxy above is the only way out for lifemodel AND for the
+        // build of its code. A container that cannot carry the rule does not
+        // start lifemodel at all (a missing input of the loader's own).
+        await egress.install();
+        http = createLoaderHttp({
+          state,
+          supervisor,
+          bootstrap,
+          logger,
+          clock,
+          vaultAccount: () => agentVault.ownerAccount(),
+        });
         await listen();
         http.server.on('error', (error) => {
           fatal(

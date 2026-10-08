@@ -29,6 +29,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
+import type { VaultOwnerAccount } from './agent-vault.js';
 import {
   ALLOWED_HOSTS,
   clearSessionCookie,
@@ -42,6 +43,7 @@ import {
   sameOrigin,
   SESSION_COOKIE_NAME,
   sessionCookie,
+  vaultLocation,
   verifyCsrf,
   verifyPassword,
   verifySession,
@@ -64,6 +66,22 @@ export interface LoaderHttpDeps {
   bootstrap: Bootstrap;
   logger: LoaderLogger;
   clock: Clock;
+  /**
+   * The instance owner account the loader registered in Agent Vault
+   * (lifemodel-q4x.3.2, decision 18). It is shown on the loader's own page,
+   * behind the login, so the owner has a way into Agent Vault's interface; it
+   * is a secret, so it is escaped into that page and reaches no log line.
+   */
+  vaultAccount?: () => Promise<VaultOwnerAccount | null>;
+}
+
+/** What the page says about Agent Vault: the account, the way in, or a reason. */
+interface VaultSection {
+  account: VaultOwnerAccount | null;
+  /** Agent Vault's own address for this request, or null when there is none. */
+  location: string | null;
+  /** Why the account could not be read, when it could not: never hidden. */
+  problem: string | null;
 }
 
 export interface LoaderHttp {
@@ -201,11 +219,48 @@ function refusalPage(reason: string): string {
 }
 
 /**
+ * What the page says about Agent Vault: where it is, and the one account that
+ * can sign in to it (lifemodel-q4x.3.2, decision 18). Agent Vault 0.40.0 has
+ * no login other than its own accounts, and the first registered user is the
+ * instance owner - the account the loader registered to provision lifemodel's
+ * vault. Without it the owner would reach a login page they cannot answer, so
+ * it is shown here, on the loader's own page and behind the loader's login.
+ *
+ * Both values are escaped into the markup, and neither is ever handed to the
+ * logger: this page is the only place the password is written out.
+ */
+function vaultBlock(vault: VaultSection): string {
+  const where =
+    vault.location === null
+      ? ''
+      : `<p><a href="${escapeHtml(vault.location)}">${escapeHtml(vault.location)}</a></p>`;
+  if (vault.problem !== null) {
+    return `<h2>Agent Vault</h2>
+${where}
+<p class="bad">the instance owner account could not be read: ${escapeHtml(vault.problem)}</p>`;
+  }
+  if (vault.account === null) {
+    return `<h2>Agent Vault</h2>
+${where}
+<p class="note">The loader has not registered its Agent Vault account yet.</p>`;
+  }
+  return `<h2>Agent Vault</h2>
+<p class="note">Agent Vault holds the keys: lifemodel's requests leave through its proxy and it
+attaches them on the way out, so lifemodel never holds one. Sign in with the account below and
+add the key for your endpoint there.</p>
+${where}
+<dl>
+  <dt>owner</dt><dd>${escapeHtml(vault.account.email)}</dd>
+  <dt>password</dt><dd>${escapeHtml(vault.account.password)}</dd>
+</dl>`;
+}
+
+/**
  * The loader's page. Every form on it carries the session-bound anti-CSRF
  * token, so a form served by another page of the instance (lifemodel's own
  * root host) cannot drive panic, resume or logout with the owner's cookie.
  */
-function dashboardPage(status: InstanceStatus, csrf: string): string {
+function dashboardPage(status: InstanceStatus, csrf: string, vault: VaultSection): string {
   const failed = status.failed;
   // The process state as it is - `stopping` included, so a stop that has not
   // finished is never shown as stopped (review round 6).
@@ -220,6 +275,7 @@ function dashboardPage(status: InstanceStatus, csrf: string): string {
   <dt>restarts</dt><dd>${String(status.restarts)}</dd>
 </dl>
 ${status.lastError === null ? '' : `<p class="bad">failed: ${escapeHtml(status.lastError)}</p>`}
+${vaultBlock(vault)}
 <form method="post" action="/panic"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Panic: stop lifemodel</button></form>
 <form method="post" action="/resume"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Resume: start lifemodel</button></form>
 <p class="note">Panic keeps lifemodel down across a restart of the container until you resume it.</p>
@@ -409,6 +465,22 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     );
   }
 
+  /**
+   * What the page says about Agent Vault. An account that cannot be read is
+   * SAID (the page is the way back, and a page that hid its own trouble would
+   * send the owner looking in the wrong place) - and never as a secret: the
+   * reason is a path and a parse error, not a value.
+   */
+  async function vaultSection(host: string): Promise<VaultSection> {
+    const location = vaultLocation(host);
+    if (deps.vaultAccount === undefined) return { account: null, location, problem: null };
+    try {
+      return { account: await deps.vaultAccount(), location, problem: null };
+    } catch (error) {
+      return { account: null, location, problem: describe(error) };
+    }
+  }
+
   async function handleDashboard(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const record = await state.readAuth();
     const token = record === null ? null : sessionToken(req, record);
@@ -417,7 +489,8 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     if (req.method !== 'POST') {
-      sendHtml(res, 200, dashboardPage(await bootstrap.status(), csrfToken(record, token)));
+      const vault = await vaultSection(header(req, 'host') ?? '');
+      sendHtml(res, 200, dashboardPage(await bootstrap.status(), csrfToken(record, token), vault));
       return;
     }
     const form = await readForm(req);

@@ -30,6 +30,15 @@ export interface RepositoryDeps extends RepositoryLocation {
   /** Which commit is already built (the loader's own state on the volume). */
   builtCommit: () => Promise<string | null>;
   recordBuiltCommit: (commit: string) => Promise<void>;
+  /**
+   * What lifemodel's user is given to leave the container with: the proxy
+   * environment built in `lifemodelEnvironment()` (lifemodel-q4x.3.2). A build
+   * runs as that user, and the kernel rule that confines that user lets it
+   * reach loopback only, so the build leaves through the same Agent Vault
+   * proxy - and it is these values, not the container's own, that it runs
+   * with. Absent only where there is no vault to point at (a test's double).
+   */
+  proxyEnvironment?: () => NodeJS.ProcessEnv;
 }
 
 export interface BuildOutcome {
@@ -204,14 +213,24 @@ export async function seedRepositoryIfMissing(deps: RepositoryDeps): Promise<boo
   return true;
 }
 
-/** The environment a build runs in: as lifemodel, with a home it may write. */
-function buildEnvironment(config: LoaderConfig): NodeJS.ProcessEnv {
+/**
+ * The environment a build runs in: as lifemodel, with a home it may write, and
+ * pointed at Agent Vault's proxy the way lifemodel's own process is. npm reads
+ * HTTPS_PROXY/HTTP_PROXY/NO_PROXY and Node reads NODE_EXTRA_CA_CERTS, so a
+ * build that runs behind the egress rule still reaches the registry: the
+ * request goes to the vault's proxy, and a host the vault has no service for
+ * passes straight through it. The proxy's values come LAST, so a name the
+ * container itself was given (`docker run -e HTTPS_PROXY=...`) cannot win over
+ * them.
+ */
+function buildEnvironment(config: LoaderConfig, proxy: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...process.env,
     HOME: config.dataDir,
     npm_config_cache: join(config.dataDir, 'npm-cache'),
     npm_config_fund: 'false',
     npm_config_audit: 'false',
+    ...proxy,
   };
 }
 
@@ -241,7 +260,7 @@ export async function buildIfNeeded(
     : {};
   const options = {
     cwd: config.repoDir,
-    env: buildEnvironment(config),
+    env: buildEnvironment(config, deps.proxyEnvironment?.() ?? {}),
     timeoutMs: config.buildTimeoutMs,
     ...identity,
   };
