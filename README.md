@@ -215,9 +215,19 @@ VPS, reach them through an SSH tunnel and keep them unpublished:
 ssh -N -L 8080:127.0.0.1:8080 you@your-vps
 ```
 
-`vault.` reaches Agent Vault's own interface, behind the same login; the root
-host answers that nothing is there yet until lifemodel's own interface is built
-(lifemodel-q4x.4). The port is published on the host's loopback only
+**The root host is lifemodel's own settings page**: the OpenAI-compatible
+endpoint, the model for each role (fast, smart, motor) and the Telegram fields
+(chat id, and the bot token as an Agent Vault placeholder — the token itself
+belongs in Agent Vault, never here). Saving writes the instance's config and
+restarts lifemodel through the loader, which starts it again at once; on a
+first start the page says which fields are still missing and lifemodel runs
+anyway. The page needs no login of its own: the loader checks every request
+before it arrives, and a link to the loader (`boot.`) is on it for the keys and
+for panic. How it works is in
+[`docs/features/instance/settings.md`](docs/features/instance/settings.md).
+
+`vault.` answers that nothing is there yet until that part of the instance is
+built. The port is published on the host's loopback only
 (`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
 HTTPS proxy in front when you want that.
 

@@ -1,0 +1,120 @@
+# lifemodel's own settings
+
+lifemodel serves a small web interface on `127.0.0.1:7100`, which Caddy reaches
+as the ROOT host (`localhost`) after the loader's login has checked the request.
+It is lifemodel's own code (`src/settings/`), not the loader's: the model
+endpoint, the models, the Telegram fields and everything lifemodel adds later
+are its settings, and the loader keeps only its login, panic, first start,
+generations and task ceilings.
+
+It has **no auth of its own by design**: every request is checked by the loader
+before it is proxied here (`forward_auth` on the root host,
+docs/features/instance/loader.md), the session cookie is the loader's, and a
+request without one never arrives. The page holds no secret: the Telegram bot
+token field carries an Agent Vault placeholder, and lifemodel never holds a
+model key (Agent Vault injects it on the way out, lifemodel-q4x.3.*).
+
+## What it serves
+
+| Route | What it does |
+| --- | --- |
+| `GET /` | the form, with the values in lifemodel's config file, what is missing, and a link to the loader (the boot host, same port) for keys and panic |
+| `POST /settings` | validate, write the config file, answer, and then ask for the restart |
+
+`GET /` on a first start (no config file at all) is a normal page that says no
+model endpoint is configured yet and names every field that is missing.
+lifemodel starts in that state, serves the page, and does NOT crash-loop: that
+is the first start of every instance.
+
+The port is `SETTINGS_PORT` (7100). It is not a setting of the interface: the
+front door's own configuration names it (docker/instance/Caddyfile).
+
+## The fields and their rules
+
+| Field | Rule |
+| --- | --- |
+| endpoint base URL | an `http`/`https` URL when it is set |
+| the fast, smart and motor model | non-empty when the endpoint is set |
+| Telegram chat id | a number when it is set |
+| Telegram bot token | an Agent Vault placeholder (`__something__`) when it is set, never the token itself |
+
+The endpoint is written as a whole or not at all: a model with no base URL is
+refused by the field it is missing, and a base URL with an empty model by that
+model's own field. The form with everything blank is a valid state (the
+Telegram fields alone), and it means "no endpoint".
+
+A refused save answers `400` with the page again: every bad field named beside
+it, the values the owner typed kept (a refused bot token is never echoed back),
+and **nothing written**. A save that cannot be written answers `500` with the
+reason in the log and **no restart**: lifemodel is not restarted onto a config
+that is not there. No rule is a silent fallback - a value is never dropped,
+corrected or taken from another field.
+
+## Where the settings are stored, and how they apply
+
+The settings are lifemodel's config file, read at startup by
+`src/config/config-loader.ts`:
+
+- `<DATA_PATH>/config/agent.json` when `DATA_PATH` is set. The loader gives an
+  instance `DATA_PATH=<volume>/data`, so an instance's settings are
+  `/var/lib/lifemodel/data/config/agent.json` — the `data/` row of the volume
+  layout in docs/features/instance/loader.md.
+- `data/config/agent.json` (the working directory's) when it is not, which is
+  what a checkout has.
+
+One function resolves it (`resolveConfigDir`), and both the startup read and the
+settings interface use it, so the file that is written is the file that is read
+next. A first start has no `data/config/` directory at all: the loader makes
+`data/`, and the first save creates the directory and the file (both as
+lifemodel's own user, inside the data directory it owns). The write is atomic (a temporary file in the same directory, fsynced,
+renamed over the target): the file is either the old one or the new one, never
+half of each. Every OTHER field of the file — the owner's identity, plugin
+configuration, anything a later version adds — is kept exactly as it was: the
+interface writes the fields it owns and touches nothing else.
+
+They apply by a **restart**, not by a live reload: the provider, the Telegram
+channel and the rest are built once, at startup, from the config, so
+reconfiguring the running agent underneath a turn is not what happens.
+
+## The restart, and the code it uses
+
+Saving writes the config, answers `200` (the page says lifemodel is
+restarting), and only then stops lifemodel the way any stop does — the turn in
+flight is drained, state and storage are flushed, the channels are released
+(docs/architecture.md, the stop) — and leaves with **exit code 75**.
+
+lifemodel asks the loader for nothing: it has no interface to it. The loader
+supervises its child and reads that code as the request
+(`loader/src/supervisor.ts`, `LIFEMODEL_RESTART_EXIT_CODE`; the same number in
+`src/settings/restart.ts`):
+
+- the start is made **at once** — no backoff, and the request is not counted as
+  a failure, because nothing went wrong;
+- it is logged at info (`lifemodel asked to be restarted: it is started again
+  at once`), and the exit itself is logged at info too, not at warn;
+- every other exit is a death and keeps the growing backoff.
+
+The usual guards still hold: a stop (panic, the container leaving) wins over
+the request, and once the loader is closing nothing is started. A lifemodel
+that asked for a restart and then asks again immediately is started again
+immediately: the code is a request, and only lifemodel's own settings save
+makes it.
+
+75 is `EX_TEMPFAIL` — "this did not work now, try again" — and it is the
+contract between the two programs, so a change to it changes both.
+
+## Tests
+
+- `tests/unit/settings-interface.test.ts` drives the interface over HTTP: the
+  form's current values, a save that writes the config and asks for the
+  restart, the refusals (no base URL, an empty model, a bad URL, a chat id that
+  is not a number, a token that is not a placeholder) with their field named,
+  and a write that fails (no restart, nothing applied). The config file is a
+  real file in a temporary directory; the restart is the one double.
+- `tests/unit/llm/model-endpoint.test.ts` covers what lifemodel builds from
+  that config, through `createLLMProvider`.
+- `tests/integration/instance-first-start.test.ts` (gated,
+  `LIFEMODEL_DOCKER_TESTS=1`) walks the real thing: login, the root host shows
+  the form, a save writes `/var/lib/lifemodel/data/config/agent.json`, the
+  loader logs the requested restart (and no backoff), and the running lifemodel
+  serves the new values.

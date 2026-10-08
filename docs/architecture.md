@@ -357,5 +357,6 @@ src/
 ├── storage/        # Persistence, memory (LanceDB VectorStore + GraphStore), conversations
 ├── types/          # Signal, Intent, Cognition, Commitment, Desire, Perspective types
 ├── models/         # UserModel for preferences
-└── config/         # Configuration loading
+├── config/         # Configuration loading (the config file, and the model endpoint's shape)
+└── settings/       # lifemodel's own web settings (the root host), and the restart code
 ```

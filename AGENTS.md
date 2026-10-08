@@ -174,9 +174,14 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 
 Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
-`DATA_PATH` moves the state, logs, plugins and models roots — it does not
-move the config file: startup reads `data/config/agent.json` before applying
-`DATA_PATH` (`src/core/container.ts`, `src/config/config-loader.ts`).
+`DATA_PATH` moves the state, logs, plugins, models AND config roots: the
+config file is `<DATA_PATH>/config/agent.json` when `DATA_PATH` is set, and
+`data/config/agent.json` (the working directory's) when it is not — one
+function, `resolveConfigDir` (`src/config/config-loader.ts`), is what the
+startup read and lifemodel's settings interface both resolve, so they can
+never disagree about the file. The loader gives an instance
+`DATA_PATH=<volume>/data`, so its config is `<volume>/data/config/agent.json`
+(`src/core/container.ts`, `src/settings/`).
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
