@@ -21,6 +21,8 @@ import {
   lifemodelSpawn,
   scriptRepository,
   settle,
+  testLoaderApp,
+  vaultSpawn,
   waitUntil,
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
@@ -226,15 +228,7 @@ describe('docker stop, end to end through the loader', () => {
     await state.writeAuth(await hashPassword('right'));
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
-    const app = createLoaderApp({
-      config: world.config,
-      fs,
-      runner: world.runner,
-      launcher: world.launcher,
-      logger: createRecordingLogger(lines),
-      clock: world.clock,
-      exit: (code) => exits.push(code),
-    });
+    const app = testLoaderApp(world, { fs, lines, exits });
     roots.push(world.root);
     await app.start();
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
@@ -249,6 +243,9 @@ describe('docker stop, end to end through the loader', () => {
     const leaving = app.shutdown('SIGTERM');
     await settle();
     child?.exit(0, null);
+    await settle();
+    // Agent Vault leaves after lifemodel and before the front door.
+    vaultSpawn(world)?.child.exit(0, null);
     await settle();
     caddySpawn(world)?.child.exit(0, null);
 
@@ -267,6 +264,8 @@ describe('docker stop, end to end through the loader', () => {
     world.clock.resolveAll();
     await settle();
     child?.exit(null, 'SIGKILL');
+    await settle();
+    vaultSpawn(world)?.child.exit(0, null);
     await settle();
     caddySpawn(world)?.child.exit(0, null);
     const code = await leaving;
@@ -405,25 +404,19 @@ describe('the wait after SIGKILL (rework 3, review round 2 finding 2)', () => {
     await state.ensureLayout();
     await state.writeAuth(await hashPassword('right'));
     const lines: RecordedLine[] = [];
-    const app = createLoaderApp({
-      config: world.config,
-      fs,
-      runner: world.runner,
-      launcher: world.launcher,
-      logger: createRecordingLogger(lines),
-      clock: world.clock,
-      exit: () => undefined,
-    });
+    const app = testLoaderApp(world, { fs, lines, exit: () => undefined });
     roots.push(world.root);
     await app.start();
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const leaving = app.shutdown('SIGTERM');
     await settle();
-    // lifemodel never leaves, not even after SIGKILL; Caddy does.
+    // lifemodel never leaves, not even after SIGKILL; Agent Vault and Caddy do.
     world.clock.resolveAll();
     await settle();
     world.clock.resolveAll();
+    await settle();
+    vaultSpawn(world)?.child.exit(0, null);
     await settle();
     caddySpawn(world)?.child.exit(0, null);
 
