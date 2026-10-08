@@ -165,6 +165,56 @@ export function parentDomain(host: string): string | null {
   return name;
 }
 
+/** The hosts a browser reaches: the pinned ones, the CLI's loopback literal excluded. */
+function isBrowserHost(name: string): boolean {
+  return name !== '127.0.0.1' && (ALLOWED_HOSTS as readonly string[]).includes(name);
+}
+
+/** The port of a `host:port` string, or '' when it names none (or names nonsense). */
+function hostPort(host: string): string {
+  const port = host.split(':')[1];
+  return port !== undefined && /^\d{1,5}$/.test(port) ? port : '';
+}
+
+/**
+ * Where a browser without a session is sent (rework 3): the loader's login on
+ * the boot host of the same instance and port, carrying where it was going.
+ * Built from the pinned names only - the forwarded host is VETTED first and
+ * only its port is taken from it - so no request can make the loader send a
+ * browser to a name of its choosing. Null for a host the loader does not
+ * answer on (the caller then answers 401).
+ */
+export function loginLocation(forwardedHost: string, forwardedUri: string): string | null {
+  const name = hostName(forwardedHost);
+  if (!isBrowserHost(name)) return null;
+  const domain = parentDomain(forwardedHost);
+  if (domain === null) return null;
+  const port = hostPort(forwardedHost);
+  const authority = (host: string): string => (port === '' ? host : `${host}:${port}`);
+  const path = forwardedUri.startsWith('/') && !forwardedUri.startsWith('//') ? forwardedUri : '/';
+  const next = `http://${authority(name)}${path}`;
+  return `http://${authority(`boot.${domain}`)}/login?next=${encodeURIComponent(next)}`;
+}
+
+/**
+ * The `next` of a login, or null when it is not an address of this instance.
+ * Only an http(s) URL on a pinned browser host is followed, so the login page
+ * is never an open redirect to somewhere else.
+ */
+export function vettedNext(next: string | undefined): string | null {
+  if (next === undefined || next === '') return null;
+  let url: URL;
+  try {
+    url = new URL(next);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.username !== '' || url.password !== '') return null;
+  if (!isBrowserHost(url.hostname.toLowerCase())) return null;
+  return url.href;
+}
+
 /** The cookie domain of a vetted host; an unvetted one is a programming error. */
 function cookieDomain(host: string): string {
   const domain = parentDomain(host);

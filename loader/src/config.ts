@@ -58,6 +58,11 @@ export interface LoaderConfig {
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
   /**
+   * The room a stop keeps after SIGKILL for the kernel to reap a child (lifemodel
+   * or Caddy); the drain gets what is left of the budget less this.
+   */
+  killWaitMs: number;
+  /**
    * The whole stop, from the first SIGTERM to the last child gone: lifemodel's
    * drain and Caddy's exit share this one deadline, and the documented
    * `--stop-timeout 120` leaves room for it (rework 2, finding 10).
@@ -81,6 +86,7 @@ const DEFAULTS = {
   caddyConfig: '/etc/lifemodel/Caddyfile',
   caddyStopWaitMs: 10_000,
   drainWaitMs: 95_000,
+  killWaitMs: 5_000,
   stopBudgetMs: 110_000,
   buildTimeoutMs: 20 * 60_000,
   restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
@@ -118,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
       stopWaitMs: readInt(env, 'LIFEMODEL_CADDY_STOP_WAIT_MS', DEFAULTS.caddyStopWaitMs),
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
+    killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),
     stopBudgetMs: readInt(env, 'LIFEMODEL_STOP_BUDGET_MS', DEFAULTS.stopBudgetMs),
     buildTimeoutMs: readInt(env, 'LIFEMODEL_BUILD_TIMEOUT_MS', DEFAULTS.buildTimeoutMs),
     restart: DEFAULTS.restart,

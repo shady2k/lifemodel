@@ -36,6 +36,7 @@ import {
   csrfToken,
   hashPassword,
   isAllowedHost,
+  loginLocation,
   parseCookies,
   type PasswordRecord,
   sameOrigin,
@@ -44,6 +45,7 @@ import {
   verifyCsrf,
   verifyPassword,
   verifySession,
+  vettedNext,
 } from './auth.js';
 import type { Bootstrap, InstanceStatus } from './bootstrap.js';
 import type { Clock } from './clock.js';
@@ -178,13 +180,13 @@ ${message === undefined ? '' : `<p class="bad">${escapeHtml(message)}</p>`}
   );
 }
 
-function loginPage(message?: string): string {
+function loginPage(message?: string, next?: string | null): string {
   return page(
     'lifemodel loader login',
     `<h2>Log in</h2>
 ${message === undefined ? '' : `<p class="bad">${escapeHtml(message)}</p>`}
 <form method="post" action="/login">
-  <label for="password">Password</label>
+${next === undefined || next === null ? '' : `  <input type="hidden" name="next" value="${escapeHtml(next)}">\n`}  <label for="password">Password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
   <p><button type="submit">Log in</button></p>
 </form>`
@@ -344,7 +346,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     if (req.method === 'GET') {
-      sendHtml(res, 200, loginPage());
+      // Where the browser was going before it was sent here; only an address
+      // of this instance is kept (no open redirect).
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      sendHtml(res, 200, loginPage(undefined, vettedNext(query.get('next') ?? undefined)));
       return;
     }
     if (req.method !== 'POST') {
@@ -361,14 +366,17 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
     const form = await readForm(req);
     const password = form['password'] ?? '';
+    const next = vettedNext(form['next']);
     if (!(await verifyPassword(password, record))) {
       refusedLogin(req);
-      sendHtml(res, 401, loginPage('That password does not match.'));
+      sendHtml(res, 401, loginPage('That password does not match.', next));
       return;
     }
     const host = req.headers.host ?? 'localhost';
     logger.info({ host }, 'the owner logged in');
-    redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
+    redirect(res, next ?? '/', {
+      'set-cookie': sessionCookie(createSession(record, clock.now()), host),
+    });
   }
 
   /** Not logged in: the same answer the page gives, and no state changed. */
@@ -489,9 +497,26 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     }
 
     if (path === '/_auth/verify') {
-      // Caddy's forward_auth: 2xx for a logged-in browser, 401 for everyone else.
-      if (await hasSession(req)) sendText(res, 200, 'ok');
-      else sendText(res, 401, 'no session');
+      // Caddy's forward_auth: 2xx for a logged-in browser. A browser without a
+      // session that is OPENING a page (GET or HEAD) is sent to the login on
+      // the boot host - forward_auth passes the redirect through - so a person
+      // who opens the address README names gets the password page, not a bare
+      // 401 (rework 3, the stage-1 walk). Everything else without a session
+      // is refused with 401: no state-changing request is ever redirected.
+      if (await hasSession(req)) {
+        sendText(res, 200, 'ok');
+        return;
+      }
+      const forwardedMethod = (header(req, 'x-forwarded-method') ?? '').toUpperCase();
+      const location =
+        forwardedMethod === 'GET' || forwardedMethod === 'HEAD'
+          ? loginLocation(
+              header(req, 'x-forwarded-host') ?? '',
+              header(req, 'x-forwarded-uri') ?? '/'
+            )
+          : null;
+      if (location === null) sendText(res, 401, 'no session');
+      else redirect(res, location);
       return;
     }
     if (path === '/setup') {

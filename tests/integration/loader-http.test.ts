@@ -222,6 +222,69 @@ describe('one login, three hosts', () => {
     await shutdownLoader(world, app);
   });
 
+  it('sends a browser that opens a page without a session to the login, and back after it (rework 3)', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app } = await createRunningLoader(world);
+    const port = app.port();
+    // What Caddy's forward_auth sends: the loader's own Host, and the browser's
+    // method, host and path as X-Forwarded-*.
+    const verify = (method: string, forwardedHost: string, uri = '/') =>
+      ask(port, 'GET', '/_auth/verify', {
+        host: forwardedHost,
+        headers: {
+          'x-forwarded-method': method,
+          'x-forwarded-host': forwardedHost,
+          'x-forwarded-uri': uri,
+        },
+      });
+
+    const boot = await verify('GET', 'boot.localhost:8080');
+    expect(boot.status).toBe(303);
+    expect(boot.headers['location']).toBe(
+      `http://boot.localhost:8080/login?next=${encodeURIComponent('http://boot.localhost:8080/')}`
+    );
+    const root = await verify('GET', 'localhost:8080', '/settings?x=1');
+    expect(root.headers['location']).toBe(
+      `http://boot.localhost:8080/login?next=${encodeURIComponent('http://localhost:8080/settings?x=1')}`
+    );
+    expect((await verify('HEAD', 'vault.localhost')).status).toBe(303);
+    // A request that would change something is refused, never redirected.
+    expect((await verify('POST', 'localhost:8080')).status).toBe(401);
+    // A path that is not a path is not carried.
+    expect((await verify('GET', 'localhost', '//evil.example/')).headers['location']).toBe(
+      `http://boot.localhost/login?next=${encodeURIComponent('http://localhost/')}`
+    );
+
+    // The login page keeps an address of this instance as where to go next...
+    const next = 'http://localhost:8080/settings';
+    const page = await ask(port, 'GET', `/login?next=${encodeURIComponent(next)}`, {
+      host: 'boot.localhost:8080',
+    });
+    expect(page.body).toContain(`name="next" value="${next}"`);
+    // ...and nothing else: no open redirect.
+    for (const foreign of ['http://evil.example/', 'javascript:alert(1)', '//evil.example/']) {
+      const refused = await ask(port, 'GET', `/login?next=${encodeURIComponent(foreign)}`, {
+        host: 'boot.localhost',
+      });
+      expect(refused.body).not.toContain('name="next"');
+    }
+    const login = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost:8080',
+      form: { password: 'right', next },
+    });
+    expect(login.status).toBe(303);
+    expect(login.headers['location']).toBe(next);
+    const foreignLogin = await ask(port, 'POST', '/login', {
+      host: 'boot.localhost',
+      form: { password: 'right', next: 'http://evil.example/' },
+    });
+    expect(foreignLogin.headers['location']).toBe('/');
+
+    await shutdownLoader(world, app);
+  });
+
   it('refuses a wrong password, says so once at warn, and never writes the password', async () => {
     const world = createLoaderWorld();
     roots.push(world.root);

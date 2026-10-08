@@ -152,21 +152,42 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     },
 
     shutdown: async (reason: string) => {
-      logger.info({ reason }, 'the loader is stopping');
-      await http?.close();
-      // ONE deadline for the whole stop (rework 2, finding 10): lifemodel gets
-      // its drain first and the front door gets what is left of the same
-      // budget, so the stop cannot run past it and be killed by Docker in the
-      // middle of its last step. The documented `--stop-timeout 120` is longer
-      // than this budget, which is why the sequence finishes.
+      // ONE deadline for the whole stop, from the moment the stop signal
+      // arrived (rework 2, finding 10; rework 3): closing the loader's server,
+      // lifemodel's drain, its SIGKILL and Caddy's exit all spend the same
+      // budget, and no step waits past it. The documented `--stop-timeout 120`
+      // is longer than this budget (110 s), so Docker's own kill comes after
+      // the loader has either finished or given up and left with code 1.
       const deadline = clock.now() + config.stopBudgetMs;
       const left = (): number => Math.max(0, deadline - clock.now());
+      logger.info({ reason, budgetMs: config.stopBudgetMs }, 'the loader is stopping');
+      // Nothing starts from here on: not a start in flight, not a restart.
+      supervisor.close();
+      const pending: string[] = [];
+      const closing = http?.close() ?? Promise.resolve();
+      // The server's close is bounded by a short share of the budget: a
+      // client that holds its connection open must not eat lifemodel's drain.
+      const closeWaitMs = Math.min(left(), config.killWaitMs);
+      const closed = await Promise.race([
+        closing.then(() => true),
+        clock.sleep(closeWaitMs).then(() => false),
+      ]);
+      if (!closed) pending.push("the loader's own server (connections still open)");
       // The supervisor already said it in one line when the drain ran out;
-      // the code below is what the container leaves with, not a second line.
+      // the code below is what the container leaves with.
       const outcome = await supervisor.stop('shutdown', left());
+      if (!outcome.stopped) pending.push('lifemodel (not reaped after SIGKILL)');
       // Last: the front door stays open while lifemodel drains, so a person
       // watching the page sees the stop rather than a connection error.
-      await frontDoor.stop(left());
+      const caddyLeft = await frontDoor.stop(left());
+      if (!caddyLeft) pending.push('caddy (not reaped after SIGKILL)');
+      if (pending.length > 0) {
+        logger.error(
+          { pending, budgetMs: config.stopBudgetMs },
+          `the stop deadline ran out with work still pending: ${pending.join(', ')}`
+        );
+        return 1;
+      }
       return outcome.drainTimedOut ? 1 : 0;
     },
   };
