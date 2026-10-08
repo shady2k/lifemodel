@@ -265,8 +265,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   receipt. `submitted` and `implemented` take their comment atomically:
   `br update <id> --status implemented --transition-comment "implemented: ..."`;
   a separate comment does not satisfy `.beads/policy.yaml`. A worker's span in
-  prime-agent is closed with `receipt --unknown`: the run script reads Claude
-  Code, Codex and omp transcripts only.
+  prime-agent gets a measured receipt (`receipt --end finished --harness
+  prime-agent --session <id>`): the run script reads its transcript. The
+  worker posts it as its last record, after the work, so the span covers it.
 
 ### Tracker operations
 
