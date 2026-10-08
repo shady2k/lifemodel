@@ -267,13 +267,15 @@ describe('transcript-compiler', () => {
       apiKey: 'test-key',
     };
 
-    const localConfig: VercelAIProviderConfig = {
+    const endpointConfig: VercelAIProviderConfig = {
       baseUrl: 'http://localhost:1234',
-      model: 'local-model',
+      fastModel: 'local-model',
+      smartModel: 'local-model',
+      motorModel: 'local-model',
     };
 
     it('returns STRICT_POLICY for local providers', () => {
-      const policy = resolveTranscriptPolicy(localConfig, 'local-model');
+      const policy = resolveTranscriptPolicy(endpointConfig, 'local-model');
       expect(policy.name).toBe('strict');
       expect(policy.mergeConsecutiveRoles).toBe(true);
     });
