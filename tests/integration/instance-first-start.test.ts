@@ -163,6 +163,19 @@ function logCount(pattern: RegExp): number {
     .filter((candidate) => pattern.test(candidate)).length;
 }
 
+/** Wait until the container logged a line one more time than it had (the event). */
+async function waitForCount(pattern: RegExp, target: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (logCount(pattern) < target) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the container never logged ${String(pattern)} ${String(target)} times:\n${docker(['logs', container])}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 /** The event of a start: the loader's own line, the second time (or later). */
 async function waitForStarts(target: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -491,6 +504,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(before.body).toContain(`http://boot.localhost:${String(port)}/`);
 
     const startsBefore = logCount(/"msg":"lifemodel started"/);
+    const interfacesBefore = logCount(/settings interface is up/);
 
     const save = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/settings', {
       cookie,
@@ -522,6 +536,11 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     await waitForStarts(startsBefore + 1, 120_000);
     const afterSave = logFrom('"msg":"lifemodel asked to be restarted"');
     expect(afterSave.some((line) => line.includes('after a backoff'))).toBe(false);
+
+    // The restarted lifemodel builds its container again before it answers:
+    // wait for ITS OWN line (the second one), not for a timer - the root host
+    // answers 502 until then.
+    await waitForCount(/settings interface is up/, interfacesBefore + 1, 120_000);
 
     // The running lifemodel reads the new settings: the page shows them.
     const after = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
