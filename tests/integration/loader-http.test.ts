@@ -488,6 +488,38 @@ describe('the command line inside the container', () => {
   });
 });
 
+describe('a panic whose stop could not finish (review round 5)', () => {
+  it('exits 1 with the pending reason, and panic stays set', async () => {
+    const world = createLoaderWorld();
+    roots.push(world.root);
+    scriptRepository(world);
+    const { app, lines } = await createRunningLoader(world);
+    await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
+
+    const panicking = cli(app, ['panic']);
+    await waitUntil(
+      () => lifemodelSpawn(world)?.child.signals.length === 1,
+      'lifemodel is asked to stop'
+    );
+    // lifemodel never leaves: not after its drain, not after SIGKILL.
+    world.clock.resolveAll();
+    await waitUntil(() => lifemodelSpawn(world)?.child.signals.length === 2, 'lifemodel is killed');
+    world.clock.resolveAll();
+    const panicked = await panicking;
+
+    expect(panicked.code).toBe(1);
+    expect(panicked.err.join('\n')).toContain('panic is set, but the stop did not finish');
+    expect(await app.state.isPanicSet()).toBe(true);
+    expect(
+      lines.some(
+        (line) => line.level === 'error' && line.message.includes('the stop did not finish')
+      )
+    ).toBe(true);
+    lifemodelSpawn(world)?.child.exit(null, 'SIGKILL');
+    await shutdownLoader(world, app);
+  });
+});
+
 describe('a failed first start (rework 1)', () => {
   it('leaves the loader serving, its state failed with the reason, and panic and resume working', async () => {
     const world = createLoaderWorld();

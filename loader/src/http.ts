@@ -53,7 +53,7 @@ import { LoaderFatalError } from './errors.js';
 import type { LoaderLogger } from './logger.js';
 import type { LoaderState } from './state.js';
 import { describe } from './state.js';
-import type { Supervisor } from './supervisor.js';
+import type { StopOutcome, Supervisor } from './supervisor.js';
 
 /** What the command line proves itself with; root-only on the volume. */
 export const CLI_TOKEN_HEADER = 'x-loader-cli-token';
@@ -283,6 +283,21 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     return null;
   }
 
+  /** The line a panic leaves: stopped, or what its stop could not finish. */
+  function panicLine(from: string, outcome: StopOutcome): void {
+    if (outcome.pending === null) {
+      logger.warn(
+        { drainTimedOut: outcome.drainTimedOut },
+        `panic set from ${from}: lifemodel is stopped`
+      );
+    } else {
+      logger.error(
+        { pending: outcome.pending },
+        `panic set from ${from}, but the stop did not finish: ${outcome.pending}`
+      );
+    }
+  }
+
   /** One warn line for a refused state change, with the reason and no secret. */
   function refusedChange(req: IncomingMessage, reason: string): void {
     logger.warn(
@@ -415,10 +430,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     if (action === 'panic') {
       await state.setPanic('the loader page');
       const outcome = await supervisor.stop('panic');
-      logger.warn(
-        { drainTimedOut: outcome.drainTimedOut },
-        'panic set from the loader page: lifemodel is stopped'
-      );
+      panicLine('the loader page', outcome);
     } else {
       await state.clearPanic();
       logger.info({}, 'panic cleared from the loader page: starting lifemodel');
@@ -464,10 +476,14 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     if (path === '/_api/panic') {
       await state.setPanic('the command line');
       const outcome = await supervisor.stop('panic');
-      logger.warn(
-        { drainTimedOut: outcome.drainTimedOut },
-        'panic set from the command line: lifemodel is stopped'
-      );
+      panicLine('the command line', outcome);
+      if (outcome.pending !== null) {
+        // Panic is set, but the stop did not finish: never answered as success.
+        sendJson(res, 500, {
+          error: `panic is set, but the stop did not finish: ${outcome.pending}`,
+        });
+        return;
+      }
       sendJson(res, 200, await bootstrap.status());
       return;
     }

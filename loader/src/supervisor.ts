@@ -347,9 +347,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       ]);
       if (!settled) {
         // Not the stop's deadline: its own cap on a start that should take
-        // milliseconds. The start is given up and settles at once.
+        // milliseconds. The start is given up and settles at once - unless the
+        // OS confirmed it in the same turn, in which case the start owns a
+        // running child and the ordinary stop below drains it (rework 3,
+        // review round 5): a stop never reports giving up a start that runs.
         abandonStart?.();
-        await inFlight;
+        const outcome = await inFlight;
+        if (outcome.started) return await stopOwnedChild(reason, left);
         stopping = false;
         logger.error(
           { reason, waitedMs: config.killWaitMs },
@@ -362,6 +366,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         };
       }
     }
+    return await stopOwnedChild(reason, left);
+  }
+
+  /** The stop of the child this supervisor owns (if any), within what is left of the budget. */
+  async function stopOwnedChild(reason: string, left: () => number): Promise<StopOutcome> {
     const current = child;
     const currentExit = exit;
     if (current === null || currentExit === null) {
