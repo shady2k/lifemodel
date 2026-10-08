@@ -1,0 +1,97 @@
+# The front door of a lifemodel instance (lifemodel-q4x, decisions 13-15).
+# Caddy is the only web entrance, and the loader starts it (it is the loader's
+# child, root-owned like the loader itself).
+#
+# The hosts, all of them on port 80 inside the container:
+#
+#   boot.<host>    the loader   (127.0.0.1:7000)
+#   <host>         lifemodel    (127.0.0.1:7100) - lifemodel's own interface
+#   vault.<host>   Agent Vault  (127.0.0.1:14321) - its own interface
+#
+# Every request on every host is checked by the loader first through
+# forward_auth to GET /_auth/verify: 2xx with the session cookie, 401 without
+# it. The loader is the one that sets the cookie (lm_session, Domain = the
+# parent host), so Caddy only passes it through; the auth request is a GET
+# (forward_auth rewrites the method) and carries X-Forwarded-Method,
+# X-Forwarded-Uri and X-Forwarded-Host beside the original Host header.
+#
+# The loader's own login and password-setting routes are the exception: it is
+# what asks for the password, so nothing may ask before it. It serves its login
+# and its assets under /login/, /setup/ or /assets/ (boot.<host> only).
+#
+# Caddy listens on every interface of the container, because the published port
+# reaches the container's own address, not its loopback: "localhost only" is
+# the `-p 127.0.0.1:8080:80` of the documented `docker run`, not this file.
+# Access from outside (a domain, certificates) is added here later
+# (lifemodel-sd2).
+{
+	# The admin API would let a request rewrite this configuration, and
+	# lifemodel runs in this container.
+	admin off
+}
+
+# The loader's own pages: the only paths that reach a host without the session
+# cookie.
+(loader_own_pages) {
+	@loader_own_pages path /login /login/* /setup /setup/* /assets/* /favicon.ico
+}
+
+# Everything else: the loader decides, and a 2xx lets the request continue to
+# the host's own backend.
+(loader_check) {
+	forward_auth 127.0.0.1:7000 {
+		uri /_auth/verify
+	}
+}
+
+:80 {
+	# One line per request on stdout, so `docker logs` shows the front door
+	# next to the loader's own lines. The session cookie and any Authorization
+	# header are dropped: no secret reaches the container log.
+	log {
+		output stdout
+		format filter {
+			wrap console
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+			}
+		}
+	}
+
+	@boot host boot.*
+	@vault host vault.*
+
+	# boot.<host>: the loader's interface, the login included.
+	handle @boot {
+		import loader_own_pages
+		handle @loader_own_pages {
+			reverse_proxy 127.0.0.1:7000
+		}
+		handle {
+			import loader_check
+			reverse_proxy 127.0.0.1:7000
+		}
+	}
+
+	# vault.<host>: Agent Vault's own interface (stage 2; until it exists this
+	# host answers that nothing is there yet).
+	handle @vault {
+		import loader_check
+		reverse_proxy 127.0.0.1:14321
+	}
+
+	# <host>: lifemodel's own interface (stage 3; the same until it exists).
+	handle {
+		import loader_check
+		reverse_proxy 127.0.0.1:7100
+	}
+
+	# A backend that is not up yet answers one plain line instead of an empty
+	# error page. Caddy reports a backend it cannot reach as 502 with an empty
+	# body, which reads as a broken instance rather than one still coming up.
+	handle_errors {
+		@unreachable expression `{err.status_code} >= 502 && {err.status_code} <= 504`
+		respond @unreachable "Nothing is answering at this address yet.\nThe loader is at the same address under boot. (boot.localhost when this is localhost.)\n" 502
+	}
+}
