@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -332,6 +333,94 @@ describe("lifemodel's settings interface", () => {
           motorModel: 'second-mid',
         });
     expect(whole).toBe(true);
+  });
+
+  it('close is bounded even when a request never sends its body', async () => {
+    // The review's concrete case: a POST with a Content-Length and half a
+    // body holds its socket. fastify's requestTimeout is 0, so an unbounded
+    // close would wait on it forever - and, called from the restart path
+    // BEFORE the deadline was armed, stall lifemodel's whole stop.
+    const graceServer = await createSettingsServer({
+      config: createConfigLoader(configDir),
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 300,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await graceServer.listen();
+    const address = graceServer.address();
+    const port = Number(address.slice(address.lastIndexOf(':') + 1));
+
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect({ host: '127.0.0.1', port }, () => {
+        socket.write(
+          'POST /settings HTTP/1.1\r\nHost: localhost:8080\r\n' +
+            'Content-Type: application/x-www-form-urlencoded\r\n' +
+            'Content-Length: 10000\r\n\r\nx='
+        );
+        // The body's remainder never arrives, and the socket stays open.
+        resolve();
+      });
+      socket.on('error', reject);
+    });
+
+    const started = Date.now();
+    await graceServer.close();
+    const elapsed = Date.now() - started;
+    // Bounded, not a stall (the grace is 300 ms); an unbounded close would
+    // hang this await and the test's own timeout would have to kill it.
+    expect(elapsed).toBeLessThan(3_000);
+  });
+
+  it('a save that arrives while the interface is closing is refused, with the reason', async () => {
+    const graceServer = await createSettingsServer({
+      config: createConfigLoader(configDir),
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 2_000,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await graceServer.listen();
+    const address = graceServer.address();
+    const port = Number(address.slice(address.lastIndexOf(':') + 1));
+
+    const socket = await new Promise<ReturnType<typeof connect>>(
+      (resolve, reject) => {
+        const opened = connect({ host: '127.0.0.1', port }, () => resolve(opened));
+        opened.on('error', reject);
+      }
+    );
+
+    // The close BEGINS (intake stops) while the socket is connected: what
+    // arrives now is a save into a process that is draining.
+    const closed = graceServer.close();
+    const body = new URLSearchParams(VALID).toString();
+    socket.write(
+      'POST /settings HTTP/1.1\r\nHost: localhost:8080\r\n' +
+        'Content-Type: application/x-www-form-urlencoded\r\n' +
+        `Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n` +
+        body
+    );
+
+    const answer = await new Promise<string>((resolve) => {
+      let received = '';
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        received += chunk;
+        if (received.includes('</html>')) resolve(received);
+      });
+      socket.on('close', () => resolve(received));
+    });
+
+    // Refused either way - by fastify's own during-close rejection, or (when
+    // the handler still runs inside the grace) by the interface's own page.
+    expect(answer).toContain('503');
+    expect(saved).toBe(0);
+    await closed;
   });
 
   it('does not restart when the config file cannot be written', async () => {

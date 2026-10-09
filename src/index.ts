@@ -149,22 +149,20 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
   }
   isShuttingDown = true;
 
-  // Intake stops FIRST, as in the loader's own stop: no new settings save is
-  // accepted while lifemodel is draining (a save that arrived now would write
-  // a config the exiting process would never apply, and the restart it asks
-  // for would be swallowed by the stop already running). The answer to the
-  // save that started THIS stop has already gone out.
-  await settingsServer?.close();
-  settingsServer = undefined;
-
+  // The ONE stop deadline is ARMED FIRST, before anything is awaited: even the
+  // settings close below stands inside it. Previously the close was awaited
+  // BEFORE the timer was armed - an HTTP request that never finished (fastify's
+  // requestTimeout is 0; a POST with a Content-Length and half a body is
+  // enough) stalled this await, the deadline never started, and the loader
+  // killed lifemodel instead of letting it drain.
   let hardExit: ArmedStopDeadlineExit | undefined;
   const active = container;
+  if (error) {
+    active?.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
+  } else {
+    active?.logger.info('Shutdown triggered: %s', reason);
+  }
   if (active) {
-    if (error) {
-      active.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
-    } else {
-      active.logger.info('Shutdown triggered: %s', reason);
-    }
     // Armed BEFORE the stop starts and disarmed when it resolved: the same
     // budget the container's own stop deadline uses (its deadline starts a
     // moment later, so this timer can only fire while the stop is unfinished).
@@ -173,14 +171,27 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
       budgetMs: active.coreLoop.getStopDrainTimeoutMs(),
       pending: () => ({ step: active.stopProgress(), ...active.coreLoop.stopReport() }),
     });
-    // A THROWING stop leaves the timer armed on purpose: the process then
-    // still leaves at the deadline (with the exit code of the hard exit)
-    // instead of hanging on a stop that will never finish.
-    await active.shutdown();
-    hardExit.disarm();
   } else {
     // eslint-disable-next-line no-console
     console.error(`Shutdown triggered: ${reason}`, error ?? '');
+  }
+
+  // Intake stops FIRST, as in the loader's own stop: no new settings save is
+  // accepted while lifemodel is draining (a save that arrived now would write
+  // a config the exiting process would never apply, and the restart it asks
+  // for would be swallowed by the stop already running). The answer to the
+  // save that started THIS stop has already gone out. The close is BOUNDED
+  // (src/settings/server.ts): an outstanding request that does not end within
+  // the grace is destroyed here, never waited on past the deadline.
+  await settingsServer?.close();
+  settingsServer = undefined;
+
+  // A THROWING stop leaves the timer armed on purpose: the process then
+  // still leaves at the deadline (with the exit code of the hard exit)
+  // instead of hanging on a stop that will never finish.
+  if (active) {
+    await active.shutdown();
+    hardExit?.disarm();
   }
   process.exit(code);
 }
