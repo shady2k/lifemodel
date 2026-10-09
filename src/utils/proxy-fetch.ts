@@ -428,11 +428,25 @@ function webResponseFrom(res: IncomingMessage): Response {
             }
           };
           res.on('data', (chunk: Buffer) => {
-            guard(() => { controller.enqueue(new Uint8Array(chunk)); });
+            guard(() => {
+              controller.enqueue(new Uint8Array(chunk));
+            });
           });
-          res.on('end', () => { guard(() => { controller.close(); }); });
-          res.on('close', () => { guard(() => { controller.close(); }); });
-          res.on('error', (error) => { guard(() => { controller.error(error); }); });
+          res.on('end', () => {
+            guard(() => {
+              controller.close();
+            });
+          });
+          res.on('close', () => {
+            guard(() => {
+              controller.close();
+            });
+          });
+          res.on('error', (error) => {
+            guard(() => {
+              controller.error(error);
+            });
+          });
         },
         cancel() {
           res.destroy();
