@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { Bot } from 'grammy';
 import PAbortController from 'abort-controller';
-import { proxyFetch } from '/home/dev/.herdr/worktrees/lifemodel/feature-lifemodel-q4x-transport-fix2/src/utils/proxy-fetch.js';
+import { proxyFetch } from '../../../src/utils/proxy-fetch.ts';
 
 const LAN = process.env['LAN'];
 const proxyPort = Number(process.env['PROXY_PORT']);

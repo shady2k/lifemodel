@@ -3,7 +3,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
-import net from 'node:net';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -13,29 +12,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
 const stand = path.join(repoRoot, 'tests/fixtures/proxy-fetch-tls/proof-stand.mts');
 
-/** This box's own LAN address: a real-socket stand dials a non-loopback name. */
-function thisLanAddress(): string {
-  return new Promise((resolve, reject) => {
-    const probe = net.connect({ host: '8.8.8.8', port: 53 });
-    probe.on('connect', () => {
-      const address = probe.address();
-      probe.destroy();
-      if (typeof address !== 'object' || address.address === undefined) {
-        reject(new Error('the LAN probe gave no local address'));
-      } else {
-        resolve(address.address);
-      }
-    });
-    probe.on('error', reject);
-  });
-}
+// Keep the HTTPS target distinct from the 127.0.0.2 HTTP redirect hop.
+const standAddress = '127.0.0.1';
 
 describe('proxyFetch against the real grammY Bot over real sockets', () => {
   let certDir: string;
   let lanAddress: string;
 
   beforeAll(async () => {
-    lanAddress = await thisLanAddress();
+    lanAddress = standAddress;
     certDir = await mkdtemp(path.join(os.tmpdir(), 'q4xtf2-certs-'));
     await run(
       'openssl',

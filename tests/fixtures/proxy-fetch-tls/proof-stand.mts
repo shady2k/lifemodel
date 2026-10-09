@@ -122,8 +122,8 @@ await new Promise((resolve) => forwardHop.listen(0, '0.0.0.0', resolve));
 const forwardPort = forwardHop.address().port;
 
 // The forward hop lives on a loopback-adjacent address; its absolute-form
-// request must travel through the proxy (the proxy may loop connections back
-// to it over the LAN address).
+// request must travel through the proxy. The HTTPS target uses a distinct
+// loopback address, supplied through the LAN environment variable.
 console.error(
   `PROOF STAND PORTS: proxy=${proxyPort} tls=${tlsPort} forward=${forwardPort} lan=${LAN}`
 );
