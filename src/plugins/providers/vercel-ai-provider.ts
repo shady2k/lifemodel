@@ -19,6 +19,7 @@ import { toStrictSchema } from '../../llm/tool-schema.js';
 import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
 import { addCacheControl } from './provider-transforms.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
+import { proxyFetch } from '../../utils/proxy-fetch.js';
 
 // Vercel AI SDK imports
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
@@ -239,7 +240,13 @@ export class VercelAIProvider extends BaseLLMProvider {
         }
       }
 
-      const response = await globalThis.fetch(input, modifiedInit);
+      // Out through the environment's proxy the way curl reaches an http
+      // endpoint: the absolute-form forward-proxy path for a plain-HTTP
+      // target, Node's tunnelling CONNECT for an https one (the proxy's MITM
+      // certificate validates against NODE_EXTRA_CA_CERTS). The transport is
+      // ONE shared place (src/utils/proxy-fetch.ts, finding 3); this wrapper
+      // keeps only its own jobs - tool-schema repair and reasoning_content.
+      const response = await proxyFetch(input, modifiedInit);
       if (!response.ok) return response;
 
       // Extract reasoning_content from response
