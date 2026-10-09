@@ -228,6 +228,15 @@ goes). lifemodel's process gets no key, no admin credential and no path into the
 store: an unmatched host passes through the vault, a host with a service gets
 its credential attached on the way out. The token never appears in a log line.
 
+The rest of the container's environment is not passed wholesale: lifemodel's
+process - and the build's - is built over the explicit boundary of
+`loader/src/env-boundary.ts`: the variables the product's own code reads, BY
+NAME, and then the proxy environment above. A model key or the vault's admin
+credential a container was started with (`-e OPENROUTER_API_KEY=...`, or an
+inherited `AGENT_VAULT_MASTER_PASSWORD`) stops at the loader; uid 1000 never
+sees it. When the product starts reading another container variable, the
+boundary's list is the one place to name it.
+
 **The owner's way into Agent Vault.** Agent Vault 0.40.0 has no login but its
 own accounts, and the first registered user is the instance owner - the account
 the loader registered to provision the vault. So the loader's own page shows
@@ -282,6 +291,7 @@ destination-bound - not "loopback":
 | TCP `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's one way out (story S5) |
 | TCP `127.0.0.1:7000` | the loader's own interface: the instance's HTTP surface on loopback (the `status|panic|resume` command line, and Caddy's forward check) |
 | UDP and TCP `127.0.0.11:<the resolver's port>` | the container's embedded resolver: resolving a name is not egress, and a dial to a resolved address still meets the REJECT. Docker gives the resolver address to its clients as `:53` and then DNATs it to the port the resolver really answers on, so the loader READS that port from the nat table (per protocol) and allows it - the port the filter actually sees. When no such rewrite exists, nothing is allowed and one line says so; a name lookup by uid 1000 is then refused (what dials outside still leaves through the vault's proxy, which looks names up itself, as root) |
+| the REPLY direction of a connection that was allowed to open (`--ctstate ESTABLISHED,RELATED` for uid 1000) | the loader's interface and lifemodel's settings server ANSWER the front door: the reply's destination is the CLIENT's ephemeral port, which no port allow names. This rule accepts no NEW packet - a connection uid 1000 opens to a port no allow names is refused at its first packet, so the reply rule opens nothing |
 
 Everything else on loopback is refused: the vault's management interface
 (`127.0.0.1:14321`) - which the loader's own login, not the proxy credential,
@@ -289,9 +299,11 @@ protects - and any other local listener the rule does not name.
 
 **The rule has an IPv6 half, and a container that cannot carry it does not
 start lifemodel.** When the container has an IPv6 address or route (the kernel
-reports them in `/proc/net/if_inet6`), the loader installs the same confinement
-in `ip6tables`: the vault's proxy port over `::1`, `icmp6-port-unreachable` for
-everything else from uid 1000 - so an address an IPv6-enabled Docker network
+reports its ADDRESSES in `/proc/net/if_inet6`, and that read is the whole
+question the loader asks of it), the loader installs the same confinement
+in `ip6tables`: the vault's proxy port over `::1`, the replies of connections
+that were allowed to open, and `icmp6-port-unreachable` for everything else
+from uid 1000 - so an address an IPv6-enabled Docker network
 gives the container (`--ipv6`, an `fd`-range subnet) cannot be the way around
 the boundary. `ip6tables` is in the image; a container where the IPv6 half
 cannot be installed is a missing input of the loader's own: one line says that
@@ -475,8 +487,9 @@ is exactly the rule: an existing `data/` that is a symlink to the volume root
 leaves the loader's files alone.
 `tests/unit/loader-egress.test.ts` is the kernel rule's, driven through the
 same app: the chain made and filled before lifemodel is started (the egress
-line in the log comes before the start's), the two rules confined to the one
-uid with a REJECT, a chain left by an earlier start emptied and its jump not
+line in the log comes before the start's), the named allows plus the reply
+rule plus a REJECT in each family, all confined to the one uid; a chain left by
+an earlier start emptied and its jump not
 added twice, the jump added once when it is missing, and the two missing inputs
 - no `iptables` to run, and an `iptables` that refuses - each ending in one
 error line and a non-zero exit with lifemodel never started.
@@ -504,9 +517,10 @@ uid 1000 - run with the very environment `/proc/<lifemodel pid>/environ` holds
 - reaches the stub through the proxy with `Authorization: Bearer <the
 credential>` and the path substituted, while the same probe without a proxy is
 refused at once (outside, and to the stub next door), root still reaches the
-stub directly, the credential is in neither lifemodel's environment, its data
-nor the container's log, and the loader's page hands over the Agent Vault
-account that Agent Vault's own login API then answers. It needs docker and the
+stub directly, the made-up MODEL credential (the walk searches for its value -
+that is the key the walk proves absent) is in neither lifemodel's environment,
+its data nor the container's log, and the loader's page hands over the Agent
+Vault account that Agent Vault's own login API then answers. It needs docker and the
 first `npm ci` inside the container, so it is off unless
 `LIFEMODEL_DOCKER_TESTS=1`:
 
