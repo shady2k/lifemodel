@@ -6,10 +6,11 @@
 
 import 'dotenv/config';
 
-import { createContainerAsync, type Container } from './core/container.js';
+import { createContainerAsync, type Container, type StopStep } from './core/container.js';
+import type { StopReport } from './core/core-loop.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
 import { createConfigLoader, resolveConfigDir } from './config/index.js';
-import { createSettingsServer, type SettingsServer } from './settings/server.js';
+import { createSettingsServer, type SettingsServer, type SettingsServerOptions } from './settings/server.js';
 import { RESTART_EXIT_CODE } from './settings/restart.js';
 
 let container: Container | undefined;
@@ -19,7 +20,9 @@ let isShuttingDown = false;
 async function main(): Promise<void> {
   // Create the application container with async initialization
   // This loads config, initializes storage, and restores state
-  container = await createContainerAsync();
+  const active = await createContainerAsync();
+  boundStopContainer(active);
+  container = active;
 
   const {
     logger,
@@ -77,6 +80,30 @@ async function main(): Promise<void> {
 }
 
 /**
+ * The container surface the stop coordinator must reach, named narrowly so
+ * the same call drives a real stop and a test's CONTROLLED boundary (review
+ * round 2, finding I: the stop order below is product code, not a fixture
+ * copy).
+ */
+export interface StopTargets {
+  logger: Container['logger'];
+  coreLoop: { getStopDrainTimeoutMs(): number; stopReport(): StopReport };
+  stopProgress: () => StopStep;
+  shutdown: () => Promise<void>;
+}
+
+/**
+ * The settings interface a test drives from the SAME wiring the real start
+ * uses. `main()` awaits it; the returned server (or `settingsAddress()`)
+ * carries its port.
+ */
+export interface SettingsStartOptions {
+  onConnection?: SettingsServerOptions['onConnection'];
+  closeGraceMs?: number;
+  port?: number;
+}
+
+/**
  * Start lifemodel's settings interface (lifemodel-q4x.4.1).
  *
  * A port that cannot be taken is NOT fatal: lifemodel keeps running and says so
@@ -84,7 +111,10 @@ async function main(): Promise<void> {
  * loop the loader would count as deaths (AGENTS.md, lesson 3: the same input
  * fails the same way every time - the owner is told instead).
  */
-async function startSettingsInterface(logger: Container['logger']): Promise<void> {
+export async function startSettingsInterface(
+  logger: Container['logger'],
+  options: SettingsStartOptions = {}
+): Promise<SettingsServer> {
   const server = createSettingsServer({
     // The same config file the container loaded its configuration from: one
     // resolution (resolveConfigDir), so the interface writes where the next
@@ -94,6 +124,9 @@ async function startSettingsInterface(logger: Container['logger']): Promise<void
     onSaved: () => {
       void restartAfterSettingsSaved();
     },
+    ...(options.port !== undefined && { port: options.port }),
+    ...(options.closeGraceMs !== undefined && { closeGraceMs: options.closeGraceMs }),
+    ...(options.onConnection !== undefined && { onConnection: options.onConnection }),
   });
   settingsServer = server;
   try {
@@ -105,6 +138,15 @@ async function startSettingsInterface(logger: Container['logger']): Promise<void
       "lifemodel's settings interface could not listen: the instance runs, but its settings page does not"
     );
   }
+  return server;
+}
+
+/**
+ * The container the stop below drains. The real start sets the container it
+ * built; a test resets the boundary with its controlled double (finding I).
+ */
+export function boundStopContainer(active: Container): void {
+  container = active;
 }
 
 /**
@@ -119,35 +161,22 @@ async function restartAfterSettingsSaved(): Promise<void> {
 }
 
 /**
- * Handle a shutdown signal.
- *
- * The stop is BOUNDED by one deadline (`shutdownDrainTimeoutMs`, default
- * 90 s): intake stops, the turn in flight and its sends are drained, state
- * and storage are flushed, the channels are released. Whatever still hangs at
- * the deadline - a stalled intake stop, a stalled tick, a hung send, a stalled
- * flush - is abandoned: the armed hard exit leaves the process with a
- * non-zero code and one error line naming what was still pending. What is lost
- * by leaving is what was only queued in memory (a schedule firing, a Motor
- * Cortex result, a reaction); the durable inbound log still replays unanswered
- * messages - see docs/architecture.md.
+ * ONE stop runs here whatever asks for it, on the container the start bound
+ * (`boundStopContainer`) and the settings server the start opened. A signal, a
+ * crash, or the settings page reaches the SAME coordination: `stopAndLeave`
+ * only carries the dedup flag; the DEADLINE-FIRST ORDER below is the product
+ * path, and a test drives exactly it (review round 2, finding I: a fixture
+ * that re-typed the order proved nothing about this sequence).
  */
-async function shutdown(reason: string, error?: unknown): Promise<void> {
-  await stopAndLeave(reason, error ? 1 : 0, error);
-}
-
-/**
- * The stop itself, with the code the process leaves with.
- *
- * `code` 0 is an ordinary end, 1 a failure, and `RESTART_EXIT_CODE` the restart
- * a saved settings page asks for - the loader answers that one by starting
- * lifemodel again at once. ONE stop runs here whatever asks for it: a signal, a
- * crash, or the settings page, and later callers get the first one's outcome.
- */
-async function stopAndLeave(reason: string, code: number, error?: unknown): Promise<void> {
-  if (isShuttingDown) {
-    return; // Already shutting down, ignore duplicate signals
-  }
-  isShuttingDown = true;
+export async function runStopSequence(options: {
+  reason: string;
+  code: number;
+  error?: unknown;
+  container?: StopTargets | undefined;
+  settingsServer?: SettingsServer | undefined;
+}): Promise<void> {
+  const { reason, code, error } = options;
+  const active = options.container;
 
   // The ONE stop deadline is ARMED FIRST, before anything is awaited: even the
   // settings close below stands inside it. Previously the close was awaited
@@ -156,7 +185,6 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
   // enough) stalled this await, the deadline never started, and the loader
   // killed lifemodel instead of letting it drain.
   let hardExit: ArmedStopDeadlineExit | undefined;
-  const active = container;
   if (error) {
     active?.logger.fatal({ err: error }, 'Shutdown triggered: %s', reason);
   } else {
@@ -183,8 +211,7 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
   // save that started THIS stop has already gone out. The close is BOUNDED
   // (src/settings/server.ts): an outstanding request that does not end within
   // the grace is destroyed here, never waited on past the deadline.
-  await settingsServer?.close();
-  settingsServer = undefined;
+  await options.settingsServer?.close();
 
   // A THROWING stop leaves the timer armed on purpose: the process then
   // still leaves at the deadline (with the exit code of the hard exit)
@@ -195,6 +222,37 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
   }
   process.exit(code);
 }
+
+/**
+ * Handle a shutdown signal.
+ *
+ * The stop is BOUNDED by one deadline (`shutdownDrainTimeoutMs`, default
+ * 90 s): intake stops, the turn in flight and its sends are drained, state
+ * and storage are flushed, the channels are released. Whatever still hangs at
+ * the deadline - a stalled intake stop, a stalled tick, a hung send, a stalled
+ * flush - is abandoned: the armed hard exit leaves the process with a
+ * non-zero code and one error line naming what was still pending. What is lost
+ * by leaving is what was only queued in memory (a schedule firing, a Motor
+ * Cortex result, a reaction); the durable inbound log still replays unanswered
+ * messages - see docs/architecture.md.
+ */
+async function shutdown(reason: string, error?: unknown): Promise<void> {
+  await stopAndLeave(reason, error ? 1 : 0, error);
+}
+
+/**
+ * The stop, as the entry point asks for it: the dedup flag lives here - ONE
+ * stop runs here whatever asks for it - and the coordination is
+ * `runStopSequence`, the same call a test drives (review round 2, finding I).
+ */
+async function stopAndLeave(reason: string, code: number, error?: unknown): Promise<void> {
+  if (isShuttingDown) {
+    return; // Already shutting down, ignore duplicate signals
+  }
+  isShuttingDown = true;
+  await runStopSequence({ reason, code, error, container, settingsServer });
+}
+
 
 process.on('SIGINT', () => {
   void shutdown('SIGINT');
@@ -213,9 +271,15 @@ process.on('unhandledRejection', (reason: unknown) => {
   void shutdown('unhandledRejection', reason);
 });
 
-// Start the application
-main().catch((error: unknown) => {
-  // eslint-disable-next-line no-console
-  console.error('Failed to start:', error);
-  process.exit(1);
-});
+// Start the application - unless a caller drives the exported pieces
+// directly (the entry-point tests, review finding I): importing this module
+// must never start a second container against the running one.
+if (process.env['LIFEMODEL_ENTRYPOINT_AUTOSTART'] === '0') {
+  // The pieces are imported; wiring belongs to the caller.
+} else {
+  main().catch((error: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error('Failed to start:', error);
+    process.exit(1);
+  });
+}
