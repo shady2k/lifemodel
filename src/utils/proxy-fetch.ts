@@ -27,10 +27,143 @@
  * retries: those belong to the wrappers that call it.
  */
 
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+
+/**
+ * The AbortSignal a caller may hand over, structurally. grammY's node shim
+ * builds its per-call signal from the `abort-controller` POLYFILL, so a
+ * signal reaching this transport is not necessarily
+ * `instanceof globalThis.AbortSignal` - Node's own fetch refuses such an
+ * object before any request is made. Anything with the abort interface is
+ * accepted and, when not native, BRIDGED into a native controller (see
+ * `bridgeSignal`).
+ */
+interface AbortSignalLike {
+  readonly aborted: boolean;
+  addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: 'abort', listener: () => void): void;
+}
+
+function isAbortSignalLike(value: unknown): value is AbortSignalLike {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<AbortSignalLike>;
+  return (
+    typeof candidate.aborted === 'boolean' &&
+    typeof candidate.addEventListener === 'function' &&
+    typeof candidate.removeEventListener === 'function'
+  );
+}
+
+function isNativeAbortSignal(signal: AbortSignalLike): boolean {
+  return typeof AbortSignal === 'function' && signal instanceof AbortSignal;
+}
+
+/** The abort reason a signal carries, when it carries one. */
+function abortReasonOf(signal: AbortSignalLike): unknown {
+  return (signal as { reason?: unknown }).reason;
+}
+
+/** The caller's signal, structurally, or null. */
+function signalOf(init: RequestInit | undefined): AbortSignalLike | null {
+  const signal = init?.signal;
+  return isAbortSignalLike(signal) ? signal : null;
+}
+
+interface SignalBridge {
+  signal: AbortSignal;
+  /** Detaches the bridge listener; call it when the work settles. */
+  dispose(): void;
+}
+
+/**
+ * Bridge a structurally-compatible signal into a native controller, so the
+ * native branches of Node's fetch accept it: abort and abort REASON travel
+ * across, and `dispose` removes the listener so the caller's signal does not
+ * outlive the request with a dangling callback.
+ */
+function bridgeSignal(signal: AbortSignalLike): SignalBridge {
+  const controller = new AbortController();
+  const abort = (): void => {
+    signal.removeEventListener('abort', abort);
+    controller.abort(abortReasonOf(signal));
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort);
+  return {
+    signal: controller.signal,
+    dispose(): void {
+      signal.removeEventListener('abort', abort);
+    },
+  };
+}
+
+/**
+ * A Response whose body settlement disposes the given hook. Used when a
+ * bridge stands behind a native response: the bridge listener must live
+ * until the body is consumed (an abort DURING response consumption must
+ * still cancel the read), not just until the headers arrived.
+ */
+function responseWithDisposeHook(response: Response, dispose: () => void): Response {
+  const body = response.body;
+  if (body === null) {
+    dispose();
+    return response;
+  }
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        reader ??= body.getReader();
+        const { done, value } = await reader.read();
+        if (done) {
+          dispose();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        dispose();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      dispose();
+      return reader === null ? body.cancel(reason) : reader.cancel(reason);
+    },
+  });
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+/**
+ * The native branches: globalThis.fetch, with a structurally-compatible but
+ * non-native signal first bridged into a native controller (Node's fetch
+ * refuses the polyfill's signal outright).
+ */
+async function nativeFetch(
+  input: Request | string | URL,
+  init: RequestInit | undefined,
+  signal: AbortSignalLike | null
+): Promise<Response> {
+  if (signal === null || isNativeAbortSignal(signal)) return globalThis.fetch(input, init);
+  const bridge = bridgeSignal(signal);
+  const initWithSignal: RequestInit = { ...(init ?? {}), signal: bridge.signal };
+  try {
+    const response = await globalThis.fetch(input, initWithSignal);
+    return responseWithDisposeHook(response, () => {
+      bridge.dispose();
+    });
+  } catch (error) {
+    bridge.dispose();
+    throw error;
+  }
+}
 
 /** How many redirect hops a proxied request may follow (undici's own bound). */
 const MAX_REDIRECTS = 5;
@@ -180,16 +313,30 @@ function describeBodyKind(body: unknown): string {
  * One request TO the proxy, absolute-form, the standard forward-proxy path.
  * Resolves with the raw response to be turned into a web Response.
  */
+/**
+ * The pinned agents of the forward-proxy hop (kept alive at most for the
+ * requests that share them; keepAlive is off, so each hop tears its socket
+ * down).
+ */
+const pinnedHttpAgent = new HttpAgent({ keepAlive: false });
+const pinnedHttpsAgent = new HttpsAgent({ keepAlive: false });
+
 function sendThroughProxy(
   target: URL,
   proxy: URL,
   method: string,
   headers: HeaderRecord,
   body: Buffer | undefined,
-  signal: AbortSignal | null
+  signal: AbortSignalLike | null
 ): Promise<IncomingMessage> {
   const isTlsProxy = proxy.protocol === 'https:';
   const request = isTlsProxy ? httpsRequest : httpRequest;
+  // A PINNED agent, not the default one: with NODE_USE_ENV_PROXY=1 the
+  // default agent of node:http is itself an env-proxy agent, which would
+  // re-route this hop (whose path is already absolute-form) and reject a
+  // Host header that names the target, not the proxy. One place decides the
+  // hops: this transport, not the agent's environment.
+  const agent = isTlsProxy ? pinnedHttpsAgent : pinnedHttpAgent;
   const proxyAuthorization =
     proxy.username !== ''
       ? `Basic ${Buffer.from(
@@ -212,6 +359,7 @@ function sendThroughProxy(
         method,
         path: target.toString(),
         headers: outgoingHeaders,
+        agent,
       },
       (res) => {
         resolve(res);
@@ -219,13 +367,33 @@ function sendThroughProxy(
     );
     req.on('error', reject);
     if (signal !== null) {
+      // The caller's abort carries over, with its reason when the signal
+      // carries one (the polyfill's carries none).
+      const reason = abortReasonOf(signal);
       const abort = (): void => {
-        req.destroy(new Error('The request through the proxy was aborted'));
+        const abortError =
+          reason instanceof Error
+            ? reason
+            : Object.assign(new Error('The request through the proxy was aborted'), {
+                cause: reason,
+              });
+        req.destroy(abortError);
       };
+      signal.addEventListener('abort', abort, { once: true });
+      // once:true removes the listener when abort fires; when the work
+      // settles without an abort, the response stream's end or close (and
+      // the request's own close) removes it, so nothing dangles.
+      const settle = (): void => {
+        signal.removeEventListener('abort', abort);
+      };
+      req.on('close', settle);
+      req.on('error', settle);
+      req.on('response', (incoming: IncomingMessage) => {
+        incoming.on('end', settle);
+        incoming.on('close', settle);
+      });
       if (signal.aborted) {
         abort();
-      } else {
-        signal.addEventListener('abort', abort, { once: true });
       }
     }
     if (body !== undefined) req.end(body);
@@ -249,15 +417,22 @@ function webResponseFrom(res: IncomingMessage): Response {
   const stream = hasBody
     ? new ReadableStream<Uint8Array>({
         start(controller) {
+          // The stream may already be closed when the underlying response is
+          // disposed (a redirect's intermediate body is canceled) - NOTHING
+          // may throw out of these callbacks, so the controller is guarded.
+          const guard = (work: () => void): void => {
+            try {
+              work();
+            } catch {
+              // The controller is already closed or errored: nothing left to do.
+            }
+          };
           res.on('data', (chunk: Buffer) => {
-            controller.enqueue(new Uint8Array(chunk));
+            guard(() => { controller.enqueue(new Uint8Array(chunk)); });
           });
-          res.on('end', () => {
-            controller.close();
-          });
-          res.on('error', (error) => {
-            controller.error(error);
-          });
+          res.on('end', () => { guard(() => { controller.close(); }); });
+          res.on('close', () => { guard(() => { controller.close(); }); });
+          res.on('error', (error) => { guard(() => { controller.error(error); }); });
         },
         cancel() {
           res.destroy();
@@ -276,52 +451,54 @@ function webResponseFrom(res: IncomingMessage): Response {
  * own everywhere the product asks an outside service over HTTP(S).
  */
 export const proxyFetch: typeof fetch = async (input, init) => {
-  // The direct branches pass the call through untouched; the proxy branch
-  // needs a Request object's parts spelled out.
+  // Any proxy in the environment routes the call through `proxiedRequest`,
+  // which re-evaluates the route on every hop and so follows a redirect
+  // across the http/https protocol boundary correctly. Without a proxy the
+  // call passes through untouched.
   if (input instanceof Request) {
     const target = new URL(input.url);
     const proxy = proxyFor(target);
-    if (proxy === null || target.protocol === 'https:') {
-      return globalThis.fetch(input, init);
+    if (proxy === null) {
+      const signal = signalOf(init) ?? (isAbortSignalLike(input.signal) ? input.signal : null);
+      return nativeFetch(input, init, signal);
     }
+    const fromInit = signalOf(init);
     return proxiedRequest({
       target,
-      proxy,
       method: (init?.method ?? input.method).toUpperCase(),
       headers: headerRecordOf({ headers: input.headers, ...init }),
       body: init?.body ?? (input.body === null ? null : await input.arrayBuffer()),
-      signal: init?.signal instanceof AbortSignal ? init.signal : input.signal,
+      signal: fromInit ?? (isAbortSignalLike(input.signal) ? input.signal : null),
     });
   }
   const target = new URL(input instanceof URL ? input.toString() : input);
   const proxy = proxyFor(target);
-  if (proxy === null || target.protocol === 'https:') {
-    // Direct, or the MITM tunnel through Node's own fetch (which tunnels
-    // CONNECT and validates the re-signed certificate against
-    // NODE_EXTRA_CA_CERTS).
-    return globalThis.fetch(input, init);
+  if (proxy === null) {
+    return nativeFetch(input, init, signalOf(init));
   }
   return proxiedRequest({
     target,
-    proxy,
     method: (init?.method ?? 'GET').toUpperCase(),
     headers: headerRecordOf(init),
     body: init?.body,
-    signal: init?.signal instanceof AbortSignal ? init.signal : null,
+    signal: signalOf(init),
   });
 };
 
 async function proxiedRequest(args: {
   target: URL;
-  proxy: URL;
   method: string;
   headers: HeaderRecord;
   body: unknown;
-  signal: AbortSignal | null;
+  signal: AbortSignalLike | null;
 }): Promise<Response> {
-  // The forward-proxy path, one hop at a time with redirects followed.
+  // One hop at a time, with the ROUTE RE-EVALUATED on every hop: a redirect
+  // may cross protocols (an http:// endpoint answering 307/308 with an
+  // https:// location), and the vault's forward path only serves absolute-
+  // form http:// requests - an https hop must switch to the native
+  // CONNECT/MITM path (or go direct when no proxy covers it), and the other
+  // way round.
   let { target } = args;
-  const { proxy } = args;
   let method = args.method;
   let body: unknown = args.body;
   let headers = args.headers;
@@ -332,32 +509,83 @@ async function proxiedRequest(args: {
         `Too many redirects through the proxy: more than ${String(MAX_REDIRECTS)} hops`
       );
     }
-    const serialized = await serializeBody(body);
-    const contentType = serialized.contentType;
-    const outgoing: HeaderRecord = { ...headers };
-    if (contentType !== undefined && outgoing['content-type'] === undefined) {
-      outgoing['content-type'] = contentType;
-    }
-    delete outgoing['content-length'];
-    const res = await sendThroughProxy(target, proxy, method, outgoing, serialized.buffer, signal);
-    if (
-      (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303) &&
-      typeof res.headers.location === 'string'
-    ) {
-      target = new URL(res.headers.location, target);
-      method = 'GET';
-      body = undefined;
-      headers = {}; // a GET redirect carries no request body's headers
-      continue;
-    }
-    if (
-      (res.statusCode === 307 || res.statusCode === 308) &&
-      typeof res.headers.location === 'string'
-    ) {
-      target = new URL(res.headers.location, target);
-      continue; // same method and body, same headers
-    }
-    return webResponseFrom(res);
+    const proxy = proxyFor(target);
+    const response =
+      proxy === null || target.protocol === 'https:'
+        ? await nativeHop(target, method, headers, body, signal)
+        : await forwardProxyHop(target, proxy, method, headers, body, signal);
+    const next = redirectOf(response, target, method, body, headers);
+    if (next === null) return response;
+    // The intermediate response is never handed to the caller: close its
+    // body so no socket leaks behind the redirect.
+    await response.body?.cancel().catch(() => undefined);
+    target = next.target;
+    method = next.method;
+    body = next.body;
+    headers = next.headers;
   }
   throw new Error('unreachable');
+}
+
+/** One hop through Node's own fetch: the CONNECT/MITM tunnel, or direct. */
+async function nativeHop(
+  target: URL,
+  method: string,
+  headers: HeaderRecord,
+  body: unknown,
+  signal: AbortSignalLike | null
+): Promise<Response> {
+  const serialized = await serializeBody(body);
+  const outgoing: HeaderRecord = { ...headers };
+  if (serialized.contentType !== undefined && outgoing['content-type'] === undefined) {
+    outgoing['content-type'] = serialized.contentType;
+  }
+  const init: RequestInit = {
+    method,
+    headers: outgoing,
+    body: serialized.buffer ? new Uint8Array(serialized.buffer) : null,
+    redirect: 'manual',
+  };
+  return nativeFetch(target, init, signal);
+}
+
+/** One hop through the forward proxy: an absolute-form request TO the proxy. */
+async function forwardProxyHop(
+  target: URL,
+  proxy: URL,
+  method: string,
+  headers: HeaderRecord,
+  body: unknown,
+  signal: AbortSignalLike | null
+): Promise<Response> {
+  const serialized = await serializeBody(body);
+  const outgoing: HeaderRecord = { ...headers };
+  if (serialized.contentType !== undefined && outgoing['content-type'] === undefined) {
+    outgoing['content-type'] = serialized.contentType;
+  }
+  delete outgoing['content-length'];
+  const res = await sendThroughProxy(target, proxy, method, outgoing, serialized.buffer, signal);
+  return webResponseFrom(res);
+}
+
+/** The next hop a redirect asks for, or null when this response is final. */
+function redirectOf(
+  response: Response,
+  target: URL,
+  method: string,
+  body: unknown,
+  headers: HeaderRecord
+): { target: URL; method: string; body: unknown; headers: HeaderRecord } | null {
+  const location = response.headers.get('location');
+  if (location === null) return null;
+  const nextTarget = new URL(location, target);
+  if (response.status === 301 || response.status === 302 || response.status === 303) {
+    // A GET redirect carries no request body and none of its headers.
+    return { target: nextTarget, method: 'GET', body: undefined, headers: {} };
+  }
+  if (response.status === 307 || response.status === 308) {
+    // Same method, body and headers - only the address changed.
+    return { target: nextTarget, method, body, headers };
+  }
+  return null;
 }
