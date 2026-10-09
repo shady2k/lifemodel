@@ -4,8 +4,10 @@ lifemodel serves a small web interface on `127.0.0.1:7100`, which Caddy reaches
 as the ROOT host (`localhost`) after the loader's login has checked the request.
 It is lifemodel's own code (`src/settings/`), not the loader's: the model
 endpoint, the models, the Telegram fields and everything lifemodel adds later
-are its settings, and the loader keeps only its login, panic, first start,
-generations and task ceilings.
+are its settings. The loader keeps only its own parts today: the login, the
+panic switch and the first start. Generation selection and task ceilings are
+NOT the loader's to set yet - they belong to later outcomes, and nothing on its
+dashboard or in its config sets them now.
 
 It has **no auth of its own by design**: every request is checked by the loader
 before it is proxied here (`forward_auth` on the root host,
@@ -22,7 +24,8 @@ model key (Agent Vault injects it on the way out, lifemodel-q4x.3.*).
 | `POST /settings` | validate, write the config file, answer, and then ask for the restart |
 
 `GET /` on a first start (no config file at all) is a normal page that says no
-model endpoint is configured yet and names every field that is missing.
+model endpoint is configured yet and names the endpoint fields that are missing
+(the four endpoint fields; the optional Telegram fields are simply blank).
 lifemodel starts in that state, serves the page, and does NOT crash-loop: that
 is the first start of every instance.
 
@@ -66,11 +69,23 @@ One function resolves it (`resolveConfigDir`), and both the startup read and the
 settings interface use it, so the file that is written is the file that is read
 next. A first start has no `data/config/` directory at all: the loader makes
 `data/`, and the first save creates the directory and the file (both as
-lifemodel's own user, inside the data directory it owns). The write is atomic (a temporary file in the same directory, fsynced,
-renamed over the target): the file is either the old one or the new one, never
-half of each. Every OTHER field of the file — the owner's identity, plugin
-configuration, anything a later version adds — is kept exactly as it was: the
-interface writes the fields it owns and touches nothing else.
+lifemodel's own user, inside the data directory it owns). The write is atomic
+(a temporary file whose name is unique to that write, fsynced, renamed over the
+target, saves serialized behind the loader's write chain): the file is one
+save WHOLE - either the old one or the new one, never half of each, and a
+failed save never publishes another save's content. Every OTHER field of the
+file — the owner's identity, plugin configuration, anything a later version
+adds — is kept exactly as it was: the interface writes the fields it owns and
+touches nothing else.
+
+This file is deliberately a **named exception to the storage rule**
+(AGENTS.md, Lesson 4, Unified Storage Path): the config file is the config
+loader's own identity — its name and its JSON shape are the contract between
+the loader and every start — so the write stays here, direct, fsynced and
+awaited before the interface answers. JSONStorage writes sanitized keys under
+the state root (neither the name nor the shape would survive it), and
+DeferredStorage would leave the write unflushed behind an answer that promises
+the save.
 
 They apply by a **restart**, not by a live reload: the provider, the Telegram
 channel and the rest are built once, at startup, from the config, so

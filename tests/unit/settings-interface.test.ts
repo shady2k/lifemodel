@@ -277,6 +277,63 @@ describe("lifemodel's settings interface", () => {
     expect((written['primaryUser'] as Record<string, unknown>)['telegramChatId']).toBeUndefined();
   });
 
+  it('leaves the file exactly as it was when the write fails', async () => {
+    const before = JSON.stringify({
+      version: 1,
+      llm: { endpoint: { baseUrl: 'http://127.0.0.1:9999/v1' } },
+    });
+    await writeFile(join(configDir, 'agent.json'), before);
+
+    await chmod(configDir, 0o500);
+    try {
+      const answer = await request('/settings', { form: VALID });
+      expect(answer.status).toBe(500);
+      expect(answer.body).toContain('could not be written');
+      expect(saved).toBe(0);
+      // Byte for byte: a refused save never touched the published file.
+      expect(await readFile(join(configDir, 'agent.json'), 'utf-8')).toBe(before);
+      // And no half-written temp file was left behind.
+      const remaining = await import('node:fs/promises').then((fs) => fs.readdir(configDir));
+      expect(remaining).toEqual(['agent.json']);
+    } finally {
+      await chmod(configDir, 0o700);
+    }
+  });
+
+  it('pins the save down: overlapping saves never mix, and the file is whole', async () => {
+    // Two saves in flight at once (the second fires before the first's answer
+    // has arrived). Each one's read-modify-write is serialized, so the file is
+    // one save WHOLE - never a mix of the two, never one save authored by the
+    // other's failed write.
+    const first = request('/settings', { form: { ...VALID, smartModel: 'first-big' } });
+    const second = request('/settings', { form: { ...VALID, smartModel: 'second-big', motorModel: 'second-mid' } });
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    await waitForSave();
+
+    const endpoint = ((await readConfig())['llm'] as Record<string, unknown>)['endpoint'] as Record<
+      string,
+      unknown
+    >;
+    const whole =
+      JSON.stringify(endpoint) ===
+        JSON.stringify({
+          baseUrl: VALID.endpointBaseUrl,
+          fastModel: 'fast-small',
+          smartModel: 'first-big',
+          motorModel: 'motor-mid',
+        }) ||
+      JSON.stringify(endpoint) ===
+        JSON.stringify({
+          baseUrl: VALID.endpointBaseUrl,
+          fastModel: 'fast-small',
+          smartModel: 'second-big',
+          motorModel: 'second-mid',
+        });
+    expect(whole).toBe(true);
+  });
+
   it('does not restart when the config file cannot be written', async () => {
     // A directory nobody may write in: the atomic write fails, so the settings
     // are NOT applied, and lifemodel is not restarted onto a config that is not

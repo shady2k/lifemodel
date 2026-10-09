@@ -14,7 +14,7 @@
  * only then does the restart run: the answer is what proves the write, and a
  * response the process never sent because it exited would be nobody's.
  */
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Logger } from '../types/index.js';
 import type { ConfigLoader } from '../config/config-loader.js';
 import {
@@ -97,7 +97,13 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     );
   });
 
-  app.post('/settings', async (request, reply) => {
+  // ONE save runs at a time, and its whole read-modify-write is inside the
+  // chain: a save that is still running holds the config file alone, and the
+  // next save reads what it actually published - never a half-applied mix of
+  // the two. The serialized body below is the answer each save describes.
+  let saveChain: Promise<unknown> = Promise.resolve();
+
+  const applySave = async (request: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const input = settingsInputFromBody(body);
     const errors = validateSettings(input);
@@ -161,6 +167,21 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
           saved: true,
         })
       );
+  };
+
+  app.post('/settings', async (request, reply) => {
+    // This request's work is the chain's tail: it starts only after the save
+    // before it has written (or failed), so its read-modify-write sees the
+    // file the earlier save actually published.
+    const settled = saveChain.then(
+      () => applySave(request, reply),
+      () => applySave(request, reply)
+    );
+    // The chain itself must survive one save's error: the next save still runs.
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    const forget = (): void => {};
+    saveChain = settled.catch(forget);
+    return await settled;
   });
 
   app.setNotFoundHandler((_request, reply) => {
