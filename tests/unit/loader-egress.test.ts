@@ -3,9 +3,12 @@
  * S5, decisions 2 and 4).
  *
  * The loader installs it as root before lifemodel starts: uid 1000 reaches
- * 127.0.0.1 (the Agent Vault proxy, the loader's own interface, the container's
- * resolver) and everything else is REJECTed, so a bypass fails at once instead
- * of hanging. The rule is the loader's own chain, refilled on every start, with
+ * the NAMED loopback services (the Agent Vault proxy, the loader's own
+ * interface, the container's resolver) and everything else uid 1000 opens is
+ * REJECTed, so a bypass fails at once instead of hanging. The reply direction
+ * of a connection that was allowed to open answers too (`--ctstate
+ * ESTABLISHED,RELATED`): that is how a uid-1000 server (the settings
+ * interface) answers a root client at all - the round-2 review's N1. The rule is the loader's own chain, refilled on every start, with
  * its jump into OUTPUT added only when it is not there - a container that is
  * restarted ends with one rule, never a stack of them.
  *
@@ -54,6 +57,7 @@ const RULE = (config: LoaderConfig): string[] => [
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.httpPort)} -j ACCEPT`,
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d ${config.egress.resolver} --dport ${String(RESOLVER_TCP_PORT)} -j ACCEPT`,
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p udp -d ${config.egress.resolver} --dport ${String(RESOLVER_UDP_PORT)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`,
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
 ];
 
@@ -93,6 +97,37 @@ function world(): LoaderWorld {
 /** The rule, as lines, for the world's own configuration. */
 function ruleLines(world2: LoaderWorld): string[] {
   return RULE(world2.config).map((rule) => `iptables ${rule}`);
+}
+
+/**
+ * What a packet would MEET walking the installed rule lines in order: the
+ * shape of the round-2 review's N1 case - a reply whose destination is the
+ * client's ephemeral port - evaluated over the loader's own chain, the way
+ * the kernel evaluates it.
+ */
+function packetVerdict(
+  rules: readonly string[],
+  packet: {
+    uid: number;
+    protocol: string;
+    destination: string;
+    destinationPort: number;
+    connectionState: 'NEW' | 'ESTABLISHED' | 'RELATED';
+  }
+): 'ACCEPT' | 'REJECT' | 'no rule' {
+  for (const line of rules) {
+    if (!line.includes(`--uid-owner ${String(packet.uid)}`)) continue;
+    const protocol = /-p (\w+)/.exec(line)?.[1];
+    if (protocol !== undefined && protocol !== packet.protocol) continue;
+    const destination = /-d (\S+)/.exec(line)?.[1];
+    if (destination !== undefined && destination !== packet.destination) continue;
+    const port = /--dport (\d+)/.exec(line)?.[1];
+    if (port !== undefined && Number(port) !== packet.destinationPort) continue;
+    const states = /--ctstate (\S+)/.exec(line)?.[1];
+    if (states !== undefined && !states.split(',').includes(packet.connectionState)) continue;
+    return line.endsWith('-j ACCEPT') ? 'ACCEPT' : 'REJECT';
+  }
+  return 'no rule';
 }
 
 interface Rig {
@@ -149,22 +184,29 @@ describe("the rule that confines lifemodel's egress", () => {
       `iptables -C OUTPUT -j ${chain}`,
       `iptables -A OUTPUT -j ${chain}`,
     ]);
-    // The five rules are the rule: only the confined uid is matched, every
-    // ACCEPT is named protocol + destination + port, and the refusal is a
-    // REJECT (a fail-at-once "connection refused", not a hang).
+    // The six rules are the rule: only the confined uid is matched, every
+    // service ACCEPT is named protocol + destination + port, and the refusal
+    // is a REJECT (a fail-at-once "connection refused", not a hang).
     const rules = egressCalls(found).filter((line) => line.includes(` -A ${chain} `));
     expect(rules).toEqual(ruleLines(found));
     for (const rule of rules) {
       expect(rule).toContain(`--uid-owner ${String(found.config.lifemodel.uid)}`);
     }
-    // The allows only name services, never a bare destination: a listener the
-    // rule does not name (the vault's own management interface on the loopback
-    // port 14321, any other root-owned listener) is refused by the last rule.
+    // The service allows only name services, never a bare destination: a
+    // listener the rule does not name (the vault's own management interface
+    // on the loopback port 14321, any other root-owned listener) is refused
+    // by the last rule for any connection uid 1000 OPENS.
     const accepts = rules.filter((rule) => rule.endsWith('-j ACCEPT'));
-    expect(accepts).toHaveLength(ruleLines(found).length - 1);
-    for (const rule of accepts) {
-      expect(rule).toContain('--dport');
-    }
+    const serviceAccepts = accepts.filter((rule) => rule.includes('--dport'));
+    const replyAccept = accepts.filter((rule) => !rule.includes('--dport'));
+    expect(serviceAccepts).toHaveLength(ruleLines(found).length - 2);
+    // The one non-service ACCEPT is the REPLY direction of connections
+    // conntrack already tracks as established or related - the settings
+    // server's answer to Caddy, whose destination is the client's ephemeral
+    // port. It carries no --dport, and it matches only packets of a
+    // connection that was ALLOWED to open, never a NEW one.
+    expect(replyAccept).toHaveLength(1);
+    expect(replyAccept[0]).toContain('-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT');
     expect(rules.join('\n')).not.toContain('--dport 14321');
     expect(rules[rules.length - 1]).toContain('REJECT --reject-with icmp-port-unreachable');
     // Root is not named anywhere: the rule confines one uid, and the traffic
@@ -234,17 +276,24 @@ describe("the rule that confines lifemodel's egress", () => {
     const found = world();
     const { app } = await rig(found);
 
-    // The allows name ports; no bare-destination ACCEPT exists, so any
+    // The service allows name ports; no bare-destination ACCEPT exists, so a
     // listener the rule does not name - Agent Vault's own management
     // interface on 14321, an arbitrary root-owned loopback service - can only
-    // meet the last rule, the REJECT.
+    // meet the REJECT for any connection uid 1000 opens. The conntrack
+    // ACCEPT accepts no NEW packet: it matches established or related packets
+    // of connections that were allowed to open, so it cannot carry a
+    // uid-1000 client to the management port either.
     const chain = found.config.egress.chain;
     const accepts = egressCalls(found).filter(
       (l) => l.includes(` -A ${chain} `) && l.endsWith('-j ACCEPT')
     );
     for (const rule of accepts) {
-      expect(rule).toContain('-p ');
-      expect(rule).toContain('--dport');
+      if (rule.includes('--dport')) {
+        expect(rule).toContain('-p ');
+      } else {
+        expect(rule).toContain('--ctstate ESTABLISHED,RELATED');
+        expect(rule).not.toContain('-p ');
+      }
     }
     expect(accepts.join('\n')).not.toContain(String(14321));
     const rejects = egressCalls(found).filter(
@@ -253,6 +302,71 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(rejects).toEqual([
       `iptables -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
     ]);
+    await shutdownLoader(found, app);
+  });
+
+  it('answers the round-2 review N1 case: a uid-1000 server replies to a root client, and a NEW dial to the management port is still refused', async () => {
+    const found = world();
+    const { app } = await rig(found);
+
+    // The settings interface (uid 1000, on the loader port) answering Caddy
+    // (root): the reply's destination is Caddy's EPHEMERAL client port, which
+    // no service allow names. It is an ESTABLISHED packet of a connection
+    // root opened, so the conntrack rule accepts it.
+    const chain = found.config.egress.chain;
+    const rules = egressCalls(found).filter((l) => l.includes(` -A ${chain} `));
+    expect(
+      packetVerdict(rules, {
+        uid: found.config.lifemodel.uid,
+        protocol: 'tcp',
+        destination: '127.0.0.1',
+        destinationPort: 48213,
+        connectionState: 'ESTABLISHED',
+      })
+    ).toBe('ACCEPT');
+    // A connection uid 1000 OPENS to the vault's management port: NEW, meets
+    // the REJECT - the reply rule does not open it.
+    expect(
+      packetVerdict(rules, {
+        uid: found.config.lifemodel.uid,
+        protocol: 'tcp',
+        destination: '127.0.0.1',
+        destinationPort: 14321,
+        connectionState: 'NEW',
+      })
+    ).toBe('REJECT');
+    // Same for an arbitrary root-owned loopback listener on an ephemeral
+    // port: a NEW uid-1000 dial is refused, so its reply never exists.
+    expect(
+      packetVerdict(rules, {
+        uid: found.config.lifemodel.uid,
+        protocol: 'tcp',
+        destination: '127.0.0.1',
+        destinationPort: 39127,
+        connectionState: 'NEW',
+      })
+    ).toBe('REJECT');
+    // A named service keep working: the vault proxy, NEW.
+    expect(
+      packetVerdict(rules, {
+        uid: found.config.lifemodel.uid,
+        protocol: 'tcp',
+        destination: '127.0.0.1',
+        destinationPort: found.config.agentVault.proxyPort,
+        connectionState: 'NEW',
+      })
+    ).toBe('ACCEPT');
+    // And root's own traffic is not in the chain at all.
+    expect(
+      packetVerdict(rules, {
+        uid: 0,
+        protocol: 'tcp',
+        destination: '127.0.0.1',
+        destinationPort: 7100,
+        connectionState: 'NEW',
+      })
+    ).toBe('no rule');
+
     await shutdownLoader(found, app);
   });
 
@@ -294,6 +408,7 @@ describe('the IPv6 half, when the container has an IPv6 address or route', () =>
       `${binary6} -L ${chain} -n`,
       `${binary6} -N ${chain}`,
       `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -p tcp -d ::1 --dport ${String(found.config.agentVault.proxyPort)} -j ACCEPT`,
+      `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`,
       `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp6-port-unreachable`,
       `${binary6} -C OUTPUT -j ${chain}`,
       `${binary6} -A OUTPUT -j ${chain}`,
