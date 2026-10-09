@@ -52,8 +52,9 @@ tick), Energy & state are physiology. Start with `README.md` and
   desire-pressure, energy, news, reminder, social-debt, thoughts, time-neuron,
   web-fetch, web-search) and shared helper libraries (`providers/`,
   `web-shared/`)
-- `src/llm/` — the provider interface, the fast/smart/motor MultiProvider
-  routing, tool-schema conversion, conversation-log writing
+- `src/llm/` — the provider interface, the single OpenAI-compatible endpoint
+  provider (the endpoint names a model per role; no separate keyed provider
+  and no fallback), tool-schema conversion, conversation-log writing
 - `src/storage/` — persistence: JSONStorage (atomic writes) behind
   DeferredStorage (batched flush), conversations, the dual-layer memory
   (LanceDB vector store + JSON graph store), the soul

@@ -139,11 +139,13 @@ lifemodel is configured via a `.env` file. The essentials:
 | `LOG_LEVEL` | `info`, `debug`, … |
 
 <details>
-<summary><b>Optional: run on your own OpenAI-compatible endpoint</b></summary>
+<summary><b>The model endpoint — the only model configuration</b></summary>
 
 Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM), and the
 endpoint carries no key of its own — a server that needs one is reached through
-Agent Vault, which injects it. The endpoint and its models are lifemodel's own
+Agent Vault, which injects it. This endpoint is the only model configuration
+there is: there is no separate keyed provider surface to fall back to. The
+endpoint and its models are lifemodel's own
 settings: on an **instance** they are set in lifemodel's interface at the root
 host (`docs/features/instance/settings.md`), and in a checkout with these
 environment variables, which name the same fields:
@@ -249,10 +251,16 @@ after SIGKILL is the one case where the loader leaves without having reaped
 it. `--cap-add NET_ADMIN` is what the loader's **egress rule** needs
 (lifemodel-q4x.3.2): before
 lifemodel starts, it installs an iptables rule that lets lifemodel's user
-(uid 1000) reach `127.0.0.1` — Agent Vault's proxy and the instance's local
-services — and REJECTs everything else, so a bypass fails at once and shows up
-as a connection error instead of a hang. Root (the loader, Caddy and Agent
-Vault itself) is untouched. A container without the capability, or without
+(uid 1000) open connections to the NAMED loopback services only — Agent
+Vault's proxy port, the loader's own interface, the container resolver's
+rewritten DNS port, each bound to its destination and protocol — and REJECTs
+every other connection that user opens (the vault's management port among
+them). On a container whose network has IPv6 addresses the same rule is
+installed for that family (`ip6tables`, over `::1` and the container's own
+address). The replies of a connection that was allowed to open are accepted, so
+the loader's own interface and lifemodel's settings server can answer the front
+door. Everything refused fails at once as a connection error, not a hang. Root
+(the loader, Caddy and Agent Vault itself) is untouched. A container without the capability, or without
 `iptables`, does not start lifemodel: the loader leaves with a non-zero code and
 one line carrying the cause, and a rule the kernel refused names
 `--cap-add NET_ADMIN`.
