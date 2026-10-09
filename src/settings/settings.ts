@@ -54,6 +54,38 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+/**
+ * Does the URL carry credentials (`user:password@` before the host)? Such a
+ * URL would put a secret into the config file, the settings page and the log -
+ * and the fetch-based provider refuses it anyway (the AI SDK rejects URL
+ * userinfo). The key belongs in Agent Vault, never in this field.
+ */
+function hasUrlCredentials(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.username !== '' || url.password !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The URL without its credentials, for echo and log: a refused or a logged
+ * endpoint must never carry its secret part. Whatever cannot be parsed gives
+ * back nothing.
+ */
+export function redactEndpointUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username === '' && url.password === '') {
+      return url.toString();
+    }
+    return `${url.origin}${url.pathname}${url.search}`;
+  } catch {
+    return '';
+  }
+}
+
 /** The endpoint the form describes, with blanks as `null` (not configured). */
 export function settingsEndpoint(input: SettingsInput): ModelEndpoint {
   const blank = (value: string): string | null => (value.trim() === '' ? null : value.trim());
@@ -77,8 +109,13 @@ export function validateSettings(input: SettingsInput): SettingsErrors {
   const errors: SettingsErrors = {};
   const endpoint = settingsEndpoint(input);
 
-  if (endpoint.baseUrl !== null && !isHttpUrl(endpoint.baseUrl)) {
-    errors.endpointBaseUrl = 'the endpoint base URL must be an http or https URL';
+  if (endpoint.baseUrl !== null) {
+    if (!isHttpUrl(endpoint.baseUrl)) {
+      errors.endpointBaseUrl = 'the endpoint base URL must be an http or https URL';
+    } else if (hasUrlCredentials(endpoint.baseUrl)) {
+      errors.endpointBaseUrl =
+        'the endpoint base URL must not carry credentials (a user name or password before the @); keys go through Agent Vault';
+    }
   }
 
   if (isEndpointFieldSet(endpoint)) {

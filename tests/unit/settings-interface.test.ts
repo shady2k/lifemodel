@@ -285,6 +285,19 @@ describe("lifemodel's settings interface", () => {
     expect(saved).toBe(0);
   });
 
+  it('refuses an endpoint URL that carries credentials, and echoes it without them', async () => {
+    const withKey = 'https://owner:not-a-real-model-key@api.example.com/v1';
+    const answer = await request('/settings', { form: { ...VALID, endpointBaseUrl: withKey } });
+    expect(answer.status).toBe(400);
+    expect(answer.body).toContain('must not carry credentials');
+    // The secret never meets the response, the page, the config or the log.
+    expect(answer.body).not.toContain('owner:');
+    expect(answer.body).not.toContain('not-a-real-model-key');
+    expect(answer.body).toContain('https://api.example.com/v1');
+    await expect(readConfig()).rejects.toThrow(); // nothing written
+    expect(saved).toBe(0);
+  });
+
   it('refuses a bot token that is not an Agent Vault placeholder', async () => {
     const answer = await request('/settings', {
       form: { ...VALID, telegramBotToken: '123456:AAH-a-real-looking-token' },

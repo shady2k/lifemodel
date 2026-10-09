@@ -10,6 +10,7 @@ import { isEndpointComplete, isEndpointFieldSet } from '../config/model-endpoint
 import {
   SETTINGS_FIELDS,
   TELEGRAM_BOT_TOKEN_PLACEHOLDER,
+  redactEndpointUrl,
   settingsEndpoint,
   type SettingsErrors,
   type SettingsInput,
@@ -87,7 +88,15 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   // A refused bot token is NEVER echoed back: the owner may have pasted the
   // real one, and a page (or a browser cache, or a log of the exchange) must
   // not hold it. An accepted one is a placeholder by the rule above.
-  const value = field === 'telegramBotToken' && error !== undefined ? '' : options.values[field];
+  // Echoed values hold no secret: a refused bot token is dropped, and a
+  // refused endpoint base URL is echoed without its credentials (the parts
+  // before the @) — the owner sees the URL, never what it carried.
+  const value =
+    field === 'telegramBotToken' && error !== undefined
+      ? ''
+      : field === 'endpointBaseUrl' && error !== undefined
+        ? redactEndpointUrl(options.values[field])
+        : options.values[field];
   const hints: Partial<Record<typeof field, string>> = {
     endpointBaseUrl:
       'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
