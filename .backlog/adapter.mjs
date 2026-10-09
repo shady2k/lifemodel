@@ -22,7 +22,11 @@ import { pathToFileURL } from 'node:url';
 const TYPES = new Set(['epic', 'task', 'bug', 'chore']);
 // `submitted` and `implemented` are br statuses of this project (.beads/policy.yaml),
 // and the transition that sets one carries its revision and evidence as a comment:
-// `submitted: <rev> -- <evidence>` (docs/backlog-integration.md).
+// `submitted: <rev> -- <evidence>` (docs/backlog-integration.md). A stage's
+// acceptance is a comment on the stage of the same shape,
+// `accepted: <accepted revision> -- <evidence>`: an accepted stage stays open
+// until it lands, and its accepted revision releases the later stages of the
+// same feature (model.md, Execution mapping).
 const STATUS = {
   open: 'open',
   blocked: 'open', // a derived view; the edges say what blocks it
@@ -32,7 +36,7 @@ const STATUS = {
   deferred: 'deferred',
   closed: 'closed',
 };
-const MARKER = /^(submitted|implemented):\s*(.*)$/s;
+const MARKER = /^(submitted|implemented|accepted):\s*(.*)$/s;
 const RECORD = /^(\S+)\s+--\s+(\S[\s\S]*)$/;
 const WORK_RECORD = '[shady2k-time';
 
@@ -93,6 +97,10 @@ export function normalize(rows, source) {
       };
       if (status === 'submitted') out.delivery = record(r.comments, 'submitted');
       if (status === 'implemented') out.integration = record(r.comments, 'implemented');
+      if (out.type === 'epic') {
+        const accepted = record(r.comments, 'accepted');
+        if (accepted.revision) out.acceptance = accepted;
+      }
       return out;
     });
   return { generatedAt: new Date().toISOString(), source, issues };
