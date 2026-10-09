@@ -15,6 +15,7 @@
  * response the process never sent because it exited would be nobody's.
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import type { Socket } from 'node:net';
 import type { Logger } from '../types/index.js';
 import type { ConfigLoader } from '../config/config-loader.js';
 import {
@@ -52,6 +53,13 @@ export interface SettingsServerOptions {
    * itself.
    */
   onSaved: () => void;
+  /**
+   * How long `close` waits for an outstanding request before destroying its
+   * socket. Kept SMALL on purpose: the close runs INSIDE lifemodel's one stop
+   * deadline (src/index.ts), and the drain, the flush and the channels still
+   * need their room after it. Default 5 s.
+   */
+  closeGraceMs?: number;
 }
 
 export interface SettingsServer {
@@ -71,7 +79,21 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   const { config, logger, onSaved } = options;
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? SETTINGS_PORT;
+  const closeGraceMs = options.closeGraceMs ?? 5_000;
   const app: FastifyInstance = Fastify({ logger: false });
+
+  // Every socket that talks to this interface, kept to be destroyed when the
+  // close gives up on a request that will not end. fastify's requestTimeout is
+  // 0 here: a POST with a Content-Length and only HALF its body would stall
+  // the close forever, and with it lifemodel's whole stop (measured: a close
+  // behind such a request never resolved until the socket died).
+  const sockets = new Set<Socket>();
+  app.server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  // A refused socket's error must not escape as an unhandled one.
+  app.server.on('clientError', () => undefined);
 
   // fastify parses JSON on its own; a browser form posts this instead.
   app.addContentTypeParser(
@@ -170,6 +192,16 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   };
 
   app.post('/settings', async (request, reply) => {
+    // The drain has asked the interface to close (a save started THIS stop, or
+    // the process is leaving): a save that arrives now would write a config the
+    // exiting process never applies, and the restart it asks for would be
+    // swallowed by the stop already running. Named, not silent.
+    if (closing) {
+      return reply
+        .code(503)
+        .type('text/plain; charset=utf-8')
+        .send('lifemodel is restarting; save again when it is up\n');
+    }
     // This request's work is the chain's tail: it starts only after the save
     // before it has written (or failed), so its read-modify-write sees the
     // file the earlier save actually published.
@@ -191,6 +223,8 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   // 0 asks the operating system for a free port (a test does that); the
   // instance is given 7100 by Caddy's own configuration.
   let boundPort = port;
+  // Set as the FIRST thing close does: the very next save is refused.
+  let closing = false;
 
   return {
     listen: async () => {
@@ -200,8 +234,43 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         boundPort = bound.port;
       }
     },
+    /**
+     * Stop the interface, BOUNDED: new saves are refused at once, the listen
+     * socket is dropped, and an outstanding request that does not end within
+     * the grace has its socket destroyed. The close can never outlast its
+     * grace by more than one check, so it can never stall lifemodel's stop
+     * (the drain, the flush and the channels still follow it inside the one
+     * stop deadline).
+     */
     close: async () => {
-      await app.close();
+      closing = true;
+      const finished = app.close().then(
+        () => true,
+        () => true
+      );
+      const inGrace = await Promise.race([
+        finished,
+        new Promise<false>((resolve) => {
+          const timer = setTimeout(() => {
+            resolve(false);
+          }, closeGraceMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (!inGrace) {
+        // Whoever is still holding a socket half-open (a POST with a
+        // Content-Length and no body) is destroyed: the stop goes on.
+        logger.warn(
+          {
+            sockets: sockets.size,
+            graceMs: closeGraceMs,
+          },
+          'Settings close gave up on an unfinished request and destroyed its socket'
+        );
+        for (const socket of sockets) {
+          socket.destroy();
+        }
+      }
     },
     address: () => `http://${host}:${String(boundPort)}`,
   };
