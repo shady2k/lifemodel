@@ -696,7 +696,12 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       type: bearer
       token: Q4X32_MODEL_KEY
   - name: q4x32-telegram
-    host: q4x32-stub.local:8080/bot/*
+    # grammY builds a path like /botTOKEN/method with NO slash after the
+    # leading "bot". A pattern of bot-slash-star does not match that path: the
+    # vault does not match the service and passes the placeholder through
+    # (measured, sibling stage-2 worker). The bare bot-star prefix is what the
+    # real channel's traffic must match.
+    host: q4x32-stub.local:8080/bot*
     auth:
       type: api-key
       key: Q4X32_BOT_TOKEN
@@ -746,6 +751,101 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         input === undefined ? {} : { input }
       );
     }
+
+    /** docker exec's `-e` flags for the proxy environment lifemodel's process holds. */
+    function proxyExecEnv(env: Record<string, string>): string[] {
+      const args: string[] = [];
+      for (const name of PROXY_NAMES) {
+        const value = env[name];
+        if (value !== undefined) args.push('-e', `${value === undefined ? '' : name}=${value}`);
+      }
+      return args;
+    }
+
+    /**
+     * One probe program run INSIDE the container as lifemodel's user, with the
+     * environment lifemodel's own process holds. The script is copied in and
+     * imports from the instance's own build on the volume - the code the
+     * running process executes - not from a test double.
+     */
+    function runProductScript(
+      name: string,
+      script: string,
+      env: Record<string, string>,
+      timeoutMs = 60_000
+    ): Run {
+      const path = `/tmp/${name}`;
+      const local = join(stubDir, name);
+      writeFileSync(local, script);
+      docker(['cp', local, `${container}:${path}`]);
+      return run('docker', ['exec', '-u', '1000', ...proxyExecEnv(env), container, 'node', path], {
+        timeoutMs,
+      });
+    }
+
+    /** lifemodel's own transport (src/utils/proxy-fetch.ts), from its own build. */
+    const PRODUCT_CLIENT_SCRIPT = `const { proxyFetch } = await import('/var/lib/lifemodel/repo/dist/utils/proxy-fetch.js');
+const res = await proxyFetch('http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: '{"model":"q4x32-stub","messages":[]}',
+});
+const answer = (await res.json()) as { choices: { message: { content: string } }[] };
+console.log('product client:', res.status, answer.choices[0]?.message?.content);
+`;
+
+    /**
+     * The Bot the channel builds (src/plugins/channels/telegram.ts):
+     * `new Bot(token, { client: { fetch: proxyFetch } })` - with the apiRoot
+     * pointed at the recording stub, so no real Telegram is touched.
+     */
+    const GRAMMY_PROBE_SCRIPT = `const { proxyFetch } = await import('/var/lib/lifemodel/repo/dist/utils/proxy-fetch.js');
+const { Bot } = await import('/var/lib/lifemodel/repo/node_modules/grammy/out/mod.js');
+const bot = new Bot('__bot_token__', {
+  client: { fetch: proxyFetch, apiRoot: 'http://${STUB_HOST}:${String(STUB_PORT)}' },
+});
+const me = await bot.api.getMe();
+console.log('grammy getMe ok:', String(me.is_bot), me.username);
+`;
+
+    /**
+     * lifemodel's own provider (the client the cognition loop uses), built
+     * from the instance's build and aimed at a direct, proxy-less host the
+     * kernel refuses; its own logger writes the failure where lifemodel's own
+     * logs are (data/logs), in lifemodel's own format.
+     */
+    const PROVIDER_REFUSAL_SCRIPT = `const { createVercelAIProvider } = await import('/var/lib/lifemodel/repo/dist/plugins/providers/vercel-ai-provider.js');
+const { createLogger } = await import('/var/lib/lifemodel/repo/dist/core/logger.js');
+const logger = createLogger({
+  logDir: '/var/lib/lifemodel/data/logs',
+  level: 'info',
+  pretty: true,
+  file: true,
+  maxFiles: 10,
+});
+const provider = createVercelAIProvider(
+  {
+    baseUrl: 'http://1.1.1.1/v1',
+    fastModel: 'q4x32-fast',
+    smartModel: 'q4x32-smart',
+    motorModel: 'q4x32-motor',
+  },
+  logger
+);
+const started = Date.now();
+try {
+  await provider.complete({
+    role: 'smart',
+    messages: [{ role: 'user', content: 'a refusal probe' }],
+  });
+  console.log('UNEXPECTED-SUCCESS');
+} catch (error) {
+  console.log(
+    'LLM error after ' + String(Date.now() - started) + ' ms: ' + String(error.message).slice(0, 200)
+  );
+}
+process.exit(0);
+`;
 
     /**
      * lifemodel's own environment, read from its own process: the variables
@@ -871,11 +971,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     }
 
     /** One request through the front door, on Agent Vault's own host. */
-    function vaultApi(
-      path: string,
-      cookie: string,
-      body: unknown
-    ): Promise<Reply> {
+    function vaultApi(path: string, cookie: string, body: unknown): Promise<Reply> {
       return new Promise((resolve, reject) => {
         const payload = JSON.stringify(body);
         const req = request(
@@ -896,7 +992,11 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
             res.setEncoding('utf8');
             res.on('data', (chunk: string) => (answer += chunk));
             res.on('end', () =>
-              resolve({ status: res.statusCode ?? 0, body: answer, setCookie: res.headers['set-cookie'] })
+              resolve({
+                status: res.statusCode ?? 0,
+                body: answer,
+                setCookie: res.headers['set-cookie'],
+              })
             );
           }
         );
@@ -984,7 +1084,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       // the vault's proxy with the agent token, loopback out of the proxy, the
       // proxy understood by fetch, and the vault's CA.
       const token = (
-        JSON.parse(docker(['exec', container, 'cat', '/var/lib/lifemodel/loader/vault-proxy.json'])) as {
+        JSON.parse(
+          docker(['exec', container, 'cat', '/var/lib/lifemodel/loader/vault-proxy.json'])
+        ) as {
           token: string;
         }
       ).token;
@@ -994,8 +1096,28 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(env['NODE_USE_ENV_PROXY']).toBe('1');
       expect(env['NODE_EXTRA_CA_CERTS']).toBe('/var/lib/lifemodel/vault-ca.pem');
 
-      // The stub's host is NOT loopback: this only arrives if the request left
-      // through the proxy, with the vault's own key attached on the way.
+      // The PRODUCT client seam, before the curl probe: lifemodel's own
+      // transport (src/utils/proxy-fetch.ts - the wrapper its provider and its
+      // Telegram channel share), run inside the container as lifemodel's user
+      // with the very environment its process holds, and the instance's own
+      // build. A curl success proves only the broker seam, not the product's
+      // own client (the stage-2 review found the walk could pass on a product
+      // whose own client fails, and it did: native fetch died with
+      // UND_ERR_SOCKET before the transport fix).
+      const productBefore = stubRecords().length;
+      const productProbe = runProductScript('q4x32-product-client.mjs', PRODUCT_CLIENT_SCRIPT, env);
+      expect(productProbe.out).toContain('product client: 200');
+      expect(productProbe.out).toContain('a fixed completion from the stub');
+      const productRecord = await stubRequestFor('/v1/chat/completions', productBefore);
+      expect(productRecord.method).toBe('POST');
+      expect(productRecord.headers['authorization']).toBe(`Bearer ${MODEL_KEY}`);
+      // The proxy's own credential is the broker's business, not the
+      // upstream's: it does not travel on.
+      expect(productRecord.headers['proxy-authorization']).toBeUndefined();
+
+      // The curl probe, the SECOND seam (the broker under the product's own
+      // client): the stub's host is NOT loopback, so this only arrives if the
+      // request left through the proxy, with the vault's own key attached.
       const before = stubRecords().length;
       const model = probeAsLifemodel(
         `http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`,
@@ -1019,17 +1141,17 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(modelRecord.headers['proxy-authorization']).toBeUndefined();
       expect(modelRecord.body).toContain('q4x32-stub');
 
-      // The Telegram shape: the token lives in the PATH, and Agent Vault
-      // substitutes it there (placeholders are declared in the service).
+      // The Telegram seam as grammY really sends it: the token lives in the
+      // PATH with NO slash after `bot` (/bot<token>/<method>), and Agent
+      // Vault substitutes it there (placeholders are declared in the
+      // service). The Bot is constructed with the channel's own shape and
+      // transport, pointed at the recording stub.
       const beforeBot = stubRecords().length;
-      const bot = probeAsLifemodel(
-        `http://${STUB_HOST}:${String(STUB_PORT)}/bot/__bot_token__/sendMessage`,
-        env,
-        ['-X', 'POST', '-d', 'chat_id=1&text=hello']
-      );
+      const bot = runProductScript('q4x32-grammy-probe.mjs', GRAMMY_PROBE_SCRIPT, env);
       expect(bot.status).toBe(0);
-      const botRecord = await stubRequestFor('/sendMessage', beforeBot);
-      expect(botRecord.url).toBe(`/bot/${BOT_TOKEN}/sendMessage`);
+      expect(bot.out).toContain('grammy getMe ok');
+      const botRecord = await stubRequestFor('/getMe', beforeBot);
+      expect(botRecord.url).toBe(`/bot${String(BOT_TOKEN)}/getMe`);
       expect(botRecord.headers['x-q4x32-bot']).toBe(BOT_TOKEN);
       expect(JSON.stringify(botRecord)).not.toContain('__bot_token__');
     }, 180_000);
@@ -1044,7 +1166,9 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(outside.result.out).not.toMatch(/timed out|Timeout/i);
 
       // And the stub, which root reaches, is out of lifemodel's reach too.
-      const neighbour = directAsLifemodel(`http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`);
+      const neighbour = directAsLifemodel(
+        `http://${STUB_HOST}:${String(STUB_PORT)}/v1/chat/completions`
+      );
       expect(neighbour.result.status).not.toBe(0);
       expect(neighbour.ms).toBeLessThan(3_000);
 
@@ -1065,6 +1189,51 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         'http://127.0.0.1:7000/login',
       ]);
       expect(loopback.out.trim()).toBe('200');
+    }, 120_000);
+
+    it("reads a refused direct dial as a connection error in lifemodel's own provider, and the refusal is logged in lifemodel's own logs", async () => {
+      // The kernel refuses the dial; the criterion asks that what lifemodel's
+      // own client then sees is a CONNECTION ERROR naming the target - not a
+      // silent hang - and that lifemodel's own logger records the failure in
+      // lifemodel's own log format, in the instance's own log directory.
+      // No proxy is passed in: the target (1.1.1.1, nothing allows it) is the
+      // direct dial the rule exists to refuse.
+      const started = Date.now();
+      const refused = runProductScript('q4x32-llm-refusal.mjs', PROVIDER_REFUSAL_SCRIPT, {});
+      // Fast refusal: the drive did not wait out any timeout.
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(15_000);
+      expect(refused.out).toMatch(/LLM error after \d+ ms/);
+      const ms = Number(/LLM error after (\d+) ms/.exec(refused.out)?.[1]);
+      expect(Number.isFinite(ms)).toBe(true);
+      expect(ms).toBeLessThan(10_000);
+      expect(refused.out).toContain('ECONNREFUSED 1.1.1.1');
+      expect(refused.out).toContain('Non-retryable LLM error');
+
+      // The event in lifemodel's own logs (the instance's own log directory,
+      // pino lines, the same words the provider logs): waited for, not assumed,
+      // and bounded.
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const found = run(
+          'docker',
+          [
+            'exec',
+            container,
+            '/bin/sh',
+            '-c',
+            "grep -rl 'ECONNREFUSED 1.1.1.1' /var/lib/lifemodel/data/logs/agent-*.log",
+          ],
+          { timeoutMs: 30_000 }
+        );
+        if (found.status === 0) break;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `no agent log carried the provider's connection error:\n${refused.out}\n${found.out}`
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }, 120_000);
 
     it('leaves root untouched, and the key on the way out comes from the vault, not from the caller', async () => {
@@ -1107,6 +1276,16 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         .filter((line) => line !== '');
       expect(addresses).toHaveLength(1);
       expect(addresses[0]).toMatch(/ lo$/);
+      // The ROUTE table, which the same document claims is checked:
+      // every IPv6 route the container has must carry only the `lo`
+      // interface - nothing forwardable, no way around the rule.
+      const routes = docker(['exec', container, 'cat', '/proc/net/ipv6_route'])
+        .split('\n')
+        .filter((line) => line.trim() !== '');
+      expect(routes.length).toBeGreaterThan(0);
+      for (const route of routes) {
+        expect(route.endsWith(' lo')).toBe(true);
+      }
     }, 60_000);
 
     it("keeps the made-up key out of lifemodel's environment, config and logs", () => {
@@ -1117,16 +1296,34 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(JSON.stringify(env)).not.toContain(MODEL_KEY);
       expect(JSON.stringify(env)).not.toContain(BOT_TOKEN);
       // Its configuration: the data on the volume, where its own settings live.
-      const inData = run('docker', ['exec', container, 'grep', '-rl', MODEL_KEY, '/var/lib/lifemodel/data']);
+      const inData = run('docker', [
+        'exec',
+        container,
+        'grep',
+        '-rl',
+        MODEL_KEY,
+        '/var/lib/lifemodel/data',
+      ]);
       expect(inData.status).toBe(1); // grep's own "found nothing"
+      // ... and the bot token, the second credential the vault substitutes:
+      // a persisted placeholder replacement must fail this gate as well.
+      const inDataBot = run('docker', [
+        'exec',
+        container,
+        'grep',
+        '-rl',
+        BOT_TOKEN,
+        '/var/lib/lifemodel/data',
+      ]);
+      expect(inDataBot.status).toBe(1);
       // And the container's log, the loader's lines included.
       const logs = docker(['logs', container]);
       expect(logs).not.toContain(MODEL_KEY);
       expect(logs).not.toContain(BOT_TOKEN);
       // The key IS in the vault: the stub saw it arrive, which is the point.
-      expect(stubRecords().some((record) => record.headers['authorization'] === `Bearer ${MODEL_KEY}`)).toBe(
-        true
-      );
+      expect(
+        stubRecords().some((record) => record.headers['authorization'] === `Bearer ${MODEL_KEY}`)
+      ).toBe(true);
     }, 120_000);
   });
 
