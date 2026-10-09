@@ -6,7 +6,9 @@ npx lint-staged
 # repository (lifemodel-q4x.4.2). They never start on the host: the isolated
 # launcher runs them inside the disposable test boundary
 # (scripts/test-isolated.mjs, see AGENTS.md), and tests/setup/scrub-git-env.ts
-# scrubs them again inside the suite.
+# scrubs them again inside the suite (the policy test at
+# tests/unit/test-entrypoints.test.ts pins the subshell's exact form - the
+# launcher's minimal unset list).
 #
 # The gates AFTER the subshell keep the ORIGINAL git environment on purpose: git
 # supplies a commit-specific GIT_INDEX_FILE for `git commit --only <path>`, and
@@ -15,10 +17,10 @@ npx lint-staged
 # the commit is actually made from - not the repository's default index
 # (lifemodel-q4x.4.2, review finding 6).
 (
-    for _var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$_var"; done
+    unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
+        GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
     node scripts/test-isolated.mjs check
 )
-
 
 # --- BEGIN LIFEMODEL BACKLOG GATE ---
 # Managed by scripts/connect-clone.sh. The tracker export lands only through a
