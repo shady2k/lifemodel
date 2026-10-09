@@ -36,6 +36,7 @@ import {
   acquireLock,
   buildPlan,
   createRunner,
+  createOrbInvoker,
   ensureArtifacts,
   findOrbctl,
   isProcessAlive,
@@ -54,7 +55,7 @@ import {
   validateSnapshot,
   vitestEnv,
   vitestSteps,
-} from '../../../scripts/test-docker-isolated.mjs';
+} from '../../scripts/test-docker-isolated.mjs';
 
 afterAll(() => {
   for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
@@ -174,7 +175,6 @@ describe('validateSnapshot', () => {
     fs.writeFileSync(path.join(root, 'package-lock.json'), '{}');
     fs.mkdirSync(path.join(root, 'src'));
     fs.writeFileSync(path.join(root, 'src', 'index.ts'), 'export {};\n');
-    fs.symlinkSync('index.ts', path.join(root, 'src', 'inside-link.ts')); // relative, stays inside
   });
 
   afterAll(() => {
@@ -182,7 +182,7 @@ describe('validateSnapshot', () => {
     fs.rmSync(outside, { recursive: true, force: true });
   });
 
-  it('accepts a clean snapshot with a relative in-tree symlink', async () => {
+  it('accepts a clean regular-file snapshot', async () => {
     const r = await validateSnapshot(root);
     expect(r.path).toBe(await fsp.realpath(root));
     expect(r.entries).toBeGreaterThan(0);
@@ -232,6 +232,18 @@ describe('validateSnapshot', () => {
     }
   });
 
+  it('rejects relative links and owner credentials on direct helper calls', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-direct-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'package.json'), '{}'); fs.writeFileSync(path.join(dir, 'package-lock.json'), '{}');
+      fs.symlinkSync('package.json', path.join(dir, 'inside-link'));
+      await expect(validateSnapshot(dir)).rejects.toThrow(/symlink/);
+      fs.rmSync(path.join(dir, 'inside-link')); fs.writeFileSync(path.join(dir, '.env'), 'KEY=synthetic');
+      await expect(validateSnapshot(dir)).rejects.toThrow(/forbidden/);
+      fs.rmSync(path.join(dir, '.env')); fs.writeFileSync(path.join(dir, '.npmrc'), '_authToken=synthetic');
+      await expect(validateSnapshot(dir)).rejects.toThrow(/npmrc policy/);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
   it('rejects a snapshot that is a file, not a directory', async () => {
     const file = path.join(os.tmpdir(), `snapshot-file-${Date.now()}.json`);
     fs.writeFileSync(file, '{}');
@@ -288,7 +300,7 @@ describe('machine identity', () => {
       NPM_CONFIG_REGISTRY: 'https://evil.example',
       AWS_SECRET_ACCESS_KEY: 'x',
     });
-    expect(scrubEnv).toEqual({
+    expect(scrubbed).toEqual({
       PATH: '/usr/bin:/bin',
       HOME: '/Users/owner',
       TMPDIR: '/tmp',
@@ -314,7 +326,7 @@ describe('buildPlan', () => {
 
   it('rejects missing inputs instead of guessing', () => {
     expect(() =>
-      buildPlan({ machineName: machine, artifacts: [], artifactsHostDir: '/c', bootstrapScriptDir: '/d' } as any),
+      buildPlan({ machineName: machine, snapshotPath: '/s', artifacts: [], artifactsHostDir: '/c', bootstrapScriptDir: '/d' } as any),
     ).toThrow(/artifacts/);
     expect(() =>
       buildPlan({
@@ -342,7 +354,7 @@ describe('buildPlan', () => {
     // machine side: reads the tar stream from stdin
     expect(transfer.argv).toEqual([
       'run', '-m', machine, '--user', MACHINE_USER, '--workdir', '/home/lifemodel/src',
-      '--', 'tar', '-xf', '-',
+      'tar', '-xf', '-',
     ]);
   });
 
@@ -389,7 +401,7 @@ describe('buildPlan', () => {
     const discover = steps.find((s) => s.id === 'discover-uid') as any;
     expect(discover.capture).toBe(true);
     const daemonStage = steps.find((s) => s.id === 'provision-daemon') as any;
-    expect(daemonStage.argv).toContain('bootstrap-orb.sh');
+    expect(daemonStage.argv).toContain('./bootstrap-orb.sh');
     expect(daemonStage.argv).toContain('daemon');
   });
 });
@@ -414,7 +426,9 @@ describe('test environment inside the machine', () => {
     expect(envKvs).toContain(`DOCKER_HOST=${rootlessSocketPath(1000)}`);
     expect(envKvs).toContain('HOME=/home/lifemodel');
     expect(envKvs).toContain('XDG_RUNTIME_DIR=/run/user/1000');
-    expect(v[v.length - 1]).toBe('tests/integration/docker.test.ts');
+    expect(v).toContain('tests/integration/docker.test.ts');
+    expect(v.at(-1)).toBe('--maxWorkers=2');
+    expect(envKvs).toContain('LIFEMODEL_DOCKER_TESTS=1');
     expect(v).toContain('./node_modules/.bin/vitest');
     expect(v).toContain('run');
   });
@@ -549,7 +563,7 @@ describe('ensureArtifacts', () => {
         expect(refused).toBe(false);
       } finally {
         Object.keys(saved).forEach((k) => {
-          saved[key] = originals[k];
+          saved[k] = originals[k];
         });
       }
     } finally {
@@ -579,7 +593,7 @@ describe('ensureArtifacts', () => {
         ).rejects.toThrow(/does not match the pinned digest/);
       } finally {
         Object.keys(saved).forEach((k) => {
-          saved[key] = originals[k];
+          saved[k] = originals[k];
         });
       }
     } finally {
@@ -613,12 +627,12 @@ describe('ownership: lock and claims', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lock-live-'));
     try {
       const lockPath = acquireLock(dir);
-      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(fs.existsSync(lockPath.path)).toBe(true);
       expect(() => acquireLock(dir)).toThrow(ActiveRunError);
-      releaseLock(dir);
+      releaseLock(dir, lockPath);
       const again = acquireLock(dir); // released -> reacquire works
-      expect(fs.existsSync(again)).toBe(true);
-      releaseLock(dir);
+      expect(fs.existsSync(again.path)).toBe(true);
+      releaseLock(dir, again);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -629,11 +643,25 @@ describe('ownership: lock and claims', () => {
     try {
       fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: deadPid }));
       const lockPath = acquireLock(dir, { isAlive: (pid: number) => pid === -1 });
-      expect(JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
-      releaseLock(dir);
+      expect(JSON.parse(fs.readFileSync(lockPath.path, 'utf8')).pid).toBe(process.pid);
+      releaseLock(dir, lockPath);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('an old owner cannot release a fresh claim, even from the same pid', () => {
+    const dir = trackTmp(fs.mkdtempSync(path.join(os.tmpdir(), 'lock-token-')));
+    const old = acquireLock(dir); releaseLock(dir, old);
+    const current = acquireLock(dir); releaseLock(dir, old);
+    expect(fs.existsSync(current.path)).toBe(true);
+    releaseLock(dir, current);
+  });
+  it('a partially written lock fails closed instead of being stolen', () => {
+    const dir = trackTmp(fs.mkdtempSync(path.join(os.tmpdir(), 'lock-partial-')));
+    fs.writeFileSync(path.join(dir, 'run.lock'), '');
+    expect(() => acquireLock(dir)).toThrow(/no valid owner/);
+    expect(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).toBe('');
   });
 
   it('stale recovery deletes only machines its own dead claims name', async () => {
@@ -669,6 +697,25 @@ describe('ownership: lock and claims', () => {
   });
 });
 
+describe('real local invoker mechanics (inside the ordinary test container)', () => {
+  it('captures a short stdout response before the child closes', async () => {
+    const invoker = createOrbInvoker({ orbctlPath: process.execPath });
+    const result = await invoker.runStep({ kind: 'orb', id: 'capture', capture: true, argv: ['-e', 'console.log(501)'] });
+    expect(result).toEqual({ code: 0, stdout: '501\n' });
+  });
+  it('awaits termination of a hanging control child', async () => {
+    const invoker = createOrbInvoker({ orbctlPath: process.execPath });
+    const running = invoker.runStep({ kind: 'orb', id: 'hang', capture: true, argv: ['-e', 'setInterval(() => {}, 1000)'] });
+    await invoker.killActive();
+    expect((await running).code).not.toBe(0);
+  });
+  it('bootstrap extracts the exact versioned Node archive naming convention', () => {
+    const bootstrap = fs.readFileSync(new URL('../../docker/test/bootstrap-orb.sh', import.meta.url), 'utf8');
+    expect(bootstrap).toContain('node-v"${NODE_VERSION}"-linux-*.tar.xz');
+    expect(bootstrap).toContain('node_src=$(echo /opt/node-v"${NODE_VERSION}"-linux-*)');
+  });
+});
+
 describe('runner with a fake orb', () => {
   it('runs the whole plan, preserves the vitest exit code, deletes the machine, releases the claim and lock', async () => {
     const invoker = fakeInvoker({ vitest: 3 });
@@ -683,8 +730,15 @@ describe('runner with a fake orb', () => {
     const teardown = invoker.calls[invoker.calls.length - 1].step;
     expect(teardown.argv).toEqual(['delete', '--force', teardown.argv[2]]);
     // claim removed, lock released
-    expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath()), 'claims', `${teardown.argv[2]}.json`))).toBe(false);
-    expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath()), 'run.lock'))).toBe(false);
+    expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath), 'claims', `${teardown.argv[2]}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(fs.realpathSync(runner.stateDirPath), 'run.lock'))).toBe(false);
+  });
+
+  it('a failed deletion keeps its recovery claim and cannot report success', async () => {
+    const invoker = fakeInvoker({ teardown: 1 });
+    const runner = testRunner({}, invoker);
+    expect(await runner.run()).toBe(EXIT_FAILURE);
+    expect(fs.existsSync(path.join(runner.stateDirPath, 'claims', `${makeMachineName('0123456789abcdef')}.json`))).toBe(true);
   });
 
   it('a failed provisioning step still deletes the machine and exits nonzero', async () => {
@@ -756,8 +810,7 @@ describe('runner with a fake orb', () => {
       const code = await runner.run();
       expect(code).toBe(EXIT_FAILURE);
       // nothing was created or deleted: the active run's machine is untouched
-      expect(invoker.calls).toHaveLength(1); // only the cleanup delete of OUR machine
-      expect(invoker.calls[0].step.argv).toEqual(['delete', '--force', makeMachineName('dddddddddddddddd')]);
+      expect(invoker.calls).toHaveLength(0); // no claim means no machine to delete
       // the other run's claim and lock survived
       expect(fs.existsSync(path.join(dir, 'claims', 'lifemodel-test-cccccccccccccccc.json'))).toBe(true);
       expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(process.pid);

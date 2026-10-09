@@ -38,6 +38,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs as parseLaunchArgs } from './test-isolated.mjs';
 
 // ---------------------------------------------------------------------------
 // Machine identity and filesystem layout inside the disposable machine
@@ -221,6 +222,8 @@ export function parseArgs(argv) {
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new UsageError(`--timeout must be a positive integer of milliseconds, got: ${parsed.timeoutMs}`);
   }
+  try { parseLaunchArgs(['docker', '--', ...parsed.vitestArgs]); }
+  catch (error) { throw new UsageError(error.message); }
   return { snapshot: parsed.snapshot, timeoutMs, vitestArgs: parsed.vitestArgs };
 }
 
@@ -233,9 +236,9 @@ const SNAPSHOT_MAX_DEPTH = 32;
 
 /**
  * Validate the sanitized snapshot: a directory with package.json and
- * package-lock.json, no .git entries anywhere (no owner git metadata travels
- * with the snapshot), no symlinks that leave the snapshot, no non-regular
- * files (sockets, fifos, devices).
+ * package-lock.json; no owner git, dotenv, root data or dependency trees;
+ * no symlinks or non-regular files. Enforce the same byte bounds and safe
+ * npm policy as the public launcher even for a direct helper call.
  */
 export async function validateSnapshot(dir) {
   const problems = [];
@@ -257,7 +260,7 @@ export async function validateSnapshot(dir) {
     }
   }
 
-  let seen = 0;
+  let seen = 0, bytes = 0;
   const stack = [{ rel: '', depth: 0 }];
   while (stack.length > 0) {
     const { rel, depth } = stack.pop();
@@ -275,18 +278,26 @@ export async function validateSnapshot(dir) {
         throw new IsolationError(`snapshot has too many entries (>${SNAPSHOT_MAX_ENTRIES}); refusing`);
       }
       const relPath = rel === '' ? dirent.name : `${rel}/${dirent.name}`;
-      if (dirent.name === '.git') {
-        problems.push(`contains a .git entry (no owner git metadata may travel): ${relPath}`);
+      if (dirent.name === '.git' || dirent.name === 'node_modules' || /^\.env(?:$|\.)/.test(dirent.name) || relPath === 'data') {
+        problems.push(`contains forbidden owner/dependency content: ${relPath}`);
         continue;
       }
       const fullEntry = path.join(full, dirent.name);
       if (dirent.isSymbolicLink()) {
-        const target = await fsp.readlink(fullEntry);
-        const resolved = path.resolve(path.dirname(fullEntry), target);
-        if (path.isAbsolute(target) || (resolved !== root && !resolved.startsWith(root + path.sep))) {
-          problems.push(`unsafe symlink ${relPath} -> ${target}`);
-        }
+        problems.push(`unsafe symlink ${relPath}`);
         continue;
+      }
+      if (dirent.isFile()) {
+        const size = (await fsp.stat(fullEntry)).size;
+        bytes += size;
+        if (size > 10 * 1024 * 1024 || bytes > 100 * 1024 * 1024) throw new IsolationError('snapshot exceeds byte limit');
+        if (dirent.name === '.npmrc') {
+          if (size > 4096) throw new IsolationError('unsupported .npmrc policy: file too large');
+          const lines = (await fsp.readFile(fullEntry, 'utf8')).split(/\r?\n/).map((line) => line.trim());
+          if (lines.some((line) => line && !/^[#;]/.test(line) && !/^legacy-peer-deps=(true|false)$/.test(line))) {
+            problems.push(`unsupported .npmrc policy: ${relPath}`);
+          }
+        }
       }
       if (dirent.isDirectory()) {
         if (depth >= SNAPSHOT_MAX_DEPTH) {
@@ -378,9 +389,13 @@ export async function recoverStale({ stateDir, invoker, isAlive = isProcessAlive
         argv: ['delete', '--force', claim.machine],
         timeoutMs: PHASE_TIMEOUTS_MS.teardown,
       });
-      if (r.code !== 0) log(`stale recovery: delete of ${claim.machine} exited ${r.code} (continuing)`);
+      if (r.code !== 0) {
+        log(`stale recovery: delete of ${claim.machine} exited ${r.code}; keeping its claim`);
+        continue;
+      }
     } catch (e) {
-      log(`stale recovery: delete of ${claim.machine} failed: ${e.message} (continuing)`);
+      log(`stale recovery: delete of ${claim.machine} failed: ${e.message}; keeping its claim`);
+      continue;
     }
     await fsp.rm(claimPath, { force: true });
     deleted.push(claim.machine);
@@ -396,7 +411,7 @@ function runArgv(machineName, user, workdir, command) {
   const argv = ['run', '-m', machineName];
   if (user) argv.push('--user', user);
   if (workdir) argv.push('--workdir', workdir);
-  argv.push('--');
+  // orbctl's parser stops at COMMAND; it rejects the usual standalone --.
   argv.push(...command);
   return argv;
 }
@@ -417,6 +432,7 @@ export function vitestEnv(uid) {
     TMPDIR: '/tmp',
     XDG_RUNTIME_DIR: `/run/user/${uid}`,
     DOCKER_HOST: rootlessSocketPath(uid),
+    LIFEMODEL_DOCKER_TESTS: '1',
   };
 }
 
@@ -465,7 +481,7 @@ export function buildPlan(input) {
   // relative to their own -C roots. These host paths never appear in any
   // machine-side argv; the machine only ever reads the tar stream from stdin.
   const artifactTarArgs = [
-    '-C', bootstrapScriptDir, bootstrapScriptName,
+    '-cf', '-', '-C', bootstrapScriptDir, bootstrapScriptName,
     '-C', artifactsHostDir, ...artifacts.map((a) => a.file),
   ];
 
@@ -559,7 +575,7 @@ export function vitestSteps({ machineName, uid, vitestArgs }) {
       id: 'npm-ci',
       kind: 'orb',
       argv: runArgv(machineName, MACHINE_USER, SRC_DIR, [
-        'env', '-i', 'HUSKY=0', `PATH=${env.PATH}`, 'npm', 'ci',
+        'env', '-i', ...envKvs, 'npm', 'ci',
       ]),
       timeoutMs: PHASE_TIMEOUTS_MS.npmCi,
     },
@@ -567,7 +583,7 @@ export function vitestSteps({ machineName, uid, vitestArgs }) {
       id: 'vitest',
       kind: 'orb',
       argv: runArgv(machineName, MACHINE_USER, SRC_DIR, [
-        'env', '-i', ...envKvs, './node_modules/.bin/vitest', 'run', ...vitestArgs,
+        'env', '-i', ...envKvs, './node_modules/.bin/vitest', 'run', ...vitestArgs, '--maxWorkers=2',
       ]),
       // Budget: whatever is left of the overall hard deadline.
       timeoutMs: Number.POSITIVE_INFINITY,
@@ -590,29 +606,28 @@ export function teardownStep(machineName) {
 
 function settle(child) {
   return new Promise((resolve) => {
-    child.once('exit', (code) => resolve({ code: code === null ? 1 : code }));
+    child.once('close', (code) => resolve({ code: code === null ? 1 : code }));
     child.once('error', () => resolve({ code: 1 }));
   });
 }
 
 function registerKiller(active, child, label, log) {
-  let killed = false;
+  let killed = false, timer;
+  const closed = new Promise((resolve) => child.once('close', () => { clearTimeout(timer); resolve(); }));
+  const send = (signal) => {
+    try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch {} }
+  };
   const killer = () => {
-    if (killed) return;
-    killed = true;
-    log(`killing ${label} (pid ${child.pid})`);
-    try {
-      child.kill('SIGTERM');
-    } catch {}
-    const t = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {}
-    }, 5_000);
-    if (typeof t.unref === 'function') t.unref();
+    if (!killed) {
+      killed = true;
+      log(`killing ${label} (pid ${child.pid})`);
+      send('SIGTERM');
+      timer = setTimeout(() => send('SIGKILL'), 5_000);
+    }
+    return closed;
   };
   active.add(killer);
-  return () => active.delete(killer);
+  return () => { clearTimeout(timer); active.delete(killer); };
 }
 
 /**
@@ -625,6 +640,7 @@ export function createOrbInvoker({ orbctlPath, log = () => {} }) {
   async function runOrb(step, stdin) {
     const child = spawn(orbctlPath, step.argv, {
       env: scrubEnv(),
+      detached: true,
       stdio: stdin ? ['pipe', step.capture ? 'pipe' : 'inherit', 'inherit'] : ['ignore', step.capture ? 'pipe' : 'inherit', 'inherit'],
     });
     child.on('error', (e) => log(`spawn failed for ${step.id}: ${e.message}`));
@@ -633,18 +649,11 @@ export function createOrbInvoker({ orbctlPath, log = () => {} }) {
       child.stdin.on('error', () => {}); // e.g. EPIPE when the machine side dies first
       stdin.pipe(child.stdin);
     }
+    const chunks = [];
+    if (step.capture) child.stdout.on('data', (chunk) => chunks.push(chunk));
     const r = await settle(child);
     unregister();
-    let stdout;
-    if (step.capture) {
-      stdout = await new Promise((resolve) => {
-        const chunks = [];
-        child.stdout.on('data', (c) => chunks.push(c));
-        child.stdout.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-        child.stdout.on('error', () => resolve(''));
-      });
-    }
-    return { code: r.code, stdout };
+    return { code: r.code, stdout: step.capture ? Buffer.concat(chunks).toString('utf8') : undefined };
   }
 
   return {
@@ -654,7 +663,7 @@ export function createOrbInvoker({ orbctlPath, log = () => {} }) {
         // Safe transfer: a host-side tar of the sanitized input piped into
         // `orbctl run ... tar -xf -`. The host path lives only in the host
         // tar arguments; the machine-side argv never names a host path.
-        const tar = spawn('tar', step.hostTarArgs, { env: scrubEnv(), stdio: ['ignore', 'pipe', 'inherit'] });
+        const tar = spawn('tar', step.hostTarArgs, { env: scrubEnv(), detached: true, stdio: ['ignore', 'pipe', 'inherit'] });
         tar.on('error', (e) => log(`tar spawn failed for ${step.id}: ${e.message}`));
         const unregisterTar = registerKiller(active, tar, `${step.id} (host tar)`, log);
         const [orbResult, tarResult] = await Promise.all([runOrb(step, tar.stdout), settle(tar)]);
@@ -668,8 +677,8 @@ export function createOrbInvoker({ orbctlPath, log = () => {} }) {
       }
       throw new IsolationError(`unknown step kind: ${step.kind}`);
     },
-    killActive() {
-      for (const killer of [...active]) killer();
+    async killActive() {
+      await Promise.all([...active].map((killer) => killer()));
     },
   };
 }
@@ -745,38 +754,35 @@ export function defaultStateDir() {
 export function acquireLock(stateDir, { isAlive = isProcessAlive } = {}) {
   fs.mkdirSync(stateDir, { recursive: true });
   const lockPath = path.join(stateDir, 'run.lock');
+  const owner = JSON.stringify({ pid: process.pid, startedAt: Date.now(), id: newRunId() });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fd = fs.openSync(lockPath, 'wx');
+      try { fs.writeFileSync(fd, owner); } finally { fs.closeSync(fd); }
+      return { path: lockPath, owner };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let observed, holder;
+      try { observed = fs.readFileSync(lockPath, 'utf8'); holder = JSON.parse(observed); }
+      catch { throw new ActiveRunError(`run lock has no valid owner: ${lockPath}; inspect it before removing it`); }
+      if (!Number.isInteger(holder.pid) || holder.pid <= 1) throw new ActiveRunError(`invalid run-lock owner: ${lockPath}`);
+      if (isAlive(holder.pid)) throw new ActiveRunError(`another test-docker-isolated run (pid ${holder.pid}) holds ${lockPath}; refusing to touch its machine`);
+      // Serialize stale-file replacement; a contender cannot unlink a fresh claim.
+      const recovery = `${lockPath}.recovery`;
+      try { fs.mkdirSync(recovery); }
+      catch { throw new ActiveRunError(`another launcher is recovering ${lockPath}`); }
       try {
-        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
-      } finally {
-        fs.closeSync(fd);
-      }
-      return lockPath;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let holder = null;
-      try {
-        holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      } catch {}
-      if (holder && isAlive(holder.pid)) {
-        throw new ActiveRunError(
-          `another test-docker-isolated run (pid ${holder.pid}) holds ${lockPath}; refusing to touch its machine`,
-        );
-      }
-      // Stale lock from a dead run: clear it and retry once.
-      try {
-        fs.unlinkSync(lockPath);
-      } catch {}
+        if (fs.readFileSync(lockPath, 'utf8') === observed) fs.unlinkSync(lockPath);
+      } finally { fs.rmdirSync(recovery); }
     }
   }
   throw new ActiveRunError(`could not acquire the run lock at ${lockPath}`);
 }
 
-export function releaseLock(stateDir) {
+export function releaseLock(stateDir, handle) {
+  const lockPath = path.join(stateDir, 'run.lock');
   try {
-    fs.rmSync(path.join(stateDir, 'run.lock'), { force: true });
+    if (handle && fs.readFileSync(lockPath, 'utf8') === handle.owner) fs.unlinkSync(lockPath);
   } catch {}
 }
 
@@ -819,7 +825,7 @@ export function createRunner({
   });
   let cleaned = false;
   let claimWritten = false;
-  let lockAcquired = false;
+  let lockHandle = null;
 
   function fireAbort(kind, signalName) {
     if (abort) return;
@@ -871,13 +877,14 @@ export function createRunner({
   async function cleanup() {
     if (cleaned) return;
     cleaned = true;
-    invoker.killActive();
+    await invoker.killActive();
+    let deletionConfirmed = false;
     try {
       // Teardown always gets its own bound: even a run that just hit the
       // hard deadline still deletes its machine from outside.
       const step = teardownStep(machineName);
       const budget = step.timeoutMs;
-      if (budget > 0) {
+      if (budget > 0 && claimWritten) {
         let timer;
         const bound = new Promise((resolve) => {
           timer = timers.setTimeout(resolve, budget);
@@ -889,20 +896,22 @@ export function createRunner({
           log(`teardown: machine delete failed: ${e.message}`);
         } finally {
           timers.clearTimeout(timer);
-          invoker.killActive(); // a hung delete child must not outlive the run
+          await invoker.killActive(); // a hung delete child must not outlive the run
         }
-        if (r && r.code !== 0) {
-          log(`teardown: orbctl delete exited ${r.code}; inspect machines named ${MACHINE_PREFIX}* by hand`);
+        deletionConfirmed = r !== null && r.code === 0;
+        if (!deletionConfirmed) {
+          log(`teardown: deletion unconfirmed; keeping the recovery claim for ${machineName}`);
         }
       }
     } finally {
-      if (claimWritten) {
+      if (claimWritten && deletionConfirmed) {
         try {
           await fsp.rm(path.join(claimsDir(stateDir), `${machineName}.json`), { force: true });
         } catch {}
       }
-      if (lockAcquired) releaseLock(stateDir); // never release a lock we do not hold
+      if (lockHandle) releaseLock(stateDir, lockHandle); // only release our exact claim
     }
+    return !claimWritten || deletionConfirmed;
   }
 
   async function run() {
@@ -911,9 +920,8 @@ export function createRunner({
     try {
       deadlineTimer = timers.setTimeout(() => fireAbort('deadline'), deadlineMs);
       fs.mkdirSync(stateDir, { recursive: true });
-      await recoverStale({ stateDir, invoker, log });
-      acquireLock(stateDir);
-      lockAcquired = true;
+      lockHandle = acquireLock(stateDir);
+      await recoverStale({ stateDir, invoker: { runStep: (step) => runStepOnce(step, step.timeoutMs) }, log });
       const claim = { machine: machineName, pid: process.pid, startedAt: now(), deadlineAt };
       await writeClaim(stateDir, claim);
       claimWritten = true;
@@ -981,8 +989,10 @@ export function createRunner({
       }
     } finally {
       try {
-        await cleanup();
+        const cleanedUp = await cleanup();
+        if (!cleanedUp && exitCode === 0) exitCode = EXIT_FAILURE;
       } catch (e) {
+        if (exitCode === 0) exitCode = EXIT_FAILURE;
         log(`cleanup error: ${e.message}`);
       }
       if (deadlineTimer) timers.clearTimeout(deadlineTimer);
@@ -1009,12 +1019,11 @@ export function createRunner({
 export function findOrbctl({ existsSync = fs.existsSync } = {}) {
   const candidates = [
     process.env.LIFEMODEL_TEST_ORBCTL,
-    'orbctl',
     '/opt/homebrew/bin/orbctl',
     '/usr/local/bin/orbctl',
+    ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, 'orbctl')),
   ].filter(Boolean);
   for (const candidate of candidates) {
-    if (candidate === 'orbctl') return candidate; // resolved via PATH by spawn
     if (existsSync(candidate)) return candidate;
   }
   throw new IsolationError(
