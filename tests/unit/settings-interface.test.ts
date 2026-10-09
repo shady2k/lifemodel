@@ -318,6 +318,44 @@ describe("lifemodel's settings interface", () => {
     expect(answer.body).toContain('id="endpointBaseUrl-error"');
   });
 
+  it('keeps the future fields of the endpoint object it replaces (nested, not top level)', async () => {
+    // Coordinator finding 10: `applySettings` built llm.endpoint FRESH, so a
+    // config carrying a field of the endpoint this interface does not own yet
+    // (headers, or anything a later version adds) lost it on every save - the
+    // top-level file fields are kept, this NESTED object was not.
+    await writeFile(
+      join(configDir, 'agent.json'),
+      JSON.stringify({
+        version: 1,
+        llm: {
+          endpoint: {
+            baseUrl: 'http://127.0.0.1:1234/v1',
+            fastModel: 'old-fast',
+            smartModel: 'old-smart',
+            motorModel: 'old-motor',
+            headers: { 'X-Test': 'keep' },
+          },
+          timeoutMs: 90_000,
+        },
+      })
+    );
+
+    const answer = await request('/settings', { form: VALID });
+    expect(answer.status).toBe(200);
+    await waitForSave();
+
+    const written = await readConfig();
+    const llm = written['llm'] as Record<string, unknown>;
+    expect(llm['timeoutMs']).toBe(90_000); // top level, already kept
+    expect(llm['endpoint']).toMatchObject({
+      baseUrl: VALID.endpointBaseUrl, // replaced by the save
+      fastModel: VALID.fastModel,
+      smartModel: VALID.smartModel,
+      motorModel: VALID.motorModel,
+      headers: { 'X-Test': 'keep' }, // NOT this interface's field: kept
+    });
+  });
+
   it('accepts an endpoint-less save: the Telegram fields alone are a valid state', async () => {
     const answer = await request('/settings', {
       form: {
