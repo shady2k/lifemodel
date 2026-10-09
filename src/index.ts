@@ -10,7 +10,11 @@ import { createContainerAsync, type Container, type StopStep } from './core/cont
 import type { StopReport } from './core/core-loop.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
 import { createConfigLoader, resolveConfigDir } from './config/index.js';
-import { createSettingsServer, type SettingsServer, type SettingsServerOptions } from './settings/server.js';
+import {
+  createSettingsServer,
+  type SettingsServer,
+  type SettingsServerOptions,
+} from './settings/server.js';
 import { RESTART_EXIT_CODE } from './settings/restart.js';
 
 let container: Container | undefined;
@@ -252,7 +256,6 @@ async function stopAndLeave(reason: string, code: number, error?: unknown): Prom
   isShuttingDown = true;
   await runStopSequence({ reason, code, error, container, settingsServer });
 }
-
 
 process.on('SIGINT', () => {
   void shutdown('SIGINT');

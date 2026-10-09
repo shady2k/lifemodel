@@ -61,7 +61,10 @@ export class ConfigLoader {
 
   constructor(configPath = 'data/config', logger?: Logger) {
     this.configPath = configPath;
-    this.storage = new DeferredStorage(new JSONStorage({ basePath: configPath, createBackup: false }), logger ?? silentLogger);
+    this.storage = new DeferredStorage(
+      new JSONStorage({ basePath: configPath, createBackup: false }),
+      logger ?? silentLogger
+    );
   }
 
   /**
@@ -130,7 +133,10 @@ export class ConfigLoader {
    * exactly as it was.
    */
   async writeFile(file: AgentConfigFile, options?: StorageSaveOptions): Promise<void> {
-    this.storage.save(CONFIG_STORAGE_KEY, file);
+    // Mark dirty through the deferred layer, then flush BELOW: the write's
+    // outcome is decided when flush() resolves (nothing persisted, or the
+    // file whole on disk).
+    await this.storage.save(CONFIG_STORAGE_KEY, file);
     await this.storage.flush(options);
   }
 
