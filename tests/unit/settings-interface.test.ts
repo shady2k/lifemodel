@@ -59,11 +59,15 @@ interface Reply {
  */
 async function request(
   path: string,
-  options: { form?: Record<string, string>; host?: string } = {}
+  {
+    form,
+    host,
+    origin = `http://${host ?? 'localhost:8080'}`,
+  }: { form?: Record<string, string>; host?: string; origin?: string | null } = {}
 ): Promise<Reply> {
   const address = server.address();
   const port = Number(address.slice(address.lastIndexOf(':') + 1));
-  const body = options.form === undefined ? undefined : new URLSearchParams(options.form).toString();
+  const body = form === undefined ? undefined : new URLSearchParams(form).toString();
   return await new Promise<Reply>((resolve, reject) => {
     const req = httpRequest(
       {
@@ -72,7 +76,10 @@ async function request(
         path,
         method: body === undefined ? 'GET' : 'POST',
         headers: {
-          Host: options.host ?? 'localhost:8080',
+          Host: host ?? 'localhost:8080',
+          ...(body === undefined || origin === null
+            ? {}
+            : { Origin: origin }),
           ...(body === undefined
             ? {}
             : {
@@ -201,6 +208,47 @@ describe("lifemodel's settings interface", () => {
     });
     expect(merged.primaryUser.telegramChatId).toBe('4242');
     expect(merged.telegramBotToken).toBe('__telegram_bot_token__');
+  });
+
+  it('accepts a same-origin save: the front door origin, scheme and port as the browser saw it', async () => {
+    const answer = await request('/settings', { form: VALID });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toContain('Saved.');
+    await waitForSave();
+    expect(saved).toBe(1);
+  });
+
+  it('refuses a foreign-origin write, naming the route (the cookie is not port-scoped)', async () => {
+    // The review's concrete case: another local service on the same site can
+    // drive this POST with the owner's ambient cookie - the loader's session
+    // is SameSite=Lax and the cookie is NOT scoped to the port.
+    const answer = await request('/settings', {
+      form: VALID,
+      origin: 'http://localhost:9000',
+    });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(answer.body).toContain('same-origin');
+    await waitForSave();
+    expect(saved).toBe(0);
+    await expect(readConfig()).rejects.toThrow(); // nothing written
+  });
+
+  it('refuses a write with no Origin header at all, naming the route', async () => {
+    const answer = await request('/settings', { form: VALID, origin: null });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(saved).toBe(0);
+  });
+
+  it('refuses a foreign scheme-origin write, naming the route', async () => {
+    const answer = await request('/settings', {
+      form: VALID,
+      origin: 'https://localhost:8080', // right host:port, wrong scheme
+    });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(saved).toBe(0);
   });
 
   it('refuses a model with no endpoint base URL, naming the base URL', async () => {
@@ -477,6 +525,7 @@ describe("lifemodel's settings interface", () => {
             method: 'POST',
             headers: {
               Host: 'localhost:8080',
+              Origin: 'http://localhost:8080',
               'Content-Type': 'application/x-www-form-urlencoded',
               'Content-Length': String(Buffer.byteLength(body)),
             },

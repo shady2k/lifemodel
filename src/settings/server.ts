@@ -191,7 +191,43 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
       );
   };
 
+  /**
+   * The Origin the front door serves the page from, as the browser saw it:
+   * the scheme of the instance's HTTP publishing (http on the root host) and
+   * the request's own Host. The loader's session cookie is SameSite=Lax, not
+   * port-scoped, so another local service could drive this POST cross-origin
+   * with the owner's ambient cookie (review finding 2, measured: 200 through
+   * such a probe). A CSRF check on the write closes it: the browser's Origin
+   * must be exactly this front door, or the save does not happen.
+   */
+  const isThisFrontDoor = (request: FastifyRequest): boolean => {
+    const origin = request.headers.origin;
+    const host = request.headers.host;
+    return (
+      typeof origin === 'string' &&
+      origin.length > 0 &&
+      typeof host === 'string' &&
+      origin === `http://${host}`
+    );
+  };
+
   app.post('/settings', async (request, reply) => {
+    // The write route before anything else: no save is driven from another
+    // origin, and a request with no Origin at all is a cross-origin tool, not
+    // the page.
+    if (!isThisFrontDoor(request)) {
+      logger.warn(
+        {
+          route: '/settings',
+          hasOrigin: typeof request.headers.origin === 'string' && request.headers.origin !== '',
+        },
+        'Settings refused: the write route rejects a request that is not from this front door'
+      );
+      return reply
+        .code(403)
+        .type('text/plain; charset=utf-8')
+        .send('Save refused: /settings accepts only same-origin writes\n');
+    }
     // The drain has asked the interface to close (a save started THIS stop, or
     // the process is leaving): a save that arrives now would write a config the
     // exiting process never applies, and the restart it asks for would be
