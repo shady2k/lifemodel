@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createConfigLoader, resolveConfigDir } from '../../src/config/config-loader.js';
-import { createTestLogger } from '../helpers/test-logger.js';
+import { createTestLogger, recordingLogger, type RecordedLog } from '../helpers/test-logger.js';
 import { createSettingsServer, type SettingsServer } from '../../src/settings/server.js';
 
 const scratch: string[] = [];
@@ -283,6 +283,104 @@ describe("lifemodel's settings interface", () => {
     expect(chat.status).toBe(400);
     expect(chat.body).toContain('the Telegram chat id must be a number');
     expect(saved).toBe(0);
+  });
+
+  it('renders a legacy config with credentials in the endpoint safe, and refuses the field', async () => {
+    // Review round 2, finding F, case 1: a config the round-1 interface (or a
+    // hand edit) wrote still echoed `user:key@` on a plain GET, and startup
+    // logged the whole URL. The GET now runs the save's rules: the field is
+    // refused with its name on the page, and the VALUE is its safe
+    // representation (origin + path) - never the secret.
+    const LEGACY_KEY = 'legacy-not-a-real-key';
+    await writeFile(
+      join(configDir, 'agent.json'),
+      JSON.stringify({
+        version: 1,
+        llm: { endpoint: { baseUrl: `https://owner:${LEGACY_KEY}@example.test/v1` } },
+      })
+    );
+
+    const page = await request('/');
+    expect(page.status).toBe(200);
+    expect(page.body).not.toContain(LEGACY_KEY);
+    expect(page.body).not.toContain('owner:');
+    expect(page.body).toContain('value="https://example.test/v1"');
+    expect(page.body).toContain('id="endpointBaseUrl-error"');
+    expect(page.body).toContain('must not carry credentials');
+    // And the owner cannot save it along by submitting as-is: the field is
+    // already visible as refused.
+  });
+
+  it('refuses a URL whose query or fragment carries a secret, and echoes it safe', async () => {
+    const LEGACY_KEY = 'made-up-query-key';
+    const fragment = 'made-up-fragment-secret';
+    const answer = await request('/settings', {
+      form: {
+        ...VALID,
+        endpointBaseUrl: `https://api.example.com/v1?api_key=${LEGACY_KEY}#${fragment}`,
+      },
+    });
+    expect(answer.status).toBe(400);
+    expect(answer.body).not.toContain(LEGACY_KEY);
+    expect(answer.body).not.toContain(fragment);
+    expect(answer.body).toContain('must not carry a query string or fragment');
+    expect(answer.body).toContain('value="https://api.example.com/v1"'); // safe representation
+    expect(saved).toBe(0);
+    await expect(readConfig()).rejects.toThrow(); // nothing written
+  });
+
+  it('records the save log with the safe URL representation only', async () => {
+    // A save's log line carries the endpoint through the redactor: origin and
+    // path only, never credentials, query or fragment - a URL the REDACTOR
+    // cannot trust cannot leak through it (review round 2, finding F).
+    const calls: RecordedLog[] = [];
+    const base = createTestLogger('silent');
+    const recorded = createConfigLoader(configDir);
+    const logServer = await createSettingsServer({
+      config: recorded,
+      logger: recordingLogger(base, calls),
+      port: 0,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await logServer.listen();
+    try {
+      const address = logServer.address();
+      const port = Number(address.slice(address.lastIndexOf(':') + 1));
+      const clean = new URLSearchParams({ ...VALID }).toString();
+      await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/settings',
+            method: 'POST',
+            headers: {
+              Host: 'localhost:8080',
+              Origin: 'http://localhost:8080',
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': String(Buffer.byteLength(clean)),
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          }
+        );
+        req.on('error', reject);
+        req.write(clean);
+        req.end();
+      });
+      const saveLines = calls.filter((call) => call.msg.includes('Settings saved'));
+      expect(saveLines.length).toBe(1);
+      const logged = JSON.stringify(saveLines[0].obj);
+      expect(logged).toContain('127.0.0.1:1234');
+      expect(logged).not.toContain('unit-test-secret');
+      expect(saved).toBe(1);
+    } finally {
+      await logServer.close();
+    }
   });
 
   it('refuses an endpoint URL that carries credentials, and echoes it without them', async () => {

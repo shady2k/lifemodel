@@ -88,13 +88,14 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   // A refused bot token is NEVER echoed back: the owner may have pasted the
   // real one, and a page (or a browser cache, or a log of the exchange) must
   // not hold it. An accepted one is a placeholder by the rule above.
-  // Echoed values hold no secret: a refused bot token is dropped, and a
-  // refused endpoint base URL is echoed without its credentials (the parts
-  // before the @) — the owner sees the URL, never what it carried.
+  // The endpoint base URL is ALWAYS echoed by its safe representation
+  // (origin + path, no credentials, no query, no fragment), whatever the
+  // validation said: a config file an older interface wrote must not leak its
+  // secret parts on a plain GET either (review round 2, finding F).
   const value =
     field === 'telegramBotToken' && error !== undefined
       ? ''
-      : field === 'endpointBaseUrl' && error !== undefined
+      : field === 'endpointBaseUrl'
         ? redactEndpointUrl(options.values[field])
         : options.values[field];
   const hints: Partial<Record<typeof field, string>> = {
