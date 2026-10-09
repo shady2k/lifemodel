@@ -179,7 +179,10 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     // actually starts (finding A: a queued save used to run to the end and
     // publish under the close). Named, not silent.
     if (closing) {
-      logger.warn({ route: '/settings' }, 'Settings refused: a save admitted earlier is still queued into the stop');
+      logger.warn(
+        { route: '/settings' },
+        'Settings refused: a save admitted earlier is still queued into the stop'
+      );
       return await closingRefusal(reply);
     }
     const body = (request.body ?? {}) as Record<string, unknown>;
