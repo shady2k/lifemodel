@@ -9,6 +9,7 @@ import { createCircuitBreaker } from '../../core/circuit-breaker.js';
 import type { Channel, CircuitStats, SendOptions, SendResult } from '../../channels/channel.js';
 import type { IRecipientRegistry } from '../../core/recipient-registry.js';
 import { withTraceContext, createTraceContext } from '../../core/trace-context.js';
+import { proxyFetch } from '../../utils/proxy-fetch.js';
 
 /**
  * Telegram message payload structure.
@@ -248,7 +249,11 @@ export class TelegramChannel implements Channel {
       return Promise.resolve();
     }
 
-    this.bot = new Bot(this.config.botToken);
+    // The Bot's own client must not dial out directly: grammY builds its own
+    // https.Agent for node-fetch, which ignores the proxy environment, and the
+    // kernel rule refuses a direct socket (finding 4). proxyFetch carries every
+    // API call through Agent Vault - the ONE shared transport.
+    this.bot = new Bot(this.config.botToken, { client: { fetch: proxyFetch } });
 
     // Handle text messages (awaited: the durable log flushes at emit time)
     this.bot.on('message:text', async (ctx) => {
@@ -654,7 +659,9 @@ export class TelegramChannel implements Channel {
     fileId: string,
     maxBytes: number
   ): Promise<{ base64: string; mediaType: string } | null> {
-    const client = this.bot ?? (this.downloadClient ??= new Bot(this.config.botToken));
+    const client =
+      this.bot ??
+      (this.downloadClient ??= new Bot(this.config.botToken, { client: { fetch: proxyFetch } }));
     const file = await client.api.getFile(fileId);
     if (!file?.file_path) {
       this.logger?.warn('Photo file_path missing from Telegram API response');
