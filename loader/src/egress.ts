@@ -39,6 +39,8 @@
  * --cap-add NET_ADMIN`). Either one missing is one line saying what and why,
  * and then a non-zero exit.
  */
+import { readFile } from 'node:fs/promises';
+
 import type { LoaderConfig } from './config.js';
 import { LoaderFatalError } from './errors.js';
 import type { CommandResult, CommandRunner } from './exec.js';
@@ -50,9 +52,31 @@ const LOOPBACK = '127.0.0.1';
 
 /** The answer a REJECTed connection gets, and what makes it fail at once. */
 const REJECT_WITH = 'icmp-port-unreachable';
+/** The IPv6 family's answer for the same refusal. */
+const REJECT_WITH6 = 'icmp6-port-unreachable';
+
+/** The address the named loopback services answer on, in the IPv6 family. */
+const LOOPBACK6 = '::1';
 
 /** The capability the container needs for this rule to be installable at all. */
 export const EGRESS_CAPABILITY = '--cap-add NET_ADMIN';
+
+/**
+ * Whether the container has an IPv6 address or route at all: the kernel
+ * reports every address in `/proc/net/if_inet6`, so a read of it is the whole
+ * question. An empty file (or no file - a kernel without IPv6 cannot have IPv6
+ * traffic either) means there is no IPv6 path to confine and none for a bypass
+ * to use. The path is on the loader's configuration (`egress.procPath`), so a
+ * test can place its own - and the image carries `ip6tables`, the binary that
+ * lets the IPv6 half of the rule be installed when the answer is yes.
+ */
+export async function ipv6IsPresentAt(path: string): Promise<boolean> {
+  try {
+    return (await readFile(path, 'utf8')).trim() !== '';
+  } catch {
+    return false;
+  }
+}
 
 export interface EgressDeps {
   runner: CommandRunner;
@@ -63,8 +87,10 @@ export interface EgressDeps {
 export interface Egress {
   /** Install the rule; idempotent, and fatal when the container cannot carry it. */
   install(): Promise<void>;
-  /** The rule as the loader installs it, for a test and for the log line. */
+  /** The IPv4 rule as the loader installs it, for a test and for the log line. */
   rules(): string[][];
+  /** The IPv6 rule, when the container has an address for it to confine. */
+  rules6(): Promise<string[][]>;
 }
 
 export function createEgress(deps: EgressDeps): Egress {
@@ -152,54 +178,126 @@ export function createEgress(deps: EgressDeps): Egress {
    * questions this module asks (`does the chain exist?`), whose answer is the
    * failure itself.
    */
+  /**
+   * One call of one family's binary. When the IPv6 family's call cannot carry
+   * its part while the container HAS an IPv6 address or route, the rule cannot
+   * be the boundary that keeps uid 1000's egress inside - so the failure is
+   * said in one line that names the unconfined IPv6 path, as the missing input
+   * it is, rather than a gap a document could excuse.
+   */
   async function iptables(
+    binary: string,
     args: string[],
     what: string,
-    allowFailure = false
+    allowFailure = false,
+    ipv6 = false
   ): Promise<CommandResult> {
     let result: CommandResult;
     try {
       result = await runner.run(binary, args);
     } catch (error) {
       throw new LoaderFatalError(
-        `the egress rule could not be installed: ${binary} could not be run (${describe(error)}), so lifemodel's traffic could not be confined to the Agent Vault proxy`,
+        ipv6
+          ? `the egress rule could not be installed: ${binary} could not be run (${describe(error)}); the container has an IPv6 address or route, so an UNCONFINED IPv6 PATH EXISTS for lifemodel's user - install ip6tables in the image and keep ${EGRESS_CAPABILITY}`
+          : `the egress rule could not be installed: ${binary} could not be run (${describe(error)}), so lifemodel's traffic could not be confined to the Agent Vault proxy`,
         { cause: error }
       );
     }
     if (result.code !== 0 && !allowFailure) {
       throw new LoaderFatalError(
-        `the egress rule could not be installed: ${binary} ${args.join(' ')} answered "${lastLine(result)}" (${what}); the container needs the NET_ADMIN capability - ${EGRESS_CAPABILITY}`
+        ipv6
+          ? `the egress rule could not be installed: ${binary} ${args.join(' ')} answered "${lastLine(result)}" (${what}); the container has an IPv6 address or route, so an UNCONFINED IPv6 PATH EXISTS for lifemodel's user - the container needs the NET_ADMIN capability - ${EGRESS_CAPABILITY}`
+          : `the egress rule could not be installed: ${binary} ${args.join(' ')} answered "${lastLine(result)}" (${what}); the container needs the NET_ADMIN capability - ${EGRESS_CAPABILITY}`
       );
     }
     return result;
   }
 
-  async function ensureChain(): Promise<void> {
+  async function ensureChain(binary: string, chain: string, ipv6 = false): Promise<void> {
     // `-L <chain>` answers 1 when the chain is not there: the one failure that
     // is an answer rather than a refusal.
-    const listed = await iptables(['-L', chain, '-n'], 'looking for the rule', true);
+    const listed = await iptables(binary, ['-L', chain, '-n'], 'looking for the rule', true, ipv6);
     if (listed.code === 0) {
       // A chain left by an earlier start in this network namespace: empty it,
       // so the rules below are the rules, once.
-      await iptables(['-F', chain], `emptying ${chain}`);
+      await iptables(binary, ['-F', chain], `emptying ${chain}`, false, ipv6);
       return;
     }
-    await iptables(['-N', chain], `creating ${chain}`);
+    await iptables(binary, ['-N', chain], `creating ${chain}`, false, ipv6);
   }
 
-  async function ensureJump(): Promise<void> {
+  async function ensureJump(binary: string, chain: string, ipv6 = false): Promise<void> {
     // The question first: is the jump into the loader's chain already there?
-    const present = await iptables(['-C', 'OUTPUT', '-j', chain], 'checking the jump', true);
+    const present = await iptables(
+      binary,
+      ['-C', 'OUTPUT', '-j', chain],
+      'checking the jump',
+      true,
+      ipv6
+    );
     if (present.code === 0) return;
-    await iptables(['-A', 'OUTPUT', '-j', chain], `jumping from OUTPUT to ${chain}`);
+    await iptables(
+      binary,
+      ['-A', 'OUTPUT', '-j', chain],
+      `jumping from OUTPUT to ${chain}`,
+      false,
+      ipv6
+    );
+  }
+
+  /** The IPv6 half of the rule: the same named services over `::1`, by parity
+   * with the IPv4 allows (the vault binds 127.0.0.1 today, so the `::1` allow
+   * names its port for the day it binds the loopback of that family too), and
+   * REJECT for everything else - which is what keeps an address the container
+   * was GIVEN by an IPv6-enabled network (the Docker `--ipv6` subnets) from
+   * being the way around the whole boundary. */
+  function referenceRules6(): string[][] {
+    return [
+      [
+        '-m',
+        'owner',
+        '--uid-owner',
+        String(uid),
+        '-p',
+        'tcp',
+        '-d',
+        LOOPBACK6,
+        '--dport',
+        String(config.agentVault.proxyPort),
+        '-j',
+        'ACCEPT',
+      ],
+      ['-m', 'owner', '--uid-owner', String(uid), '-j', 'REJECT', '--reject-with', REJECT_WITH6],
+    ];
   }
 
   async function install(): Promise<void> {
-    await ensureChain();
+    await ensureChain(binary, chain);
     for (const rule of referenceRules()) {
-      await iptables(['-A', chain, ...rule], `adding a rule to ${chain}`);
+      await iptables(binary, ['-A', chain, ...rule], `adding a rule to ${chain}`);
     }
-    await ensureJump();
+    await ensureJump(binary, chain);
+    // The IPv6 half: without it the family an IPv6-enabled Docker network
+    // gives the container would bypass the rule entirely (a uid-1000 dial to
+    // an `fd`-range address would leave, no Authorization header asked). So
+    // the half is installed whenever the container HAS an IPv6 address or
+    // route, and a container where it cannot be installed does not start
+    // lifemodel at all - the two states are "confined" and "not started",
+    // never "unconfined and going anyway".
+    const ipv6Present = await ipv6IsPresentAt(config.egress.procPath);
+    if (!ipv6Present) {
+      logger.info(
+        { procPath: config.egress.procPath },
+        'the container has no IPv6 address or route: the rule has no IPv6 path to confine, and none for a bypass to use'
+      );
+    } else {
+      const binary6 = config.egress.ipv6Binary;
+      await ensureChain(binary6, chain, true);
+      for (const rule of referenceRules6()) {
+        await iptables(binary6, ['-A', chain, ...rule], `adding a rule to ${chain}`, false, true);
+      }
+      await ensureJump(binary6, chain, true);
+    }
     logger.info(
       {
         uid,
@@ -209,10 +307,18 @@ export function createEgress(deps: EgressDeps): Egress {
         proxyPort: config.agentVault.proxyPort,
         loaderPort: config.httpPort,
         resolver: config.egress.resolver === '' ? null : config.egress.resolver,
+        ipv6: config.egress.ipv6Binary,
       },
-      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${config.egress.resolver === '' ? '' : ', the resolver'}): everything else from uid ${String(uid)} is refused`
+      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${config.egress.resolver === '' ? '' : ', the resolver'}${ipv6Present ? `, and for IPv6 ${LOOPBACK6}` : ''}): everything else from uid ${String(uid)} is refused`
     );
   }
 
-  return { install, rules: referenceRules };
+  return {
+    install,
+    rules: referenceRules,
+    rules6: async () => {
+      const present = await ipv6IsPresentAt(config.egress.procPath);
+      return present ? referenceRules6() : [];
+    },
+  };
 }

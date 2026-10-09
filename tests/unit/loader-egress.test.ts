@@ -26,6 +26,7 @@ import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
+  containerHasIpv6,
   createLoaderWorld,
   lifemodelSpawn,
   scriptAgentVault,
@@ -245,6 +246,72 @@ describe("the rule that confines lifemodel's egress", () => {
       found.runner.lines().filter((line) => line === 'iptables -A OUTPUT -j LIFEMODEL_EGRESS')
     ).toHaveLength(1);
     await shutdownLoader(found, app);
+  });
+});
+
+describe('the IPv6 half, when the container has an IPv6 address or route', () => {
+  it('is installed through ip6tables: the named port over ::1, REJECT for everything else', async () => {
+    const found = world();
+    const binary6 = found.config.egress.ipv6Binary;
+    // An IPv6-enabled Docker network: the kernel reports the container's
+    // address in the double of /proc/net/if_inet6, so the half is installed.
+    containerHasIpv6(found, 'fd66:0004:0002:0000:0000:0000:0000:0002 03 40 \n');
+    found.runner.on(`${binary6} -L ${found.config.egress.chain}`, () => ({
+      code: 1,
+      stdout: '',
+      stderr: 'ip6tables: No chain/target/match by that name.\n',
+    }));
+    found.runner.on(`${binary6} -C OUTPUT -j ${found.config.egress.chain}`, () => ({
+      code: 1,
+      stdout: '',
+      stderr: 'ip6tables: Bad rule (does a matching rule exist in that chain?).\n',
+    }));
+    const { app } = await rig(found);
+
+    const calls6 = found.runner.lines().filter((l) => l.startsWith(`${binary6} `));
+    const chain = found.config.egress.chain;
+    expect(calls6).toEqual([
+      `${binary6} -L ${chain} -n`,
+      `${binary6} -N ${chain}`,
+      `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -p tcp -d ::1 --dport ${String(found.config.agentVault.proxyPort)} -j ACCEPT`,
+      `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp6-port-unreachable`,
+      `${binary6} -C OUTPUT -j ${chain}`,
+      `${binary6} -A OUTPUT -j ${chain}`,
+    ]);
+    await shutdownLoader(found, app);
+  });
+
+  it('is not installed at all when the container has no IPv6 address or route', async () => {
+    const found = world();
+    // The double of /proc/net/if_inet6 is EMPTY in a fresh world: the default
+    // Docker network gives the container nothing over IPv6 but ::1 on lo - and
+    // even that is said by NOT asking ip6tables to confine what cannot dial.
+    const { app } = await rig(found);
+    expect(
+      found.runner.lines().filter((l) => l.startsWith(`${found.config.egress.ipv6Binary} `))
+    ).toEqual([]);
+    await shutdownLoader(found, app);
+  });
+
+  it('does not start lifemodel when the container has IPv6 but ip6tables cannot run', async () => {
+    const found = world();
+    containerHasIpv6(found, 'fd66:0004:0002:0000:0000:0000:0000:0002 03 40 eth0\n');
+    // The OS has no ip6tables to run at all - the image does carry it, but says
+    // the test can model the refusal either way.
+    const inner = found.runner.run.bind(found.runner);
+    found.runner.run = (command, args, options) =>
+      command === found.config.egress.ipv6Binary
+        ? Promise.reject(new Error('spawn ip6tables ENOENT'))
+        : inner(command, args, options);
+
+    const { lines, exits } = await rig(found);
+
+    expect(exits).toEqual([1]);
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('spawn ip6tables ENOENT');
+    expect(errors[0]?.message).toContain('UNCONFINED IPv6 PATH');
+    expect(lifemodelSpawn(found)).toBeUndefined();
   });
 });
 
