@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,11 +59,15 @@ interface Reply {
  */
 async function request(
   path: string,
-  options: { form?: Record<string, string>; host?: string } = {}
+  {
+    form,
+    host,
+    origin = `http://${host ?? 'localhost:8080'}`,
+  }: { form?: Record<string, string>; host?: string; origin?: string | null } = {}
 ): Promise<Reply> {
   const address = server.address();
   const port = Number(address.slice(address.lastIndexOf(':') + 1));
-  const body = options.form === undefined ? undefined : new URLSearchParams(options.form).toString();
+  const body = form === undefined ? undefined : new URLSearchParams(form).toString();
   return await new Promise<Reply>((resolve, reject) => {
     const req = httpRequest(
       {
@@ -71,7 +76,10 @@ async function request(
         path,
         method: body === undefined ? 'GET' : 'POST',
         headers: {
-          Host: options.host ?? 'localhost:8080',
+          Host: host ?? 'localhost:8080',
+          ...(body === undefined || origin === null
+            ? {}
+            : { Origin: origin }),
           ...(body === undefined
             ? {}
             : {
@@ -202,6 +210,47 @@ describe("lifemodel's settings interface", () => {
     expect(merged.telegramBotToken).toBe('__telegram_bot_token__');
   });
 
+  it('accepts a same-origin save: the front door origin, scheme and port as the browser saw it', async () => {
+    const answer = await request('/settings', { form: VALID });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toContain('Saved.');
+    await waitForSave();
+    expect(saved).toBe(1);
+  });
+
+  it('refuses a foreign-origin write, naming the route (the cookie is not port-scoped)', async () => {
+    // The review's concrete case: another local service on the same site can
+    // drive this POST with the owner's ambient cookie - the loader's session
+    // is SameSite=Lax and the cookie is NOT scoped to the port.
+    const answer = await request('/settings', {
+      form: VALID,
+      origin: 'http://localhost:9000',
+    });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(answer.body).toContain('same-origin');
+    await waitForSave();
+    expect(saved).toBe(0);
+    await expect(readConfig()).rejects.toThrow(); // nothing written
+  });
+
+  it('refuses a write with no Origin header at all, naming the route', async () => {
+    const answer = await request('/settings', { form: VALID, origin: null });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(saved).toBe(0);
+  });
+
+  it('refuses a foreign scheme-origin write, naming the route', async () => {
+    const answer = await request('/settings', {
+      form: VALID,
+      origin: 'https://localhost:8080', // right host:port, wrong scheme
+    });
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain('/settings');
+    expect(saved).toBe(0);
+  });
+
   it('refuses a model with no endpoint base URL, naming the base URL', async () => {
     const answer = await request('/settings', { form: { ...VALID, endpointBaseUrl: '' } });
     expect(answer.status).toBe(400);
@@ -233,6 +282,19 @@ describe("lifemodel's settings interface", () => {
     const chat = await request('/settings', { form: { ...VALID, telegramChatId: 'me' } });
     expect(chat.status).toBe(400);
     expect(chat.body).toContain('the Telegram chat id must be a number');
+    expect(saved).toBe(0);
+  });
+
+  it('refuses an endpoint URL that carries credentials, and echoes it without them', async () => {
+    const withKey = 'https://owner:not-a-real-model-key@api.example.com/v1';
+    const answer = await request('/settings', { form: { ...VALID, endpointBaseUrl: withKey } });
+    expect(answer.status).toBe(400);
+    expect(answer.body).toContain('must not carry credentials');
+    // The secret never meets the response, the page, the config or the log.
+    expect(answer.body).not.toContain('owner:');
+    expect(answer.body).not.toContain('not-a-real-model-key');
+    expect(answer.body).toContain('https://api.example.com/v1');
+    await expect(readConfig()).rejects.toThrow(); // nothing written
     expect(saved).toBe(0);
   });
 
@@ -275,6 +337,151 @@ describe("lifemodel's settings interface", () => {
       endpoint: { baseUrl: null, fastModel: null, smartModel: null, motorModel: null },
     });
     expect((written['primaryUser'] as Record<string, unknown>)['telegramChatId']).toBeUndefined();
+  });
+
+  it('leaves the file exactly as it was when the write fails', async () => {
+    const before = JSON.stringify({
+      version: 1,
+      llm: { endpoint: { baseUrl: 'http://127.0.0.1:9999/v1' } },
+    });
+    await writeFile(join(configDir, 'agent.json'), before);
+
+    await chmod(configDir, 0o500);
+    try {
+      const answer = await request('/settings', { form: VALID });
+      expect(answer.status).toBe(500);
+      expect(answer.body).toContain('could not be written');
+      expect(saved).toBe(0);
+      // Byte for byte: a refused save never touched the published file.
+      expect(await readFile(join(configDir, 'agent.json'), 'utf-8')).toBe(before);
+      // And no half-written temp file was left behind.
+      const remaining = await import('node:fs/promises').then((fs) => fs.readdir(configDir));
+      expect(remaining).toEqual(['agent.json']);
+    } finally {
+      await chmod(configDir, 0o700);
+    }
+  });
+
+  it('pins the save down: overlapping saves never mix, and the file is whole', async () => {
+    // Two saves in flight at once (the second fires before the first's answer
+    // has arrived). Each one's read-modify-write is serialized, so the file is
+    // one save WHOLE - never a mix of the two, never one save authored by the
+    // other's failed write.
+    const first = request('/settings', { form: { ...VALID, smartModel: 'first-big' } });
+    const second = request('/settings', { form: { ...VALID, smartModel: 'second-big', motorModel: 'second-mid' } });
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    await waitForSave();
+
+    const endpoint = ((await readConfig())['llm'] as Record<string, unknown>)['endpoint'] as Record<
+      string,
+      unknown
+    >;
+    const whole =
+      JSON.stringify(endpoint) ===
+        JSON.stringify({
+          baseUrl: VALID.endpointBaseUrl,
+          fastModel: 'fast-small',
+          smartModel: 'first-big',
+          motorModel: 'motor-mid',
+        }) ||
+      JSON.stringify(endpoint) ===
+        JSON.stringify({
+          baseUrl: VALID.endpointBaseUrl,
+          fastModel: 'fast-small',
+          smartModel: 'second-big',
+          motorModel: 'second-mid',
+        });
+    expect(whole).toBe(true);
+  });
+
+  it('close is bounded even when a request never sends its body', async () => {
+    // The review's concrete case: a POST with a Content-Length and half a
+    // body holds its socket. fastify's requestTimeout is 0, so an unbounded
+    // close would wait on it forever - and, called from the restart path
+    // BEFORE the deadline was armed, stall lifemodel's whole stop.
+    const graceServer = await createSettingsServer({
+      config: createConfigLoader(configDir),
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 300,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await graceServer.listen();
+    const address = graceServer.address();
+    const port = Number(address.slice(address.lastIndexOf(':') + 1));
+
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect({ host: '127.0.0.1', port }, () => {
+        socket.write(
+          'POST /settings HTTP/1.1\r\nHost: localhost:8080\r\n' +
+            'Content-Type: application/x-www-form-urlencoded\r\n' +
+            'Content-Length: 10000\r\n\r\nx='
+        );
+        // The body's remainder never arrives, and the socket stays open.
+        resolve();
+      });
+      socket.on('error', reject);
+    });
+
+    const started = Date.now();
+    await graceServer.close();
+    const elapsed = Date.now() - started;
+    // Bounded, not a stall (the grace is 300 ms); an unbounded close would
+    // hang this await and the test's own timeout would have to kill it.
+    expect(elapsed).toBeLessThan(3_000);
+  });
+
+  it('a save that arrives while the interface is closing is refused, with the reason', async () => {
+    const graceServer = await createSettingsServer({
+      config: createConfigLoader(configDir),
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 2_000,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await graceServer.listen();
+    const address = graceServer.address();
+    const port = Number(address.slice(address.lastIndexOf(':') + 1));
+
+    const socket = await new Promise<ReturnType<typeof connect>>(
+      (resolve, reject) => {
+        const opened = connect({ host: '127.0.0.1', port }, () => resolve(opened));
+        opened.on('error', reject);
+      }
+    );
+
+    // The close BEGINS (intake stops) while the socket is connected: what
+    // arrives now is a save into a process that is draining.
+    const closed = graceServer.close();
+    const body = new URLSearchParams(VALID).toString();
+    socket.write(
+      'POST /settings HTTP/1.1\r\nHost: localhost:8080\r\n' +
+        'Content-Type: application/x-www-form-urlencoded\r\n' +
+        `Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n` +
+        body
+    );
+
+    const answer = await new Promise<string>((resolve) => {
+      let received = '';
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        received += chunk;
+        if (received.includes('</html>')) resolve(received);
+      });
+      socket.on('close', () => resolve(received));
+    });
+
+    // Refused either way - by fastify's own during-close rejection, or (when
+    // the handler still runs inside the grace) by the interface's own page.
+    expect(answer).toContain('503');
+    expect(saved).toBe(0);
+    await closed;
   });
 
   it('does not restart when the config file cannot be written', async () => {
@@ -331,6 +538,7 @@ describe("lifemodel's settings interface", () => {
             method: 'POST',
             headers: {
               Host: 'localhost:8080',
+              Origin: 'http://localhost:8080',
               'Content-Type': 'application/x-www-form-urlencoded',
               'Content-Length': String(Buffer.byteLength(body)),
             },

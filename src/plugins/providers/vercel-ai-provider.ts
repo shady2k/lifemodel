@@ -16,12 +16,10 @@ import type {
 } from '../../llm/provider.js';
 import { BaseLLMProvider, LLMError } from '../../llm/provider.js';
 import { toStrictSchema } from '../../llm/tool-schema.js';
-import { resolveModelParams, resolveProviderPreferences } from './model-params.js';
-import { addCacheControl } from './provider-transforms.js';
+import { resolveModelParams } from './model-params.js';
 import { compileTranscript, resolveTranscriptPolicy } from './transcript-compiler.js';
 
 // Vercel AI SDK imports
-import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, jsonSchema } from 'ai';
 import type { LanguageModel } from 'ai';
@@ -31,24 +29,6 @@ import { resolve4 } from 'node:dns/promises';
  * JSON object type for tool arguments.
  */
 type JsonObject = Record<string, unknown>;
-
-/**
- * OpenRouter configuration for VercelAIProvider.
- */
-export interface VercelAIOpenRouterConfig {
-  /** API key (required for OpenRouter) */
-  apiKey: string;
-  /** Fast model for classification */
-  fastModel?: string;
-  /** Smart model for reasoning */
-  smartModel?: string;
-  /** Motor model for Motor Cortex tasks */
-  motorModel?: string;
-  /** App name for OpenRouter dashboard */
-  appName?: string;
-  /** Site URL for OpenRouter attribution */
-  siteUrl?: string;
-}
 
 /**
  * An OpenAI-compatible endpoint, with the model this instance uses for each
@@ -74,21 +54,7 @@ export interface VercelAIEndpointConfig {
 /**
  * Configuration for VercelAIProvider.
  */
-export type VercelAIProviderConfig = VercelAIOpenRouterConfig | VercelAIEndpointConfig;
-
-/**
- * Discriminate between config types.
- */
-function isOpenRouterConfig(config: VercelAIProviderConfig): config is VercelAIOpenRouterConfig {
-  return 'apiKey' in config;
-}
-
-const OPENROUTER_DEFAULTS = {
-  name: 'openrouter',
-  defaultModel: 'anthropic/claude-3.5-haiku',
-  fastModel: 'anthropic/claude-3.5-haiku',
-  smartModel: 'anthropic/claude-sonnet-4',
-};
+export type VercelAIProviderConfig = VercelAIEndpointConfig;
 
 const DEFAULT_TIMEOUT = 180_000; // 3 minutes (a local endpoint needs more time)
 const DEFAULT_MAX_RETRIES = 3;
@@ -117,7 +83,7 @@ export class VercelAIProvider extends BaseLLMProvider {
     super(logger);
 
     this.config = config;
-    this.name = isOpenRouterConfig(config) ? OPENROUTER_DEFAULTS.name : 'endpoint';
+    this.name = 'endpoint';
     this.providerLogger = logger?.child({ component: 'vercel-ai-provider' });
 
     const circuitConfig: Parameters<typeof createCircuitBreaker>[0] = {
@@ -138,17 +104,10 @@ export class VercelAIProvider extends BaseLLMProvider {
     this.providerLogger?.info(
       {
         provider: this.name,
-        ...(isOpenRouterConfig(config)
-          ? {
-              fastModel: config.fastModel ?? OPENROUTER_DEFAULTS.fastModel,
-              smartModel: config.smartModel ?? OPENROUTER_DEFAULTS.smartModel,
-            }
-          : {
-              baseUrl: config.baseUrl,
-              fastModel: config.fastModel,
-              smartModel: config.smartModel,
-              motorModel: config.motorModel,
-            }),
+        baseUrl: config.baseUrl,
+        fastModel: config.fastModel,
+        smartModel: config.smartModel,
+        motorModel: config.motorModel,
       },
       'VercelAIProvider initialized'
     );
@@ -158,9 +117,6 @@ export class VercelAIProvider extends BaseLLMProvider {
    * Check if provider is configured.
    */
   isAvailable(): boolean {
-    if (isOpenRouterConfig(this.config)) {
-      return Boolean(this.config.apiKey);
-    }
     return Boolean(
       this.config.baseUrl &&
       (this.config.fastModel ?? this.config.smartModel ?? this.config.motorModel)
@@ -176,19 +132,6 @@ export class VercelAIProvider extends BaseLLMProvider {
       return request.model;
     }
 
-    if (isOpenRouterConfig(this.config)) {
-      // Select based on role for OpenRouter
-      switch (request.role) {
-        case 'fast':
-          return this.config.fastModel ?? OPENROUTER_DEFAULTS.fastModel;
-        case 'smart':
-          return this.config.smartModel ?? OPENROUTER_DEFAULTS.smartModel;
-        case 'motor':
-          return this.config.motorModel ?? this.config.fastModel ?? OPENROUTER_DEFAULTS.fastModel;
-        default:
-          return OPENROUTER_DEFAULTS.defaultModel;
-      }
-    }
     // The endpoint uses the model its configuration names for THIS role
     // (lifemodel-q4x.4.1); a role it does not name is not sent to the endpoint
     // at all (`createLLMProvider` routes it to the other provider), so reaching
@@ -266,20 +209,12 @@ export class VercelAIProvider extends BaseLLMProvider {
    * parsing internally on this endpoint. addCacheControl is skipped separately
    * to avoid multipart system messages that @ai-sdk/openai rejects.
    */
-  private getModel(modelId: string, request?: CompletionRequest): LanguageModel {
-    if (isOpenRouterConfig(this.config)) {
-      return createOpenRouter({
-        apiKey: this.config.apiKey,
-      })(modelId, {
-        ...(request?.parallelToolCalls === false && { parallelToolCalls: false }),
-      });
-    } else {
-      return createOpenAI({
-        baseURL: this.config.baseUrl,
-        apiKey: 'no-key-required',
-        fetch: this.createEndpointFetch(),
-      }).chat(modelId);
-    }
+  private getModel(modelId: string): LanguageModel {
+    return createOpenAI({
+      baseURL: this.config.baseUrl,
+      apiKey: 'no-key-required',
+      fetch: this.createEndpointFetch(),
+    }).chat(modelId);
   }
 
   /**
@@ -530,50 +465,9 @@ export class VercelAIProvider extends BaseLLMProvider {
         return { role: msg.role, content: parts };
       }
 
-      // Handle multipart content from addCacheControl
-      // MUTATION BOUNDARY: addCacheControl mutates content from string → Array.
-      // This cast acknowledges the mutation; the actual type safety happens at the
-      // call site in executeRequest where we cast back to Message[].
-      const rawContent = (msg as unknown as Record<string, unknown>)['content'];
-      if (Array.isArray(rawContent)) {
-        const providerKey = isOpenRouterConfig(this.config) ? 'openrouter' : 'openai';
-
-        // System messages only accept string content in the AI SDK.
-        // Extract text and move cache_control to message-level providerOptions.
-        if (msg.role === 'system') {
-          const text = rawContent
-            .map((p: Record<string, unknown>) => (typeof p['text'] === 'string' ? p['text'] : ''))
-            .join('\n\n');
-          const firstCacheControl = rawContent.find(
-            (p: Record<string, unknown>) => p['cache_control']
-          ) as Record<string, unknown> | undefined;
-          const result: Record<string, unknown> = { role: 'system', content: text };
-          if (firstCacheControl?.['cache_control']) {
-            result['providerOptions'] = {
-              [providerKey]: { cacheControl: firstCacheControl['cache_control'] },
-            };
-          }
-          return result as { role: string; content: string };
-        }
-
-        // User/assistant: multipart content with cache_control on each part
-        const parts = rawContent.map((part: Record<string, unknown>) => {
-          const converted: Record<string, unknown> = {
-            type: part['type'],
-            text: part['text'],
-          };
-          if (part['cache_control']) {
-            converted['providerOptions'] = {
-              [providerKey]: { cacheControl: part['cache_control'] },
-            };
-          }
-          return converted;
-        });
-        return { role: msg.role, content: parts };
-      }
       return {
         role: msg.role,
-        content: (rawContent as string) || '',
+        content: msg.content || '',
       };
     });
   }
@@ -685,48 +579,18 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
-   * Build provider options for OpenRouter-specific fields and response format.
-   * Uses extraBody to pass response_format to the underlying API.
+   * Build provider options for the endpoint: response_format, parallel tool
+   * calls and the raw tool injection (AI SDK v6 schema stripping workaround).
    */
   private buildProviderOptions(
-    modelId: string,
     overrides: ReturnType<typeof resolveModelParams>,
     request: CompletionRequest
-  ): { openrouter?: Record<string, unknown>; openai?: Record<string, unknown> } | undefined {
+  ): { openai?: Record<string, unknown> } | undefined {
     const providerOptions: Record<string, Record<string, unknown>> = {};
     const extraBody: Record<string, unknown> = {};
 
-    // Determine provider key (openrouter or openai)
-    const providerKey = isOpenRouterConfig(this.config) ? 'openrouter' : 'openai';
-
-    if (isOpenRouterConfig(this.config)) {
-      const openrouterOptions: Record<string, unknown> = {};
-
-      // Add provider preferences
-      const providerPrefs = resolveProviderPreferences(modelId);
-      if (providerPrefs) {
-        openrouterOptions['provider'] = {
-          order: providerPrefs.order,
-          ignore: providerPrefs.ignore,
-          allow_fallbacks: providerPrefs.allow_fallbacks,
-          preferred_min_throughput: providerPrefs.preferred_min_throughput,
-        };
-      } else {
-        openrouterOptions['provider'] = {
-          preferred_min_throughput: { p50: 10 },
-        };
-      }
-
-      // Add reasoning config
-      if (overrides.reasoning === 'enable') {
-        openrouterOptions['reasoning'] = { enabled: true };
-      } else if (overrides.reasoning === 'disable') {
-        openrouterOptions['reasoning'] = { enabled: false };
-      }
-      // If 'omit', don't add the field
-
-      providerOptions[providerKey] = openrouterOptions;
-    }
+    // The endpoint is OpenAI-compatible: `openai` is the provider key.
+    const providerKey = 'openai' as const;
 
     // Add responseFormat via extraBody (both OpenRouter and OpenAI-compatible)
     // Note: response_format is an OpenAI API parameter, not an AI SDK generateText parameter
@@ -793,26 +657,6 @@ export class VercelAIProvider extends BaseLLMProvider {
   }
 
   /**
-   * Build headers for OpenRouter app identification.
-   */
-  private buildHeaders(): Record<string, string> | undefined {
-    if (!isOpenRouterConfig(this.config)) {
-      return undefined;
-    }
-
-    const headers: Record<string, string> = {};
-    if (this.config.siteUrl) {
-      headers['HTTP-Referer'] = this.config.siteUrl;
-    }
-    if (this.config.appName) {
-      headers['X-Title'] = this.config.appName;
-      headers['User-Agent'] = `${this.config.appName}/1.0`;
-    }
-
-    return Object.keys(headers).length > 0 ? headers : undefined;
-  }
-
-  /**
    * Perform the actual LLM request using AI SDK.
    */
   private async executeRequest(
@@ -837,26 +681,11 @@ export class VercelAIProvider extends BaseLLMProvider {
     }));
 
     // Compile transcript to provider-conformant structure
-    const policy = resolveTranscriptPolicy(this.config, modelId);
+    const policy = resolveTranscriptPolicy(modelId);
     messages = compileTranscript(messages, policy, this.providerLogger);
 
-    // Add cache control breakpoints (mutates content from string → Array)
-    // Only for OpenRouter — the endpoint path uses /v1/chat/completions, which
-    // handles multipart correctly
-    // Cast through unknown since Message interface lacks index signature for array content
-    const transformable = messages as unknown as Record<string, unknown>[];
-    if (isOpenRouterConfig(this.config)) {
-      addCacheControl(transformable, modelId);
-    }
-
-    // Cast back to Message[] at the mutation boundary
-    // addCacheControl mutates the content field from string to Array, which is
-    // incompatible with the Message type. We acknowledge this boundary here and
-    // let convertMessages handle the actual array content via its own narrow cast.
-    const mutatedMessages = messages;
-
     // Convert transformed messages to AI SDK format
-    const coreMessages = this.convertMessages(mutatedMessages);
+    const coreMessages = this.convertMessages(messages);
 
     // Convert tools
     const aiTools = this.convertTools(request.tools);
@@ -864,21 +693,18 @@ export class VercelAIProvider extends BaseLLMProvider {
     // Build tool choice
     const toolChoice = request.toolChoice ? this.mapToolChoice(request.toolChoice) : undefined;
 
-    // Build HTTP headers for OpenRouter app identification
-    const httpHeaders = this.buildHeaders();
-
-    // Build provider options (OpenRouter-specific body fields)
-    const providerOptions = this.buildProviderOptions(modelId, overrides, request);
+    // Build provider options (response format, tools)
+    const providerOptions = this.buildProviderOptions(overrides, request);
 
     // Set raw tools for the endpoint's fetch interceptor (AI SDK v6 schema stripping workaround)
-    if (!isOpenRouterConfig(this.config) && request.tools && request.tools.length > 0) {
+    if (request.tools && request.tools.length > 0) {
       this.pendingRawTools = this.convertToolsRaw(request.tools, false) ?? null;
     } else {
       this.pendingRawTools = null;
     }
 
-    // Get the model (pass request so parallelToolCalls reaches the model constructor)
-    const model = this.getModel(modelId, request);
+    // Get the model
+    const model = this.getModel(modelId);
 
     // Debug logging
     this.providerLogger?.debug(
@@ -963,7 +789,6 @@ export class VercelAIProvider extends BaseLLMProvider {
         );
       },
       ...(providerOptions && { providerOptions }),
-      ...(httpHeaders && { headers: httpHeaders }),
       ...(request.timeoutMs && { timeout: request.timeoutMs }),
       // Add tools and repair callback if tools are present
       ...(hasTools && {
@@ -1037,7 +862,7 @@ export class VercelAIProvider extends BaseLLMProvider {
       // Strip Harmony protocol tokens from the endpoint's responses.
       // LM Studio bug: gpt-oss models leak <|channel|>final <|constrain|>JSON<|message|>
       // when tools are present and the model responds with constrained JSON output.
-      if (!isOpenRouterConfig(this.config) && response.content) {
+      if (response.content) {
         response.content = this.stripHarmonyTokens(response.content);
       }
 
@@ -1406,16 +1231,6 @@ export class VercelAIProvider extends BaseLLMProvider {
   getCircuitStats(): ReturnType<CircuitBreaker['getStats']> {
     return this.circuitBreaker.getStats();
   }
-}
-
-/**
- * Factory function for OpenRouter config.
- */
-export function createVercelAIOpenRouterProvider(
-  config: VercelAIOpenRouterConfig,
-  logger?: Logger
-): VercelAIProvider {
-  return new VercelAIProvider(config, logger);
 }
 
 /**

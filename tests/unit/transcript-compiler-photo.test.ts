@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../../src/llm/provider.js';
-import { compileTranscript, OPENROUTER_POLICY } from '../../src/plugins/providers/transcript-compiler.js';
+import { compileTranscript, STRICT_POLICY } from '../../src/plugins/providers/transcript-compiler.js';
 
 // Helper to create messages
 const user = (content: string, contentParts?: Message['contentParts']): Message => ({
@@ -20,8 +20,7 @@ describe('transcript-compiler contentParts protection', () => {
       ]),
     ];
 
-    // OpenRouter policy enables mergeConsecutiveRoles
-    const result = compileTranscript(messages, OPENROUTER_POLICY);
+    const result = compileTranscript(messages, STRICT_POLICY);
 
     // The two user messages should NOT be merged
     const userMessages = result.filter((m) => m.role === 'user');
@@ -41,7 +40,7 @@ describe('transcript-compiler contentParts protection', () => {
       user('follow-up text'),
     ];
 
-    const result = compileTranscript(messages, OPENROUTER_POLICY);
+    const result = compileTranscript(messages, STRICT_POLICY);
 
     const userMessages = result.filter((m) => m.role === 'user');
     expect(userMessages).toHaveLength(2);
@@ -56,7 +55,7 @@ describe('transcript-compiler contentParts protection', () => {
       user('second'),
     ];
 
-    const result = compileTranscript(messages, OPENROUTER_POLICY);
+    const result = compileTranscript(messages, STRICT_POLICY);
 
     const userMessages = result.filter((m) => m.role === 'user');
     expect(userMessages).toHaveLength(1);

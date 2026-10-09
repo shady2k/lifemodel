@@ -14,11 +14,13 @@
  * only then does the restart run: the answer is what proves the write, and a
  * response the process never sent because it exited would be nobody's.
  */
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import type { Socket } from 'node:net';
 import type { Logger } from '../types/index.js';
 import type { ConfigLoader } from '../config/config-loader.js';
 import {
   applySettings,
+  redactEndpointUrl,
   settingsInputFromBody,
   settingsInputFromFile,
   validateSettings,
@@ -52,6 +54,13 @@ export interface SettingsServerOptions {
    * itself.
    */
   onSaved: () => void;
+  /**
+   * How long `close` waits for an outstanding request before destroying its
+   * socket. Kept SMALL on purpose: the close runs INSIDE lifemodel's one stop
+   * deadline (src/index.ts), and the drain, the flush and the channels still
+   * need their room after it. Default 5 s.
+   */
+  closeGraceMs?: number;
 }
 
 export interface SettingsServer {
@@ -71,7 +80,21 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   const { config, logger, onSaved } = options;
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? SETTINGS_PORT;
+  const closeGraceMs = options.closeGraceMs ?? 5_000;
   const app: FastifyInstance = Fastify({ logger: false });
+
+  // Every socket that talks to this interface, kept to be destroyed when the
+  // close gives up on a request that will not end. fastify's requestTimeout is
+  // 0 here: a POST with a Content-Length and only HALF its body would stall
+  // the close forever, and with it lifemodel's whole stop (measured: a close
+  // behind such a request never resolved until the socket died).
+  const sockets = new Set<Socket>();
+  app.server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  // A refused socket's error must not escape as an unhandled one.
+  app.server.on('clientError', () => undefined);
 
   // fastify parses JSON on its own; a browser form posts this instead.
   app.addContentTypeParser(
@@ -97,7 +120,13 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     );
   });
 
-  app.post('/settings', async (request, reply) => {
+  // ONE save runs at a time, and its whole read-modify-write is inside the
+  // chain: a save that is still running holds the config file alone, and the
+  // next save reads what it actually published - never a half-applied mix of
+  // the two. The serialized body below is the answer each save describes.
+  let saveChain: Promise<unknown> = Promise.resolve();
+
+  const applySave = async (request: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const input = settingsInputFromBody(body);
     const errors = validateSettings(input);
@@ -140,8 +169,11 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         );
     }
 
+    // The URL by its nonsecret parts only: it must be able to carry no
+    // credential through here (validation refuses credentials), but a log
+    // line is no place to gamble on it.
     logger.info(
-      { endpoint: input.endpointBaseUrl, roles: 3 },
+      { endpoint: redactEndpointUrl(input.endpointBaseUrl), roles: 3 },
       'Settings saved: lifemodel asks the loader to start it again'
     );
 
@@ -161,6 +193,67 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
           saved: true,
         })
       );
+  };
+
+  /**
+   * The Origin the front door serves the page from, as the browser saw it:
+   * the scheme of the instance's HTTP publishing (http on the root host) and
+   * the request's own Host. The loader's session cookie is SameSite=Lax, not
+   * port-scoped, so another local service could drive this POST cross-origin
+   * with the owner's ambient cookie (review finding 2, measured: 200 through
+   * such a probe). A CSRF check on the write closes it: the browser's Origin
+   * must be exactly this front door, or the save does not happen.
+   */
+  const isThisFrontDoor = (request: FastifyRequest): boolean => {
+    const origin = request.headers.origin;
+    const host = request.headers.host;
+    return (
+      typeof origin === 'string' &&
+      origin.length > 0 &&
+      typeof host === 'string' &&
+      origin === `http://${host}`
+    );
+  };
+
+  app.post('/settings', async (request, reply) => {
+    // The write route before anything else: no save is driven from another
+    // origin, and a request with no Origin at all is a cross-origin tool, not
+    // the page.
+    if (!isThisFrontDoor(request)) {
+      logger.warn(
+        {
+          route: '/settings',
+          hasOrigin: typeof request.headers.origin === 'string' && request.headers.origin !== '',
+        },
+        'Settings refused: the write route rejects a request that is not from this front door'
+      );
+      return reply
+        .code(403)
+        .type('text/plain; charset=utf-8')
+        .send('Save refused: /settings accepts only same-origin writes\n');
+    }
+    // The drain has asked the interface to close (a save started THIS stop, or
+    // the process is leaving): a save that arrives now would write a config the
+    // exiting process never applies, and the restart it asks for would be
+    // swallowed by the stop already running. Named, not silent.
+    if (closing) {
+      return reply
+        .code(503)
+        .type('text/plain; charset=utf-8')
+        .send('lifemodel is restarting; save again when it is up\n');
+    }
+    // This request's work is the chain's tail: it starts only after the save
+    // before it has written (or failed), so its read-modify-write sees the
+    // file the earlier save actually published.
+    const settled = saveChain.then(
+      () => applySave(request, reply),
+      () => applySave(request, reply)
+    );
+    // The chain itself must survive one save's error: the next save still runs.
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    const forget = (): void => {};
+    saveChain = settled.catch(forget);
+    return await settled;
   });
 
   app.setNotFoundHandler((_request, reply) => {
@@ -170,6 +263,8 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   // 0 asks the operating system for a free port (a test does that); the
   // instance is given 7100 by Caddy's own configuration.
   let boundPort = port;
+  // Set as the FIRST thing close does: the very next save is refused.
+  let closing = false;
 
   return {
     listen: async () => {
@@ -179,8 +274,43 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         boundPort = bound.port;
       }
     },
+    /**
+     * Stop the interface, BOUNDED: new saves are refused at once, the listen
+     * socket is dropped, and an outstanding request that does not end within
+     * the grace has its socket destroyed. The close can never outlast its
+     * grace by more than one check, so it can never stall lifemodel's stop
+     * (the drain, the flush and the channels still follow it inside the one
+     * stop deadline).
+     */
     close: async () => {
-      await app.close();
+      closing = true;
+      const finished = app.close().then(
+        () => true,
+        () => true
+      );
+      const inGrace = await Promise.race([
+        finished,
+        new Promise<false>((resolve) => {
+          const timer = setTimeout(() => {
+            resolve(false);
+          }, closeGraceMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (!inGrace) {
+        // Whoever is still holding a socket half-open (a POST with a
+        // Content-Length and no body) is destroyed: the stop goes on.
+        logger.warn(
+          {
+            sockets: sockets.size,
+            graceMs: closeGraceMs,
+          },
+          'Settings close gave up on an unfinished request and destroyed its socket'
+        );
+        for (const socket of sockets) {
+          socket.destroy();
+        }
+      }
     },
     address: () => `http://${host}:${String(boundPort)}`,
   };

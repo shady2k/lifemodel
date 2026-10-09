@@ -1,4 +1,5 @@
-import { readFile, access, mkdir, rename, open as openFile } from 'node:fs/promises';
+import { readFile, access, mkdir, rename, open as openFile, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
@@ -17,6 +18,20 @@ export function resolveConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   const dataPath = env['DATA_PATH'];
   return dataPath ? join(dataPath, 'config') : 'data/config';
 }
+
+/**
+ * The chain every write of every loader's file is serialized behind: the
+ * settings interface saves ONE at a time, and even two direct writeFile calls
+ * cannot interleave their temp-rename inodes.
+ */
+let writeChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Swallow one error on purpose: the temp file is already unreachable, and a
+ * cleanup miss must not mask the write's own error.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+function ignoreRemovalFailure(): void {}
 
 /**
  * ConfigLoader - loads and merges configuration from multiple sources.
@@ -82,39 +97,76 @@ export class ConfigLoader {
    *
    * It is written atomically (a temporary file in the same directory, fsynced,
    * renamed over the target), so a crash mid-write can never leave half a
-   * config behind: the file is either the old one or the new one. This file is
-   * the config loader's own (its name and its shape are the loader's), which is
-   * why it is not written through JSONStorage: that writes sanitized keys under
-   * the state root, and neither its name nor its shape would survive it.
+   * config behind: the file is either the old one or the new one.
+   *
+   * Two properties are load-bearing for lifemodel's settings interface:
+   *
+   * - THE TEMP FILE IS UNIQUE TO THIS WRITE (its name carries a random id),
+   *   and every write is serialized behind the loader's own chain. Overlapping
+   *   saves can therefore never share a temporary inode, and a failed save can
+   *   never publish another save's content - its failure is reported with the
+   *   file left exactly as it was.
+   * - THE PATH IS A NAMED EXCEPTION TO LESSON 4 (Unified Storage Path): this
+   *   file is the config loader's own, and the loader reads it back at every
+   *   start. JSONStorage writes sanitized keys under the state root (neither
+   *   this file's name nor its shape would survive it), and DeferredStorage
+   *   would leave the write unflushed behind an answer that promises the save.
+   *   So the write stays here - direct, fsynced, and awaited before the
+   *   interface answers. docs/features/instance/settings.md carries the same
+   *   note.
    */
   async writeFile(file: AgentConfigFile): Promise<void> {
-    const target = this.filePath;
-    // The config DIRECTORY may not exist yet: a first start has no
-    // `data/config/` at all (the loader makes `data/`, not its subdirectories),
-    // and the first save is what creates the file. Created here, by lifemodel's
-    // own user, inside the data directory it owns.
-    await mkdir(dirname(target), { recursive: true });
-    const temporary = `${target}.tmp-${String(process.pid)}`;
-    const handle = await openFile(temporary, 'w');
-    try {
-      await handle.writeFile(`${JSON.stringify(file, null, 2)}\n`, 'utf-8');
-      // On disk before the rename: a rename is atomic, but a power loss could
-      // still publish an empty file if the data behind it was not flushed.
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, target);
-    // The directory entry itself: without this the rename can be lost too.
-    const directory = await openFile(dirname(target), 'r');
-    try {
-      await directory.sync();
-    } catch {
-      // A directory that cannot be synced is not a reason to lose the write:
-      // the file is in place and readable.
-    } finally {
-      await directory.close();
-    }
+    const run = async (): Promise<void> => {
+      const target = this.filePath;
+      // The config DIRECTORY may not exist yet: a first start has no
+      // `data/config/` at all (the loader makes `data/`, not its subdirectories),
+      // and the first save is what creates the file. Created here, by lifemodel's
+      // own user, inside the data directory it owns.
+      await mkdir(dirname(target), { recursive: true });
+      // A name ONLY this write can hold: two saves never share an inode, so a
+      // failed save cannot publish the other's content.
+      const temporary = `${target}.tmp-${randomUUID()}`;
+      try {
+        const handle = await openFile(temporary, 'w');
+        try {
+          await handle.writeFile(`${JSON.stringify(file, null, 2)}\n`, 'utf-8');
+          // On disk before the rename: a rename is atomic, but a power loss could
+          // still publish an empty file if the data behind it was not flushed.
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        try {
+          await rename(temporary, target);
+        } catch (error) {
+          // The rename failed: nothing was published. Remove the now-unreachable
+          // temp file and let the error reach the caller.
+          await unlink(temporary).catch(ignoreRemovalFailure);
+          throw error;
+        }
+        // The directory entry itself: without this the rename can be lost too.
+        const directory = await openFile(dirname(target), 'r');
+        try {
+          await directory.sync();
+        } catch {
+          // A directory that cannot be synced is not a reason to lose the write:
+          // the file is in place and readable.
+        } finally {
+          await directory.close();
+        }
+      } catch (error) {
+        // A failure before the rename never touched the target; remove the
+        // incomplete temp file so the directory holds no half-written config.
+        await unlink(temporary).catch(ignoreRemovalFailure);
+        throw error;
+      }
+    };
+    // Serialize writes through the loader itself (the settings interface
+    // serializes its whole save too; this chain is what two callers that
+    // bypass it still cannot defeat).
+    const settled = writeChain.then(run, run);
+    writeChain = settled.catch(ignoreRemovalFailure);
+    await settled;
   }
 
   /**
@@ -213,15 +265,6 @@ export class ConfigLoader {
 
     // LLM
     if (file.llm) {
-      if (file.llm.fastModel) {
-        config.llm.fastModel = file.llm.fastModel;
-      }
-      if (file.llm.smartModel) {
-        config.llm.smartModel = file.llm.smartModel;
-      }
-      if (file.llm.motorModel) {
-        config.llm.motorModel = file.llm.motorModel;
-      }
       // The endpoint: each field on its own, so a half-written one is visible
       // as half-written rather than merged away (lifemodel-q4x.4.1).
       if (file.llm.endpoint) {
@@ -271,11 +314,6 @@ export class ConfigLoader {
    */
   private mergeEnvironment(config: MergedConfig): void {
     // Secrets (always from env)
-    const openRouterKey = process.env['OPENROUTER_API_KEY'];
-    if (openRouterKey) {
-      config.llm.openRouterApiKey = openRouterKey;
-    }
-
     const telegramToken = process.env['TELEGRAM_BOT_TOKEN'];
     if (telegramToken) {
       config.telegramBotToken = telegramToken;
@@ -285,22 +323,6 @@ export class ConfigLoader {
     const chatId = process.env['PRIMARY_USER_CHAT_ID'];
     if (chatId) {
       config.primaryUser.telegramChatId = chatId;
-    }
-
-    // LLM models (env overrides config)
-    const fastModel = process.env['LLM_FAST_MODEL'];
-    if (fastModel) {
-      config.llm.fastModel = fastModel;
-    }
-
-    const smartModel = process.env['LLM_SMART_MODEL'];
-    if (smartModel) {
-      config.llm.smartModel = smartModel;
-    }
-
-    const motorModel = process.env['LLM_MOTOR_MODEL'];
-    if (motorModel) {
-      config.llm.motorModel = motorModel;
     }
 
     // The endpoint (each field on its own: an environment variable names one
