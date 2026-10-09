@@ -116,10 +116,10 @@ disposable test boundary, `scripts/test-isolated.mjs
   label at the next run start and reports what it pruned;
 - the boundary runs Node.js 24 (`node:24-bookworm-slim`) with dependencies
   provisioned from the committed lockfile; a run is offline;
-- `docker` mode never uses the owner's daemon. No safe backend for it is
-  available on this machine today (a nested daemon is not workable here), so
-  it fails closed with a prerequisite message rather than run — docker mode
-  is not promised to work locally (lifemodel-q4x.5.1);
+- `docker` mode must never use the owner's daemon. Its separate backend is
+  required before Docker integration tests can run; an unavailable backend
+  fails closed. A failed nested-namespace probe is not proof that every
+  private-daemon backend is impossible (lifemodel-q4x.5.3);
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
   reads the committed config surfaces (package.json scripts, vitest config,
   the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a

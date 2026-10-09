@@ -154,6 +154,7 @@ jobs:
   # missing answer. Branch protection requiring `changes` too is the other half
   # of the guarantee: a failed `changes` job is then a red required check.
   ci-product:
+    timeout-minutes: 40
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest

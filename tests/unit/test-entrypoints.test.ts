@@ -45,8 +45,9 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
   it('watch is explicitly unsupported: the launcher has no watch option, and the host is refused', () => {
     const watch = scripts['test:watch'] ?? '';
     expect(watch).not.toBe('');
-    expect(watch).toMatch(/unsupported/);
-    expect(watch.trim().endsWith('exit 1')).toBe(true);
+    // Match the whole command: an explanation followed by a failure, with
+    // no hidden host command before or after it.
+    expect(watch).toMatch(/^echo '[^'\n]*unsupported[^'\n]*' >&2 && exit 1$/);
     // It names the bounded substitute a person can actually run.
     expect(watch).toContain('test-isolated.mjs test');
   });
@@ -77,7 +78,9 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     // lint-staged and the gate drive the commit through git context variables
     // (GIT_INDEX_FILE above all); none of them may leak into the launcher's
     // child, which snapshots the tree itself.
-    expect(hook).toMatch(/unset GIT_INDEX_FILE/);
+    expect(hook).toMatch(
+      /^\(\n\s+unset GIT_INDEX_FILE[^\n]*\\\n[^\n]*\n\s+node scripts\/test-isolated\.mjs check\n\)/m,
+    );
     expect(hook).toContain('# --- BEGIN LIFEMODEL BACKLOG GATE ---');
     expect(hook).toContain('node .backlog/gate.mjs');
     expect(hook).toContain('# --- END LIFEMODEL BACKLOG GATE ---');

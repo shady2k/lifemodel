@@ -196,8 +196,8 @@ the repository's installation, and each person's plugin and hooks are their own.
   (`--worktree`); exit 2 disconnects the proof and fails the connect. Safe to
   rerun. With no `node_modules` it still connects and says the product checks
   are skipped until `npm ci` — a message that is already stale under the
-  launcher wiring (the hook needs the isolated launcher, not `node_modules`),
-  `lifemodel-z5e`.
+  launcher wiring (the suite needs the isolated launcher; husky's
+  `lint-staged` still needs host development dependencies), `lifemodel-z5e`.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml`, on pull requests to
   `main` and pushes to `main`, node 24, `fetch-depth: 0`, no npm install. The
   backlog baseline is the PR's merge base or the push's `before` (else
