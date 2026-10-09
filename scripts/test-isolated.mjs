@@ -41,7 +41,15 @@ export function parseArgs(args) {
 }
 
 export function stageSnapshot(root, destination) {
-  fs.mkdirSync(destination, { recursive: true });
+  destination = path.resolve(destination);
+  if (destination === path.parse(destination).root || destination === path.resolve(root)) throw new Error('Snapshot needs a separate non-root destination');
+  function makeDirectory(target) {
+    fs.mkdirSync(target, { recursive: true });
+    for (let current = target; current === destination || current.startsWith(destination + path.sep); current = path.dirname(current)) {
+      fs.chmodSync(current, 0o755);
+    }
+  }
+  makeDirectory(destination);
   let count = 0, bytes = 0;
   function assertNoLinks(relative) {
     let prefix = root;
@@ -61,14 +69,16 @@ export function stageSnapshot(root, destination) {
     if (++count > 100_000) throw new Error('Source snapshot exceeds entry limit');
     const target = path.join(destination, relative);
     if (stat.isDirectory()) {
-      fs.mkdirSync(target, { recursive: true });
+      makeDirectory(target);
       for (const child of fs.readdirSync(source)) copy(path.join(relative, child));
     } else if (stat.isFile()) {
       bytes += stat.size;
       if (stat.size > 10 * 1024 * 1024 || bytes > 100 * 1024 * 1024) throw new Error('Source snapshot exceeds byte limit');
-      fs.mkdirSync(path.dirname(target), { recursive: true });
+      makeDirectory(path.dirname(target));
       fs.copyFileSync(source, target);
-      fs.chmodSync(target, stat.mode & 0o777);
+      // Docker copies as root. Source-only copies must be readable by uid1000;
+      // preserve execute intent, never source ownership or restrictive modes.
+      fs.chmodSync(target, stat.mode & 0o111 ? 0o755 : 0o644);
     } else throw new Error(`Snapshot refuses special file: ${relative}`);
   }
   for (const entry of [...FILES, ...DIRS, '.beads/config.yaml', '.beads/policy.yaml', '.beads/issues.jsonl']) copy(entry);
@@ -90,6 +100,7 @@ export function stageSnapshot(root, destination) {
       policy.push(line.trim());
     }
     fs.writeFileSync(path.join(destination, '.npmrc'), policy.join('\n') + '\n');
+    fs.chmodSync(path.join(destination, '.npmrc'), 0o644);
   }
   return destination;
 }
