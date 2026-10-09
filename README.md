@@ -241,9 +241,8 @@ Prerequisites for tests and checks: **Node.js ≥ 24 and Docker**. Watch mode is
 explicitly unsupported (`npm run test:watch` explains why and exits): run a
 bounded one-shot suite instead, e.g.
 `node scripts/test-isolated.mjs test -- tests/unit/energy-management.test.ts`.
-`docker` mode needs a safe Docker backend that is not your own daemon; on this
-machine it fails closed today (no nested daemon is workable here) — it is not
-promised to work locally. CI runs the same launcher command behind its own
+`docker` mode needs a separate isolated backend, not your own daemon. If the
+backend is unavailable, it refuses the run instead of falling back to the host. CI runs the same launcher command behind its own
 disposable Docker daemon and never installs on its host.
 
 ---
