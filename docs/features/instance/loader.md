@@ -207,8 +207,8 @@ environment around it, built in `lifemodelEnvironment()` in
 
 | Variable | Value | Why |
 | --- | --- | --- |
-| `HTTPS_PROXY`, `HTTP_PROXY` | `http://<agent token>:lifemodel@127.0.0.1:14322` | every standard client routes through the vault's listener; the token is the proxy credential and the vault is the password, exactly as Agent Vault's own `vault run` builds it |
-| `NO_PROXY` | `localhost,127.0.0.1` | loopback traffic (the vault's control plane, the loader, the container's resolver) does not go through the proxy |
+| `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy` | `http://<agent token>:lifemodel@127.0.0.1:14322` | every standard client routes through the vault's listener; the token is the proxy credential and the vault is the password, exactly as Agent Vault's own `vault run` builds it - and EACH of the three is set in both spellings, because clients are not agreed on the case and a stale lowercase one from `docker run` otherwise wins |
+| `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1` | loopback traffic (the vault's control plane, the loader, the container's resolver) does not go through the proxy |
 | `NODE_USE_ENV_PROXY` | `1` | Node 24's `fetch` honours the environment's proxy only with it |
 | `NODE_EXTRA_CA_CERTS` | `vault-ca.pem` above | the certificates the proxy re-signs with validate |
 | `AGENT_VAULT_ADDR`, `AGENT_VAULT_TOKEN`, `AGENT_VAULT_VAULT` | the broker, the token, the vault | the vault's own protocol |

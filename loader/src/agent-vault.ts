@@ -683,9 +683,21 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
         // broker's own control plane skip the proxy, NODE_USE_ENV_PROXY so
         // Node 24's fetch uses the environment's proxy at all, and the CA so
         // the certificates the proxy re-signs with validate.
+        //
+        // Each of the three is set in BOTH spellings: clients are not agreed
+        // on the case (Node's EnvHttpProxyAgent prefers the lowercase one),
+        // and `docker run` hands a caller's lowercase `http_proxy` into the
+        // container as its own - a stale lowercase value must not silently
+        // win over what the loader set. The environment that reaches
+        // lifemodel's process is built by spreading `process.env` FIRST and
+        // this object LAST, so these keys also REPLACE whatever the container
+        // inherited.
         HTTPS_PROXY: proxy,
+        https_proxy: proxy,
         HTTP_PROXY: proxy,
+        http_proxy: proxy,
         NO_PROXY,
+        no_proxy: NO_PROXY,
         NODE_USE_ENV_PROXY: '1',
         NODE_EXTRA_CA_CERTS: vaultConfig.caPath,
       };
