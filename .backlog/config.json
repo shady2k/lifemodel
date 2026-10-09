@@ -61,7 +61,7 @@
     "landing": "pull-request",
     "maxWorkers": 3,
     "workersRunTests": true,
-    "claims": "atomic and exclusive (claim_exclusive in .beads/config.yaml) through `br update <id> --claim --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>'`; the holder is the agent doing the work, never the person",
+    "claims": "atomic and exclusive through `node .backlog/claim.mjs <id> --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>' [--checkout <revision>]` (br>=0.7.0, authoritative project readiness, native exclusive claim and --if-unchanged CAS; implemented-dependency advisory override only inside the guarded adapter). Never direct --force or status/assignee fallback; holder is the full agent name",
     "mutationBudgetMinutes": 10,
     "mutationFallback": "no mutation tool: at stage acceptance the coordinator hand-plants 2-3 mutations in the changed logic and records whether a test went red; a survivor becomes a test or a question to the owner, never a pass",
     "reviewPreference": "different-model",

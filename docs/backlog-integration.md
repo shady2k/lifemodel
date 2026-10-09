@@ -76,7 +76,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.87.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.39.0,
+  0.91.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.41.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
@@ -259,7 +259,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Parallel execution:** one git worktree per worker (herdr worktrees for
   prime-agent worker sessions), up to the config's `maxWorkers`. Claims are
   atomic and exclusive (`claim_exclusive` in `.beads/config.yaml`) through
-  `br update <id> --claim --actor '<full agent name>'`; the holder is the agent
+  `node .backlog/claim.mjs <id> --actor '<full agent name>'`; the holder is the agent
   doing the work under its full name
   `<harness>-<role>:<person>@<machine>:<branch>#<session>`, never the person.
   Generated files and `package-lock.json` count as collisions. The stage's
@@ -271,7 +271,7 @@ the repository's installation, and each person's plugin and hooks are their own.
   that the owner's rules in `AGENTS.md` are not reworded to fit the code: a
   violation is filed as a finding and the rule stays (a worker once weakened
   Plugin Isolation that way). A brief also carries the tracker claim
-  (`br update <id> --claim --actor '<full agent name>'`), not only the run
+  (`node .backlog/claim.mjs <id> --actor '<full agent name>'`), not only the run
   script's claim record: without it the gate reads the span as ended. A leaf
   set `implemented` must sit under a stage.
 - **One task, one fresh session; one stage, one fresh reviewer.** A worker
@@ -303,7 +303,7 @@ what this protocol adds is listed.
 | --- | --- |
 | create | `br create "<title>" -t task\|bug\|epic -l <milestone>,<area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [--acceptance ...] --silent` |
 | link / unlink | `br dep add <consumer leaf> <producer leaf>` (`blocks`), the reason and what releases it in a comment; provenance is `discovered-from`, which the adapter never reads as a dependency |
-| claim | `br update <id> --claim --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>'` (atomic, exclusive; sets assignee and `in_progress`), then the record `runs.mjs claim` prints. A dependant of an `implemented` prerequisite - in the same stage, or in a later stage of the same feature once the prerequisite's stage is accepted and still open - is blocked to br: claim it with `--claim --force --actor ...`, which stays exclusive and keeps the edge, only when `npm run ready` lists it |
+| claim | `node .backlog/claim.mjs <id> --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>' [--checkout <revision>]`, then the record `runs.mjs claim` prints. Requires `br >=0.7.0`: reads the authoritative flushed tracker, checks an open unheld ready leaf and revision ancestry, then uses native exclusive `--claim --if-unchanged`. Only a satisfied implemented prerequisite permits the internal `--force` advisory-readiness override. Direct/manual `--force` is not the workflow; unknown, held, unmerged, cross-feature or stale-target claims refuse without a claim mutation. No early closure or edge removal |
 | release | `br update <id> --status open --assignee '' --actor ...`; submitted and implemented work keeps its status |
 | implemented | coordinator: `br update <id> --status implemented --assignee '' --transition-comment 'implemented: <rev> -- <checks>' --actor ...` |
 | submitted | worker: `br update <id> --status submitted --assignee '' --transition-comment 'submitted: <branch>@<rev> -- <evidence>' --actor ...`; the coordinator then takes the assignee |
