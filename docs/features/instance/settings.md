@@ -69,23 +69,22 @@ One function resolves it (`resolveConfigDir`), and both the startup read and the
 settings interface use it, so the file that is written is the file that is read
 next. A first start has no `data/config/` directory at all: the loader makes
 `data/`, and the first save creates the directory and the file (both as
-lifemodel's own user, inside the data directory it owns). The write is atomic
-(a temporary file whose name is unique to that write, fsynced, renamed over the
-target, saves serialized behind the loader's write chain): the file is one
-save WHOLE - either the old one or the new one, never half of each, and a
-failed save never publishes another save's content. Every OTHER field of the
+lifemodel's own user, inside the data directory it owns). Every write's
+temporary file name is unique to that write, so overlapping saves never share a
+temporary inode and a failed save never publishes another save's content. Every OTHER field of the
 file — the owner's identity, plugin configuration, anything a later version
 adds — is kept exactly as it was: the interface writes the fields it owns and
 touches nothing else.
 
-This file is deliberately a **named exception to the storage rule**
-(AGENTS.md, Lesson 4, Unified Storage Path): the config file is the config
-loader's own identity — its name and its JSON shape are the contract between
-the loader and every start — so the write stays here, direct, fsynced and
-awaited before the interface answers. JSONStorage writes sanitized keys under
-the state root (neither the name nor the shape would survive it), and
-DeferredStorage would leave the write unflushed behind an answer that promises
-the save.
+The write goes through the SAME storage pipeline as the rest of lifemodel's
+data (AGENTS.md, Lesson 4): DeferredStorage, flushed through JSONStorage rooted
+at the config directory. The key `agent` is written as
+`<config dir>/agent.json` with the object serialized as
+`JSON.stringify(object, null, 2)` — the file's name and its JSON shape, the
+contract between the loader and every start, are unchanged. The save is fsynced
+before its atomic rename, so the file is one save WHOLE — either the old one or
+the new one, never half of each — and nothing that can fail runs after the
+rename: a write that throws has published nothing.
 
 They apply by a **restart**, not by a live reload: the provider, the Telegram
 channel and the rest are built once, at startup, from the config, so
