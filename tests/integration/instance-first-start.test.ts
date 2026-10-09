@@ -590,6 +590,10 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
 
       // `docker restart`: the loader comes up again on the same volume.
       docker(['restart', container], { timeoutMs: 180_000 });
+      // The restart re-published the front door on a NEW host port (the
+      // documented command asks Docker for one): every later test in this walk
+      // needs the fresh one, so it is read here, where the port changed.
+      port = publishedPort();
       // The second run's own line, not the first one's (the log is appended).
       await waitForLogLines(/"msg":"Agent Vault is up:/, 2, 60_000);
 
