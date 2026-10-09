@@ -10,7 +10,7 @@
  * server calls once the answer has gone out).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -564,4 +564,178 @@ describe("lifemodel's settings interface", () => {
       await freshServer.close();
     }
   });
+
+  it('drains the running save inside the close, and refuses the one queued behind it', async () => {
+    // Review round 2, finding A: the close used to be about SOCKETS only.
+    // The contract now: a save admitted while the interface was open finishes
+    // inside the grace (the owner sees its answer), a save still QUEUED when
+    // the close begins is refused, and nothing publishes after the close.
+    const real = createConfigLoader(configDir);
+    await writeFile(join(configDir, 'agent.json'), '{"version":1,"identity":{"name":"Nika"}}');
+
+    const { controlled, writeSettled, release, writesStarted } = heldWrite(real);
+
+    const held = await createSettingsServer({
+      config: controlled,
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 5_000,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await held.listen();
+    const address = held.address();
+
+    // Save A: admitted, and held at its write.
+    const a = requestTo(address, VALID);
+    await writesStarted();
+    // Save B: queued behind A - it is what the close finds in the chain.
+    const b = requestTo(address, { ...VALID, smartModel: 'queued-in' });
+    const closed = held.close();
+    // Nothing is destroyed yet: A's answer is still owed inside the grace.
+    release();
+    await writeSettled(2_000);
+    const [answerA, answerB] = await Promise.all([a, b]);
+    await closed;
+
+    expect(answerA.status).toBe(200);
+    expect(answerA.body).toContain('Saved.');
+    expect(answerB.status).toBe(503);
+    expect(answerB.body).toContain('save again');
+    expect(saved).toBe(1);
+    // A published, and the close did not return before the chain settled:
+    const endpoint = ((await readConfig())['llm'] as Record<string, unknown>)['endpoint'];
+    expect(endpoint).toMatchObject({ baseUrl: VALID.endpointBaseUrl });
+  });
+
+  it('stops a write the close gave up on at its publication point: nothing lands after the close', async () => {
+    // The reviewer's probe: a save held in flight, a close that returns on
+    // the grace, a release after that. The old contract let the held write
+    // land AFTER the close returned - unacknowledged settings silently
+    // published to a process on its way out. Now the abandoned close has the
+    // write stopped at its publication point: the file stays as it was.
+    const real = createConfigLoader(configDir);
+    const before = '{"version":1,"identity":{"name":"Nika"}}';
+    await writeFile(join(configDir, 'agent.json'), before);
+
+    const { controlled, writeSettled, release, writesStarted } = heldWrite(real);
+
+    const held = await createSettingsServer({
+      config: controlled,
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 300,
+      onSaved: () => {
+        saved += 1;
+      },
+    });
+    await held.listen();
+    const address = held.address();
+
+    const a = requestTo(address, VALID);
+    await writesStarted();
+    // A second save, queued behind the held one: the close refuses it too.
+    const b = requestTo(address, { ...VALID, smartModel: 'queued-in' });
+    const started = Date.now();
+    await held.close();
+    // Bounded: the grace, not the held write ("destroying an HTTP socket is
+    // not a cancellation of an async writer" - the stop contract is).
+    expect(Date.now() - started).toBeLessThan(2_000);
+
+    // Only now does the held save run on: past the abandoned close, its
+    // publication signal is aborted, so the REAL writer refuses to publish.
+    release();
+    await a;
+    await b;
+    await writeSettled(2_000);
+    expect(saved).toBe(0);
+    expect(await readFile(join(configDir, 'agent.json'), 'utf-8')).toBe(before);
+    // The refused write's temp file is removed again; the settle above is the
+    // event the directory check waits on.
+    expect(await readdir(configDir)).toEqual(['agent.json']); // no temp left
+  });
 });
+
+/**
+ * A config boundary whose write the test holds and releases, over the REAL
+ * loader: the settled state of the write (refused or published) is what the
+ * assertions wait on. `heldStart` is the event of the write starting.
+ */
+function heldWrite(real: ReturnType<typeof createConfigLoader>): {
+  controlled: Pick<ReturnType<typeof createConfigLoader>, 'readFile' | 'writeFile'>;
+  writeSettled: (withinMs: number) => Promise<void>;
+  release: () => void;
+  writesStarted: () => Promise<void>;
+} {
+  let releaseHandle = (): void => {};
+  const writeHeld = new Promise<void>((resolve) => {
+    releaseHandle = resolve;
+  });
+  let settleHandle = (): void => {};
+  const writeDone = new Promise<void>((resolve) => {
+    settleHandle = resolve;
+  });
+  let startedWaited = (): void => {};
+  const startedEvent = new Promise<void>((resolve) => {
+    startedWaited = resolve;
+  });
+  const controlled = {
+    readFile: (): ReturnType<typeof real.readFile> => real.readFile(),
+    writeFile: async (
+      file: Parameters<typeof real.writeFile>[0],
+      options?: { signal?: AbortSignal }
+    ): Promise<void> => {
+      startedWaited();
+      try {
+        await writeHeld;
+        return await real.writeFile(file, options);
+      } finally {
+        // The settle of the REAL write (refused or published) is the event
+        // the assertions wait for - not a fixed sleep.
+        settleHandle();
+      }
+    },
+  };
+  return {
+    controlled,
+    writeSettled: (withinMs: number): Promise<void> =>
+      Promise.race([writeDone, new Promise<void>((r) => setTimeout(r, withinMs))]),
+    release: () => releaseHandle(),
+    writesStarted: (): Promise<void> =>
+      Promise.race([startedEvent, new Promise<void>((r) => setTimeout(r, 2_000))]),
+  };
+}
+
+/** One request helpers' form, for a server a test holds separately. */
+async function requestTo(address: string, form: Record<string, string>): Promise<Reply> {
+  const port = Number(address.slice(address.lastIndexOf(':') + 1));
+  const body = new URLSearchParams(form).toString();
+  return await new Promise<Reply>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/settings',
+        method: 'POST',
+        headers: {
+          Host: 'localhost:8080',
+          Origin: 'http://localhost:8080',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': String(Buffer.byteLength(body)),
+        },
+      },
+      (res) => {
+        let answer = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          answer += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: answer }));
+      }
+    );
+    req.on('error', (e) => resolve({ status: 0, body: `socket error: ${(e as Error).message}` }));
+    req.write(body);
+    req.end();
+  });
+}
