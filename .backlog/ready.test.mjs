@@ -54,3 +54,11 @@ test('a closed prerequisite releases everywhere', () => {
   ]).issues;
   assert.deepEqual(ids(issues, () => false), ['C']);
 });
+
+test('two parentless tasks never form a same-stage implemented dependency', () => {
+  const issues = normalize([
+    row('A', 'task', 'implemented', [], [at('implemented: r1 -- checked', 1)]),
+    row('B', 'task', 'open', [dep('A', 'blocks')]),
+  ]).issues;
+  assert.deepEqual(ids(issues, () => true), []);
+});

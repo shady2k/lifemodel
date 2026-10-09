@@ -44,7 +44,7 @@ export function readyLeaves(issues, { stage = null, merged }) {
     if (!d) return false;
     if (d.status === 'closed') return true;
     if (d.status !== 'implemented') return false;
-    if (d.parent === leaf.parent) return merged(d.integration?.revision);
+    if (d.parent && d.parent === leaf.parent) return merged(d.integration?.revision);
     const dStage = by.get(d.parent);
     return (
       Boolean(dStage?.acceptance?.revision) &&
