@@ -72,10 +72,7 @@ const LIFEMODEL_ENVIRONMENT_VARIABLES: readonly string[] = [
  * longer reads one - Agent Vault injects it on the way out) and the trusted
  * layer's own admin credential.
  */
-const SECRET_VARIABLES: readonly string[] = [
-  'OPENROUTER_API_KEY',
-  'AGENT_VAULT_MASTER_PASSWORD',
-];
+const SECRET_VARIABLES: readonly string[] = ['OPENROUTER_API_KEY', 'AGENT_VAULT_MASTER_PASSWORD'];
 
 /** The one boundary: the container's named variables, then the proxy's. */
 export function lifemodelEnvironment(
@@ -87,7 +84,10 @@ export function lifemodelEnvironment(
     const value = container[name];
     if (value !== undefined) env[name] = value;
   }
+  // Rebuilt - not mutated with a computed `delete` - so no name on the
+  // denylist survives, whatever it arrived with.
   const built = { ...env, ...proxy };
-  for (const name of SECRET_VARIABLES) delete built[name];
-  return built;
+  return Object.fromEntries(
+    Object.entries(built).filter(([name]) => !SECRET_VARIABLES.includes(name))
+  );
 }
