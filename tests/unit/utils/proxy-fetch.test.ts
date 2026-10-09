@@ -277,4 +277,195 @@ describe('proxyFetch (the product transport through the proxy)', () => {
       slow.close();
     }
   });
+
+  it('accepts a structurally-compatible NON-native signal on the native branch and hands fetch a native one', async () => {
+    // The red case the round-2 review reproduced: grammY's node shim builds
+    // its signal with the `abort-controller` polyfill, so
+    // `instanceof globalThis.AbortSignal` is false for it, and Node's own
+    // fetch refused the object outright. The transport must bridge it.
+    const { AbortController: PolyfillController } = await import('abort-controller');
+    const caller = new PolyfillController();
+    const direct = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    process.env['HTTPS_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['NO_PROXY'] = 'localhost,127.0.0.1';
+
+    try {
+      const response = await proxyFetch('https://api.example.invalid/v1/models', {
+        signal: caller.signal,
+      });
+      expect(response.status).toBe(200);
+      // Fetch received a NATIVE signal, and it is the one cancellation runs on.
+      const calls = direct.mock.calls.filter((call) => call[1] !== undefined);
+      expect(calls.length).toBeGreaterThan(0);
+      const handed = (calls[calls.length - 1]?.[1] as RequestInit | undefined)?.signal;
+      expect(handed).toBeInstanceOf(AbortSignal);
+      // Abort on the caller's polyfill signal reaches the native bridge.
+      expect((handed as AbortSignal).aborted).toBe(false);
+      caller.abort();
+      expect((handed as AbortSignal).aborted).toBe(true);
+    } finally {
+      direct.mockRestore();
+    }
+  });
+
+  it('needs only the abort interface on the forward-proxy branch: a polyfill signal cancels a hanging request', async () => {
+    const { AbortController: PolyfillController } = await import('abort-controller');
+    process.env['HTTP_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['NO_PROXY'] = 'localhost,127.0.0.1';
+
+    const slow = http.createServer(() => {
+      /* no response */
+    });
+    await new Promise<void>((resolve) => slow.listen(0, '0.0.0.0', resolve));
+    const slowPort = (slow.address() as { port: number }).port;
+    try {
+      const caller = new PolyfillController();
+      const pending = proxyFetch(`http://127.0.0.2:${String(slowPort)}/v1/chat/completions`, {
+        method: 'POST',
+        body: '{}',
+        signal: caller.signal,
+      });
+      setTimeout(() => caller.abort(), 100);
+      const outcome = await Promise.race([
+        pending.then(
+          () => 'settled',
+          (error: unknown) => 'rejected:' + (error instanceof Error ? error.name : 'thrown')
+        ),
+        new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+      ]);
+      // Without the signal the abort is DROPPED and the request hangs
+      // forever; with it, the abort cancels the request.
+      expect(outcome.startsWith('rejected')).toBe(true);
+    } finally {
+      slow.close();
+    }
+  });
+
+  it('routes a 307 redirect http to https onto the native tunnel, keeping method and body', async () => {
+    // Agent Vault's forward path refuses an absolute-form https:// request
+    // (400): the pre-fix code sent the second hop that way and died there.
+    process.env['HTTP_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['NO_PROXY'] = 'localhost,127.0.0.1';
+
+    // A hop the proxy relays to answers 307 with an https:// location.
+    const forge = http.createServer((req, res) => {
+      if (req.url === '/v1/chat/completions') {
+        res.writeHead(307, { location: 'https://api.example.invalid:8443/v1/chat/completions' });
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => forge.listen(0, '0.0.0.0', resolve));
+    const forgePort = (forge.address() as { port: number }).port;
+
+    const direct = vi.spyOn(globalThis, 'fetch');
+    direct.mockImplementation(
+      async (input: unknown, init?: RequestInit) =>
+        new Response(JSON.stringify({ model: 'stub' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
+    try {
+      const response = await proxyFetch(
+        `http://127.0.0.2:${String(forgePort)}/v1/chat/completions`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'q4xtf2-model' }),
+        }
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ model: 'stub' });
+
+      // The second hop was NOT another absolute-form request to the proxy
+      // (the vault's 400), but the native branches of fetch.
+      expect(proxy.seen).toHaveLength(1);
+      const nativeCalls = direct.mock.calls;
+      expect(nativeCalls).toHaveLength(1);
+      const nativeInput = nativeCalls[0]?.[0];
+      expect(String(nativeInput)).toBe('https://api.example.invalid:8443/v1/chat/completions');
+      const nativeInit = nativeCalls[0]?.[1] as RequestInit;
+      expect(nativeInit.method).toBe('POST'); // the 307 keeps the method
+      expect(Buffer.from(nativeInit.body as Uint8Array).toString('utf8')).toContain('q4xtf2-model'); // the 307 keeps the body
+      if (nativeInit.signal !== undefined && nativeInit.signal !== null) {
+        expect(nativeInit.signal).toBeInstanceOf(AbortSignal);
+      }
+    } finally {
+      direct.mockRestore();
+      forge.close();
+    }
+  });
+
+  it('routes a 301 redirect http to https onto the native tunnel as a bodyless GET', async () => {
+    process.env['HTTP_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['NO_PROXY'] = 'localhost,127.0.0.1';
+
+    const forge = http.createServer((req, res) => {
+      if (req.url === '/v1/models') {
+        res.writeHead(301, { location: 'https://api.example.invalid:8443/v1/models' });
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => forge.listen(0, '0.0.0.0', resolve));
+    const forgePort = (forge.address() as { port: number }).port;
+
+    const direct = vi.spyOn(globalThis, 'fetch');
+    direct.mockImplementation(async () => new Response('{}', { status: 200 }));
+    try {
+      const response = await proxyFetch(`http://127.0.0.2:${String(forgePort)}/v1/models`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"a":1}',
+      });
+      expect(response.status).toBe(200);
+      expect(proxy.seen).toHaveLength(1);
+      const nativeCalls = direct.mock.calls;
+      expect(nativeCalls).toHaveLength(1);
+      const nativeInit = nativeCalls[0]?.[1] as RequestInit;
+      expect(String(nativeCalls[0]?.[0])).toBe('https://api.example.invalid:8443/v1/models');
+      expect(nativeInit.method).toBe('GET'); // the 301 asks for GET
+      expect(nativeInit.body ?? null).toBeNull(); // without the request body
+      expect(nativeInit.headers ?? {}).toEqual({}); // and its headers
+    } finally {
+      direct.mockRestore();
+      forge.close();
+    }
+  });
+
+  it('routes a redirect from an https hop back onto the forward proxy, and keeps the caller aborting through both', async () => {
+    process.env['HTTP_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['HTTPS_PROXY'] = `http://agent-token:lifemodel@127.0.0.1:${String(proxy.port)}`;
+    process.env['NO_PROXY'] = 'localhost,127.0.0.1';
+
+    const direct = vi.spyOn(globalThis, 'fetch');
+    // The https hop (native fetch under the hood) answers a 302 whose
+    // location is a plain http:// address: the next hop must go out as an
+    // absolute-form request to the FORWARD proxy again (relay -> stub).
+    direct.mockImplementation(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: `http://127.0.0.2:${String(stub.port)}/v1/models` },
+        })
+    );
+    try {
+      const response = await proxyFetch('https://api.example.invalid:8443/v1/models');
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+      expect(proxy.seen).toHaveLength(1); // the http hop through the proxy
+      expect(proxy.seen[0]?.method).toBe('GET');
+      expect(proxy.seen[0]?.url).toBe(`http://127.0.0.2:${String(stub.port)}/v1/models`);
+      expect(direct.mock.calls).toHaveLength(1); // only the first, https hop
+    } finally {
+      direct.mockRestore();
+    }
+  });
 });

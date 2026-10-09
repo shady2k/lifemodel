@@ -184,6 +184,43 @@ describe('the loader first start', () => {
     expect((await app.bootstrap.status()).commit).toBe(moved);
   });
 
+  it('builds with the proxy environment and the named variables, and with no model key or admin credential the container inherited', async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    await setPassword(world);
+    // The container inherited a legacy model key and the trusted layer's own
+    // admin credential, and some variables that are nobody's business.
+    const container = process.env;
+    const saved: [string, string | undefined][] = [
+      'OPENROUTER_API_KEY',
+      'AGENT_VAULT_MASTER_PASSWORD',
+      'SOME_UNRELATED_CONTAINER_VARIABLE',
+    ].map((name) => [name, container[name]]);
+    container['OPENROUTER_API_KEY'] = 'q4xlf2-made-up-model-key';
+    container['AGENT_VAULT_MASTER_PASSWORD'] = 'q4xlf2-made-up-master-password';
+    container['SOME_UNRELATED_CONTAINER_VARIABLE'] = 'q4xlf2-unrelated';
+    try {
+      const { app } = makeApp(world);
+      await app.bootstrap.ensureReady('startup');
+
+      const build = world.runner.calls.find((call) => call.command === 'npm');
+      expect(build).toBeDefined();
+      const env = build?.options.env ?? {};
+      // The build needs a home it can write and its cache on the volume...
+      expect(env['npm_config_cache']).toBe(join(world.config.dataDir, 'npm-cache'));
+      expect(env['HOME']).toBe(world.config.dataDir);
+      // ...and none of the container's secrets.
+      expect(env['OPENROUTER_API_KEY']).toBeUndefined();
+      expect(env['AGENT_VAULT_MASTER_PASSWORD']).toBeUndefined();
+      expect(env['SOME_UNRELATED_CONTAINER_VARIABLE']).toBeUndefined();
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete container[name];
+        else container[name] = value;
+      }
+    }
+  });
+
   it('refuses to seed over a directory that is not a repository, and records it as the failure', async () => {
     const world = createLoaderWorld();
     scriptRepository(world);

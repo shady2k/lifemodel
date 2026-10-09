@@ -110,7 +110,14 @@ describe('a suite started from a git hook', () => {
 
     const env = hookEnvironment(repo.dir);
     env['GIT_COMMON_DIR'] = join(repo.dir, '.git');
-    fixture(scrubGitEnvironment(env));
+    // The scrub removes the variables IN PLACE and hands back their NAMES:
+    // what git runs with is the scrubbed environment itself, not the list of
+    // names (a removed-name array passed as an environment supplies numeric
+    // keys instead, and a scrub that returned names without deleting would
+    // stay green - review round 2, finding H).
+    const removed = scrubGitEnvironment(env);
+    expect(removed.sort()).toEqual(['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE']);
+    fixture(env);
 
     expect(repo.head()).toBe(before);
     expect(repo.config()).toBe(configBefore);

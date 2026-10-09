@@ -1,8 +1,11 @@
-import { readFile, access, mkdir, rename, open as openFile, unlink } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { readFile, access } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
+import { DeferredStorage } from '../storage/deferred-storage.js';
+import { JSONStorage } from '../storage/json-storage.js';
+import type { StorageSaveOptions } from '../storage/storage.js';
+import type { Logger } from '../types/logger.js';
 
 /**
  * Where lifemodel's config file lives (lifemodel-q4x.4.1).
@@ -19,19 +22,23 @@ export function resolveConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   return dataPath ? join(dataPath, 'config') : 'data/config';
 }
 
-/**
- * The chain every write of every loader's file is serialized behind: the
- * settings interface saves ONE at a time, and even two direct writeFile calls
- * cannot interleave their temp-rename inodes.
- */
-let writeChain: Promise<unknown> = Promise.resolve();
+/** The storage key of the config file under its own directory: `agent.json`. */
+const CONFIG_STORAGE_KEY = 'agent';
 
 /**
- * Swallow one error on purpose: the temp file is already unreachable, and a
- * cleanup miss must not mask the write's own error.
+ * The loader has no logger of its own: a write failure is reported by CALLING
+ * code (the settings interface answers 500 with it). This one stays silent so
+ * a bare `createConfigLoader()` still works.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-function
-function ignoreRemovalFailure(): void {}
+const silentLogger: Logger = {
+  trace: () => undefined,
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+  fatal: () => undefined,
+  child: () => silentLogger,
+};
 
 /**
  * ConfigLoader - loads and merges configuration from multiple sources.
@@ -44,9 +51,20 @@ function ignoreRemovalFailure(): void {}
 export class ConfigLoader {
   private readonly configPath: string;
   private loadedConfig: AgentConfigFile | null = null;
+  /**
+   * The REQUIRED write pipeline at the config root (AGENTS.md, Lesson 4):
+   * DeferredStorage over JSONStorage, and `flush()` is the awaited durability
+   * point. `createBackup: false` keeps the config loader the only writer of
+   * `agent.json`'s history (no `.backup.json` sibling of the config file).
+   */
+  private readonly storage: DeferredStorage;
 
-  constructor(configPath = 'data/config') {
+  constructor(configPath = 'data/config', logger?: Logger) {
     this.configPath = configPath;
+    this.storage = new DeferredStorage(
+      new JSONStorage({ basePath: configPath, createBackup: false }),
+      logger ?? silentLogger
+    );
   }
 
   /**
@@ -95,78 +113,31 @@ export class ConfigLoader {
   /**
    * Write the config file - the SAME file `load()` reads at startup.
    *
-   * It is written atomically (a temporary file in the same directory, fsynced,
-   * renamed over the target), so a crash mid-write can never leave half a
-   * config behind: the file is either the old one or the new one.
+   * The write runs through the REQUIRED storage pipeline (AGENTS.md, Lesson 4):
+   * DeferredStorage, flushed through JSONStorage rooted at the config
+   * directory. The key `agent` maps to `<config dir>/agent.json` with the
+   * object serialized as `JSON.stringify(object, null, 2)` - the file's name
+   * and the object's shape are unchanged, and the save is atomic (a temp file
+   * unique to this write, fsynced, renamed over the target by
+   * `JSONStorage.save`, whose publication point is that one rename).
    *
-   * Two properties are load-bearing for lifemodel's settings interface:
+   * Awaiting `flush()` here is what makes the write's outcome DECIDED before
+   * the promise resolves: either the rename published and this promise
+   * resolves with the file whole on disk, or nothing was published and it
+   * rejects - there is no third state (review round 2, findings B and C: the
+   * old direct writer rejected AFTER its rename on a directory-sync failure,
+   * reporting as unmutated a file that already held the new settings).
    *
-   * - THE TEMP FILE IS UNIQUE TO THIS WRITE (its name carries a random id),
-   *   and every write is serialized behind the loader's own chain. Overlapping
-   *   saves can therefore never share a temporary inode, and a failed save can
-   *   never publish another save's content - its failure is reported with the
-   *   file left exactly as it was.
-   * - THE PATH IS A NAMED EXCEPTION TO LESSON 4 (Unified Storage Path): this
-   *   file is the config loader's own, and the loader reads it back at every
-   *   start. JSONStorage writes sanitized keys under the state root (neither
-   *   this file's name nor its shape would survive it), and DeferredStorage
-   *   would leave the write unflushed behind an answer that promises the save.
-   *   So the write stays here - direct, fsynced, and awaited before the
-   *   interface answers. docs/features/instance/settings.md carries the same
-   *   note.
+   * The optional `signal` (a caller's stop contract) aborts the write at its
+   * publication point: an aborted write never renames, and the file is left
+   * exactly as it was.
    */
-  async writeFile(file: AgentConfigFile): Promise<void> {
-    const run = async (): Promise<void> => {
-      const target = this.filePath;
-      // The config DIRECTORY may not exist yet: a first start has no
-      // `data/config/` at all (the loader makes `data/`, not its subdirectories),
-      // and the first save is what creates the file. Created here, by lifemodel's
-      // own user, inside the data directory it owns.
-      await mkdir(dirname(target), { recursive: true });
-      // A name ONLY this write can hold: two saves never share an inode, so a
-      // failed save cannot publish the other's content.
-      const temporary = `${target}.tmp-${randomUUID()}`;
-      try {
-        const handle = await openFile(temporary, 'w');
-        try {
-          await handle.writeFile(`${JSON.stringify(file, null, 2)}\n`, 'utf-8');
-          // On disk before the rename: a rename is atomic, but a power loss could
-          // still publish an empty file if the data behind it was not flushed.
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        try {
-          await rename(temporary, target);
-        } catch (error) {
-          // The rename failed: nothing was published. Remove the now-unreachable
-          // temp file and let the error reach the caller.
-          await unlink(temporary).catch(ignoreRemovalFailure);
-          throw error;
-        }
-        // The directory entry itself: without this the rename can be lost too.
-        const directory = await openFile(dirname(target), 'r');
-        try {
-          await directory.sync();
-        } catch {
-          // A directory that cannot be synced is not a reason to lose the write:
-          // the file is in place and readable.
-        } finally {
-          await directory.close();
-        }
-      } catch (error) {
-        // A failure before the rename never touched the target; remove the
-        // incomplete temp file so the directory holds no half-written config.
-        await unlink(temporary).catch(ignoreRemovalFailure);
-        throw error;
-      }
-    };
-    // Serialize writes through the loader itself (the settings interface
-    // serializes its whole save too; this chain is what two callers that
-    // bypass it still cannot defeat).
-    const settled = writeChain.then(run, run);
-    writeChain = settled.catch(ignoreRemovalFailure);
-    await settled;
+  async writeFile(file: AgentConfigFile, options?: StorageSaveOptions): Promise<void> {
+    // Mark dirty through the deferred layer, then flush BELOW: the write's
+    // outcome is decided when flush() resolves (nothing persisted, or the
+    // file whole on disk).
+    await this.storage.save(CONFIG_STORAGE_KEY, file);
+    await this.storage.flush(options);
   }
 
   /**

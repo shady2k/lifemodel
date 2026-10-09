@@ -23,11 +23,18 @@ never overwrites it. The runtime is node 24 on `node:24-bookworm-slim` with
 dependencies (onnxruntime, LanceDB, sharp) need nothing beyond the libraries
 that base image already has. `iptables` is what the loader's egress rule is
 made of (lifemodel-q4x.3.2): before lifemodel starts, the loader fills its own
-chain with "uid 1000 reaches `127.0.0.1`, everything else is REJECTed", so
-lifemodel leaves through Agent Vault's proxy or not at all. Making that rule
-needs `--cap-add NET_ADMIN`; `netbase`'s `/etc/protocols` is what iptables
-reads, and a container without the capability does not start lifemodel - the
-loader says so in one line and leaves with a non-zero code.
+chain with "uid 1000 connects to the NAMED loopback services only - Agent
+Vault's proxy port, the loader's own interface, the container resolver's
+rewritten DNS port, each bound to its destination and protocol - every other
+connection it opens is REJECTed", so lifemodel leaves through Agent Vault's
+proxy or not at all. The replies of connections that were allowed to open are
+accepted, which is how the loader's interface and lifemodel's settings server
+answer the front door; the vault's management port stays refused. On a
+container whose network gave it IPv6 addresses the same rule is installed for
+that family (`ip6tables`). Making that rule needs `--cap-add NET_ADMIN`;
+`netbase`'s `/etc/protocols` is what iptables reads, and a container without
+the capability does not start lifemodel - the loader says so in one line and
+leaves with a non-zero code.
 
 `ENTRYPOINT` is `["/usr/bin/tini","--","node","/opt/lifemodel/loader/dist/main.js"]`
 with no `USER`: the loader is root, lifemodel is uid/gid 1000 (`lifemodel`).

@@ -8,9 +8,11 @@ import {
   readdir,
   rmdir,
   stat,
+  open,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
-import type { Storage } from './storage.js';
+import type { Storage, StorageSaveOptions } from './storage.js';
 import type { Logger } from '../types/logger.js';
 
 /**
@@ -99,11 +101,14 @@ export class JSONStorage implements Storage {
   }
 
   /**
-   * Get the temp path for atomic writes.
+   * Get the temp path of one write. The name carries a random id, so two
+   * writes NEVER share a temporary inode - a shared `agent.tmp.json` is how a
+   * failed write can publish another write's content (config keys under one
+   * base path used to do exactly that, review round 1 finding 3).
    */
   private getTempPath(key: string): string {
     validateKey(key, this.basePath);
-    return join(this.basePath, `${keyToPath(key)}.tmp${this.extension}`);
+    return join(this.basePath, `${keyToPath(key)}.tmp-${randomUUID()}${this.extension}`);
   }
 
   /**
@@ -231,7 +236,20 @@ export class JSONStorage implements Storage {
     }
   }
 
-  async save(key: string, data: unknown): Promise<void> {
+  /**
+   * Save a key atomically, with the durability the callers' contracts promise:
+   *
+   * - the data is on disk BEFORE the publication point (the handle is fsynced,
+   *   so a power loss cannot rename an empty or partial file into place);
+   * - the publication point is ONE atomic name at the end: `this.path` never
+   *   holds anything but a whole save, and NOTHING that can reject runs after
+   *   the rename - a save that threw has, by construction, not published;
+   * - the temp file is unique to this write, and a failed write removes it
+   *   again (cleanup misses are swallowed: the temp is unreachable).
+   * - a caller's `signal` aborts the save at its publication point (see
+   *   StorageSaveOptions): the temp is removed and the stored file is untouched.
+   */
+  async save(key: string, data: unknown, options?: StorageSaveOptions): Promise<void> {
     await this.ensureDir();
 
     const path = this.getPath(key);
@@ -244,20 +262,41 @@ export class JSONStorage implements Storage {
     // Serialize data
     const content = JSON.stringify(data, null, 2);
 
-    // Write to temp file first (atomic write preparation)
-    await writeFile(tempPath, content, 'utf-8');
-
-    // Create backup if file exists and backup is enabled
-    if (this.createBackup && (await this.exists(key))) {
+    try {
+      // Write to temp file first (atomic write preparation), then force it to
+      // the disk BEFORE the rename: the rename is atomic, but without the sync
+      // a power loss could still publish a truncated file behind it.
+      const handle = await open(tempPath, 'w');
       try {
-        await rename(path, backupPath);
-      } catch {
-        // Ignore backup errors - continue with save
+        await handle.writeFile(content, 'utf-8');
+        await handle.sync();
+      } finally {
+        await handle.close();
       }
-    }
 
-    // Atomic rename of temp file to actual path
-    await rename(tempPath, path);
+      // The CALLER'S stop contract is honoured at the publication point: an
+      // aborted save never renames, and its temp is removed below.
+      options?.signal?.throwIfAborted();
+
+      // Create backup if file exists and backup is enabled
+      if (this.createBackup && (await this.exists(key))) {
+        try {
+          await rename(path, backupPath);
+        } catch {
+          // Ignore backup errors - continue with save
+        }
+      }
+
+      // Atomic rename of temp file to actual path - THE publication point.
+      // Nothing after it can reject or revisit the published file: a save that
+      // reports failure has never published (review round 2, finding C).
+      await rename(tempPath, path);
+    } catch (error) {
+      // The temp file is now unreachable: remove it so no half save is left in
+      // the directory, and let the error reach the caller.
+      await unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   async delete(key: string): Promise<boolean> {

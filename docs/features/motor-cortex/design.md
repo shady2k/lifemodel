@@ -470,10 +470,12 @@ LLM_MOTOR_MODEL=anthropic/claude-haiku-4.5      # NEW: Motor Cortex sub-agent
 ```
 
 Implementation:
-- Add `'motor'` to `ModelRole` type in `src/llm/provider.ts` (`'fast' | 'smart'` → `'fast' | 'smart' | 'motor'`)
-- Add `motor?` slot to `MultiProviderConfig` in `src/llm/multi-provider.ts`
-- Fallback chain: motor → fast → default (if no `LLM_MOTOR_MODEL` set, uses fast model)
-- Add `motorModel` to config schema + `LLM_MOTOR_MODEL` to config loader
+- `'motor'` added to the `ModelRole` type in `src/llm/provider.ts`
+  (`'fast' | 'smart' | 'motor'`).
+- The multi provider this design planned is REMOVED: there is one
+  OpenAI-compatible endpoint and no fallback — the endpoint names a model per
+  role (`LLM_ENDPOINT_MOTOR_MODEL` / the settings page), and a role it does
+  not name is refused with an error naming the role.
 
 Rationale for a dedicated env var: Motor Cortex tasks have different requirements than Cognition. A browser workflow needs many cheap iterations; a code-debugging task may benefit from a smarter model. The user can tune this independently.
 

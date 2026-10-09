@@ -8,6 +8,15 @@
  */
 import { spawn } from 'node:child_process';
 
+/**
+ * How long a CANCELLED command is allowed to sit out its SIGTERM before the
+ * runner stops asking and kills it: a provisioning CLI that ignores SIGTERM
+ * must not hold the loader's stop past this bound (the command's own
+ * `timeoutMs`, when one was given, is the shared deadline the escalation
+ * never runs past).
+ */
+const ABORT_KILL_WAIT_MS = 5_000;
+
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -23,8 +32,11 @@ export interface RunOptions {
   /**
    * Kill the command when this signal aborts: the loader's stop aborts the
    * commands its startup is still running (they are root-owned work, and the
-   * stop must reach everything a start made). A command that died this way
-   * rejects with the cancellation, like a timeout does.
+   * stop must reach everything a start made). The command rejects with the
+   * cancellation like a timeout does - but only ONCE THE CHILD IS REAPED:
+   * the SIGTERM is escalated to SIGKILL under the command's own shared
+   * deadline, and a child that ignores SIGTERM keeps the command's ownership
+   * (its promise unsettled) until it is reaped.
    */
   signal?: AbortSignal;
   /**
@@ -84,7 +96,6 @@ export function createNodeRunner(): CommandRunner {
           env: options.env,
           uid: options.uid,
           gid: options.gid,
-          signal: options.signal,
           // Input is always a pipe that is closed at once, so a command
           // reading nothing sees end-of-input exactly as it did before, and a
           // command that needs a line (`--password-stdin`) gets it here.
@@ -99,6 +110,10 @@ export function createNodeRunner(): CommandRunner {
         let stdout = '';
         let stderr = '';
         let timedOut = false;
+        let cancelled = false;
+        let spawnError: Error | undefined;
+        let settled = false;
+        const startedAt = Date.now();
         const timer =
           options.timeoutMs === undefined
             ? undefined
@@ -106,16 +121,63 @@ export function createNodeRunner(): CommandRunner {
                 timedOut = true;
                 child.kill('SIGKILL');
               }, options.timeoutMs);
+        /**
+         * Cancellation is the loader's to carry through to the child's death:
+         * a promise that settled on the abort would report a command the OS
+         * child of which is still alive (the round-2 review's N2 - a child
+         * that ignores SIGTERM outlives the rejection). So the promise stays
+         * owned until `close` - the child is REAPED - and the SIGTERM is
+         * escalated to SIGKILL under the command's own shared deadline, never
+         * later than `ABORT_KILL_WAIT_MS` after it.
+         */
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        const onAbort = (): void => {
+          if (cancelled || settled) return;
+          cancelled = true;
+          child.kill('SIGTERM');
+          const sharedRemaining =
+            options.timeoutMs === undefined
+              ? ABORT_KILL_WAIT_MS
+              : Math.max(0, options.timeoutMs - (Date.now() - startedAt));
+          killTimer = setTimeout(
+            () => child.kill('SIGKILL'),
+            Math.min(ABORT_KILL_WAIT_MS, sharedRemaining)
+          );
+        };
+        if (options.signal?.aborted === true) onAbort();
+        options.signal?.addEventListener('abort', onAbort, { once: true });
         child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
         child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+        // The error event is NOT the child's death: a failed spawn (no binary)
+        // is followed by `close`, and an abort's AbortError arrives while the
+        // child may still be alive. Recorded here; the promise settles below,
+        // when the child is reaped.
         child.on('error', (error) => {
+          if (settled) return;
+          settled = true;
           if (timer) clearTimeout(timer);
+          if (killTimer) clearTimeout(killTimer);
+          options.signal?.removeEventListener('abort', onAbort);
           reject(error);
         });
         child.on('close', (code) => {
+          if (settled) return;
+          settled = true;
           if (timer) clearTimeout(timer);
-          if (timedOut) {
+          if (killTimer) clearTimeout(killTimer);
+          options.signal?.removeEventListener('abort', onAbort);
+          // A child that died by OUR cancellation or the timeout never said
+          // its work was done: its rejection says so, once it is reaped.
+          if (cancelled && code === null) {
+            reject(new Error(`${command} ${args.join(' ')} was cancelled`));
+            return;
+          }
+          if (timedOut && code === null) {
             reject(new Error(`${command} ${args.join(' ')} timed out`));
+            return;
+          }
+          if (spawnError !== undefined) {
+            reject(spawnError);
             return;
           }
           resolve({ code: code ?? -1, stdout, stderr });
