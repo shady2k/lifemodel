@@ -274,7 +274,19 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     }
   }
 
-  async function readRecord<T extends { version: 1 }>(path: string): Promise<T | null> {
+  /**
+   * One record of the loader's own on the volume, read wholesale: JSON, the
+   * version this loader writes, and EVERY field it needs as a non-empty
+   * string. A record that holds less than that is not "partly there" - it is
+   * a record the loader cannot use, and using it would hand clients an
+   * unusable credential while announcing success - so the file's path and
+   * the missing field's name (NEVER a value; these records hold secrets) are
+   * what the loader leaves with.
+   */
+  async function readRecord<T extends { version: 1 }>(
+    path: string,
+    fields: readonly string[]
+  ): Promise<T | null> {
     if (!(await fs.exists(path))) return null;
     let text: string;
     try {
@@ -290,6 +302,15 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     }
     if (value.version !== 1) {
       throw new LoaderFatalError(`${path} does not hold what this loader wrote`);
+    }
+    const asRecord = value as Record<string, unknown>;
+    for (const field of fields) {
+      const value = asRecord[field];
+      if (typeof value !== 'string' || value === '') {
+        throw new LoaderFatalError(
+          `${path} is not a complete record: the field "${field}" is missing or empty - restore the record or remove the file, and the loader will provision it again (the missing value is never printed)`
+        );
+      }
     }
     return value;
   }
@@ -372,8 +393,8 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
 
   /** The owner account's credentials, generated once and kept root-only. */
   async function ensureOwnerCredentials(): Promise<OwnerRecord> {
-    const existing = await readRecord<OwnerRecord>(ownerPath);
-    if (existing !== null && existing.email !== '' && existing.password !== '') return existing;
+    const existing = await readRecord<OwnerRecord>(ownerPath, ['email', 'password']);
+    if (existing !== null) return existing;
     const record: OwnerRecord = {
       version: 1,
       email: vaultConfig.ownerEmail,
@@ -483,8 +504,8 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
 
   /** The vault, the agent and its token, created once and reused after that. */
   async function provision(): Promise<VaultCredential> {
-    const known = await readRecord<ProxyRecord>(proxyPath);
-    if (known !== null && known.token !== '' && known.vault !== '' && known.agent !== '') {
+    const known = await readRecord<ProxyRecord>(proxyPath, ['vault', 'agent', 'token']);
+    if (known !== null) {
       return { vault: known.vault, agent: known.agent, token: known.token };
     }
     const owner = await ensureOwnerCredentials();
@@ -757,8 +778,8 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
       };
     },
     ownerAccount: async () => {
-      const known = await readRecord<OwnerRecord>(ownerPath);
-      if (known === null || known.email === '' || known.password === '') return null;
+      const known = await readRecord<OwnerRecord>(ownerPath, ['email', 'password']);
+      if (known === null) return null;
       return { email: known.email, password: known.password };
     },
   };

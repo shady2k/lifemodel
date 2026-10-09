@@ -619,6 +619,64 @@ describe('Agent Vault, the layer that holds the keys', () => {
     await shutdownLoader(found, app);
   });
 
+  it('says the record is not complete when a field is missing, or is not a string', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const state = createLoaderState({
+      fs: createNodeFileSystem(),
+      config: found.config,
+      logger: createRecordingLogger([]),
+    });
+    await state.ensureLayout();
+    await state.writeAuth(await hashPassword('right'));
+    // Syntactically valid, version right, fields not there: what the review
+    // found - the loader would hand clients `undefined:undefined@...` while
+    // announcing a vault it does not actually have.
+    mkdirSync(found.config.loaderDir, { recursive: true });
+    for (const record of [
+      { version: 1 },
+      {
+        version: 1,
+        vault: found.config.agentVault.vaultName,
+        agent: 'lifemodel',
+        token: 123, // a number where the token (a string) belongs
+      },
+    ]) {
+      writeFileSync(
+        join(found.config.loaderDir, 'vault-proxy.json'),
+        `${JSON.stringify(record)}\n`
+      );
+      const { lines, exits } = await startExpectingFailure(found);
+      expect(exits).toEqual([1]);
+      const error = lines.find((line) => line.level === 'error');
+      expect(error?.message).toContain('vault-proxy.json');
+      expect(error?.message).toMatch(/"(token|vault|agent)"/);
+      expect(error?.message).toContain('not a complete record');
+      // And the secret-shaped fallback never got built either.
+      expect(JSON.stringify(lines)).not.toContain('undefined:undefined');
+    }
+  });
+
+  it('says the same about the owner record, with its path and field', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const state = createLoaderState({
+      fs: createNodeFileSystem(),
+      config: found.config,
+      logger: createRecordingLogger([]),
+    });
+    await state.ensureLayout();
+    await state.writeAuth(await hashPassword('right'));
+    mkdirSync(found.config.loaderDir, { recursive: true });
+    const recordPath = join(found.config.loaderDir, 'vault-owner.json');
+    writeFileSync(recordPath, `${JSON.stringify({ version: 1 })}\n`);
+    const { lines, exits } = await startExpectingFailure(found);
+    expect(exits).toEqual([1]);
+    const error = lines.find((line) => line.level === 'error');
+    expect(error?.message).toContain('vault-owner.json');
+    expect(error?.message).toContain('"email"');
+  });
+
   it("bounds every provisioning command with the loader's command wait, and a cancellation", async () => {
     const found = world();
     scriptFirstStart(found);
