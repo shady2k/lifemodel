@@ -660,7 +660,8 @@ export class TelegramChannel implements Channel {
     maxBytes: number
   ): Promise<{ base64: string; mediaType: string } | null> {
     const client =
-      this.bot ?? (this.downloadClient ??= new Bot(this.config.botToken, { client: { fetch: proxyFetch } }));
+      this.bot ??
+      (this.downloadClient ??= new Bot(this.config.botToken, { client: { fetch: proxyFetch } }));
     const file = await client.api.getFile(fileId);
     if (!file?.file_path) {
       this.logger?.warn('Photo file_path missing from Telegram API response');

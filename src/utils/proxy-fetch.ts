@@ -30,6 +30,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { randomBytes } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 
 /** How many redirect hops a proxied request may follow (undici's own bound). */
 const MAX_REDIRECTS = 5;
@@ -102,7 +103,7 @@ function headerRecordOf(init: RequestInit | undefined): HeaderRecord {
     }
   } else if (headers !== undefined) {
     for (const [key, value] of Object.entries(headers)) {
-      if (value !== undefined) out[key.toLowerCase()] = String(value);
+      if (value !== undefined) out[key.toLowerCase()] = value;
     }
   }
   return out;
@@ -133,7 +134,10 @@ async function serializeBody(body: unknown): Promise<SerializedBody> {
     return { buffer: Buffer.from(body), contentType: undefined };
   }
   if (ArrayBuffer.isView(body)) {
-    return { buffer: Buffer.from(body.buffer, body.byteOffset, body.byteLength), contentType: undefined };
+    return {
+      buffer: Buffer.from(body.buffer, body.byteOffset, body.byteLength),
+      contentType: undefined,
+    };
   }
   if (body instanceof FormData) {
     const boundary = `proxy-fetch-${randomBytes(12).toString('hex')}`;
@@ -183,7 +187,7 @@ function sendThroughProxy(
   headers: HeaderRecord,
   body: Buffer | undefined,
   signal: AbortSignal | null
-): Promise<import('node:http').IncomingMessage> {
+): Promise<IncomingMessage> {
   const isTlsProxy = proxy.protocol === 'https:';
   const request = isTlsProxy ? httpsRequest : httpRequest;
   const proxyAuthorization =
@@ -206,10 +210,12 @@ function sendThroughProxy(
         host: proxy.hostname,
         port: proxy.port === '' ? (isTlsProxy ? 443 : 80) : Number(proxy.port),
         method,
-        path: `${target.toString()}`,
+        path: target.toString(),
         headers: outgoingHeaders,
       },
-      (res) => resolve(res)
+      (res) => {
+        resolve(res);
+      }
     );
     req.on('error', reject);
     if (signal !== null) {
@@ -227,7 +233,7 @@ function sendThroughProxy(
   });
 }
 
-function webResponseFrom(res: import('node:http').IncomingMessage): Response {
+function webResponseFrom(res: IncomingMessage): Response {
   const responseHeaders = new Headers();
   for (const [key, value] of Object.entries(res.headers)) {
     if (value === undefined) continue;
@@ -243,9 +249,15 @@ function webResponseFrom(res: import('node:http').IncomingMessage): Response {
   const stream = hasBody
     ? new ReadableStream<Uint8Array>({
         start(controller) {
-          res.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
-          res.on('end', () => controller.close());
-          res.on('error', (error) => controller.error(error));
+          res.on('data', (chunk: Buffer) => {
+            controller.enqueue(new Uint8Array(chunk));
+          });
+          res.on('end', () => {
+            controller.close();
+          });
+          res.on('error', (error) => {
+            controller.error(error);
+          });
         },
         cancel() {
           res.destroy();
@@ -281,7 +293,7 @@ export const proxyFetch: typeof fetch = async (input, init) => {
       signal: init?.signal instanceof AbortSignal ? init.signal : input.signal,
     });
   }
-  const target = new URL(input instanceof URL ? input.toString() : String(input));
+  const target = new URL(input instanceof URL ? input.toString() : input);
   const proxy = proxyFor(target);
   if (proxy === null || target.protocol === 'https:') {
     // Direct, or the MITM tunnel through Node's own fetch (which tunnels
@@ -316,7 +328,9 @@ async function proxiedRequest(args: {
   const signal = args.signal;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     if (hop === MAX_REDIRECTS) {
-      throw new Error(`Too many redirects through the proxy: more than ${String(MAX_REDIRECTS)} hops`);
+      throw new Error(
+        `Too many redirects through the proxy: more than ${String(MAX_REDIRECTS)} hops`
+      );
     }
     const serialized = await serializeBody(body);
     const contentType = serialized.contentType;
@@ -324,9 +338,7 @@ async function proxiedRequest(args: {
     if (contentType !== undefined && outgoing['content-type'] === undefined) {
       outgoing['content-type'] = contentType;
     }
-    for (const name of Object.keys(outgoing)) {
-      if (name === 'content-length') delete outgoing[name];
-    }
+    delete outgoing['content-length'];
     const res = await sendThroughProxy(target, proxy, method, outgoing, serialized.buffer, signal);
     if (
       (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303) &&
