@@ -103,8 +103,11 @@ describe('Telegram channel gives both of its Bots the proxy transport (finding 4
   it("the download client's Bot is constructed with the proxy fetch", async () => {
     // A replayed photo receipt reaches the download client while the channel
     // has not started: the download Bot is the second construction site.
-    await (channel as unknown as { downloadPhoto: (fileId: string, maxBytes: number) => Promise<unknown> })
-      .downloadPhoto('file_1', 1024);
+    await (
+      channel as unknown as {
+        downloadPhoto: (fileId: string, maxBytes: number) => Promise<unknown>;
+      }
+    ).downloadPhoto('file_1', 1024);
     expect(botConstructorArgs).toHaveLength(1);
     const [, options] = botConstructorArgs[0] as [string, { client?: { fetch?: unknown } }];
     expect(options?.client?.fetch).toBe(proxyFetch);

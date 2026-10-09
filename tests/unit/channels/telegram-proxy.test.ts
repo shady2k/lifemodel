@@ -36,7 +36,11 @@ function telegramAnswer(res: http.ServerResponse, url: string): void {
   res.end(JSON.stringify({ ok: true, result }));
 }
 
-async function startRecordingServer(): Promise<{ server: Server; port: number; seen: SeenRequest[] }> {
+async function startRecordingServer(): Promise<{
+  server: Server;
+  port: number;
+  seen: SeenRequest[];
+}> {
   const seen: SeenRequest[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -54,7 +58,11 @@ async function startRecordingServer(): Promise<{ server: Server; port: number; s
 }
 
 /** A forward proxy that relays absolute-form requests and records them. */
-async function startRecordingProxy(): Promise<{ server: Server; port: number; seen: SeenRequest[] }> {
+async function startRecordingProxy(): Promise<{
+  server: Server;
+  port: number;
+  seen: SeenRequest[];
+}> {
   const seen: SeenRequest[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -120,7 +128,11 @@ describe('grammY through the proxy transport (finding 4)', () => {
   });
 
   /** Wait, bounded, for a request a recording list shows. */
-  async function waitForRecord(list: SeenRequest[], urlPart: string, timeoutMs = 10_000): Promise<SeenRequest> {
+  async function waitForRecord(
+    list: SeenRequest[],
+    urlPart: string,
+    timeoutMs = 10_000
+  ): Promise<SeenRequest> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const found = list.find((record) => record.url.includes(urlPart));
