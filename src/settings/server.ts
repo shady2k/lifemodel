@@ -129,9 +129,16 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
 
   app.get('/', async (request, reply) => {
     const file = await config.readFile();
+    const values = settingsInputFromFile(file);
+    // The GET runs the SAVE's rules on what the file holds: a config an older
+    // interface (or a hand edit) wrote is REFUSED with its field named and
+    // shown redacted - never migrated silently behind the owner's back, and
+    // never echoed with the secret part of its endpoint URL (review round 2,
+    // finding F).
     return reply.type('text/html; charset=utf-8').send(
       renderSettingsPage({
-        values: settingsInputFromFile(file),
+        values,
+        errors: validateSettings(values),
         host: request.headers.host,
         overriddenBy: overridingVariables(),
       })

@@ -70,17 +70,33 @@ function hasUrlCredentials(value: string): boolean {
 }
 
 /**
- * The URL without its credentials, for echo and log: a refused or a logged
- * endpoint must never carry its secret part. Whatever cannot be parsed gives
- * back nothing.
+ * A query string or fragment in the endpoint base URL: parts a URL can carry
+ * a secret in (`?key=...`, `#...`) that this interface does not accept, while
+ * it does not manage the endpoint's own authentication (the key goes through
+ * Agent Vault on the way out). The redactor below strips both from any echo,
+ * page or log, and validation refuses them in a NEW submission.
+ */
+function hasUrlQueryOrFragment(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.search !== '' || url.hash !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The SAFE representation of the endpoint URL, the only one an echo, a page
+ * or a log gets: its origin and path. The credentials are gone whatever the
+ * value is, and so are the parts a URL can hide a secret in (query, fragment) -
+ * not only when validation already refused the value (review round 2,
+ * finding F: a config file an older interface wrote still echoed `user:key@`
+ * on GET, and an accepted `?api_key=`/`#...` was echoed whole afterwards).
  */
 export function redactEndpointUrl(value: string): string {
   try {
     const url = new URL(value);
-    if (url.username === '' && url.password === '') {
-      return url.toString();
-    }
-    return `${url.origin}${url.pathname}${url.search}`;
+    return `${url.origin}${url.pathname}`;
   } catch {
     return '';
   }
@@ -115,6 +131,9 @@ export function validateSettings(input: SettingsInput): SettingsErrors {
     } else if (hasUrlCredentials(endpoint.baseUrl)) {
       errors.endpointBaseUrl =
         'the endpoint base URL must not carry credentials (a user name or password before the @); keys go through Agent Vault';
+    } else if (hasUrlQueryOrFragment(endpoint.baseUrl)) {
+      errors.endpointBaseUrl =
+        'the endpoint base URL must not carry a query string or fragment (?... or #...); a URL part this interface does not manage is refused, and a key in one never reaches this server';
     }
   }
 
