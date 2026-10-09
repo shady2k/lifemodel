@@ -15,7 +15,13 @@
  *   uid 1000 (lifemodel's user) may open a connection to the NAMED loopback
  *   services only - the Agent Vault proxy port (14322), the loader's own
  *   interface (7000), the container's resolver's DNS port - each protocol and
- *   destination-port bound, and everything else from that uid is REJECTed.
+ *   destination-port bound, and everything else from that uid is REJECTed -
+ *   except the REPLY direction of a connection that was allowed to open
+ *   (`--ctstate ESTABLISHED,RELATED` for the owner), which is how a uid-1000
+ *   server (the settings interface) can ANSWER a root client - Caddy - at
+ *   all: the answer's destination is the client's ephemeral port, which no
+ *   --dport allow names. A connection the rule never allowed has no
+ *   established packets, so this does not restore any NEW loopback path.
  *   The parent decision allows the proxy port and the loopback services
  *   lifemodel needs, not every loopback listener: the allows are named in
  *   `referenceRules()` below, with the reason of each. Every other uid, root
@@ -146,6 +152,31 @@ export function createEgress(deps: EgressDeps): Egress {
     for (const service of resolver) {
       rules.push(allow(service.port, service.protocol as 'udp' | 'tcp', config.egress.resolver));
     }
+    // The REPLY direction of authorized inbound connections: when the loader's
+    // own interface or the settings server (uid 1000, on the loader port)
+    // ANSWERS a root client - Caddy's forward_auth asks, the settings page
+    // loads - the answer's destination is the CLIENT's ephemeral port, which
+    // no --dport allow names. Without this rule the answer is REJECTed and the
+    // root host is unreachable even though the server listens (the round-2
+    // review's N1, reproduced live). The rule matches only packets of a
+    // connection conntrack already TRACKS as established or related - a
+    // connection that was ALLOWED to be opened - so it does not restore
+    // all-loopback NEW connections and it does not open the vault's
+    // management port: a uid-1000 NEW packet to a port no allow names still
+    // meets the REJECT below, and a connection that never opens has no
+    // established packets to answer with.
+    rules.push([
+      '-m',
+      'owner',
+      '--uid-owner',
+      String(uid),
+      '-m',
+      'conntrack',
+      '--ctstate',
+      'ESTABLISHED,RELATED',
+      '-j',
+      'ACCEPT',
+    ]);
     rules.push([
       '-m',
       'owner',
@@ -268,6 +299,21 @@ export function createEgress(deps: EgressDeps): Egress {
         '-j',
         'ACCEPT',
       ],
+      // The reply direction of authorized inbound connections, for the same
+      // reason the IPv4 half has the rule (the settings server answering a
+      // root client over the family the container was given).
+      [
+        '-m',
+        'owner',
+        '--uid-owner',
+        String(uid),
+        '-m',
+        'conntrack',
+        '--ctstate',
+        'ESTABLISHED,RELATED',
+        '-j',
+        'ACCEPT',
+      ],
       ['-m', 'owner', '--uid-owner', String(uid), '-j', 'REJECT', '--reject-with', REJECT_WITH6],
     ];
   }
@@ -349,7 +395,7 @@ export function createEgress(deps: EgressDeps): Egress {
         resolverPorts: services.length === 0 ? null : services,
         ipv6: config.egress.ipv6Binary,
       },
-      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${services.length > 0 ? `, the resolver on ${services.map((s) => `${s.protocol} ${String(s.port)}`).join(' and ')}` : ''}${ipv6Present ? `, and for IPv6 ${LOOPBACK6}` : ''}): everything else from uid ${String(uid)} is refused`
+      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${services.length > 0 ? `, the resolver on ${services.map((s) => `${s.protocol} ${String(s.port)}`).join(' and ')}` : ''}${ipv6Present ? `, and for IPv6 ${LOOPBACK6}` : ''}): everything else uid ${String(uid)} opens is refused (answers of connections that were allowed to open reply)`
     );
     if (config.egress.resolver !== '' && services.length === 0) {
       logger.warn(
