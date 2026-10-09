@@ -195,11 +195,19 @@ must name the address the loader gave it). Telemetry is off
    `vault-ca.pem` (root, `0644`): lifemodel's user must READ it to trust the
    proxy and must not be able to write it.
 
-**The next start reuses all of it.** With `loader/vault-proxy.json` on the
-volume, nothing is created again: the loader reads the vault and the token from
-it and only re-reads the CA, so `docker restart`, a new container on the same
-volume and a store that was replaced each end with exactly one vault, one agent
-and one token. The store itself is made only when the volume holds none.
+**The next start reuses all of it - after checking the store.** With
+`loader/vault-proxy.json` on the volume, the loader first reconciles the record
+with what the store still holds: the CLI's own read of the vault the record
+names, and the CLI session that proves the account can act. `docker restart`
+and a new container on the same volume find the record valid there and create
+nothing - one vault, one agent, one token, the token re-read from the record.
+A store that was REPLACED while the record survived fails the reconcile (the
+vault the record names is not in the store; the session is gone with the
+store): one warn line says the record does not match, the loader provisions
+whole against the replacement store, and writes a fresh record beside it - so
+the owner sees exactly one vault, one agent and one token again, and the
+clients get the token the replacement store actually knows. The store itself
+is made only when the volume holds none.
 
 **What lifemodel's process is given** is that token and the standard proxy
 environment around it, built in `lifemodelEnvironment()` in
@@ -226,7 +234,10 @@ the loader registered to provision the vault. So the loader's own page shows
 that account's e-mail and password, read from `loader/vault-owner.json`, with a
 link to `vault.<the same host and port>`: the owner signs in there and adds the
 keys (decisions 12 and 18, story S3). Both values are HTML-escaped into the
-page, the page is `no-store`, and neither ever reaches a log line. An account
+page, the page is `no-store`, and THE PASSWORD never reaches a log line - nor
+the token. (The e-mail can: an account whose registration the CLI refuses is
+fatal, and that one line names the account's address it refused; the password
+never does.) An account
 that cannot be read is SAID on the page, with its reason - the page is the way
 back - rather than left blank.
 

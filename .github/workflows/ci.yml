@@ -19,8 +19,9 @@
 #      scripts/build-image.sh a person runs, and then a REAL first start inside
 #      the image it just built. It holds no write token: the workflow's own
 #      read-only permissions, and a checkout that keeps no credential. It is
-#      the check that will gate a merge, so it also fails closed on a failed
-#      `changes` job;
+#      not a required check (owner decision 17, below), so it too fails
+#      closed on a failed `changes` job to say what happened rather than a
+#      green skip;
 #   5. ci-image-publish: the same build on a PUSH TO MAIN, and the only job
 #      that asks for packages: write. It publishes
 #      ghcr.io/shady2k/lifemodel:main and :<sha> on EVERY push to main —
@@ -33,8 +34,8 @@
 # Dockerfile that this job runs — publish or overwrite images before merge.
 # Gating the login and push steps on `push` does not prevent that; a separate
 # job with read-only permissions and a credential-less checkout does. The PR
-# job is not a required check yet: branch protection requires `changes`,
-# `ci-product` and `ci-backlog`, and the coordinator adds `ci-image` at merge.
+# job is not a required check: branch protection requires `changes`,
+# `ci-product` and `ci-backlog` (owner, 2026-10-09; docs/backlog-integration.md).
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
