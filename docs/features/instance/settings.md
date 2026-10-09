@@ -25,9 +25,12 @@ model key (Agent Vault injects it on the way out, lifemodel-q4x.3.*).
 
 `GET /` on a first start (no config file at all) is a normal page that says no
 model endpoint is configured yet and names the endpoint fields that are missing
-(the four endpoint fields; the optional Telegram fields are simply blank).
+(the four endpoint fields; the Telegram chat id is blank, and the bot token
+field starts as the placeholder `__telegram_bot_token__`).
 lifemodel starts in that state, serves the page, and does NOT crash-loop: that
-is the first start of every instance.
+is the first start of every instance. A GET whose config file holds an endpoint
+value the rules refuse (below) shows that field's error too, with the safe
+representation of the value — never its secret part.
 
 The port is `SETTINGS_PORT` (7100). It is not a setting of the interface: the
 front door's own configuration names it (docker/instance/Caddyfile).
@@ -36,7 +39,7 @@ front door's own configuration names it (docker/instance/Caddyfile).
 
 | Field | Rule |
 | --- | --- |
-| endpoint base URL | an `http`/`https` URL when it is set |
+| endpoint base URL | an `http`/`https` URL when it is set, carrying no credentials (`user:password@` is refused) and no query string or fragment (`?...`, `#...` are refused) |
 | the fast, smart and motor model | non-empty when the endpoint is set |
 | Telegram chat id | a number when it is set |
 | Telegram bot token | an Agent Vault placeholder (`__something__`) when it is set, never the token itself |
@@ -46,12 +49,24 @@ refused by the field it is missing, and a base URL with an empty model by that
 model's own field. The form with everything blank is a valid state (the
 Telegram fields alone), and it means "no endpoint".
 
-A refused save answers `400` with the page again: every bad field named beside
-it, the values the owner typed kept (a refused bot token is never echoed back),
-and **nothing written**. A save that cannot be written answers `500` with the
-reason in the log and **no restart**: lifemodel is not restarted onto a config
-that is not there. No rule is a silent fallback - a value is never dropped,
-corrected or taken from another field.
+Not every refusal is the same kind:
+
+- `400` — a field does not satisfy its rule: the page comes back with every
+  bad field named beside it, the values the owner typed kept (a refused bot
+  token is never echoed back; a refused endpoint URL is echoed without its
+  secret part), and **nothing written**.
+- `403` — the write route is reached from another origin (or with no Origin at
+  all): not the front door, so not saved or written regardless of the fields.
+- `503` — lifemodel is closing or restarting (the save arrives during the
+  stop, or is still queued behind one when it does): not written; the owner is
+  asked to save again once lifemodel is up.
+- `500` — the write of the config file failed and **nothing was published**:
+  the reason is in the log and lifemodel is NOT restarted onto a config that is
+  not there. The write's publication point is one atomic rename, so a write
+  that answered `500` never put the new file in place.
+
+No rule is a silent fallback - a value is never dropped, corrected or taken
+from another field.
 
 ## Where the settings are stored, and how they apply
 
