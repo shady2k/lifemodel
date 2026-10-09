@@ -232,17 +232,46 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     ];
   }
 
+  /**
+   * The commands the current startup is still running. Each has its own bound
+   * (`commandWaitMs`) and the current startup's cancellation: the stop aborts
+   * the live ones (they are ROOT-owned work, and a stop must reach everything
+   * a start made), and reports whatever does not settle even killed.
+   */
+  interface TrackedCommand {
+    promise: Promise<CommandResultLike>;
+    abort(): void;
+  }
+  interface CommandResultLike {
+    code: number;
+    stdout: string;
+    stderr: string;
+  }
+  const liveCommands = new Set<TrackedCommand>();
+  /** The startup's cancellation for the commands it runs; null between starts. */
+  let startupCommands: AbortController | null = null;
+
   /** One CLI call of the same binary, with the vault's own HOME. */
-  async function vaultCli(
-    args: string[],
-    stdin?: string
-  ): Promise<{ code: number; stdout: string; stderr: string }> {
-    const options = { cwd: config.volumeRoot, env: storeEnvironment() };
-    return runner.run(
-      vaultConfig.binary,
-      args,
-      stdin === undefined ? options : { ...options, stdin }
-    );
+  async function vaultCli(args: string[], stdin?: string): Promise<CommandResultLike> {
+    const controller = startupCommands ?? new AbortController();
+    const tracked: TrackedCommand = {
+      promise: runner.run(vaultConfig.binary, args, {
+        cwd: config.volumeRoot,
+        env: storeEnvironment(),
+        ...(stdin === undefined ? {} : { stdin }),
+        timeoutMs: vaultConfig.commandWaitMs,
+        signal: controller.signal,
+      }),
+      abort: () => {
+        controller.abort();
+      },
+    };
+    liveCommands.add(tracked);
+    try {
+      return await tracked.promise;
+    } finally {
+      liveCommands.delete(tracked);
+    }
   }
 
   async function readRecord<T extends { version: 1 }>(path: string): Promise<T | null> {
@@ -510,6 +539,9 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     // The stop-free interval this start belongs to: a stop bumps the epoch,
     // and then nothing this start makes may outlive that stop's answer.
     const startEpoch = epoch;
+    // This start's own cancellation for its CLI commands; the stop aborts it.
+    const commands = new AbortController();
+    startupCommands = commands;
     if (!(await fs.exists(vaultConfig.binary))) {
       throw new LoaderFatalError(
         `Agent Vault is missing: there is no agent-vault at ${vaultConfig.binary}, so no key could be held for lifemodel`
@@ -621,6 +653,28 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     const remaining = (): number => Math.max(0, deadline - clock.now());
     epoch += 1;
     stopping = true;
+    // The commands the startup is still running are the stop's to reach too:
+    // they are killed here, and what does not settle even killed is reported.
+    const running = [...liveCommands];
+    for (const tracked of running) tracked.abort();
+    if (running.length > 0) {
+      logger.info(
+        { commands: running.length },
+        'aborting the vault commands the startup is running'
+      );
+      const settled = await Promise.race([
+        Promise.allSettled(running.map((tracked) => tracked.promise)).then(() => true),
+        clock.sleep(remaining()).then(() => false),
+      ]);
+      if (!settled) {
+        logger.error(
+          { commands: running.length },
+          "Agent Vault's provisioning commands had not left when the stop deadline ran out"
+        );
+        stopping = false;
+        return false;
+      }
+    }
     const current = child;
     if (current === null) {
       stopping = false;

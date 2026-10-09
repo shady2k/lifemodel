@@ -252,8 +252,17 @@ describe('Agent Vault, the layer that holds the keys', () => {
     // requests. The agent token is the proxy credential, and it is the only
     // secret in there - no key, no vault admin credential, no store.
     const proxy = `http://${TOKEN}:lifemodel@127.0.0.1:${String(found.config.agentVault.proxyPort)}`;
-    for (const name of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy']) {
-      expect(env[name]).toBe(name === 'NO_PROXY' || name === 'no_proxy' ? 'localhost,127.0.0.1' : proxy);
+    for (const name of [
+      'HTTPS_PROXY',
+      'https_proxy',
+      'HTTP_PROXY',
+      'http_proxy',
+      'NO_PROXY',
+      'no_proxy',
+    ]) {
+      expect(env[name]).toBe(
+        name === 'NO_PROXY' || name === 'no_proxy' ? 'localhost,127.0.0.1' : proxy
+      );
     }
     expect(env['NODE_USE_ENV_PROXY']).toBe('1');
     expect(env['NODE_EXTRA_CA_CERTS']).toBe(found.config.agentVault.caPath);
@@ -548,8 +557,19 @@ describe('Agent Vault, the layer that holds the keys', () => {
       ): Promise<{ code: number; stdout: string; stderr: string }> => {
         if (args[0] === 'auth' && !held) {
           held = true;
-          await new Promise<void>((resolve) => {
-            release = resolve;
+          // The command is held, and it dies on the loader's cancellation -
+          // what the real runner does when the stop aborts a live command.
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+            new Promise<never>((_, reject) => {
+              options.signal?.addEventListener('abort', () =>
+                reject(new Error('the auth command was cancelled'))
+              );
+            }),
+          ]).catch((error: unknown) => {
+            throw error;
           });
         }
         return inner.run(command, args, options);
@@ -573,13 +593,16 @@ describe('Agent Vault, the layer that holds the keys', () => {
     (release as unknown as () => void)();
     await starting;
 
+    // The child was reached: the stop aborted the held command, the start's
+    // own unwind (inside the stop's reach) killed the child it had made, and
+    // NOTHING of it is running.
     expect(vault.status().running).toBe(false);
-    expect(vaultSpawn(found)?.child.signals).toContain('SIGTERM');
+    expect(vaultSpawn(found)?.child.signals).toContain('SIGKILL');
     // The start gave its child up instead of finishing: it never announced a
-    // vault that is up, and it said what it did.
+    // vault that is up, and it said what it did - while the loader stopped.
     expect(lines.some((line) => line.message.includes('Agent Vault is up'))).toBe(false);
     expect(
-      lines.some((line) => line.message.includes('was started while the loader was stopping'))
+      lines.some((line) => line.message.includes('did not finish starting: the loader is stopping'))
     ).toBe(true);
     expect(lines.filter((line) => line.level === 'error')).toEqual([]);
   });
@@ -594,6 +617,102 @@ describe('Agent Vault, the layer that holds the keys', () => {
     expect(written).toContain('Agent Vault is up');
 
     await shutdownLoader(found, app);
+  });
+
+  it("bounds every provisioning command with the loader's command wait, and a cancellation", async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const { app } = await start(found);
+
+    const cliCalls = found.runner.calls.filter(
+      (call) => call.command === found.config.agentVault.binary
+    );
+    expect(cliCalls.length).toBeGreaterThan(0);
+    for (const call of cliCalls) {
+      expect(call.options.timeoutMs).toBe(found.config.agentVault.commandWaitMs);
+      expect(call.options.signal).toBeDefined();
+    }
+    await shutdownLoader(found, app);
+  });
+
+  it('a stop aborts the provisioning command a stuck startup is running, and answers the truth', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    // The command the startup is hung on settles ONLY when the loader's
+    // cancellation reaches it - what the real runner does to a killed child.
+    const binary = found.config.agentVault.binary;
+    const aborted: boolean[] = [];
+    found.runner.on(`${binary} agent info`, (call) => {
+      return new Promise<{ code: number; stdout: string; stderr: string }>((_, reject) => {
+        call.options.signal?.addEventListener('abort', () => {
+          aborted.push(true);
+          reject(new Error(`${binary} agent info was cancelled`));
+        });
+      });
+    });
+
+    const state = createLoaderState({
+      fs: createNodeFileSystem(),
+      config: found.config,
+      logger: createRecordingLogger([]),
+    });
+    await state.ensureLayout();
+    await state.writeAuth(await hashPassword('right'));
+    const { app, lines, exits } = rig(found, () => Promise.resolve(true));
+    const coming = app.start();
+    // The startup hangs at the CLI command - the review's stuck bring-up.
+    await waitUntil(
+      () => found.runner.calls.some((call) => call.command === binary && call.args[0] === 'agent'),
+      'the startup is hung on a provisioning command'
+    );
+    const stopping = app.shutdown('test');
+    // The stop must abort the stuck command...
+    await waitUntil(() => aborted.length === 1, 'the stuck command is aborted by the stop');
+    // ...then continue the startup's own unwind (its wait was over).
+    caddySpawn(found)?.child.exit(0, null);
+    const answer = await stopping;
+
+    expect(answer).toBe(0);
+    expect(aborted).toEqual([true]);
+    expect(exits).toEqual([]); // the stop's answer is the truth, never a fatal
+    expect(lifemodelSpawn(found)).toBeUndefined();
+    expect(lines.some((line) => line.message.includes('Agent Vault is up'))).toBe(false);
+    void coming;
+  });
+
+  it('a stop reports the provisioning command it aborted but could not settle', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const binary = found.config.agentVault.binary;
+    // The command ignores its cancellation: even aborted, it never settles.
+    found.runner.on(`${binary} agent info`, () => new Promise<never>(() => undefined));
+    const lines: RecordedLine[] = [];
+    const vault = createAgentVault({
+      launcher: found.launcher,
+      runner: found.runner,
+      fs: createNodeFileSystem(),
+      logger: createRecordingLogger(lines),
+      clock: found.clock,
+      config: found.config,
+      probeHealth: () => Promise.resolve(true),
+    });
+    const starting = vault.start();
+    await waitUntil(
+      () => found.runner.calls.some((call) => call.command === binary && call.args[0] === 'agent'),
+      'the startup is hung on a provisioning command'
+    );
+
+    // The stop aborts it, waits for it within its budget, and loses: the
+    // unresolved command is named in one line, and the stop says so.
+    const stopping = vault.stop(vaultConfigStopBudget());
+    found.clock.resolveAll(); // the stop budget is spent while it was stuck
+    expect(await stopping).toBe(false);
+    expect(
+      lines.some((line) =>
+        line.message.includes("Agent Vault's provisioning commands had not left")
+      )
+    ).toBe(true);
+    void starting; // the start stays held on the command the stop gave up on
   });
 });
 
@@ -637,6 +756,11 @@ async function start(found: LoaderWorld): Promise<{
   await app.start();
   expect(exits).toEqual([]);
   return { app, lines };
+}
+
+/** The stop's budget for a module-level stop in these tests: short, and the clock must move. */
+function vaultConfigStopBudget(): number {
+  return 200;
 }
 
 /** A loader whose Agent Vault start fails: what it left with, and what it said. */
