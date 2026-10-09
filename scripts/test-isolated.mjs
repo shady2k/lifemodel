@@ -14,9 +14,9 @@ const SOURCE_LABEL = 'com.lifemodel.test-source';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
-  'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', 'AGENTS.md', 'README.md', 'LICENSE'];
-const DIRS = ['src', 'tests', 'scripts', 'cli', 'docker', 'docs', '.backlog', '.githooks', '.husky', '.github'];
-const FORBIDDEN = new Set(['.git', 'node_modules', 'dist', 'coverage', '.DS_Store', '.npmrc']);
+  'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
+const DIRS = ['src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'docs', '.backlog', '.githooks', '.husky', '.github'];
+const FORBIDDEN = new Set(['.git', 'node_modules', 'dist', 'data', 'coverage', '.DS_Store', '.npmrc']);
 const log = (text) => console.error(`[test-isolated] ${text}`);
 
 export function parseArgs(args) {
@@ -144,8 +144,11 @@ export function acquireLock(directory = path.join(os.tmpdir(), `lifemodel-test-$
 
 export function innerSteps(mode, args) {
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
+  // The loader is a separate TypeScript project: root and loader typechecks,
+  // then lint and format over both trees, then the suite last.
   return mode === 'check'
-    ? [['tsc', '--noEmit'], ['eslint', 'src/'], ['prettier', '--check', 'src/**/*.ts'], suite]
+    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'],
+      ['eslint', 'src/', 'loader/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts'], suite]
     : [suite];
 }
 

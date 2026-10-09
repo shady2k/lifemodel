@@ -16,8 +16,6 @@
     "lint:fix": "eslint src/ loader/ --fix",
     "typecheck": "tsc --noEmit",
     "typecheck:loader": "tsc -p loader/tsconfig.json --noEmit",
-    "lint": "eslint src/ loader/",
-    "lint:fix": "eslint src/ loader/ --fix",
     "format": "prettier --write \"src/**/*.ts\" \"loader/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"loader/**/*.ts\"",
     "test": "node scripts/test-isolated.mjs test",
