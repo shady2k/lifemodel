@@ -502,11 +502,30 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     return tokenOf(vault, name, created);
   }
 
-  /** The vault, the agent and its token, created once and reused after that. */
+  /**
+   * The vault, the agent and its token, created once and reused after that -
+   * and reused ONLY when the record still matches what the vault's store
+   * holds: the store can be replaced while `vault-proxy.json` survives (that
+   * is what recovery from a bad store looks like), and a record read back
+   * without the store check would hand clients a token the replacement store
+   * does not know while the loader announces success. So a kept record is
+   * reconciled first: the CLI's own read of the vault the record names, and
+   * the CLI session that proves the account can still act for the loader.
+   * Either missing: the record does not match the store, and provisioning
+   * runs whole, ending with a fresh record.
+   */
   async function provision(): Promise<VaultCredential> {
     const known = await readRecord<ProxyRecord>(proxyPath, ['vault', 'agent', 'token']);
     if (known !== null) {
-      return { vault: known.vault, agent: known.agent, token: known.token };
+      const session = await fs.exists(sessionPath);
+      const inStore = await vaultCli(['vault', 'credential-store', 'show', known.vault]);
+      if (session && inStore.code === 0) {
+        return { vault: known.vault, agent: known.agent, token: known.token };
+      }
+      logger.warn(
+        { vault: known.vault, agent: known.agent, record: proxyPath },
+        'the saved proxy record does not match what the store holds: it is provisioned again, and the record beside it is written fresh'
+      );
     }
     const owner = await ensureOwnerCredentials();
     await cliAuthenticate(owner);
