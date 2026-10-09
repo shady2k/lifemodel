@@ -52,6 +52,8 @@ describe('the contract with the image', () => {
     // binary the image carries and the loader's own chain in the filter table.
     expect(config.egress).toEqual({
       binary: 'iptables',
+      ipv6Binary: 'ip6tables',
+      procPath: '/proc/net/if_inet6',
       chain: 'LIFEMODEL_EGRESS',
       resolver: '127.0.0.11',
     });

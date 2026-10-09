@@ -276,12 +276,17 @@ Everything else on loopback is refused: the vault's management interface
 (`127.0.0.1:14321`) - which the loader's own login, not the proxy credential,
 protects - and any other local listener the rule does not name.
 
-**The rule is IPv4, and that is the whole of the container's reach.** The
-container on Docker's default network has one IPv4 address and, over IPv6,
-nothing but `::1`: no global address and no route out (the gated walk checks
-both inside the container), so there is no other address for a bypass to use.
-An instance whose Docker network has IPv6 enabled is not covered by this
-stage's rule.
+**The rule has an IPv6 half, and a container that cannot carry it does not
+start lifemodel.** When the container has an IPv6 address or route (the kernel
+reports them in `/proc/net/if_inet6`), the loader installs the same confinement
+in `ip6tables`: the vault's proxy port over `::1`, `icmp6-port-unreachable` for
+everything else from uid 1000 - so an address an IPv6-enabled Docker network
+gives the container (`--ipv6`, an `fd`-range subnet) cannot be the way around
+the boundary. `ip6tables` is in the image; a container where the IPv6 half
+cannot be installed is a missing input of the loader's own: one line says that
+an unconfined IPv6 path exists, and lifemodel is never started. A container
+with no IPv6 address or route at all installs the IPv4 rule only, and says so
+in one line.
 
 **The same environment is what a build runs with.** The instance's code is
 built as lifemodel's user (uid 1000), and that is the user the kernel rule

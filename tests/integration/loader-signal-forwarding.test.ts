@@ -191,6 +191,12 @@ describe('the loader as the container main process', () => {
     const iptables = join(standIn.root, 'iptables');
     const egressLog = join(standIn.root, 'egress.log');
     writeFileSync(iptables, IPTABLES_SOURCE, { mode: 0o755 });
+    // The same stand-in answers for ip6tables, and the container's view of its
+    // own IPv6 addresses is written here: one line, the way the kernel writes
+    // one in an IPv6-enabled Docker network - so the ip6tables half is
+    // installed deterministically, and never by the test box's own stack.
+    const ifinet6 = join(standIn.root, 'if-inet6');
+    writeFileSync(ifinet6, 'fd66:0004:0002:0000:0000:0000:0000:0003 04 40 eth0\n');
     const fs = createNodeFileSystem();
     const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
     await state.ensureLayout();
@@ -212,6 +218,8 @@ describe('the loader as the container main process', () => {
         LIFEMODEL_DRAIN_WAIT_MS: '4000',
         LIFEMODEL_MARKER: standIn.marker,
         LIFEMODEL_EGRESS_IPTABLES: iptables,
+        LIFEMODEL_EGRESS_IP6TABLES: iptables,
+        LIFEMODEL_EGRESS_IF_INET6: ifinet6,
         LIFEMODEL_EGRESS_LOG: egressLog,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -249,6 +257,12 @@ describe('the loader as the container main process', () => {
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p udp -d 127.0.0.11 --dport 53 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.11 --dport 53 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
+        '-C OUTPUT -j LIFEMODEL_EGRESS',
+        '-A OUTPUT -j LIFEMODEL_EGRESS',
+        '-L LIFEMODEL_EGRESS -n',
+        '-N LIFEMODEL_EGRESS',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d ::1 --dport 14322 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp6-port-unreachable',
         '-C OUTPUT -j LIFEMODEL_EGRESS',
         '-A OUTPUT -j LIFEMODEL_EGRESS',
       ]);
