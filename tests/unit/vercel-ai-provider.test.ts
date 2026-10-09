@@ -8,8 +8,6 @@ vi.mock('ai', () => ({
   generateText: vi.fn(),
   jsonSchema: (schema: unknown) => schema,
 }));
-vi.mock('@openrouter/ai-sdk-provider', () => ({ createOpenRouter: () => () => ({}) }));
-
 // Mock createOpenAI to track whether .chat() or .responses() is called
 const mockChatModel = vi.fn(() => ({}));
 const mockResponsesModel = vi.fn(() => ({}));
@@ -28,7 +26,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('includes minimal tools with permissive inputSchema', async () => {
-    const provider = new VercelAIProvider({ apiKey: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
     const tools: MinimalOpenAIChatTool[] = [
       {
         type: 'function',
@@ -46,7 +44,7 @@ describe('VercelAIProvider', () => {
   });
 
   it('does not crash when generateText returns undefined toolCalls', async () => {
-    const provider = new VercelAIProvider({ apiKey: 'test' });
+    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
 
     (generateText as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue({
       text: 'ok',
@@ -72,11 +70,11 @@ describe('VercelAIProvider', () => {
 
     const providerOptions = (
       provider as unknown as {
-        buildProviderOptions: (modelId: string, overrides: Record<string, unknown>, req: unknown) => {
+        buildProviderOptions: (overrides: Record<string, unknown>, req: unknown) => {
           openai?: Record<string, unknown>;
         } | undefined;
       }
-    ).buildProviderOptions('test', {}, request);
+    ).buildProviderOptions({}, request);
 
     expect(providerOptions?.openai?.['parallel_tool_calls']).toBe(false);
   });
@@ -98,57 +96,6 @@ describe('VercelAIProvider', () => {
 
     const content = converted[0]?.content as Record<string, unknown>[];
     expect(content[0]?.['toolName']).toBe('core_memory');
-  });
-
-  it('uses provider-specific cache control key for user messages', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
-    const messages = [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: 'hello',
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-      },
-    ] as unknown as Message[];
-
-    const converted = (
-      provider as unknown as { convertMessages: (m: Message[]) => { content: unknown }[] }
-    ).convertMessages(messages);
-
-    const parts = converted[0]?.content as Record<string, unknown>[];
-    const providerOptions = parts[0]?.['providerOptions'] as Record<string, unknown>;
-    expect(providerOptions?.['openai']).toEqual({ cacheControl: { type: 'ephemeral' } });
-  });
-
-  it('converts system message array content to string with message-level providerOptions', () => {
-    const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
-    const messages = [
-      {
-        role: 'system',
-        content: [
-          {
-            type: 'text',
-            text: 'hello',
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-      },
-    ] as unknown as Message[];
-
-    const converted = (
-      provider as unknown as {
-        convertMessages: (m: Message[]) => { role: string; content: unknown; providerOptions?: unknown }[];
-      }
-    ).convertMessages(messages);
-
-    // System messages must have string content (AI SDK CoreSystemMessage requirement)
-    expect(converted[0]?.content).toBe('hello');
-    const providerOptions = converted[0]?.providerOptions as Record<string, unknown>;
-    expect(providerOptions?.['openai']).toEqual({ cacheControl: { type: 'ephemeral' } });
   });
 
   it('local provider uses .chat() not .responses()', async () => {
@@ -208,8 +155,8 @@ describe('VercelAIProvider', () => {
       response: { id: 'resp_1' },
     };
 
-    it('OpenRouter: raw tools in providerOptions preserve full parameter schemas', async () => {
-      const provider = new VercelAIProvider({ apiKey: 'test' });
+    it('raw tools in providerOptions preserve full parameter schemas', async () => {
+      const provider = new VercelAIProvider({ baseUrl: 'http://localhost:1234', fastModel: 'test', smartModel: 'test', motorModel: 'test' });
       (generateText as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(
         successResponse
       );
@@ -221,11 +168,11 @@ describe('VercelAIProvider', () => {
 
       const call = (generateText as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0] as Record<string, unknown>;
 
-      // Verify providerOptions.openrouter.tools has raw schemas (the SDK bug workaround)
+      // Verify providerOptions.openai.tools has raw schemas (the SDK bug workaround)
       const providerOptions = call['providerOptions'] as Record<string, Record<string, unknown>> | undefined;
-      expect(providerOptions?.['openrouter']).toBeTruthy();
+      expect(providerOptions?.['openai']).toBeTruthy();
 
-      const rawTools = providerOptions!['openrouter']!['tools'] as { type: string; function: { name: string; parameters?: Record<string, unknown> } }[];
+      const rawTools = providerOptions!['openai']!['tools'] as { type: string; function: { name: string; parameters?: Record<string, unknown> } }[];
       expect(rawTools).toHaveLength(2);
 
       // Full tool: parameters.properties must be populated (not stripped)
@@ -256,7 +203,6 @@ describe('VercelAIProvider', () => {
 
       const call = (generateText as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0] as Record<string, unknown>;
 
-      // Local providers don't use providerOptions.openrouter — tools go through SDK directly
       const tools = call['tools'] as Record<string, { parameters: unknown; description: string }>;
       expect(tools).toBeTruthy();
 
@@ -277,9 +223,9 @@ describe('VercelAIProvider', () => {
         additionalProperties: true,
       });
 
-      // Local should NOT have openrouter providerOptions with tools
+      // The endpoint injects raw tools via providerOptions (the SDK bug workaround)
       const providerOptions = call['providerOptions'] as Record<string, Record<string, unknown>> | undefined;
-      expect(providerOptions?.['openrouter']?.['tools']).toBeUndefined();
+      expect(providerOptions?.['openai']?.['tools']).toBeTruthy();
     });
   });
 

@@ -30,9 +30,8 @@ convertMessages() → generateText() (wire format + transport)
 ```
 
 **Policies:**
-- `STRICT_POLICY` — Local providers: merge consecutive same-role, collapse leading system to 1
-- `GEMINI_POLICY` — Gemini via OpenRouter: insert synthetic user turn, convert mid-system to user
-- `OPENROUTER_POLICY` — Passthrough (OpenRouter normalizes)
+- `STRICT_POLICY` — The endpoint (OpenAI-compatible): merge consecutive same-role, collapse leading system to 1
+- `GEMINI_POLICY` — Gemini: insert synthetic user turn, convert mid-system to user
 
 **Transform pipeline** (order matters):
 1. Merge leading system messages → exactly `maxLeadingSystemMessages`

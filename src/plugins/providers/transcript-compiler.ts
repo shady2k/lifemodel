@@ -18,7 +18,6 @@
 
 import type { Logger } from '../../types/index.js';
 import type { Message } from '../../llm/provider.js';
-import type { VercelAIProviderConfig } from './vercel-ai-provider.js';
 import { isGeminiModel } from './provider-transforms.js';
 
 /**
@@ -46,20 +45,6 @@ export const STRICT_POLICY: TranscriptPolicy = {
   name: 'strict',
   mergeConsecutiveRoles: true,
   maxLeadingSystemMessages: 1,
-  requireLeadingUserTurn: false,
-  convertMidSystemToUser: false,
-};
-
-/**
- * OpenRouter policy — merge consecutive roles locally.
- * While OpenRouter normalizes server-side, the Vercel AI SDK validates
- * messages *client-side* per provider adapter. The Anthropic adapter rejects
- * consecutive same-role messages before the request is sent.
- */
-export const OPENROUTER_POLICY: TranscriptPolicy = {
-  name: 'openrouter',
-  mergeConsecutiveRoles: true,
-  maxLeadingSystemMessages: Infinity,
   requireLeadingUserTurn: false,
   convertMidSystemToUser: false,
 };
@@ -374,29 +359,20 @@ function assertToolCallPairing(messages: CompilerMessage[], logger?: Logger): vo
 }
 
 /**
- * Resolve the appropriate transcript policy based on config and model.
+ * Resolve the appropriate transcript policy for an OpenAI-compatible endpoint,
+ * by model.
  *
- * @param config - Provider configuration
+ * The endpoint is the ONE model surface lifemodel has (lifemodel-q4x.4.1): an
+ * OpenAI-compatible server the settings names. A Gemini model reached through
+ * it keeps Gemini's own constraints; every other model needs the strict
+ * normalization local servers expect.
+ *
  * @param modelId - Model identifier
  * @returns Appropriate transcript policy
  */
-export function resolveTranscriptPolicy(
-  config: VercelAIProviderConfig,
-  modelId: string
-): TranscriptPolicy {
-  // Check if this is an OpenRouter config
-  const isOpenRouter = 'apiKey' in config;
-
-  if (!isOpenRouter) {
-    // Local providers need strict normalization
-    return STRICT_POLICY;
-  }
-
-  // OpenRouter with Gemini model needs Gemini policy
+export function resolveTranscriptPolicy(modelId: string): TranscriptPolicy {
   if (isGeminiModel(modelId)) {
     return GEMINI_POLICY;
   }
-
-  // OpenRouter handles normalization for other models
-  return OPENROUTER_POLICY;
+  return STRICT_POLICY;
 }
