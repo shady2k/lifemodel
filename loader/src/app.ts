@@ -112,6 +112,17 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
 
   let http: LoaderHttp | null = null;
 
+  /**
+   * The stop's own latch: set when a stop begins and never unset. A stop must
+   * reach everything a start created - including a start that was still on its
+   * way when the stop arrived (held inside a step, or midway through it) - so
+   * every startup continuation checks this latch at its fences: past it, the
+   * start ends, and it neither spawns anything new nor opens the interface.
+   */
+  let stopping = false;
+  /** The startup running now, for the stop to wait for and re-run against before it answers. */
+  let startup: Promise<void> | null = null;
+
   function listen(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const server = http?.server;
@@ -125,6 +136,133 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         resolve();
       });
     });
+  }
+
+  /**
+   * The stop's second reach: whatever a fenced start made in the windows the
+   * stop's own steps cannot see into. The startup in flight is awaited under
+   * the same deadline first; what it created between the stop's steps is then
+   * stopped again, and only what is still unreachable is reported.
+   */
+  async function stopStartupLeftovers(left: () => number, pending: string[]): Promise<void> {
+    const inFlight = startup;
+    if (inFlight === null) return;
+    const settled = await Promise.race([
+      inFlight.then(() => true).catch(() => true),
+      clock.sleep(left()).then(() => false),
+    ]);
+    if (!settled) {
+      pending.push("the loader's startup was still in flight when the stop deadline ran out");
+      return;
+    }
+    // The start is over - fenced before any later step, so nothing it still
+    // holds was created past its fence. What it DID make in the windows
+    // between the stop's steps (a caddy that landed after the front door's
+    // stop, a vault child past the vault's stop, the interface re-opened) is
+    // stopped again here.
+    if (http !== null) {
+      const closedAgain = await Promise.race([
+        http.close().then(() => true),
+        clock.sleep(Math.min(left(), config.killWaitMs)).then(() => false),
+      ]);
+      if (!closedAgain) {
+        pending.push(
+          "the loader's own server (opened while the stop ran, still holding connections)"
+        );
+      }
+    }
+    const vaultAgain = await agentVault.stop(left());
+    if (!vaultAgain)
+      pending.push('Agent Vault (started while the stop ran, not reaped by the deadline)');
+    const caddyAgain = await frontDoor.stop(left());
+    if (!caddyAgain) pending.push('caddy (started while the stop ran, not reaped by the deadline)');
+  }
+
+  /**
+   * The startup, one fence after every step: the stop's latch can go up while
+   * any of these are running (a `docker stop` right after `docker run` runs
+   * its shutdown beside the start), and a start that finds it up makes
+   * NOTHING further - the stop re-reaches whatever an earlier window in this
+   * start left behind, and the stop's answer stays the truth.
+   */
+  async function bringUp(): Promise<void> {
+    try {
+      await state.ensureLayout();
+      // The code the image carries, for a volume that holds no repository
+      // yet: without it this instance can never be seeded, so it is one of
+      // the loader's own inputs and is checked before it serves.
+      await requireSeedBundleForFirstStart({ fs, config });
+      if (stopping) return;
+      // The front door first: it is what the owner reaches, and it must be
+      // up while lifemodel is still being seeded, built or panicked.
+      await frontDoor.start();
+      if (stopping) return;
+      // Agent Vault next, and before lifemodel: lifemodel's proxy credential
+      // comes from the vault the loader creates here, and the vault must be
+      // ready to answer before the process that uses it runs.
+      await agentVault.start();
+      if (stopping) return;
+      // Then the kernel rule: uid 1000 may reach the named loopback services
+      // and nothing else, so the proxy above is the only way out for
+      // lifemodel AND for the build of its code. A container that cannot
+      // carry the rule does not start lifemodel at all (a missing input of
+      // the loader's own).
+      await egress.install();
+      if (stopping) return;
+      http = createLoaderHttp({
+        state,
+        supervisor,
+        bootstrap,
+        logger,
+        clock,
+        vaultAccount: () => agentVault.ownerAccount(),
+      });
+      await listen();
+      if (stopping) {
+        // The interface the stop had already closed once is closed again by
+        // the stop itself (it re-reaches what a start made in its windows);
+        // this start says only that it is not serving.
+        logger.info({}, "the loader's interface is not opened for serving: the loader is stopping");
+        return;
+      }
+      http.server.on('error', (error) => {
+        fatal(
+          new LoaderFatalError(
+            `the loader's own server failed on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+            { cause: error }
+          )
+        );
+      });
+      logger.info(
+        { port: config.httpPort, volume: config.volumeRoot, repo: config.repoDir },
+        'the loader is up'
+      );
+      if ((await state.readAuth()) === null) {
+        logger.info({}, 'no password is set: the owner is asked at /setup');
+        return;
+      }
+      // A password is set, so this start continues where the last one left
+      // off: seed if the volume is empty, build if needed, start lifemodel.
+      // A failure here is the instance's state, not the loader's exit.
+      void bootstrap.ensureReady('startup');
+    } catch (error) {
+      if (stopping) {
+        // The stop is what ended this start (the fence above returns cleanly,
+        // and a step that failed because the loader is leaving - its child
+        // killed under it, its port taken away - is that stop's doing): the
+        // loader is leaving with the stop's answer, not this start's reason.
+        logger.info({}, "the loader's start did not finish: the loader is stopping");
+        return;
+      }
+      fatal(
+        error instanceof LoaderFatalError
+          ? error
+          : new LoaderFatalError(
+              `the loader cannot listen on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+              { cause: error }
+            )
+      );
+    }
   }
 
   return {
@@ -143,62 +281,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     },
 
     start: async () => {
+      // A start asked for while a stop is in, or after a stop answered, does
+      // nothing at all: the latch never unsets, so a stop cannot be answered
+      // with work a later start quietly brought up.
+      if (stopping) {
+        logger.info({}, 'the loader is stopping or was stopped already: it is not started again');
+        return;
+      }
+      const run = bringUp();
+      startup = run;
       try {
-        await state.ensureLayout();
-        // The code the image carries, for a volume that holds no repository
-        // yet: without it this instance can never be seeded, so it is one of
-        // the loader's own inputs and is checked before it serves.
-        await requireSeedBundleForFirstStart({ fs, config });
-        // The front door first: it is what the owner reaches, and it must be
-        // up while lifemodel is still being seeded, built or panicked.
-        await frontDoor.start();
-        // Agent Vault next, and before lifemodel: lifemodel's proxy credential
-        // comes from the vault the loader creates here, and the vault must be
-        // ready to answer before the process that uses it runs.
-        await agentVault.start();
-        // Then the kernel rule: uid 1000 may reach loopback and nothing else,
-        // so the proxy above is the only way out for lifemodel AND for the
-        // build of its code. A container that cannot carry the rule does not
-        // start lifemodel at all (a missing input of the loader's own).
-        await egress.install();
-        http = createLoaderHttp({
-          state,
-          supervisor,
-          bootstrap,
-          logger,
-          clock,
-          vaultAccount: () => agentVault.ownerAccount(),
-        });
-        await listen();
-        http.server.on('error', (error) => {
-          fatal(
-            new LoaderFatalError(
-              `the loader's own server failed on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
-              { cause: error }
-            )
-          );
-        });
-        logger.info(
-          { port: config.httpPort, volume: config.volumeRoot, repo: config.repoDir },
-          'the loader is up'
-        );
-        if ((await state.readAuth()) === null) {
-          logger.info({}, 'no password is set: the owner is asked at /setup');
-          return;
-        }
-        // A password is set, so this start continues where the last one left
-        // off: seed if the volume is empty, build if needed, start lifemodel.
-        // A failure here is the instance's state, not the loader's exit.
-        void bootstrap.ensureReady('startup');
-      } catch (error) {
-        fatal(
-          error instanceof LoaderFatalError
-            ? error
-            : new LoaderFatalError(
-                `the loader cannot listen on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
-                { cause: error }
-              )
-        );
+        await run;
+      } finally {
+        if (startup === run) startup = null;
       }
     },
 
@@ -212,6 +307,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       const deadline = clock.now() + config.stopBudgetMs;
       const left = (): number => Math.max(0, deadline - clock.now());
       logger.info({ reason, budgetMs: config.stopBudgetMs }, 'the loader is stopping');
+      // The latch comes first: no startup continues past its fences, and
+      // nothing starts from here on (not a start in flight, not a restart).
+      stopping = true;
       // Nothing starts from here on: not a start in flight, not a restart.
       supervisor.close();
       const pending: string[] = [];
@@ -237,6 +335,9 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       // watching the page sees the stop rather than a connection error.
       const caddyLeft = await frontDoor.stop(left());
       if (!caddyLeft) pending.push('caddy (not reaped after SIGKILL by the stop deadline)');
+      // A start that was still working when the stop began: its continuation
+      // is fenced, awaited, and re-stopped under the same deadline.
+      await stopStartupLeftovers(left, pending);
       if (pending.length > 0) {
         // Each entry says which bound it hit: the shared deadline, or a step's
         // own shorter cap (rework 3, review round 4 finding 3).
