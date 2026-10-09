@@ -37,8 +37,10 @@ the repository's installation, and each person's plugin and hooks are their own.
   revision, the tasks included, the criterion, the full-check, mutation and
   review evidence, and what is left pending. Beside it the marker comment
   `accepted: <accepted revision> -- <evidence>`, which the adapter exports as
-  the stage's `acceptance`: an accepted stage stays open until the feature
-  lands, and its accepted revision releases the dependants in the later stages
+  the stage's `acceptance`: an accepted stage stays open until its accepted work
+  lands on the main line and its current specs/docs are synced. Then its own
+  DONE WHEN permits closing its tasks and stage; an unfinished parent feature
+  stays open. Before closure, its accepted revision releases the dependants in the later stages
   of the same feature (see ready below). The latest such comment counts.
 - **Features and stages:** beads `epic`. A feature is a root epic wearing the
   milestone label; a stage is an epic under it. A stage's coordinator holds it
