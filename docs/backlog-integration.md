@@ -35,7 +35,11 @@ the repository's installation, and each person's plugin and hooks are their own.
   decisions are ADRs in `docs/adr/`, numbered, never renumbered.
 - **Acceptance records:** on the stage's issue, as a comment: base and final
   revision, the tasks included, the criterion, the full-check, mutation and
-  review evidence, and what is left pending.
+  review evidence, and what is left pending. Beside it the marker comment
+  `accepted: <accepted revision> -- <evidence>`, which the adapter exports as
+  the stage's `acceptance`: an accepted stage stays open until the feature
+  lands, and its accepted revision releases the dependants in the later stages
+  of the same feature (see ready below). The latest such comment counts.
 - **Features and stages:** beads `epic`. A feature is a root epic wearing the
   milestone label; a stage is an epic under it. A stage's coordinator holds it
   (assignee) while it is being integrated.
@@ -72,7 +76,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.82.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.37.0,
+  0.87.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.39.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
@@ -92,9 +96,13 @@ the repository's installation, and each person's plugin and hooks are their own.
   comment `id`, `created_at`, `author` and `text`. The run script reads that
   export as `--backlog` (`node .backlog/adapter.mjs` written to a file), and a
   record is posted unchanged with `br comments add <id> -f <file> --actor
-  <agent>`, the file holding exactly what the script printed. `timeRecordsExempt`
-  is empty: time records are adopted by this setup and no unclaimed work was in
-  flight.
+  <agent>`, the file holding exactly what the script printed. A record is
+  never edited or deleted (br has no comment deletion, and the comment id must
+  stay the same in every export): a damaged, conflicting or stray one is
+  retired by the run script's `void`, naming its comment id, posted the same
+  way; where the record still matters it is then written again with the run
+  script. `timeRecordsExempt` is empty: time records are adopted by this setup
+  and no unclaimed work was in flight.
 - **Tracker layout:** the store is `br` (beads_rust 0.7): one SQLite database
   per machine under the main checkout's `.beads/`, which `br` resolves from
   every worktree; its JSONL export `.beads/issues.jsonl` is a tracked file.
@@ -155,8 +163,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   remote ref reaches; none is a pass that says so). `--export-at <rev>`
   resolves tasks from the export at a revision. An empty range is exit 2,
   never a pass. Its tests: `node --test .backlog/commits.test.mjs` (a scratch
-  remote); the adapter's: `node --test .backlog/adapter.test.mjs`; the merge
-  gate's: `node --test .backlog/merge-gate.test.mjs`.
+  remote); the adapter's: `node --test .backlog/adapter.test.mjs`; ready's:
+  `node --test .backlog/ready.test.mjs`; the merge gate's:
+  `node --test .backlog/merge-gate.test.mjs`.
 - **Local entry points:** `.githooks/pre-commit` (tracker layout guard, then
   the backlog gate when the export or the gate is staged),
   `.githooks/commit-msg` (commit links), `.githooks/pre-push` (the introduced
@@ -294,16 +303,16 @@ what this protocol adds is listed.
 | --- | --- |
 | create | `br create "<title>" -t task\|bug\|epic -l <milestone>,<area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [--acceptance ...] --silent` |
 | link / unlink | `br dep add <consumer leaf> <producer leaf>` (`blocks`), the reason and what releases it in a comment; provenance is `discovered-from`, which the adapter never reads as a dependency |
-| claim | `br update <id> --claim --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>'` (atomic, exclusive; sets assignee and `in_progress`), then the record `runs.mjs claim` prints. A same-stage dependant of an `implemented` prerequisite is blocked to br: claim it with `--claim --force --actor ...`, which stays exclusive and keeps the edge |
+| claim | `br update <id> --claim --actor '<harness>-<role>:<person>@<machine>:<branch>#<session>'` (atomic, exclusive; sets assignee and `in_progress`), then the record `runs.mjs claim` prints. A dependant of an `implemented` prerequisite - in the same stage, or in a later stage of the same feature once the prerequisite's stage is accepted and still open - is blocked to br: claim it with `--claim --force --actor ...`, which stays exclusive and keeps the edge, only when `npm run ready` lists it |
 | release | `br update <id> --status open --assignee '' --actor ...`; submitted and implemented work keeps its status |
 | implemented | coordinator: `br update <id> --status implemented --assignee '' --transition-comment 'implemented: <rev> -- <checks>' --actor ...` |
 | submitted | worker: `br update <id> --status submitted --assignee '' --transition-comment 'submitted: <branch>@<rev> -- <evidence>' --actor ...`; the coordinator then takes the assignee |
 | reopen | `br update <id> --status in_progress --transition-comment 'reopened: <why>'`, then recheck dependants |
 | close | `br close <id> --reason 'accepted at <rev>: <evidence a stranger can check>'` after stage acceptance; cancellation or duplicate says so in the reason |
-| comment / edit | `br comments add <id> ...`, `br update`; a work record with `br comments add <id> -f <file> --actor <agent>`, the file exactly as the run script printed it, never reflowed or edited |
+| comment / edit | `br comments add <id> ...`, `br update`; a work record with `br comments add <id> -f <file> --actor <agent>`, the file exactly as the run script printed it, never reflowed, edited or deleted; a wrong one is retired by the run script's `void` record |
 | defer / undefer | `br defer <id> --until <date>` (the reason in a comment); `br undefer <id>` |
 | milestone / label | `br label add <root> <milestone>` (values from the config); `br update <id> --add-label ...` |
-| ready | `npm run ready` (`node .backlog/ready.mjs [--stage <id>] [--checkout <rev>]`): open unheld leaves whose prerequisites are closed, or implemented in the same stage with the recorded revision contained in the checkout. `br ready` alone never releases a dependant of an implemented prerequisite |
+| ready | `npm run ready` (`node .backlog/ready.mjs [--stage <id>] [--checkout <rev>]`): open unheld leaves whose prerequisites are closed, or implemented in the same stage with the recorded revision contained in the checkout, or implemented in an earlier stage of the same feature whose `accepted:` revision is contained in the checkout (the stage still open). A prerequisite in another feature waits for closure. `br ready` alone never releases a dependant of an implemented prerequisite |
 | holds | `br list --status in_progress` |
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented` |
 | children | `br show <id>` lists them, every status; or the adapter's export filtered on `parent` |
