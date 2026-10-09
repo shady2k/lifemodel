@@ -98,8 +98,8 @@ describe('DeferredStorage', () => {
       await deferredStorage.flush();
 
       expect(mockStorage.save).toHaveBeenCalledTimes(2);
-      expect(mockStorage.save).toHaveBeenCalledWith('key1', { value: 'test1' });
-      expect(mockStorage.save).toHaveBeenCalledWith('key2', { value: 'test2' });
+      expect(mockStorage.save).toHaveBeenCalledWith('key1', { value: 'test1' }, undefined);
+      expect(mockStorage.save).toHaveBeenCalledWith('key2', { value: 'test2' }, undefined);
     });
 
     it('should not write clean entries on subsequent flushes', async () => {
@@ -176,7 +176,7 @@ describe('DeferredStorage', () => {
       // Only one write to disk after flush
       await deferredStorage.flush();
       expect(mockStorage.save).toHaveBeenCalledTimes(1);
-      expect(mockStorage.save).toHaveBeenCalledWith('sameKey', { value: 3 });
+      expect(mockStorage.save).toHaveBeenCalledWith('sameKey', { value: 3 }, undefined);
     });
   });
 
@@ -201,7 +201,7 @@ describe('DeferredStorage', () => {
 
       // Second flush should persist the updated value
       await deferredStorage.flush();
-      expect(mockStorage.save).toHaveBeenLastCalledWith('key1', { value: 'updated-during-flush' });
+      expect(mockStorage.save).toHaveBeenLastCalledWith('key1', { value: 'updated-during-flush' }, undefined);
     });
 
     it('should schedule re-flush when flush is requested during in-progress flush', async () => {
@@ -273,7 +273,7 @@ describe('DeferredStorage', () => {
       // Wait for auto-flush (interval is 100ms)
       await new Promise((r) => setTimeout(r, 150));
 
-      expect(mockStorage.save).toHaveBeenCalledWith('autoKey', { value: 'auto' });
+      expect(mockStorage.save).toHaveBeenCalledWith('autoKey', { value: 'auto' }, undefined);
     });
   });
 
@@ -283,7 +283,7 @@ describe('DeferredStorage', () => {
 
       await deferredStorage.shutdown();
 
-      expect(mockStorage.save).toHaveBeenCalledWith('shutdownKey', { value: 'flush-me' });
+      expect(mockStorage.save).toHaveBeenCalledWith('shutdownKey', { value: 'flush-me' }, undefined);
     });
 
     it('writes everything queued up to shutdown even when an auto-flush is in progress', async () => {

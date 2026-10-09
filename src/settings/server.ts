@@ -17,7 +17,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Socket } from 'node:net';
 import type { Logger } from '../types/index.js';
-import type { ConfigLoader } from '../config/config-loader.js';
+import type { AgentConfigFile } from '../config/config-schema.js';
 import {
   applySettings,
   redactEndpointUrl,
@@ -25,6 +25,17 @@ import {
   settingsInputFromFile,
   validateSettings,
 } from './settings.js';
+
+/**
+ * The config boundary the interface serves: what the page reads and what a
+ * save writes, with the write's stop options (`signal`, see
+ * `ConfigLoader.writeFile`). Structural, so a test can hold a save in flight
+ * with its own writer while the publication contract stays the product's.
+ */
+export interface SettingsConfig {
+  readFile(): Promise<AgentConfigFile | null>;
+  writeFile(file: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void>;
+}
 import { renderSettingsPage } from './page.js';
 
 /** The port Caddy proxies the root host to (docs/features/instance/image.md). */
@@ -42,7 +53,7 @@ const OVERRIDING_VARIABLES = [
 
 export interface SettingsServerOptions {
   /** The loader of lifemodel's config file: the page reads and writes through it. */
-  config: ConfigLoader;
+  config: SettingsConfig;
   logger: Logger;
   /** Where lifemodel listens; Caddy reaches it here (default 7100). */
   port?: number;
@@ -61,6 +72,12 @@ export interface SettingsServerOptions {
    * need their room after it. Default 5 s.
    */
   closeGraceMs?: number;
+  /**
+   * Observed for every incoming connection - a test watches the socket the
+   * half-sent request holds (finding I's receipt is an event, not a sleep),
+   * and an operator log can name what the close later gave up on.
+   */
+  onConnection?: (socket: Socket) => void;
 }
 
 export interface SettingsServer {
@@ -92,6 +109,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   app.server.on('connection', (socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
+    options.onConnection?.(socket);
   });
   // A refused socket's error must not escape as an unhandled one.
   app.server.on('clientError', () => undefined);
@@ -111,9 +129,16 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
 
   app.get('/', async (request, reply) => {
     const file = await config.readFile();
+    const values = settingsInputFromFile(file);
+    // The GET runs the SAVE's rules on what the file holds: a config an older
+    // interface (or a hand edit) wrote is REFUSED with its field named and
+    // shown redacted - never migrated silently behind the owner's back, and
+    // never echoed with the secret part of its endpoint URL (review round 2,
+    // finding F).
     return reply.type('text/html; charset=utf-8').send(
       renderSettingsPage({
-        values: settingsInputFromFile(file),
+        values,
+        errors: validateSettings(values),
         host: request.headers.host,
         overriddenBy: overridingVariables(),
       })
@@ -126,7 +151,40 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   // the two. The serialized body below is the answer each save describes.
   let saveChain: Promise<unknown> = Promise.resolve();
 
+  // The ONE publication signal of this interface, aborted once: when the
+  // close gives up on its grace, EVERY write still in flight - and every
+  // write that starts after - refuses at its publication point (the writer
+  // checks the signal before its rename). The stop contracts with the
+  // interface to publish nothing the owner has not seen answered; a per-save
+  // handle cannot do that (a write admitted a moment later would have no
+  // handle in the abort sweep). Destroying an HTTP socket is NOT a
+  // cancellation of an async writer; this signal is (review round 2,
+  // finding A).
+  const stopSignal = new AbortController();
+
+  const closingRefusal = async (reply: FastifyReply): Promise<unknown> =>
+    reply
+      .code(503)
+      .type('text/plain; charset=utf-8')
+      .send('lifemodel is restarting; save again when it is up\n');
+
+  /** The request's socket is gone: no answer can reach anybody. */
+  const responseGone = (request: FastifyRequest): boolean => request.raw.socket.destroyed;
+
   const applySave = async (request: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
+    // This save was ADMITTED before the close and sat queued in the chain
+    // behind another save. Whatever the close's grace answered or not, the
+    // stop does not carry new writes: the admission stands only while the
+    // interface is open, and it is RE-checked here, where the queued work
+    // actually starts (finding A: a queued save used to run to the end and
+    // publish under the close). Named, not silent.
+    if (closing) {
+      logger.warn(
+        { route: '/settings' },
+        'Settings refused: a save admitted earlier is still queued into the stop'
+      );
+      return await closingRefusal(reply);
+    }
     const body = (request.body ?? {}) as Record<string, unknown>;
     const input = settingsInputFromBody(body);
     const errors = validateSettings(input);
@@ -148,15 +206,33 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
 
     const existing = await config.readFile();
     try {
-      await config.writeFile(applySettings(existing, input));
+      // The write carries the interface's one stop signal: an abandoned
+      // close has it aborted, and the writer stops at its publication point
+      // instead of publishing under a process that is leaving (finding A).
+      await config.writeFile(applySettings(existing, input), { signal: stopSignal.signal });
     } catch (error) {
-      // Nothing was written (the write is atomic): the owner is told, and the
-      // running lifemodel is left alone rather than restarted onto a config
-      // that is not there.
+      // Nothing was published (the write is atomic, and its publication point
+      // is one rename it did not reach or did not pass): the owner is told,
+      // and the running lifemodel is left alone rather than restarted onto a
+      // config that is not there.
+      const socketGone = responseGone(request);
       logger.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Settings could not be written'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          published: false,
+          socketGone,
+          stopRefused: abandoned && stopSignal.signal.aborted,
+        },
+        socketGone
+          ? 'Settings save gave up with the close: nothing was published'
+          : 'Settings could not be written'
       );
+      if (socketGone) {
+        // The socket the answer would go to is destroyed (the close gave up
+        // on this request): no reply is possible, and dereferencing one
+        // would hide the logged outcome instead.
+        return undefined;
+      }
       return reply
         .code(500)
         .type('text/html; charset=utf-8')
@@ -265,6 +341,9 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   let boundPort = port;
   // Set as the FIRST thing close does: the very next save is refused.
   let closing = false;
+  // Set when the close GAVE UP on the grace: from here, nothing still running
+  // may publish - the pending writes are stopped at their publication points.
+  let abandoned = false;
 
   return {
     listen: async () => {
@@ -284,22 +363,24 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
      */
     close: async () => {
       closing = true;
-      const finished = app.close().then(
-        () => true,
-        () => true
-      );
-      const inGrace = await Promise.race([
-        finished,
+      const deadline = Date.now() + closeGraceMs;
+      const runsOutWithin = (ms: number): Promise<false> =>
         new Promise<false>((resolve) => {
           const timer = setTimeout(() => {
             resolve(false);
-          }, closeGraceMs);
+          }, ms);
           timer.unref?.();
-        }),
-      ]);
-      if (!inGrace) {
-        // Whoever is still holding a socket half-open (a POST with a
-        // Content-Length and no body) is destroyed: the stop goes on.
+        });
+      const giveUp = (): void => {
+        // The grace is over. The stop contracts the interface to publish
+        // nothing the owner has not seen answered (review round 2, finding
+        // A): every write still in flight is stopped at its publication
+        // point - the writer checks the signal before its rename - and
+        // whoever is still holding a socket half-open (a POST with a
+        // Content-Length and no body) is destroyed. Destroying an HTTP
+        // socket is NOT a cancellation of an async writer; the signal is.
+        abandoned = true;
+        stopSignal.abort();
         logger.warn(
           {
             sockets: sockets.size,
@@ -310,7 +391,40 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         for (const socket of sockets) {
           socket.destroy();
         }
+      };
+
+      // Stage 1 - DRAIN the saves, while their sockets are still alive: a
+      // save already running publishes and answers, and a save queued behind
+      // it is refused by its own start (applySave re-checks `closing` where
+      // the queued work begins). fastify's close is NOT called first: it
+      // swallows the queued requests before their refusal could reach the
+      // owner (measured: a queued save answered as a dead socket, no 503),
+      // and that is what the refusal is for.
+      const drained = await Promise.race([
+        saveChain.then(
+          () => true,
+          () => true
+        ),
+        runsOutWithin(closeGraceMs),
+      ]);
+      if (drained) {
+        // Everything admitted settled: whatever it answered, refused or
+        // stopped, NOTHING can still publish past this point. Hand the
+        // listen socket back, inside the budget that is left.
+        const finished = app.close().then(
+          () => true,
+          () => true
+        );
+        if (await Promise.race([finished, runsOutWithin(deadline - Date.now())])) {
+          return;
+        }
       }
+      giveUp();
+      // Do NOT wait for the stopped writes here: the abandonment is recorded
+      // (nothing they do can publish any more - stage 1 drained what it
+      // could, stage 2's stragglers have nothing live to refuse), and a stop
+      // that hangs past this point belongs to lifemodel's one stop deadline,
+      // not to this interface's grace.
     },
     address: () => `http://${host}:${String(boundPort)}`,
   };

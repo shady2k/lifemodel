@@ -1,4 +1,4 @@
-import type { Storage } from './storage.js';
+import type { Storage, StorageSaveOptions } from './storage.js';
 import type { Logger } from '../types/index.js';
 
 /**
@@ -198,8 +198,11 @@ export class DeferredStorage implements Storage {
    * finish and then runs its own pass: an AWAITED flush() is a durability
    * point (the durable inbound log and the stop's final flush depend on it),
    * not a fire-and-forget request.
+   *
+   * The optional save options reach the underlying writes: a signal aborts
+   * them at their publication points (see StorageSaveOptions).
    */
-  async flush(): Promise<void> {
+  async flush(options?: StorageSaveOptions): Promise<void> {
     while (this.flushing) {
       this.reflushNeeded = true;
       await this.flushCompletion;
@@ -232,7 +235,7 @@ export class DeferredStorage implements Storage {
 
       // Write dirty entries (sequentially to avoid overwhelming disk)
       for (const { key, data } of dirtyEntries) {
-        await this.underlying.save(key, data);
+        await this.underlying.save(key, data, options);
         // Only mark clean if the cache entry still holds the same data reference.
         // If save() was called during the flush with new data, the reference will
         // differ, so we leave it dirty for the next flush.
