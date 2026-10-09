@@ -93,9 +93,9 @@ exit 0
  * provisioning asks it - including the session file that proves the account
  * can act for the loader.
  */
-const AGENT_VAULT_SOURCE = `#!/usr/bin/env node
+const AGENT_VAULT_SOURCE = (caFile: string): string => `#!/usr/bin/env node
 const { createServer } = require('node:http');
-const { mkdirSync, writeFileSync } = require('node:fs');
+const { mkdirSync, readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
 const args = process.argv.slice(2);
@@ -128,7 +128,7 @@ if (args[0] === 'server') {
 } else if (args[0] === 'agent') {
   process.stdout.write('av_agt_the-stand-in-token\\n');
 } else if (args[0] === 'ca') {
-  process.stdout.write('-----BEGIN CERTIFICATE-----\\nMIIBthe-stand-in\\n-----END CERTIFICATE-----\\n');
+  process.stdout.write(readFileSync(${JSON.stringify(caFile)}, 'utf8'));
 } else {
   process.stdout.write('the stand-in knows only the server and the provisioning commands\\n');
   process.exit(2);
@@ -183,6 +183,30 @@ async function freePort(): Promise<number> {
 describe('the loader as the container main process', () => {
   it('forwards SIGTERM, waits for lifemodel to drain, and leaves with 0', async () => {
     const standIn = makeStandInVolume();
+    const caFile = join(standIn.root, 'synthetic-ca.pem');
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        join(standIn.root, 'synthetic-ca.key'),
+        '-out',
+        caFile,
+        '-days',
+        '1',
+        '-subj',
+        '/CN=loader-signal-test-ca',
+        '-addext',
+        'basicConstraints=critical,CA:TRUE',
+        '-addext',
+        'keyUsage=critical,keyCertSign,cRLSign',
+      ],
+      { timeout: 10_000, stdio: 'ignore' }
+    );
     const vaultApiPort = await freePort();
     const config = loadConfig({
       LIFEMODEL_VOLUME_ROOT: standIn.root,
@@ -196,7 +220,7 @@ describe('the loader as the container main process', () => {
     });
     writeFileSync(config.caddy.binary, CADDY_SOURCE, { mode: 0o755 });
     writeFileSync(config.caddy.config, ':80 {\n}\n');
-    writeFileSync(config.agentVault.binary, AGENT_VAULT_SOURCE, { mode: 0o755 });
+    writeFileSync(config.agentVault.binary, AGENT_VAULT_SOURCE(caFile), { mode: 0o755 });
     const iptables = join(standIn.root, 'iptables');
     const egressLog = join(standIn.root, 'egress.log');
     writeFileSync(iptables, IPTABLES_SOURCE, { mode: 0o755 });
