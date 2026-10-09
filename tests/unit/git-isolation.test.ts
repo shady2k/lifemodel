@@ -5,7 +5,7 @@
  * temporary directory must leave it untouched once the environment is scrubbed.
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -123,44 +123,106 @@ describe('a suite started from a git hook', () => {
     expect(repo.config()).toBe(configBefore);
   });
 
-  it('has the husky hook drop GIT_* in the product-checks subshell only, keeping the gates’ git environment', () => {
-    const hook = readFileSync(
-      fileURLToPath(new URL('../../.husky/pre-commit', import.meta.url)),
-      'utf8'
-    );
-    const lines = hook.split('\n');
-    const lineOf = (needle: string): number => lines.findIndex((line) => line.includes(needle));
-    const subshellLine = lines.findIndex((line) => line.trim() === '(');
-    const closeLine = lines.findIndex((line) => line.trim() === ')');
-    const unsetLine = lineOf('unset "$_var"');
-    const gateLine = lineOf('node .backlog/gate.mjs');
-    const startLine = lineOf('npx lint-staged');
-    const testsLine = lineOf('npx vitest run');
-    // The comment mentions the command too; the actual guard line is exact.
-    const guardLine = lines.findIndex((line) => line.trim().startsWith('if git diff --cached'));
-    // After lint-staged, before the tests: the checks run env-clean.
-    expect(unsetLine).toBeGreaterThan(startLine);
-    expect(unsetLine).toBeLessThan(testsLine);
-    // ...inside a subshell...
-    expect(subshellLine).toBeGreaterThan(startLine);
-    expect(unsetLine).toBeGreaterThan(subshellLine);
-    expect(closeLine).toBeGreaterThan(unsetLine);
-    // ...and the hook's own gates AFTER the subshell keep the hook's git
-    // environment: the tracker guard judges the commit's index, not the
-    // repository's default one (git commit --only names another).
-    expect(closeLine).toBeLessThan(guardLine);
-    expect(gateLine).toBeGreaterThan(closeLine);
-  });
+  it.each([false, true])(
+    'dispatches the real hook with tracker staged in the commit index: %s',
+    (trackerInCommit) => {
+      const dir = tempDir('git-hook-dispatch-');
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // No inherited Git settings or user/system Git configuration.
+      const clean: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH,
+        HOME: dir,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+      };
+      git(dir, ['init', '-q'], clean);
+      git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/fixture-feature'], clean);
+      mkdirSync(join(dir, '.beads'));
+      mkdirSync(join(dir, '.backlog'));
+      const tracker = join(dir, '.beads', 'issues.jsonl');
+      writeFileSync(tracker, 'base\n');
+      writeFileSync(join(dir, '.backlog', 'config.json'), '{}\n');
+      git(dir, ['add', '.beads/issues.jsonl', '.backlog/config.json'], clean);
+      git(dir, ['commit', '-q', '-m', 'fixture base'], clean);
 
-  it('has the husky hook drop GIT_* after lint-staged and before the tests', () => {
-    const hook = readFileSync(
-      fileURLToPath(new URL('../../.husky/pre-commit', import.meta.url)),
-      'utf8'
-    );
-    const unset = hook.indexOf('unset "$_var"');
-    expect(unset).toBeGreaterThan(hook.indexOf('npx lint-staged'));
-    expect(unset).toBeLessThan(hook.indexOf('npx vitest run'));
-  });
+      const alternate = join(dir, '.git', 'commit-index');
+      const alternateEnv = { ...clean, GIT_INDEX_FILE: alternate };
+      git(dir, ['read-tree', 'HEAD'], alternateEnv);
+      const commitContent = trackerInCommit ? 'commit\n' : 'base\n';
+      const defaultContent = trackerInCommit ? 'base\n' : 'default\n';
+      writeFileSync(tracker, commitContent);
+      git(dir, ['add', '.beads/issues.jsonl'], alternateEnv);
+      writeFileSync(tracker, defaultContent);
+      git(dir, ['add', '.beads/issues.jsonl'], clean);
+
+      const names = [
+        'GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
+        'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+      ];
+      const objects = join(dir, '.git', 'objects');
+      const extraObjects = join(dir, 'extra-objects');
+      mkdirSync(extraObjects);
+      const dirty = {
+        GIT_INDEX_FILE: alternate,
+        GIT_DIR: join(dir, '.git'),
+        GIT_WORK_TREE: dir,
+        GIT_COMMON_DIR: join(dir, '.git'),
+        GIT_OBJECT_DIRECTORY: objects,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: extraObjects,
+      };
+      const log = join(dir, 'calls.jsonl');
+      // Only external tools are substituted. Git and the hook's shell,
+      // tracker guard, branch lookup and HEAD lookup remain real.
+      const shim = `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { basename } = require('node:path');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+const tool = basename(process.argv[1]);
+let phase;
+if (tool === 'npx' && JSON.stringify(args) === '["lint-staged"]') phase = 'lint';
+else if (tool === 'node' && JSON.stringify(args) === '["scripts/test-isolated.mjs","check"]') phase = 'product';
+else if (tool === 'node' && JSON.stringify(args) === '[".backlog/gate.mjs"]') phase = 'gate';
+else throw new Error('unexpected dispatch: ' + tool + ' ' + JSON.stringify(args));
+const env = Object.fromEntries(${JSON.stringify(names)}.map(name => [name, process.env[name] ?? null]));
+let staged = null;
+if (phase !== 'product') {
+  const result = spawnSync('git', ['show', ':0:.beads/issues.jsonl'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr);
+  staged = result.stdout;
+}
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ phase, env, staged }) + '\\n');
+`;
+      for (const tool of ['npx', 'node']) {
+        writeFileSync(join(bin, tool), shim, { mode: 0o755 });
+      }
+      expect(git(dir, ['show', ':0:.beads/issues.jsonl'], clean)).toBe(defaultContent.trim());
+      expect(git(dir, ['show', ':0:.beads/issues.jsonl'], alternateEnv)).toBe(commitContent.trim());
+      const hook = fileURLToPath(new URL('../../.husky/pre-commit', import.meta.url));
+      const run = spawnSync('/bin/sh', [hook], {
+        cwd: dir,
+        env: { ...clean, ...dirty, PATH: `${bin}:${clean.PATH}` },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(run.error).toBeUndefined();
+      expect(run.status).toBe(trackerInCommit ? 1 : 0);
+      if (trackerInCommit) expect(run.stderr).toContain('TRACKER:');
+      else expect(run.stderr).toBe('');
+      const calls = readFileSync(log, 'utf8').trim().split('\n').map(
+        (line) => JSON.parse(line)
+      );
+      expect(calls).toEqual([
+        { phase: 'lint', env: dirty, staged: commitContent },
+        { phase: 'product', env: Object.fromEntries(names.map(name => [name, null])), staged: null },
+        ...(!trackerInCommit ? [{ phase: 'gate', env: dirty, staged: commitContent }] : []),
+      ]);
+      expect(readFileSync(tracker, 'utf8')).toBe(defaultContent);
+      expect(git(dir, ['show', ':0:.beads/issues.jsonl'], clean)).toBe(defaultContent.trim());
+      expect(git(dir, ['show', ':0:.beads/issues.jsonl'], alternateEnv)).toBe(commitContent.trim());
+    }
+  );
 });
 
 /**
