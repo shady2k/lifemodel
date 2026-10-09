@@ -13,6 +13,7 @@ import { join } from 'node:path';
 
 import type { LoaderConfig } from './config.js';
 import { LoaderFatalError } from './errors.js';
+import { lifemodelEnvironment } from './env-boundary.js';
 import type { CommandRunner } from './exec.js';
 import type { FileSystem } from './fs.js';
 import type { LoaderLogger } from './logger.js';
@@ -215,22 +216,23 @@ export async function seedRepositoryIfMissing(deps: RepositoryDeps): Promise<boo
 
 /**
  * The environment a build runs in: as lifemodel, with a home it may write, and
- * pointed at Agent Vault's proxy the way lifemodel's own process is. npm reads
- * HTTPS_PROXY/HTTP_PROXY/NO_PROXY and Node reads NODE_EXTRA_CA_CERTS, so a
- * build that runs behind the egress rule still reaches the registry: the
- * request goes to the vault's proxy, and a host the vault has no service for
- * passes straight through it. The proxy's values come LAST, so a name the
- * container itself was given (`docker run -e HTTPS_PROXY=...`) cannot win over
- * them.
+ * pointed at Agent Vault's proxy the way lifemodel's own process is, and
+ * built from the SAME explicit environment boundary as lifemodel's process
+ * (loader/src/env-boundary.ts): npm reads HTTPS_PROXY/HTTP_PROXY/NO_PROXY and
+ * Node reads NODE_EXTRA_CA_CERTS, so a build that runs behind the egress rule
+ * still reaches the registry - the request goes to the vault's proxy, and a
+ * host the vault has no service for passes straight through it. The proxy's
+ * values replace whatever the container was given (a `docker run -e
+ * HTTPS_PROXY=...` cannot win over them), and a model key or an admin
+ * credential the container inherited does not reach the build either.
  */
 function buildEnvironment(config: LoaderConfig, proxy: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...lifemodelEnvironment(process.env, proxy),
     HOME: config.dataDir,
     npm_config_cache: join(config.dataDir, 'npm-cache'),
     npm_config_fund: 'false',
     npm_config_audit: 'false',
-    ...proxy,
   };
 }
 

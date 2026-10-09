@@ -31,6 +31,7 @@
  */
 import type { Clock } from './clock.js';
 import type { LoaderConfig } from './config.js';
+import { lifemodelEnvironment } from './env-boundary.js';
 import type { ProcessLauncher, SpawnOptions, SpawnedProcess } from './exec.js';
 import type { LoaderLogger } from './logger.js';
 import { describe } from './state.js';
@@ -107,9 +108,19 @@ export interface Supervisor {
   status(): LifemodelStatus;
 }
 
-/** The environment lifemodel runs in: its data on the volume, a home it may write. */
+/**
+ * The environment lifemodel runs in: its data on the volume, a home it may
+ * write, and the EXPLICIT boundary from loader/src/env-boundary.ts - the
+ * container's named variables and the proxy's, never the whole
+ * `process.env` (a model key or an admin credential the container inherited
+ * stops here; finding 6 residual, stage-3 finding D).
+ */
 function childEnvironment(config: LoaderConfig, proxy: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...process.env, DATA_PATH: config.dataDir, HOME: config.dataDir, ...proxy };
+  return {
+    ...lifemodelEnvironment(process.env, proxy),
+    DATA_PATH: config.dataDir,
+    HOME: config.dataDir,
+  };
 }
 
 interface ExitSignal {
