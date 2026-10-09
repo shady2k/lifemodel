@@ -213,15 +213,6 @@ export class ConfigLoader {
 
     // LLM
     if (file.llm) {
-      if (file.llm.fastModel) {
-        config.llm.fastModel = file.llm.fastModel;
-      }
-      if (file.llm.smartModel) {
-        config.llm.smartModel = file.llm.smartModel;
-      }
-      if (file.llm.motorModel) {
-        config.llm.motorModel = file.llm.motorModel;
-      }
       // The endpoint: each field on its own, so a half-written one is visible
       // as half-written rather than merged away (lifemodel-q4x.4.1).
       if (file.llm.endpoint) {
@@ -271,11 +262,6 @@ export class ConfigLoader {
    */
   private mergeEnvironment(config: MergedConfig): void {
     // Secrets (always from env)
-    const openRouterKey = process.env['OPENROUTER_API_KEY'];
-    if (openRouterKey) {
-      config.llm.openRouterApiKey = openRouterKey;
-    }
-
     const telegramToken = process.env['TELEGRAM_BOT_TOKEN'];
     if (telegramToken) {
       config.telegramBotToken = telegramToken;
@@ -285,22 +271,6 @@ export class ConfigLoader {
     const chatId = process.env['PRIMARY_USER_CHAT_ID'];
     if (chatId) {
       config.primaryUser.telegramChatId = chatId;
-    }
-
-    // LLM models (env overrides config)
-    const fastModel = process.env['LLM_FAST_MODEL'];
-    if (fastModel) {
-      config.llm.fastModel = fastModel;
-    }
-
-    const smartModel = process.env['LLM_SMART_MODEL'];
-    if (smartModel) {
-      config.llm.smartModel = smartModel;
-    }
-
-    const motorModel = process.env['LLM_MOTOR_MODEL'];
-    if (motorModel) {
-      config.llm.motorModel = motorModel;
     }
 
     // The endpoint (each field on its own: an environment variable names one

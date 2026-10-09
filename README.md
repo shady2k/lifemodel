@@ -101,7 +101,7 @@ Cognition uses **native OpenAI tool-calling** with *Codex-style natural terminat
 - **Docker** — required for the Motor Cortex's agentic (code-executing) runs
   and for the isolated test boundary (see [Test isolation](#-development))
 - A **Telegram bot token** ([@BotFather](https://t.me/BotFather))
-- An **[OpenRouter](https://openrouter.ai/)** API key (or any OpenAI-compatible endpoint — LM Studio, Ollama, vLLM, …)
+- An OpenAI-compatible endpoint with a model per role — LM Studio, Ollama, vLLM, [OpenRouter](https://openrouter.ai/), …
 
 ### Install & run
 
@@ -135,10 +135,6 @@ lifemodel is configured via a `.env` file. The essentials:
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `PRIMARY_USER_CHAT_ID` | Your Telegram chat ID (DM [@userinfobot](https://t.me/userinfobot) to get it) — enables proactive messaging |
-| `OPENROUTER_API_KEY` | API key from [openrouter.ai](https://openrouter.ai/) |
-| `LLM_FAST_MODEL` | Cheap model for classification / yes-no / emotion detection |
-| `LLM_SMART_MODEL` | Expensive model for reasoning & message composition |
-| `LLM_MOTOR_MODEL` | Model used by the Motor Cortex agentic runtime |
 | `TZ` | Your timezone (e.g. `Europe/Moscow`) |
 | `LOG_LEVEL` | `info`, `debug`, … |
 
@@ -159,9 +155,10 @@ environment variables, which name the same fields:
 | `LLM_ENDPOINT_SMART_MODEL` | The model for the *smart* role (reasoning, composition) |
 | `LLM_ENDPOINT_MOTOR_MODEL` | The model for the *motor* role (Motor Cortex) |
 
-A role the endpoint does not name is served by OpenRouter, whose key comes from
-`OPENROUTER_API_KEY`; with no endpoint configured at all, OpenRouter serves
-every role.
+There is no second endpoint and no fallback: a role the endpoint does not name
+is refused with an error naming that role, never answered with a different
+endpoint or another role's model. No key is ever set here — a server that needs
+one is reached through Agent Vault, which injects it.
 
 </details>
 
@@ -324,7 +321,7 @@ The codebase is heavily documented. Start here:
 ## 🛠️ Tech Stack
 
 **Language & runtime:** TypeScript (strict, ESM) on Node.js ≥ 24
-**LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · [OpenRouter](https://openrouter.ai/) · OpenAI-compatible providers
+**LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · OpenAI-compatible providers
 **Memory:** [LanceDB](https://lancedb.com/) (vector store) + a custom graph store · [Transformers.js](https://huggingface.co/docs/transformers.js) embeddings
 **Channels:** [grammY](https://grammy.dev/) (Telegram)
 **Sandbox:** Docker-isolated runtime + IPC

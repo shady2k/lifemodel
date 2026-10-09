@@ -67,12 +67,6 @@ export interface AgentConfigFile {
 
   /** LLM configuration */
   llm?: {
-    /** Fast model for classification (OpenRouter) */
-    fastModel?: string;
-    /** Smart model for composition (OpenRouter) */
-    smartModel?: string;
-    /** Motor Cortex model (OpenRouter) */
-    motorModel?: string;
     /**
      * The OpenAI-compatible endpoint lifemodel talks to, with the model for
      * each role (lifemodel-q4x.4.1). Written by lifemodel's own settings
@@ -159,14 +153,6 @@ export interface MergedConfig {
 
   /** LLM configuration */
   llm: {
-    openRouterApiKey: string | null;
-    fastModel: string;
-    smartModel: string;
-    motorModel: string;
-    /** App name for API tracking (shows in provider dashboards) */
-    appName: string;
-    /** Site URL for API tracking */
-    siteUrl: string | null;
     /**
      * The OpenAI-compatible endpoint, with the model for each role
      * (lifemodel-q4x.4.1). No key: Agent Vault injects it on the way out.
@@ -257,12 +243,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
     telegramChatId: null,
   },
   llm: {
-    openRouterApiKey: null,
-    fastModel: 'anthropic/claude-haiku-4.5',
-    smartModel: 'anthropic/claude-sonnet-4.5',
-    motorModel: 'anthropic/claude-haiku-4.5',
-    appName: 'Lifemodel',
-    siteUrl: 'https://github.com/shady2k/lifemodel',
     endpoint: {
       // Nothing is configured on a first start: lifemodel starts, serves its
       // settings interface and says what is missing (lifemodel-q4x.4.1).

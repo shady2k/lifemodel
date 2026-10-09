@@ -26,9 +26,6 @@ const mocks = vi.hoisted(() => {
   return { chat, createOpenAI };
 });
 vi.mock('@ai-sdk/openai', () => ({ createOpenAI: mocks.createOpenAI }));
-vi.mock('@openrouter/ai-sdk-provider', () => ({
-  createOpenRouter: () => (modelId: string) => ({ modelId }),
-}));
 vi.mock('ai', () => ({
   generateText: vi.fn().mockResolvedValue({
     text: 'ok',
@@ -121,32 +118,21 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     ).toBeNull();
   });
 
-  it('keeps OpenRouter working as one more endpoint, for the roles the endpoint does not name', async () => {
-    process.env['OPENROUTER_API_KEY'] = 'a-key-that-is-not-in-the-config';
+  it('builds ONE provider: a separately keyed OpenRouter surface is not accepted as config', async () => {
+    // The old surface declared a key and per-OpenRouter models beside the
+    // endpoint and constructed a second provider from them. The type has one
+    // field left (`endpoint`), and the refusal is typed, not only behavioral:
+    // this is what keeps the key out of lifemodel, Agency Vault injects it.
     const provider = createLLMProvider(
       {
-        endpoint: { ...COMPLETE, smartModel: null },
-        fastModel: 'openrouter-fast',
-        smartModel: 'openrouter-smart',
+        endpoint: COMPLETE,
+        // @ts-expect-error - the keyed OpenRouter surface is gone from the type,
+        // so this line is a compile error and cannot come back silently.
+        openRouterApiKey: 'a-key-lifemodel-must-not-hold',
       },
       logger()
     );
-
-    expect(provider?.name).toBe('multi');
-    // The endpoint names the fast role...
-    expect(await modelFor(provider as LLMProvider, 'fast')).toBe('fast-small');
-    // ... and the role it does not name goes to OpenRouter, not to fast-small.
-    mocks.chat.mockClear();
-    await (provider as LLMProvider).complete({
-      messages: [{ role: 'user', content: 'hello' }],
-      role: 'smart',
-    });
-    expect(mocks.chat).not.toHaveBeenCalled();
-  });
-
-  it('serves every role from OpenRouter when no endpoint is configured', async () => {
-    process.env['OPENROUTER_API_KEY'] = 'a-key-that-is-not-in-the-config';
-    const provider = createLLMProvider({ fastModel: 'openrouter-fast' }, logger());
-    expect(provider?.name).toBe('openrouter');
+    expect(provider?.name).toBe('endpoint');
+    expect(await modelFor(provider as LLMProvider, 'smart')).toBe('smart-big');
   });
 });
