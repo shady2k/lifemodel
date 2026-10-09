@@ -52,7 +52,7 @@ stage_root() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-        uidmap fuse-overlayfs iptables iproute2 xz-utils git ca-certificates
+        uidmap fuse-overlayfs slirp4netns iptables iproute2 xz-utils git ca-certificates
 
     for f in /etc/subuid /etc/subgid; do
         grep -q "^${USER_NAME}:" "$f" \
@@ -69,8 +69,8 @@ stage_root() {
     rm -rf "$tmp"
 
     log "extracting pinned node ${NODE_VERSION}"
-    tar -xJf "$PROVISION_DIR"/node-"${NODE_VERSION}"-linux-*.tar.xz -C /opt
-    node_src=$(echo /opt/node-"${NODE_VERSION}"-linux-*)
+    tar -xJf "$PROVISION_DIR"/node-v"${NODE_VERSION}"-linux-*.tar.xz -C /opt
+    node_src=$(echo /opt/node-v"${NODE_VERSION}"-linux-*)
     [ -d "$node_src" ] || die "node tarball did not extract where expected: $node_src"
     ln -sfn "$node_src" /opt/node24
     /opt/node24/bin/node --version
@@ -109,7 +109,7 @@ stage_daemon() {
 
     log "preparing the rootless daemon (user ${USER_NAME}, uid ${uid})"
     as_user "mkdir -p $HOME_DIR/.config/docker"
-    as_user "printf '%s\n' '{\"storage-driver\":\"fuse-overlayfs\"}' > $HOME_DIR/.config/docker/daemon.json"
+    as_user "printf '%s\n' '{}' > $HOME_DIR/.config/docker/daemon.json"
     as_user "touch $HOME_DIR/rootless-docker.log"
 
     start_daemon() {
