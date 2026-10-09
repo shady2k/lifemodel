@@ -21,6 +21,13 @@ export interface RunOptions {
   gid?: number;
   timeoutMs?: number;
   /**
+   * Kill the command when this signal aborts: the loader's stop aborts the
+   * commands its startup is still running (they are root-owned work, and the
+   * stop must reach everything a start made). A command that died this way
+   * rejects with the cancellation, like a timeout does.
+   */
+  signal?: AbortSignal;
+  /**
    * One line written to the command's standard input, which is then closed.
    * Agent Vault's CLI takes its master password (and the password of the
    * owner account the loader registers) through `--password-stdin` and
@@ -77,6 +84,7 @@ export function createNodeRunner(): CommandRunner {
           env: options.env,
           uid: options.uid,
           gid: options.gid,
+          signal: options.signal,
           // Input is always a pipe that is closed at once, so a command
           // reading nothing sees end-of-input exactly as it did before, and a
           // command that needs a line (`--password-stdin`) gets it here.
