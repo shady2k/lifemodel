@@ -46,6 +46,7 @@ describe('the contract with the image', () => {
       agentName: 'lifemodel',
       ownerEmail: 'owner@lifemodel.local',
       startWaitMs: 15_000,
+      commandWaitMs: 30_000,
       stopWaitMs: 10_000,
     });
     // The rule that confines lifemodel's egress (lifemodel-q4x.3.2): the
