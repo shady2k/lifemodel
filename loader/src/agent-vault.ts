@@ -783,9 +783,9 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
         // and `docker run` hands a caller's lowercase `http_proxy` into the
         // container as its own - a stale lowercase value must not silently
         // win over what the loader set. The environment that reaches
-        // lifemodel's process is built by spreading `process.env` FIRST and
-        // this object LAST, so these keys also REPLACE whatever the container
-        // inherited.
+        // lifemodel's process is built over the explicit boundary of
+        // loader/src/env-boundary.ts with THIS object appended last, so these
+        // keys REPLACE whatever the container inherited.
         HTTPS_PROXY: proxy,
         https_proxy: proxy,
         HTTP_PROXY: proxy,

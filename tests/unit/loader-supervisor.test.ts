@@ -62,6 +62,48 @@ function errorLines(lines: RecordedLine[]): RecordedLine[] {
   return lines.filter((line) => line.level === 'error');
 }
 
+describe("the environment boundary lifemodel's process is built from", () => {
+  it("hands the child the named variables it reads and the proxy's, and no model key or admin credential the container inherited", async () => {
+    const world = createLoaderWorld();
+    scriptRepository(world);
+    // The container was started with secrets the loader must keep: the legacy
+    // model key (the provider no longer reads one - the vault injects it on
+    // the way out) and the trusted layer's own admin credential, plus
+    // variables that are nobody's business.
+    const container = process.env;
+    const saved: [string, string | undefined][] = ['OPENROUTER_API_KEY', 'AGENT_VAULT_MASTER_PASSWORD', 'LLM_ENDPOINT_BASE_URL', 'TELEGRAM_BOT_TOKEN', 'SOME_UNRELATED_CONTAINER_VARIABLE'].map(
+      (name) => [name, container[name]]
+    );
+    container['OPENROUTER_API_KEY'] = 'q4xlf2-made-up-model-key';
+    container['AGENT_VAULT_MASTER_PASSWORD'] = 'q4xlf2-made-up-master-password';
+    container['LLM_ENDPOINT_BASE_URL'] = 'http://127.0.0.1:19134/v1';
+    container['TELEGRAM_BOT_TOKEN'] = 'q4xlf2-made-up-bot-token';
+    container['SOME_UNRELATED_CONTAINER_VARIABLE'] = 'q4xlf2-unrelated';
+    try {
+      const { supervisor } = makeSupervisor(world);
+      const outcome = await supervisor.start();
+      expect(outcome).toEqual({ started: true, reason: 'started' });
+      const env = lifemodelSpawn(world)?.options.env ?? {};
+
+      // The named variables the product reads DO arrive...
+      expect(env['DATA_PATH']).toBe(world.config.dataDir);
+      expect(env['HOME']).toBe(world.config.dataDir);
+      expect(env['LLM_ENDPOINT_BASE_URL']).toBe('http://127.0.0.1:19134/v1');
+      expect(env['TELEGRAM_BOT_TOKEN']).toBe('q4xlf2-made-up-bot-token');
+      // ...and the secrets the container inherited do NOT.
+      expect(env['OPENROUTER_API_KEY']).toBeUndefined();
+      expect(env['AGENT_VAULT_MASTER_PASSWORD']).toBeUndefined();
+      // Nor anything else the product does not read, by name.
+      expect(env['SOME_UNRELATED_CONTAINER_VARIABLE']).toBeUndefined();
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete container[name];
+        else container[name] = value;
+      }
+    }
+  });
+});
+
 describe('panic', () => {
   it('refuses to start while panic is set, starts again once it is cleared', async () => {
     const rig = makeSupervisor(createLoaderWorld());
