@@ -331,11 +331,17 @@ describe('one login, three hosts', () => {
 
     expect(wrong.status).toBe(401);
     expect(wrong.headers['set-cookie']).toBeUndefined();
+    // The test's stands-in for iptables answers nothing about the container's
+    // resolver, so the rule says once that its port is not allowed (and once
+    // is all it says): the one warning a wrong password speaks is the login.
     const warned = lines.filter((line) => line.level === 'warn');
     expect(warned.map((line) => line.message)).toEqual([
+      expect.stringContaining('the container resolver'),
       'login refused: the password does not match',
     ]);
-    expect(warned[0]?.fields['host']).toBe('boot.localhost');
+    expect(warned.find((line) => line.message.startsWith('login refused'))?.fields['host']).toBe(
+      'boot.localhost'
+    );
     for (const line of lines) {
       expect(JSON.stringify(line)).not.toContain('the wrong one');
       expect(JSON.stringify(line)).not.toContain('the right one');
