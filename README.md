@@ -344,8 +344,8 @@ npm run dev          # run with hot reload (tsx)
 npm run build        # compile TypeScript → dist/
 npm start            # run the compiled build
 
-npm test             # run the test suite inside the disposable test boundary
-npm run test:docker  # the launcher's docker mode
+npm test             # isolated unit and ordinary integration tests
+npm run test:docker  # retained backend; heavy image acceptance is CI-only
 npm run test:watch   # unsupported — see Test isolation below
 
 npm run check        # typecheck + lint + format + suite, via the isolated launcher
@@ -358,7 +358,7 @@ Tests live under `tests/` (unit, integration, helpers) — never inside `src/`. 
 
 ### Test isolation
 
-The suite never starts on the host. `npm test` and `npm run check` start
+Local and ordinary CI suites never start on the host. `npm test` and `npm run check` start
 `scripts/test-isolated.mjs`, which runs the checks and the suite one-shot and
 bounded inside a disposable Node 24 container built from a selective snapshot
 of the tree. The run never sees your `.env`, your `data/` state, your git
@@ -384,7 +384,22 @@ shares a Linux kernel; it is not a hardware VM. Missing or unsupported backends
 fail closed, never to your socket or a privileged fallback. CI runs ordinary
 checks through the same launcher with GitHub's disposable Docker daemon.
 
-Real boundary checks (each runs its test workload inside the boundary):
+The owner-approved exception is the PR-only `ci-image` job on a fresh
+GitHub-hosted Ubuntu runner. It may install test dependencies with host `npm ci`
+and run only `tests/integration/instance-first-start.test.ts` directly, with
+at most 2 workers, against its actual built
+`ghcr.io/shady2k/lifemodel:ci-$SHA` image and the runner's Docker daemon.
+The job has a 45-minute limit, read-only permissions, full credential-less
+checkout, no user secrets and no login or publishing step. Publishing stays
+in the separate main-push `ci-image-publish` job. No other job inherits this
+exception; `ci-product` remains on the isolated Node 24 launcher.
+
+Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
+locally, including through `test:docker`. The completed isolated Docker
+backend is retained; this exception requires no new VM, DinD or controller.
+
+Retained boundary acceptance commands (not instructions to run the heavy
+image walk locally):
 
 ```bash
 node scripts/accept-test-isolation.mjs

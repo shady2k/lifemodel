@@ -98,7 +98,7 @@ runs.
 
 ## Test isolation
 
-The suite never starts on the host. Every suite entrypoint — `npm run test`,
+Local and ordinary CI suites never start on the host. Their entrypoints — `npm run test`,
 `npm run check`, the husky pre-commit hook, CI's product job — goes through the
 disposable test boundary, `scripts/test-isolated.mjs
 <check|test|docker> [--timeout-ms <ms>] [-- <vitest args>]`:
@@ -143,7 +143,21 @@ disposable test boundary, `scripts/test-isolated.mjs
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
   reads the committed config surfaces (package.json scripts, vitest config,
   the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a
-  raw vitest start on the host.
+  raw vitest start on the host outside the named `ci-image` exception.
+
+The owner-approved exception is the PR-only `ci-image` job on a fresh
+GitHub-hosted Ubuntu runner. It may install test dependencies with host `npm ci`
+and run only `tests/integration/instance-first-start.test.ts` directly, with
+at most 2 workers, against its actual built
+`ghcr.io/shady2k/lifemodel:ci-$SHA` image and the runner's Docker daemon.
+The job has a 45-minute limit, read-only permissions, full credential-less
+checkout, no user secrets and no login or publishing step. Publishing stays
+in the separate main-push `ci-image-publish` job. No other job inherits this
+exception; `ci-product` remains on the isolated Node 24 launcher.
+
+Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
+locally, including through `test:docker`. The completed isolated Docker
+backend is retained; this exception requires no new VM, DinD or controller.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
@@ -158,11 +172,11 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
   runs the same launcher command, `node scripts/test-isolated.mjs check`, on
   node 24 behind GitHub's disposable Docker daemon: typecheck, lint, the
   format check and the suite (at most 2 workers), stopping at the first
-  failure. No `npm ci` runs on the CI host. A manifest that disagrees with
+  failure. No `npm ci` runs on the `ci-product` host. A manifest that disagrees with
   `package-lock.json` fails the entrypoint policy tests in the suite, which is
   what `npm ci` used to prove before the checks started.
 - Run one file: `node scripts/test-isolated.mjs test --
-  tests/unit/energy-management.test.ts` (any path under `tests/`).
+  tests/unit/energy-management.test.ts` (unit or ordinary integration tests).
 - Tests do not use pino's file transport: it writes from a worker thread that a
   test cannot stop, and it raced the removal of temp directories. Use a
   recording or in-memory logger (`tests/helpers/test-logger.ts`), or

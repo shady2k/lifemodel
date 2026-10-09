@@ -308,7 +308,10 @@ jobs:
   # acceptance is made of, and it is what the image check was missing — a
   # loader that builds but cannot complete a first start used to pass this job
   # (rework 2, finding 9). It needs docker, which ubuntu-latest has, and the
-  # first `npm ci` INSIDE the container, so it is bounded at 45 minutes.
+  # instance provisioning `npm ci` INSIDE the container, bounded at 45 minutes.
+  # Owner-approved exception: this fresh GitHub-hosted Ubuntu PR job installs
+  # host test dependencies and runs only the built-image first-start file.
+  # Local heavy image acceptance is forbidden; ordinary suites stay isolated.
   #
   # The full history is an input, not a convenience: scripts/build-image.sh
   # makes the seed bundle the instance's repository is cloned from, and it
