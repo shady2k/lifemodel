@@ -188,6 +188,10 @@ export function applySettings(file: AgentConfigFile | null, input: SettingsInput
     llm: {
       ...(file?.llm ?? {}),
       endpoint: {
+        // Spread FIRST, replace after: the endpoint's future fields (anything
+        // a later version adds) are not this interface's to drop, only the
+        // four here are.
+        ...(file?.llm?.endpoint ?? {}),
         baseUrl: endpoint.baseUrl,
         fastModel: endpoint.fastModel,
         smartModel: endpoint.smartModel,
