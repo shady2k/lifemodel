@@ -20,11 +20,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
+import type { LoaderConfig } from '../../loader/src/config.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
+  containerHasIpv6,
   createLoaderWorld,
   lifemodelSpawn,
   scriptAgentVault,
@@ -34,11 +36,30 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-/** The rule this task installs, as the loader runs it. */
-const RULE = [
-  '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -d 127.0.0.1 -j ACCEPT',
-  '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
+/**
+ * The rule this task installs, as the loader runs it: the NAMED loopback
+ * services (the vault's proxy port, the loader's interface, the container's
+ * resolver's DNS port), and REJECT for everything else from uid 1000.
+ */
+/**
+ * The ports the scripted nat table gives the container's own resolver for the
+ * two protocols it answers on: the ports the docker rewrite maps 53 onto, not
+ * the well-known one the clients dial.
+ */
+const RESOLVER_UDP_PORT = 32_878;
+const RESOLVER_TCP_PORT = 38_033;
+
+const RULE = (config: LoaderConfig): string[] => [
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.agentVault.proxyPort)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.httpPort)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d ${config.egress.resolver} --dport ${String(RESOLVER_TCP_PORT)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p udp -d ${config.egress.resolver} --dport ${String(RESOLVER_UDP_PORT)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
 ];
+
+/** What Docker's own nat table answers about the resolver (the real shape). */
+const NAT_OUTPUT = `-A DOCKER_OUTPUT -d 127.0.0.11/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 127.0.0.11:${String(RESOLVER_TCP_PORT)}
+-A DOCKER_OUTPUT -d 127.0.0.11/32 -p udp -m udp --dport 53 -j DNAT --to-destination 127.0.0.11:${String(RESOLVER_UDP_PORT)}\n`;
 
 function world(): LoaderWorld {
   const created = createLoaderWorld();
@@ -60,7 +81,18 @@ function world(): LoaderWorld {
     stdout: '',
     stderr: 'iptables: Bad rule (does a matching rule exist in that chain?).\n',
   }));
+  // The container's own resolver, as Docker's nat table answers for it.
+  created.runner.on(`${binary} -t nat -S DOCKER_OUTPUT`, () => ({
+    code: 0,
+    stdout: NAT_OUTPUT,
+    stderr: '',
+  }));
   return created;
+}
+
+/** The rule, as lines, for the world's own configuration. */
+function ruleLines(world2: LoaderWorld): string[] {
+  return RULE(world2.config).map((rule) => `iptables ${rule}`);
 }
 
 interface Rig {
@@ -112,19 +144,29 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${chain} -n`,
       `iptables -N ${chain}`,
-      ...RULE.map((rule) => `iptables ${rule}`),
+      `iptables -t nat -S DOCKER_OUTPUT`,
+      ...ruleLines(found),
       `iptables -C OUTPUT -j ${chain}`,
       `iptables -A OUTPUT -j ${chain}`,
     ]);
-    // The two rules are the rule: only the confined uid is matched, and the
-    // refusal is a REJECT (a fail-at-once "connection refused", not a hang).
+    // The five rules are the rule: only the confined uid is matched, every
+    // ACCEPT is named protocol + destination + port, and the refusal is a
+    // REJECT (a fail-at-once "connection refused", not a hang).
     const rules = egressCalls(found).filter((line) => line.includes(` -A ${chain} `));
-    expect(rules).toHaveLength(RULE.length);
+    expect(rules).toEqual(ruleLines(found));
     for (const rule of rules) {
       expect(rule).toContain(`--uid-owner ${String(found.config.lifemodel.uid)}`);
     }
-    expect(rules[0]).toContain('-d 127.0.0.1 -j ACCEPT');
-    expect(rules[1]).toContain('REJECT --reject-with icmp-port-unreachable');
+    // The allows only name services, never a bare destination: a listener the
+    // rule does not name (the vault's own management interface on the loopback
+    // port 14321, any other root-owned listener) is refused by the last rule.
+    const accepts = rules.filter((rule) => rule.endsWith('-j ACCEPT'));
+    expect(accepts).toHaveLength(ruleLines(found).length - 1);
+    for (const rule of accepts) {
+      expect(rule).toContain('--dport');
+    }
+    expect(rules.join('\n')).not.toContain('--dport 14321');
+    expect(rules[rules.length - 1]).toContain('REJECT --reject-with icmp-port-unreachable');
     // Root is not named anywhere: the rule confines one uid, and the traffic
     // that leaves the container (the vault's own) is root's.
     expect(rules.join('\n')).not.toContain('--uid-owner 0');
@@ -167,7 +209,8 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${found.config.egress.chain} -n`,
       `iptables -F ${found.config.egress.chain}`,
-      ...RULE.map((rule) => `iptables ${rule}`),
+      `iptables -t nat -S DOCKER_OUTPUT`,
+      ...ruleLines(found),
       `iptables -C OUTPUT -j ${found.config.egress.chain}`,
     ]);
     await shutdownLoader(found, app);
@@ -183,8 +226,34 @@ describe("the rule that confines lifemodel's egress", () => {
     ).toEqual([]);
     expect(
       egressCalls(found).filter((line) => line.includes(' -A LIFEMODEL_EGRESS '))
-    ).toHaveLength(RULE.length);
+    ).toHaveLength(ruleLines(found).length);
     await shutdownLoader(found, second.app);
+  });
+
+  it('refuses every loopback listener it does not name - the vault management port among them', async () => {
+    const found = world();
+    const { app } = await rig(found);
+
+    // The allows name ports; no bare-destination ACCEPT exists, so any
+    // listener the rule does not name - Agent Vault's own management
+    // interface on 14321, an arbitrary root-owned loopback service - can only
+    // meet the last rule, the REJECT.
+    const chain = found.config.egress.chain;
+    const accepts = egressCalls(found).filter(
+      (l) => l.includes(` -A ${chain} `) && l.endsWith('-j ACCEPT')
+    );
+    for (const rule of accepts) {
+      expect(rule).toContain('-p ');
+      expect(rule).toContain('--dport');
+    }
+    expect(accepts.join('\n')).not.toContain(String(14321));
+    const rejects = egressCalls(found).filter(
+      (l) => l.includes(` -A ${chain} `) && l.includes('-j REJECT')
+    );
+    expect(rejects).toEqual([
+      `iptables -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
+    ]);
+    await shutdownLoader(found, app);
   });
 
   it('adds the jump into its chain exactly once, on a container that has none', async () => {
@@ -197,6 +266,72 @@ describe("the rule that confines lifemodel's egress", () => {
       found.runner.lines().filter((line) => line === 'iptables -A OUTPUT -j LIFEMODEL_EGRESS')
     ).toHaveLength(1);
     await shutdownLoader(found, app);
+  });
+});
+
+describe('the IPv6 half, when the container has an IPv6 address or route', () => {
+  it('is installed through ip6tables: the named port over ::1, REJECT for everything else', async () => {
+    const found = world();
+    const binary6 = found.config.egress.ipv6Binary;
+    // An IPv6-enabled Docker network: the kernel reports the container's
+    // address in the double of /proc/net/if_inet6, so the half is installed.
+    containerHasIpv6(found, 'fd66:0004:0002:0000:0000:0000:0000:0002 03 40 \n');
+    found.runner.on(`${binary6} -L ${found.config.egress.chain}`, () => ({
+      code: 1,
+      stdout: '',
+      stderr: 'ip6tables: No chain/target/match by that name.\n',
+    }));
+    found.runner.on(`${binary6} -C OUTPUT -j ${found.config.egress.chain}`, () => ({
+      code: 1,
+      stdout: '',
+      stderr: 'ip6tables: Bad rule (does a matching rule exist in that chain?).\n',
+    }));
+    const { app } = await rig(found);
+
+    const calls6 = found.runner.lines().filter((l) => l.startsWith(`${binary6} `));
+    const chain = found.config.egress.chain;
+    expect(calls6).toEqual([
+      `${binary6} -L ${chain} -n`,
+      `${binary6} -N ${chain}`,
+      `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -p tcp -d ::1 --dport ${String(found.config.agentVault.proxyPort)} -j ACCEPT`,
+      `${binary6} -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp6-port-unreachable`,
+      `${binary6} -C OUTPUT -j ${chain}`,
+      `${binary6} -A OUTPUT -j ${chain}`,
+    ]);
+    await shutdownLoader(found, app);
+  });
+
+  it('is not installed at all when the container has no IPv6 address or route', async () => {
+    const found = world();
+    // The double of /proc/net/if_inet6 is EMPTY in a fresh world: the default
+    // Docker network gives the container nothing over IPv6 but ::1 on lo - and
+    // even that is said by NOT asking ip6tables to confine what cannot dial.
+    const { app } = await rig(found);
+    expect(
+      found.runner.lines().filter((l) => l.startsWith(`${found.config.egress.ipv6Binary} `))
+    ).toEqual([]);
+    await shutdownLoader(found, app);
+  });
+
+  it('does not start lifemodel when the container has IPv6 but ip6tables cannot run', async () => {
+    const found = world();
+    containerHasIpv6(found, 'fd66:0004:0002:0000:0000:0000:0000:0002 03 40 eth0\n');
+    // The OS has no ip6tables to run at all - the image does carry it, but says
+    // the test can model the refusal either way.
+    const inner = found.runner.run.bind(found.runner);
+    found.runner.run = (command, args, options) =>
+      command === found.config.egress.ipv6Binary
+        ? Promise.reject(new Error('spawn ip6tables ENOENT'))
+        : inner(command, args, options);
+
+    const { lines, exits } = await rig(found);
+
+    expect(exits).toEqual([1]);
+    const errors = lines.filter((line) => line.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('spawn ip6tables ENOENT');
+    expect(errors[0]?.message).toContain('UNCONFINED IPv6 PATH');
+    expect(lifemodelSpawn(found)).toBeUndefined();
   });
 });
 

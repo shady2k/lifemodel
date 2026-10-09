@@ -74,6 +74,11 @@ printf '%s\\n' "$*" >> "$LIFEMODEL_EGRESS_LOG"
 case "$*" in
   "-L LIFEMODEL_EGRESS -n") exit 1 ;;
   "-C OUTPUT -j LIFEMODEL_EGRESS") exit 1 ;;
+  "-t nat -S DOCKER_OUTPUT")
+    printf '%s\n' \
+      '-A DOCKER_OUTPUT -d 127.0.0.11/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 127.0.0.11:38033' \
+      '-A DOCKER_OUTPUT -d 127.0.0.11/32 -p udp -m udp --dport 53 -j DNAT --to-destination 127.0.0.11:32878'
+    exit 0 ;;
 esac
 exit 0
 `;
@@ -191,6 +196,12 @@ describe('the loader as the container main process', () => {
     const iptables = join(standIn.root, 'iptables');
     const egressLog = join(standIn.root, 'egress.log');
     writeFileSync(iptables, IPTABLES_SOURCE, { mode: 0o755 });
+    // The same stand-in answers for ip6tables, and the container's view of its
+    // own IPv6 addresses is written here: one line, the way the kernel writes
+    // one in an IPv6-enabled Docker network - so the ip6tables half is
+    // installed deterministically, and never by the test box's own stack.
+    const ifinet6 = join(standIn.root, 'if-inet6');
+    writeFileSync(ifinet6, 'fd66:0004:0002:0000:0000:0000:0000:0003 04 40 eth0\n');
     const fs = createNodeFileSystem();
     const state = createLoaderState({ fs, config, logger: createRecordingLogger([]) });
     await state.ensureLayout();
@@ -212,6 +223,8 @@ describe('the loader as the container main process', () => {
         LIFEMODEL_DRAIN_WAIT_MS: '4000',
         LIFEMODEL_MARKER: standIn.marker,
         LIFEMODEL_EGRESS_IPTABLES: iptables,
+        LIFEMODEL_EGRESS_IP6TABLES: iptables,
+        LIFEMODEL_EGRESS_IF_INET6: ifinet6,
         LIFEMODEL_EGRESS_LOG: egressLog,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -237,13 +250,25 @@ describe('the loader as the container main process', () => {
       );
       expect(output.some((line) => line.includes('caddy is up'))).toBe(true);
       // The kernel rule was installed by the loader's own process, before it
-      // started lifemodel: one acceptance for lifemodel's uid to loopback, and
-      // a REJECT for everything else from that uid.
+      // started lifemodel: the NAMED loopback services (the vault proxy, the
+      // loader's interface - this test's loader listens on the ephemeral port
+      // 0, so the rule names port 0 - and the container's resolver), and a
+      // REJECT for everything else from that uid.
       expect(readFileSync(egressLog, 'utf8').trim().split('\n')).toEqual([
         '-L LIFEMODEL_EGRESS -n',
         '-N LIFEMODEL_EGRESS',
-        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -d 127.0.0.1 -j ACCEPT',
+        '-t nat -S DOCKER_OUTPUT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 14322 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 0 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.11 --dport 38033 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p udp -d 127.0.0.11 --dport 32878 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
+        '-C OUTPUT -j LIFEMODEL_EGRESS',
+        '-A OUTPUT -j LIFEMODEL_EGRESS',
+        '-L LIFEMODEL_EGRESS -n',
+        '-N LIFEMODEL_EGRESS',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d ::1 --dport 14322 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp6-port-unreachable',
         '-C OUTPUT -j LIFEMODEL_EGRESS',
         '-A OUTPUT -j LIFEMODEL_EGRESS',
       ]);

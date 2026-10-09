@@ -195,11 +195,19 @@ must name the address the loader gave it). Telemetry is off
    `vault-ca.pem` (root, `0644`): lifemodel's user must READ it to trust the
    proxy and must not be able to write it.
 
-**The next start reuses all of it.** With `loader/vault-proxy.json` on the
-volume, nothing is created again: the loader reads the vault and the token from
-it and only re-reads the CA, so `docker restart`, a new container on the same
-volume and a store that was replaced each end with exactly one vault, one agent
-and one token. The store itself is made only when the volume holds none.
+**The next start reuses all of it - after checking the store.** With
+`loader/vault-proxy.json` on the volume, the loader first reconciles the record
+with what the store still holds: the CLI's own read of the vault the record
+names, and the CLI session that proves the account can act. `docker restart`
+and a new container on the same volume find the record valid there and create
+nothing - one vault, one agent, one token, the token re-read from the record.
+A store that was REPLACED while the record survived fails the reconcile (the
+vault the record names is not in the store; the session is gone with the
+store): one warn line says the record does not match, the loader provisions
+whole against the replacement store, and writes a fresh record beside it - so
+the owner sees exactly one vault, one agent and one token again, and the
+clients get the token the replacement store actually knows. The store itself
+is made only when the volume holds none.
 
 **What lifemodel's process is given** is that token and the standard proxy
 environment around it, built in `lifemodelEnvironment()` in
@@ -207,8 +215,8 @@ environment around it, built in `lifemodelEnvironment()` in
 
 | Variable | Value | Why |
 | --- | --- | --- |
-| `HTTPS_PROXY`, `HTTP_PROXY` | `http://<agent token>:lifemodel@127.0.0.1:14322` | every standard client routes through the vault's listener; the token is the proxy credential and the vault is the password, exactly as Agent Vault's own `vault run` builds it |
-| `NO_PROXY` | `localhost,127.0.0.1` | loopback traffic (the vault's control plane, the loader, the container's resolver) does not go through the proxy |
+| `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy` | `http://<agent token>:lifemodel@127.0.0.1:14322` | every standard client routes through the vault's listener; the token is the proxy credential and the vault is the password, exactly as Agent Vault's own `vault run` builds it - and EACH of the three is set in both spellings, because clients are not agreed on the case and a stale lowercase one from `docker run` otherwise wins |
+| `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1` | loopback traffic (the vault's control plane, the loader, the container's resolver) does not go through the proxy |
 | `NODE_USE_ENV_PROXY` | `1` | Node 24's `fetch` honours the environment's proxy only with it |
 | `NODE_EXTRA_CA_CERTS` | `vault-ca.pem` above | the certificates the proxy re-signs with validate |
 | `AGENT_VAULT_ADDR`, `AGENT_VAULT_TOKEN`, `AGENT_VAULT_VAULT` | the broker, the token, the vault | the vault's own protocol |
@@ -226,7 +234,10 @@ the loader registered to provision the vault. So the loader's own page shows
 that account's e-mail and password, read from `loader/vault-owner.json`, with a
 link to `vault.<the same host and port>`: the owner signs in there and adds the
 keys (decisions 12 and 18, story S3). Both values are HTML-escaped into the
-page, the page is `no-store`, and neither ever reaches a log line. An account
+page, the page is `no-store`, and THE PASSWORD never reaches a log line - nor
+the token. (The e-mail can: an account whose registration the CLI refuses is
+fatal, and that one line names the account's address it refused; the password
+never does.) An account
 that cannot be read is SAID on the page, with its reason - the page is the way
 back - rather than left blank.
 
@@ -251,9 +262,9 @@ removes it, logs one line, and starts.
 
 ## lifemodel's egress
 
-**The rule.** Before lifemodel starts, the loader installs one iptables rule in
-its own chain (`LIFEMODEL_EGRESS`): packets owned by uid 1000 to `127.0.0.1` are
-accepted, everything else from that uid is REJECTed with
+**The rule.** Before lifemodel starts, the loader fills its own chain
+(`LIFEMODEL_EGRESS`): packets owned by uid 1000 to the NAMED loopback services
+are accepted, everything else from that uid is REJECTed with
 `icmp-port-unreachable`, which a client sees at once as "connection refused".
 Every other uid - root, and so the loader, Caddy and Agent Vault - is untouched
 and keeps the container's own network. The chain is FLUSHED and refilled on
@@ -263,12 +274,30 @@ a stack of them. The rule is what makes the proxy environment more than a
 suggestion: a process that unsets `HTTPS_PROXY` and opens a socket itself meets
 the kernel, and gets a refusal instead of a connection.
 
-**The rule is IPv4, and that is the whole of the container's reach.** The
-container on Docker's default network has one IPv4 address and, over IPv6,
-nothing but `::1`: no global address and no route out (the gated walk checks
-both inside the container), so there is no other address for a bypass to use.
-An instance whose Docker network has IPv6 enabled is not covered by this
-stage's rule.
+**What the rule allows, by protocol and port.** The named services, each
+destination-bound - not "loopback":
+
+| Allowed for uid 1000 | Why |
+| --- | --- |
+| TCP `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's one way out (story S5) |
+| TCP `127.0.0.1:7000` | the loader's own interface: the instance's HTTP surface on loopback (the `status|panic|resume` command line, and Caddy's forward check) |
+| UDP and TCP `127.0.0.11:<the resolver's port>` | the container's embedded resolver: resolving a name is not egress, and a dial to a resolved address still meets the REJECT. Docker gives the resolver address to its clients as `:53` and then DNATs it to the port the resolver really answers on, so the loader READS that port from the nat table (per protocol) and allows it - the port the filter actually sees. When no such rewrite exists, nothing is allowed and one line says so; a name lookup by uid 1000 is then refused (what dials outside still leaves through the vault's proxy, which looks names up itself, as root) |
+
+Everything else on loopback is refused: the vault's management interface
+(`127.0.0.1:14321`) - which the loader's own login, not the proxy credential,
+protects - and any other local listener the rule does not name.
+
+**The rule has an IPv6 half, and a container that cannot carry it does not
+start lifemodel.** When the container has an IPv6 address or route (the kernel
+reports them in `/proc/net/if_inet6`), the loader installs the same confinement
+in `ip6tables`: the vault's proxy port over `::1`, `icmp6-port-unreachable` for
+everything else from uid 1000 - so an address an IPv6-enabled Docker network
+gives the container (`--ipv6`, an `fd`-range subnet) cannot be the way around
+the boundary. `ip6tables` is in the image; a container where the IPv6 half
+cannot be installed is a missing input of the loader's own: one line says that
+an unconfined IPv6 path exists, and lifemodel is never started. A container
+with no IPv6 address or route at all installs the IPv4 rule only, and says so
+in one line.
 
 **The same environment is what a build runs with.** The instance's code is
 built as lifemodel's user (uid 1000), and that is the user the kernel rule

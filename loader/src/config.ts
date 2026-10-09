@@ -62,6 +62,13 @@ export interface AgentVaultConfig {
   ownerEmail: string;
   /** How long Agent Vault may take to answer `/health` before the loader gives up. */
   startWaitMs: number;
+  /**
+   * How long ONE CLI command of Agent Vault may take (the loader's login and
+   * provisioning run them as root): each is bounded and the stop, arriving
+   * while one is stuck, kills it. Without the bound a stuck command would
+   * leave the bring-up waiting forever before the loader's interface opens.
+   */
+  commandWaitMs: number;
   /** How long Agent Vault may take to leave before it is killed. */
   stopWaitMs: number;
 }
@@ -75,8 +82,24 @@ export interface AgentVaultConfig {
 export interface EgressConfig {
   /** The iptables the image carries; a container without it is a missing input. */
   binary: string;
+  /**
+   * The ip6tables the image carries, for the IPv6 half of the rule; installed
+   * whenever the container has an IPv6 address or route (`egress.procPath`),
+   * and a container where it cannot be installed does not start lifemodel -
+   * the one line names the unconfined IPv6 path.
+   */
+  ipv6Binary: string;
+  /** Where the kernel reports the container's IPv6 addresses (/proc/net/if_inet6). */
+  procPath: string;
   /** The chain the loader owns and fills with the one rule. */
   chain: string;
+  /**
+   * The container's embedded resolver (Docker answers names at 127.0.0.11):
+   * the DNS port of it is one of the loopback services uid 1000 may still
+   * reach. Empty switches the resolver's two rules off - a container without
+   * its own resolver resolves nothing locally at all.
+   */
+  resolver: string;
 }
 
 export interface LoaderConfig {
@@ -136,9 +159,13 @@ const DEFAULTS = {
   caddyStopWaitMs: 10_000,
   agentVaultBinary: '/usr/local/bin/agent-vault',
   agentVaultStartWaitMs: 15_000,
+  agentVaultCommandWaitMs: 30_000,
   agentVaultStopWaitMs: 10_000,
   egressBinary: 'iptables',
+  egressIpv6Binary: 'ip6tables',
+  egressIpv6ProcPath: '/proc/net/if_inet6',
   egressChain: 'LIFEMODEL_EGRESS',
+  egressResolver: '127.0.0.11',
   agentVaultApiPort: 14_321,
   agentVaultProxyPort: 14_322,
   drainWaitMs: 95_000,
@@ -193,11 +220,19 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
         'LIFEMODEL_AGENT_VAULT_START_WAIT_MS',
         DEFAULTS.agentVaultStartWaitMs
       ),
+      commandWaitMs: readInt(
+        env,
+        'LIFEMODEL_AGENT_VAULT_COMMAND_WAIT_MS',
+        DEFAULTS.agentVaultCommandWaitMs
+      ),
       stopWaitMs: readInt(env, 'LIFEMODEL_AGENT_VAULT_STOP_WAIT_MS', DEFAULTS.agentVaultStopWaitMs),
     },
     egress: {
       binary: env['LIFEMODEL_EGRESS_IPTABLES'] ?? DEFAULTS.egressBinary,
+      ipv6Binary: env['LIFEMODEL_EGRESS_IP6TABLES'] ?? DEFAULTS.egressIpv6Binary,
+      procPath: env['LIFEMODEL_EGRESS_IF_INET6'] ?? DEFAULTS.egressIpv6ProcPath,
       chain: env['LIFEMODEL_EGRESS_CHAIN'] ?? DEFAULTS.egressChain,
+      resolver: env['LIFEMODEL_EGRESS_RESOLVER'] ?? DEFAULTS.egressResolver,
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
     killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),

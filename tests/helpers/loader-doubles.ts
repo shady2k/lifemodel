@@ -345,6 +345,16 @@ export async function waitUntil(
   }
 }
 
+/**
+ * Say whether the container (the world) has an IPv6 address or route, the way
+ * the kernel says it: writing the double of `/proc/net/if_inet6`. One line of
+ * what the kernel writes - an address with its interface - makes the loader
+ * install the ip6tables half an empty file makes it skip the half.
+ */
+export function containerHasIpv6(world: LoaderWorld, line: string): void {
+  writeFileSync(world.config.egress.procPath, line);
+}
+
 /** The child the loader started for lifemodel (the front door starts first). */
 export function lifemodelSpawn(world: LoaderWorld): SpawnedFake | undefined {
   return world.launcher.spawns.findLast((spawn) => spawn.args[0] === world.config.lifemodelEntry);
@@ -482,6 +492,14 @@ export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld
     stopBudgetMs: 6_000,
     restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
   };
+  config.egress = {
+    ...config.egress,
+    ipv6Binary: join(root, 'ip6tables'),
+    // The container's IPv6 addresses as a WRITTEN file, so a test decides the
+    // fact precisely: empty by default (no IPv6 address or route), one line
+    // when a test wants the ip6tables half installed or its refusal seen.
+    procPath: join(root, 'if-inet6'),
+  };
   writeFileSync(config.seedBundle, 'a git bundle the image carries\n');
   // The front door the image carries: the loader starts it, so the test
   // volume holds the two files it needs.
@@ -490,6 +508,10 @@ export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld
   // And Agent Vault's binary, which the loader starts as it starts Caddy. The
   // store is NOT made here: making it is the loader's own first act.
   writeFileSync(config.agentVault.binary, '#!/bin/sh\n# agent-vault, the keys\n');
+  // The written /proc/net/if_inet6 double, EMPTY: no IPv6 address or route, so
+  // the loader installs the IPv4 rule only. A test gives the file the line the
+  // kernel would, when it wants the IPv6 half installed or refused.
+  writeFileSync(config.egress.procPath, '');
   return {
     root,
     config,

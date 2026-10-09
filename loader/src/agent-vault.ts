@@ -232,20 +232,61 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     ];
   }
 
+  /**
+   * The commands the current startup is still running. Each has its own bound
+   * (`commandWaitMs`) and the current startup's cancellation: the stop aborts
+   * the live ones (they are ROOT-owned work, and a stop must reach everything
+   * a start made), and reports whatever does not settle even killed.
+   */
+  interface TrackedCommand {
+    promise: Promise<CommandResultLike>;
+    abort(): void;
+  }
+  interface CommandResultLike {
+    code: number;
+    stdout: string;
+    stderr: string;
+  }
+  const liveCommands = new Set<TrackedCommand>();
+  /** The startup's cancellation for the commands it runs; null between starts. */
+  let startupCommands: AbortController | null = null;
+
   /** One CLI call of the same binary, with the vault's own HOME. */
-  async function vaultCli(
-    args: string[],
-    stdin?: string
-  ): Promise<{ code: number; stdout: string; stderr: string }> {
-    const options = { cwd: config.volumeRoot, env: storeEnvironment() };
-    return runner.run(
-      vaultConfig.binary,
-      args,
-      stdin === undefined ? options : { ...options, stdin }
-    );
+  async function vaultCli(args: string[], stdin?: string): Promise<CommandResultLike> {
+    const controller = startupCommands ?? new AbortController();
+    const tracked: TrackedCommand = {
+      promise: runner.run(vaultConfig.binary, args, {
+        cwd: config.volumeRoot,
+        env: storeEnvironment(),
+        ...(stdin === undefined ? {} : { stdin }),
+        timeoutMs: vaultConfig.commandWaitMs,
+        signal: controller.signal,
+      }),
+      abort: () => {
+        controller.abort();
+      },
+    };
+    liveCommands.add(tracked);
+    try {
+      return await tracked.promise;
+    } finally {
+      liveCommands.delete(tracked);
+    }
   }
 
-  async function readRecord<T extends { version: 1 }>(path: string): Promise<T | null> {
+  /**
+   * One record of the loader's own on the volume, read wholesale: JSON, the
+   * version this loader writes, and EVERY field it needs as a non-empty
+   * string. A record that holds less than that is not "partly there" - it is
+   * a record the loader cannot use, and using it would hand clients an
+   * unusable credential while announcing success - so the file's path and
+   * the missing field's name (NEVER a value; these records hold secrets) are
+   * what the loader leaves with.
+   */
+  async function readRecord<T extends { version: 1 }>(
+    path: string,
+    fields: readonly string[]
+  ): Promise<T | null> {
     if (!(await fs.exists(path))) return null;
     let text: string;
     try {
@@ -261,6 +302,15 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     }
     if (value.version !== 1) {
       throw new LoaderFatalError(`${path} does not hold what this loader wrote`);
+    }
+    const asRecord = value as Record<string, unknown>;
+    for (const field of fields) {
+      const value = asRecord[field];
+      if (typeof value !== 'string' || value === '') {
+        throw new LoaderFatalError(
+          `${path} is not a complete record: the field "${field}" is missing or empty - restore the record or remove the file, and the loader will provision it again (the missing value is never printed)`
+        );
+      }
     }
     return value;
   }
@@ -343,8 +393,8 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
 
   /** The owner account's credentials, generated once and kept root-only. */
   async function ensureOwnerCredentials(): Promise<OwnerRecord> {
-    const existing = await readRecord<OwnerRecord>(ownerPath);
-    if (existing !== null && existing.email !== '' && existing.password !== '') return existing;
+    const existing = await readRecord<OwnerRecord>(ownerPath, ['email', 'password']);
+    if (existing !== null) return existing;
     const record: OwnerRecord = {
       version: 1,
       email: vaultConfig.ownerEmail,
@@ -452,11 +502,30 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     return tokenOf(vault, name, created);
   }
 
-  /** The vault, the agent and its token, created once and reused after that. */
+  /**
+   * The vault, the agent and its token, created once and reused after that -
+   * and reused ONLY when the record still matches what the vault's store
+   * holds: the store can be replaced while `vault-proxy.json` survives (that
+   * is what recovery from a bad store looks like), and a record read back
+   * without the store check would hand clients a token the replacement store
+   * does not know while the loader announces success. So a kept record is
+   * reconciled first: the CLI's own read of the vault the record names, and
+   * the CLI session that proves the account can still act for the loader.
+   * Either missing: the record does not match the store, and provisioning
+   * runs whole, ending with a fresh record.
+   */
   async function provision(): Promise<VaultCredential> {
-    const known = await readRecord<ProxyRecord>(proxyPath);
-    if (known !== null && known.token !== '' && known.vault !== '' && known.agent !== '') {
-      return { vault: known.vault, agent: known.agent, token: known.token };
+    const known = await readRecord<ProxyRecord>(proxyPath, ['vault', 'agent', 'token']);
+    if (known !== null) {
+      const session = await fs.exists(sessionPath);
+      const inStore = await vaultCli(['vault', 'credential-store', 'show', known.vault]);
+      if (session && inStore.code === 0) {
+        return { vault: known.vault, agent: known.agent, token: known.token };
+      }
+      logger.warn(
+        { vault: known.vault, agent: known.agent, record: proxyPath },
+        'the saved proxy record does not match what the store holds: it is provisioned again, and the record beside it is written fresh'
+      );
     }
     const owner = await ensureOwnerCredentials();
     await cliAuthenticate(owner);
@@ -510,6 +579,9 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     // The stop-free interval this start belongs to: a stop bumps the epoch,
     // and then nothing this start makes may outlive that stop's answer.
     const startEpoch = epoch;
+    // This start's own cancellation for its CLI commands; the stop aborts it.
+    const commands = new AbortController();
+    startupCommands = commands;
     if (!(await fs.exists(vaultConfig.binary))) {
       throw new LoaderFatalError(
         `Agent Vault is missing: there is no agent-vault at ${vaultConfig.binary}, so no key could be held for lifemodel`
@@ -621,6 +693,28 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
     const remaining = (): number => Math.max(0, deadline - clock.now());
     epoch += 1;
     stopping = true;
+    // The commands the startup is still running are the stop's to reach too:
+    // they are killed here, and what does not settle even killed is reported.
+    const running = [...liveCommands];
+    for (const tracked of running) tracked.abort();
+    if (running.length > 0) {
+      logger.info(
+        { commands: running.length },
+        'aborting the vault commands the startup is running'
+      );
+      const settled = await Promise.race([
+        Promise.allSettled(running.map((tracked) => tracked.promise)).then(() => true),
+        clock.sleep(remaining()).then(() => false),
+      ]);
+      if (!settled) {
+        logger.error(
+          { commands: running.length },
+          "Agent Vault's provisioning commands had not left when the stop deadline ran out"
+        );
+        stopping = false;
+        return false;
+      }
+    }
     const current = child;
     if (current === null) {
       stopping = false;
@@ -683,16 +777,28 @@ export function createAgentVault(deps: AgentVaultDeps): AgentVault {
         // broker's own control plane skip the proxy, NODE_USE_ENV_PROXY so
         // Node 24's fetch uses the environment's proxy at all, and the CA so
         // the certificates the proxy re-signs with validate.
+        //
+        // Each of the three is set in BOTH spellings: clients are not agreed
+        // on the case (Node's EnvHttpProxyAgent prefers the lowercase one),
+        // and `docker run` hands a caller's lowercase `http_proxy` into the
+        // container as its own - a stale lowercase value must not silently
+        // win over what the loader set. The environment that reaches
+        // lifemodel's process is built by spreading `process.env` FIRST and
+        // this object LAST, so these keys also REPLACE whatever the container
+        // inherited.
         HTTPS_PROXY: proxy,
+        https_proxy: proxy,
         HTTP_PROXY: proxy,
+        http_proxy: proxy,
         NO_PROXY,
+        no_proxy: NO_PROXY,
         NODE_USE_ENV_PROXY: '1',
         NODE_EXTRA_CA_CERTS: vaultConfig.caPath,
       };
     },
     ownerAccount: async () => {
-      const known = await readRecord<OwnerRecord>(ownerPath);
-      if (known === null || known.email === '' || known.password === '') return null;
+      const known = await readRecord<OwnerRecord>(ownerPath, ['email', 'password']);
+      if (known === null) return null;
       return { email: known.email, password: known.password };
     },
   };
