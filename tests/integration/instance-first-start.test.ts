@@ -30,6 +30,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
 
 /** Set LIFEMODEL_DOCKER_TESTS=1 to run these; nothing here is cheap. */
 const enabled = process.env.LIFEMODEL_DOCKER_TESTS === '1';
@@ -589,13 +590,16 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       const caBefore = docker(['exec', container, 'cat', caPath]);
 
       // `docker restart`: the loader comes up again on the same volume.
-      docker(['restart', container], { timeoutMs: 180_000 });
-      // The restart re-published the front door on a NEW host port (the
-      // documented command asks Docker for one): every later test in this walk
-      // needs the fresh one, so it is read here, where the port changed.
-      port = publishedPort();
-      // The second run's own line, not the first one's (the log is appended).
-      await waitForLogLines(/"msg":"Agent Vault is up:/, 2, 60_000);
+      await restartWithSettingsReady({
+        logCount,
+        waitForLogLines,
+        restart: () => {
+          docker(['restart', container], { timeoutMs: 180_000 });
+        },
+        refreshPort: () => {
+          port = publishedPort();
+        },
+      });
 
       expect(docker(['exec', container, 'cat', tokenPath])).toBe(before);
       expect(docker(['exec', container, 'cat', caPath])).toBe(caBefore);
@@ -619,12 +623,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     const cookie = cookieOf(login);
     expect(cookie).toContain('lm_session=');
 
-    // lifemodel is still building its container for a moment after the loader
-    // says it started: the event is its own line that the interface is up, not
-    // a timer (the root host answers 502 until then). lifemodel's own lines are
-    // pino-pretty, the loader's are JSON.
-    await waitForLogLine(/settings interface is up/, 120_000);
-
+    // The preceding vault restart waited for its fresh settings-listener event.
     const before = await fetchThroughFrontDoor(port, `localhost:${String(port)}`, '/', { cookie });
     expect(before.status).toBe(200);
     expect(before.body).toContain('Save and restart lifemodel');
