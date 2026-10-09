@@ -77,6 +77,13 @@ export interface EgressConfig {
   binary: string;
   /** The chain the loader owns and fills with the one rule. */
   chain: string;
+  /**
+   * The container's embedded resolver (Docker answers names at 127.0.0.11):
+   * the DNS port of it is one of the loopback services uid 1000 may still
+   * reach. Empty switches the resolver's two rules off - a container without
+   * its own resolver resolves nothing locally at all.
+   */
+  resolver: string;
 }
 
 export interface LoaderConfig {
@@ -139,6 +146,7 @@ const DEFAULTS = {
   agentVaultStopWaitMs: 10_000,
   egressBinary: 'iptables',
   egressChain: 'LIFEMODEL_EGRESS',
+  egressResolver: '127.0.0.11',
   agentVaultApiPort: 14_321,
   agentVaultProxyPort: 14_322,
   drainWaitMs: 95_000,
@@ -198,6 +206,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
     egress: {
       binary: env['LIFEMODEL_EGRESS_IPTABLES'] ?? DEFAULTS.egressBinary,
       chain: env['LIFEMODEL_EGRESS_CHAIN'] ?? DEFAULTS.egressChain,
+      resolver: env['LIFEMODEL_EGRESS_RESOLVER'] ?? DEFAULTS.egressResolver,
     },
     drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
     killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),

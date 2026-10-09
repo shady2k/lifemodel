@@ -50,7 +50,11 @@ describe('the contract with the image', () => {
     });
     // The rule that confines lifemodel's egress (lifemodel-q4x.3.2): the
     // binary the image carries and the loader's own chain in the filter table.
-    expect(config.egress).toEqual({ binary: 'iptables', chain: 'LIFEMODEL_EGRESS' });
+    expect(config.egress).toEqual({
+      binary: 'iptables',
+      chain: 'LIFEMODEL_EGRESS',
+      resolver: '127.0.0.11',
+    });
     expect(SESSION_COOKIE_NAME).toBe('lm_session');
     // A test is not root; the image's loader is, and that is what sets this.
     expect(config.privileged).toBe(false);

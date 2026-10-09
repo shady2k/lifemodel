@@ -237,12 +237,17 @@ describe('the loader as the container main process', () => {
       );
       expect(output.some((line) => line.includes('caddy is up'))).toBe(true);
       // The kernel rule was installed by the loader's own process, before it
-      // started lifemodel: one acceptance for lifemodel's uid to loopback, and
-      // a REJECT for everything else from that uid.
+      // started lifemodel: the NAMED loopback services (the vault proxy, the
+      // loader's interface - this test's loader listens on the ephemeral port
+      // 0, so the rule names port 0 - and the container's resolver), and a
+      // REJECT for everything else from that uid.
       expect(readFileSync(egressLog, 'utf8').trim().split('\n')).toEqual([
         '-L LIFEMODEL_EGRESS -n',
         '-N LIFEMODEL_EGRESS',
-        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -d 127.0.0.1 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 14322 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 0 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p udp -d 127.0.0.11 --dport 53 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.11 --dport 53 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
         '-C OUTPUT -j LIFEMODEL_EGRESS',
         '-A OUTPUT -j LIFEMODEL_EGRESS',
