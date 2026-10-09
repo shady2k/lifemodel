@@ -251,9 +251,9 @@ removes it, logs one line, and starts.
 
 ## lifemodel's egress
 
-**The rule.** Before lifemodel starts, the loader installs one iptables rule in
-its own chain (`LIFEMODEL_EGRESS`): packets owned by uid 1000 to `127.0.0.1` are
-accepted, everything else from that uid is REJECTed with
+**The rule.** Before lifemodel starts, the loader fills its own chain
+(`LIFEMODEL_EGRESS`): packets owned by uid 1000 to the NAMED loopback services
+are accepted, everything else from that uid is REJECTed with
 `icmp-port-unreachable`, which a client sees at once as "connection refused".
 Every other uid - root, and so the loader, Caddy and Agent Vault - is untouched
 and keeps the container's own network. The chain is FLUSHED and refilled on
@@ -262,6 +262,19 @@ there, so a container that is restarted ends with one copy of the rule and not
 a stack of them. The rule is what makes the proxy environment more than a
 suggestion: a process that unsets `HTTPS_PROXY` and opens a socket itself meets
 the kernel, and gets a refusal instead of a connection.
+
+**What the rule allows, by protocol and port.** The named services, each
+destination-bound - not "loopback":
+
+| Allowed for uid 1000 | Why |
+| --- | --- |
+| TCP `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's one way out (story S5) |
+| TCP `127.0.0.1:7000` | the loader's own interface: the instance's HTTP surface on loopback (the `status|panic|resume` command line, and Caddy's forward check) |
+| UDP and TCP `127.0.0.11:53` | the container's embedded resolver: resolving a name is not egress, and a dial to the resolved address still meets the REJECT |
+
+Everything else on loopback is refused: the vault's management interface
+(`127.0.0.1:14321`) - which the loader's own login, not the proxy credential,
+protects - and any other local listener the rule does not name.
 
 **The rule is IPv4, and that is the whole of the container's reach.** The
 container on Docker's default network has one IPv4 address and, over IPv6,

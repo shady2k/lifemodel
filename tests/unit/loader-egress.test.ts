@@ -20,6 +20,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
+import type { LoaderConfig } from '../../loader/src/config.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createNodeFileSystem } from '../../loader/src/fs.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
@@ -34,10 +35,17 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-/** The rule this task installs, as the loader runs it. */
-const RULE = [
-  '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -d 127.0.0.1 -j ACCEPT',
-  '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
+/**
+ * The rule this task installs, as the loader runs it: the NAMED loopback
+ * services (the vault's proxy port, the loader's interface, the container's
+ * resolver's DNS port), and REJECT for everything else from uid 1000.
+ */
+const RULE = (config: LoaderConfig): string[] => [
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.agentVault.proxyPort)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.httpPort)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p udp -d ${config.egress.resolver} --dport 53 -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d ${config.egress.resolver} --dport 53 -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
 ];
 
 function world(): LoaderWorld {
@@ -61,6 +69,11 @@ function world(): LoaderWorld {
     stderr: 'iptables: Bad rule (does a matching rule exist in that chain?).\n',
   }));
   return created;
+}
+
+/** The rule, as lines, for the world's own configuration. */
+function ruleLines(world2: LoaderWorld): string[] {
+  return RULE(world2.config).map((rule) => `iptables ${rule}`);
 }
 
 interface Rig {
@@ -112,19 +125,28 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${chain} -n`,
       `iptables -N ${chain}`,
-      ...RULE.map((rule) => `iptables ${rule}`),
+      ...ruleLines(found),
       `iptables -C OUTPUT -j ${chain}`,
       `iptables -A OUTPUT -j ${chain}`,
     ]);
-    // The two rules are the rule: only the confined uid is matched, and the
-    // refusal is a REJECT (a fail-at-once "connection refused", not a hang).
+    // The five rules are the rule: only the confined uid is matched, every
+    // ACCEPT is named protocol + destination + port, and the refusal is a
+    // REJECT (a fail-at-once "connection refused", not a hang).
     const rules = egressCalls(found).filter((line) => line.includes(` -A ${chain} `));
-    expect(rules).toHaveLength(RULE.length);
+    expect(rules).toEqual(ruleLines(found));
     for (const rule of rules) {
       expect(rule).toContain(`--uid-owner ${String(found.config.lifemodel.uid)}`);
     }
-    expect(rules[0]).toContain('-d 127.0.0.1 -j ACCEPT');
-    expect(rules[1]).toContain('REJECT --reject-with icmp-port-unreachable');
+    // The allows only name services, never a bare destination: a listener the
+    // rule does not name (the vault's own management interface on the loopback
+    // port 14321, any other root-owned listener) is refused by the last rule.
+    const accepts = rules.filter((rule) => rule.endsWith('-j ACCEPT'));
+    expect(accepts).toHaveLength(ruleLines(found).length - 1);
+    for (const rule of accepts) {
+      expect(rule).toContain('--dport');
+    }
+    expect(rules.join('\n')).not.toContain('--dport 14321');
+    expect(rules[rules.length - 1]).toContain('REJECT --reject-with icmp-port-unreachable');
     // Root is not named anywhere: the rule confines one uid, and the traffic
     // that leaves the container (the vault's own) is root's.
     expect(rules.join('\n')).not.toContain('--uid-owner 0');
@@ -167,7 +189,7 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${found.config.egress.chain} -n`,
       `iptables -F ${found.config.egress.chain}`,
-      ...RULE.map((rule) => `iptables ${rule}`),
+      ...ruleLines(found),
       `iptables -C OUTPUT -j ${found.config.egress.chain}`,
     ]);
     await shutdownLoader(found, app);
@@ -183,8 +205,34 @@ describe("the rule that confines lifemodel's egress", () => {
     ).toEqual([]);
     expect(
       egressCalls(found).filter((line) => line.includes(' -A LIFEMODEL_EGRESS '))
-    ).toHaveLength(RULE.length);
+    ).toHaveLength(ruleLines(found).length);
     await shutdownLoader(found, second.app);
+  });
+
+  it('refuses every loopback listener it does not name - the vault management port among them', async () => {
+    const found = world();
+    const { app } = await rig(found);
+
+    // The allows name ports; no bare-destination ACCEPT exists, so any
+    // listener the rule does not name - Agent Vault's own management
+    // interface on 14321, an arbitrary root-owned loopback service - can only
+    // meet the last rule, the REJECT.
+    const chain = found.config.egress.chain;
+    const accepts = egressCalls(found).filter(
+      (l) => l.includes(` -A ${chain} `) && l.endsWith('-j ACCEPT')
+    );
+    for (const rule of accepts) {
+      expect(rule).toContain('-p ');
+      expect(rule).toContain('--dport');
+    }
+    expect(accepts.join('\n')).not.toContain(String(14321));
+    const rejects = egressCalls(found).filter(
+      (l) => l.includes(` -A ${chain} `) && l.includes('-j REJECT')
+    );
+    expect(rejects).toEqual([
+      `iptables -A ${chain} -m owner --uid-owner ${String(found.config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
+    ]);
+    await shutdownLoader(found, app);
   });
 
   it('adds the jump into its chain exactly once, on a container that has none', async () => {

@@ -12,12 +12,16 @@
  *
  * What the rule says, and only that:
  *
- *   uid 1000 (lifemodel's user) may open a connection to 127.0.0.1 - the
- *   Agent Vault proxy on 14322, the loader's own interface, the container's
- *   resolver - and anything else is REJECTed. Every other uid, root included
- *   (the loader, Caddy, Agent Vault), is untouched: the rule names the one uid
- *   it confines, and the traffic that leaves the container through the vault's
- *   proxy is root's.
+ *   uid 1000 (lifemodel's user) may open a connection to the NAMED loopback
+ *   services only - the Agent Vault proxy port (14322), the loader's own
+ *   interface (7000), the container's resolver's DNS port - each protocol and
+ *   destination-port bound, and everything else from that uid is REJECTed.
+ *   The parent decision allows the proxy port and the loopback services
+ *   lifemodel needs, not every loopback listener: the allows are named in
+ *   `referenceRules()` below, with the reason of each. Every other uid, root
+ *   included (the loader, Caddy, Agent Vault), is untouched: the rule names
+ *   the one uid it confines, and the traffic that leaves the container
+ *   through the vault's proxy is root's.
  *
  * REJECT and not DROP: a bypass must fail at once and say so ("Connection
  * refused"), because lifemodel reads that as a connection error and records
@@ -41,7 +45,7 @@ import type { CommandResult, CommandRunner } from './exec.js';
 import type { LoaderLogger } from './logger.js';
 import { describe } from './state.js';
 
-/** The address lifemodel's user may still reach: Agent Vault and local services. */
+/** The address the named loopback services answer on. */
 const LOOPBACK = '127.0.0.1';
 
 /** The answer a REJECTed connection gets, and what makes it fail at once. */
@@ -69,12 +73,63 @@ export function createEgress(deps: EgressDeps): Egress {
   const chain = config.egress.chain;
   const uid = config.lifemodel.uid;
 
-  /** The rule, as iptables arguments: loopback for lifemodel's user, and nothing else. */
+  /**
+   * The NAMED loopback services uid 1000 may reach, protocol and port bound,
+   * and REJECT for everything else from that uid. The parent decision reads
+   * "Agent Vault's proxy port (and loopback services it needs)" - not simply
+   * "loopback" - so each allow is named here with its reason, and every
+   * loopback listener the loader does not name is unreachable for uid 1000,
+   * the vault's own management interface on 14321 among them (which is what
+   * uid 1000 must NOT open, without the loader's login):
+   *
+   *   - the Agent Vault PROXY port (TCP): the one way out the stage exists to
+   *     give - lifemodel's https and http traffic leaves through it, key
+   *     attached on the way out (story S5);
+   *   - the loader's OWN interface port (TCP): the instance's HTTP surface on
+   *     loopback - the `lifemodel status|panic|resume` command line talks to
+   *     it over loopback, and Caddy asks it about every request; the rule
+   *     never refused it before;
+   *   - the container's embedded resolver's DNS port (UDP and TCP): a
+   *     container user's own name lookups (getaddrinfo: /lib) go there -
+   *     resolving a NAME is not egress; the DIAL to a resolved address still
+   *     meets the REJECT below, as the gated walk checks directly.
+   */
   function referenceRules(): string[][] {
-    return [
-      ['-m', 'owner', '--uid-owner', String(uid), '-d', LOOPBACK, '-j', 'ACCEPT'],
-      ['-m', 'owner', '--uid-owner', String(uid), '-j', 'REJECT', '--reject-with', REJECT_WITH],
+    const allow = (port: number, protocol: 'tcp' | 'udp', destination: string): string[] => [
+      '-m',
+      'owner',
+      '--uid-owner',
+      String(uid),
+      '-p',
+      protocol,
+      '-d',
+      destination,
+      '--dport',
+      String(port),
+      '-j',
+      'ACCEPT',
     ];
+    const rules: string[][] = [
+      allow(config.agentVault.proxyPort, 'tcp', LOOPBACK),
+      allow(config.httpPort, 'tcp', LOOPBACK),
+    ];
+    // The resolver the container itself points its clients at; empty when a
+    // container has none of its own (a name lookup then simply fails as one).
+    if (config.egress.resolver !== '') {
+      rules.push(allow(53, 'udp', config.egress.resolver));
+      rules.push(allow(53, 'tcp', config.egress.resolver));
+    }
+    rules.push([
+      '-m',
+      'owner',
+      '--uid-owner',
+      String(uid),
+      '-j',
+      'REJECT',
+      '--reject-with',
+      REJECT_WITH,
+    ]);
+    return rules;
   }
 
   /** The last non-empty line a command printed: the reason, in one line. */
@@ -146,8 +201,16 @@ export function createEgress(deps: EgressDeps): Egress {
     }
     await ensureJump();
     logger.info(
-      { uid, loopback: LOOPBACK, chain, rules: referenceRules().length },
-      `lifemodel's traffic is confined to ${LOOPBACK}: uid ${String(uid)} leaves through the Agent Vault proxy or not at all`
+      {
+        uid,
+        loopback: LOOPBACK,
+        chain,
+        rules: referenceRules().length,
+        proxyPort: config.agentVault.proxyPort,
+        loaderPort: config.httpPort,
+        resolver: config.egress.resolver === '' ? null : config.egress.resolver,
+      },
+      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${config.egress.resolver === '' ? '' : ', the resolver'}): everything else from uid ${String(uid)} is refused`
     );
   }
 
