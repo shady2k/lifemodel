@@ -134,6 +134,11 @@ describe('the loader first start', () => {
     );
     expect(env['HTTP_PROXY']).toBe(env['HTTPS_PROXY']);
     expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
+    // Both spellings, and the lowercase ones the container could have been
+    // given by `docker run` are the loader's own, not the inherited ones.
+    expect(env['https_proxy']).toBe(env['HTTPS_PROXY']);
+    expect(env['http_proxy']).toBe(env['HTTP_PROXY']);
+    expect(env['no_proxy']).toBe(env['NO_PROXY']);
     expect(env['NODE_USE_ENV_PROXY']).toBe('1');
     expect(env['NODE_EXTRA_CA_CERTS']).toBe(world.config.agentVault.caPath);
     expect(JSON.stringify(env)).not.toContain(world.config.agentVault.ownerEmail);

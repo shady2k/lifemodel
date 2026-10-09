@@ -238,6 +238,12 @@ describe('Agent Vault, the layer that holds the keys', () => {
     // lifemodel would try to reach a proxy the kernel rule forbids.
     setEnv('HTTPS_PROXY', 'http://corp-proxy:3128');
     setEnv('HTTP_PROXY', 'http://corp-proxy:3128');
+    // The lowercase spellings are the ones a client like Node's
+    // EnvHttpProxyAgent prefers: a stale one would send lifemodel to a proxy
+    // the kernel rule refuses (`no_proxy=*` would send it DIRECT).
+    setEnv('https_proxy', 'http://corp-proxy:3128');
+    setEnv('http_proxy', 'http://corp-proxy:3128');
+    setEnv('no_proxy', '*');
     const { app } = await start(found);
 
     await waitUntil(() => lifemodelSpawn(found) !== undefined, 'lifemodel is started');
@@ -246,9 +252,9 @@ describe('Agent Vault, the layer that holds the keys', () => {
     // requests. The agent token is the proxy credential, and it is the only
     // secret in there - no key, no vault admin credential, no store.
     const proxy = `http://${TOKEN}:lifemodel@127.0.0.1:${String(found.config.agentVault.proxyPort)}`;
-    expect(env['HTTPS_PROXY']).toBe(proxy);
-    expect(env['HTTP_PROXY']).toBe(proxy);
-    expect(env['NO_PROXY']).toBe('localhost,127.0.0.1');
+    for (const name of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy']) {
+      expect(env[name]).toBe(name === 'NO_PROXY' || name === 'no_proxy' ? 'localhost,127.0.0.1' : proxy);
+    }
     expect(env['NODE_USE_ENV_PROXY']).toBe('1');
     expect(env['NODE_EXTRA_CA_CERTS']).toBe(found.config.agentVault.caPath);
     const owner = JSON.parse(
