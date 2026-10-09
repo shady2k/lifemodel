@@ -100,7 +100,7 @@ runs.
 The suite never starts on the host. Every suite entrypoint — `npm run test`,
 `npm run check`, the husky pre-commit hook, CI's product job — goes through the
 disposable test boundary, `scripts/test-isolated.mjs
-<check|test|docker> [-- <vitest args>]`:
+<check|test|docker> [--timeout-ms <ms>] [-- <vitest args>]`:
 
 - a run is one-shot and bounded, with at most 2 vitest workers enforced twice —
   by the launcher and by `vitest.config.ts`;
@@ -111,15 +111,34 @@ disposable test boundary, `scripts/test-isolated.mjs
   never reach it; the launcher fails closed when it cannot hold that;
 - the launcher installs SIGINT/SIGTERM handlers and a hard deadline: on exit —
   success, inner failure, timeout or interruption — it stops and removes the
-  containers and volumes it started, then re-raises the exit code; a hard kill
+  containers and temporary source images it started, then returns the exit
+  code (124 for timeout,
+  130/143 for interruption); a hard kill
   can leave a container behind, and the launcher prunes leftovers matching its
   label at the next run start and reports what it pruned;
-- the boundary runs Node.js 24 (`node:24-bookworm-slim`) with dependencies
-  provisioned from the committed lockfile; a run is offline;
-- `docker` mode must never use the owner's daemon. Its separate backend is
-  required before Docker integration tests can run; an unavailable backend
-  fails closed. A failed nested-namespace probe is not proof that every
-  private-daemon backend is impossible (lifemodel-q4x.5.3);
+- the boundary runs Node.js 24.21.0 (`node:24.21.0-bookworm-slim`) with
+  dependencies provisioned by native `npm ci` inside a container. Only the
+  allowlisted `legacy-peer-deps` install policy is copied from `.npmrc`;
+  credentials and registry overrides are rejected. The dependency cache key
+  includes the manifests, policy and resolved base image/platform. Provisioning
+  can use the network; the test container is offline, non-root, capped at 2 CPUs,
+  3 GiB of memory (no additional swap) and 256 processes. Its root filesystem
+  is read-only; writes use memory-backed `/tmp` (768 MiB) and `/home/node`
+  (64 MiB). The per-run source image is removed after the container. The
+  dependency cache is intentionally retained;
+- the overall run deadline is 25 minutes (`--timeout-ms` can lower it). Cleanup
+  is awaited afterwards; the Docker-machine helper has up to 75 seconds to stop
+  control processes and delete its machine after interruption;
+- `docker` mode runs on macOS with OrbStack. It creates a fresh Ubuntu 24.04
+  machine with `--isolated --isolate-network`, 2 CPUs, 4 GiB memory and a
+  32 GiB disk limit. No Mac mounts or SSH forwarding are enabled. The source
+  and SHA-verified Node/Docker artifacts arrive over stdin; native `npm ci`
+  and a private rootless Docker daemon run inside the machine. OrbStack
+  machines share a Linux kernel: this is not a hardware-VM security boundary.
+  Unsupported hosts, missing OrbStack and failed rootless setup fail closed;
+  there is no owner-socket, privileged or host-suite fallback. Deletion is
+  awaited from outside the machine; an unconfirmed deletion keeps its claim
+  for next-run recovery and cannot turn a successful suite into a green run;
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
   reads the committed config surfaces (package.json scripts, vitest config,
   the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a

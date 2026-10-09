@@ -241,9 +241,31 @@ Prerequisites for tests and checks: **Node.js ≥ 24 and Docker**. Watch mode is
 explicitly unsupported (`npm run test:watch` explains why and exits): run a
 bounded one-shot suite instead, e.g.
 `node scripts/test-isolated.mjs test -- tests/unit/energy-management.test.ts`.
-`docker` mode needs a separate isolated backend, not your own daemon. If the
-backend is unavailable, it refuses the run instead of falling back to the host. CI runs the same launcher command behind its own
-disposable Docker daemon and never installs on its host.
+Ordinary checks use an offline, non-root Node 24.21.0 container (2 CPUs,
+3 GiB memory, no extra swap, 256 processes). Its root is read-only; temporary
+writes use capped memory-backed filesystems. Dependencies are installed inside
+a container and cached. Per-run containers and source images are removed after
+success, failure, timeout or interruption. The default deadline is 25 minutes.
+
+`docker` mode uses a private rootless daemon in a disposable OrbStack machine
+on macOS: no Mac mounts, no SSH forwarding, and network isolation from the host
+and other machines. Its limits are 2 CPUs, 4 GiB memory and 32 GiB disk. OrbStack
+shares a Linux kernel; it is not a hardware VM. Missing or unsupported backends
+fail closed, never to your socket or a privileged fallback. CI runs ordinary
+checks through the same launcher with GitHub's disposable Docker daemon.
+
+Real boundary checks (each runs its test workload inside the boundary):
+
+```bash
+node scripts/accept-test-isolation.mjs
+node scripts/accept-docker-isolation.mjs success
+node scripts/accept-docker-isolation.mjs interrupt
+node scripts/accept-docker-isolation.mjs timeout
+```
+
+The launch lock prevents overlapping heavy runs. Do not run raw `npx vitest` or
+install host dependencies just to test. See [AGENTS.md](AGENTS.md#test-isolation)
+for cleanup, cache and argument policy.
 
 ---
 
