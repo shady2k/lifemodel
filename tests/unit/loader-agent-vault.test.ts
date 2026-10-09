@@ -74,7 +74,8 @@ const TOKEN = 'av_agt_the-token-the-loader-created';
  * The answers of Agent Vault's CLI on an EMPTY volume: no account, no vault,
  * no agent - the first start, which is what creates all three.
  */
-function scriptFirstStart(found: LoaderWorld): void {
+/** The first start takes the token its test wants; the default is the one the tests named. */
+function scriptFirstStart(found: LoaderWorld, token = TOKEN): void {
   const { runner, config } = found;
   const binary = config.agentVault.binary;
   runner.on(`${binary} auth login`, () => ({
@@ -105,8 +106,8 @@ function scriptFirstStart(found: LoaderWorld): void {
     stdout: '',
     stderr: 'Error: Agent not found\n',
   }));
-  runner.on(`${binary} agent create`, () => ({ code: 0, stdout: `${TOKEN}\n`, stderr: '' }));
-  runner.on(`${binary} agent rotate`, () => ({ code: 0, stdout: `${TOKEN}\n`, stderr: '' }));
+  runner.on(`${binary} agent create`, () => ({ code: 0, stdout: `${token}\n`, stderr: '' }));
+  runner.on(`${binary} agent rotate`, () => ({ code: 0, stdout: `${token}\n`, stderr: '' }));
   runner.on(`${binary} ca fetch`, () => ({
     code: 0,
     stdout: '-----BEGIN CERTIFICATE-----\nMIIBthe-proxy-ca\n-----END CERTIFICATE-----\n',
@@ -286,8 +287,14 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const callsSoFar = vaultCalls(found).length;
 
     // `docker restart`: a fresh loader over the volume the first one left.
+    // (Its CLI answers as one does over a store whose holder still stands -
+    // the load, the CA - and the reconcile asks the store for the vault first.)
+    scriptExistingStore(found);
     const second = await start(found);
-    expect(vaultCalls(found).slice(callsSoFar)).toEqual(['ca fetch']);
+    expect(vaultCalls(found).slice(callsSoFar)).toEqual([
+      'vault credential-store show lifemodel',
+      'ca fetch',
+    ]);
     await waitUntil(() => lifemodelSpawn(found) !== undefined, 'lifemodel is started again');
     const env = lifemodelSpawn(found)?.options.env ?? {};
     expect(env['AGENT_VAULT_TOKEN']).toBe(firstToken);
@@ -617,6 +624,39 @@ describe('Agent Vault, the layer that holds the keys', () => {
     expect(written).toContain('Agent Vault is up');
 
     await shutdownLoader(found, app);
+  });
+
+  it('re-provisions when the store was replaced under a surviving record', async () => {
+    const found = world();
+    scriptFirstStart(found);
+    const first = await start(found);
+    await shutdownLoader(found, first.app);
+    const firstToken = JSON.parse(
+      readFileSync(join(found.config.loaderDir, 'vault-proxy.json'), 'utf8')
+    ).token;
+
+    // The store is replaced (the recovery path the docs once claimed whole):
+    // nothing of it is on the volume, `loader/vault-proxy.json` survived.
+    rmSync(found.config.agentVault.storeDir, { recursive: true, force: true });
+
+    // The CLI of the replacement store: nothing of the loader's there yet,
+    // and it mints its own token.
+    scriptFirstStart(found, 'av_agt_the-token-the-replacement-store-minted');
+    const second = await start(found);
+    const secondToken = JSON.parse(
+      readFileSync(join(found.config.loaderDir, 'vault-proxy.json'), 'utf8')
+    ).token;
+    // The record was RECONCILED with the store instead of trusted: a fresh
+    // vault, a fresh agent, a fresh token, and the record written beside them.
+    expect(secondToken).not.toBe(firstToken);
+    expect(
+      second.lines.some((line) => line.message.includes('does not match what the store holds'))
+    ).toBe(true);
+    await waitUntil(() => lifemodelSpawn(found) !== undefined, 'lifemodel is started with the fresh record');
+    expect(lifemodelSpawn(found)?.options.env['AGENT_VAULT_TOKEN']).toBe(secondToken);
+    expect(second.lines.filter((line) => line.level === 'error')).toEqual([]);
+
+    await shutdownLoader(found, second.app);
   });
 
   it('says the record is not complete when a field is missing, or is not a string', async () => {
