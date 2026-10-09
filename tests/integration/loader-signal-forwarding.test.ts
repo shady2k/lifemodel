@@ -40,11 +40,15 @@ afterEach(() => {
 /**
  * The stand-in for lifemodel: it writes a file when it is up, and on SIGTERM
  * it does 150 ms of "drain" work before leaving with 0. A loader that killed
- * it would leave no file behind.
+ * it would leave no file behind. Its marker path is BAKED IN, not passed
+ * through the environment: the supervisor builds the child's environment from
+ * the explicit boundary of loader/src/env-boundary.ts now - the named
+ * variables the product reads - and a stand-in's marker path is not one of
+ * them (finding 6 residual).
  */
-const INSTANCE_SOURCE = `
+const INSTANCE_SOURCE = (marker: string): string => `
 const { writeFileSync } = require('node:fs');
-const marker = process.env.LIFEMODEL_MARKER;
+const marker = ${JSON.stringify(marker)};
 writeFileSync(marker + '.up', 'up\\n');
 process.on('SIGTERM', () => {
   setTimeout(() => {
@@ -146,7 +150,7 @@ function makeStandInVolume(): StandIn {
   const repo = join(root, 'repo');
   mkdirSync(join(repo, 'dist'), { recursive: true });
   const marker = join(root, 'lifemodel-marker');
-  writeFileSync(join(repo, 'dist', 'index.js'), INSTANCE_SOURCE);
+  writeFileSync(join(repo, 'dist', 'index.js'), INSTANCE_SOURCE(marker));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
   execFileSync('git', ['add', '-A'], { cwd: repo });
   execFileSync(
@@ -299,9 +303,6 @@ describe('the loader as the container main process', () => {
 describe('the supervisor with a real child', () => {
   it('waits for the child to leave by itself instead of killing it', async () => {
     const standIn = makeStandInVolume();
-    // The supervisor passes its own environment to the child: the stand-in
-    // learns where to write its marker from there.
-    process.env['LIFEMODEL_MARKER'] = standIn.marker;
     const config = {
       ...loadConfig({}),
       volumeRoot: standIn.root,
