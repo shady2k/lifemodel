@@ -20,6 +20,7 @@ import type { Logger } from '../types/index.js';
 import type { ConfigLoader } from '../config/config-loader.js';
 import {
   applySettings,
+  redactEndpointUrl,
   settingsInputFromBody,
   settingsInputFromFile,
   validateSettings,
@@ -168,8 +169,11 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         );
     }
 
+    // The URL by its nonsecret parts only: it must be able to carry no
+    // credential through here (validation refuses credentials), but a log
+    // line is no place to gamble on it.
     logger.info(
-      { endpoint: input.endpointBaseUrl, roles: 3 },
+      { endpoint: redactEndpointUrl(input.endpointBaseUrl), roles: 3 },
       'Settings saved: lifemodel asks the loader to start it again'
     );
 
