@@ -87,8 +87,12 @@ export interface EgressDeps {
 export interface Egress {
   /** Install the rule; idempotent, and fatal when the container cannot carry it. */
   install(): Promise<void>;
-  /** The IPv4 rule as the loader installs it, for a test and for the log line. */
-  rules(): string[][];
+  /**
+   * The IPv4 rule as the loader installs it, with the resolver ports the nat
+   * table named (an empty list when it named none), for a test and for the
+   * log line.
+   */
+  rules(services?: readonly { protocol: string; port: number }[]): string[][];
   /** The IPv6 rule, when the container has an address for it to confine. */
   rules6(): Promise<string[][]>;
 }
@@ -115,12 +119,12 @@ export function createEgress(deps: EgressDeps): Egress {
    *     loopback - the `lifemodel status|panic|resume` command line talks to
    *     it over loopback, and Caddy asks it about every request; the rule
    *     never refused it before;
-   *   - the container's embedded resolver's DNS port (UDP and TCP): a
-   *     container user's own name lookups (getaddrinfo: /lib) go there -
+   *   - the container's embedded resolver (`resolverPorts()` below, UDP and
+   *     TCP): a container user's own name lookups (getaddrinfo) go there -
    *     resolving a NAME is not egress; the DIAL to a resolved address still
    *     meets the REJECT below, as the gated walk checks directly.
    */
-  function referenceRules(): string[][] {
+  function referenceRules(resolver: readonly { protocol: string; port: number }[]): string[][] {
     const allow = (port: number, protocol: 'tcp' | 'udp', destination: string): string[] => [
       '-m',
       'owner',
@@ -139,11 +143,8 @@ export function createEgress(deps: EgressDeps): Egress {
       allow(config.agentVault.proxyPort, 'tcp', LOOPBACK),
       allow(config.httpPort, 'tcp', LOOPBACK),
     ];
-    // The resolver the container itself points its clients at; empty when a
-    // container has none of its own (a name lookup then simply fails as one).
-    if (config.egress.resolver !== '') {
-      rules.push(allow(53, 'udp', config.egress.resolver));
-      rules.push(allow(53, 'tcp', config.egress.resolver));
+    for (const service of resolver) {
+      rules.push(allow(service.port, service.protocol as 'udp' | 'tcp', config.egress.resolver));
     }
     rules.push([
       '-m',
@@ -271,9 +272,47 @@ export function createEgress(deps: EgressDeps): Egress {
     ];
   }
 
+  /**
+   * The container's embedded resolver answers at `resolver` - but Docker
+   * DNATs what its clients send there (the nat OUTPUT rule maps the well-known
+   * port 53 onto the resolver's own port, and I could not match the port that
+   * the filter sees if I named 53), so the filter rule names the port the nat
+   * rewrite hands the traffic - READ here, not guessed: one read of the nat
+   * table, the DNAT lines that point at the resolver address, their ports and
+   * protocols. Empty when the container has no such rewrite: uid 1000's own
+   * name lookups are then refused, said in one line (a name lookup is not
+   * what egress exists to allow, and everything that DIALS still goes through
+   * the vault's proxy, which does its own lookups as root).
+   */
+  async function resolverPorts(binary: string): Promise<{ protocol: string; port: number }[]> {
+    const resolver = config.egress.resolver;
+    if (resolver === '') return [];
+    const listed = await iptables(
+      binary,
+      ['-t', 'nat', '-S', 'DOCKER_OUTPUT'],
+      "looking for the container's resolver in the nat table",
+      true
+    );
+    if (listed.code !== 0) return [];
+    const services: { protocol: string; port: number }[] = [];
+    const needle = `-d ${resolver}`;
+    const rewrite = `-j DNAT --to-destination ${resolver}:`;
+    for (const line of listed.stdout.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.includes(needle) || !trimmed.includes(rewrite)) continue;
+      const protocol = /(^|\s)-p (\w+)(\s|$)/.exec(trimmed)?.[2] ?? '';
+      const port = Number(trimmed.slice(trimmed.lastIndexOf(':') + 1));
+      if ((protocol === 'udp' || protocol === 'tcp') && port > 0) {
+        services.push({ protocol, port });
+      }
+    }
+    return services;
+  }
+
   async function install(): Promise<void> {
     await ensureChain(binary, chain);
-    for (const rule of referenceRules()) {
+    const services = await resolverPorts(binary);
+    for (const rule of referenceRules(services)) {
       await iptables(binary, ['-A', chain, ...rule], `adding a rule to ${chain}`);
     }
     await ensureJump(binary, chain);
@@ -303,19 +342,26 @@ export function createEgress(deps: EgressDeps): Egress {
         uid,
         loopback: LOOPBACK,
         chain,
-        rules: referenceRules().length,
+        rules: referenceRules(services).length,
         proxyPort: config.agentVault.proxyPort,
         loaderPort: config.httpPort,
         resolver: config.egress.resolver === '' ? null : config.egress.resolver,
+        resolverPorts: services.length === 0 ? null : services,
         ipv6: config.egress.ipv6Binary,
       },
-      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${config.egress.resolver === '' ? '' : ', the resolver'}${ipv6Present ? `, and for IPv6 ${LOOPBACK6}` : ''}): everything else from uid ${String(uid)} is refused`
+      `lifemodel's traffic is confined to the named loopback services (the vault proxy, the loader interface${services.length > 0 ? `, the resolver on ${services.map((s) => `${s.protocol} ${String(s.port)}`).join(' and ')}` : ''}${ipv6Present ? `, and for IPv6 ${LOOPBACK6}` : ''}): everything else from uid ${String(uid)} is refused`
     );
+    if (config.egress.resolver !== '' && services.length === 0) {
+      logger.warn(
+        { resolver: config.egress.resolver },
+        'the container resolver was given, but no nat rewrite names it: its port is not allowed for uid 1000, so its own name lookups are refused (what dials outside still leaves through the vault proxy)'
+      );
+    }
   }
 
   return {
     install,
-    rules: referenceRules,
+    rules: (services = []) => referenceRules(services),
     rules6: async () => {
       const present = await ipv6IsPresentAt(config.egress.procPath);
       return present ? referenceRules6() : [];

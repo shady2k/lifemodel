@@ -281,7 +281,7 @@ destination-bound - not "loopback":
 | --- | --- |
 | TCP `127.0.0.1:14322` | Agent Vault's proxy: lifemodel's one way out (story S5) |
 | TCP `127.0.0.1:7000` | the loader's own interface: the instance's HTTP surface on loopback (the `status|panic|resume` command line, and Caddy's forward check) |
-| UDP and TCP `127.0.0.11:53` | the container's embedded resolver: resolving a name is not egress, and a dial to the resolved address still meets the REJECT |
+| UDP and TCP `127.0.0.11:<the resolver's port>` | the container's embedded resolver: resolving a name is not egress, and a dial to a resolved address still meets the REJECT. Docker gives the resolver address to its clients as `:53` and then DNATs it to the port the resolver really answers on, so the loader READS that port from the nat table (per protocol) and allows it - the port the filter actually sees. When no such rewrite exists, nothing is allowed and one line says so; a name lookup by uid 1000 is then refused (what dials outside still leaves through the vault's proxy, which looks names up itself, as root) |
 
 Everything else on loopback is refused: the vault's management interface
 (`127.0.0.1:14321`) - which the loader's own login, not the proxy credential,

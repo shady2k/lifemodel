@@ -74,6 +74,11 @@ printf '%s\\n' "$*" >> "$LIFEMODEL_EGRESS_LOG"
 case "$*" in
   "-L LIFEMODEL_EGRESS -n") exit 1 ;;
   "-C OUTPUT -j LIFEMODEL_EGRESS") exit 1 ;;
+  "-t nat -S DOCKER_OUTPUT")
+    printf '%s\n' \
+      '-A DOCKER_OUTPUT -d 127.0.0.11/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 127.0.0.11:38033' \
+      '-A DOCKER_OUTPUT -d 127.0.0.11/32 -p udp -m udp --dport 53 -j DNAT --to-destination 127.0.0.11:32878'
+    exit 0 ;;
 esac
 exit 0
 `;
@@ -252,10 +257,11 @@ describe('the loader as the container main process', () => {
       expect(readFileSync(egressLog, 'utf8').trim().split('\n')).toEqual([
         '-L LIFEMODEL_EGRESS -n',
         '-N LIFEMODEL_EGRESS',
+        '-t nat -S DOCKER_OUTPUT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 14322 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.1 --dport 0 -j ACCEPT',
-        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p udp -d 127.0.0.11 --dport 53 -j ACCEPT',
-        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.11 --dport 53 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p tcp -d 127.0.0.11 --dport 38033 -j ACCEPT',
+        '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -p udp -d 127.0.0.11 --dport 32878 -j ACCEPT',
         '-A LIFEMODEL_EGRESS -m owner --uid-owner 1000 -j REJECT --reject-with icmp-port-unreachable',
         '-C OUTPUT -j LIFEMODEL_EGRESS',
         '-A OUTPUT -j LIFEMODEL_EGRESS',

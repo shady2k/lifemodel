@@ -41,13 +41,25 @@ import {
  * services (the vault's proxy port, the loader's interface, the container's
  * resolver's DNS port), and REJECT for everything else from uid 1000.
  */
+/**
+ * The ports the scripted nat table gives the container's own resolver for the
+ * two protocols it answers on: the ports the docker rewrite maps 53 onto, not
+ * the well-known one the clients dial.
+ */
+const RESOLVER_UDP_PORT = 32_878;
+const RESOLVER_TCP_PORT = 38_033;
+
 const RULE = (config: LoaderConfig): string[] => [
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.agentVault.proxyPort)} -j ACCEPT`,
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d 127.0.0.1 --dport ${String(config.httpPort)} -j ACCEPT`,
-  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p udp -d ${config.egress.resolver} --dport 53 -j ACCEPT`,
-  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d ${config.egress.resolver} --dport 53 -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p tcp -d ${config.egress.resolver} --dport ${String(RESOLVER_TCP_PORT)} -j ACCEPT`,
+  `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -p udp -d ${config.egress.resolver} --dport ${String(RESOLVER_UDP_PORT)} -j ACCEPT`,
   `-A LIFEMODEL_EGRESS -m owner --uid-owner ${String(config.lifemodel.uid)} -j REJECT --reject-with icmp-port-unreachable`,
 ];
+
+/** What Docker's own nat table answers about the resolver (the real shape). */
+const NAT_OUTPUT = `-A DOCKER_OUTPUT -d 127.0.0.11/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 127.0.0.11:${String(RESOLVER_TCP_PORT)}
+-A DOCKER_OUTPUT -d 127.0.0.11/32 -p udp -m udp --dport 53 -j DNAT --to-destination 127.0.0.11:${String(RESOLVER_UDP_PORT)}\n`;
 
 function world(): LoaderWorld {
   const created = createLoaderWorld();
@@ -68,6 +80,12 @@ function world(): LoaderWorld {
     code: 1,
     stdout: '',
     stderr: 'iptables: Bad rule (does a matching rule exist in that chain?).\n',
+  }));
+  // The container's own resolver, as Docker's nat table answers for it.
+  created.runner.on(`${binary} -t nat -S DOCKER_OUTPUT`, () => ({
+    code: 0,
+    stdout: NAT_OUTPUT,
+    stderr: '',
   }));
   return created;
 }
@@ -126,6 +144,7 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${chain} -n`,
       `iptables -N ${chain}`,
+      `iptables -t nat -S DOCKER_OUTPUT`,
       ...ruleLines(found),
       `iptables -C OUTPUT -j ${chain}`,
       `iptables -A OUTPUT -j ${chain}`,
@@ -190,6 +209,7 @@ describe("the rule that confines lifemodel's egress", () => {
     expect(egressCalls(found)).toEqual([
       `iptables -L ${found.config.egress.chain} -n`,
       `iptables -F ${found.config.egress.chain}`,
+      `iptables -t nat -S DOCKER_OUTPUT`,
       ...ruleLines(found),
       `iptables -C OUTPUT -j ${found.config.egress.chain}`,
     ]);
