@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, symlinkSync, rmSync, truncateSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, symlinkSync, rmSync, truncateSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, stageSnapshot, acquireLock, innerSteps, containerArgs, command } from '../../scripts/test-isolated.mjs';
@@ -59,6 +59,18 @@ describe('the disposable launch boundary', () => {
       mkdirSync(join(root, 'tests')); writeFileSync(join(root, 'tests', 'large'), '');
       truncateSync(join(root, 'tests', 'large'), 11 * 1024 * 1024);
       expect(() => stageSnapshot(root, join(root, 'snapshot'))).toThrow(/byte limit/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('normalizes snapshot-only permissions for the non-root Docker copy', () => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-modes-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}'); writeFileSync(join(root, 'package-lock.json'), '{}');
+      mkdirSync(join(root, '.beads')); writeFileSync(join(root, '.beads', 'issues.jsonl'), '{}', { mode: 0o600 });
+      mkdirSync(join(root, 'scripts')); writeFileSync(join(root, 'scripts', 'tool.sh'), '#!/bin/sh', { mode: 0o700 });
+      const destination = stageSnapshot(root, join(root, 'snapshot'));
+      expect(statSync(join(destination, '.beads', 'issues.jsonl')).mode & 0o777).toBe(0o644);
+      expect(statSync(join(destination, 'scripts', 'tool.sh')).mode & 0o777).toBe(0o755);
+      expect(statSync(join(root, '.beads', 'issues.jsonl')).mode & 0o777).toBe(0o600);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
   it('allows only one live run and releases only its own lock', () => {
