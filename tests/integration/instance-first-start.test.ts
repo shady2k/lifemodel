@@ -1135,7 +1135,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     }, 120_000);
   });
 
-  it(''holds panic and resumes, from the command line in the container', () => {
+  it('holds panic and resumes, from the command line in the container', () => {
     const panicked = docker(['exec', container, 'lifemodel', 'panic'], { timeoutMs: 180_000 });
     expect(panicked).toContain('panic on');
     expect(panicked).toMatch(/^stopped\n/);
