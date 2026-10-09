@@ -99,6 +99,7 @@ Cognition uses **native OpenAI tool-calling** with *Codex-style natural terminat
 
 - **Node.js ≥ 24**
 - **Docker** — required for the Motor Cortex's agentic (code-executing) runs
+  and for the isolated test boundary (see [Test isolation](#-development))
 - A **Telegram bot token** ([@BotFather](https://t.me/BotFather))
 - An **[OpenRouter](https://openrouter.ai/)** API key (or any OpenAI-compatible endpoint — LM Studio, Ollama, vLLM, …)
 
@@ -213,15 +214,37 @@ npm run dev          # run with hot reload (tsx)
 npm run build        # compile TypeScript → dist/
 npm start            # run the compiled build
 
-npm test             # run the test suite (vitest)
-npm run test:watch   # watch mode
+npm test             # run the test suite inside the disposable test boundary
+npm run test:docker  # the launcher's docker mode
+npm run test:watch   # unsupported — see Test isolation below
 
+npm run check        # typecheck + lint + format + suite, via the isolated launcher
 npm run lint         # eslint
 npm run typecheck    # tsc --noEmit
 npm run format       # prettier --write
 ```
 
-Tests live under `tests/` (unit, integration, helpers) — never inside `src/`. Pre-commit hooks (Husky + lint-staged) enforce lint & formatting.
+Tests live under `tests/` (unit, integration, helpers) — never inside `src/`. Pre-commit hooks (Husky + lint-staged) enforce lint & formatting on staged files, then run the product checks through the isolated launcher.
+
+### Test isolation
+
+The suite never starts on the host. `npm test` and `npm run check` start
+`scripts/test-isolated.mjs`, which runs the checks and the suite one-shot and
+bounded inside a disposable Node 24 container built from a selective snapshot
+of the tree. The run never sees your `.env`, your `data/` state, your git
+credentials or your Docker daemon — nothing of your checkout is bind-mounted
+and no Docker socket is mounted — and the launcher stops and removes the
+containers it started when the run ends, fails, times out or is interrupted
+(a hard kill leaves a container that the next run prunes and reports).
+
+Prerequisites for tests and checks: **Node.js ≥ 24 and Docker**. Watch mode is
+explicitly unsupported (`npm run test:watch` explains why and exits): run a
+bounded one-shot suite instead, e.g.
+`node scripts/test-isolated.mjs test -- tests/unit/energy-management.test.ts`.
+`docker` mode needs a safe Docker backend that is not your own daemon; on this
+machine it fails closed today (no nested daemon is workable here) — it is not
+promised to work locally. CI runs the same launcher command behind its own
+disposable Docker daemon and never installs on its host.
 
 ---
 
