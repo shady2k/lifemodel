@@ -1,7 +1,17 @@
 set -e
 npx lint-staged
-npx tsc --noEmit
-npx vitest run
+
+# The typecheck, the format check and the suite never start on the host: the
+# isolated launcher runs them inside the disposable test boundary
+# (scripts/test-isolated.mjs, see AGENTS.md). lint-staged and the backlog gate
+# below drive the commit through git context variables (GIT_INDEX_FILE above
+# all); none of them may leak into the launcher's child, which snapshots the
+# tree itself.
+(
+    unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
+        GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    node scripts/test-isolated.mjs check
+)
 
 
 # --- BEGIN LIFEMODEL BACKLOG GATE ---

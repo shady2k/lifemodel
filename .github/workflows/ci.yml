@@ -9,10 +9,11 @@
 #      `git diff --no-renames` and passes them to the classifier, which answers
 #      product=true or product=false;
 #   2. ci-product: typecheck, lint, the format check and the test suite, which
-#      is exactly what `npm run check` runs by hand, on node 24 after `npm ci`
-#      from the committed lockfile, when the answer is product=true (or when
-#      the `changes` job did not succeed, see its comment) and the pull request
-#      is not a draft;
+#      is exactly what `npm run check` runs by hand, on node 24 and started
+#      through the isolated test launcher (scripts/test-isolated.mjs) so the
+#      checks and the suite never run in this checkout, when the answer is
+#      product=true (or when the `changes` job did not succeed, see its
+#      comment) and the pull request is not a draft;
 #   3. ci-backlog: the backlog gate below, on every change, for everyone.
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
@@ -27,12 +28,12 @@
 # somebody has to override. Branch protection on main requires `changes`,
 # `ci-product` and `ci-backlog` (docs/backlog-integration.md).
 #
-# `npm run check` and this job run the same checks, but the environments differ:
-# the verdict holds for node 24 and the dependencies of the committed lockfile,
-# which is what `npm ci` installs here. A local green run on another node
-# version, or with other installed dependencies, is not this verdict — and a
-# manifest that disagrees with `package-lock.json` can pass every local check
-# and fail here at `npm ci` before `npm run check` starts.
+# `npm run check` and this job run the same checks through the same launcher
+# command, on node 24, with no `npm ci` on the host in either place: the
+# launcher provisions what it needs inside the boundary and fails closed when
+# it cannot (AGENTS.md, "Test isolation"). What `npm ci` used to prove here —
+# a `package.json` that agrees with `package-lock.json` — the suite itself now
+# proves, in tests/unit/test-entrypoints.test.ts, inside the boundary.
 #
 # ci-backlog needs node and a full history and nothing else. Its three steps
 # mirror the local hooks (.githooks/pre-commit, .githooks/commit-msg), which a
@@ -162,13 +163,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: npm
 
-      - name: Install what the checks run on
-        run: npm ci
-
-      - name: Typecheck, lint, the format check and the suite
-        run: npm run check
+      # The launcher, not the host: no `npm ci` here, no `node_modules` in this
+      # checkout, and the checks and the suite never start in it. The daemon
+      # behind the launcher is the disposable Docker daemon of this runner.
+      - name: Typecheck, lint, the format check and the suite, inside the isolated test boundary
+        run: node scripts/test-isolated.mjs check
 
   ci-backlog:
     runs-on: ubuntu-latest

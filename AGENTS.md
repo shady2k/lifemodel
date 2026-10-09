@@ -75,9 +75,10 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run dev` | run from source with tsx (`src/index.ts`) |
 | `npm run build` | compile to `dist/` and copy `src/runtime/builtin-skills` |
 | `npm start` | run the build (`dist/index.js`) |
-| `npm run test` | run the whole test suite (vitest) |
-| `npm run test:watch` | vitest in watch mode |
-| `npm run check` | every product check in one command — typecheck, lint, the format check, then `vitest run --maxWorkers=2`, stopping at the first failure; the exact command CI's product job runs |
+| `npm run test` | run the whole test suite inside the disposable test boundary (`node scripts/test-isolated.mjs test`) |
+| `npm run test:docker` | the launcher's docker mode (`node scripts/test-isolated.mjs docker`) |
+| `npm run test:watch` | explicitly unsupported: the launcher runs the suite one-shot and bounded and has no watch option yet, and watch on the host is refused by the entrypoint policy — run `node scripts/test-isolated.mjs test -- <path>` instead |
+| `npm run check` | every product check in one command — typecheck, lint, the format check and the suite (`--maxWorkers=2`), all started through the isolated launcher (`node scripts/test-isolated.mjs check`), stopping at the first failure; the exact command CI's product job runs |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint over `src/` (`lint:fix` to auto-fix) |
 | `npm run format` / `format:check` | Prettier over `src/**/*.ts` |
@@ -87,25 +88,61 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run ready` | open leaves ready to claim |
 | `npm run browser:auth` | browser authentication (`cli/browser-auth.ts`) |
 
-`dev`, `build`, `test`, `check`, `typecheck` and `lint` need `node_modules`
-(`npm ci`, on node 24 to match CI's own install).
-The backlog gate and the present check need only `node`. Docker is required for
-Motor Cortex agentic runs.
+`dev`, `build`, `start`, `typecheck` and `lint` need `node_modules` (`npm ci`,
+on node 24 to match CI's own install). `npm run test` and `npm run check` do
+not need host `node_modules`: they need **Node.js ≥ 24 and Docker** (Test
+isolation, below). The backlog gate and the present check need only `node`.
+Docker is required for the isolated test boundary and for Motor Cortex agentic
+runs.
+
+## Test isolation
+
+The suite never starts on the host. Every suite entrypoint — `npm run test`,
+`npm run check`, the husky pre-commit hook, CI's product job — goes through the
+disposable test boundary, `scripts/test-isolated.mjs
+<check|test|docker> [-- <vitest args>]`:
+
+- a run is one-shot and bounded, with at most 2 vitest workers enforced twice —
+  by the launcher and by `vitest.config.ts`;
+- the run works inside a disposable container built from a selective snapshot
+  of the tree (allowlisted source, test and config paths, the manifests),
+  copied in — nothing of the owner checkout is bind-mounted, and `.git`,
+  `.env*`, `data/`, `node_modules`, git credentials and the Docker socket
+  never reach it; the launcher fails closed when it cannot hold that;
+- the launcher installs SIGINT/SIGTERM handlers and a hard deadline: on exit —
+  success, inner failure, timeout or interruption — it stops and removes the
+  containers and volumes it started, then re-raises the exit code; a hard kill
+  can leave a container behind, and the launcher prunes leftovers matching its
+  label at the next run start and reports what it pruned;
+- the boundary runs Node.js 24 (`node:24-bookworm-slim`) with dependencies
+  provisioned from the committed lockfile; a run is offline;
+- `docker` mode never uses the owner's daemon. No safe backend for it is
+  available on this machine today (a nested daemon is not workable here), so
+  it fails closed with a prerequisite message rather than run — docker mode
+  is not promised to work locally (lifemodel-q4x.5.1);
+- the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
+  reads the committed config surfaces (package.json scripts, vitest config,
+  the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a
+  raw vitest start on the host.
+
+Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
+(`test:watch`) is explicitly unsupported, never a host fallback.
 
 ## Testing
 
 - All tests live in `tests/` (unit and integration, plus `fixtures/` and
   `helpers/`). Never create test files inside `src/`.
-- Run the suite with `npm run test`.
-- `npm run check` is the one command with CI's verdict — on node 24 with the
-  dependencies of the committed lockfile: typecheck, lint, the format check and
-  the suite (at most 2 workers), stopping at the first failure. CI's
-  `ci-product` job runs exactly it, for a change whose paths include product
-  code. A green run on another node version, or with other installed
-  dependencies, is not that verdict; CI also fails at its own `npm ci` when
-  `package.json` and `package-lock.json` disagree, before the checks start.
-- Run one file: `npx vitest run tests/unit/energy-management.test.ts`
-  (any path under `tests/`).
+- Run the suite with `npm run test` — through the boundary, one-shot and
+  bounded (Test isolation, above).
+- `npm run check` is the one command with CI's verdict — CI's `ci-product` job
+  runs the same launcher command, `node scripts/test-isolated.mjs check`, on
+  node 24 behind GitHub's disposable Docker daemon: typecheck, lint, the
+  format check and the suite (at most 2 workers), stopping at the first
+  failure. No `npm ci` runs on the CI host. A manifest that disagrees with
+  `package-lock.json` fails the entrypoint policy tests in the suite, which is
+  what `npm ci` used to prove before the checks started.
+- Run one file: `node scripts/test-isolated.mjs test --
+  tests/unit/energy-management.test.ts` (any path under `tests/`).
 - Tests do not use pino's file transport: it writes from a worker thread that a
   test cannot stop, and it raced the removal of temp directories. Use a
   recording or in-memory logger (`tests/helpers/test-logger.ts`), or

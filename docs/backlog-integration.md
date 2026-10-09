@@ -175,16 +175,18 @@ the repository's installation, and each person's plugin and hooks are their own.
   `.husky/pre-commit` and `.husky/commit-msg`, marked and idempotently: husky
   (an `npm ci`) sets `core.hooksPath=.husky/_`, and with the blocks in place
   the gate runs whichever hooks directory is active — husky's product checks
-  (lint-staged, tsc, vitest) included.
+  (lint-staged, then the isolated check through `scripts/test-isolated.mjs`)
+  included.
 - **The hooks directory is `.githooks`, not husky's `.husky/_`:** the gate
   hooks must fire in a clone that has not run `npm ci` (agents' worktrees
   never do), and `.githooks` needs only `node` and `git`. The product checks
-  stay where the project put them (`.husky/pre-commit`, needing `node_modules`)
-  and run when husky is active; until then the hook says they were skipped and
-  CI runs them: the `ci-product` job runs `npm run check` (node 24, `npm ci`)
-  for a change whose paths include product code — and when the `changes` job
-  that decides that did not succeed — and is skipped for one that cannot touch
-  it.
+  stay where the project put them (`.husky/pre-commit`: lint-staged, then the
+  isolated check through `scripts/test-isolated.mjs`) and run when husky is
+  active; until then the hook says they were skipped and CI runs them: the
+  `ci-product` job runs `node scripts/test-isolated.mjs check` (node 24,
+  behind GitHub's disposable Docker daemon, no host `npm ci`) for a change
+  whose paths include product code — and when the `changes` job that decides
+  that did not succeed — and is skipped for one that cannot touch it.
 - **Connecting a clone:** `npm run connect` (`scripts/connect-clone.sh`). It
   checks `git`, `node`, `br`, the four hooks, the gate's files and a readable
   `.backlog/config.json`, reports everything missing in one run and connects
@@ -193,7 +195,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   appends the marked gate blocks to the husky hooks, and runs the gate once
   (`--worktree`); exit 2 disconnects the proof and fails the connect. Safe to
   rerun. With no `node_modules` it still connects and says the product checks
-  are skipped until `npm ci`.
+  are skipped until `npm ci` — a message that is already stale under the
+  launcher wiring (the hook needs the isolated launcher, not `node_modules`),
+  `lifemodel-z5e`.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml`, on pull requests to
   `main` and pushes to `main`, node 24, `fetch-depth: 0`, no npm install. The
   backlog baseline is the PR's merge base or the push's `before` (else
@@ -214,9 +218,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   deliberate: without it a move of product code into `docs/` would be read by
   its destination only and answer `false`. `ci-product` runs on `true` — and
   also when `changes` did not succeed, so a broken `changes` job cannot skip it
-  — on ubuntu-latest with node 24 and the npm cache, `npm ci` and
-  `npm run check`; it is skipped for a draft pull request and for a cancelled
-  run. A skipped job reports as success to a required check, so branch
+  — on ubuntu-latest with node 24, running `node scripts/test-isolated.mjs
+  check` through the launcher with no host `npm ci`; it is skipped for a draft
+  pull request and for a cancelled run. A skipped job reports as success to a required check, so branch
   protection requires **`changes`, `ci-product` and `ci-backlog`**: requiring
   `changes` is what makes a failed `changes` job a red check rather than a
   quiet skip.
@@ -226,24 +230,31 @@ the repository's installation, and each person's plugin and hooks are their own.
   then).
 - **Static checks:** `npm run check` runs them together with the suite:
   typecheck, lint (`npm run lint`), the format check (`npm run format:check`),
-  then `vitest run --maxWorkers=2`, stopping at the first failure (needs
-  `node_modules`). The gate's own checks need only node: `npm run backlog`.
-- **Related tests:** `npx vitest run --maxWorkers=2 <touched test files>` —
-  tests live in `tests/` (unit, integration), never in `src/` (AGENTS.md).
+  then the suite — all started through the isolated launcher
+  (`node scripts/test-isolated.mjs check`), stopping at the first failure.
+  It needs **Node.js ≥ 24 and Docker**, not host `node_modules` (AGENTS.md,
+  "Test isolation"). The gate's own checks need only node: `npm run backlog`.
+- **Related tests:** `node scripts/test-isolated.mjs test -- <touched test
+  files>` — tests live in `tests/` (unit, integration), never in `src/`
+  (AGENTS.md). The suite never starts on the host.
 - **Full stage checks:** `npm run check` — typecheck, lint, the format check
-  and `vitest run --maxWorkers=2`, stopping at the first failure (needs
-  `node_modules`). It is exactly the command CI's `ci-product` job runs, and the
-  verdict it gives is CI's on **node 24 with the dependencies of the committed
-  lockfile** (`npm ci`); on another node version, or with other installed
-  dependencies, the same green run is not that verdict. CI can also fail where
-  the local command passed: `npm ci` refuses a `package.json` that disagrees
-  with `package-lock.json`, before `npm run check` starts. On this machine
-  memory is short (owner, 2026-10-07): every vitest run uses at most 2 workers,
-  and only one vitest process runs at a time; repeated full runs go one after
-  another.
+  and the suite, all through the isolated launcher
+  (`node scripts/test-isolated.mjs check`), stopping at the first failure
+  (Node.js ≥ 24 and Docker; no host `node_modules`). It is exactly the command
+  CI's `ci-product` job runs: the same launcher command, whose boundary is
+  node 24 with the dependencies of the committed lockfile. A manifest that
+  disagrees with `package-lock.json` fails the entrypoint policy tests in the
+  suite (`tests/unit/test-entrypoints.test.ts`) — what `npm ci` used to prove
+  before the checks started. On this machine memory is short (owner,
+  2026-10-07): every suite run uses at most 2 workers — enforced twice, by the
+  launcher and by `vitest.config.ts` — and only one vitest process runs at a
+  time; repeated full runs go one after another.
 - **`npm ci` in a worktree** re-runs husky's `prepare`, which switches the
   repository-wide `core.hooksPath` to `.husky/_`: commits in every checkout then
   run husky's hooks. Run `npm run connect` afterwards to restore `.githooks`.
+  `npm ci` is still what installs dependencies for `dev`, `build` and `start`;
+  tests and checks no longer need it — the isolated launcher provisions its
+  environment inside the boundary.
 - **Mutation checks:** no mutation tool is installed. The agreed alternative
   is the config's `execution.mutationFallback`: the coordinator hand-plants
   2–3 mutations in the changed logic at stage acceptance and records which
