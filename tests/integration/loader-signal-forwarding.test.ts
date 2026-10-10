@@ -293,7 +293,11 @@ async function prove(caseName: 'loader' | 'supervisor', scenario: Scenario) {
       `artifact locations: ${JSON.stringify(artifacts)}; ` +
       `process state: ${startAttempted ? 'SpawnMayExist' : 'NoProcessStarted'}; ` +
       `${removalState}; control absence verified: ${controlAbsenceVerified}. ` +
-      `Reported paths may be absent or partially removed after attempted cleanup.`);
+      `Reported paths may be absent or partially removed after attempted cleanup. ` +
+      `Collected failures: ${failures.map(error =>
+        error instanceof Error ? error.stack ?? error.message : String(error)).join('\n')}\n` +
+      `Settlement report: ${JSON.stringify(report)}\n` +
+      `Runner stderr: ${stderr}`);
   }
 }
 describe('owned real signal fixtures', () => {
