@@ -20,12 +20,14 @@ for f in adapter.mjs gate.mjs merge-gate.mjs config.json; do
         exit 1
     fi
 done
-for f in check.mjs time-format.mjs; do
+for f in check.mjs time-format.mjs check-product.mjs; do
     if [ ! -f "$gate/rules/$f" ]; then
         printf 'pre-commit: %s is missing from this checkout; run npm run connect, which names what is missing\n' "$gate/rules/$f" >&2
         exit 1
     fi
 done
+
+node "$gate/rules/check-product.mjs" --staged
 
 # --- 1. the tracker layout --------------------------------------------------
 # The tracker is one state for every branch: .beads/issues.jsonl reaches main
