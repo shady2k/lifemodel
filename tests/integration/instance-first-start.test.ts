@@ -18,6 +18,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
 import {
+  INSTANCE_ADDED_CAPABILITY,
+  hasOnlyInstanceAddedCapability,
+} from './helpers/instance-docker-capability.js';
+import {
   formatInstanceProofFailure,
   type InstanceProofCheckpoint,
 } from './helpers/instance-proof-failure.js';
@@ -1125,7 +1129,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       '--publish',
       '127.0.0.1::80',
       '--cap-add',
-      'NET_ADMIN',
+      INSTANCE_ADDED_CAPABILITY,
       '--stop-timeout',
       '120',
       '--mount',
@@ -2446,7 +2450,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(JSON.stringify(config(recreated[2])) === JSON.stringify(config(original[2]))).toBe(true);
       expect(recreated[2].Image === image && recreated[3].NetworkMode === network &&
         recreated[2].StopTimeout === 120).toBe(true);
-      expect(Array.isArray(recreated[3].CapAdd) && recreated[3].CapAdd.includes('NET_ADMIN')).toBe(true);
+      expect(hasOnlyInstanceAddedCapability(recreated[3].CapAdd)).toBe(true);
       const stableHostConfig = (v: Record<string, unknown>, actualPort: number) => {
         const bindings = v.PortBindings as Record<string, { HostIp: string; HostPort: string }[]>;
         const rule = bindings?.['80/tcp']?.[0];
