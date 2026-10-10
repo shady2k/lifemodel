@@ -1,9 +1,9 @@
 import { expect, it } from 'vitest';
 import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
 
-it('requires fresh settings readiness after the vault restart', async () => {
+it.each([1, 3])('requires fresh settings and vault readiness after baseline %i', async (vaultBefore) => {
   const logs = [
-    '"msg":"Agent Vault is up: first run"',
+    ...Array.from({ length: vaultBefore }, (_, i) => `"msg":"Agent Vault is up: run ${i + 1}"`),
     'settings interface is up',
   ];
   const order: string[] = [];
@@ -45,7 +45,8 @@ it('requires fresh settings readiness after the vault restart', async () => {
     finished = true;
   });
 
-  expect(order).toEqual(['baseline', 'restart', 'port']);
+  expect(waits[0]?.count).toBe(vaultBefore + 1);
+  expect(order).toEqual(['baseline', 'baseline', 'restart', 'port']);
   expect(finished).toBe(false);
 
   // Replay contains old settings readiness and only new vault readiness.

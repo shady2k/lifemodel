@@ -10,8 +10,8 @@
  * All resources belong to this test's tracked cleanup.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -148,6 +148,278 @@ function runOk(cmd: string, args: string[], opts: Parameters<typeof run>[2] = {}
 
 function docker(args: string[], opts: Parameters<typeof run>[2] = {}): string {
   return runOk('docker', args, opts);
+}
+
+interface NativeDockerResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  spawnError: boolean;
+  timedOut: boolean;
+  elapsedMs: number;
+  outputTail: string;
+}
+
+interface NativeDockerHandle {
+  readonly closed: boolean;
+  readonly result: NativeDockerResult | undefined;
+  awaitClose(): Promise<NativeDockerResult>;
+  cleanup(): Promise<NativeDockerResult>;
+}
+
+/**
+ * Own the CLI until actual close. Killing the CLI does not cancel a Docker
+ * daemon operation. An uncertain result therefore preserves fixture artifacts.
+ */
+const ownedNativeDocker = new Set<NativeDockerHandle>();
+let nativeTerminationUncertain = false;
+
+function startNativeDocker(
+  command:
+    | { kind: 'stop' }
+    | { kind: 'receipt-copy'; destination: string }
+    | { kind: 'logs-since'; sinceISO: string },
+): NativeDockerHandle {
+  requireImageCiContext();
+  if (container === '') throw new Error('Native Docker instance is missing');
+
+  if (command.kind === 'logs-since' &&
+      (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(command.sinceISO) ||
+       !Number.isFinite(Date.parse(command.sinceISO)))) {
+    throw new Error('Native log boundary is not a UTC timestamp');
+  }
+  if (command.kind === 'receipt-copy' &&
+      command.destination !== join(stubDir, 'receipt-after-stop.json')) {
+    throw new Error('Native receipt copy destination is not the fixture path');
+  }
+
+  const receiptPath = '/var/lib/lifemodel/data/state/core/inbound_log.json';
+  const args = command.kind === 'stop'
+    ? ['stop', '--time', '120', container]
+    : command.kind === 'logs-since'
+      ? ['logs', '--since', command.sinceISO, '--timestamps', container]
+      : ['cp', `${container}:${receiptPath}`, command.destination];
+
+  const started = Date.now();
+  const child = spawn('docker', args, {
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let closed = false;
+  let spawnError = false;
+  let timedOut = false;
+  let result: NativeDockerResult | undefined;
+  let tail = Buffer.alloc(0);
+  let termTimer: ReturnType<typeof setTimeout> | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let uncertainTimer: ReturnType<typeof setTimeout> | undefined;
+  let terminationStarted = false;
+
+  const append = (chunk: Buffer): void => {
+    tail = Buffer.concat([tail, chunk]).subarray(-16 * 1024);
+  };
+  child.stdout.on('data', append);
+  child.stderr.on('data', append);
+  child.on('error', () => {
+    spawnError = true;
+  });
+
+  let resolveClose!: (value: NativeDockerResult) => void;
+  const actualClose = new Promise<NativeDockerResult>(resolve => {
+    resolveClose = resolve;
+  });
+  let rejectUncertain!: (reason: Error) => void;
+  const uncertain = new Promise<never>((_resolve, reject) => {
+    rejectUncertain = reject;
+  });
+  // Observe rejection even if the caller fails before awaiting this handle.
+  void uncertain.catch(() => undefined);
+
+  const terminate = (): void => {
+    if (closed || terminationStarted) return;
+    terminationStarted = true;
+    nativeTerminationUncertain = true;
+    child.kill('SIGTERM');
+    killTimer = setTimeout(() => {
+      if (!closed) child.kill('SIGKILL');
+    }, 1_000);
+    uncertainTimer = setTimeout(() => {
+      if (!closed) {
+        rejectUncertain(new Error(
+          'UNCERTAIN native Docker CLI termination: actual close not observed; preserve fixture artifacts',
+        ));
+      }
+    }, 3_000);
+  };
+
+  const handle: NativeDockerHandle = {
+    get closed() { return closed; },
+    get result() { return result; },
+    awaitClose: () => Promise.race([actualClose, uncertain]),
+    cleanup: () => {
+      terminate();
+      return Promise.race([actualClose, uncertain]);
+    },
+  };
+  ownedNativeDocker.add(handle);
+
+  child.once('close', (code, signal) => {
+    closed = true;
+    if (termTimer !== undefined) clearTimeout(termTimer);
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    if (uncertainTimer !== undefined) clearTimeout(uncertainTimer);
+    result = {
+      code,
+      signal,
+      spawnError,
+      timedOut,
+      elapsedMs: Date.now() - started,
+      outputTail: tail.toString('utf8'),
+    };
+    ownedNativeDocker.delete(handle);
+    resolveClose(result);
+  });
+
+  // Stop: 122 seconds plus bounded TERM/KILL cleanup, at most 125 seconds.
+  // Copy: a short operation with the same actual-close ownership.
+  termTimer = setTimeout(() => {
+    timedOut = true;
+    terminate();
+  }, command.kind === 'stop' ? 122_000 : 2_000);
+  return handle;
+}
+
+async function cleanupOwnedNativeDocker(): Promise<void> {
+  requireImageCiContext();
+  const results = await Promise.allSettled(
+    [...ownedNativeDocker].map(handle => handle.cleanup()),
+  );
+  if (results.some(result => result.status === 'rejected') ||
+      ownedNativeDocker.size !== 0 ||
+      nativeTerminationUncertain) {
+    throw new Error(
+      'UNCERTAIN native Docker operation: preserve named containers, volume and fixture directory',
+    );
+  }
+}
+
+interface PersistedReceiptEntry {
+  seq: number;
+  key: string;
+  recipientId: string;
+  routing: { channel: string; destination: string } | null;
+  signal: {
+    id: string;
+    type: string;
+    data: {
+      updateId?: string;
+      recipientId?: string;
+      channel?: string;
+      text?: string;
+    };
+  };
+}
+
+interface PersistedInboundReceipt {
+  version: 2;
+  nextSeq: number;
+  recentKeys: string[];
+  recipients: Record<string, {
+    committedThrough: number;
+    committedBeyond: number[];
+  }>;
+  entries: PersistedReceiptEntry[];
+}
+
+/** JSONStorage saves the envelope directly; there is no extra DTO wrapper. */
+function parsePersistedReceipt(raw: string): PersistedInboundReceipt {
+  if (Buffer.byteLength(raw) > 4 * 1024 * 1024) {
+    throw new Error('Persisted inbound receipt exceeded its fixture bound');
+  }
+  let value: PersistedInboundReceipt;
+  try {
+    value = JSON.parse(raw) as PersistedInboundReceipt;
+  } catch {
+    throw new Error('Persisted inbound receipt is not valid JSON');
+  }
+  if (!value || value.version !== 2 ||
+      !Number.isSafeInteger(value.nextSeq) ||
+      !Array.isArray(value.recentKeys) ||
+      !value.recentKeys.every(key => typeof key === 'string') ||
+      !value.recipients || typeof value.recipients !== 'object' ||
+      Array.isArray(value.recipients) ||
+      !Array.isArray(value.entries)) {
+    throw new Error('Persisted inbound receipt has an invalid envelope');
+  }
+  for (const progress of Object.values(value.recipients)) {
+    if (!progress || !Number.isSafeInteger(progress.committedThrough) ||
+        !Array.isArray(progress.committedBeyond) ||
+        !progress.committedBeyond.every(seq => Number.isSafeInteger(seq))) {
+      throw new Error('Persisted inbound receipt has invalid recipient progress');
+    }
+  }
+  for (const entry of value.entries) {
+    if (!entry || !Number.isSafeInteger(entry.seq) ||
+        typeof entry.key !== 'string' ||
+        typeof entry.recipientId !== 'string' ||
+        !entry.signal || typeof entry.signal.id !== 'string' ||
+        typeof entry.signal.type !== 'string' ||
+        !entry.signal.data || typeof entry.signal.data !== 'object' ||
+        !(entry.routing === null ||
+          (typeof entry.routing === 'object' &&
+           typeof entry.routing.channel === 'string' &&
+           typeof entry.routing.destination === 'string'))) {
+      throw new Error('Persisted inbound receipt has an invalid entry');
+    }
+  }
+  return value;
+}
+
+function receiptCommitted(
+  receipt: PersistedInboundReceipt,
+  entry: Pick<PersistedReceiptEntry, 'seq' | 'recipientId'>,
+): boolean {
+  const progress = receipt.recipients[entry.recipientId];
+  return progress !== undefined &&
+    (progress.committedThrough >= entry.seq ||
+     progress.committedBeyond.includes(entry.seq));
+}
+
+/** Call only before starting the async stop, or after a successful restart. */
+function readRunningPersistedReceipt(): PersistedInboundReceipt | undefined {
+  requireImageCiContext();
+  if (ownedNativeDocker.size !== 0) {
+    throw new Error('Synchronous receipt read forbidden during native Docker work');
+  }
+  const result = run('docker', [
+    'exec', container, 'cat',
+    '/var/lib/lifemodel/data/state/core/inbound_log.json',
+  ], { timeoutMs: 2_000 });
+  if (result.status !== 0) {
+    if (/No such file or directory/.test(result.out)) return undefined;
+    throw new Error('Native persisted inbound receipt read failed');
+  }
+  return parsePersistedReceipt(result.out);
+}
+
+/** docker cp reads the mounted file even while the instance is stopped. */
+async function readStoppedPersistedReceipt(): Promise<PersistedInboundReceipt> {
+  requireImageCiContext();
+  const destination = join(stubDir, 'receipt-after-stop.json');
+  const handle = startNativeDocker({ kind: 'receipt-copy', destination });
+  try {
+    const result = await handle.awaitClose();
+    if (result.spawnError || result.timedOut ||
+        result.signal !== null || result.code !== 0) {
+      throw new Error('Native stopped-container receipt copy failed');
+    }
+    const stat = statSync(destination);
+    if (!stat.isFile() || stat.size > 4 * 1024 * 1024) {
+      throw new Error('Copied inbound receipt exceeded its fixture bound');
+    }
+    return parsePersistedReceipt(readFileSync(destination, 'utf8'));
+  } finally {
+    if (!handle.closed) await handle.cleanup();
+  }
 }
 
 interface Reply {
@@ -676,7 +948,11 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     await waitForLogLine(/"msg":"the instance is ready".*"started":true/, FIRST_START_TIMEOUT_MS);
   }
 
-  afterAll(() => {
+  afterAll(async () => {
+    // Never wipe evidence while a Docker CLI or daemon operation is uncertain.
+    if (ownedNativeDocker.size !== 0 || nativeTerminationUncertain) {
+      await cleanupOwnedNativeDocker();
+    }
     if (stubContainer !== '') {
       run('docker', ['rm', '--force', stubContainer]);
     }
@@ -1539,6 +1815,289 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(JSON.stringify(env).includes(journeyConfig.credentials.telegramToken)).toBe(false);
       expect(logs.includes(journeyConfig.credentials.telegramToken)).toBe(false);
     }, 90_000);
+
+    it('drains a real held turn and final send before restarting the same instance', async () => {
+      requireImageCiContext();
+      const deadline = Date.now() + 285_000;
+      const remaining = (): number => {
+        const ms = deadline - Date.now();
+        if (ms <= 0) throw new Error('Native graceful-drain journey exceeded its deadline');
+        return ms;
+      };
+      const phase = journeyConfig.phases.find(p => p.id === 'q4x22-drain');
+      const fresh = journeyConfig.phases.find(p => p.id === 'q4x22-replay');
+      if (phase === undefined || fresh === undefined) {
+        throw new Error('Native graceful-drain phases are missing');
+      }
+
+      type Event = Awaited<ReturnType<typeof journey.journal>>[number];
+      async function waitEvent(
+        label: string,
+        matches: (event: Event) => boolean,
+        ceilingMs = 30_000,
+      ): Promise<Event> {
+        const until = Date.now() + Math.min(remaining(), ceilingMs);
+        for (;;) {
+          remaining();
+          const found = (await journey.journal()).find(matches);
+          if (found !== undefined) return found;
+          if (Date.now() + 250 >= until) {
+            throw new Error(`Native graceful-drain journey missing ${label}`);
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+      function requireNativeSuccess(result: NativeDockerResult): void {
+        if (result.code !== 0 || result.signal !== null ||
+            result.spawnError || result.timedOut) {
+          throw new Error('Native graceful-drain Docker operation failed');
+        }
+      }
+
+      const baseline = await journey.journal();
+      const since = baseline.reduce((max, event) => Math.max(max, event.seq), 0);
+      await journey.control({
+        op: 'hold', phase: phase.id, model: true, send: true,
+      });
+      await journey.control({ op: 'queue', phase: phase.id });
+      const model = await waitEvent('authenticated model request', event =>
+        event.seq > since && event.event === 'model.request' &&
+        event.phase === phase.id && event.authorizationMatch === true &&
+        event.model === JOURNEY_FIXTURE.modelName &&
+        /^portal-model\.local(?::8080)?$/.test(String(event.actualHost)),
+      );
+      await waitEvent('held real model response', event =>
+        event.seq > model.seq && event.event === 'model.held' &&
+        event.phase === phase.id && event.requestId === model.requestId,
+      );
+      await waitEvent('real update delivery', event =>
+        event.seq > since && event.event === 'telegram.poll.response' &&
+        Array.isArray(event.updateIds) && event.updateIds.includes(phase.updateId),
+      );
+
+      let accepted: PersistedReceiptEntry | undefined;
+      const receiptDeadline = Date.now() + Math.min(remaining(), 10_000);
+      for (;;) {
+        remaining();
+        const receipt = readRunningPersistedReceipt();
+        const entry = receipt?.entries.find(e => e.key === String(phase.updateId));
+        if (receipt !== undefined && entry !== undefined) {
+          expect(entry.signal.data.updateId === String(phase.updateId)).toBe(true);
+          expect(entry.signal.data.text === phase.triggerUser).toBe(true);
+          expect(entry.signal.data.recipientId === entry.recipientId).toBe(true);
+          expect(entry.routing?.channel === 'telegram').toBe(true);
+          expect(entry.routing?.destination === String(journeyConfig.ownerChatId)).toBe(true);
+          expect(receiptCommitted(receipt, entry)).toBe(false);
+          accepted = entry;
+          break;
+        }
+        if (Date.now() + 250 >= receiptDeadline) {
+          throw new Error('Native held turn has no persisted inbound receipt');
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+
+      // The native request must use the actual final trigger framing.
+      expect(model.expectedNativeS8field === true).toBe(true);
+      // All synchronous log snapshots precede the owned asynchronous stop.
+      const intakeBefore = logCount(/Channel intake stopped/);
+      const shutdownBefore = logCount(/Shutdown complete/);
+      expect([intakeBefore, shutdownBefore].every(Number.isInteger)).toBe(true);
+      // Docker and this test use the same hosted runner clock. The timestamp
+      // boundary excludes historical settings-save stops even if the tail rolls.
+      const stopStartISO = new Date().toISOString();
+      const stop = startNativeDocker({ kind: 'stop' });
+      async function currentStopLogs(): Promise<string> {
+        const reader = startNativeDocker({
+          kind: 'logs-since', sinceISO: stopStartISO,
+        });
+        try {
+          const result = await reader.awaitClose();
+          requireNativeSuccess(result);
+          return result.outputTail;
+        } finally {
+          if (!reader.closed) await reader.cleanup();
+        }
+      }
+
+      try {
+        const intakeDeadline = Date.now() + Math.min(remaining(), 20_000);
+        for (;;) {
+          remaining();
+          const logs = await currentStopLogs();
+          if (logs.includes('Channel intake stopped')) break;
+          if (stop.closed || Date.now() + 250 >= intakeDeadline) {
+            throw new Error('Current native stop did not stop channel intake');
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        expect(stop.closed).toBe(false);
+        await journey.control({ op: 'release', phase: phase.id, gate: 'model' });
+        const sent = await waitEvent('final real Telegram answer', event =>
+          event.seq > model.seq && event.event === 'telegram.send.request' &&
+          event.phase === phase.id && event.chatMatch === true &&
+          event.text === phase.answer,
+        );
+        await waitEvent('held final Telegram send', event =>
+          event.seq > sent.seq && event.event === 'send.held' &&
+          event.phase === phase.id && event.requestId === sent.requestId,
+        );
+        // Observe actual CLI ownership while the real final send is held.
+        expect(stop.closed).toBe(false);
+        await journey.control({ op: 'release', phase: phase.id, gate: 'send' });
+        await waitEvent('final send acknowledgement', event =>
+          event.seq > sent.seq && event.event === 'telegram.send.ack' &&
+          event.phase === phase.id && event.requestId === sent.requestId,
+        );
+        const stopped = await stop.awaitClose();
+        requireNativeSuccess(stopped);
+        expect(stop.closed).toBe(true);
+        expect(stopped.elapsedMs < 120_000).toBe(true);
+        const state = JSON.parse(docker([
+          'inspect', '--format', '{{json .State}}', container,
+        ], { timeoutMs: 2_000 })) as {
+          Running?: boolean; Pid?: number; ExitCode?: number;
+        };
+        expect(state.Running === false && state.Pid === 0 && state.ExitCode === 0).toBe(true);
+        const stopLogs = await currentStopLogs();
+        expect(stopLogs.includes('Shutdown complete')).toBe(true);
+        const records: { lineIndex: number; value: Record<string, unknown> }[] = [];
+        const own = (value: Record<string, unknown>, key: string): boolean =>
+          Object.prototype.hasOwnProperty.call(value, key);
+        stopLogs.split('\n').forEach((line, lineIndex) => {
+          const start = line.indexOf('{');
+          if (start < 0) return;
+          try {
+            const value: unknown = JSON.parse(line.slice(start));
+            if (value !== null && typeof value === 'object' &&
+                !Array.isArray(value)) {
+              records.push({
+                lineIndex, value: value as Record<string, unknown>,
+              });
+            }
+          } catch {
+            // A non-JSON application line is not supervisor evidence.
+          }
+        });
+        const forwarding = records.find(({ value }) =>
+          value.component === 'loader' &&
+          value.msg === 'stopping lifemodel: SIGTERM, then its drain' &&
+          own(value, 'reason') && typeof value.reason === 'string',
+        );
+        const childExit = records.find(({ value }) =>
+          value.component === 'loader' &&
+          value.msg === 'lifemodel exited (code 0)' &&
+          own(value, 'code') && value.code === 0 &&
+          own(value, 'signal') && value.signal === null &&
+          own(value, 'ranMs') && typeof value.ranMs === 'number' &&
+          Number.isFinite(value.ranMs) && value.ranMs >= 0,
+        );
+        const supervisorStopped = records.find(({ value }) =>
+          value.component === 'loader' &&
+          value.msg === 'lifemodel stopped' &&
+          own(value, 'drainTimedOut') && value.drainTimedOut === false &&
+          own(value, 'reason') && forwarding !== undefined &&
+          value.reason === forwarding.value.reason,
+        );
+        const shutdownLine = stopLogs.split('\n').findIndex(line =>
+          line.includes('Shutdown complete'),
+        );
+        expect(forwarding !== undefined).toBe(true);
+        expect(childExit !== undefined).toBe(true);
+        expect(supervisorStopped !== undefined).toBe(true);
+        expect(forwarding !== undefined && childExit !== undefined &&
+          supervisorStopped !== undefined &&
+          forwarding.lineIndex < shutdownLine &&
+          shutdownLine >= 0 && shutdownLine < childExit.lineIndex &&
+          childExit.lineIndex < supervisorStopped.lineIndex).toBe(true);
+        expect(records.some(({ value }) =>
+          value.drainTimedOut === true ||
+          value.signal === 'SIGKILL' ||
+          (typeof value.msg === 'string' &&
+            /SIGKILL|it is killed|stop deadline ran out|hard[- ](?:exit|deadline)|hard shutdown deadline/i.test(value.msg)),
+        )).toBe(false);
+        expect(/SIGKILL|hard[- ](?:exit|deadline)|hard shutdown deadline|did not exit within.*drain.*killed/i.test(stopLogs)).toBe(false);
+        const receipt = await readStoppedPersistedReceipt();
+        expect(receiptCommitted(receipt, accepted)).toBe(true);
+
+        const beforeRestart = await journey.journal();
+        const restartSince = beforeRestart.reduce((max, event) => Math.max(max, event.seq), 0);
+        await restartWithSettingsReady({
+          logCount,
+          waitForLogLines,
+          restart: () => {
+            docker(['restart', container], { timeoutMs: 180_000 });
+          },
+          refreshPort: () => { port = publishedPort(); },
+        });
+        await waitEvent('fresh native Telegram getMe', event =>
+          event.seq > restartSince && event.event === 'telegram.request' &&
+          event.method === 'getMe' && event.tokenMatch === true &&
+          /^api\.telegram\.org(?::443)?$/.test(String(event.actualHost)),
+        );
+        // This phase proves a fresh running turn, not crash replay semantics.
+        await journey.control({
+          op: 'hold', phase: fresh.id, model: false, send: false,
+        });
+        await journey.control({ op: 'queue', phase: fresh.id });
+        const freshModel = await waitEvent('fresh authenticated model turn', event =>
+          event.seq > restartSince && event.event === 'model.request' &&
+          event.phase === fresh.id && event.authorizationMatch === true,
+        );
+        const freshSend = await waitEvent('fresh final answer', event =>
+          event.seq > freshModel.seq && event.event === 'telegram.send.request' &&
+          event.phase === fresh.id && event.chatMatch === true && event.text === fresh.answer,
+        );
+        await waitEvent('fresh final acknowledgement', event =>
+          event.seq > freshSend.seq && event.event === 'telegram.send.ack' &&
+          event.phase === fresh.id && event.requestId === freshSend.requestId,
+        );
+        expect(freshModel.expectedNativeS8field === true).toBe(true);
+        await waitEvent('fresh authenticated offset acknowledgement', event =>
+          event.seq > restartSince &&
+          event.event === 'telegram.poll.request' &&
+          event.authenticated === true &&
+          typeof event.offset === 'number' &&
+          Number.isSafeInteger(event.offset) &&
+          event.offset > phase.updateId,
+        );
+        const events = (await journey.journal()).filter(event => event.seq > since);
+        const offsetAcknowledgements = events.filter(event =>
+          event.seq > restartSince &&
+          event.event === 'telegram.poll.request' &&
+          event.authenticated === true &&
+          typeof event.offset === 'number' &&
+          Number.isSafeInteger(event.offset) &&
+          event.offset > phase.updateId,
+        );
+        expect(offsetAcknowledgements.length > 0).toBe(true);
+        expect(offsetAcknowledgements.every(poll => events.some(event =>
+          event.seq > restartSince && event.seq < poll.seq &&
+          event.event === 'telegram.request' &&
+          event.requestId === poll.requestId &&
+          event.method === 'getUpdates' &&
+          event.tokenMatch === true &&
+          /^api\.telegram\.org(?::443)?$/.test(String(event.actualHost)),
+        ))).toBe(true);
+        expect(events.filter(event =>
+          event.event === 'telegram.send.request' && event.phase === phase.id,
+        ).length).toBe(1);
+        expect(events.filter(event =>
+          event.event === 'telegram.send.ack' && event.phase === phase.id,
+        ).length).toBe(1);
+        expect(events.some(event =>
+          event.event === 'telegram.request' && event.requestId === sent.requestId &&
+          event.method === 'sendMessage' && event.tokenMatch === true,
+        )).toBe(true);
+        // Only this positive post-restart window is asserted.
+      } catch (error) {
+        nativeTerminationUncertain = true;
+        throw error;
+      } finally {
+        // Do not terminate a successfully closed stop CLI.
+        if (!stop.closed) await stop.cleanup();
+      }
+    }, 300_000);
   });
 
   it('holds panic and resumes, from the command line in the container', () => {

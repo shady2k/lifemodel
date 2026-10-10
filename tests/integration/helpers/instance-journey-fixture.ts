@@ -211,6 +211,10 @@ function poll(req, res, data, id) {
   const timeout = Number(data.timeout ?? 0);
   if (!Number.isSafeInteger(offset) || offset < 0 ||
       !Number.isFinite(timeout) || timeout < 0) return fail(res);
+  // poll is reached only after the real Telegram token and host checks.
+  record('telegram.poll.request', {
+    requestId: id, offset, authenticated: true
+  });
   for (let i = updates.length - 1; i >= 0; --i)
     if (updates[i].update_id < offset) updates.splice(i, 1);
   let done = false, timer;
@@ -312,13 +316,31 @@ async function handle(req, res, secure) {
     if (!secure && hostname === 'portal-model.local' &&
         url.pathname === '/v1/chat/completions') {
       const newestUser = Array.isArray(data.messages)
-        ? data.messages.findLast(m => m.role === 'user') : undefined;
+        ? data.messages.findLast(m => m && m.role === 'user') : undefined;
+      const content = newestUser?.content;
+      const text = typeof content === 'string' ? content
+        : Array.isArray(content) ? content
+          .filter(part => part && part.type === 'text' &&
+            typeof part.text === 'string')
+          .map(part => part.text).join('') : '';
+      // buildTriggerPrompt appends the current trigger LAST.
+      // History and memory must never license a phase by substring.
+      const finalInput = [...text.matchAll(
+        /<user_input>([\s\S]*?)<\/user_input>/g
+      )].at(-1);
+      const currentInput = finalInput &&
+        text.slice(finalInput.index + finalInput[0].length).trim() === ''
+        ? finalInput[1] : undefined;
       const matched = [...phases.values()].filter(p =>
-        newestUser && JSON.stringify(newestUser.content).includes(p.triggerUser));
+        currentInput !== undefined && currentInput === p.triggerUser);
       const p = matched.length === 1 ? matched[0] : undefined;
+      const expectedNativeS8field = !!p &&
+        currentInput === p.triggerUser &&
+        text.endsWith('<user_input>' + p.triggerUser + '</user_input>');
       const authorizationMatch = oldAuth === 'Bearer ' + C.credentials.modelKey;
       record('model.request', { requestId: id, phase: p?.id,
-        actualHost: host, model: data.model, authorizationMatch });
+        actualHost: host, model: data.model, authorizationMatch,
+        expectedNativeS8field });
       if (!authorizationMatch) return fail(res, 401);
       if (req.method !== 'POST' || data.model !== F.modelName || !p ||
           !p.queued || data.stream === true) return fail(res);
