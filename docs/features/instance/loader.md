@@ -15,8 +15,10 @@ tini -- node /opt/lifemodel/loader/dist/main.js
 It needs no runtime dependency (node built-ins only); `typescript` and
 `@types/node` are its devDependencies, so the image builds it with `npm ci &&
 npm run build` inside `loader/`. This repository builds it with
-`npm run build:loader` and typechecks it with `npm run typecheck:loader`; both
-are part of `npm run check`.
+`npm run build:loader` and typechecks it with `npm run typecheck:loader`.
+`npm run check` includes the loader's typecheck, lint, format check and ordinary
+suite, not its build. Run ordinary checks only through the isolated launcher;
+the real instance image is built and validated in the named CI job.
 
 ## What it does
 

@@ -109,38 +109,35 @@ documents-only push included, which is what story S9 asks for.
 
 ## Testing it
 
-`tests/integration/instance-image.test.ts` builds the image and runs a
-container, then checks the front door with `Host` headers the way a browser
-reaches it. It needs docker and about 600 MB, so it is off unless
-`LIFEMODEL_DOCKER_TESTS=1` is set:
+Ordinary unit and integration checks run only through
+`node scripts/test-isolated.mjs check`. This includes the build script's
+refusal checks without building an image or exposing a Docker socket.
 
-```
-LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-image.test.ts
-```
+Heavy image build and real first-start acceptance are **CI-only** in the
+existing PR `ci-image` job. It uses a fresh disposable GitHub-hosted Ubuntu
+runner and its Docker daemon, the exact prebuilt image, read-only permissions,
+a credential-less checkout, no owner secrets or registry login/publishing,
+a 45-minute job bound and at most two Vitest workers. Do not run a local image
+walk, raw host Vitest, VM or DinD. The production run command above is for
+operating an instance, not a local acceptance-test instruction.
 
-It builds from a throwaway clone with `tests/fixtures/stub-loader/` in place of
-the real loader, so the image can be checked on its own; the stub is never part
-of an image anyone runs. `tests/unit/build-image.test.ts` covers the script's
-three refusals — a shallow checkout, a missing `loader/`, a `.docker-context`
-that is already there — without docker.
+`tests/integration/instance-first-start.test.ts` uses the real loader and
+lifemodel. Its original walk checks setup, the seeded repository and commit,
+uid 1000, settings/save/restart, Vault store/token/CA persistence, authenticated
+front-door access, proxy credential injection, denied direct egress and panic.
+The uid-1000 transport probe is not an actual configured-provider turn.
 
-`tests/integration/instance-first-start.test.ts` is the same gated walk with the
-REAL loader: an empty volume, `POST /setup` on `boot.localhost`, the loader's
-own line that lifemodel is running, `lifemodel status` on a 40-hex commit, and
-the lifemodel process running as uid 1000. It walks Agent Vault too: the store
-is root `0700` and the CA lifemodel must read is root `0644`, both listeners
-answer inside the container, `vault.localhost` shows Agent Vault's own
-interface behind the loader's login (and is redirected to that login without
-it), and a `docker restart` reuses the same store and the same token. And it
-walks the key on the way out (lifemodel-q4x.3.2): a stub OpenAI-compatible
-endpoint runs as a second container on the container's own Docker network, its
-host has a service in lifemodel's vault, and a probe as uid 1000 - run with the
-environment `/proc/<lifemodel pid>/environ` holds - reaches the stub through
-the proxy with the credential attached and the path placeholder substituted,
-while the same probe without a proxy is refused at once and root still reaches
-the stub directly. Run locally it builds its own image
-from the checkout; with `LIFEMODEL_TEST_IMAGE=<image:tag>` it boots that image
-instead and neither builds nor removes it. It is what CI's `ci-image` job runs
-(`LIFEMODEL_DOCKER_TESTS=1`, on the image the job built), because a loader that builds but cannot complete a
-first start used to pass that job: the image check has to prove boot, not just
-the build. Locally it takes about four minutes from a warm layer cache.
+The owner has authorized expanding this same CI-only walk to an owner-facing
+Vault credential/service journey and actual configured-provider request,
+observed turn/send drain, same-volume container recreation and panic across
+Docker-daemon restart. These expanded outcomes still need implementation and
+current-revision CI evidence; the historical 15-case result does not prove
+them. A daemon restart is permitted only on that job's fresh disposable runner,
+never on the owner's machine. Synthetic Telegram TLS/DNS and model fixtures
+must preserve the production Telegram address, TLS validation and default
+private-range denial; no production test hooks or global TLS bypass.
+
+`tests/integration/instance-image.test.ts` has nine stand-in image cases using
+`tests/fixtures/stub-loader/`. They are not the real first-start journey and
+remain unexecuted under the current named CI approval. They are not added to
+that exception and are not a substitute for real runtime acceptance.

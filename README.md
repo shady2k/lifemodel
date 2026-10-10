@@ -225,8 +225,9 @@ before it arrives, and a link to the loader (`boot.`) is on it for the keys and
 for panic. How it works is in
 [`docs/features/instance/settings.md`](docs/features/instance/settings.md).
 
-`vault.` answers that nothing is there yet until that part of the instance is
-built. The port is published on the host's loopback only
+`vault.` serves the installed Agent Vault interface behind the loader's login.
+Agent Vault also requires its own account login, using the credentials shown
+on the loader's page. The port is published on the host's loopback only
 (`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
 HTTPS proxy in front when you want that.
 
