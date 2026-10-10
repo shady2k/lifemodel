@@ -17,6 +17,10 @@ import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
+import {
+  formatInstanceProofFailure,
+  type InstanceProofCheckpoint,
+} from './helpers/instance-proof-failure.js';
 import { InstanceStableSnapshot, STABLE_SNAPSHOT_SCRIPT, type StableInstanceFingerprint } from './helpers/instance-stable-snapshot.js';
 import {
   InstanceNativeVaultPortal,
@@ -2381,10 +2385,12 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         string, string, Record<string, unknown>, Record<string, unknown>,
         { Type: string; Name?: string; Destination: string; RW: boolean }[],
       ];
+    let checkpoint: InstanceProofCheckpoint<'S7'> = 'originalinspect';
     try {
       requireImageCiContext();
       const phase = journeyConfig.phases.find(p => p.id === 'q4x22-recreate');
       if (phase === undefined) throw new Error('S7 fixture phase is missing');
+      checkpoint = 'originalinspect';
       const original = inspect();
       const originalPort = port;
       const mount = original[4].filter(m => m.Destination === '/var/lib/lifemodel');
@@ -2395,6 +2401,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       const pid = /"pid":(\d+)/.exec(started ?? '')?.[1];
       if (pid === undefined) throw new Error('S7 has no real child PID');
       const stoppedBefore = count(/"msg":"lifemodel stopped"/);
+      checkpoint = 'panic';
       const panicked = native(['exec', container, 'lifemodel', 'panic'], 180_000);
       expect(/^stopped\r?$/m.test(panicked) && /^panic on\r?$/m.test(panicked)).toBe(true);
       await wait('real child settlement', () =>
@@ -2402,22 +2409,27 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         native(['exec', '-u', '0', container, 'sh', '-c',
           `if test -e /proc/${pid}; then printf present; else printf absent; fi`,
         ]).trim() === 'absent');
+      checkpoint = 'snapshotbefore';
       const before = readNativeStableFingerprint();
       expect(before.panic.present && before.inboundReceipt.present).toBe(true);
       writeFileSync(beforePath, JSON.stringify(before), { mode: 0o600 });
 
       // No -v and no unrelated container removal. Native success is mandatory.
+      checkpoint = 'remove';
       const removed = native(['rm', '--force', oldName], 180_000).trim();
       expect(removed === oldName).toBe(true);
       // createInstance registers the new name before Docker creates it.
       // It reuses allocation ownership; startContainer must not run here.
+      checkpoint = 'create';
       createInstance(freshName, sameVolume);
+      checkpoint = 'loaderready';
       await wait('fresh loader', () => /"msg":"the loader is up"/.test(logs()));
       await wait('native Vault health', () => native([
         'exec', container, 'curl', '-sS', '-m', '1', '-o', '/dev/null',
         '-w', '%{http_code}', 'http://127.0.0.1:14321/health',
       ]).trim() === '200');
       port = publishedPort();
+      checkpoint = 'inspectreplacement';
       const recreated = inspect();
       expect(recreated[0] !== original[0] && recreated[1] === original[1]).toBe(true);
       // Docker derives the default hostname from each different container ID.
@@ -2457,11 +2469,13 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(volume === sameVolume && allocatedInstanceVolume === sameVolume).toBe(true);
       expect(count(/"msg":"lifemodel started"/) === 0).toBe(true);
       expect(count(/settings interface is up/) === 0).toBe(true);
+      checkpoint = 'comparefingerprints';
       const after = readNativeStableFingerprint();
       writeFileSync(afterPath, JSON.stringify(after), { mode: 0o600 });
       // Includes panic at/reason, builtCommit, credentials and durable receipt.
       expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
 
+      checkpoint = 'password';
       const login = await fetchThroughFrontDoor(port, `boot.localhost:${port}`, '/login', {
         form: { password: 'first-start-pass' },
       });
@@ -2470,10 +2484,12 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       expect(/^lm_session=[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/.test(cookie)).toBe(true);
       const startsBefore = count(/"msg":"lifemodel started"/);
       const settingsBefore = count(/settings interface is up/);
+      checkpoint = 'resume';
       const resumed = native(['exec', container, 'lifemodel', 'resume'], 180_000);
       expect(/^running\r?$/m.test(resumed) && /^panic off\r?$/m.test(resumed)).toBe(true);
       await wait('explicit resume start', () =>
         count(/"msg":"lifemodel started"/) === startsBefore + 1);
+      checkpoint = 'settings';
       await wait('resumed settings listener', () =>
         count(/settings interface is up/) === settingsBefore + 1);
       const settings = await fetchThroughFrontDoor(port, `localhost:${port}`, '/', { cookie });
@@ -2489,6 +2505,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         resumedFingerprint.panic.file === null &&
         JSON.stringify(resumedFingerprint.agentConfig) === JSON.stringify(before.agentConfig)).toBe(true);
 
+      checkpoint = 'modelhold';
       await journey.control({ op: 'hold', phase: phase.id, model: true, send: false });
       const since = (await journey.journal()).reduce((max, e) => Math.max(max, e.seq), 0);
       await journey.control({ op: 'queue', phase: phase.id });
@@ -2502,6 +2519,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       const delivered = await event('real Telegram delivery', e =>
         e.seq > since && e.event === 'telegram.poll.response' &&
         Array.isArray(e.updateIds) && e.updateIds.includes(phase.updateId));
+      checkpoint = 'receipt';
       let accepted: PersistedReceiptEntry | undefined;
       await wait('native accepted update', () => {
         accepted = parsePersistedReceipt(native(['exec', container, 'cat',
@@ -2514,6 +2532,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         accepted.signal.data.text === phase.triggerUser &&
         accepted.routing?.channel === 'telegram' &&
         accepted.routing.destination === String(journeyConfig.ownerChatId)).toBe(true);
+      checkpoint = 'sendack';
       await journey.control({ op: 'release', phase: phase.id, gate: 'model' });
       const sent = await event('unique correct answer', e =>
         e.seq > model.seq && e.event === 'telegram.send.request' &&
@@ -2533,9 +2552,10 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         accepted, reply: { requestId: sent.requestId, text: sent.text, ackSeq: ack.seq },
         modelSeq: model.seq, deliverySeq: delivered.seq,
       }), { mode: 0o600 });
-    } catch {
+    } catch (error) {
       nativeTerminationUncertain = true;
-      throw new Error(`S7 failed; retain containers=${oldName},${freshName},${stubContainer}; ` +
+      throw new Error(formatInstanceProofFailure('S7', checkpoint, error) + '\n' +
+        `S7 failed; retain containers=${oldName},${freshName},${stubContainer}; ` +
         `volume=${sameVolume}; network=${network}; fixture=${stubDir}; ` +
         `artifacts=${beforePath},${afterPath},${proofPath} (files may not yet exist)`);
     }
@@ -2799,7 +2819,9 @@ try {
       });
     }
 
+    let checkpoint: InstanceProofCheckpoint<'S6'> = 'initial';
     try {
+      checkpoint = 'initial';
       const initial = cli('status', 2_000);
       const commit = /^commit ([0-9a-f]{40})$/m.exec(initial)?.[1];
       check(commit !== undefined);
@@ -2808,8 +2830,10 @@ try {
       const original = snapshot(builtCommit);
       check(original.panic === null);
 
+      checkpoint = 'panic';
       status(cli('panic'), false, builtCommit);
       status(cli('status', 2_000), false, builtCommit);
+      checkpoint = 'fingerprint';
       const panicked = snapshot(builtCommit);
       sameStable(original, panicked);
       check(panicked.panic !== null);
@@ -2820,12 +2844,14 @@ try {
       // Refuse a marker-free baseline rather than accept stale evidence.
       check(beforeDaemon[0]! > 0 && beforeDaemon[1]! > 0);
 
+      checkpoint = 'restart';
       restart = startNativeDocker({ kind: 'daemon-restart' });
       const completion = await restart.awaitClose();
       check(restart.closed &&
         completion.code === 0 && completion.signal === null &&
         !completion.spawnError && !completion.timedOut);
 
+      checkpoint = 'daemonready';
       // This bound starts only after successful actual privileged CLI close.
       const readyUntil = Math.min(deadline, Date.now() + 120_000);
       for (;;) {
@@ -2847,6 +2873,7 @@ try {
           setTimeout(resolve, Math.min(250, remaining(readyUntil))));
       }
 
+      checkpoint = 'recovery';
       // Docker may answer info before the restart-policy container is running.
       for (;;) {
         remaining(readyUntil);
@@ -2867,6 +2894,7 @@ try {
       check(recovered.panic === panicked.panic);
       check(counts(readyUntil)[2] === beforeDaemon[2]);
 
+      checkpoint = 'password';
       await passwordProof();
       const authenticated = snapshot(builtCommit);
       sameStable(original, authenticated);
@@ -2874,6 +2902,7 @@ try {
       status(cli('status', 2_000), false, builtCommit);
       check(counts()[2] === beforeDaemon[2]);
 
+      checkpoint = 'resume';
       // Vault does not restart on resume. Capture only the events resume needs.
       const beforeResume = counts();
       status(cli('resume'), true, builtCommit); // Exactly one explicit resume.
@@ -2885,9 +2914,10 @@ try {
       check(resumed.panic === null);
       check(identity(resumedUntil) === originalIdentity);
       // No model or Telegram assertion: the stub need not survive this test.
-    } catch {
+    } catch (error) {
       nativeTerminationUncertain = true;
       throw new Error(
+        formatInstanceProofFailure('S6', checkpoint, error) + '\n' +
         'S6 failed; preserve exact fixture artifacts: ' +
         JSON.stringify({ container, stub: stubContainer, volume, network, stubDir }),
       );
@@ -2896,9 +2926,10 @@ try {
       if (restart !== undefined && !restart.closed) {
         try {
           await restart.cleanup();
-        } catch {
+        } catch (error) {
           nativeTerminationUncertain = true;
           throw new Error(
+            formatInstanceProofFailure('S6', checkpoint, error) + '\n' +
             'S6 native close uncertain; preserve exact fixture artifacts: ' +
             JSON.stringify({ container, stub: stubContainer, volume, network, stubDir }),
           );
