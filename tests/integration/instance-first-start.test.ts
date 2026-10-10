@@ -21,6 +21,7 @@ import {
   INSTANCE_ADDED_CAPABILITY,
   hasOnlyInstanceAddedCapability,
 } from './helpers/instance-docker-capability.js';
+import { compareInstanceMounts } from './helpers/instance-docker-mounts.js';
 import {
   formatInstanceProofFailure,
   type InstanceProofCheckpoint,
@@ -2469,7 +2470,11 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         JSON.stringify(stableHostConfig(original[3], originalPort))).toBe(true);
       expect(recreated[4].some(m => m.Type === 'bind' &&
         m.Destination === '/etc/ssl/certs/lifemodel-ci-fixture.pem' && m.RW === false)).toBe(true);
-      expect(JSON.stringify(recreated[4]) === JSON.stringify(original[4])).toBe(true);
+      const mountsComparison = compareInstanceMounts(recreated[4], original[4]);
+      if (!mountsComparison.equal) {
+        console.error(JSON.stringify(mountsComparison));
+      }
+      expect(mountsComparison.equal).toBe(true);
       expect(volume === sameVolume && allocatedInstanceVolume === sameVolume).toBe(true);
       expect(count(/"msg":"lifemodel started"/) === 0).toBe(true);
       expect(count(/settings interface is up/) === 0).toBe(true);
