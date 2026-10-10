@@ -5,7 +5,11 @@
  * lifemodel is stopped, panicked or being built - so the loader owns Caddy
  * and keeps it up independently of lifemodel.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import {
+  loaderAppRegistrar,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 
 import {
   caddySpawn,
@@ -19,19 +23,17 @@ import {
   waitUntil,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 describe('caddy, the front door the loader owns', () => {
   it('is opened before lifemodel starts, with the image paths', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
 
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     expect(world.launcher.spawns.map((spawn) => spawn.command)).toEqual([
@@ -54,9 +56,11 @@ describe('caddy, the front door the loader owns', () => {
 
   it('stays up when panic stops lifemodel', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     await app.state.setPanic('a test');
@@ -75,9 +79,11 @@ describe('caddy, the front door the loader owns', () => {
 
   it('is started again after a backoff when it dies', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
 
     caddySpawn(world)?.child.exit(1, null);
     await settle();
@@ -97,12 +103,14 @@ describe('caddy, the front door the loader owns', () => {
 
   it('a missing caddy is a missing input: one line with the cause, then a non-zero exit', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     const missing = { ...world.config.caddy, binary: `${world.root}/no-caddy-here` };
     world.config = { ...world.config, caddy: missing };
 
-    const { app, lines, exits } = await createRunningLoader(world);
+    const { app, lines, exits } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => exits.length > 0, 'the loader left');
 
     expect(exits).toEqual([1]);
@@ -115,9 +123,11 @@ describe('caddy, the front door the loader owns', () => {
 
   it('stops inside the ONE deadline of the whole stop (rework 2, finding 10)', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const leaving = app.shutdown('SIGTERM');
@@ -145,9 +155,11 @@ describe('caddy, the front door the loader owns', () => {
 
   it('gives up on a Caddy that is not reaped after SIGKILL at the deadline (rework 3)', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const leaving = app.shutdown('SIGTERM');
@@ -173,9 +185,11 @@ describe('caddy, the front door the loader owns', () => {
 
   it('is stopped last: lifemodel drains first, the front door closes after', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const leaving = app.shutdown('SIGTERM');

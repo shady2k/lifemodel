@@ -16,8 +16,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+// The observer allocates the world root before this process starts.
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -31,7 +30,10 @@ import { createSupervisor } from '../../loader/src/supervisor.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import { waitUntil } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
+const ownedRoot = process.argv[4];
+assert.ok(typeof ownedRoot === 'string' && ownedRoot.length > 0);
+const roots: string[] = [ownedRoot];
+let volumeConstructed = false;
 
 // A Node fixture, not a nested Vitest worker.
 function expect(actual: unknown) {
@@ -88,6 +90,7 @@ process.on('message', (message: { type?: string }) => {
   resume();
 });
 async function ready(root: string, required: RequiredProcess[]) {
+  assert.equal(root, ownedRoot);
   await new Promise<void>(resolve => {
     if (paused) return;
     release = resolve;
@@ -215,8 +218,10 @@ interface StandIn {
 
 /** A volume whose instance is already built, on a real commit of a real repository. */
 function makeStandInVolume(): StandIn {
-  const root = mkdtempSync(join(tmpdir(), 'loader-signal-'));
-  roots.push(root);
+  assert.equal(volumeConstructed, false);
+  volumeConstructed = true;
+  // Ownership was registered before startup, including before config can throw.
+  const root = ownedRoot;
   const repo = join(root, 'repo');
   mkdirSync(join(repo, 'dist'), { recursive: true });
   const marker = join(root, 'lifemodel-marker');
@@ -464,4 +469,5 @@ try {
   send({ type: 'result', code: 1, roots, error: String(error) });
 }
 
-// Artifact roots intentionally remain on disk, including on failed cleanup.
+// The external guard removes ownedRoot only after proven group settlement.
+// Failed settlement retains the root and the observer's control evidence.

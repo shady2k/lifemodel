@@ -25,7 +25,10 @@ import { describe, expect, it } from 'vitest';
 import { createLoaderApp } from '../../loader/src/app.js';
 import type { LoaderConfig } from '../../loader/src/config.js';
 import { hashPassword } from '../../loader/src/auth.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import {
+  ownLoaderApp,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
@@ -49,6 +52,8 @@ import {
  * two protocols it answers on: the ports the docker rewrite maps 53 onto, not
  * the well-known one the clients dial.
  */
+registerLoaderLifecycle();
+
 const RESOLVER_UDP_PORT = 32_878;
 const RESOLVER_TCP_PORT = 38_033;
 
@@ -139,7 +144,7 @@ interface Rig {
 /** A loader with a password already set, over `found`. */
 async function rig(found: LoaderWorld): Promise<Rig> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: found.fs,
     config: found.config,
     logger: createRecordingLogger([]),
   });
@@ -149,7 +154,7 @@ async function rig(found: LoaderWorld): Promise<Rig> {
   const exits: number[] = [];
   const app = createLoaderApp({
     config: found.config,
-    fs: createNodeFileSystem(),
+    fs: found.fs,
     runner: found.runner,
     launcher: found.launcher,
     logger: createRecordingLogger(lines),
@@ -157,6 +162,7 @@ async function rig(found: LoaderWorld): Promise<Rig> {
     exit: (code) => exits.push(code),
     agentVaultProbe: () => Promise.resolve(true),
   });
+  ownLoaderApp(found, app);
   await app.start();
   return { app, lines, exits };
 }

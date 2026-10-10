@@ -10,12 +10,18 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import type { FileSystem } from '../../loader/src/fs.js';
+import {
+  loaderAppRegistrar,
+  ownLoaderApp,
+  registerLoaderCleanup,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
   caddySpawn,
@@ -30,18 +36,14 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 interface AppUnderTest {
   app: ReturnType<typeof createLoaderApp>;
   world: LoaderWorld;
   lines: RecordedLine[];
   exits: number[];
-  fs: ReturnType<typeof createNodeFileSystem>;
+  fs: FileSystem;
 }
 
 /** One loader over a volume of its own, with the process boundary doubled. */
@@ -50,16 +52,16 @@ function makeApp(
   lines: RecordedLine[] = [],
   exits: number[] = []
 ): AppUnderTest {
-  roots.push(world.root);
-  const fs = createNodeFileSystem();
+  const fs = world.fs;
   const app = testLoaderApp(world, { fs, lines, exits });
+  ownLoaderApp(world, app);
   return { app, world, lines, exits, fs };
 }
 
 /** The password the owner would have set through boot.<host>. */
 async function setPassword(world: LoaderWorld, password = 'right'): Promise<void> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: world.fs,
     config: world.config,
     logger: createRecordingLogger([]),
   });
@@ -117,7 +119,9 @@ describe('the loader first start', () => {
     // and a real uid on the command possible.
     const world = createLoaderWorld({ privileged: true });
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => world.runner.lines().includes('npm ci'), 'the build ran');
 
     // The build runs as uid 1000, and the loader's rule lets that uid reach
@@ -382,7 +386,7 @@ describe('the loader says what it is missing', () => {
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
     const app = testLoaderApp(world, { config, lines, exits });
-    roots.push(world.root);
+    ownLoaderApp(world, app);
 
     await app.start();
     await waitUntil(() => exits.length > 0, 'the loader left');
@@ -411,7 +415,7 @@ describe('the loader says what it is missing', () => {
       lines,
       exits,
     });
-    roots.push(world.root);
+    ownLoaderApp(world, app);
 
     await app.start();
 
@@ -429,9 +433,43 @@ describe('the loader says what it is missing', () => {
     await setPassword(world);
     // Something else already listens where the loader's interface belongs.
     const blocker = createServer(() => undefined);
-    await new Promise<void>((resolve) => {
-      blocker.listen(0, '127.0.0.1', resolve);
+    let listening: Promise<void> | undefined;
+    registerLoaderCleanup(world, () => {
+      // Invoke close immediately. If listen is still pending, close again
+      // after its verdict so a late listener cannot escape cleanup.
+      const closing = new Promise<void>((resolve, reject) => {
+        blocker.close((error) => {
+          if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+          else resolve();
+        });
+      });
+      return (async (): Promise<void> => {
+        const results = await Promise.allSettled([
+          closing,
+          listening ?? Promise.resolve(),
+        ]);
+        await new Promise<void>((resolve, reject) => {
+          blocker.close((error) => {
+            if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+            else resolve();
+          });
+        });
+        const errors = results.flatMap((result) =>
+          result.status === 'rejected' ? [result.reason] : []
+        );
+        if (errors.length > 0) {
+          throw new AggregateError(errors, 'Blocker server cleanup failed');
+        }
+      })();
     });
+    listening = new Promise<void>((resolve, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(0, '127.0.0.1', () => {
+        blocker.off('error', reject);
+        resolve();
+      });
+    });
+    await listening;
     const taken = (blocker.address() as AddressInfo).port;
 
     const lines: RecordedLine[] = [];
@@ -441,7 +479,7 @@ describe('the loader says what it is missing', () => {
       lines,
       exits,
     });
-    roots.push(world.root);
+    ownLoaderApp(world, app);
 
     await app.start();
 
@@ -451,7 +489,12 @@ describe('the loader says what it is missing', () => {
     expect(errors[0]?.message).toContain(String(taken));
     expect(errors[0]?.message).toContain('cannot listen');
     await shutdownLoader(world, app);
-    blocker.close();
+    await new Promise<void>((resolve, reject) => {
+      blocker.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
   });
 });
 
@@ -493,7 +536,7 @@ describe('what the loader keeps on the volume', () => {
     const loaderDir = world.config.loaderDir;
     expect(statSync(loaderDir).mode & 0o777).toBe(0o700);
     const state = createLoaderState({
-      fs: createNodeFileSystem(),
+      fs: world.fs,
       config: world.config,
       logger: createRecordingLogger([]),
     });

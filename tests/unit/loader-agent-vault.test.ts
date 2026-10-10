@@ -27,13 +27,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createAgentVault } from '../../loader/src/agent-vault.js';
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import {
+  ownAgentVault,
+  ownLoaderApp,
+  registerLoaderLifecycle,
+  registerLoaderRelease,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
   caddySpawn,
   createLoaderWorld,
   lifemodelSpawn,
+  loaderFileSystem,
   scriptRepository,
   settle,
   shutdownLoader,
@@ -43,12 +49,13 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
+registerLoaderLifecycle();
+
 /** The environment a test sets must not leak into the next one. */
 const savedEnv: [string, string | undefined][] = [];
 
 afterEach(() => {
-  roots.splice(0);
+
   for (const [name, value] of savedEnv.splice(0)) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -63,7 +70,7 @@ function setEnv(name: string, value: string): void {
 /** A volume of this test's own, with the repository the loader's seed needs. */
 function world(): LoaderWorld {
   const created = createLoaderWorld();
-  roots.push(created.root);
+
   scriptRepository(created);
   return created;
 }
@@ -477,20 +484,22 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const found = world();
     scriptFirstStart(found);
     const lines: RecordedLine[] = [];
-    const inner = createNodeFileSystem();
     // The start is held in the middle of preparing the store, which is where
     // the container's own stop can arrive (its signals are wired before the
     // loader starts).
     let release: (() => void) | null = null;
-    const fs = {
-      ...inner,
+    registerLoaderRelease(found, (): void => {
+      release?.();
+    });
+    const fs = loaderFileSystem(found, (guardedBase) => ({
+      ...guardedBase,
       chmod: async (path: string, mode: number): Promise<void> => {
         await new Promise<void>((resolve) => {
           release = resolve;
         });
-        await inner.chmod(path, mode);
+        await guardedBase.chmod(path, mode);
       },
-    };
+    }));
     const vault = createAgentVault({
       launcher: found.launcher,
       runner: found.runner,
@@ -500,7 +509,9 @@ describe('Agent Vault, the layer that holds the keys', () => {
       config: found.config,
       probeHealth: () => Promise.resolve(true),
     });
+    ownAgentVault(found, vault);
     const starting = vault.start();
+    registerLoaderRelease(found, (): void => {}, starting);
     await waitUntil(() => release !== null, 'the start reached the store');
 
     expect(await vault.stop()).toBe(true); // nothing was running
@@ -521,13 +532,15 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const vault = createAgentVault({
       launcher: found.launcher,
       runner: found.runner,
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       logger: createRecordingLogger(lines),
       clock: found.clock,
       config: found.config,
       probeHealth: () => Promise.resolve(up),
     });
+    ownAgentVault(found, vault);
     const starting = vault.start();
+    registerLoaderRelease(found, (): void => {}, starting);
     await waitUntil(() => vaultSpawn(found) !== undefined, 'the server is spawned');
 
     // The container's own stop arrives now. The child this start already made
@@ -556,6 +569,9 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const inner = found.runner;
     let release: (() => void) | null = null;
     let held = false;
+    registerLoaderRelease(found, (): void => {
+      release?.();
+    });
     const runner = {
       run: async (
         command: string,
@@ -585,13 +601,15 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const vault = createAgentVault({
       launcher: found.launcher,
       runner,
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       logger: createRecordingLogger(lines),
       clock: found.clock,
       config: found.config,
       probeHealth: () => Promise.resolve(true),
     });
+    ownAgentVault(found, vault);
     const starting = vault.start();
+    registerLoaderRelease(found, (): void => {}, starting);
     await waitUntil(() => release !== null, 'the start reached the provisioning');
 
     const stopping = vault.stop();
@@ -663,7 +681,7 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const found = world();
     scriptFirstStart(found);
     const state = createLoaderState({
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       config: found.config,
       logger: createRecordingLogger([]),
     });
@@ -701,7 +719,7 @@ describe('Agent Vault, the layer that holds the keys', () => {
     const found = world();
     scriptFirstStart(found);
     const state = createLoaderState({
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       config: found.config,
       logger: createRecordingLogger([]),
     });
@@ -750,7 +768,7 @@ describe('Agent Vault, the layer that holds the keys', () => {
     });
 
     const state = createLoaderState({
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       config: found.config,
       logger: createRecordingLogger([]),
     });
@@ -783,18 +801,30 @@ describe('Agent Vault, the layer that holds the keys', () => {
     scriptFirstStart(found);
     const binary = found.config.agentVault.binary;
     // The command ignores its cancellation: even aborted, it never settles.
-    found.runner.on(`${binary} agent info`, () => new Promise<never>(() => undefined));
+    let releaseCommand: (() => void) | undefined;
+    registerLoaderRelease(found, (): void => {
+      releaseCommand?.();
+    });
+    found.runner.on(`${binary} agent info`, () =>
+      new Promise<never>((_, reject) => {
+        releaseCommand = (): void => {
+          reject(new Error('fixture cleanup released the held agent info command'));
+        };
+      })
+    );
     const lines: RecordedLine[] = [];
     const vault = createAgentVault({
       launcher: found.launcher,
       runner: found.runner,
-      fs: createNodeFileSystem(),
+      fs: found.fs,
       logger: createRecordingLogger(lines),
       clock: found.clock,
       config: found.config,
       probeHealth: () => Promise.resolve(true),
     });
+    ownAgentVault(found, vault);
     const starting = vault.start();
+    registerLoaderRelease(found, (): void => {}, starting);
     await waitUntil(
       () => found.runner.calls.some((call) => call.command === binary && call.args[0] === 'agent'),
       'the startup is hung on a provisioning command'
@@ -827,7 +857,7 @@ function rig(
   const exits: number[] = [];
   const app = createLoaderApp({
     config: found.config,
-    fs: createNodeFileSystem(),
+    fs: found.fs,
     runner: found.runner,
     launcher: found.launcher,
     logger: createRecordingLogger(lines),
@@ -835,6 +865,7 @@ function rig(
     exit: (code) => exits.push(code),
     agentVaultProbe: probe,
   });
+  ownLoaderApp(found, app);
   return { app, lines, exits };
 }
 
@@ -844,7 +875,7 @@ async function start(found: LoaderWorld): Promise<{
   lines: RecordedLine[];
 }> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: found.fs,
     config: found.config,
     logger: createRecordingLogger([]),
   });
@@ -867,7 +898,7 @@ async function startExpectingFailure(found: LoaderWorld): Promise<{
   exits: number[];
 }> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: found.fs,
     config: found.config,
     logger: createRecordingLogger([]),
   });

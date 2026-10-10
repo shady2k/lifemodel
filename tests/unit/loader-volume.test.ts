@@ -17,11 +17,14 @@
  */
 import { lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import {
+  ownLoaderApp,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
@@ -35,11 +38,7 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 interface Rig {
   world: LoaderWorld;
@@ -51,18 +50,22 @@ interface Rig {
 
 /** A loader over `world`, recording every identity change it makes. */
 function makeApp(world: LoaderWorld): Rig {
-  roots.push(world.root);
   const lines: RecordedLine[] = [];
   const exits: number[] = [];
-  const recording = createRecordingFileSystem();
-  const app = testLoaderApp(world, { fs: recording, lines, exits });
+  const recording = createRecordingFileSystem(world.fs);
+  const app = testLoaderApp(world, {
+    fs: () => recording,
+    lines,
+    exits,
+  });
+  ownLoaderApp(world, app);
   return { world, lines, exits, recording, app };
 }
 
 /** The password the owner would have set through boot.<host>. */
 async function setPassword(world: LoaderWorld): Promise<void> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: world.fs,
     config: world.config,
     logger: createRecordingLogger([]),
   });
@@ -72,7 +75,7 @@ async function setPassword(world: LoaderWorld): Promise<void> {
 /** A volume that has been started before: the layout, and a password. */
 async function existingVolume(world: LoaderWorld): Promise<void> {
   const state = createLoaderState({
-    fs: createNodeFileSystem(),
+    fs: world.fs,
     config: world.config,
     logger: createRecordingLogger([]),
   });
@@ -105,7 +108,7 @@ describe('the volume the loader prepares', () => {
     scriptRepository(world);
     await existingVolume(world);
     const state = createLoaderState({
-      fs: createNodeFileSystem(),
+      fs: world.fs,
       config: world.config,
       logger: createRecordingLogger([]),
     });
@@ -114,7 +117,7 @@ describe('the volume the loader prepares', () => {
 
     // What the review described: an existing data/ that is a symlink to the
     // volume root - the loader's own directory is inside it.
-    const fs = createNodeFileSystem();
+    const fs = world.fs;
     await fs.remove(world.config.dataDir);
     symlinkSync(world.config.volumeRoot, world.config.dataDir);
 
@@ -148,8 +151,8 @@ describe('the volume the loader prepares', () => {
     // review found (a uid-1000 tree whose child directory is swapped for a
     // symlink to the volume root between the listing and the recursion).
     const world = createLoaderWorld({ privileged: true });
-    roots.push(world.root);
-    const fs = createNodeFileSystem();
+
+    const fs = world.fs;
     const { uid, gid } = world.config.lifemodel;
 
     await expect(fs.chownFreshTree('/tmp', uid, gid)).rejects.toThrow(
@@ -163,8 +166,8 @@ describe('the volume the loader prepares', () => {
     // what made the first container walk fail - the walk then found a directory
     // that was already lifemodel's and refused it (rework 2).
     const world = createLoaderWorld({ privileged: true });
-    roots.push(world.root);
-    const fs = createNodeFileSystem();
+
+    const fs = world.fs;
     const tree = join(world.root, 'fresh');
     mkdirSync(join(tree, 'sub'), { recursive: true });
     writeFileSync(join(tree, 'sub', 'a-file'), 'the clone\n');
@@ -181,7 +184,7 @@ describe('the volume the loader prepares', () => {
   it('a data/ that exists as a file is a missing input: one line with the cause', async () => {
     const world = createLoaderWorld({ privileged: true });
     scriptRepository(world);
-    const fs = createNodeFileSystem();
+    const fs = world.fs;
     await fs.ensureDir(world.config.volumeRoot, 0o755);
     writeFileSync(world.config.dataDir, "a file where lifemodel's data belongs\n");
 

@@ -14,10 +14,13 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import {
+  ownLoaderApp,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger } from '../../loader/src/logger.js';
 import {
   readHeadCommit,
@@ -31,11 +34,7 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 /**
  * What git printed in the walk, verbatim: its own message first, its advice
@@ -55,9 +54,9 @@ function safety(world: LoaderWorld): string {
 }
 
 function repositoryDeps(world: LoaderWorld): RepositoryDeps {
-  roots.push(world.root);
+
   return {
-    fs: createNodeFileSystem(),
+    fs: world.fs,
     runner: world.runner,
     logger: createRecordingLogger([]),
     config: world.config,
@@ -112,16 +111,17 @@ describe('git and the instance repository', () => {
   it('makes every git call of a first start safe, through the loader itself', async () => {
     const world = createLoaderWorld();
     scriptRepository(world);
-    roots.push(world.root);
+
     const app = createLoaderApp({
       config: world.config,
-      fs: createNodeFileSystem(),
+      fs: world.fs,
       runner: world.runner,
       launcher: world.launcher,
       logger: createRecordingLogger([]),
       clock: world.clock,
       exit: () => undefined,
     });
+    ownLoaderApp(world, app);
 
     await app.bootstrap.ensureReady('setup');
 
@@ -172,17 +172,17 @@ describe('the code the image carries', () => {
   it('is asked for only while the volume holds no repository', async () => {
     const world = createLoaderWorld();
     const missing = { ...world.config, seedBundle: join(world.root, 'not-there.bundle') };
-    roots.push(world.root);
+
 
     await expect(
-      requireSeedBundleForFirstStart({ fs: createNodeFileSystem(), config: missing })
+      requireSeedBundleForFirstStart({ fs: world.fs, config: missing })
     ).rejects.toThrow(/seed bundle is missing/);
 
     // The volume has an instance already: the bundle is never used again, so a
     // start is not refused for its absence.
     mkdirSync(join(world.config.repoDir, '.git'), { recursive: true });
     await expect(
-      requireSeedBundleForFirstStart({ fs: createNodeFileSystem(), config: missing })
+      requireSeedBundleForFirstStart({ fs: world.fs, config: missing })
     ).resolves.toBeUndefined();
   });
 });

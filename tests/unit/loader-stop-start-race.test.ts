@@ -12,16 +12,23 @@
 import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
-import { createNodeFileSystem, type FileSystem } from '../../loader/src/fs.js';
+import {
+  ownLoaderApp,
+  registerLoaderLifecycle,
+  registerLoaderRelease,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
   caddySpawn,
   createLoaderWorld,
   lifemodelSpawn,
+  loaderFileSystem,
   scriptAgentVault,
   vaultSpawn,
   waitUntil,
 } from '../helpers/loader-doubles.js';
+
+registerLoaderLifecycle();
 
 interface Rig {
   app: LoaderApp;
@@ -38,16 +45,20 @@ interface Rig {
 function rig(): Rig {
   const found = createLoaderWorld();
   scriptAgentVault(found);
-  const inner = createNodeFileSystem();
   let release: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const fs = {
-    ...inner,
+  registerLoaderRelease(found, (): void => {
+    release?.();
+  });
+  const fs = loaderFileSystem(found, (guardedBase) => ({
+    ...guardedBase,
     exists: (path: string) =>
-      path === found.config.seedBundle ? gate.then(() => true) : inner.exists(path),
-  };
+      path === found.config.seedBundle
+        ? gate.then(() => true)
+        : guardedBase.exists(path),
+  }));
   const lines: RecordedLine[] = [];
   const exits: number[] = [];
   const app = createLoaderApp({
@@ -60,13 +71,23 @@ function rig(): Rig {
     exit: (code) => exits.push(code),
     agentVaultProbe: () => Promise.resolve(true),
   });
-  return { app, found, lines, exits, release: () => release?.() };
+  ownLoaderApp(found, app);
+  return {
+    app,
+    found,
+    lines,
+    exits,
+    release: (): void => {
+      release?.();
+    },
+  };
 }
 
 describe('a stop that arrives while a start is still working', () => {
   it('fences the start: it makes nothing further, and the stop answers with the truth', async () => {
     const { app, found, lines, exits, release } = rig();
     const coming = app.start(); // NOT awaited: the start is the work being raced.
+    registerLoaderRelease(found, (): void => {}, coming);
 
     const stopping = app.shutdown('test'); // the stop arrives while the start is held
     // Nothing existed to stop: the stop runs out of steps and races the
@@ -94,6 +115,7 @@ describe('a stop that arrives while a start is still working', () => {
   it('a start held past the deadline is reported, and the stop leaves with 1', async () => {
     const { app, found, lines, exits } = rig(); // never released
     const coming = app.start();
+    registerLoaderRelease(found, (): void => {}, coming);
 
     const stopping = app.shutdown('test');
     await waitUntil(

@@ -1,8 +1,17 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstat, rm } from 'node:fs/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const [mode, proof, scenario, caseName, home] = process.argv.slice(2);
+const [mode, proof, scenario, caseName, home, ownedRoot] = process.argv.slice(2);
+// Trust only the explicit root supplied by this fixture's observer.
+// No directory scan, prefix routing, or readiness-derived replacement path.
+if (!home || !ownedRoot || !isAbsolute(home) || !isAbsolute(ownedRoot) ||
+    resolve(home) !== home || resolve(ownedRoot) !== ownedRoot ||
+    dirname(ownedRoot) !== home) {
+  throw new Error('invalid explicit world-root ownership');
+}
 const file = fileURLToPath(import.meta.url);
 const world = fileURLToPath(new URL('./loader-signal-world.mts', import.meta.url));
 const env = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: home, LANG: 'C' };
@@ -38,7 +47,7 @@ if (mode === 'member') {
   // Spawned detached by the observer: process.pid is our private, live PGID.
   // Keep default signal dispositions. The detached guard is outside this group.
   const guard = spawn(process.execPath,
-    [file, 'guard', proof, scenario, caseName, home],
+    [file, 'guard', proof, scenario, caseName, home, ownedRoot],
     { detached: true, env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
   let member;
   let lost = false;
@@ -81,7 +90,8 @@ if (mode === 'member') {
     }
   });
   if (interrupted) {
-    member = spawn(process.execPath, [file, 'member', proof, scenario, caseName, home],
+    member = spawn(process.execPath,
+      [file, 'member', proof, scenario, caseName, home, ownedRoot],
       { env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     member.on('error', parentGone);
     member.on('message', message => {
@@ -119,6 +129,8 @@ if (mode === 'member') {
   let closed = false, finished = false, parentLost = false, requested = false;
   let readyMessage, readiness, groupSignal, continued = false;
   let result = { code: 1, error: 'fixture did not return a result' };
+  let settledReport;
+  const rootCleanup = { beforeExists: false, afterGone: false };
   const seen = new Map();
   function publish(report, code) {
     if (finished) return;
@@ -129,7 +141,8 @@ if (mode === 'member') {
     process.exit(code);
   }
   function fail(error) {
-    publish({ clean: false, result, error: String(error), parentLost, readiness,
+    publish({ ...settledReport, clean: false, result, error: String(error),
+      ownedRoot, rootCleanup, parentLost, readiness,
       groupSignal, runnerMember, seen: [...seen.values()] }, 1);
   }
   function parentGone() { parentLost = true; void stop(); }
@@ -140,7 +153,8 @@ if (mode === 'member') {
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
   const runtimeTimer = setTimeout(() => void stop(), 35_000);
-  child = spawn(process.execPath, ['--import', 'tsx', world, caseName, scenario],
+  child = spawn(process.execPath,
+    ['--import', 'tsx', world, caseName, scenario, ownedRoot],
     { detached: true, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   const spawned = new Promise(resolve => {
     child.once('spawn', () => resolve(true));
@@ -228,7 +242,16 @@ if (mode === 'member') {
   function fault(error) { result = { code: 1, error: String(error) }; void stop(); }
   child.on('message', message => {
     if (message.type === 'ready') {
-      readyMessage = message;
+      if (readyMessage || message.root !== ownedRoot) {
+        fault('duplicate or mismatched world root readiness');
+        return;
+      }
+      // Copy trusted fields; later packets cannot replace ownership or readiness.
+      readyMessage = {
+        type: 'ready',
+        root: ownedRoot,
+        required: message.required,
+      };
       void identityReady.then(forwardReady).catch(fault);
     } else if (message.type === 'barrierFault') {
       fault(message.error);
@@ -296,8 +319,35 @@ if (mode === 'member') {
       if (!closed || members(child.pid).length !== 0 || memberPresent())
         throw new Error('owned workload or runner witness did not settle');
       await close;
-      publish({ clean: true, result, parentLost, readiness, groupSignal, runnerMember,
-        group: child.pid, remaining: [], closed, seen: [...seen.values()] }, result.code);
+      settledReport = {
+        clean: true, result, parentLost, readiness, groupSignal, runnerMember,
+        group: child.pid, remaining: [], closed, seen: [...seen.values()],
+        ownedRoot,
+      };
+
+      // All existing native-close, empty-group, and witness checks passed.
+      // This detached guard owns the explicit root independently of runner IPC.
+      // It can therefore finish cleanup after the runner or observer disconnects.
+      // Never use result.roots or a later ready packet as deletion authority.
+      try {
+        const before = await lstat(ownedRoot);
+        if (!before.isDirectory() || before.isSymbolicLink())
+          throw new Error('owned world root is not a directory');
+        rootCleanup.beforeExists = true;
+        await rm(ownedRoot, { recursive: true, force: false });
+        try {
+          await lstat(ownedRoot);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          rootCleanup.afterGone = true;
+        }
+        if (!rootCleanup.afterGone)
+          throw new Error('owned world root remains after removal');
+      } catch (error) {
+        rootCleanup.error = String(error);
+        throw error;
+      }
+      publish({ ...settledReport, rootCleanup }, result.code);
     })().catch(fail);
     return stopping;
   }

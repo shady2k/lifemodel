@@ -1,14 +1,12 @@
 /**
- * The doubles the loader's tests use (lifemodel-q4x.2.1).
- *
- * The loader runs unprivileged in a test, so the two boundaries it needs root
- * for - starting lifemodel as uid 1000 and running git/npm - are doubled here
- * and nothing else: the volume is a real directory, the files are really
- * written, the HTTP server really listens.
+ * Loader test doubles. Volumes and HTTP resources remain real.
+ * This helper has no Vitest runtime dependency.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { clearTimeout, setTimeout as realTimeout } from 'node:timers';
 
 import type { HealthProbe } from '../../loader/src/agent-vault.js';
 import { createLoaderApp } from '../../loader/src/app.js';
@@ -26,6 +24,7 @@ import type {
   SpawnOptions,
   SpawnedProcess,
 } from '../../loader/src/exec.js';
+import { FixtureLifetime } from './loader-fixture-lifetime.js';
 
 export interface RecordedCommand {
   command: string;
@@ -33,21 +32,14 @@ export interface RecordedCommand {
   options: RunOptions;
 }
 
-/**
- * git's own safety options for the instance's repository - `-c
- * safe.directory=<the repository>` - taken out of a command line: they say HOW
- * the loader made git trust the repository, not WHICH command it ran, so the
- * matching and `lines()` leave them out. `rawLines()` and the recorded `args`
- * keep every argument, and one test asserts on them (rework 1: git refuses a
- * repository its caller does not own).
- */
+/** Ignore git safety settings for matching, but preserve recorded arguments. */
 function withoutGitSafetyOptions(args: string[]): string[] {
   const kept: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     const next = args[index + 1];
     if (argument === '-c' && next !== undefined && next.startsWith('safe.directory=')) {
-      index += 1; // the option and its value belong together
+      index += 1;
       continue;
     }
     if (argument !== undefined) kept.push(argument);
@@ -55,15 +47,31 @@ function withoutGitSafetyOptions(args: string[]): string[] {
   return kept;
 }
 
-/** A command runner whose answers a test writes: `git clone`, `npm ci`, ... */
+/** Tracks the entire admitted handler, including direct late filesystem writes. */
 export class FakeRunner implements CommandRunner {
   readonly calls: RecordedCommand[] = [];
+  private closed = false;
+  private readonly admitted = new Set<Promise<CommandResult>>();
   private readonly handlers: {
     prefix: string;
     handle: (call: RecordedCommand) => CommandResult | Promise<CommandResult>;
   }[] = [];
 
-  /** Answer every command line that starts with `prefix`; the last word wins. */
+  closeAdmission(): void {
+    this.closed = true;
+  }
+
+  admittedCount(): number {
+    return this.admitted.size;
+  }
+
+  async drainHandlers(): Promise<void> {
+    if (!this.closed) throw new Error('Runner admission must be closed');
+    // No new handlers can enter. Rejections are results, not resource leaks.
+    await Promise.allSettled([...this.admitted]);
+  }
+
+  /** The most recently registered matching handler wins. */
   on(
     prefix: string,
     handle: (call: RecordedCommand) => CommandResult | Promise<CommandResult>
@@ -71,24 +79,44 @@ export class FakeRunner implements CommandRunner {
     this.handlers.unshift({ prefix, handle });
   }
 
-  async run(command: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
+  run(command: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
+    if (this.closed) return new Promise<CommandResult>(() => {});
+
+    // Reserve before invoking even the synchronous portion of the handler.
+    let resolveOperation!: (
+      result: CommandResult | PromiseLike<CommandResult>
+    ) => void;
+    let rejectOperation!: (error: unknown) => void;
+    const operation = new Promise<CommandResult>((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
+    });
+    this.admitted.add(operation);
+    void operation.then(
+      () => { this.admitted.delete(operation); },
+      () => { this.admitted.delete(operation); }
+    );
+
     const call: RecordedCommand = { command, args, options };
     this.calls.push(call);
     const line = `${command} ${withoutGitSafetyOptions(args).join(' ')}`;
-    for (const handler of this.handlers) {
-      if (line.startsWith(handler.prefix)) return handler.handle(call);
+    try {
+      const handler = this.handlers.find((candidate) => line.startsWith(candidate.prefix));
+      resolveOperation(
+        handler ? handler.handle(call) : { code: 0, stdout: '', stderr: '' }
+      );
+    } catch (error) {
+      rejectOperation(error);
     }
-    return { code: 0, stdout: '', stderr: '' };
+    return operation;
   }
 
-  /** Every command line run so far, as one string per call. */
   lines(): string[] {
     return this.calls.map(
       (call) => `${call.command} ${withoutGitSafetyOptions(call.args).join(' ')}`
     );
   }
 
-  /** The same lines with every argument as it was passed, git's options included. */
   rawLines(): string[] {
     return this.calls.map((call) => `${call.command} ${call.args.join(' ')}`);
   }
@@ -97,11 +125,8 @@ export class FakeRunner implements CommandRunner {
 export interface FakeChild extends SpawnedProcess {
   readonly signals: NodeJS.Signals[];
   readonly exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[];
-  /** The test decides when the child dies. */
   exit(code: number | null, signal?: NodeJS.Signals | null): void;
-  /** The test decides that the OS could not start it at all. */
   fail(error: Error): void;
-  /** The OS's verdict on a held spawn (`holdSpawns`): the process runs now. */
   confirmSpawn(): void;
 }
 
@@ -112,35 +137,31 @@ export interface SpawnedFake {
   child: FakeChild;
 }
 
-/**
- * A launcher whose children only die when the test says so.
- *
- * A real spawn answers asynchronously: `spawn` returning is not the process
- * running, and the failure of a spawn arrives as an `error` event afterwards.
- * The fake keeps that shape - a child is "spawned" a microtask later, so the
- * loader's own wait for it is what a test exercises (rework 2, finding 6) - and
- * `failSpawns`/`refuseSpawns` are the two ways a start can be refused.
- */
+/** Fake children keep asynchronous spawn acknowledgement and explicit exits. */
 export class FakeLauncher implements ProcessLauncher {
   readonly spawns: SpawnedFake[] = [];
-  /** Every spawn of `command` (all of them when it is omitted) reports this. */
+  private closed = false;
+  private eventsFrozen = false;
   private failError: { error: Error; command?: string } | null = null;
-  /** Every spawn of `command` (all of them when it is omitted) throws this. */
   private refuseError: { error: Error; command?: string } | null = null;
-  /** Spawns wait for the test's `confirmSpawn` before the OS says they run. */
   private holding = false;
 
-  /** The OS's verdict on every later spawn waits until the test confirms it. */
+  closeAdmission(): void {
+    this.closed = true;
+  }
+
+  freezeEvents(): void {
+    this.eventsFrozen = true;
+  }
+
   holdSpawns(): void {
     this.holding = true;
   }
 
-  /** The OS cannot start the process: the error arrives after `spawn`. */
   failSpawns(error: Error, command?: string): void {
     this.failError = { error, ...(command === undefined ? {} : { command }) };
   }
 
-  /** `spawn` itself throws: the launcher cannot even ask the OS. */
   refuseSpawns(error: Error, command?: string): void {
     this.refuseError = { error, ...(command === undefined ? {} : { command }) };
   }
@@ -155,6 +176,7 @@ export class FakeLauncher implements ProcessLauncher {
   }
 
   spawn(command: string, args: string[], options: SpawnOptions): SpawnedProcess {
+    if (this.closed) throw new Error('FakeLauncher admission is closed');
     const refused = this.appliesTo(this.refuseError, command);
     if (refused !== null) throw refused;
     const failing = this.appliesTo(this.failError, command);
@@ -171,32 +193,48 @@ export class FakeLauncher implements ProcessLauncher {
         child.signals.push(signal);
       },
       onSpawn: (listener) => {
-        if (spawned) queueMicrotask(listener);
-        else spawnListeners.push(listener);
+        if (this.eventsFrozen) return;
+        if (spawned) {
+          queueMicrotask(() => {
+            if (!this.eventsFrozen) listener();
+          });
+        } else {
+          spawnListeners.push(listener);
+        }
       },
       onExit: (listener) => {
-        exitListeners.push(listener);
+        if (!this.eventsFrozen) exitListeners.push(listener);
       },
       onError: (listener) => {
-        if (failure !== null) queueMicrotask(() => listener(failure as Error));
-        else errorListeners.push(listener);
+        if (this.eventsFrozen) return;
+        if (failure !== null) {
+          const error = failure;
+          queueMicrotask(() => {
+            if (!this.eventsFrozen) listener(error);
+          });
+        } else {
+          errorListeners.push(listener);
+        }
       },
       exit: (code, signal = null) => {
+        if (this.eventsFrozen) return;
         for (const listener of exitListeners) listener(code, signal);
       },
       fail: (error) => {
+        if (this.eventsFrozen) return;
         failure = error;
         for (const listener of errorListeners.splice(0)) listener(error);
       },
       confirmSpawn: () => {
+        if (this.eventsFrozen) return;
         spawned = true;
         for (const listener of spawnListeners.splice(0)) listener();
       },
     };
     this.spawns.push({ command, args, options, child });
     if (failing !== null) {
-      // After the caller has had its chance to listen, as the real one does.
       queueMicrotask(() => {
+        if (this.eventsFrozen) return;
         spawned = false;
         child.fail(failing);
       });
@@ -208,14 +246,16 @@ export class FakeLauncher implements ProcessLauncher {
 export interface ManualClock extends Clock {
   readonly sleeps: number[];
   advance(ms: number): void;
-  /** Let every waiting sleep finish (a backoff, a drain deadline). */
+  /** Explicit test action only; cleanup never resolves virtual deadlines. */
   resolveAll(): void;
   pending(): number;
+  /** Abandon virtual waiters without resolving them. */
+  freeze(): void;
 }
 
-/** A clock a test drives: nothing waits on a real timer. */
 export function createManualClock(startMs = 1_700_000_000_000): ManualClock {
   let current = startMs;
+  let frozen = false;
   const sleeps: number[] = [];
   const waiters: (() => void)[] = [];
   return {
@@ -223,41 +263,71 @@ export function createManualClock(startMs = 1_700_000_000_000): ManualClock {
     now: () => current,
     sleep: (ms: number) => {
       sleeps.push(ms);
+      if (frozen) return new Promise<void>(() => {});
       return new Promise<void>((resolve) => {
         waiters.push(resolve);
       });
     },
     advance: (ms: number) => {
-      current += ms;
+      if (!frozen) current += ms;
     },
     resolveAll: () => {
+      if (frozen) return;
       for (const resolve of waiters.splice(0)) resolve();
     },
     pending: () => waiters.length,
+    freeze: () => {
+      frozen = true;
+      waiters.length = 0;
+    },
   };
 }
 
-/** Let every pending promise chain of the loader run to its next wait. */
 export async function settle(times = 4): Promise<void> {
   for (let i = 0; i < times; i += 1) {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 
-/** A loader that is up, with the two children it owns doubled. */
 /**
- * A loader for a test that drives it itself: the same wiring as
- * `createRunningLoader`, with Agent Vault's CLI answers and its readiness
- * doubled, so nothing here needs the real binary or a real server.
+ * Factory overrides may hold, record, synthesize results, or throw. ALL native
+ * filesystem work MUST use the supplied guardedBase. Raw filesystem APIs,
+ * unguarded delegates, and native side channels are forbidden by this mock
+ * contract; this is not sandbox enforcement. Virtual holds are not native I/O.
+ * Object overrides remain whole-promise tracked because they may close over
+ * an unguarded delegate; admitted work must genuinely settle before deletion.
  */
+export type LoaderFileSystemOverride =
+  | FileSystem
+  | ((guardedBase: FileSystem) => FileSystem);
+
+export function loaderFileSystem(
+  world: LoaderWorld,
+  override?: LoaderFileSystemOverride
+): FileSystem {
+  if (override === undefined) return world.fs;
+  // Factory overrides contain virtual holds. Their only native I/O must
+  // delegate through guardedBase; wrapping the hold again would count an
+  // inert post-fence continuation as admitted native work forever.
+  if (typeof override === 'function') return override(world.fs);
+  // Object overrides may close over an unguarded native filesystem, so
+  // their entire already-admitted operation must genuinely settle.
+  return world.fixtureLifetime.wrapFs(override);
+}
+
+export type LoaderAppRegistrar = (
+  world: LoaderWorld,
+  app: ReturnType<typeof createLoaderApp>
+) => void;
+
+/** Construct an app for a test that drives startup itself. */
 export function testLoaderApp(
   world: LoaderWorld,
   options: {
-    fs?: FileSystem;
+    fs?: LoaderFileSystemOverride;
     lines: RecordedLine[];
     exits?: number[];
     exit?: (code: number) => void;
-    /** A world whose configuration the test moved (another port, no bundle, ...). */
     config?: LoaderConfig;
   }
 ): ReturnType<typeof createLoaderApp> {
@@ -265,7 +335,7 @@ export function testLoaderApp(
   const exits = options.exits;
   return createLoaderApp({
     config: options.config ?? world.config,
-    fs: options.fs ?? createNodeFileSystem(),
+    fs: loaderFileSystem(world, options.fs),
     runner: world.runner,
     launcher: world.launcher,
     logger: createRecordingLogger(options.lines),
@@ -286,26 +356,22 @@ export interface RunningLoader {
 }
 
 /**
- * Bring a loader up on a volume of its own, with a password already set (as
- * the owner would have set it through boot.<host>) unless asked otherwise.
+ * The injected registrar runs synchronously after construction and before
+ * start, including starts that subsequently fail. Consumers supply the
+ * Vitest adapter; this pure helper does not import it.
  */
 export async function createRunningLoader(
   world: LoaderWorld,
   options: {
     password?: string | null;
-    fs?: FileSystem;
-    /**
-     * What Agent Vault's CLI answers. Scripted by default: a loader that comes
-     * up now includes the vault it provisioned, and only the tests that are
-     * about that provisioning answer for it themselves.
-     */
+    fs?: LoaderFileSystemOverride;
     vault?: boolean;
-    /** Say whether Agent Vault is up, instead of asking a real server. */
     agentVaultProbe?: HealthProbe;
+    injectAppRegistrar?: LoaderAppRegistrar;
   } = {}
 ): Promise<RunningLoader> {
   const password = options.password === undefined ? 'right' : options.password;
-  const fs = options.fs ?? createNodeFileSystem();
+  const fs = loaderFileSystem(world, options.fs);
   if (options.vault !== false) scriptAgentVault(world);
   const state = createLoaderState({ fs, config: world.config, logger: createRecordingLogger([]) });
   await state.ensureLayout();
@@ -320,10 +386,17 @@ export async function createRunningLoader(
     logger: createRecordingLogger(lines),
     clock: world.clock,
     exit: (code) => exits.push(code),
-    // The real probe asks the server's own `/health`; here the vault is a
-    // doubled process, so the test says what it answers.
     agentVaultProbe: options.agentVaultProbe ?? ((): Promise<boolean> => Promise.resolve(true)),
   });
+  if (options.injectAppRegistrar !== undefined) {
+    const entry = owner(world);
+    try {
+      invokeSynchronous(entry, 'app registrar', () => options.injectAppRegistrar!(world, app));
+    } catch (error) {
+      entry.errors.push(error);
+      throw error;
+    }
+  }
   await app.start();
   await waitUntil(
     () => vaultSpawn(world) !== undefined || exits.length > 0,
@@ -332,7 +405,6 @@ export async function createRunningLoader(
   return { app, lines, exits };
 }
 
-/** Wait for the event a test asserts on (a spawn, a file), never for a tick count. */
 export async function waitUntil(
   condition: () => boolean,
   what: string,
@@ -341,41 +413,28 @@ export async function waitUntil(
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() > deadline) throw new Error(`not seen within ${timeoutMs}ms: ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    await new Promise((resolve) => realTimeout(resolve, 2));
   }
 }
 
-/**
- * Say whether the container (the world) has an IPv6 address or route, the way
- * the kernel says it: writing the double of `/proc/net/if_inet6`. One line of
- * what the kernel writes - an address with its interface - makes the loader
- * install the ip6tables half an empty file makes it skip the half.
- */
 export function containerHasIpv6(world: LoaderWorld, line: string): void {
   writeFileSync(world.config.egress.procPath, line);
 }
 
-/** The child the loader started for lifemodel (the front door starts first). */
 export function lifemodelSpawn(world: LoaderWorld): SpawnedFake | undefined {
   return world.launcher.spawns.findLast((spawn) => spawn.args[0] === world.config.lifemodelEntry);
 }
 
-/** The child the loader started for the front door. */
 export function caddySpawn(world: LoaderWorld): SpawnedFake | undefined {
   return world.launcher.spawns.findLast((spawn) => spawn.command === world.config.caddy.binary);
 }
 
-/** The child the loader started for Agent Vault (the server, not its CLI). */
 export function vaultSpawn(world: LoaderWorld): SpawnedFake | undefined {
   return world.launcher.spawns.findLast(
     (spawn) => spawn.command === world.config.agentVault.binary && spawn.args[0] === 'server'
   );
 }
 
-/**
- * Stop the loader the way the container does, and let the front door leave:
- * a test that never stops Caddy would hang on the loader's own shutdown.
- */
 export async function shutdownLoader(
   world: LoaderWorld,
   app: { shutdown(reason: string): Promise<number> },
@@ -387,7 +446,6 @@ export async function shutdownLoader(
     await waitUntil(() => lifemodel.child.signals.length > 0, 'lifemodel is asked to stop');
     lifemodel.child.exit(0, null);
   }
-  // Agent Vault leaves after lifemodel, and inside the same one deadline.
   const vault = vaultSpawn(world);
   if (vault !== undefined) {
     await waitUntil(() => vault.child.signals.length > 0, 'Agent Vault is asked to stop');
@@ -403,23 +461,306 @@ export async function shutdownLoader(
 
 export interface LoaderWorld {
   root: string;
+  fixtureLifetime: FixtureLifetime;
+  fs: FileSystem;
   config: LoaderConfig;
   runner: FakeRunner;
   launcher: FakeLauncher;
   clock: ManualClock;
 }
 
+/** Latches and hold releases must finish synchronously and return void. */
+export type LoaderSynchronousCallback = () => void;
+
 /**
- * A FileSystem that records every identity change and does the real thing.
- *
- * Giving a path to lifemodel is what a test cannot observe when the test IS
- * lifemodel's user (uid 1000 here), so the paths are recorded instead: the test
- * asserts on WHAT was given away, which is the rule (rework 2, finding 1).
+ * Native cleanup must seal its own admission synchronously when called and
+ * return a promise covering its complete native closure.
  */
+export type LoaderNativeCleanup = () => Promise<unknown>;
+
+type Diagnostic = {
+  source: string;
+  status: 'fulfilled' | 'rejected';
+  value: unknown;
+};
+
+type OwnedRoot = {
+  root: string;
+  fixtureLifetime: FixtureLifetime;
+  world?: LoaderWorld;
+  stopping: boolean;
+  stops: LoaderSynchronousCallback[];
+  releases: LoaderSynchronousCallback[];
+  native: LoaderNativeCleanup[];
+  errors: unknown[];
+  diagnostics: Diagnostic[];
+  finalAccounting: boolean;
+  cleanup?: Promise<void>;
+};
+
+const loaderRoots = new Map<string, OwnedRoot>();
+
+export function ownedLoaderRoots(): readonly string[] {
+  return [...loaderRoots.keys()];
+}
+
+function owner(world: LoaderWorld): OwnedRoot {
+  const entry = loaderRoots.get(world.root);
+  if (!entry || entry.world !== world || entry.stopping) {
+    throw new Error('Loader world is not an open owned fixture');
+  }
+  return entry;
+}
+
+function ownedEntry(world: LoaderWorld): OwnedRoot {
+  const entry = loaderRoots.get(world.root);
+  if (!entry || entry.world !== world) {
+    throw new Error('Loader world is not an owned fixture');
+  }
+  return entry;
+}
+
+function diagnostic(
+  entry: OwnedRoot,
+  source: string,
+  status: Diagnostic['status'],
+  value: unknown
+): void {
+  // Virtual continuations may remain parked forever or reject much later.
+  // They never mutate final error accounting or authorize root deletion.
+  if (!entry.finalAccounting) entry.diagnostics.push({ source, status, value });
+}
+
+function observeDiagnostic(
+  entry: OwnedRoot,
+  source: string,
+  promise: PromiseLike<unknown>
+): void {
+  void Promise.resolve(promise).then(
+    (value) => { diagnostic(entry, source, 'fulfilled', value); },
+    (error) => { diagnostic(entry, source, 'rejected', error); }
+  );
+}
+
+/**
+ * TypeScript permits async functions where () => void is expected.
+ * Enforce the runtime contract too. Misuse is an immediate cleanup error;
+ * observe the returned promise without awaiting it or allowing an unhandled
+ * rejection. Native work belongs in registerLoaderCleanup instead.
+ */
+function invokeSynchronous(
+  entry: OwnedRoot,
+  source: string,
+  callback: LoaderSynchronousCallback
+): void {
+  const result: unknown = callback();
+  if (result !== null && result !== undefined &&
+      (typeof result === 'object' || typeof result === 'function')) {
+    const then = (result as { then?: unknown }).then;
+    if (typeof then === 'function') {
+      observeDiagnostic(entry, `${source}: invalid promise`, result as PromiseLike<unknown>);
+      throw new TypeError(
+        `${source} must return void synchronously; register native cleanup separately`
+      );
+    }
+  }
+  if (result !== undefined) {
+    throw new TypeError(`${source} must return void synchronously`);
+  }
+}
+
+export function registerLoaderBeginStop(
+  world: LoaderWorld,
+  stop: LoaderSynchronousCallback
+): void {
+  owner(world).stops.push(stop);
+}
+
+export function registerLoaderCleanup(
+  world: LoaderWorld,
+  close: LoaderNativeCleanup
+): void {
+  owner(world).native.push(close);
+}
+
+/**
+ * Register holds when they are created, before an operation can wait on them.
+ * startPromise is diagnostic only; it is not native settlement evidence.
+ */
+export function registerLoaderRelease(
+  world: LoaderWorld,
+  release: LoaderSynchronousCallback,
+  startPromise?: Promise<unknown>
+): void {
+  const entry = owner(world);
+  let released = false;
+  entry.releases.push(() => {
+    if (released) return;
+    released = true;
+    // Preserve the runtime result so invokeSynchronous can reject misuse.
+    return release();
+  });
+  if (startPromise !== undefined) {
+    observeDiagnostic(entry, 'held startup', startPromise);
+  }
+}
+
+/** Observe virtual shutdown without awaiting it or adding late cleanup errors. */
+export function observeLoaderStop(world: LoaderWorld, promise: Promise<unknown>): void {
+  observeDiagnostic(ownedEntry(world), 'virtual stop', promise);
+}
+
+function validateBound(timeoutMs: number): void {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
+    throw new RangeError('Real cleanup bound must be between 0 and 2147483647');
+  }
+}
+
+export async function loaderRealBound<T>(
+  work: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  // Observe even if validation fails before the race is installed.
+  void work.catch(() => {});
+  validateBound(timeoutMs);
+  let timer: ReturnType<typeof realTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = realTimeout(
+          () => reject(new Error(`Loader cleanup timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function initiate(entry: OwnedRoot): Promise<unknown>[] {
+  entry.stopping = true;
+  const invoke = (source: string, callback: LoaderSynchronousCallback): void => {
+    try {
+      invokeSynchronous(entry, source, callback);
+    } catch (error) {
+      entry.errors.push(error);
+    }
+  };
+
+  // Set every stop latch before revoking resource admission or releasing holds.
+  for (const stop of entry.stops.splice(0)) invoke('stop latch', stop);
+  entry.world?.runner.closeAdmission();
+  entry.world?.launcher.closeAdmission();
+  entry.fixtureLifetime.closeAdmission();
+
+  // Native closure callbacks execute now, not in a later microtask. HTTP
+  // closure thereby seals its state-keyed admission before holds are released.
+  const native = entry.native.splice(0).map((close) => {
+    let operation: Promise<unknown>;
+    try {
+      operation = Promise.resolve(close());
+    } catch (error) {
+      operation = Promise.reject(error);
+    }
+    void operation.catch(() => {});
+    return operation;
+  });
+
+  for (const release of entry.releases.splice(0)) invoke('hold release', release);
+
+  // Keep clocks and fake events live until independent native settlement.
+  return native;
+}
+
+function disposeEntry(entry: OwnedRoot, timeoutMs: number): Promise<void> {
+  if (entry.cleanup !== undefined) return entry.cleanup;
+  try {
+    validateBound(timeoutMs);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  // Publish the shared cleanup promise before callbacks can reenter cleanup.
+  entry.cleanup = Promise.resolve().then(async () => {
+    const native = initiate(entry);
+    const fences = [
+      ...native,
+      entry.world?.runner.drainHandlers() ?? Promise.resolve(),
+      entry.fixtureLifetime.drainNativeIo(timeoutMs),
+    ];
+    const results = await Promise.allSettled(
+      fences.map((promise) => loaderRealBound(promise, timeoutMs))
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') entry.errors.push(result.reason);
+    }
+
+    const admittedIo = entry.fixtureLifetime.admittedCount();
+    const admittedHandlers = entry.world?.runner.admittedCount() ?? 0;
+    const settlementComplete =
+      results.every((result) => result.status === 'fulfilled') &&
+      entry.fixtureLifetime.isClosed() &&
+      admittedIo === 0 &&
+      admittedHandlers === 0;
+
+    if (!settlementComplete) {
+      entry.errors.push(new Error(
+        `Independent settlement incomplete: ${admittedIo} native operation(s), ` +
+        `${admittedHandlers} runner handler(s); retain ${entry.root}`
+      ));
+    } else {
+      // Never resolveAll() or pump a virtual deadline to get here.
+      entry.world?.clock.freeze();
+      entry.world?.launcher.freezeEvents();
+    }
+
+    // Only synchronous contract failures and bounded native evidence affect
+    // deletion. Observers of parked virtual promises cannot add errors later.
+    entry.finalAccounting = true;
+    if (entry.errors.length > 0) {
+      throw new AggregateError(
+        [...entry.errors],
+        `Retained loader root: ${entry.root}`
+      );
+    }
+
+    try {
+      await rm(entry.root, { recursive: true, force: true });
+    } catch (error) {
+      entry.errors.push(error);
+      throw new AggregateError(
+        [...entry.errors],
+        `Retained loader ownership after root removal failed: ${entry.root}`
+      );
+    }
+    loaderRoots.delete(entry.root);
+  });
+  return entry.cleanup;
+}
+
+export function cleanupWorld(world: LoaderWorld, timeoutMs = 5_000): Promise<void> {
+  const entry = loaderRoots.get(world.root);
+  if (!entry) return Promise.resolve();
+  if (entry.world !== world) return Promise.reject(new Error('Loader ownership mismatch'));
+  return disposeEntry(entry, timeoutMs);
+}
+
+export async function disposeLoaderWorlds(timeoutMs = 5_000): Promise<void> {
+  const results = await Promise.allSettled(
+    [...loaderRoots.values()].map((entry) => disposeEntry(entry, timeoutMs))
+  );
+  const errors = results.flatMap((result) =>
+    result.status === 'rejected' ? [result.reason] : []
+  );
+  if (errors.length > 0) {
+    throw new AggregateError(errors, 'Loader fixture cleanup failed');
+  }
+}
+
 export interface RecordingFileSystem extends FileSystem {
-  /** Paths given to an identity as they are: a directory, a file, a symlink. */
   readonly chowns: string[];
-  /** Paths whose whole tree was given to an identity. */
   readonly freshTrees: string[];
 }
 
@@ -444,88 +785,91 @@ export function createRecordingFileSystem(
 }
 
 export interface LoaderWorldOptions {
-  /**
-   * Run as root, the way the image's loader does. A test is not root, so it can
-   * only really chown to ITS OWN identity: `identity` defaults to the test's
-   * own uid and gid, which is what makes a real chown succeed here.
-   */
   privileged?: boolean;
   identity?: { uid: number; gid: number };
 }
 
-/**
- * A volume of its own in /tmp: the same layout the image gives the loader, on
- * a filesystem a test may really write to.
- */
 export function createLoaderWorld(options: LoaderWorldOptions = {}): LoaderWorld {
+  const fixtureLifetime = new FixtureLifetime();
   const root = mkdtempSync(join(tmpdir(), 'loader-test-'));
-  const identity = options.identity ?? {
-    uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
-    gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
-  };
-  const config: LoaderConfig = {
-    ...loadConfig({}),
-    volumeRoot: root,
-    repoDir: join(root, 'repo'),
-    dataDir: join(root, 'data'),
-    loaderDir: join(root, 'loader'),
-    seedBundle: join(root, 'seed.bundle'),
-    lifemodelEntry: join(root, 'repo', 'dist', 'index.js'),
-    caddy: {
-      binary: join(root, 'caddy'),
-      config: join(root, 'Caddyfile'),
-      stopWaitMs: 1_000,
-    },
-    agentVault: {
-      ...loadConfig({}).agentVault,
-      binary: join(root, 'agent-vault'),
-      storeDir: join(root, 'vault'),
-      caPath: join(root, 'vault-ca.pem'),
-      startWaitMs: 1_000,
-      stopWaitMs: 1_000,
-    },
-    httpPort: 0,
-    privileged: options.privileged ?? false,
-    lifemodel: identity,
-    drainWaitMs: 5_000,
-    killWaitMs: 1_000,
-    stopBudgetMs: 6_000,
-    restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
-  };
-  config.egress = {
-    ...config.egress,
-    ipv6Binary: join(root, 'ip6tables'),
-    // The container's IPv6 addresses as a WRITTEN file, so a test decides the
-    // fact precisely: empty by default (no IPv6 address or route), one line
-    // when a test wants the ip6tables half installed or its refusal seen.
-    procPath: join(root, 'if-inet6'),
-  };
-  writeFileSync(config.seedBundle, 'a git bundle the image carries\n');
-  // The front door the image carries: the loader starts it, so the test
-  // volume holds the two files it needs.
-  writeFileSync(config.caddy.binary, '#!/bin/sh\n# caddy, the only web entrance\n');
-  writeFileSync(config.caddy.config, ':80 {\n\trespond "the front door"\n}\n');
-  // And Agent Vault's binary, which the loader starts as it starts Caddy. The
-  // store is NOT made here: making it is the loader's own first act.
-  writeFileSync(config.agentVault.binary, '#!/bin/sh\n# agent-vault, the keys\n');
-  // The written /proc/net/if_inet6 double, EMPTY: no IPv6 address or route, so
-  // the loader installs the IPv4 rule only. A test gives the file the line the
-  // kernel would, when it wants the IPv6 half installed or refused.
-  writeFileSync(config.egress.procPath, '');
-  return {
+  // Own the root immediately, before any subsequent construction or writes.
+  const entry: OwnedRoot = {
     root,
-    config,
-    runner: new FakeRunner(),
-    launcher: new FakeLauncher(),
-    clock: createManualClock(),
+    fixtureLifetime,
+    stopping: false,
+    stops: [],
+    releases: [],
+    native: [],
+    errors: [],
+    diagnostics: [],
+    finalAccounting: false,
   };
+  loaderRoots.set(root, entry);
+
+  try {
+    const fs = fixtureLifetime.wrapFs(createNodeFileSystem());
+    const identity = options.identity ?? {
+      uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
+      gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
+    };
+    const config: LoaderConfig = {
+      ...loadConfig({}),
+      volumeRoot: root,
+      repoDir: join(root, 'repo'),
+      dataDir: join(root, 'data'),
+      loaderDir: join(root, 'loader'),
+      seedBundle: join(root, 'seed.bundle'),
+      lifemodelEntry: join(root, 'repo', 'dist', 'index.js'),
+      caddy: {
+        binary: join(root, 'caddy'),
+        config: join(root, 'Caddyfile'),
+        stopWaitMs: 1_000,
+      },
+      agentVault: {
+        ...loadConfig({}).agentVault,
+        binary: join(root, 'agent-vault'),
+        storeDir: join(root, 'vault'),
+        caPath: join(root, 'vault-ca.pem'),
+        startWaitMs: 1_000,
+        stopWaitMs: 1_000,
+      },
+      httpPort: 0,
+      privileged: options.privileged ?? false,
+      lifemodel: identity,
+      drainWaitMs: 5_000,
+      killWaitMs: 1_000,
+      stopBudgetMs: 6_000,
+      restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
+    };
+    config.egress = {
+      ...config.egress,
+      ipv6Binary: join(root, 'ip6tables'),
+      procPath: join(root, 'if-inet6'),
+    };
+    writeFileSync(config.seedBundle, 'a git bundle the image carries\n');
+    writeFileSync(config.caddy.binary, '#!/bin/sh\n# caddy, the only web entrance\n');
+    writeFileSync(config.caddy.config, ':80 {\n\trespond "the front door"\n}\n');
+    writeFileSync(config.agentVault.binary, '#!/bin/sh\n# agent-vault, the keys\n');
+    writeFileSync(config.egress.procPath, '');
+
+    const world: LoaderWorld = {
+      root,
+      fixtureLifetime,
+      fs,
+      config,
+      runner: new FakeRunner(),
+      launcher: new FakeLauncher(),
+      clock: createManualClock(),
+    };
+    entry.world = world;
+    return world;
+  } catch (error) {
+    // Failed construction remains registered and is reported by suite cleanup.
+    entry.errors.push(error);
+    throw error;
+  }
 }
 
-/**
- * What the real git and npm would do to a volume: a repository on the commit
- * the test names, dependencies installed, the entry built. Registered on a
- * FakeRunner so the loader's own sequencing is what is under test.
- */
 export function scriptRepository(
   world: LoaderWorld,
   commit = 'c0ffee1c0ffee1c0ffee1c0ffee1c0ffee1c0ff'
@@ -549,24 +893,14 @@ function mkdirp(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
-/** Where Agent Vault's CLI keeps the session it saves when it logs in. */
 export function vaultSessionPath(world: LoaderWorld): string {
   return join(world.config.agentVault.storeDir, '.agent-vault', 'session.json');
 }
 
-/**
- * What Agent Vault's own CLI answers (lifemodel-q4x.3.1), so a loader test
- * needs no real binary: a store that already holds the loader's account, the
- * vault `lifemodel` and the agent `lifemodel`, and the CA the proxy publishes.
- * A test that wants the first-start path leaves the store empty by scripting
- * the commands itself (see `scriptAgentVaultFirstStart`).
- */
 export function scriptAgentVault(world: LoaderWorld, token = 'av_agt_a-test-token'): void {
   const { runner, config } = world;
   const binary = config.agentVault.binary;
   runner.on(`${binary} auth login`, () => {
-    // The real CLI writes the session file, and the loader treats its absence
-    // as "that account cannot act for me".
     mkdirp(join(config.agentVault.storeDir, '.agent-vault'));
     writeFileSync(vaultSessionPath(world), '{"token":"a-cli-session"}');
     return { code: 0, stdout: '✓ Login successful.\n', stderr: '' };

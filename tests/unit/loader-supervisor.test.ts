@@ -7,12 +7,17 @@
  * tests decide when it dies - and the drain is a clock a test drives, so
  * nothing here waits on a real 95 seconds.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp } from '../../loader/src/app.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
-import { createNodeFileSystem } from '../../loader/src/fs.js';
+import {
+  ownLoaderApp,
+  ownSupervisor,
+  registerLoaderLifecycle,
+  registerLoaderRelease,
+} from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
   createSupervisor,
@@ -31,11 +36,7 @@ import {
   type LoaderWorld,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 interface Rig {
   supervisor: Supervisor;
@@ -45,7 +46,7 @@ interface Rig {
 }
 
 function makeSupervisor(world: LoaderWorld): Rig {
-  roots.push(world.root);
+
   const lines: RecordedLine[] = [];
   const panic = { set: false };
   const supervisor = createSupervisor({
@@ -55,6 +56,7 @@ function makeSupervisor(world: LoaderWorld): Rig {
     config: world.config,
     isPanicSet: () => Promise.resolve(panic.set),
   });
+  ownSupervisor(world, supervisor);
   return { supervisor, world, lines, panic };
 }
 
@@ -264,7 +266,7 @@ describe('the drain', () => {
 describe('docker stop, end to end through the loader', () => {
   async function startedApp(world: LoaderWorld) {
     scriptRepository(world);
-    const fs = createNodeFileSystem();
+    const fs = world.fs;
     const state = createLoaderState({
       fs,
       config: world.config,
@@ -275,7 +277,8 @@ describe('docker stop, end to end through the loader', () => {
     const lines: RecordedLine[] = [];
     const exits: number[] = [];
     const app = testLoaderApp(world, { fs, lines, exits });
-    roots.push(world.root);
+    ownLoaderApp(world, app);
+
     await app.start();
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     return { app, lines, exits };
@@ -327,9 +330,12 @@ describe('docker stop, end to end through the loader', () => {
 describe('a stop that meets a start in flight (rework 3, review round 2 finding 1)', () => {
   it('spawns nothing when the stop arrives while the panic flag is being read', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     const lines: RecordedLine[] = [];
     let answerPanic: (set: boolean) => void = () => undefined;
+    registerLoaderRelease(world, (): void => {
+      answerPanic(false);
+    });
     const supervisor = createSupervisor({
       launcher: world.launcher,
       logger: createRecordingLogger(lines),
@@ -340,8 +346,10 @@ describe('a stop that meets a start in flight (rework 3, review round 2 finding 
           answerPanic = resolve;
         }),
     });
+    ownSupervisor(world, supervisor);
 
     const starting = supervisor.start();
+    registerLoaderRelease(world, (): void => {}, starting);
     await settle();
     const stopping = supervisor.stop('shutdown');
     await settle();
@@ -441,7 +449,7 @@ describe('the wait after SIGKILL (rework 3, review round 2 finding 2)', () => {
   it('makes the loader leave with 1 and one line naming what is still pending', async () => {
     const world = createLoaderWorld();
     scriptRepository(world);
-    const fs = createNodeFileSystem();
+    const fs = world.fs;
     const state = createLoaderState({
       fs,
       config: world.config,
@@ -451,7 +459,8 @@ describe('the wait after SIGKILL (rework 3, review round 2 finding 2)', () => {
     await state.writeAuth(await hashPassword('right'));
     const lines: RecordedLine[] = [];
     const app = testLoaderApp(world, { fs, lines, exit: () => undefined });
-    roots.push(world.root);
+    ownLoaderApp(world, app);
+
     await app.start();
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
@@ -558,7 +567,7 @@ describe('a start the stop cannot wait for (rework 3, review rounds 3 and 4)', (
 
   it('gives up on a panic read that never answers, and spawns nothing', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     const lines: RecordedLine[] = [];
     const supervisor = createSupervisor({
       launcher: world.launcher,
@@ -567,8 +576,10 @@ describe('a start the stop cannot wait for (rework 3, review rounds 3 and 4)', (
       config: world.config,
       isPanicSet: () => new Promise<boolean>(() => undefined),
     });
+    ownSupervisor(world, supervisor);
 
     const starting = supervisor.start();
+    registerLoaderRelease(world, (): void => {}, starting);
     await settle();
     const stopping = supervisor.stop('panic');
     await settle();
@@ -675,7 +686,7 @@ describe('a lifemodel that asks to be restarted (lifemodel-q4x.4.1)', () => {
     // The loader is leaving: the request starts nothing either.
     panic.set = false;
     const second = makeSupervisor(createLoaderWorld());
-    roots.push(second.world.root);
+
     await second.supervisor.start();
     second.supervisor.close();
     second.world.launcher.spawns[0]?.child.exit(LIFEMODEL_RESTART_EXIT_CODE, null);

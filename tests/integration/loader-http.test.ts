@@ -9,7 +9,11 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import {
+  loaderAppRegistrar,
+  registerLoaderLifecycle,
+} from '../helpers/loader-lifecycle.js';
 
 import { runCli } from '../../loader/src/cli.js';
 import type { InstanceStatus } from '../../loader/src/bootstrap.js';
@@ -25,11 +29,7 @@ import {
   waitUntil,
 } from '../helpers/loader-doubles.js';
 
-const roots: string[] = [];
-
-afterEach(() => {
-  roots.splice(0);
-});
+registerLoaderLifecycle();
 
 interface Answer {
   status: number;
@@ -126,9 +126,12 @@ function cookieOf(headers: IncomingHttpHeaders): string {
 describe('first start through the browser', () => {
   it('asks for a password on boot.<host>, then seeds, builds and starts the instance', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world, { password: null });
+    const { app, lines } = await createRunningLoader(world, {
+      password: null,
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     const setup = await ask(port, 'GET', '/setup', { host: 'boot.localhost' });
@@ -185,9 +188,11 @@ describe('first start through the browser', () => {
 
   it('a second visit with the password set sends the owner to the login page', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     const setup = await ask(port, 'GET', '/setup', { host: 'boot.localhost' });
@@ -201,9 +206,11 @@ describe('first start through the browser', () => {
 describe('one login, three hosts', () => {
   it('answers forward_auth 2xx for the cookie and 401 for everything else', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     const login = await ask(port, 'POST', '/login', {
@@ -238,9 +245,11 @@ describe('one login, three hosts', () => {
 
   it('sends a browser that opens a page without a session to the login, and back after it (rework 3)', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
     // What Caddy's forward_auth sends: the loader's own Host, and the browser's
     // method, host and path as X-Forwarded-*.
@@ -319,9 +328,12 @@ describe('one login, three hosts', () => {
 
   it('refuses a wrong password, says so once at warn, and never writes the password', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world, { password: 'the right one' });
+    const { app, lines } = await createRunningLoader(world, {
+      password: 'the right one',
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     const wrong = await ask(port, 'POST', '/login', {
@@ -359,9 +371,11 @@ describe('one login, three hosts', () => {
 
   it('logs out by clearing the cookie', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
     const login = await ask(port, 'POST', '/login', {
       host: 'boot.localhost',
@@ -386,9 +400,11 @@ describe('one login, three hosts', () => {
 describe('the command line inside the container', () => {
   it('reports the state, the commit and panic; panic stops lifemodel, resume starts it', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const status = await cli(app, ['status']);
@@ -433,9 +449,11 @@ describe('the command line inside the container', () => {
 
   it('refuses a caller without the loader token, and an unknown command', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     const forged = await ask(port, 'GET', '/_api/status', {
@@ -457,11 +475,13 @@ describe('the command line inside the container', () => {
 
   it('reports a start the OS refused, and resume exits 1 with the reason', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     // The OS cannot start lifemodel (rework 2, finding 6); Caddy is fine.
     world.launcher.refuseSpawns(new Error('spawn node EPERM'), 'node');
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(
       () => lines.some((line) => line.message.includes('the instance did not come up')),
       'the loader says the instance did not come up'
@@ -487,9 +507,11 @@ describe('the command line inside the container', () => {
 
   it('says why it cannot reach the loader', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
     await shutdownLoader(world, app);
 
@@ -511,9 +533,11 @@ describe('the command line inside the container', () => {
 describe('a panic whose stop could not finish (review round 5)', () => {
   it('exits 1 with the pending reason, and panic stays set', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     const panicking = cli(app, ['panic']);
@@ -543,9 +567,11 @@ describe('a panic whose stop could not finish (review round 5)', () => {
 describe('a panic from the page whose stop could not finish (review round 6)', () => {
   it('answers with the pending reason, and the page shows the stop unfinished', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     const login = await ask(port, 'POST', '/login', {
@@ -583,7 +609,7 @@ describe('a panic from the page whose stop could not finish (review round 6)', (
 describe('a failed first start (rework 1)', () => {
   it('leaves the loader serving, its state failed with the reason, and panic and resume working', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     // The build fails the way the owner's own repository can: a real npm ci
     // error. The loader is up and has a password, so it tries at startup.
@@ -597,7 +623,9 @@ describe('a failed first start (rework 1)', () => {
           }
         : { code: 0, stdout: 'added 1 package\n', stderr: '' }
     );
-    const { app, lines, exits } = await createRunningLoader(world);
+    const { app, lines, exits } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     // The event the test waits for is the loader's own line, not a timer.
@@ -662,9 +690,11 @@ describe('a failed first start (rework 1)', () => {
 describe('panic holds across a restart of the container', () => {
   it('a fresh loader over the same volume starts nothing until it is resumed', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const first = await createRunningLoader(world);
+    const first = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     await first.app.state.setPanic('the command line');
 
@@ -676,7 +706,9 @@ describe('panic holds across a restart of the container', () => {
     const spawnsSoFar = world.launcher.spawns.length;
 
     // `docker restart`: the loader comes up again on the same volume.
-    const second = await createRunningLoader(world);
+    const second = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await settle(8);
 
     // The trusted layer only: the front door and Agent Vault.
@@ -700,9 +732,11 @@ describe('panic holds across a restart of the container', () => {
 describe('the loader page drives panic and resume', () => {
   it('stops lifemodel from the button and starts it again', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     const port = app.port();
     const login = await ask(port, 'POST', '/login', {
@@ -758,9 +792,11 @@ describe("a state change must come from the loader's own page (rework 2, finding
 
   it('refuses panic and resume with a valid cookie but no token or a foreign Origin', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     const port = app.port();
     const { cookie, csrf } = await loggedIn(port);
@@ -815,9 +851,11 @@ describe("a state change must come from the loader's own page (rework 2, finding
 
   it('refuses a POST to / : the two actions have their own addresses', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
     const port = app.port();
     const { cookie, csrf } = await loggedIn(port);
@@ -841,9 +879,12 @@ describe("a state change must come from the loader's own page (rework 2, finding
 
   it('refuses a password set and a login driven from another page of the site', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world, { password: null });
+    const { app } = await createRunningLoader(world, {
+      password: null,
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     // The root host's page cannot claim the instance by setting its password.
@@ -877,9 +918,12 @@ describe("a state change must come from the loader's own page (rework 2, finding
 describe('the loader answers on its own hosts only (rework 2, finding 7)', () => {
   it('refuses any other Host, on every route, and derives no cookie from one', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app, lines } = await createRunningLoader(world, { password: null });
+    const { app, lines } = await createRunningLoader(world, {
+      password: null,
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
 
     for (const path of ['/', '/setup', '/login', '/_auth/verify', '/_api/status']) {
@@ -910,7 +954,9 @@ describe('the loader answers on its own hosts only (rework 2, finding 7)', () =>
 describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", () => {
   /** The loader page a logged-in owner gets. */
   async function dashboardOf(world: ReturnType<typeof createLoaderWorld>, host = 'boot.localhost') {
-    const { app, lines } = await createRunningLoader(world);
+    const { app, lines } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const port = app.port();
     const login = await ask(port, 'POST', '/login', { host, form: { password: 'right' } });
     expect(login.status).toBe(303);
@@ -920,7 +966,7 @@ describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", ()
 
   it('shows the instance owner account, and where to sign in with it', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     const { app, lines, page } = await dashboardOf(world);
 
@@ -945,9 +991,11 @@ describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", ()
 
   it('shows it to nobody who has not logged in', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
-    const { app } = await createRunningLoader(world);
+    const { app } = await createRunningLoader(world, {
+      injectAppRegistrar: loaderAppRegistrar(),
+    });
     const owner = JSON.parse(
       readFileSync(join(world.config.loaderDir, 'vault-owner.json'), 'utf8')
     ) as { password: string };
@@ -961,7 +1009,7 @@ describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", ()
 
   it('escapes the account, so a password can never become markup', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     // A record the loader did not generate (an older one, or a hand-made one):
     // it is still shown, and it is still shown as TEXT.
@@ -980,7 +1028,7 @@ describe("the owner's way into Agent Vault (lifemodel-q4x.3.2, decision 18)", ()
 
   it('says why in the page when the account cannot be read', async () => {
     const world = createLoaderWorld();
-    roots.push(world.root);
+
     scriptRepository(world);
     const { app, page: before } = await dashboardOf(world);
     expect(before.body).toContain('owner@lifemodel.local');
