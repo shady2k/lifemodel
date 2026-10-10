@@ -38,7 +38,7 @@ done
 for f in adapter.mjs commits.mjs gate.mjs merge-gate.mjs config.json; do
     [ -f ".backlog/$f" ] || need ".backlog/$f is missing from this checkout"
 done
-for f in check.mjs time-format.mjs check-commits.mjs check-docs.mjs check-present.mjs document-format.mjs; do
+for f in check.mjs time-format.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs document-format.mjs; do
     [ -f ".backlog/rules/$f" ] || need ".backlog/rules/$f is missing from this checkout"
 done
 [ -f .beads/issues.jsonl ] || need ".beads/issues.jsonl is missing from this checkout"
@@ -53,7 +53,6 @@ node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' .backl
     exit 1
 }
 
-git config core.hooksPath .githooks
 
 # The tracker first: a fresh clone has the committed export but no database,
 # and the commit-link hook reads br's own view. br builds it from the export; a
@@ -67,19 +66,40 @@ mark='# --- BEGIN LIFEMODEL BACKLOG GATE ---'
 append_block() {
     hook=$1; block=$2
     [ -e "$hook" ] || printf '%s\n' '#!/usr/bin/env sh' > "$hook"
-    if ! grep -Fq "$mark" "$hook"; then
-        if grep -qE '^[[:space:]]*exec[[:space:]]' "$hook"; then
-            printf 'connect: %s ends in an exec; a block appended after it would never run.\n' "$hook" >&2
-            exit 1
-        fi
-        printf '\n%s\n' "$block" >> "$hook"
-    fi
+    node --input-type=module - "$hook" "$block" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+const [hook, block] = process.argv.slice(2);
+const text = readFileSync(hook, 'utf8');
+const begin = '# --- BEGIN LIFEMODEL BACKLOG GATE ---';
+const end = '# --- END LIFEMODEL BACKLOG GATE ---';
+const starts = text.split(begin).length - 1;
+const ends = text.split(end).length - 1;
+if (starts !== ends || starts > 1 || (starts && text.indexOf(end) < text.indexOf(begin))) {
+    console.error(`connect: ${hook} has broken managed markers`);
+    process.exit(1);
+}
+const prefix = starts ? text.slice(0, text.indexOf(begin)) : text;
+if (/^\s*exec\s/m.test(prefix)) {
+    console.error(`connect: ${hook} has an exec before its managed block`);
+    process.exit(1);
+}
+const next = starts
+    ? prefix + block.trim() + text.slice(text.indexOf(end) + end.length)
+    : text + '\n' + block.trim() + '\n';
+writeFileSync(hook, next);
+NODE
+    [ "$?" -eq 0 ] || exit 1
     chmod +x "$hook"
     sh -n "$hook" || { printf 'connect: %s is not a valid shell script\n' "$hook" >&2; exit 1; }
 }
 
 PRE_BLOCK='
 # --- BEGIN LIFEMODEL BACKLOG GATE ---
+if ! command -v node >/dev/null 2>&1 || [ ! -f .backlog/rules/check-product.mjs ]; then
+    printf "pre-commit: the product-document check cannot run; run npm run connect\n" >&2
+    exit 1
+fi
+node .backlog/rules/check-product.mjs --staged || exit 1
 # Managed by scripts/connect-clone.sh. The tracker export lands only through a
 # session landing branch (land/<name>) and its pull request; refuse it staged on
 # any other branch but main (the seeding commit of the installation itself is
@@ -112,6 +132,8 @@ fi
 
 append_block .husky/pre-commit "$PRE_BLOCK"
 append_block .husky/commit-msg "$MSG_BLOCK"
+
+git config core.hooksPath .githooks
 
 # Prove the gate runs here, now. A red verdict is the gate working; only an
 # inability to run (exit 2) is a failed connection.

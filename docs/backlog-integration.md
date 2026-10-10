@@ -76,9 +76,9 @@ the repository's installation, and each person's plugin and hooks are their own.
   another revision. A status the adapter does not map is refused (exit 2);
   tombstones are dropped.
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
-  `check-commits.mjs`, `check-docs.mjs`, and `check-present.mjs` with
+  `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.91.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.41.0,
+  0.97.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.43.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,
@@ -140,6 +140,14 @@ the repository's installation, and each person's plugin and hooks are their own.
   /home/dev/repos/lifemodel/.beads/issues.jsonl` (the main checkout's export,
   which br keeps flushed), refreshed after its own br writes. A stale export
   made a worker's receipt miss its own claim (lifemodel-ggc run).
+- **Product-document form check:** `.backlog/rules/check-product.mjs` runs
+  unconditionally in both commit-hook paths on `--staged`, preserving Git's
+  commit-specific index, and in `ci-backlog` on the PR head or pushed revision
+  (`--rev`). It checks recognized product documents under `docs/`; with none,
+  it passes without imposing that format on ordinary project documents.
+  Missing checker inputs refuse and name `npm run connect`. This is not the
+  deferred transition document gate below. Shipped selftests run from the
+  plugin directory, where their fixtures and product templates live.
 - **Document gate: not installed yet.** Its task is "Install the document
   gate: specs and acceptance evidence checked at each transition"
   (filed beside the setup task, milestone `platform-1`). Until it lands,
@@ -275,8 +283,9 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Mutation checks:** no mutation tool is installed. The agreed alternative
   is the config's `execution.mutationFallback`: the coordinator hand-plants
   2–3 mutations in the changed logic at stage acceptance and records which
-  tests went red. A survivor becomes a test or a question to the owner, never
-  a pass. A skipped check is recorded as skipped, never as passed.
+  tests went red. Meaningful survivors are filed as tasks. Mutation evidence
+  reports test strength, not a correctness verdict, and does not block the
+  change. A skipped check is recorded as skipped, never as passed.
 - **Reviewer:** `openai-codex/gpt-6-sol` (another model), at stage
   acceptance, in its own prime-agent session:
   `prime-agent --provider openai-codex --model gpt-6-sol`. Its brief must

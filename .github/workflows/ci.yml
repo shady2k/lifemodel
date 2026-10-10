@@ -207,6 +207,21 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Product documents follow their form
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            pull_request) revision="$HEAD_SHA" ;;
+            push) revision="$AFTER" ;;
+            *) echo "unsupported event: $EVENT" >&2; exit 2 ;;
+          esac
+          [ -n "$revision" ] || { echo "missing product-document revision" >&2; exit 2; }
+          node .backlog/rules/check-product.mjs --rev "$revision"
+
       - name: The backlog is still a queue
         env:
           # Through the environment rather than into the script: an expression

@@ -12,7 +12,11 @@ set -eu
 
 gate=.backlog
 if [ ! -f "$gate/commits.mjs" ]; then
-    printf 'pre-push: this tree has no %s/commits.mjs; commit links are not checked here\n' "$gate" >&2
+    if [ -f "$gate/config.json" ] || git cat-file -e HEAD:.backlog/config.json 2>/dev/null; then
+        printf 'pre-push: .backlog/commits.mjs is missing; run npm run connect\n' >&2
+        exit 1
+    fi
+    printf 'pre-push: this pre-installation tree has no commit-link check\n' >&2
     exit 0
 fi
 command -v node >/dev/null 2>&1 || { printf 'pre-push: node is not on PATH; run npm run connect\n' >&2; exit 1; }

@@ -23,6 +23,11 @@ npx lint-staged
 )
 
 # --- BEGIN LIFEMODEL BACKLOG GATE ---
+if ! command -v node >/dev/null 2>&1 || [ ! -f .backlog/rules/check-product.mjs ]; then
+    printf "pre-commit: the product-document check cannot run; run npm run connect\n" >&2
+    exit 1
+fi
+node .backlog/rules/check-product.mjs --staged || exit 1
 # Managed by scripts/connect-clone.sh. The tracker export lands only through a
 # session landing branch (land/<name>) and its pull request; refuse it staged on
 # any other branch but main (the seeding commit of the installation itself is
