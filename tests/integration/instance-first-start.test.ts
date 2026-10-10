@@ -17,6 +17,7 @@ import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
+import { InstanceStableSnapshot, STABLE_SNAPSHOT_SCRIPT, type StableInstanceFingerprint } from './helpers/instance-stable-snapshot.js';
 import {
   InstanceNativeVaultPortal,
   type PortalTransport,
@@ -172,12 +173,16 @@ interface NativeDockerHandle {
  */
 const ownedNativeDocker = new Set<NativeDockerHandle>();
 let nativeTerminationUncertain = false;
+/** One attempt only, including a failed spawn or uncertain completion. */
+let nativeDaemonRestartAttempted = false;
 
 function startNativeDocker(
   command:
     | { kind: 'stop' }
     | { kind: 'receipt-copy'; destination: string }
-    | { kind: 'logs-since'; sinceISO: string },
+    | { kind: 'logs-since'; sinceISO: string }
+    | { kind: 'daemon-restart' }
+    | { kind: 'daemon-info' },
 ): NativeDockerHandle {
   requireImageCiContext();
   if (container === '') throw new Error('Native Docker instance is missing');
@@ -193,17 +198,61 @@ function startNativeDocker(
   }
 
   const receiptPath = '/var/lib/lifemodel/data/state/core/inbound_log.json';
-  const args = command.kind === 'stop'
-    ? ['stop', '--time', '120', container]
-    : command.kind === 'logs-since'
-      ? ['logs', '--since', command.sinceISO, '--timestamps', container]
-      : ['cp', `${container}:${receiptPath}`, command.destination];
+  let executable: 'docker' | 'sudo';
+  let args: string[];
+
+  switch (command.kind) {
+    case 'stop':
+      executable = 'docker';
+      args = ['stop', '--time', '120', container];
+      break;
+    case 'logs-since':
+      executable = 'docker';
+      args = ['logs', '--since', command.sinceISO, '--timestamps', container];
+      break;
+    case 'receipt-copy':
+      executable = 'docker';
+      args = ['cp', `${container}:${receiptPath}`, command.destination];
+      break;
+    case 'daemon-info':
+      executable = 'docker';
+      args = ['info', '--format', '{{.ServerVersion}}'];
+      break;
+    case 'daemon-restart':
+      if (nativeDaemonRestartAttempted) {
+        throw new Error('The authorized Docker daemon restart was already attempted');
+      }
+      if (nativeTerminationUncertain || ownedNativeDocker.size !== 0) {
+        throw new Error('Docker daemon restart forbidden during pending or uncertain native work');
+      }
+      executable = 'sudo';
+      args = ['-n', 'systemctl', 'restart', 'docker'];
+      break;
+    default:
+      throw new Error('Unsupported native operation');
+  }
+
+  // Accidental-execution prevention, not hardware attestation.
+  // In particular, every privileged spawn passes this guard.
+  requireImageCiContext();
+  if (command.kind === 'daemon-restart') {
+    nativeDaemonRestartAttempted = true;
+  }
 
   const started = Date.now();
-  const child = spawn('docker', args, {
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = (() => {
+    try {
+      return spawn(executable, args, {
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      if (command.kind === 'daemon-restart') {
+        nativeTerminationUncertain = true;
+      }
+      throw new Error('Native operation could not be spawned');
+    }
+  })();
   let closed = false;
   let spawnError = false;
   let timedOut = false;
@@ -275,16 +324,28 @@ function startNativeDocker(
       elapsedMs: Date.now() - started,
       outputTail: tail.toString('utf8'),
     };
+    if (command.kind === 'daemon-restart' &&
+        (code !== 0 || signal !== null || spawnError || timedOut)) {
+      // Actual CLI close is not proof that the daemon operation was cancelled.
+      // This latch is permanent, even if daemon access later returns.
+      nativeTerminationUncertain = true;
+    }
     ownedNativeDocker.delete(handle);
     resolveClose(result);
   });
 
   // Stop: 122 seconds plus bounded TERM/KILL cleanup, at most 125 seconds.
-  // Copy: a short operation with the same actual-close ownership.
+  // Daemon restart: 120 seconds plus the same bounded 3-second cleanup.
+  // CLI termination does not cancel the daemon operation.
+  // Copy/log reads retain their existing short bound and actual-close ownership.
   termTimer = setTimeout(() => {
     timedOut = true;
     terminate();
-  }, command.kind === 'stop' ? 122_000 : 2_000);
+  }, command.kind === 'stop'
+    ? 122_000
+    : command.kind === 'daemon-restart'
+      ? 120_000
+      : 2_000);
   return handle;
 }
 
@@ -469,6 +530,10 @@ function fetchThroughFrontDoor(
         );
       }
     );
+    const deadline = setTimeout(() => {
+      req.destroy(new Error('Front-door request exceeded its deadline'));
+    }, 2_000);
+    req.once('close', () => clearTimeout(deadline));
     req.on('error', reject);
     if (body !== undefined) req.write(body);
     req.end();
@@ -597,6 +662,12 @@ const journeyConfig: JourneyFixtureConfig = {
       updateId: 220003,
       triggerUser: 'fixture replay question',
       answer: 'fixture replay answer',
+    },
+    {
+      id: 'q4x22-recreate',
+      updateId: 220004,
+      triggerUser: 'fixture recreate question',
+      answer: 'fixture recreate answer',
     },
   ],
 };
@@ -736,6 +807,59 @@ async function waitForLogLines(
 function cookieOf(reply: Reply): string {
   const header = reply.setCookie?.[0] ?? '';
   return header.split(';')[0] ?? '';
+}
+
+/**
+ * Invoke later while panic holds lifemodel stopped, with the OCI still running.
+ * No settings wait: a panicked boot must not start the settings process.
+ */
+function readNativeStableFingerprint(): StableInstanceFingerprint {
+  requireImageCiContext();
+  if (container === '' || volume === '' ||
+      ownedNativeDocker.size !== 0 || nativeTerminationUncertain) {
+    throw new Error('Native stable snapshot has no idle owned instance');
+  }
+
+  const checked = (args: string[]): string => {
+    requireImageCiContext();
+    try {
+      const result = run('docker', args, { timeoutMs: 2_000 });
+      if (result.status !== 0 ||
+          Buffer.byteLength(result.out) > 16 * 1024) throw new Error();
+      return result.out;
+    } catch {
+      // No command body, native stderr, credentials, or callback error escapes.
+      throw new Error('Native stable snapshot read failed');
+    }
+  };
+
+  const status = checked(['exec', container, 'lifemodel', 'status']);
+  if (!/^stopped\r?$/m.test(status) || !/^panic on\r?$/m.test(status)) {
+    throw new Error('Stable snapshot requires panic on and lifemodel stopped');
+  }
+
+  // Read Git as its actual owner. No owner/global safe-directory changes.
+  const head = checked([
+    'exec', '-u', '1000', container,
+    'git', '-C', '/var/lib/lifemodel/repo', 'rev-parse', 'HEAD',
+  ]).trim();
+  if (!/^[0-9a-f]{40}$/.test(head)) {
+    throw new Error('Native repository supplied no valid HEAD');
+  }
+  const tracked = checked([
+    'exec', '-u', '1000', container,
+    'git', '-C', '/var/lib/lifemodel/repo',
+    'ls-files', '--error-unmatch', '--', 'package.json',
+  ]).trim();
+  if (tracked !== 'package.json') {
+    throw new Error('Native package.json is not tracked');
+  }
+
+  const raw = checked([
+    'exec', '-u', '0', container,
+    'node', '-e', STABLE_SNAPSHOT_SCRIPT, head,
+  ]);
+  return new InstanceStableSnapshot().stableFingerprint(raw);
 }
 
 /** One file's owner and mode inside the container, as `stat` prints them. */
@@ -895,13 +1019,91 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     return Number(match.groups.port);
   }
 
+  const instanceNamespace = `lifemodel-first-start-${process.pid}`;
+  const volumeOwnerLabel = 'lifemodel.ci.first-start-owner';
+  let allocatedInstanceVolume = '';
+
+  /** Allocate once. Re-creation must call createInstance directly. */
   function startContainer(): void {
-    container = `lifemodel-first-start-${process.pid}`;
-    volume = `${container}-volume`;
-    // An empty volume and the documented command's shape: the port published on
-    // loopback only, the one capability the Agent Vault stage needs, and the
-    // stop timeout the documented command gives the whole stop (the loader
-    // spends at most 110 s of it on lifemodel's drain and on Caddy).
+    requireImageCiContext();
+    if (allocatedInstanceVolume !== '' || volume !== '' || container !== '') {
+      throw new Error('First-start resources were already allocated');
+    }
+
+    const namedVolume = `${instanceNamespace}-volume`;
+    const existing = run('docker', [
+      'volume', 'ls', '--format', '{{.Name}}',
+    ], { timeoutMs: 2_000 });
+    if (existing.status !== 0 ||
+        existing.out.split(/\r?\n/).includes(namedVolume)) {
+      throw new Error('Cannot allocate an unambiguously new fixture volume');
+    }
+
+    // Register the exact attempted fixture name before native creation.
+    allocatedInstanceVolume = namedVolume;
+    volume = namedVolume;
+    try {
+      const made = run('docker', [
+        'volume', 'create', '--label', `${volumeOwnerLabel}=${instanceNamespace}`, namedVolume,
+      ], { timeoutMs: 2_000 });
+      if (made.status !== 0 || made.out.trim() !== namedVolume) throw new Error();
+    } catch {
+      nativeTerminationUncertain = true;
+      throw new Error(`Volume creation uncertain; retain container=${container}; stub=${stubContainer}; ` +
+        `volume=${namedVolume}; network=${network}; fixture=${stubDir}`);
+    }
+    createInstance(instanceNamespace, namedVolume);
+  }
+
+  /**
+   * Use only the already allocated fixture volume.
+   * No setup, key provisioning, panic/resume, or settings waits occur here.
+   */
+  function createInstance(name: string, existingVolume: string): void {
+    requireImageCiContext();
+    if (name === '' ||
+        ![instanceNamespace, `${instanceNamespace}-recreate`].includes(name) ||
+        existingVolume === '' ||
+        existingVolume !== `${instanceNamespace}-volume` ||
+        existingVolume !== allocatedInstanceVolume ||
+        existingVolume !== volume ||
+        image !== prebuiltImage ||
+        network !== `q4x32-first-start-net-${process.pid}` ||
+        stubDir === '' ||
+        !isIPv4(stubIPv4) ||
+        stubIPv4 === '0.0.0.0' ||
+        stubIPv4.startsWith('127.') ||
+        ownedNativeDocker.size !== 0 ||
+        nativeTerminationUncertain) {
+      throw new Error('Invalid or unowned native instance allocation');
+    }
+
+    const inspected = run('docker', [
+      'volume', 'inspect',
+      '--format', '{{json .}}',
+      existingVolume,
+    ], { timeoutMs: 2_000 });
+    let owned = false;
+    try {
+      const value: unknown = JSON.parse(inspected.out);
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        const labels = record.Labels;
+        owned = inspected.status === 0 &&
+          record.Name === existingVolume &&
+          typeof labels === 'object' && labels !== null &&
+          !Array.isArray(labels) &&
+          (labels as Record<string, unknown>)[volumeOwnerLabel] === instanceNamespace;
+      }
+    } catch {
+      // Never print inspection output.
+    }
+    if (!owned) throw new Error('Fixture volume ownership could not be verified');
+
+    // Validation and ownership checks precede native container creation.
+    container = name;
+    volume = existingVolume;
+    port = 0;
     docker([
       'run',
       '--detach',
@@ -912,9 +1114,8 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       // CI fixture exception only. Production private-range denial stays on.
       '--env',
       `AGENT_VAULT_NETWORK_ALLOWLIST=${stubIPv4}/32`,
-      // Go's system certificate directory is available before Vault starts.
-      // Only the public synthetic CA enters the instance, read-only.
-      // Preserve NODE_EXTRA_CA_CERTS for the separate client-to-Vault trust.
+      // Public synthetic CA is available before Vault starts, read-only.
+      // NODE_EXTRA_CA_CERTS remains the separate client-to-Vault trust.
       '--mount',
       `type=bind,source=${join(stubDir, 'fixture-ca.pem')},target=/etc/ssl/certs/lifemodel-ci-fixture.pem,readonly`,
       '--publish',
@@ -952,6 +1153,23 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     // Never wipe evidence while a Docker CLI or daemon operation is uncertain.
     if (ownedNativeDocker.size !== 0 || nativeTerminationUncertain) {
       await cleanupOwnedNativeDocker();
+    }
+    if (volume !== '') {
+      requireImageCiContext();
+      const inspected = run('docker', ['volume', 'inspect', '--format', '{{json .}}', volume],
+        { timeoutMs: 2_000 });
+      let verified = false;
+      try {
+        const v = JSON.parse(inspected.out);
+        verified = inspected.status === 0 && v !== null && !Array.isArray(v) &&
+          typeof v === 'object' && v.Name === volume && volume === allocatedInstanceVolume &&
+          v.Labels?.[volumeOwnerLabel] === instanceNamespace;
+      } catch { /* Never print secret-bearing native output. */ }
+      if (!verified) {
+        nativeTerminationUncertain = true;
+        throw new Error(`Unverified volume; retain container=${container}; stub=${stubContainer}; ` +
+          `volume=${volume}; network=${network}; fixture=${stubDir}`);
+      }
     }
     if (stubContainer !== '') {
       run('docker', ['rm', '--force', stubContainer]);
@@ -2109,4 +2327,583 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     expect(resumed).toContain('panic off');
     expect(resumed).toMatch(/^running\n/);
   }, 240_000);
+
+  it('recreates the panicked instance on its original volume and runs a real turn', async () => {
+    const proofPath = join(stubDir, 'q4x22-recreate-proof.json');
+    const beforePath = join(stubDir, 'q4x22-recreate-before.json');
+    const afterPath = join(stubDir, 'q4x22-recreate-after.json');
+    const oldName = container;
+    const sameVolume = volume;
+    const freshName = `${instanceNamespace}-recreate`;
+    const deadline = Date.now() + 540_000;
+    const native = (args: string[], ceiling = 2_000): string => {
+      requireImageCiContext();
+      if (ownedNativeDocker.size !== 0 || nativeTerminationUncertain) {
+        throw new Error('S7 requires idle owned native resources');
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error('S7 exceeded its deadline');
+      const result = run('docker', args, { timeoutMs: Math.min(left, ceiling) });
+      if (result.status !== 0) throw new Error('S7 native command failed');
+      return result.out;
+    };
+    const logs = (): string => native(['logs', container]);
+    const count = (pattern: RegExp): number =>
+      logs().split('\n').filter(line => pattern.test(line)).length;
+    const wait = async (label: string, ready: () => boolean | Promise<boolean>): Promise<void> => {
+      const until = Math.min(deadline, Date.now() + 90_000);
+      for (;;) {
+        if (Date.now() >= until) throw new Error(`S7 missing ${label}`);
+        if (await ready()) return;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    };
+    type Event = Awaited<ReturnType<typeof journey.journal>>[number];
+    const event = async (label: string, matches: (e: Event) => boolean): Promise<Event> => {
+      let found: Event | undefined;
+      await wait(label, async () => {
+        found = (await journey.journal()).find(matches);
+        return found !== undefined;
+      });
+      if (found === undefined) throw new Error(`S7 missing ${label}`);
+      return found;
+    };
+    const inspect = () => JSON.parse(native([
+      'inspect', '--format',
+      '{{json .Id}}|{{json .Image}}|{{json .Config}}|{{json .HostConfig}}|{{json .Mounts}}',
+      container,
+    ]).trim().split('|').map(part => part).length === 5
+      ? '[' + native([
+        'inspect', '--format',
+        '{{json .Id}},{{json .Image}},{{json .Config}},{{json .HostConfig}},{{json .Mounts}}',
+        container,
+      ]).trim() + ']' : 'null') as [
+        string, string, Record<string, unknown>, Record<string, unknown>,
+        { Type: string; Name?: string; Destination: string; RW: boolean }[],
+      ];
+    try {
+      requireImageCiContext();
+      const phase = journeyConfig.phases.find(p => p.id === 'q4x22-recreate');
+      if (phase === undefined) throw new Error('S7 fixture phase is missing');
+      const original = inspect();
+      const originalPort = port;
+      const mount = original[4].filter(m => m.Destination === '/var/lib/lifemodel');
+      expect(mount.length === 1 && mount[0]?.Type === 'volume' &&
+        mount[0]?.Name === sameVolume && mount[0]?.RW === true).toBe(true);
+      const started = logs().split('\n').filter(line =>
+        /"msg":"lifemodel started","pid":\d+/.test(line)).at(-1);
+      const pid = /"pid":(\d+)/.exec(started ?? '')?.[1];
+      if (pid === undefined) throw new Error('S7 has no real child PID');
+      const stoppedBefore = count(/"msg":"lifemodel stopped"/);
+      const panicked = native(['exec', container, 'lifemodel', 'panic'], 180_000);
+      expect(/^stopped\r?$/m.test(panicked) && /^panic on\r?$/m.test(panicked)).toBe(true);
+      await wait('real child settlement', () =>
+        count(/"msg":"lifemodel stopped"/) === stoppedBefore + 1 &&
+        native(['exec', '-u', '0', container, 'sh', '-c',
+          `if test -e /proc/${pid}; then printf present; else printf absent; fi`,
+        ]).trim() === 'absent');
+      const before = readNativeStableFingerprint();
+      expect(before.panic.present && before.inboundReceipt.present).toBe(true);
+      writeFileSync(beforePath, JSON.stringify(before), { mode: 0o600 });
+
+      // No -v and no unrelated container removal. Native success is mandatory.
+      const removed = native(['rm', '--force', oldName], 180_000).trim();
+      expect(removed === oldName).toBe(true);
+      // createInstance registers the new name before Docker creates it.
+      // It reuses allocation ownership; startContainer must not run here.
+      createInstance(freshName, sameVolume);
+      await wait('fresh loader', () => /"msg":"the loader is up"/.test(logs()));
+      await wait('native Vault health', () => native([
+        'exec', container, 'curl', '-sS', '-m', '1', '-o', '/dev/null',
+        '-w', '%{http_code}', 'http://127.0.0.1:14321/health',
+      ]).trim() === '200');
+      port = publishedPort();
+      const recreated = inspect();
+      expect(recreated[0] !== original[0] && recreated[1] === original[1]).toBe(true);
+      // Docker derives the default hostname from each different container ID.
+      // Compare explicit stable configuration; do not compare that identity.
+      const config = (v: Record<string, unknown>) => ({
+        Image: v.Image, User: v.User, Cmd: v.Cmd, Entrypoint: v.Entrypoint,
+        Env: v.Env, WorkingDir: v.WorkingDir, ExposedPorts: v.ExposedPorts,
+        Volumes: v.Volumes, Labels: v.Labels, StopSignal: v.StopSignal,
+        StopTimeout: v.StopTimeout, NetworkDisabled: v.NetworkDisabled,
+        AttachStdin: v.AttachStdin, AttachStdout: v.AttachStdout,
+        AttachStderr: v.AttachStderr, Tty: v.Tty, OpenStdin: v.OpenStdin,
+        StdinOnce: v.StdinOnce, Healthcheck: v.Healthcheck,
+      });
+      expect(JSON.stringify(config(recreated[2])) === JSON.stringify(config(original[2]))).toBe(true);
+      expect(recreated[2].Image === image && recreated[3].NetworkMode === network &&
+        recreated[2].StopTimeout === 120).toBe(true);
+      expect(Array.isArray(recreated[3].CapAdd) && recreated[3].CapAdd.includes('NET_ADMIN')).toBe(true);
+      const stableHostConfig = (v: Record<string, unknown>, actualPort: number) => {
+        const bindings = v.PortBindings as Record<string, { HostIp: string; HostPort: string }[]>;
+        const rule = bindings?.['80/tcp']?.[0];
+        expect(bindings !== null && typeof bindings === 'object' && !Array.isArray(bindings) &&
+          Object.keys(bindings).length === 1 && bindings['80/tcp']?.length === 1 &&
+          rule?.HostIp === '127.0.0.1' && typeof rule.HostPort === 'string' &&
+          (rule.HostPort === '' || rule.HostPort === '0' ||
+            (/^[1-9][0-9]{0,4}$/.test(rule.HostPort) && Number(rule.HostPort) === actualPort &&
+              actualPort >= 1 && actualPort <= 65535))).toBe(true);
+        // The fixed create argv requests an ephemeral host port. Docker may
+        // preserve the request or report the allocation. Compare all other
+        // HostConfig fields, retaining the exact loopback-only publish rule.
+        return { ...v, PortBindings: { '80/tcp': [{ HostIp: '127.0.0.1', HostPort: 'ephemeral' }] } };
+      };
+      expect(JSON.stringify(stableHostConfig(recreated[3], port)) ===
+        JSON.stringify(stableHostConfig(original[3], originalPort))).toBe(true);
+      expect(recreated[4].some(m => m.Type === 'bind' &&
+        m.Destination === '/etc/ssl/certs/lifemodel-ci-fixture.pem' && m.RW === false)).toBe(true);
+      expect(JSON.stringify(recreated[4]) === JSON.stringify(original[4])).toBe(true);
+      expect(volume === sameVolume && allocatedInstanceVolume === sameVolume).toBe(true);
+      expect(count(/"msg":"lifemodel started"/) === 0).toBe(true);
+      expect(count(/settings interface is up/) === 0).toBe(true);
+      const after = readNativeStableFingerprint();
+      writeFileSync(afterPath, JSON.stringify(after), { mode: 0o600 });
+      // Includes panic at/reason, builtCommit, credentials and durable receipt.
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+
+      const login = await fetchThroughFrontDoor(port, `boot.localhost:${port}`, '/login', {
+        form: { password: 'first-start-pass' },
+      });
+      expect(login.status === 303).toBe(true);
+      const cookie = cookieOf(login);
+      expect(/^lm_session=[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/.test(cookie)).toBe(true);
+      const startsBefore = count(/"msg":"lifemodel started"/);
+      const settingsBefore = count(/settings interface is up/);
+      const resumed = native(['exec', container, 'lifemodel', 'resume'], 180_000);
+      expect(/^running\r?$/m.test(resumed) && /^panic off\r?$/m.test(resumed)).toBe(true);
+      await wait('explicit resume start', () =>
+        count(/"msg":"lifemodel started"/) === startsBefore + 1);
+      await wait('resumed settings listener', () =>
+        count(/settings interface is up/) === settingsBefore + 1);
+      const settings = await fetchThroughFrontDoor(port, `localhost:${port}`, '/', { cookie });
+      expect(settings.status === 200 &&
+        settings.body.includes('value="http://portal-model.local:8080/v1"') &&
+        settings.body.includes(`value="${JOURNEY_FIXTURE.modelName}"`)).toBe(true);
+      const running = native(['exec', container, 'lifemodel', 'status']);
+      expect(/^running\r?$/m.test(running) && /^panic off\r?$/m.test(running)).toBe(true);
+      const resumedFingerprint = new InstanceStableSnapshot().stableFingerprint(native([
+        'exec', '-u', '0', container, 'node', '-e', STABLE_SNAPSHOT_SCRIPT, before.repoHead,
+      ]));
+      expect(!resumedFingerprint.panic.present &&
+        resumedFingerprint.panic.file === null &&
+        JSON.stringify(resumedFingerprint.agentConfig) === JSON.stringify(before.agentConfig)).toBe(true);
+
+      await journey.control({ op: 'hold', phase: phase.id, model: true, send: false });
+      const since = (await journey.journal()).reduce((max, e) => Math.max(max, e.seq), 0);
+      await journey.control({ op: 'queue', phase: phase.id });
+      const model = await event('authenticated recreated model turn', e =>
+        e.seq > since && e.event === 'model.request' && e.phase === phase.id &&
+        /^portal-model\.local(?::8080)?$/.test(String(e.actualHost)) &&
+        e.model === JOURNEY_FIXTURE.modelName && e.authorizationMatch === true);
+      expect(model.expectedNativeS8field === true).toBe(true);
+      await event('held recreated model response', e =>
+        e.seq > model.seq && e.event === 'model.held' && e.phase === phase.id && e.requestId === model.requestId);
+      const delivered = await event('real Telegram delivery', e =>
+        e.seq > since && e.event === 'telegram.poll.response' &&
+        Array.isArray(e.updateIds) && e.updateIds.includes(phase.updateId));
+      let accepted: PersistedReceiptEntry | undefined;
+      await wait('native accepted update', () => {
+        accepted = parsePersistedReceipt(native(['exec', container, 'cat',
+          '/var/lib/lifemodel/data/state/core/inbound_log.json',
+        ])).entries.find(e => e.key === String(phase.updateId));
+        return accepted !== undefined;
+      });
+      expect(accepted?.signal.type === 'user_message' &&
+        accepted.signal.data.updateId === String(phase.updateId) &&
+        accepted.signal.data.text === phase.triggerUser &&
+        accepted.routing?.channel === 'telegram' &&
+        accepted.routing.destination === String(journeyConfig.ownerChatId)).toBe(true);
+      await journey.control({ op: 'release', phase: phase.id, gate: 'model' });
+      const sent = await event('unique correct answer', e =>
+        e.seq > model.seq && e.event === 'telegram.send.request' &&
+        e.phase === phase.id && e.chatMatch === true && e.text === phase.answer);
+      const ack = await event('matching send ACK', e =>
+        e.seq > sent.seq && e.event === 'telegram.send.ack' &&
+        e.phase === phase.id && e.requestId === sent.requestId);
+      const events = (await journey.journal()).filter(e => e.seq > since);
+      expect(events.filter(e => e.event === 'telegram.send.request' && e.phase === phase.id).length === 1 &&
+        events.filter(e => e.event === 'telegram.send.ack' && e.phase === phase.id).length === 1).toBe(true);
+      expect([delivered.requestId, sent.requestId].every((requestId, index) =>
+        events.some(e => e.event === 'telegram.request' && e.requestId === requestId &&
+          e.method === (index === 0 ? 'getUpdates' : 'sendMessage') &&
+          e.tokenMatch === true && /^api\.telegram\.org(?::443)?$/.test(String(e.actualHost))))).toBe(true);
+      writeFileSync(proofPath, JSON.stringify({
+        originalId: original[0], recreatedId: recreated[0], volume: sameVolume,
+        accepted, reply: { requestId: sent.requestId, text: sent.text, ackSeq: ack.seq },
+        modelSeq: model.seq, deliverySeq: delivered.seq,
+      }), { mode: 0o600 });
+    } catch {
+      nativeTerminationUncertain = true;
+      throw new Error(`S7 failed; retain containers=${oldName},${freshName},${stubContainer}; ` +
+        `volume=${sameVolume}; network=${network}; fixture=${stubDir}; ` +
+        `artifacts=${beforePath},${afterPath},${proofPath} (files may not yet exist)`);
+    }
+  }, 570_000);
+  // LAST: endpoint-dependent journeys must precede the daemon restart.
+  it('preserves panic across the authorized daemon restart, then explicitly resumes', async () => {
+    requireImageCiContext();
+    const deadline = Date.now() + 600_000;
+    let restart: NativeDockerHandle | undefined;
+
+    function remaining(until = deadline): number {
+      const ms = Math.min(deadline, until) - Date.now();
+      if (ms <= 0) throw new Error('S6 deadline exceeded');
+      return ms;
+    }
+
+    function check(ok: boolean): void {
+      if (!ok) throw new Error('S6 persistence or readiness proof failed');
+    }
+
+    // Do not use runOk: failed exec output can contain sensitive material.
+    function read(args: string[], ceilingMs = 2_000, until = deadline): string {
+      requireImageCiContext();
+      check(ownedNativeDocker.size === 0 && !nativeTerminationUncertain);
+      const result = run('docker', args, {
+        timeoutMs: Math.min(ceilingMs, remaining(until)),
+      });
+      check(result.status === 0);
+      return result.out;
+    }
+
+    const cli = (command: 'status' | 'panic' | 'resume',
+                 ceilingMs = 180_000, until = deadline): string =>
+      read(['exec', container, 'lifemodel', command], ceilingMs, until);
+
+    function status(raw: string, running: boolean, commit: string): void {
+      check(raw.trim() === [
+        running ? 'running' : 'stopped',
+        `commit ${commit}`,
+        running ? 'panic off' : 'panic on',
+      ].join('\n'));
+    }
+
+    // Standalone literal script, executed only inside the CI instance.
+    // Only digests leave the container. No SQLite/session journal is hashed.
+    const snapshotScript = `
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, lstatSync } from 'node:fs';
+import { join } from 'node:path';
+
+try {
+  const root = '/var/lib/lifemodel';
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const files = [
+    'loader/auth.json',
+    'loader/cli-token',
+    'loader/vault-owner.json',
+    'loader/vault-proxy.json',
+    'vault-ca.pem',
+  ];
+  const stable = {};
+  for (const file of files) {
+    const bytes = readFileSync(join(root, file));
+    if (bytes.length === 0) throw new Error();
+    stable[file] = digest(bytes);
+  }
+
+  const config = [];
+  function walk(dir, relative = '') {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      const key = relative ? relative + '/' + name : name;
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) throw new Error();
+      if (stat.isDirectory()) walk(path, key);
+      else if (stat.isFile()) config.push([key, digest(readFileSync(path))]);
+      else throw new Error();
+    }
+  }
+  walk(join(root, 'data/config'));
+  if (!config.some(([name]) => name === 'agent.json')) throw new Error();
+  stable.config = digest(JSON.stringify(config));
+
+  const state = JSON.parse(readFileSync(join(root, 'loader/state.json'), 'utf8'));
+  if (state.version !== 1 || state.builtCommit !== process.argv[1] ||
+      !/^[0-9a-f]{40}$/.test(state.builtCommit)) throw new Error();
+  stable.state = digest(JSON.stringify({
+    version: state.version,
+    builtCommit: state.builtCommit,
+  }));
+
+  let panic = null;
+  try {
+    const bytes = readFileSync(join(root, 'loader/panic.json'));
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (Object.keys(value).sort().join(',') !== 'at,reason' ||
+        typeof value.at !== 'string' ||
+        !/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$/.test(value.at) ||
+        !Number.isFinite(Date.parse(value.at)) ||
+        value.reason !== 'the command line') throw new Error();
+    panic = digest(bytes);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  process.stdout.write(JSON.stringify({ stable, panic }));
+} catch {
+  process.stderr.write('S6 snapshot failed\\n');
+  process.exitCode = 1;
+}
+`;
+
+    interface Proof {
+      stable: Record<string, string>;
+      panic: string | null;
+    }
+
+    function snapshot(commit: string, until = deadline): Proof {
+      const value = JSON.parse(read([
+        'exec', container, 'node', '--input-type=module',
+        '-e', snapshotScript, commit,
+      ], 2_000, until)) as Proof;
+      const keys = [
+        'loader/auth.json', 'loader/cli-token',
+        'loader/vault-owner.json', 'loader/vault-proxy.json',
+        'vault-ca.pem', 'config', 'state',
+      ];
+      check(value !== null && typeof value === 'object' &&
+        value.stable !== null && typeof value.stable === 'object' &&
+        Object.keys(value.stable).sort().join(',') === keys.sort().join(',') &&
+        Object.values(value.stable).every(v => /^[0-9a-f]{64}$/.test(v)) &&
+        (value.panic === null || /^[0-9a-f]{64}$/.test(value.panic)));
+      return value;
+    }
+
+    function sameStable(a: Proof, b: Proof): void {
+      check(Object.keys(a.stable).every(key => a.stable[key] === b.stable[key]));
+    }
+
+    // Inspect only non-secret fields, not the full container configuration.
+    function identity(until = deadline): string {
+      const value = JSON.parse(read([
+        'inspect', '--format',
+        '{"id":{{json .Id}},"mounts":{{json .Mounts}},' +
+        '"policy":{{json .HostConfig.RestartPolicy}},' +
+        '"running":{{json .State.Running}}}', container,
+      ], 2_000, until)) as {
+        id: string;
+        mounts: {
+          Type: string; Name?: string; Destination: string; RW: boolean;
+        }[];
+        policy: { Name: string; MaximumRetryCount: number };
+        running: boolean;
+      };
+      const mounts = value.mounts.filter(m => m.Destination === '/var/lib/lifemodel');
+      check(/^[0-9a-f]{64}$/.test(value.id) &&
+        value.running === true &&
+        mounts.length === 1 &&
+        mounts[0]?.Type === 'volume' &&
+        mounts[0]?.Name === volume &&
+        mounts[0]?.RW === true &&
+        value.policy.Name === 'always' &&
+        value.policy.MaximumRetryCount === 0);
+      return JSON.stringify({
+        id: value.id,
+        volume: mounts[0]?.Name,
+        destination: mounts[0]?.Destination,
+        policy: value.policy,
+      });
+    }
+
+    const loaderMarker = /"msg":"the loader is up"/;
+    const vaultMarker =
+      /"msg":"[^"]*(?:agent vault|vault)[^"]*(?:ready|is up|started)[^"]*"/i;
+    const startMarker = /"msg":"lifemodel started"/;
+    const settingsMarker = /settings interface is up/;
+
+    function counts(until = deadline): number[] {
+      const lines = read(['logs', container], 2_000, until).split('\n');
+      return [loaderMarker, vaultMarker, startMarker, settingsMarker]
+        .map(pattern => lines.filter(line => pattern.test(line)).length);
+    }
+
+    async function waitCounts(
+      before: number[], mode: 'daemon' | 'resume', until: number,
+    ): Promise<void> {
+      for (;;) {
+        remaining(until);
+        const now = counts(until);
+        if (mode === 'daemon') {
+          // Panic must prevent every new lifemodel start.
+          check(now[2] === before[2]);
+          if (now[0]! > before[0]! && now[1]! > before[1]!) return;
+        } else if (now[2]! > before[2]! && now[3]! > before[3]!) {
+          return;
+        }
+        await new Promise(resolve =>
+          setTimeout(resolve, Math.min(250, remaining(until))));
+      }
+    }
+
+    function refreshPort(until = deadline): void {
+      const match = /^127\.0\.0\.1:(\d+)$/.exec(
+        read(['port', container, '80/tcp'], 2_000, until).trim(),
+      );
+      const next = Number(match?.[1]);
+      check(Number.isInteger(next) && next > 0 && next <= 65535);
+      port = next;
+    }
+
+    // Bounded real password authentication through Caddy and the loader.
+    // Never include response bodies or cookie values in errors.
+    async function passwordProof(): Promise<void> {
+      requireImageCiContext();
+      await new Promise<void>((resolve, reject) => {
+        const payload = new URLSearchParams({
+          password: 'first-start-pass',
+        }).toString();
+        let settled = false;
+        const fail = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error('S6 original password proof failed'));
+        };
+        const req = request({
+          host: '127.0.0.1',
+          port,
+          path: '/login',
+          method: 'POST',
+          headers: {
+            Host: `boot.localhost:${String(port)}`,
+            Origin: `http://boot.localhost:${String(port)}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': String(Buffer.byteLength(payload)),
+          },
+        }, res => {
+          const validCookie = (res.headers['set-cookie'] ?? []).some(header =>
+            /^lm_session=[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/
+              .test(header.split(';')[0] ?? ''),
+          );
+          res.on('error', fail);
+          res.on('aborted', fail);
+          res.on('end', () => {
+            if (settled) return;
+            if (res.statusCode !== 303 || !validCookie) {
+              fail();
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          });
+          res.resume();
+        });
+        const timer = setTimeout(() => {
+          fail();
+          req.destroy();
+        }, Math.min(2_000, remaining()));
+        req.on('error', fail);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const initial = cli('status', 2_000);
+      const commit = /^commit ([0-9a-f]{40})$/m.exec(initial)?.[1];
+      check(commit !== undefined);
+      const builtCommit = commit!;
+      status(initial, true, builtCommit);
+      const original = snapshot(builtCommit);
+      check(original.panic === null);
+
+      status(cli('panic'), false, builtCommit);
+      status(cli('status', 2_000), false, builtCommit);
+      const panicked = snapshot(builtCommit);
+      sameStable(original, panicked);
+      check(panicked.panic !== null);
+
+      read(['update', '--restart', 'always', container]);
+      const originalIdentity = identity();
+      const beforeDaemon = counts();
+      // Refuse a marker-free baseline rather than accept stale evidence.
+      check(beforeDaemon[0]! > 0 && beforeDaemon[1]! > 0);
+
+      restart = startNativeDocker({ kind: 'daemon-restart' });
+      const completion = await restart.awaitClose();
+      check(restart.closed &&
+        completion.code === 0 && completion.signal === null &&
+        !completion.spawnError && !completion.timedOut);
+
+      // This bound starts only after successful actual privileged CLI close.
+      const readyUntil = Math.min(deadline, Date.now() + 120_000);
+      for (;;) {
+        remaining(readyUntil);
+        requireImageCiContext();
+        const info = startNativeDocker({ kind: 'daemon-info' });
+        let available = false;
+        try {
+          const result = await info.awaitClose();
+          check(info.closed && !result.spawnError &&
+            !result.timedOut && result.signal === null);
+          // A normal nonzero info exit during recovery is only "not ready".
+          available = result.code === 0 && result.outputTail.trim() !== '';
+        } finally {
+          if (!info.closed) await info.cleanup();
+        }
+        if (available) break;
+        await new Promise(resolve =>
+          setTimeout(resolve, Math.min(250, remaining(readyUntil))));
+      }
+
+      // Docker may answer info before the restart-policy container is running.
+      for (;;) {
+        remaining(readyUntil);
+        const running = read([
+          'inspect', '--format', '{{.State.Running}}', container,
+        ], 2_000, readyUntil).trim();
+        if (running === 'true') break;
+        await new Promise(resolve =>
+          setTimeout(resolve, Math.min(250, remaining(readyUntil))));
+      }
+
+      await waitCounts(beforeDaemon, 'daemon', readyUntil);
+      check(identity(readyUntil) === originalIdentity);
+      refreshPort(readyUntil);
+      status(cli('status', 2_000, readyUntil), false, builtCommit);
+      const recovered = snapshot(builtCommit, readyUntil);
+      sameStable(original, recovered);
+      check(recovered.panic === panicked.panic);
+      check(counts(readyUntil)[2] === beforeDaemon[2]);
+
+      await passwordProof();
+      const authenticated = snapshot(builtCommit);
+      sameStable(original, authenticated);
+      check(authenticated.panic === panicked.panic);
+      status(cli('status', 2_000), false, builtCommit);
+      check(counts()[2] === beforeDaemon[2]);
+
+      // Vault does not restart on resume. Capture only the events resume needs.
+      const beforeResume = counts();
+      status(cli('resume'), true, builtCommit); // Exactly one explicit resume.
+      const resumedUntil = Math.min(deadline, Date.now() + 120_000);
+      await waitCounts(beforeResume, 'resume', resumedUntil);
+      status(cli('status', 2_000, resumedUntil), true, builtCommit);
+      const resumed = snapshot(builtCommit, resumedUntil);
+      sameStable(original, resumed);
+      check(resumed.panic === null);
+      check(identity(resumedUntil) === originalIdentity);
+      // No model or Telegram assertion: the stub need not survive this test.
+    } catch {
+      nativeTerminationUncertain = true;
+      throw new Error(
+        'S6 failed; preserve exact fixture artifacts: ' +
+        JSON.stringify({ container, stub: stubContainer, volume, network, stubDir }),
+      );
+    } finally {
+      // The existing owned helper handles uncertain native CLI termination.
+      if (restart !== undefined && !restart.closed) {
+        try {
+          await restart.cleanup();
+        } catch {
+          nativeTerminationUncertain = true;
+          throw new Error(
+            'S6 native close uncertain; preserve exact fixture artifacts: ' +
+            JSON.stringify({ container, stub: stubContainer, volume, network, stubDir }),
+          );
+        }
+      }
+    }
+  }, 610_000);
 });
