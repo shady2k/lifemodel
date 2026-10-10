@@ -1,45 +1,58 @@
 /**
- * A first start in the real container, end to end (lifemodel-q4x.2.1 rework 1).
+ * A first start in the real container, end to end (lifemodel-q4x.2.2).
  *
- * The walk that found the two defects: an empty volume, POST /setup, and the
- * loader must seed the instance's repository from the code the image carries,
- * build the commit and start lifemodel - as uid 1000, from a repository that
- * belongs to uid 1000 while the loader runs as root (git refuses such a
- * repository as "dubious ownership" unless the loader names it safe).
+ * Enabled only in the existing GitHub-hosted pull-request ci-image job.
+ * LIFEMODEL_TEST_IMAGE must name that job's freshly built image.
+ * This test neither builds nor removes the image.
  *
- * It builds a real image and runs a real container, and the first `npm ci`
- * inside the container takes minutes, so it is off unless
- * LIFEMODEL_DOCKER_TESTS=1:
- *
- *   LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
- *
- * Unlike tests/integration/instance-image.test.ts, the image here carries the
- * REAL loader (taken from this checkout's working tree, so the branch's own
- * loader is what is run) and the instance is never handed a stub: everything
- * it asserts is what a person gets from `docker run` and `docker exec`.
- *
- * LIFEMODEL_TEST_IMAGE=<image:tag> boots an image that is already built
- * instead of building one: CI's image job sets it to the image it has just
- * built, so the image that is walked is the image that was built (rework 3,
- * review round 2 finding 3). The test then neither builds nor removes it.
+ * The instance runs the real loader and lifemodel. A second container from
+ * the same image supplies only external synthetic model/Telegram endpoints.
+ * All resources belong to this test's tracked cleanup.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
+import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { restartWithSettingsReady } from './helpers/restart-with-settings-ready.js';
+import {
+  InstanceNativeVaultPortal,
+  type PortalTransport,
+} from './helpers/instance-native-vault-portal.js';
+import {
+  buildInstanceJourneyScript,
+  createJourneyFacade,
+  JOURNEY_FIXTURE,
+  type FixtureTransport,
+  type JourneyFixtureConfig,
+} from './helpers/instance-journey-fixture.js';
 
-/** Set LIFEMODEL_DOCKER_TESTS=1 to run these; nothing here is cheap. */
+/** Disabled unless explicitly enabled; enabled outside the CI context fails. */
 const enabled = process.env.LIFEMODEL_DOCKER_TESTS === '1';
 
-/** An image already built (CI's own); unset, the test builds one from this checkout. */
-const prebuiltImage = process.env.LIFEMODEL_TEST_IMAGE ?? '';
+/** The existing ci-image job's prebuilt image; there is no local fallback. */
+const prebuiltImage = (process.env.LIFEMODEL_TEST_IMAGE ?? '').trim();
 
-/** This checkout, whose loader, Dockerfile and build script are under test. */
-const checkout = fileURLToPath(new URL('../..', import.meta.url));
+/**
+ * Guard against accidental execution, not host-security attestation:
+ * environment variables can be forged. Call before any native I/O.
+ */
+function requireImageCiContext(): void {
+  const required: Record<string, string> = {
+    GITHUB_ACTIONS: 'true',
+    GITHUB_JOB: 'ci-image',
+    GITHUB_EVENT_NAME: 'pull_request',
+    RUNNER_ENVIRONMENT: 'github-hosted',
+    RUNNER_OS: 'Linux',
+  };
+  if (!enabled ||
+      Object.entries(required).some(([name, value]) => process.env[name] !== value) ||
+      prebuiltImage === '') {
+    throw new Error('First-start tests require the enabled GitHub-hosted Linux pull-request ci-image job and a prebuilt LIFEMODEL_TEST_IMAGE');
+  }
+}
 
 /** The first start builds the instance inside the container: this is its ceiling. */
 const FIRST_START_TIMEOUT_MS = 15 * 60_000;
@@ -190,7 +203,85 @@ function fetchThroughFrontDoor(
   });
 }
 
-let buildDir = '';
+/** Native Vault DTO transport through Caddy; no redirects or ambient auth. */
+const nativePortalTransport: PortalTransport = (input) =>
+  new Promise((resolve, reject) => {
+    if (input.host !== 'vault.localhost' ||
+        !input.path.startsWith('/v1/') ||
+        !['GET', 'POST'].includes(input.method)) {
+      reject(new Error('Invalid native portal request'));
+      return;
+    }
+
+    let payload: string | undefined;
+    try {
+      payload = input.body === undefined ? undefined : JSON.stringify(input.body);
+    } catch {
+      reject(new Error('Invalid native portal JSON'));
+      return;
+    }
+
+    const headers: Record<string, string> = {
+      ...input.headers,
+      Host: `vault.localhost:${String(port)}`,
+    };
+    if (payload !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = String(Buffer.byteLength(payload));
+    }
+
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error('Native portal transport failed'));
+    };
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: input.path,
+        method: input.method,
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > 4 * 1024 * 1024) {
+            fail();
+            res.destroy();
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('error', fail);
+        res.on('aborted', fail);
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+            headers: { ...res.headers },
+          });
+        });
+      }
+    );
+    // Absolute deadline, including connection and response-body time.
+    const timer = setTimeout(() => {
+      fail();
+      req.destroy();
+    }, 2_000);
+    req.on('error', fail);
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+
 let image = '';
 let container = '';
 let volume = '';
@@ -199,6 +290,84 @@ let port = 0;
 let stubDir = '';
 let stubContainer = '';
 let network = '';
+let stubPort = 0;
+let stubIPv4 = '';
+
+/** Synthetic values only; phase identifiers remain stable across restarts. */
+const journeyConfig: JourneyFixtureConfig = {
+  syntheticOnly: true,
+  tls: {
+    keyPath: '/tmp/lifemodel-fixture-leaf.key',
+    certPath: '/tmp/lifemodel-fixture-leaf.pem',
+    publicCaPath: '/tmp/lifemodel-fixture-ca.pem',
+  },
+  credentials: {
+    modelKey: 'fixture-model-key',
+    telegramToken: '123456:fixture-token',
+    controlKey: 'fixture-control-key',
+  },
+  ownerChatId: 4242,
+  phases: [
+    {
+      id: 'q4x22-portal',
+      updateId: 220001,
+      triggerUser: 'fixture portal question',
+      answer: 'fixture portal answer',
+    },
+    {
+      id: 'q4x22-drain',
+      updateId: 220002,
+      triggerUser: 'fixture drain question',
+      answer: 'fixture drain answer',
+    },
+    {
+      id: 'q4x22-replay',
+      updateId: 220003,
+      triggerUser: 'fixture replay question',
+      answer: 'fixture replay answer',
+    },
+  ],
+};
+
+/** Host-loopback fixture control only; never uses the instance proxy. */
+const fixtureTransport: FixtureTransport = (input) =>
+  new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port: stubPort,
+        path: input.path,
+        method: input.method,
+        headers: {
+          ...input.headers,
+          ...(input.body === undefined ? {} : {
+            'content-length': String(Buffer.byteLength(input.body)),
+          }),
+        },
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          body += chunk;
+          if (Buffer.byteLength(body) > 4 * 1024 * 1024) {
+            res.destroy(new Error('Fixture response exceeded its bound'));
+          }
+        });
+        res.on('error', reject);
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      }
+    );
+    req.setTimeout(2_000, () => req.destroy(new Error('Fixture request timed out')));
+    req.on('error', reject);
+    if (input.body !== undefined) req.write(input.body);
+    req.end();
+  });
+
+const journey = createJourneyFacade(
+  fixtureTransport,
+  journeyConfig.credentials.controlKey
+);
 
 /**
  * Waits for the event, never for a timer: the line the container logged. The
@@ -305,40 +474,14 @@ function ownership(path: string): string {
 describe.skipIf(!enabled)('a first start in the real container', () => {
   beforeAll(
     async () => {
-      if (prebuiltImage !== '') {
-        image = prebuiltImage;
-      } else {
-        buildImage();
-      }
+      requireImageCiContext();
+      image = prebuiltImage;
       await startStub();
       startContainer();
       await afterStart();
     },
     FIRST_START_TIMEOUT_MS + 25 * 60_000
   );
-
-  /** The image from this checkout, as build-image.sh makes it. */
-  function buildImage(): void {
-    // A real clone with real history: build-image.sh refuses a shallow
-    // checkout, and the seed bundle it makes must carry that history.
-    buildDir = mkdtempSync(join(tmpdir(), 'lifemodel-first-start-'));
-    const clone = join(buildDir, 'repo');
-    runOk('git', ['clone', '--quiet', '--shared', checkout, clone], { cwd: buildDir });
-    // The files this test is about, as this branch has them: the clone carries
-    // the committed state, and the loader under test is the one here.
-    cpSync(join(checkout, 'loader'), join(clone, 'loader'), { recursive: true });
-    cpSync(join(checkout, 'docker/instance'), join(clone, 'docker/instance'), { recursive: true });
-    cpSync(join(checkout, '.dockerignore'), join(clone, '.dockerignore'));
-    cpSync(join(checkout, 'scripts/build-image.sh'), join(clone, 'scripts/build-image.sh'));
-
-    const tag = `test-${process.pid}`;
-    runOk('sh', ['scripts/build-image.sh', tag], {
-      cwd: clone,
-      env: { ...process.env, LIFEMODEL_IMAGE: 'lifemodel-first-start' },
-      timeoutMs: 20 * 60_000,
-    });
-    image = `lifemodel-first-start:${tag}`;
-  }
 
   /**
    * The stub endpoint, as a second container from the same image on a network
@@ -350,7 +493,48 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     stubContainer = `q4x32-stub-${process.pid}`;
     stubDir = mkdtempSync(join(tmpdir(), 'q4x32-stub-'));
     const script = join(stubDir, 'stub.mjs');
-    writeFileSync(script, STUB_SCRIPT);
+    const caKey = join(stubDir, 'fixture-ca.key');
+    const caCert = join(stubDir, 'fixture-ca.pem');
+    const leafKey = join(stubDir, 'fixture-leaf.key');
+    const leafCsr = join(stubDir, 'fixture-leaf.csr');
+    const leafCert = join(stubDir, 'fixture-leaf.pem');
+    const extensions = join(stubDir, 'fixture-leaf.ext');
+
+    // Validate synthetic-only configuration before creating any workload.
+    writeFileSync(script, buildInstanceJourneyScript(STUB_SCRIPT, journeyConfig), {
+      mode: 0o600,
+    });
+    writeFileSync(extensions, [
+      'basicConstraints=critical,CA:FALSE',
+      'keyUsage=critical,digitalSignature,keyEncipherment',
+      'extendedKeyUsage=serverAuth',
+      'subjectAltName=DNS:api.telegram.org',
+      '',
+    ].join('\n'), { mode: 0o600 });
+
+    // Argument arrays only. Each synthetic certificate operation is bounded.
+    runOk('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+      '-days', '2', '-subj', '/CN=Lifemodel synthetic CI fixture CA',
+      '-addext', 'basicConstraints=critical,CA:TRUE',
+      '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+      '-keyout', caKey, '-out', caCert,
+    ], { timeoutMs: 30_000 });
+    runOk('openssl', [
+      'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+      '-subj', '/CN=api.telegram.org',
+      '-keyout', leafKey, '-out', leafCsr,
+    ], { timeoutMs: 30_000 });
+    runOk('openssl', [
+      'x509', '-req', '-in', leafCsr,
+      '-CA', caCert, '-CAkey', caKey, '-set_serial', '220001',
+      '-days', '2', '-sha256', '-extfile', extensions, '-out', leafCert,
+    ], { timeoutMs: 30_000 });
+    chmodSync(caKey, 0o600);
+    chmodSync(leafKey, 0o600);
+    chmodSync(caCert, 0o644);
+    chmodSync(leafCert, 0o644);
+
     docker(['network', 'create', network]);
     docker([
       'create',
@@ -358,10 +542,22 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       stubContainer,
       '--network',
       network,
-      // A service host in Agent Vault must be a real hostname (one dot at
-      // least, a letters-only TLD), so the stub answers to this one name.
       '--network-alias',
       STUB_HOST,
+      '--network-alias',
+      'portal-model.local',
+      '--network-alias',
+      'api.telegram.org',
+      '--user',
+      '0:0',
+      '--publish',
+      '127.0.0.1::8080',
+      '--mount',
+      `type=bind,source=${leafKey},target=${journeyConfig.tls.keyPath},readonly`,
+      '--mount',
+      `type=bind,source=${leafCert},target=${journeyConfig.tls.certPath},readonly`,
+      '--mount',
+      `type=bind,source=${caCert},target=${journeyConfig.tls.publicCaPath},readonly`,
       '--entrypoint',
       'node',
       image,
@@ -369,14 +565,50 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     ]);
     docker(['cp', script, `${stubContainer}:/tmp/q4x32-stub.mjs`]);
     docker(['start', stubContainer]);
-    // The stub's own line is the event: it is listening before anything asks.
+
+    const published = docker(['port', stubContainer, '8080/tcp']).trim();
+    const match = /^127\.0\.0\.1:(\d+)$/.exec(published);
+    stubPort = Number(match?.[1]);
+    if (!Number.isInteger(stubPort) || stubPort < 1 || stubPort > 65535) {
+      throw new Error('Fixture control port was not published on host loopback');
+    }
+
+    const inspected: unknown = JSON.parse(docker([
+      'inspect', '--format', '{{json .NetworkSettings.Networks}}', stubContainer,
+    ]));
+    if (typeof inspected !== 'object' || inspected === null || Array.isArray(inspected)) {
+      throw new Error('Fixture network inspection returned no network map');
+    }
+    const attachment = (inspected as Record<string, unknown>)[network];
+    const address = typeof attachment === 'object' && attachment !== null
+      ? (attachment as Record<string, unknown>).IPAddress : undefined;
+    if (typeof address !== 'string' || !isIPv4(address) ||
+        address === '0.0.0.0' || address.startsWith('127.')) {
+      throw new Error('Fixture network inspection returned no usable IPv4 address');
+    }
+    stubIPv4 = address;
+
+    // Health reports both real listeners ready. Read the real journal API too.
+    // No phase is queued or held in this wiring-only piece.
     const deadline = Date.now() + 30_000;
     for (;;) {
-      if (docker(['logs', stubContainer]).includes('q4x32 stub listening')) return;
-      if (Date.now() > deadline) {
-        throw new Error(`the stub never listened: ${docker(['logs', stubContainer])}`);
+      try {
+        const health = await journey.health();
+        const events = await journey.journal();
+        if (health.ready === true &&
+            health.httpPort === JOURNEY_FIXTURE.httpPort &&
+            health.tlsPort === JOURNEY_FIXTURE.tlsPort &&
+            health.modelName === JOURNEY_FIXTURE.modelName &&
+            health.journalPath === JOURNEY_FIXTURE.journalPath &&
+            Array.isArray(events)) {
+          return;
+        }
+      } catch {
+        // Connection refusal while listeners start is retried within the bound.
       }
-      // A bounded wait, never a timer of its own: the stub's line is the event.
+      if (Date.now() > deadline) {
+        throw new Error('Fixture HTTP/TLS health and journal never became ready');
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
@@ -405,14 +637,14 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       container,
       '--network',
       network,
-      // The stub is a container on this network, so it has a private address
-      // (172.x), and Agent Vault's proxy refuses private ranges by default.
-      // `AGENT_VAULT_ALLOW_PRIVATE_RANGES` is the documented way to open them
-      // for an instance whose endpoint is on the owner's own network - which
-      // is exactly what a local model server or this stub is. Cloud metadata
-      // endpoints stay blocked either way.
+      // CI fixture exception only. Production private-range denial stays on.
       '--env',
-      'AGENT_VAULT_ALLOW_PRIVATE_RANGES=true',
+      `AGENT_VAULT_NETWORK_ALLOWLIST=${stubIPv4}/32`,
+      // Go's system certificate directory is available before Vault starts.
+      // Only the public synthetic CA enters the instance, read-only.
+      // Preserve NODE_EXTRA_CA_CERTS for the separate client-to-Vault trust.
+      '--mount',
+      `type=bind,source=${join(stubDir, 'fixture-ca.pem')},target=/etc/ssl/certs/lifemodel-ci-fixture.pem,readonly`,
       '--publish',
       '127.0.0.1::80',
       '--cap-add',
@@ -460,12 +692,7 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
     if (volume !== '') {
       run('docker', ['volume', 'rm', '--force', volume]);
     }
-    if (image !== '' && prebuiltImage === '') {
-      run('docker', ['rmi', '--force', image]);
-    }
-    if (buildDir !== '') {
-      rmSync(buildDir, { recursive: true, force: true });
-    }
+    // The prebuilt CI image belongs to ci-image, not this fixture's cleanup.
   }, 180_000);
 
   it('seeds, builds and starts lifemodel: status says running on a 40-hex commit', () => {
@@ -1132,6 +1359,186 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
         true
       );
     }, 120_000);
+    it('uses owner portal settings for one real model and Telegram journey', async () => {
+      requireImageCiContext();
+      const deadline = Date.now() + 85_000;
+      const remaining = (): number => {
+        const ms = deadline - Date.now();
+        if (ms <= 0) throw new Error('Portal journey exceeded its deadline');
+        return ms;
+      };
+      const phase = journeyConfig.phases.find(p => p.id === 'q4x22-portal');
+      if (phase === undefined) throw new Error('Portal journey phase is missing');
+
+      type Event = Awaited<ReturnType<typeof journey.journal>>[number];
+      async function waitForEvent(
+        label: string,
+        matches: (event: Event) => boolean,
+      ): Promise<Event> {
+        for (;;) {
+          remaining();
+          const events = await journey.journal();
+          const found = events.find(matches);
+          if (found !== undefined) return found;
+          if (deadline - Date.now() <= 250) {
+            throw new Error(`Portal journey missing ${label}`);
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+
+      port = publishedPort();
+      const page = await loaderPage();
+      if (!/^lm_session=[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/.test(page.cookie)) {
+        throw new Error('Loader supplied no valid session cookie');
+      }
+      let account: ReturnType<typeof accountFromPage>;
+      try {
+        account = accountFromPage(page.body);
+      } catch {
+        throw new Error('Public loader page supplied no owner account');
+      }
+      const portal = new InstanceNativeVaultPortal(
+        nativePortalTransport,
+        page.cookie.replace(/^lm_session=/, ''),
+      );
+      const identity = await portal.login({
+        accountEmail: account.email,
+        accountPassword: account.password,
+      });
+      expect(identity.email === account.email && identity.role === 'owner').toBe(true);
+
+      const newModelRemoteKey = journeyConfig.credentials.modelKey;
+      await portal.setCredentials({
+        PORTAL_MODEL_API_KEY: newModelRemoteKey,
+        TELEGRAM_BOT_TOKEN: journeyConfig.credentials.telegramToken,
+      });
+      await portal.upsertServices([
+        {
+          name: 'q4x22-portal-model',
+          host: 'portal-model.local:8080/v1/*',
+          auth: { type: 'bearer', token: 'PORTAL_MODEL_API_KEY' },
+        },
+        {
+          name: 'q4x22-portal-telegram',
+          host: 'api.telegram.org',
+          auth: { type: 'passthrough' },
+          substitutions: [{
+            key: 'TELEGRAM_BOT_TOKEN',
+            placeholder: JOURNEY_FIXTURE.telegramPlaceholder,
+            in: ['path'],
+          }],
+        },
+      ]);
+      await journey.control({
+        op: 'hold', phase: phase.id, model: false, send: false,
+      });
+
+      const baseline = await journey.journal();
+      const since = baseline.reduce((max, event) => Math.max(max, event.seq), 0);
+      const startsBefore = logCount(/"msg":"lifemodel started"/);
+      const interfacesBefore = logCount(/settings interface is up/);
+      const save = await fetchThroughFrontDoor(
+        port,
+        `localhost:${String(port)}`,
+        '/settings',
+        {
+          cookie: page.cookie,
+          origin: `http://localhost:${String(port)}`,
+          form: {
+            endpointBaseUrl: 'http://portal-model.local:8080/v1',
+            fastModel: JOURNEY_FIXTURE.modelName,
+            smartModel: JOURNEY_FIXTURE.modelName,
+            motorModel: JOURNEY_FIXTURE.modelName,
+            telegramChatId: String(journeyConfig.ownerChatId),
+            telegramBotToken: JOURNEY_FIXTURE.telegramPlaceholder,
+          },
+        },
+      );
+      expect(save.status).toBe(200);
+      expect(save.body.includes('Saved.')).toBe(true);
+      await waitForStarts(startsBefore + 1, remaining());
+      await waitForCount(/settings interface is up/, interfacesBefore + 1, remaining());
+
+      await waitForEvent('native Telegram getMe', event =>
+        event.seq > since &&
+        event.event === 'telegram.request' &&
+        event.method === 'getMe' &&
+        event.tokenMatch === true &&
+        /^api\.telegram\.org(?::443)?$/.test(String(event.actualHost)),
+      );
+      await journey.control({ op: 'queue', phase: phase.id });
+
+      const model = await waitForEvent('authenticated real model request', event =>
+        event.seq > since &&
+        event.event === 'model.request' &&
+        event.phase === phase.id &&
+        /^portal-model\.local(?::8080)?$/.test(String(event.actualHost)) &&
+        event.model === JOURNEY_FIXTURE.modelName &&
+        event.authorizationMatch === true,
+      );
+      await waitForEvent('real Telegram update delivery', event =>
+        event.seq > since &&
+        event.event === 'telegram.poll.response' &&
+        Array.isArray(event.updateIds) &&
+        event.updateIds.includes(phase.updateId),
+      );
+      const sent = await waitForEvent('final Telegram answer', event =>
+        event.seq > model.seq &&
+        event.event === 'telegram.send.request' &&
+        event.phase === phase.id &&
+        event.chatMatch === true &&
+        event.text === phase.answer,
+      );
+      await waitForEvent('final Telegram send acknowledgement', event =>
+        event.seq > sent.seq &&
+        event.event === 'telegram.send.ack' &&
+        event.phase === phase.id &&
+        event.requestId === sent.requestId,
+      );
+
+      const events = (await journey.journal()).filter(event => event.seq > since);
+      const pollResponses = events.filter(event =>
+        event.event === 'telegram.poll.response' &&
+        Array.isArray(event.updateIds) &&
+        event.updateIds.includes(phase.updateId),
+      );
+      expect(pollResponses.length > 0).toBe(true);
+      expect(pollResponses.every(response => events.some(event =>
+        event.event === 'telegram.request' &&
+        event.requestId === response.requestId &&
+        event.method === 'getUpdates' &&
+        event.tokenMatch === true &&
+        /^api\.telegram\.org(?::443)?$/.test(String(event.actualHost)),
+      ))).toBe(true);
+      expect(events.filter(event =>
+        event.event === 'telegram.send.request' &&
+        event.phase === phase.id &&
+        event.text === phase.answer,
+      ).length).toBe(1);
+      expect(events.filter(event =>
+        event.event === 'telegram.send.ack' && event.phase === phase.id,
+      ).length).toBe(1);
+      expect(events.some(event =>
+        event.event === 'telegram.request' &&
+        event.requestId === sent.requestId &&
+        event.method === 'sendMessage' &&
+        event.tokenMatch === true,
+      )).toBe(true);
+
+      // Boolean assertions prevent secret-bearing failure snapshots.
+      const env = lifemodelEnvironment();
+      expect(JSON.stringify(env).includes(newModelRemoteKey)).toBe(false);
+      const configSearch = run('docker', [
+        'exec', container, 'grep', '-rl',
+        newModelRemoteKey, '/var/lib/lifemodel/data',
+      ]);
+      expect(configSearch.status).toBe(1);
+      const logs = docker(['logs', container]);
+      expect(logs.includes(newModelRemoteKey)).toBe(false);
+      expect(JSON.stringify(env).includes(journeyConfig.credentials.telegramToken)).toBe(false);
+      expect(logs.includes(journeyConfig.credentials.telegramToken)).toBe(false);
+    }, 90_000);
   });
 
   it('holds panic and resumes, from the command line in the container', () => {
