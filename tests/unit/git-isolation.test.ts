@@ -140,6 +140,8 @@ describe('a suite started from a git hook', () => {
       git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/fixture-feature'], clean);
       mkdirSync(join(dir, '.beads'));
       mkdirSync(join(dir, '.backlog'));
+      mkdirSync(join(dir, '.backlog', 'rules'));
+      writeFileSync(join(dir, '.backlog', 'rules', 'check-product.mjs'), '');
       const tracker = join(dir, '.beads', 'issues.jsonl');
       writeFileSync(tracker, 'base\n');
       writeFileSync(join(dir, '.backlog', 'config.json'), '{}\n');
@@ -184,6 +186,7 @@ let phase;
 if (tool === 'npx' && JSON.stringify(args) === '["lint-staged"]') phase = 'lint';
 else if (tool === 'node' && JSON.stringify(args) === '["scripts/test-isolated.mjs","check"]') phase = 'product';
 else if (tool === 'node' && JSON.stringify(args) === '[".backlog/gate.mjs"]') phase = 'gate';
+else if (tool === 'node' && JSON.stringify(args) === '[".backlog/rules/check-product.mjs","--staged"]') phase = 'documents';
 else throw new Error('unexpected dispatch: ' + tool + ' ' + JSON.stringify(args));
 const env = Object.fromEntries(${JSON.stringify(names)}.map(name => [name, process.env[name] ?? null]));
 let staged = null;
@@ -216,6 +219,7 @@ appendFileSync(${JSON.stringify(log)}, JSON.stringify({ phase, env, staged }) + 
       expect(calls).toEqual([
         { phase: 'lint', env: dirty, staged: commitContent },
         { phase: 'product', env: Object.fromEntries(names.map(name => [name, null])), staged: null },
+        { phase: 'documents', env: dirty, staged: commitContent },
         ...(!trackerInCommit ? [{ phase: 'gate', env: dirty, staged: commitContent }] : []),
       ]);
       expect(readFileSync(tracker, 'utf8')).toBe(defaultContent);
