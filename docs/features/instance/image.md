@@ -127,12 +127,13 @@ uid 1000, settings/save/restart, Vault store/token/CA persistence, authenticated
 front-door access, proxy credential injection, denied direct egress and panic.
 The uid-1000 transport probe is not an actual configured-provider turn.
 
-The owner has authorized expanding this same CI-only walk to an owner-facing
-Vault credential/service journey and actual configured-provider request,
-observed turn/send drain, same-volume container recreation and panic across
-Docker-daemon restart. These expanded outcomes still need implementation and
-current-revision CI evidence; the historical 15-case result does not prove
-them. A daemon restart is permitted only on that job's fresh disposable runner,
+The expanded walk implements the owner-authorized Vault credential/service
+journey and actual configured-provider/Telegram turn, observed turn/send drain,
+same-volume container recreation, and panic across Docker-daemon restart.
+Runtime acceptance requires successful current-revision CI evidence for each
+outcome. Source review, mock-filesystem snapshot tests, and the historical
+15-case result do not establish that acceptance. The daemon-restart case runs
+last and permits one fixed restart only on that job's fresh disposable runner,
 never on the owner's machine. Synthetic Telegram TLS/DNS and model fixtures
 must preserve the production Telegram address, TLS validation and default
 private-range denial; no production test hooks or global TLS bypass.

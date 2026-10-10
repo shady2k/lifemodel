@@ -522,10 +522,24 @@ refused at once (outside, and to the stub next door), root still reaches the
 stub directly, the made-up MODEL credential (the walk searches for its value -
 that is the key the walk proves absent) is in neither lifemodel's environment,
 its data nor the container's log, and the loader's page hands over the Agent
-Vault account that Agent Vault's own login API then answers. It needs docker and the
-first `npm ci` inside the container, so it is off unless
-`LIFEMODEL_DOCKER_TESTS=1`:
+Vault account that Agent Vault's own login API then answers. This transport
+probe does not establish an actual configured-provider turn.
 
-```
-LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
-```
+The expanded walk also uses the owner-facing native Vault account to save the
+credential and services, then requires an actual configured-model request and
+unique Telegram reply. It holds a real turn and final send across graceful
+stop, recreates the panicked instance on the same named volume, and checks
+panic across one Docker-daemon restart before explicit resume. Recreation
+preserves the original password, repository/commit, configuration, keys and
+durable state; filesystem mock tests are not evidence of native ownership.
+
+Heavy image build and real first-start acceptance are **CI-only** in the
+existing GitHub-hosted PR `ci-image` job. The job uses a fresh disposable Ubuntu
+runner, the exact prebuilt image, read-only permissions, credential-less
+checkout and no owner secrets, login or publishing; its ceiling remains 45
+minutes with at most two workers. `LIFEMODEL_DOCKER_TESTS=1` is an internal job
+switch, not permission or an instruction to run heavy tests locally. The last
+case permits one fixed Docker-daemon restart only on that disposable runner,
+never on the owner's machine. Source review and ordinary isolated checks do
+not replace successful current-revision real-image CI evidence. See
+[the image boundaries](image.md).
