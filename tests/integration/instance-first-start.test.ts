@@ -22,6 +22,7 @@ import {
   hasOnlyInstanceAddedCapability,
 } from './helpers/instance-docker-capability.js';
 import { compareInstanceMounts } from './helpers/instance-docker-mounts.js';
+import { hasAuthenticatedTelegramRequest } from './helpers/instance-telegram-correlation.js';
 import {
   formatInstanceProofFailure,
   type InstanceProofCheckpoint,
@@ -2549,13 +2550,14 @@ describe.skipIf(!enabled)('a first start in the real container', () => {
       const ack = await event('matching send ACK', e =>
         e.seq > sent.seq && e.event === 'telegram.send.ack' &&
         e.phase === phase.id && e.requestId === sent.requestId);
-      const events = (await journey.journal()).filter(e => e.seq > since);
+      const journal = await journey.journal();
+      const events = journal.filter(e => e.seq > since);
       expect(events.filter(e => e.event === 'telegram.send.request' && e.phase === phase.id).length === 1 &&
         events.filter(e => e.event === 'telegram.send.ack' && e.phase === phase.id).length === 1).toBe(true);
-      expect([delivered.requestId, sent.requestId].every((requestId, index) =>
-        events.some(e => e.event === 'telegram.request' && e.requestId === requestId &&
-          e.method === (index === 0 ? 'getUpdates' : 'sendMessage') &&
-          e.tokenMatch === true && /^api\.telegram\.org(?::443)?$/.test(String(e.actualHost))))).toBe(true);
+      expect(
+        hasAuthenticatedTelegramRequest(journal, delivered, 'getUpdates') &&
+        hasAuthenticatedTelegramRequest(journal, sent, 'sendMessage'),
+      ).toBe(true);
       writeFileSync(proofPath, JSON.stringify({
         originalId: original[0], recreatedId: recreated[0], volume: sameVolume,
         accepted, reply: { requestId: sent.requestId, text: sent.text, ackSeq: ack.seq },
