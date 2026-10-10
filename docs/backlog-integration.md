@@ -225,7 +225,22 @@ the repository's installation, and each person's plugin and hooks are their own.
   pull request and for a cancelled run. A skipped job reports as success to a required check, so branch
   protection requires **`changes`, `ci-product` and `ci-backlog`**: requiring
   `changes` is what makes a failed `changes` job a red check rather than a
-  quiet skip.
+  quiet skip. The image (story S9) is **two jobs**. `ci-image` runs on a pull
+  request that owes `ci-product` — the image carries the product — with
+  `fetch-depth: 0` (the seed bundle it makes is the history the instance's
+  repository is cloned from): it builds with `scripts/build-image.sh` and then
+  runs the real first start inside the image,
+  `LIFEMODEL_DOCKER_TESTS=1 npx vitest run --maxWorkers=2
+  tests/integration/instance-first-start.test.ts`, so a loader that builds but
+  cannot boot is caught. It holds no write token: the workflow's own
+  `contents: read`, a checkout with `persist-credentials: false`, and no login.
+  `ci-image-publish` runs on every push to `main` — no classifier gate, so a
+  documents-only push publishes too — builds and pushes
+  `ghcr.io/shady2k/lifemodel:main` and `:<sha>` with `github.token`, and is the
+  only job that asks for `packages: write`. **`ci-image` is not a required
+  check** (owner, 2026-10-09): it runs on every product pull request and its
+  result is seen there, but a red one does not block the merge by itself -
+  read it before merging a product change.
 - **Bulk-edit age correction:** none yet; no bulk edit has run. When one does,
   keep paired `--ages-from`/`--ages-through` snapshots of the export before
   and after, and pass them to `check.mjs` (the gate will grow that wiring

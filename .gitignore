@@ -4,6 +4,10 @@ node_modules/
 # Build output
 dist/
 
+# The seed bundle scripts/build-image.sh writes into the build context for the
+# length of a docker build; it removes it again.
+.docker-context/
+
 # Data (mounted volume in production)
 data/
 

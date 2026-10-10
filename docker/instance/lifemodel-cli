@@ -1,0 +1,14 @@
+#!/bin/sh
+# The loader's command line inside the container (lifemodel-q4x, decisions on
+# the loader):
+#
+#   docker exec <container> lifemodel status   # running|stopped, the commit,
+#                                              # panic on|off
+#   docker exec <container> lifemodel panic    # stop lifemodel and keep it down
+#   docker exec <container> lifemodel resume   # clear panic, start it again
+#
+# Two lines of shim: the loader's own CLI does the work, so there is one
+# implementation of status, panic and resume, and `lifemodel` is the one word a
+# person types.
+set -eu
+exec node /opt/lifemodel/loader/dist/cli.js "$@"

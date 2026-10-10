@@ -67,12 +67,31 @@ export interface AgentConfigFile {
 
   /** LLM configuration */
   llm?: {
-    /** Fast model for classification */
-    fastModel?: string;
-    /** Smart model for composition */
-    smartModel?: string;
-    /** Motor Cortex model */
-    motorModel?: string;
+    /**
+     * The OpenAI-compatible endpoint lifemodel talks to, with the model for
+     * each role (lifemodel-q4x.4.1). Written by lifemodel's own settings
+     * interface; no key is ever stored here (Agent Vault holds it).
+     */
+    endpoint?: {
+      /** Base URL, e.g. http://127.0.0.1:1234/v1 */
+      baseUrl?: string | null;
+      /** The fast role's model */
+      fastModel?: string | null;
+      /** The smart role's model */
+      smartModel?: string | null;
+      /** The motor role's model */
+      motorModel?: string | null;
+    };
+  };
+
+  /** Telegram configuration */
+  telegram?: {
+    /**
+     * The bot token as an Agent Vault placeholder (e.g.
+     * `__telegram_bot_token__`), never the token itself: Agent Vault
+     * substitutes it in the request path (lifemodel-q4x.3.*).
+     */
+    botToken?: string;
   };
 
   /** Logging configuration */
@@ -134,21 +153,15 @@ export interface MergedConfig {
 
   /** LLM configuration */
   llm: {
-    openRouterApiKey: string | null;
-    fastModel: string;
-    smartModel: string;
-    motorModel: string;
-    /** App name for API tracking (shows in provider dashboards) */
-    appName: string;
-    /** Site URL for API tracking */
-    siteUrl: string | null;
-    /** Local model configuration (OpenAI-compatible API) */
-    local: {
+    /**
+     * The OpenAI-compatible endpoint, with the model for each role
+     * (lifemodel-q4x.4.1). No key: Agent Vault injects it on the way out.
+     */
+    endpoint: {
       baseUrl: string | null;
-      model: string | null;
-      useForFast: boolean;
-      useForSmart: boolean;
-      useForMotor: boolean;
+      fastModel: string | null;
+      smartModel: string | null;
+      motorModel: string | null;
     };
   };
 
@@ -230,18 +243,13 @@ export const DEFAULT_CONFIG: MergedConfig = {
     telegramChatId: null,
   },
   llm: {
-    openRouterApiKey: null,
-    fastModel: 'anthropic/claude-haiku-4.5',
-    smartModel: 'anthropic/claude-sonnet-4.5',
-    motorModel: 'anthropic/claude-haiku-4.5',
-    appName: 'Lifemodel',
-    siteUrl: 'https://github.com/shady2k/lifemodel',
-    local: {
+    endpoint: {
+      // Nothing is configured on a first start: lifemodel starts, serves its
+      // settings interface and says what is missing (lifemodel-q4x.4.1).
       baseUrl: null,
-      model: null,
-      useForFast: true, // Default: use local for fast if configured
-      useForSmart: false, // Default: use cloud for smart
-      useForMotor: false, // Default: use cloud for motor cortex
+      fastModel: null,
+      smartModel: null,
+      motorModel: null,
     },
   },
   logging: {

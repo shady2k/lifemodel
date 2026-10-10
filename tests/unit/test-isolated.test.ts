@@ -61,6 +61,48 @@ describe('the disposable launch boundary', () => {
       expect(() => stageSnapshot(root, join(root, 'snapshot'))).toThrow(/byte limit/);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+  it('copies the loader tree, its manifests and tsconfig, without nested dotenv, git, data, node_modules or dist', () => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-loader-'));
+    const snapshot = join(root, 'snapshot');
+    const source = join(root, 'source');
+    for (const directory of ['loader/src', 'loader/dist', 'loader/data', 'loader/.git', 'loader/node_modules', 'tests']) mkdirSync(join(source, directory), { recursive: true });
+    writeFileSync(join(source, 'package.json'), '{}');
+    writeFileSync(join(source, 'package-lock.json'), '{}');
+    writeFileSync(join(source, 'loader', 'package.json'), '{}');
+    writeFileSync(join(source, 'loader', 'package-lock.json'), '{}');
+    writeFileSync(join(source, 'loader', 'tsconfig.json'), '{}');
+    writeFileSync(join(source, 'loader', 'src', 'main.ts'), 'export {};');
+    writeFileSync(join(source, 'loader', 'dist', 'main.js'), 'built');
+    writeFileSync(join(source, 'loader', 'data', 'state.json'), 'synthetic-only');
+    writeFileSync(join(source, 'loader', '.git', 'HEAD'), 'ref: refs/heads/main');
+    writeFileSync(join(source, 'loader', 'node_modules', 'dep.js'), 'dependency');
+    for (const nested of ['.env', '.env.local']) writeFileSync(join(source, 'loader', nested), 'synthetic-only');
+    try {
+      stageSnapshot(source, snapshot);
+      for (const file of ['loader/tsconfig.json', 'loader/package.json', 'loader/package-lock.json', 'loader/src/main.ts']) {
+        expect(existsSync(join(snapshot, file))).toBe(true);
+      }
+      for (const file of ['loader/.env', 'loader/.env.local', 'loader/dist', 'loader/data', 'loader/.git', 'loader/node_modules']) {
+        expect(existsSync(join(snapshot, file))).toBe(false);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('copies the root .dockerignore the build-image tests read, while forbidden entries stay absent', () => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-dockerignore-'));
+    const snapshot = join(root, 'snapshot');
+    const source = join(root, 'source');
+    mkdirSync(join(source, 'src', 'node_modules'), { recursive: true });
+    mkdirSync(join(source, 'src', 'dist'), { recursive: true });
+    mkdirSync(join(source, 'src', 'data'), { recursive: true });
+    for (const name of ['package.json', 'package-lock.json', '.dockerignore', 'src/index.ts', 'src/.env', 'src/.env.local',
+      'src/node_modules/dep.js', 'src/dist/out.js', 'src/data/state.json']) writeFileSync(join(source, name), 'synthetic-only');
+    try {
+      stageSnapshot(source, snapshot);
+      expect(existsSync(join(snapshot, '.dockerignore'))).toBe(true);
+      expect(existsSync(join(snapshot, 'src', 'index.ts'))).toBe(true);
+      for (const entry of ['src/.env', 'src/.env.local', 'src/node_modules', 'src/dist', 'src/data']) expect(existsSync(join(snapshot, entry))).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it('normalizes snapshot-only permissions for the non-root Docker copy', () => {
     const root = mkdtempSync(join(tmpdir(), 'snapshot-modes-'));
     try {
@@ -91,7 +133,11 @@ describe('the disposable launch boundary', () => {
     expect(args).toContain('--memory-swap 3g');
   });
   it('executes static checks before the suite without recursive npm scripts', () => {
-    expect(innerSteps('check', []).map(([name]) => name)).toEqual(['tsc', 'eslint', 'prettier', 'vitest']);
+    expect(innerSteps('check', []).map(([name]) => name)).toEqual(['tsc', 'tsc', 'eslint', 'prettier', 'vitest']);
+    expect(innerSteps('check', [])[0]).toEqual(['tsc', '--noEmit']);
+    expect(innerSteps('check', [])[1]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[2]).toEqual(['eslint', 'src/', 'loader/']);
+    expect(innerSteps('check', [])[3]).toEqual(['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts']);
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');
   });
   it('preserves a child failure and times out a child that never settles', async () => {

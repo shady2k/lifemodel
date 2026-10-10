@@ -1,6 +1,6 @@
 # CI — the checks every change to lifemodel passes.
 #
-# Three jobs, and what a change owes is decided by the paths it touches
+# Five jobs, and what a change owes is decided by the paths it touches
 # (scripts/ci-changed-paths.sh, scripts/ci-product-paths.sh, lifemodel-cup):
 #
 #   1. changes: does this change touch product code? It reads the change's
@@ -14,7 +14,28 @@
 #      checks and the suite never run in this checkout, when the answer is
 #      product=true (or when the `changes` job did not succeed, see its
 #      comment) and the pull request is not a draft;
-#   3. ci-backlog: the backlog gate below, on every change, for everyone.
+#   3. ci-backlog: the backlog gate below, on every change, for everyone;
+#   4. ci-image: the instance image (story S9) on a PULL REQUEST — the same
+#      scripts/build-image.sh a person runs, and then a REAL first start inside
+#      the image it just built. It holds no write token: the workflow's own
+#      read-only permissions, and a checkout that keeps no credential. It is
+#      not a required check (owner decision 17, below), so it too fails
+#      closed on a failed `changes` job to say what happened rather than a
+#      green skip;
+#   5. ci-image-publish: the same build on a PUSH TO MAIN, and the only job
+#      that asks for packages: write. It publishes
+#      ghcr.io/shady2k/lifemodel:main and :<sha> on EVERY push to main —
+#      documents-only pushes included, which is what story S9 asks for — so it
+#      has no classifier gate.
+#
+# Why the image work is split in two (rework 2, findings 2 and 4): one job that
+# both builds for a pull request and holds `packages: write` lets a same-
+# repository pull request — which can edit scripts/build-image.sh and the
+# Dockerfile that this job runs — publish or overwrite images before merge.
+# Gating the login and push steps on `push` does not prevent that; a separate
+# job with read-only permissions and a credential-less checkout does. The PR
+# job is not a required check: branch protection requires `changes`,
+# `ci-product` and `ci-backlog` (owner, 2026-10-09; docs/backlog-integration.md).
 #
 # `--no-renames` in the first job is not a detail: `git diff --name-only`
 # reports a detected rename by its destination alone, so moving product code
@@ -26,7 +47,8 @@
 # that does not owe the product checks passes under branch protection that
 # requires them: the skip is what "not owed" looks like there, not a failure
 # somebody has to override. Branch protection on main requires `changes`,
-# `ci-product` and `ci-backlog` (docs/backlog-integration.md).
+# `ci-product` and `ci-backlog`; `ci-image` runs on product pull requests but
+# is not required (owner, 2026-10-09; docs/backlog-integration.md).
 #
 # `npm run check` and this job run the same checks through the same launcher
 # command, on node 24, with no `npm ci` on the host in either place: the
@@ -276,3 +298,107 @@ jobs:
           base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
           echo "base: $base"
           node "$gate/rules/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
+
+  # The instance image (story S9): the runtime, the loader, Caddy and the code
+  # the image carries as a git bundle at this commit.
+  #
+  # On a PULL REQUEST it builds and then proves the image can really start an
+  # instance: an empty volume, POST /setup through the front door, and the
+  # loader's own line that lifemodel is running. That walk is what the stage's
+  # acceptance is made of, and it is what the image check was missing — a
+  # loader that builds but cannot complete a first start used to pass this job
+  # (rework 2, finding 9). It needs docker, which ubuntu-latest has, and the
+  # instance provisioning `npm ci` INSIDE the container, bounded at 45 minutes.
+  # Owner-approved exception: this fresh GitHub-hosted Ubuntu PR job installs
+  # host test dependencies and runs only the built-image first-start file.
+  # Local heavy image acceptance is forbidden; ordinary suites stay isolated.
+  #
+  # The full history is an input, not a convenience: scripts/build-image.sh
+  # makes the seed bundle the instance's repository is cloned from, and it
+  # refuses a shallow checkout by name rather than shipping one whose history
+  # could never be merged with upstream.
+  #
+  # NOTHING HERE HOLDS A WRITE TOKEN (rework 2, finding 2): this job has the
+  # workflow's own `contents: read`, its checkout keeps no credential, and no
+  # step logs in anywhere. Publishing is ci-image-publish below, on main only.
+  ci-image:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The seed bundle carries this history; a shallow clone has none.
+          fetch-depth: 0
+          # A pull request must not be able to push with this job's token, and
+          # it does not need to: nothing here writes to the repository.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install what the first-start walk runs on
+        run: npm ci
+
+      - name: Build the image
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          # The tag is this run's own: nothing is pushed.
+          scripts/build-image.sh "ci-$SHA"
+
+      # The walk boots THE image built above, not a second build of its own
+      # (rework 3, review round 2 finding 3).
+      - name: A real first start inside the image
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          LIFEMODEL_DOCKER_TESTS=1 LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA" \
+            npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
+
+  # Publishing, on a push to main. It is the only job that asks for
+  # `packages: write`, and the only one that logs in to ghcr.io.
+  #
+  # It has NO classifier gate: story S9 wants `main` and the commit published on
+  # every push to main, and a documents-only push used to skip the job and leave
+  # `:main` at an older revision (rework 2, finding 4). The push already passed
+  # the checks that gate a merge; this job's business is the image.
+  ci-image-publish:
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The seed bundle carries this history; a shallow clone has none.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Log in to ghcr.io
+        env:
+          # Through the environment rather than into a shell line, as in the
+          # jobs above.
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build and publish the image
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          # Built and pushed in one step: the tag the build makes is the tag
+          # `docker push` names, so the two cannot disagree.
+          scripts/build-image.sh main "$SHA"
+          docker push "ghcr.io/shady2k/lifemodel:main"
+          docker push "ghcr.io/shady2k/lifemodel:$SHA"

@@ -101,7 +101,7 @@ Cognition uses **native OpenAI tool-calling** with *Codex-style natural terminat
 - **Docker** — required for the Motor Cortex's agentic (code-executing) runs
   and for the isolated test boundary (see [Test isolation](#-development))
 - A **Telegram bot token** ([@BotFather](https://t.me/BotFather))
-- An **[OpenRouter](https://openrouter.ai/)** API key (or any OpenAI-compatible endpoint — LM Studio, Ollama, vLLM, …)
+- An OpenAI-compatible endpoint with a model per role — LM Studio, Ollama, vLLM, [OpenRouter](https://openrouter.ai/), …
 
 ### Install & run
 
@@ -124,6 +124,9 @@ npm run build
 npm start
 ```
 
+To run a whole instance instead — the loader, the login and lifemodel as a
+service on its own volume — see [Run your own instance](#-run-your-own-instance).
+
 ### Configuration
 
 lifemodel is configured via a `.env` file. The essentials:
@@ -132,25 +135,32 @@ lifemodel is configured via a `.env` file. The essentials:
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `PRIMARY_USER_CHAT_ID` | Your Telegram chat ID (DM [@userinfobot](https://t.me/userinfobot) to get it) — enables proactive messaging |
-| `OPENROUTER_API_KEY` | API key from [openrouter.ai](https://openrouter.ai/) |
-| `LLM_FAST_MODEL` | Cheap model for classification / yes-no / emotion detection |
-| `LLM_SMART_MODEL` | Expensive model for reasoning & message composition |
-| `LLM_MOTOR_MODEL` | Model used by the Motor Cortex agentic runtime |
 | `TZ` | Your timezone (e.g. `Europe/Moscow`) |
 | `LOG_LEVEL` | `info`, `debug`, … |
 
 <details>
-<summary><b>Optional: run on local / self-hosted models</b></summary>
+<summary><b>The model endpoint — the only model configuration</b></summary>
 
-Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM):
+Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM), and the
+endpoint carries no key of its own — a server that needs one is reached through
+Agent Vault, which injects it. This endpoint is the only model configuration
+there is: there is no separate keyed provider surface to fall back to. The
+endpoint and its models are lifemodel's own
+settings: on an **instance** they are set in lifemodel's interface at the root
+host (`docs/features/instance/settings.md`), and in a checkout with these
+environment variables, which name the same fields:
 
 | Variable | Description |
 |----------|-------------|
-| `LLM_LOCAL_BASE_URL` | Base URL of your OpenAI-compatible server |
-| `LLM_LOCAL_MODEL` | Local model name |
-| `LLM_LOCAL_USE_FOR_FAST` | Use the local model for the *fast* role |
-| `LLM_LOCAL_USE_FOR_SMART` | Use the local model for the *smart* role (usually keep cloud) |
-| `LLM_LOCAL_USE_FOR_MOTOR` | Use the local model for the *motor* role |
+| `LLM_ENDPOINT_BASE_URL` | Base URL of the endpoint (e.g. `http://localhost:1234/v1`) |
+| `LLM_ENDPOINT_FAST_MODEL` | The model for the *fast* role (classification) |
+| `LLM_ENDPOINT_SMART_MODEL` | The model for the *smart* role (reasoning, composition) |
+| `LLM_ENDPOINT_MOTOR_MODEL` | The model for the *motor* role (Motor Cortex) |
+
+There is no second endpoint and no fallback: a role the endpoint does not name
+is refused with an error naming that role, never answered with a different
+endpoint or another role's model. No key is ever set here — a server that needs
+one is reached through Agent Vault, which injects it.
 
 </details>
 
@@ -164,6 +174,127 @@ Any OpenAI-compatible server works (LM Studio, Ollama, LocalAI, vLLM):
 | `SEARCH_PROVIDER_PRIORITY` | Provider fallback order |
 
 </details>
+
+---
+
+## 🐳 Run your own instance
+
+The published image runs a whole instance in one container: the **loader**
+(the password, first start, panic), **Caddy** as the only web entrance,
+**Agent Vault** (the layer that holds the keys, so lifemodel holds none), and
+lifemodel itself as an unprivileged user whose code is a git repository on the
+volume — so it can change itself and keep the change across restarts.
+
+```bash
+docker run -d \
+  --name lifemodel \
+  --restart unless-stopped \
+  --stop-timeout 120 \
+  --cap-add NET_ADMIN \
+  -v lifemodel:/var/lib/lifemodel \
+  -p 127.0.0.1:8080:80 \
+  ghcr.io/shady2k/lifemodel:main
+```
+
+Then open **http://boot.localhost:8080**: the loader asks you to set its
+password, and after that it creates the instance's repository on the volume
+from the code the image carries, builds it and starts lifemodel. Nothing asks
+you for a model key at this point.
+
+| Address | What it is |
+| --- | --- |
+| `boot.localhost:8080` | the loader: its password, panic and resume |
+| `localhost:8080` | lifemodel's own interface |
+| `vault.localhost:8080` | Agent Vault: its own interface — the vault, the keys and the services |
+
+`localhost` is the machine's own name and the others are its subdomains. On a
+VPS, reach them through an SSH tunnel and keep them unpublished:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 you@your-vps
+```
+
+**The root host is lifemodel's own settings page**: the OpenAI-compatible
+endpoint, the model for each role (fast, smart, motor) and the Telegram fields
+(chat id, and the bot token as an Agent Vault placeholder — the token itself
+belongs in Agent Vault, never here). Saving writes the instance's config and
+restarts lifemodel through the loader, which starts it again at once; on a
+first start the page says which fields are still missing and lifemodel runs
+anyway. The page needs no login of its own: the loader checks every request
+before it arrives, and a link to the loader (`boot.`) is on it for the keys and
+for panic. How it works is in
+[`docs/features/instance/settings.md`](docs/features/instance/settings.md).
+
+`vault.` serves the installed Agent Vault interface behind the loader's login.
+Agent Vault also requires its own account login, using the credentials shown
+on the loader's page. The port is published on the host's loopback only
+(`-p 127.0.0.1:8080:80`), so nothing on the internet reaches it — put your own
+HTTPS proxy in front when you want that.
+
+The loader's own page (`boot.localhost:8080`, behind its password) also shows
+the **Agent Vault account** it registered for this instance — the e-mail and
+the password, with the link to `vault.` — because Agent Vault's only login is
+its own accounts and that one is the instance owner's. Sign in there and add
+the model key for your endpoint, plus a service for that endpoint's host. No
+model key is ever shown on the loader's page, and lifemodel never holds one.
+
+The rest of the command: the volume `lifemodel` holds the instance (its
+repository and its data — `docker rm -f` and the same `docker run` bring the
+same instance back), and `--stop-timeout 120` gives the whole stop room: the
+loader's own stop has one 110-second deadline, counted from the moment the
+signal arrives, for lifemodel's 90-second drain, for Agent Vault leaving after
+it and for Caddy leaving last. No step
+of the stop waits past that deadline (some have shorter caps of their own), so
+the loader leaves before Docker's own kill at 120 seconds; when a step could
+not finish, it leaves with a non-zero code and one line naming what was still
+pending and which bound it hit. A process the kernel will not let go of even
+after SIGKILL is the one case where the loader leaves without having reaped
+it. `--cap-add NET_ADMIN` is what the loader's **egress rule** needs
+(lifemodel-q4x.3.2): before
+lifemodel starts, it installs an iptables rule that lets lifemodel's user
+(uid 1000) open connections to the NAMED loopback services only — Agent
+Vault's proxy port, the loader's own interface, the container resolver's
+rewritten DNS port, each bound to its destination and protocol — and REJECTs
+every other connection that user opens (the vault's management port among
+them). On a container whose network has IPv6 addresses the same rule is
+installed for that family (`ip6tables`, over `::1` and the container's own
+address). The replies of a connection that was allowed to open are accepted, so
+the loader's own interface and lifemodel's settings server can answer the front
+door. Everything refused fails at once as a connection error, not a hang. Root
+(the loader, Caddy and Agent Vault itself) is untouched. A container without the capability, or without
+`iptables`, does not start lifemodel: the loader leaves with a non-zero code and
+one line carrying the cause, and a rule the kernel refused names
+`--cap-add NET_ADMIN`.
+
+Agent Vault itself holds a passwordless store in `/var/lib/lifemodel/vault`
+(root-only), and the loader creates the vault `lifemodel` and an agent token
+for it. lifemodel's process gets that token as its proxy credential, with
+`HTTPS_PROXY`/`HTTP_PROXY` pointing at Agent Vault's proxy, `NO_PROXY` for
+loopback, `NODE_USE_ENV_PROXY=1` (Node 24's `fetch` honours the proxy only with
+it) and `NODE_EXTRA_CA_CERTS` pointing at the CA the loader exported to
+`/var/lib/lifemodel/vault-ca.pem`. lifemodel's vault is **not** strict: a host
+with a service gets its credential attached on the way out, any other host
+(news, the open web) passes through the proxy unchanged. The proxy dials
+public addresses only unless you open the private ones — add
+`-e AGENT_VAULT_ALLOW_PRIVATE_RANGES=true` to the `docker run` when your model
+server is on your own machine or network (Agent Vault's netguard; cloud
+metadata endpoints stay blocked either way).
+
+From the command line, inside the container:
+
+```bash
+docker exec lifemodel lifemodel status   # running|stopped|failed, the commit, panic on|off
+                                         # (failed adds a line: failed: <the reason>)
+docker exec lifemodel lifemodel panic    # stop lifemodel and keep it down
+docker exec lifemodel lifemodel resume   # clear panic and start it again
+docker logs -f lifemodel                 # the loader's, Caddy's and Agent Vault's lines
+```
+
+Build the image yourself with `scripts/build-image.sh`: it makes the seed
+bundle from your checkout first (a full clone — a shallow one is refused by
+name) and then runs the `docker build`. What the image holds and how the front
+door routes the three hosts is in
+[`docs/features/instance/image.md`](docs/features/instance/image.md).
 
 ---
 
@@ -199,7 +330,7 @@ The codebase is heavily documented. Start here:
 ## 🛠️ Tech Stack
 
 **Language & runtime:** TypeScript (strict, ESM) on Node.js ≥ 24
-**LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · [OpenRouter](https://openrouter.ai/) · OpenAI-compatible providers
+**LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · OpenAI-compatible providers
 **Memory:** [LanceDB](https://lancedb.com/) (vector store) + a custom graph store · [Transformers.js](https://huggingface.co/docs/transformers.js) embeddings
 **Channels:** [grammY](https://grammy.dev/) (Telegram)
 **Sandbox:** Docker-isolated runtime + IPC
@@ -214,8 +345,8 @@ npm run dev          # run with hot reload (tsx)
 npm run build        # compile TypeScript → dist/
 npm start            # run the compiled build
 
-npm test             # run the test suite inside the disposable test boundary
-npm run test:docker  # the launcher's docker mode
+npm test             # isolated unit and ordinary integration tests
+npm run test:docker  # retained backend; heavy image acceptance is CI-only
 npm run test:watch   # unsupported — see Test isolation below
 
 npm run check        # typecheck + lint + format + suite, via the isolated launcher
@@ -228,7 +359,7 @@ Tests live under `tests/` (unit, integration, helpers) — never inside `src/`. 
 
 ### Test isolation
 
-The suite never starts on the host. `npm test` and `npm run check` start
+Local and ordinary CI suites never start on the host. `npm test` and `npm run check` start
 `scripts/test-isolated.mjs`, which runs the checks and the suite one-shot and
 bounded inside a disposable Node 24 container built from a selective snapshot
 of the tree. The run never sees your `.env`, your `data/` state, your git
@@ -254,7 +385,22 @@ shares a Linux kernel; it is not a hardware VM. Missing or unsupported backends
 fail closed, never to your socket or a privileged fallback. CI runs ordinary
 checks through the same launcher with GitHub's disposable Docker daemon.
 
-Real boundary checks (each runs its test workload inside the boundary):
+The owner-approved exception is the PR-only `ci-image` job on a fresh
+GitHub-hosted Ubuntu runner. It may install test dependencies with host `npm ci`
+and run only `tests/integration/instance-first-start.test.ts` directly, with
+at most 2 workers, against its actual built
+`ghcr.io/shady2k/lifemodel:ci-$SHA` image and the runner's Docker daemon.
+The job has a 45-minute limit, read-only permissions, full credential-less
+checkout, no user secrets and no login or publishing step. Publishing stays
+in the separate main-push `ci-image-publish` job. No other job inherits this
+exception; `ci-product` remains on the isolated Node 24 launcher.
+
+Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
+locally, including through `test:docker`. The completed isolated Docker
+backend is retained; this exception requires no new VM, DinD or controller.
+
+Retained boundary acceptance commands (not instructions to run the heavy
+image walk locally):
 
 ```bash
 node scripts/accept-test-isolation.mjs

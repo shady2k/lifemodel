@@ -1,18 +1,26 @@
 set -e
 npx lint-staged
 
-# The typecheck, the format check and the suite never start on the host: the
-# isolated launcher runs them inside the disposable test boundary
-# (scripts/test-isolated.mjs, see AGENTS.md). lint-staged and the backlog gate
-# below drive the commit through git context variables (GIT_INDEX_FILE above
-# all); none of them may leak into the launcher's child, which snapshots the
-# tree itself.
+# lint-staged needs the hook's GIT_* to see the staged files; the checks after
+# it must not see them at all: a test that runs git would act on THIS
+# repository (lifemodel-q4x.4.2). They never start on the host: the isolated
+# launcher runs them inside the disposable test boundary
+# (scripts/test-isolated.mjs, see AGENTS.md), and tests/setup/scrub-git-env.ts
+# scrubs them again inside the suite (the policy test at
+# tests/unit/test-entrypoints.test.ts pins the subshell's exact form - the
+# launcher's minimal unset list).
+#
+# The gates AFTER the subshell keep the ORIGINAL git environment on purpose: git
+# supplies a commit-specific GIT_INDEX_FILE for `git commit --only <path>`, and
+# both the tracker guard (`git diff --cached`) and the backlog gate (which reads
+# the staged export at `:0` via GIT_INDEX_FILE) must judge THAT index - the one
+# the commit is actually made from - not the repository's default index
+# (lifemodel-q4x.4.2, review finding 6).
 (
     unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
         GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
     node scripts/test-isolated.mjs check
 )
-
 
 # --- BEGIN LIFEMODEL BACKLOG GATE ---
 # Managed by scripts/connect-clone.sh. The tracker export lands only through a

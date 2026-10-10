@@ -65,10 +65,9 @@ This ensures OpenAI's strict mode enforces the nested structure at generation ti
 
 The provider layer uses a **transcript compiler** to normalize messages for provider-specific constraints (see [ADR-001](../adr/001-gemini-message-sanitization.md)):
 - `STRICT_POLICY` (local providers) — merges consecutive same-role messages, collapses leading system messages
-- `GEMINI_POLICY` (Gemini via OpenRouter) — inserts synthetic user turn, converts mid-conversation system to user
-- `OPENROUTER_POLICY` (other OpenRouter models) — passthrough (OpenRouter normalizes)
+- `GEMINI_POLICY` (Gemini, however it is reached) — inserts synthetic user turn, converts mid-conversation system to user
 
-Policy is resolved automatically in `executeRequest()` based on provider config and model ID.
+Policy is resolved automatically in `executeRequest()` from the model ID.
 
 ## Available Plugins
 

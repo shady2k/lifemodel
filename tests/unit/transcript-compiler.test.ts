@@ -4,10 +4,8 @@ import {
   compileTranscript,
   resolveTranscriptPolicy,
   STRICT_POLICY,
-  OPENROUTER_POLICY,
   GEMINI_POLICY,
 } from '../../src/plugins/providers/transcript-compiler.js';
-import type { VercelAIProviderConfig } from '../../src/plugins/providers/vercel-ai-provider.js';
 
 // Helper to create messages
 const sys = (content: string): Message => ({ role: 'system', content });
@@ -201,40 +199,6 @@ describe('transcript-compiler', () => {
     });
   });
 
-  describe('OPENROUTER_POLICY', () => {
-    it('merges consecutive same-role messages', () => {
-      const messages: Message[] = [
-        sys('System 1'),
-        sys('System 2'),
-        user('Hello'),
-        assistant('Response 1'),
-        assistant('Response 2'),
-      ];
-
-      const result = compileTranscript(messages, OPENROUTER_POLICY);
-
-      // Consecutive assistant messages merged (AI SDK Anthropic adapter validates locally)
-      expect(result).toHaveLength(3);
-      expect(result[0]).toEqual(sys('System 1\n\nSystem 2'));
-      expect(result[1]).toEqual(user('Hello'));
-      expect(result[2]).toEqual(assistant('Response 1\n\nResponse 2'));
-    });
-
-    it('preserves multiple leading system messages', () => {
-      const messages: Message[] = [
-        sys('Identity'),
-        sys('Context'),
-        user('Hello'),
-      ];
-
-      const result = compileTranscript(messages, OPENROUTER_POLICY);
-
-      // maxLeadingSystemMessages is Infinity, but mergeConsecutiveRoles merges them
-      expect(result).toHaveLength(2);
-      expect(result[0]?.role).toBe('system');
-      expect(result[1]?.role).toBe('user');
-    });
-  });
 
   describe('atomicity assertions', () => {
     it('warns but does not throw on orphan tool result (trimmed history)', () => {
@@ -263,31 +227,16 @@ describe('transcript-compiler', () => {
   });
 
   describe('resolveTranscriptPolicy', () => {
-    const openRouterConfig: VercelAIProviderConfig = {
-      apiKey: 'test-key',
-    };
-
-    const localConfig: VercelAIProviderConfig = {
-      baseUrl: 'http://localhost:1234',
-      model: 'local-model',
-    };
-
-    it('returns STRICT_POLICY for local providers', () => {
-      const policy = resolveTranscriptPolicy(localConfig, 'local-model');
+    it('returns STRICT_POLICY for the endpoint with any other model', () => {
+      const policy = resolveTranscriptPolicy('local-model');
       expect(policy.name).toBe('strict');
       expect(policy.mergeConsecutiveRoles).toBe(true);
     });
 
-    it('returns GEMINI_POLICY for OpenRouter with Gemini model', () => {
-      const policy = resolveTranscriptPolicy(openRouterConfig, 'google/gemini-2.0-flash');
+    it('returns GEMINI_POLICY for a Gemini model reached through the endpoint', () => {
+      const policy = resolveTranscriptPolicy('google/gemini-2.0-flash');
       expect(policy.name).toBe('gemini');
       expect(policy.requireLeadingUserTurn).toBe(true);
-    });
-
-    it('returns OPENROUTER_POLICY for OpenRouter with non-Gemini model', () => {
-      const policy = resolveTranscriptPolicy(openRouterConfig, 'anthropic/claude-3.5-sonnet');
-      expect(policy.name).toBe('openrouter');
-      expect(policy.mergeConsecutiveRoles).toBe(true);
     });
   });
 

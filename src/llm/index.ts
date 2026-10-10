@@ -12,14 +12,10 @@ export { LLMError, BaseLLMProvider } from './provider.js';
 export {
   VercelAIProvider,
   createVercelAIProvider,
-  createVercelAIOpenRouterProvider,
-  createVercelAILocalProvider,
+  createVercelAIEndpointProvider,
   type VercelAIProviderConfig,
-  type VercelAIOpenRouterConfig,
-  type VercelAILocalConfig,
+  type VercelAIEndpointConfig,
 } from '../plugins/providers/vercel-ai-provider.js';
-
-export { MultiProvider, createMultiProvider, type MultiProviderConfig } from './multi-provider.js';
 
 export {
   MessageComposer,

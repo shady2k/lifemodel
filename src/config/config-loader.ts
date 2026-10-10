@@ -2,6 +2,43 @@ import { readFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentConfigFile, MergedConfig } from './config-schema.js';
 import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
+import { DeferredStorage } from '../storage/deferred-storage.js';
+import { JSONStorage } from '../storage/json-storage.js';
+import type { StorageSaveOptions } from '../storage/storage.js';
+import type { Logger } from '../types/logger.js';
+
+/**
+ * Where lifemodel's config file lives (lifemodel-q4x.4.1).
+ *
+ * `DATA_PATH` moves the config with the rest of the instance's data: the loader
+ * gives lifemodel `DATA_PATH=<volume>/data`, so the file is
+ * `<volume>/data/config/agent.json` - the path the volume layout names. Without
+ * `DATA_PATH` (a checkout, a test) it is the working directory's `data/config`.
+ * One function, so the reader at startup and the writer of lifemodel's settings
+ * interface can never disagree about which file it is.
+ */
+export function resolveConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  const dataPath = env['DATA_PATH'];
+  return dataPath ? join(dataPath, 'config') : 'data/config';
+}
+
+/** The storage key of the config file under its own directory: `agent.json`. */
+const CONFIG_STORAGE_KEY = 'agent';
+
+/**
+ * The loader has no logger of its own: a write failure is reported by CALLING
+ * code (the settings interface answers 500 with it). This one stays silent so
+ * a bare `createConfigLoader()` still works.
+ */
+const silentLogger: Logger = {
+  trace: () => undefined,
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+  fatal: () => undefined,
+  child: () => silentLogger,
+};
 
 /**
  * ConfigLoader - loads and merges configuration from multiple sources.
@@ -14,9 +51,20 @@ import { DEFAULT_CONFIG, CONFIG_FILE_VERSION } from './config-schema.js';
 export class ConfigLoader {
   private readonly configPath: string;
   private loadedConfig: AgentConfigFile | null = null;
+  /**
+   * The REQUIRED write pipeline at the config root (AGENTS.md, Lesson 4):
+   * DeferredStorage over JSONStorage, and `flush()` is the awaited durability
+   * point. `createBackup: false` keeps the config loader the only writer of
+   * `agent.json`'s history (no `.backup.json` sibling of the config file).
+   */
+  private readonly storage: DeferredStorage;
 
-  constructor(configPath = 'data/config') {
+  constructor(configPath = 'data/config', logger?: Logger) {
     this.configPath = configPath;
+    this.storage = new DeferredStorage(
+      new JSONStorage({ basePath: configPath, createBackup: false }),
+      logger ?? silentLogger
+    );
   }
 
   /**
@@ -45,6 +93,51 @@ export class ConfigLoader {
    */
   getLoadedConfigFile(): AgentConfigFile | null {
     return this.loadedConfig;
+  }
+
+  /**
+   * The file this loader reads: `<configPath>/agent.json`.
+   */
+  get filePath(): string {
+    return join(this.configPath, 'agent.json');
+  }
+
+  /**
+   * Read the config file as it is on disk, without merging anything:
+   * lifemodel's settings interface renders what the owner saved.
+   */
+  async readFile(): Promise<AgentConfigFile | null> {
+    return await this.loadConfigFile();
+  }
+
+  /**
+   * Write the config file - the SAME file `load()` reads at startup.
+   *
+   * The write runs through the REQUIRED storage pipeline (AGENTS.md, Lesson 4):
+   * DeferredStorage, flushed through JSONStorage rooted at the config
+   * directory. The key `agent` maps to `<config dir>/agent.json` with the
+   * object serialized as `JSON.stringify(object, null, 2)` - the file's name
+   * and the object's shape are unchanged, and the save is atomic (a temp file
+   * unique to this write, fsynced, renamed over the target by
+   * `JSONStorage.save`, whose publication point is that one rename).
+   *
+   * Awaiting `flush()` here is what makes the write's outcome DECIDED before
+   * the promise resolves: either the rename published and this promise
+   * resolves with the file whole on disk, or nothing was published and it
+   * rejects - there is no third state (review round 2, findings B and C: the
+   * old direct writer rejected AFTER its rename on a directory-sync failure,
+   * reporting as unmutated a file that already held the new settings).
+   *
+   * The optional `signal` (a caller's stop contract) aborts the write at its
+   * publication point: an aborted write never renames, and the file is left
+   * exactly as it was.
+   */
+  async writeFile(file: AgentConfigFile, options?: StorageSaveOptions): Promise<void> {
+    // Mark dirty through the deferred layer, then flush BELOW: the write's
+    // outcome is decided when flush() resolves (nothing persisted, or the
+    // file whole on disk).
+    await this.storage.save(CONFIG_STORAGE_KEY, file);
+    await this.storage.flush(options);
   }
 
   /**
@@ -143,15 +236,21 @@ export class ConfigLoader {
 
     // LLM
     if (file.llm) {
-      if (file.llm.fastModel) {
-        config.llm.fastModel = file.llm.fastModel;
+      // The endpoint: each field on its own, so a half-written one is visible
+      // as half-written rather than merged away (lifemodel-q4x.4.1).
+      if (file.llm.endpoint) {
+        const endpoint = file.llm.endpoint;
+        if (endpoint.baseUrl !== undefined) config.llm.endpoint.baseUrl = endpoint.baseUrl;
+        if (endpoint.fastModel !== undefined) config.llm.endpoint.fastModel = endpoint.fastModel;
+        if (endpoint.smartModel !== undefined) config.llm.endpoint.smartModel = endpoint.smartModel;
+        if (endpoint.motorModel !== undefined) config.llm.endpoint.motorModel = endpoint.motorModel;
       }
-      if (file.llm.smartModel) {
-        config.llm.smartModel = file.llm.smartModel;
-      }
-      if (file.llm.motorModel) {
-        config.llm.motorModel = file.llm.motorModel;
-      }
+    }
+
+    // Telegram bot token: the config file carries the Agent Vault PLACEHOLDER
+    // (`__telegram_bot_token__`), never the token (lifemodel-q4x.3.*).
+    if (file.telegram?.botToken) {
+      config.telegramBotToken = file.telegram.botToken;
     }
 
     // Logging
@@ -186,11 +285,6 @@ export class ConfigLoader {
    */
   private mergeEnvironment(config: MergedConfig): void {
     // Secrets (always from env)
-    const openRouterKey = process.env['OPENROUTER_API_KEY'];
-    if (openRouterKey) {
-      config.llm.openRouterApiKey = openRouterKey;
-    }
-
     const telegramToken = process.env['TELEGRAM_BOT_TOKEN'];
     if (telegramToken) {
       config.telegramBotToken = telegramToken;
@@ -202,46 +296,26 @@ export class ConfigLoader {
       config.primaryUser.telegramChatId = chatId;
     }
 
-    // LLM models (env overrides config)
-    const fastModel = process.env['LLM_FAST_MODEL'];
-    if (fastModel) {
-      config.llm.fastModel = fastModel;
+    // The endpoint (each field on its own: an environment variable names one
+    // field, and a half-written endpoint stays visible as one)
+    const endpointBaseUrl = process.env['LLM_ENDPOINT_BASE_URL'];
+    if (endpointBaseUrl !== undefined) {
+      config.llm.endpoint.baseUrl = endpointBaseUrl;
     }
 
-    const smartModel = process.env['LLM_SMART_MODEL'];
-    if (smartModel) {
-      config.llm.smartModel = smartModel;
+    const endpointFastModel = process.env['LLM_ENDPOINT_FAST_MODEL'];
+    if (endpointFastModel !== undefined) {
+      config.llm.endpoint.fastModel = endpointFastModel;
     }
 
-    const motorModel = process.env['LLM_MOTOR_MODEL'];
-    if (motorModel) {
-      config.llm.motorModel = motorModel;
+    const endpointSmartModel = process.env['LLM_ENDPOINT_SMART_MODEL'];
+    if (endpointSmartModel !== undefined) {
+      config.llm.endpoint.smartModel = endpointSmartModel;
     }
 
-    // Local model configuration
-    const localBaseUrl = process.env['LLM_LOCAL_BASE_URL'];
-    if (localBaseUrl) {
-      config.llm.local.baseUrl = localBaseUrl;
-    }
-
-    const localModel = process.env['LLM_LOCAL_MODEL'];
-    if (localModel) {
-      config.llm.local.model = localModel;
-    }
-
-    const localUseForFast = process.env['LLM_LOCAL_USE_FOR_FAST'];
-    if (localUseForFast !== undefined) {
-      config.llm.local.useForFast = localUseForFast === 'true';
-    }
-
-    const localUseForSmart = process.env['LLM_LOCAL_USE_FOR_SMART'];
-    if (localUseForSmart !== undefined) {
-      config.llm.local.useForSmart = localUseForSmart === 'true';
-    }
-
-    const localUseForMotor = process.env['LLM_LOCAL_USE_FOR_MOTOR'];
-    if (localUseForMotor !== undefined) {
-      config.llm.local.useForMotor = localUseForMotor === 'true';
+    const endpointMotorModel = process.env['LLM_ENDPOINT_MOTOR_MODEL'];
+    if (endpointMotorModel !== undefined) {
+      config.llm.endpoint.motorModel = endpointMotorModel;
     }
 
     // Log level
