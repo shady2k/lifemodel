@@ -1,5 +1,7 @@
 # Generation candidate design — proposed decision and owner trade
 
+**Superseded 2026-10-11 (owner):** generations run as their own containers started by the loader, with state in Valkey and Postgres; the same-container candidate this document reasons about is not built. Kept as the record of that direction; see `docs/charters/instance-1.md`.
+
 Status: supporting source-only design; decision-pending, not capability acceptance.
 Change: lifemodel-b0r-design. Task: lifemodel-b0r.8.3. Stage: lifemodel-b0r.8.
 Source baseline: 78a5dca. Planning/research PR23/24 merged; bookkeeping PR25 merged. Present behavior unchanged.
