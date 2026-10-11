@@ -1,5 +1,7 @@
 # Candidate-first generation rollout — proposed change
 
+**Superseded 2026-10-11 (owner):** generations run as their own containers started by the loader, with state in Valkey and Postgres; the same-container candidate this document reasons about is not built. Kept as the record of that direction; see `docs/charters/instance-1.md`.
+
 Status: Proposed behavioral contract and coarse implementation stages; not implemented or accepted capability documentation.
 Planning is a supporting docs-only change. Source-only feasibility must settle the architecture before implementation. No product requirements or present-capability documents are changed.
 Change: lifemodel-b0r-planning.

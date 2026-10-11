@@ -1,7 +1,8 @@
 # instance-1 — Your own lifemodel that changes itself
 
 **Agreed:** 2026-10-07 by the owner as `self-change-1`; reshaped and renamed
-2026-10-08 by the owner. **Design:** ADR-006 (`docs/adr/006-self-evolution.md`,
+2026-10-08 by the owner; re-cut 2026-10-11 by the owner around container
+generations and a web interface (below). **Design:** ADR-006 (`docs/adr/006-self-evolution.md`,
 not yet on main), simplified: git, restart and a loader instead of
 generations and cutover. The instance shape follows razzant/ouroboros: the
 instance's code is a git repository it changes by commits.
@@ -25,6 +26,29 @@ embeddings and the rest are lifemodel's own settings in its own web interface,
 which it can extend. Data is never rolled back: format changes are expanding,
 or carry an up/down migration pair the loader runs when switching generations.
 The decisions and their evidence are on the outcome-4 feature's decision log.
+
+**Generations as containers (owner, 2026-10-11).** The self-development loop
+is the milestone's aim and comes first. Generations switch the way Kubernetes
+rolls out a stateless service: the existing loader (extended, not rewritten)
+runs in its own container, the only one with access to Docker, and starts each
+generation of lifemodel as its own container beside the running one; liveness
+and readiness probes, then the switch of the epoch, the health window, the
+rollback and the maintenance mode. A generation keeps no state of its own:
+**Valkey** holds the event bus (streams) and one current snapshot of the tick,
+committed atomically with the epoch check and flushed to disk on every write;
+**Postgres with pgvector** holds memory and configuration (no shared folder:
+the configuration lives in the store); **OpenBao**, beside Agent Vault, issues
+the credentials. The tick is the only boundary: asynchronous results arrive on
+the bus and are handled in later ticks; a planned switch lets the old
+generation finish its tick and leave, and the new one continues from the
+current snapshot. Nothing exists to migrate: the instance starts greenfield.
+The core is not split into modules now; the bus and the external state are the
+seams that later let modules be cut out and written in any language. This
+replaces the earlier owner direction of an initialized candidate promoted
+inside the same container (`lifemodel-b0r.8`, its documents kept as the record
+of that direction); reversible format migrations and "refuse when uncertain"
+carry over. The channel of this milestone is a web interface; Telegram comes
+later.
 
 ## Outcomes
 
@@ -51,24 +75,36 @@ development test environment, never on somebody's real instance.
    environment uses a stub endpoint and a made-up key; owner, 2026-10-08);
    recreating the container keeps the code and the data; panic keeps it down
    across a restart of the container and of Docker until it is resumed.
-5. **A broken version reverts itself, and the owner can boot any
-   generation.** *Check:* a generation that never becomes healthy is replaced,
+5. **A new generation takes over from the running one, and a broken one
+   reverts itself** (re-cut 2026-10-11; was "A broken version reverts itself,
+   and the owner can boot any generation"). *Check:* in the test environment
+   the loader, in its own container, starts generation N+1 as a container
+   beside N; N+1 passes its readiness probe and the epoch switches; the
+   conversation continues from the current snapshot with no message lost or
+   answered twice; a generation that never becomes healthy is replaced,
    without the owner, by the previous healthy one with a report; in the
    loader's maintenance mode the owner boots an older generation, and data
-   changed by a breaking migration is brought back to that generation's format.
+   changed by a breaking migration is brought back to that generation's
+   format. Outcome 4's check is walked again on this shape: one command still
+   starts the instance, no key is in lifemodel's process, panic holds across
+   restarts.
 6. **Tasks run in parallel, each within its own limits.** *Check:* two tasks
    run at once with different profiles; each sees only its own files and its
    allowed domains, no key is present in its process, and a task asking for
    more than the owner's ceilings is refused. Motor Cortex runs its work on
    this executor instead of Docker.
 7. **The owner asks, and lifemodel changes itself and reports.** *Check:* the
-   owner writes "learn X" in Telegram; a self-change task changes lifemodel's
+   owner writes "learn X" in the web interface (outcome 8; was Telegram); a self-change task changes lifemodel's
    code through prime-agent, passes the gates and becomes a new generation
    through the loader, and lifemodel reports what changed, why and how to roll
    back. A deliberately broken change reverts itself and is reported.
+8. **The owner talks to lifemodel through the web interface** (new
+   2026-10-11). *Check:* behind the loader's password the owner writes in the
+   web chat and gets lifemodel's answer, and the conversation survives a
+   switch of generations.
 
-Outcome 4 is needed by all the others; 5 and 6 are independent of each other;
-7 needs 5 and 6.
+Outcome 4 is needed by all the others; 5, 6 and 8 are independent of each
+other; 7 needs 5, 6 and 8. The numbers are names, not an order.
 
 ## Out
 
@@ -85,8 +121,15 @@ Outcome 4 is needed by all the others; 5 and 6 are independent of each other;
 - Starting a change without the owner's request (`evolution-1`).
 - A cutover without a pause, the LLM gateway that meters spend
   (`platform-1`, added when needed).
-- Moving memory behind a port (`memory-1`). Long-term memory is not
+- Moving memory behind its own port (`memory-1`); this milestone only moves
+  its storage into Postgres with pgvector. Long-term memory is not
   versioned, and data is never rolled back.
+- Telegram on the new shape (owner, 2026-10-11): until it is ported, the
+  owner talks to lifemodel through the web interface only.
+- Replaying the bus journal, a hot standby generation, functions and
+  several versions running at once, cutting the core into modules, modules
+  in other languages, rewriting lifemodel in Go or Rust (owner, 2026-10-11:
+  later, on the same seams).
 - Steer and `/stop` (`dialogue-1`).
 - Choosing where the target machine lives.
 
@@ -105,6 +148,14 @@ rollback) and the outcomes were re-cut: outcome 4 grew to the loader, Agent
 Vault and lifemodel's own interface; generations became outcome 5 with a
 maintenance mode; the task executor became outcome 6; change-yourself moved
 to outcome 7.
+
+The re-cut of 2026-10-11 carries nothing over and defers nothing open: it
+rewrites outcome 5 around container generations, adds outcome 8 (the web
+interface) and moves outcome 7's request from Telegram to it. The
+candidate-first stages of outcome 5 (`lifemodel-b0r.4`-`.7`) and its design
+stage (`lifemodel-b0r.8`) are closed as replaced by that decision; the
+vector-memory storage finding (`lifemodel-ww8`) is closed as moot, since
+LanceDB leaves for Postgres with pgvector.
 
 ## Finding budget
 

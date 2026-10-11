@@ -1,5 +1,7 @@
 # Generation candidate authority — worked options
 
+**Superseded 2026-10-11 (owner):** generations run as their own containers started by the loader, with state in Valkey and Postgres; the same-container candidate this document reasons about is not built. Kept as the record of that direction; see `docs/charters/instance-1.md`.
+
 Status: supporting source-only design proposal; no enforcement implemented or accepted.
 Change: lifemodel-b0r-design. Task: lifemodel-b0r.8.1. Source baseline: 78a5dca.
 Input: fresh `shady2k-gateway/glm-5.3-flash` report; coordinator rejected its watchdog-as-ceiling alternative. Raw report `/tmp/lifemodel-b0r-authority-options.md` is not an acceptance contract.

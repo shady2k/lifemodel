@@ -1,5 +1,7 @@
 # Native lifetime and current-data handoff — source-only contract
 
+**Superseded 2026-10-11 (owner):** generations run as their own containers started by the loader, with state in Valkey and Postgres; the same-container candidate this document reasons about is not built. Kept as the record of that direction; see `docs/charters/instance-1.md`.
+
 Status: supporting source-only design proposal; not operational release or migration proof.
 Change: lifemodel-b0r-design. Task: lifemodel-b0r.8.2. Source baseline: 78a5dca.
 Input: fresh `shady2k-gateway/glm-5.3-flash` report, with coordinator corrections. Raw `/tmp/lifemodel-b0r-handoff-options.md` remains historical, not an acceptance contract.
