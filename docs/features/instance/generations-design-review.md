@@ -55,3 +55,7 @@ Reviewed `docs/features/instance/generations-authority-options.md` and `docs/fea
 
 **Remaining work is proof/implementation, not a missing correction to these targeted source-only design statements.** Pinned-package claims are sourced to the raw worker's public-tarball reading, not independently validated here; neither report says JS declarations prove native close. `lifemodel-653`/`lifemodel-ww8` ownership, deployment approval, ceilings and health constants remain open; no probes or acceptance performed in this disposition.
 
+### Decision composition disposition
+
+Also reviewed `docs/features/instance/generations-design-decision.md` against the same findings. It composes the corrected authority and handoff contracts without reintroducing watchdog launch, owner acceptance as enforcement, spawn-only root selection, child-intent release proof, atomic-write durability claims or historical-root fallback. It keeps same-process promotion fixed; failed/unknown native and external owners, sync or epoch refuse. Its owner-held trade is preventive aggregate cgroup delegation versus no concurrent candidate under existing deployment, with no weakened implementation path. Status explicitly remains **decision-pending, not an accepted ADR**, and the requested environment/native plan, runtime changes, CI and resources are not authorized by this document. No residual design-text blocker found under this targeted verification; all executable proof gates remain open.
+
