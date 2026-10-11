@@ -9,7 +9,7 @@ Input: fresh `shady2k-gateway/glm-5.3-flash` report, with coordinator correction
 Lockfile pins `@lancedb/lancedb` 0.26.2, `@huggingface/transformers` 3.8.1, `onnxruntime-node/common` 1.21.0, pino 10.3.0, thread-stream 4.0.0 and grammy 1.39.3. Public pinned tarballs were read, never installed/executed.
 
 - Lance `dist/connection.d.ts` and `dist/table.d.ts` expose `close(): void` and `isOpen()`. Connection documentation says created tables remain independent after connection close: close every owned table then connection. Package API exists; `src/storage/lance-vector-store.ts` wrapper has no close surface. Flags/declarations do not prove native fd/mmap/task release.
-- Transformers `src/pipelines.js` awaits model dispose; `src/models.js` awaits dispose of owned session handlers. ONNX binding exposes dispose and common interface exposes release. Actual native completion remains a proof gate; current embedder hides disposal.
+- Pinned Transformers package source (`@huggingface/transformers` tarball, pipelines.js and models.js) awaits model dispose and disposal of owned session handlers; these are package paths, not repository files. ONNX binding exposes dispose and common interface exposes release. Actual native completion remains a proof gate; current embedder hides disposal.
 - Explicit pino transport can retain thread-stream, end and observe close. Existing logger discards that handle. Flush/end/close, child transports and external owners must be accounted; no bounded native release guaranteed by these declarations.
 - grammy stop does not await middleware. Existing Telegram intake adds its own emit drain. Same-token cross-process exclusivity is an admission obligation, not Telegram/grammy dedup proof.
 
