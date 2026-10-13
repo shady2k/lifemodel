@@ -23,6 +23,9 @@ let
   };
   kubectl = "${lifemodelK3s}/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml";
   lifemodelCli = pkgs.writeShellScriptBin "lifemodel" ''
+    export LIFEMODEL_STATE_DIR=/var/lib/lifemodel
+    export LIFEMODEL_CONFIGURED_REF=${lib.escapeShellArg platformRef}
+    export LIFEMODEL_NIXOS=1
     exec ${pkgs.nodejs}/bin/node ${../cli/lifemodel.mjs} "$@"
   '';
   platformRef = if cfg.platform.digest != null then "digest=${cfg.platform.digest}" else "tag=${cfg.platform.tag}";
@@ -72,6 +75,13 @@ in
       package = lifemodelK3s;
     };
     environment.systemPackages = [ lifemodelK3s lifemodelCli ];
+    system.activationScripts.lifemodel-bootstrap = {
+      text = ''
+        if ${pkgs.systemd}/bin/systemctl is-active --quiet lifemodel-flux-bootstrap.service; then
+          ${pkgs.systemd}/bin/systemctl restart lifemodel-flux-bootstrap.service
+        fi
+      '';
+    };
     systemd.services.lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
       wantedBy = [ "multi-user.target" ];
@@ -82,7 +92,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      path = [ pkgs.coreutils pkgs.gnugrep lifemodelK3s lifemodelCli ];
+      path = [ pkgs.coreutils pkgs.gnugrep pkgs.util-linux lifemodelK3s lifemodelCli ];
       script = ''
         set -euo pipefail
         KUBECTL='${kubectl}'
@@ -116,9 +126,16 @@ in
           $KUBECTL create secret generic platform-cosign --namespace flux-system \
             --from-file=cosign.pub=${keyFile} --dry-run=client -o yaml | $KUBECTL apply --server-side -f -
         ''}
-        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f ${renderedOCI}
-        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f ${renderedKustomization}
-        lifemodel record-applied ${lib.escapeShellArg platformRef}
+        install -d -m 0700 /var/lib/lifemodel
+        exec 9>/var/lib/lifemodel/lock
+        flock -x 9
+        effectiveOCI=$(mktemp)
+        trap 'rm -f "$effectiveOCI"' EXIT
+        LIFEMODEL_LOCKED=1 lifemodel render-ref ${renderedOCI} ${lib.escapeShellArg platformRef} > "$effectiveOCI"
+        effectiveRef=$(LIFEMODEL_LOCKED=1 lifemodel effective-ref ${lib.escapeShellArg platformRef})
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
+        LIFEMODEL_LOCKED=1 lifemodel record-applied "$effectiveRef"
       '';
     };
   };
