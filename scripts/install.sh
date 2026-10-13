@@ -184,6 +184,11 @@ fi
 [ "$(id -u)" -eq 0 ] || die "must run as root (k3s and the Flux bootstrap need it)"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+if ! command -v node >/dev/null 2>&1; then
+  command -v apt-get >/dev/null 2>&1 || die "Node.js is required (install nodejs or use a Debian/Ubuntu host with apt-get)"
+  apt-get update
+  apt-get install -y nodejs
+fi
 
 if command -v k3s >/dev/null 2>&1; then
   installed_version=$(k3s --version | awk 'NR==1 {print $3}')
@@ -252,5 +257,20 @@ fi
 render_root_objects "$render_dir"
 $KUBECTL apply --server-side -f "$render_dir/ocirepository.yaml"
 $KUBECTL apply --server-side -f "$render_dir/kustomization.yaml"
+
+# Install the recovery CLI and durably retain this successfully applied pin.
+install -d -m 0755 /usr/local/lib/lifemodel /usr/local/bin /var/lib/lifemodel
+install -m 0644 "$SCRIPT_DIR/../deploy/cli/lifemodel.mjs" /usr/local/lib/lifemodel/lifemodel.mjs
+cat > /usr/local/bin/lifemodel <<'EOF'
+#!/bin/sh
+exec node /usr/local/lib/lifemodel/lifemodel.mjs "$@"
+EOF
+chmod 0755 /usr/local/bin/lifemodel
+if [ -n "$PLATFORM_DIGEST" ]; then
+  configured_ref="digest=$PLATFORM_DIGEST"
+else
+  configured_ref="tag=$PLATFORM_TAG"
+fi
+LIFEMODEL_HISTORY=/var/lib/lifemodel/platform-history lifemodel record-applied "$configured_ref"
 
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

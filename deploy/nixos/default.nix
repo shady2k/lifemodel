@@ -22,6 +22,10 @@ let
     hash = "sha256-nB/afkAUKVMe0UePZ7oGs+3/ZRO3XafuR73p8cTUJRw=";
   };
   kubectl = "${lifemodelK3s}/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml";
+  lifemodelCli = pkgs.writeShellScriptBin "lifemodel" ''
+    exec ${pkgs.nodejs}/bin/node ${../cli/lifemodel.mjs} "$@"
+  '';
+  platformRef = if cfg.platform.digest != null then "digest=${cfg.platform.digest}" else "tag=${cfg.platform.tag}";
   keyFile = "/run/lifemodel/platform-cosign.pub";
   otherFlux = (config.services.fluxcd.enable or false) || (config.fluxcd.enable or false);
 in
@@ -67,7 +71,7 @@ in
       clusterInit = true;
       package = lifemodelK3s;
     };
-    environment.systemPackages = [ lifemodelK3s ];
+    environment.systemPackages = [ lifemodelK3s lifemodelCli ];
     systemd.services.lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
       wantedBy = [ "multi-user.target" ];
@@ -78,7 +82,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      path = [ pkgs.coreutils pkgs.gnugrep lifemodelK3s ];
+      path = [ pkgs.coreutils pkgs.gnugrep lifemodelK3s lifemodelCli ];
       script = ''
         set -euo pipefail
         KUBECTL='${kubectl}'
@@ -114,6 +118,7 @@ in
         ''}
         $KUBECTL apply --server-side -f ${renderedOCI}
         $KUBECTL apply --server-side -f ${renderedKustomization}
+        lifemodel record-applied ${lib.escapeShellArg platformRef}
       '';
     };
   };

@@ -20,3 +20,17 @@ the default. For key verification set `verify.mode = "key"` and
 `verify.publicKey` to the PEM public key text. Use `platform.digest` instead of
 a mutable tag when pinning an artifact by digest. `platform.insecureRegistry`
 is only for a VM-local plain-HTTP registry.
+
+
+## When the loader is broken
+
+SSH to the dedicated VM and run `sudo lifemodel doctor`. It reports Flux source
+and Kustomization readiness, revisions, and loader pod health. To restore the
+previous successfully applied platform release, run
+`sudo lifemodel doctor --repin previous`. This patches the root `platform`
+OCIRepository and requests a Flux reconcile. On NixOS, a later
+`nixos-rebuild switch` reapplies the configured pin, so copy the exact
+`services.lifemodel.platform.tag` or `.digest` setting printed by the command
+into the host configuration before rebuilding. The previous pin is kept in
+`/var/lib/lifemodel/platform-history`; it is advanced only after the installer
+or NixOS bootstrap successfully applies the configured root objects.
