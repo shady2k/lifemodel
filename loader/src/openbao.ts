@@ -2,7 +2,6 @@
 import { request as httpsRequest } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import type { PlatformPhaseStore } from './platform-bootstrap.js';
 
 export interface BaoKeys { keys: string[]; rootToken: string | null }
 export interface BaoStatus { initialized: boolean; sealed: boolean }
