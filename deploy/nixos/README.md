@@ -16,8 +16,9 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
 Then run `sudo nixos-rebuild switch --flake .#HOST`. The module starts k3s
 with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
 the verified platform source and root Kustomization. Keyless verification is
-the default. For key verification set `verify.mode = "key"` and
-`verify.publicKey` to the PEM public key text. Use `platform.digest` instead of
+the default. The recovery CLI requires Node.js 18 or newer; the generic installer
+checks this before any cluster writes. For key verification set
+`verify.mode = "key"` and `verify.publicKey` to the PEM public key text. Use `platform.digest` instead of
 a mutable tag when pinning an artifact by digest. `platform.insecureRegistry`
 is only for a VM-local plain-HTTP registry.
 
@@ -27,12 +28,23 @@ is only for a VM-local plain-HTTP registry.
 SSH to the dedicated VM and run `sudo lifemodel doctor`. It reports Flux source
 and Kustomization readiness, revisions, and loader pod health. To restore the
 previous successfully applied platform release, run
-`sudo lifemodel doctor --repin previous`. This patches the root `platform`
-OCIRepository and requests a Flux reconcile. Recovery completes within the
-A0 Kustomization's 2-minute timeout plus the loader's start time. The old
-loader keeps serving during a broken rollout. On NixOS, a later
-`nixos-rebuild switch` reapplies the configured pin, so copy the exact
-`services.lifemodel.platform.tag` or `.digest` setting printed by the command
-into the host configuration before rebuilding. The previous pin is kept in
-`/var/lib/lifemodel/platform-history`; it is advanced only after the installer
-or NixOS bootstrap successfully applies the configured root objects.
+`sudo lifemodel doctor --repin previous`. Doctor stores a durable override and
+restarts the single bootstrap writer; it does not patch the cluster itself.
+The writer uses the override only while the configured tag or digest still
+matches the configuration recorded with it. An unchanged NixOS switch keeps
+the override. Setting a new configured tag or digest makes that configured ref
+win and removes the override. Run `sudo lifemodel doctor --repin clear` to
+remove an override explicitly. Doctor reports an active override prominently.
+
+On the test VM, recovery was measured at 82 seconds. The A0 Kustomization's
+two-minute timeout covers its reconciliation and health check; it does not
+bound OCI fetching and verification, controller scheduling or retries, the
+root Kustomization's separate five-minute wait, or complete recovery. Doctor
+requests reconciliation and returns; rerun `sudo lifemodel doctor` to confirm
+the new release is ready. During a rollout, the old loader keeps serving only
+while the replacement never becomes Ready. If the replacement becomes Ready
+and fails later, the old pod may already have been retired.
+
+The previous successfully applied ref is kept in `/var/lib/lifemodel/platform-history`.
+It advances only after the bootstrap writer successfully applies the configured
+root objects.

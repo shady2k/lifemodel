@@ -36,7 +36,7 @@ function object(objects: Record<string, any>[], kind: string): Record<string, an
   return found!;
 }
 
-function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string, tag = 'v1.0.0'): { status: number | null; output: string; root: string } {
+function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string, tag = 'v1.0.0', options: { unsupportedNode?: boolean; metacharState?: boolean } = {}): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
   const bin = join(root, 'bin');
   const state = join(root, 'namespace-state');
@@ -49,6 +49,7 @@ function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: 
     chmodSync(path, 0o755);
   };
   command('id', 'echo 0');
+  if (options.unsupportedNode) command('node', 'echo 14');
   command('k3s', `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
 case "$*" in
   *'get nodes'*) exit 0 ;;
@@ -58,7 +59,7 @@ case "$*" in
   *'--field-manager=lifemodel-bootstrap'*)
     file=''; for arg do file=$arg; done
     echo "root:$*" >> "$K3S_LOG"
-    if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | awk -F"'" '{print $2}' > "$K3S_APPLIED_TAG"; fi
+    if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | sed -E "s/.*tag: //; s/[\\\"']//g" > "$K3S_APPLIED_TAG"; fi
     ;;
   *' -f -'*) cat >/dev/null ;;
   *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
@@ -74,7 +75,7 @@ esac`);
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
     LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
-    LIFEMODEL_STATE_DIR: join(root, 'state'),
+    LIFEMODEL_STATE_DIR: options.metacharState ? join(root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`') : join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
   const result = spawnSync('sh', [installer, '--platform-url', 'oci://example.test/platform', '--tag', tag, '--root-templates', rootTemplates], { encoding: 'utf8', env });
@@ -159,13 +160,40 @@ describe('platform manifests', () => {
       expect(first.status, first.output).toBe(0);
       const second = runInstallerHarness(false, false, first.root, 'v2.0.0');
       expect(second.status, second.output).toBe(0);
+      const installed = join(second.root, 'install-root/usr/local/bin/lifemodel');
+      const recovery = spawnSync(installed, ['doctor', '--repin', 'previous'], { encoding: 'utf8', env: { ...process.env, PATH: `${join(second.root, 'bin')}:${process.env.PATH}`, LIFEMODEL_INSTALL_ROOT: join(second.root, 'install-root'), LIFEMODEL_STATE_DIR: join(second.root, 'state'), K3S_STATE: join(second.root, 'namespace-state'), K3S_LOG: join(second.root, 'kubectl.log'), K3S_APPLIED_TAG: join(second.root, 'applied-tag'), K3S_FAIL_FLUX: '0', K3S_FOREIGN: '0' } });
+      expect(recovery.status, recovery.stderr).toBe(0);
       const log = readFileSync(join(second.root, 'kubectl.log'), 'utf8');
       const rootApplies = log.split('\n').filter((line) => line.startsWith('root:'));
-      expect(rootApplies).toHaveLength(4);
-      expect(rootApplies.every((line) => line.includes('--server-side --field-manager=lifemodel-bootstrap --force-conflicts'))).toBe(true);
-      expect(readFileSync(join(second.root, 'applied-tag'), 'utf8').trim()).toBe('v2.0.0');
-      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v2.0.0\ntag=v1.0.0\n');
+      expect(rootApplies).toHaveLength(6);
+      expect(rootApplies.every((line) => line.includes('--server-side --field-manager=lifemodel-bootstrap'))).toBe(true);
+      expect(readFileSync(join(second.root, 'applied-tag'), 'utf8').trim()).toBe('v1.0.0');
+      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v1.0.0\ntag=v2.0.0\n');
+      expect(JSON.parse(readFileSync(join(second.root, 'state', 'platform-override'), 'utf8'))).toEqual({ ref: 'tag=v1.0.0', configuredRef: 'tag=v2.0.0' });
     } finally { rmSync(first.root, { recursive: true, force: true }); }
+  });
+
+  it('binds the installed CLI to its state directory and quotes metacharacter paths', () => {
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { metacharState: true });
+    try {
+      expect(result.status, result.output).toBe(0);
+      const bin = join(result.root, 'install-root/usr/local/bin/lifemodel');
+      const env = { ...process.env, PATH: `${join(result.root, 'bin')}:${process.env.PATH}` };
+      for (const key of ['LIFEMODEL_STATE_DIR', 'LIFEMODEL_HISTORY', 'LIFEMODEL_INSTALL_ROOT']) delete (env as NodeJS.ProcessEnv)[key];
+      const record = spawnSync(bin, ['record-applied', 'tag=v2.0.0'], { encoding: 'utf8', env });
+      expect(record.status, record.stderr).toBe(0);
+      expect(readFileSync(join(result.root, 'state $(touch SHOULD_NOT_EXIST) `echo nope`', 'platform-history'), 'utf8')).toBe('tag=v2.0.0\ntag=v1.0.0\n');
+      expect(existsSync(join(result.root, 'SHOULD_NOT_EXIST'))).toBe(false);
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
+  });
+
+  it('rejects an unsupported existing Node runtime before cluster writes', () => {
+    const result = runInstallerHarness(false, false, undefined, 'v1.0.0', { unsupportedNode: true });
+    try {
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain('Node.js 18 or newer is required');
+      expect(existsSync(join(result.root, 'kubectl.log'))).toBe(false);
+    } finally { rmSync(result.root, { recursive: true, force: true }); }
   });
 
   it('still refuses a foreign flux-system namespace', () => {

@@ -135,12 +135,14 @@
       '';
       bootstrapScript = keyless.config.systemd.services.lifemodel-flux-bootstrap.script;
       bootstrapOwnership =
-        assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f " bootstrapScript;
-        assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f " bootstrapScript;
+        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"'' bootstrapScript;
+        assert lib.hasInfix (builtins.unsafeDiscardStringContext (lib.baseNameOf (toString keyless.config.services.lifemodel.generatedRootKustomization))) bootstrapScript;
+        assert !(lib.hasInfix "--force-conflicts" bootstrapScript);
+        assert lib.hasInfix "systemctl restart lifemodel-flux-bootstrap.service" keyless.config.system.activationScripts.lifemodel-bootstrap.text;
         assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -" bootstrapScript;
-        assert lib.hasInfix "$KUBECTL apply --server-side -f " bootstrapScript;
-        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/ocirepository.yaml"'' installScript;
-        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/kustomization.yaml"'' installScript;
+        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"'' installScript;
+        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"'' installScript;
+        assert !(lib.hasInfix "--force-conflicts" installScript);
         pkgs.runCommand "lifemodel-bootstrap-field-ownership" {} "touch $out";
       moduleEvaluation = assert toString keyless.config.services.k3s.package
           == toString nixpkgs.legacyPackages.${system}.k3s;

@@ -184,11 +184,14 @@ fi
 [ "$(id -u)" -eq 0 ] || die "must run as root (k3s and the Flux bootstrap need it)"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+command -v flock >/dev/null 2>&1 || die "flock is required"
 if ! command -v node >/dev/null 2>&1; then
   command -v apt-get >/dev/null 2>&1 || die "Node.js is required (install nodejs or use a Debian/Ubuntu host with apt-get)"
   apt-get update
   apt-get install -y nodejs
 fi
+node_major=$(node -p 'Number(process.versions.node.split(".")[0])')
+[ "$node_major" -ge 18 ] || die "Node.js 18 or newer is required; found $(node --version)"
 
 if command -v k3s >/dev/null 2>&1; then
   installed_version=$(k3s --version | awk 'NR==1 {print $3}')
@@ -253,30 +256,46 @@ if [ "$VERIFY_MODE" = "key" ]; then
     --dry-run=client -o yaml | $KUBECTL apply --server-side -f -
 fi
 
+LIFEMODEL_INSTALL_ROOT=${LIFEMODEL_INSTALL_ROOT:-}
+LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 # The verified root platform source, rendered from the shared templates.
 render_root_objects "$render_dir"
-$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/ocirepository.yaml"
-$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/kustomization.yaml"
+mkdir -p "$LIFEMODEL_STATE_DIR"
+if [ "${LIFEMODEL_LOCKED:-0}" != 1 ]; then
+  exec 9>"$LIFEMODEL_STATE_DIR/lock"
+  flock -x 9
+fi
+if [ -n "$PLATFORM_DIGEST" ]; then configured_ref="digest=$PLATFORM_DIGEST"; else configured_ref="tag=$PLATFORM_TAG"; fi
+cli_source="$SCRIPT_DIR/../deploy/cli/lifemodel.mjs"
+effective_oci="$render_dir/ocirepository-effective.yaml"
+LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCKED=1 node "$cli_source" render-ref "$render_dir/ocirepository.yaml" "$configured_ref" > "$effective_oci"
+effective_ref=$(LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCKED=1 node "$cli_source" effective-ref "$configured_ref")
+$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"
+$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"
 
 # Install the recovery CLI and durably retain this successfully applied pin.
 # These roots are configurable so installer tests can exercise the real install
 # path without writing into the host's /usr/local or /var/lib directories.
-LIFEMODEL_INSTALL_ROOT=${LIFEMODEL_INSTALL_ROOT:-}
-LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 cli_lib_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/lib/lifemodel"
 cli_bin_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/bin"
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+newline='
+'
+case "$LIFEMODEL_STATE_DIR" in *"$newline"*) die 'state directory must not contain a newline' ;; esac
+quoted_cli=$(shell_quote "$cli_lib_dir/lifemodel.mjs")
+quoted_state=$(shell_quote "$LIFEMODEL_STATE_DIR")
+quoted_install_root=$(shell_quote "$LIFEMODEL_INSTALL_ROOT")
+quoted_ref=$(shell_quote "$configured_ref")
+apply_args=$(node -e 'const [script,url,tag,digest,mode,issuer,subject,key,insecure]=process.argv.slice(1); const a=[script,"--platform-url",url]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); process.stdout.write(JSON.stringify(a));' -- "$SCRIPT_DIR/install.sh" "$PLATFORM_URL" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$PUBLIC_KEY_FILE" "$INSECURE_REGISTRY")
+quoted_args=$(shell_quote "$apply_args")
 install -d -m 0755 "$cli_lib_dir" "$cli_bin_dir" "$LIFEMODEL_STATE_DIR"
 install -m 0644 "$SCRIPT_DIR/../deploy/cli/lifemodel.mjs" "$cli_lib_dir/lifemodel.mjs"
 cat > "$cli_bin_dir/lifemodel" <<EOF
 #!/bin/sh
-exec node "$cli_lib_dir/lifemodel.mjs" "\$@"
+LIFEMODEL_STATE_DIR=$quoted_state LIFEMODEL_INSTALL_ROOT=$quoted_install_root LIFEMODEL_CONFIGURED_REF=$quoted_ref LIFEMODEL_APPLY_SCRIPT=/bin/sh LIFEMODEL_APPLY_ARGS=$quoted_args exec node $quoted_cli "\$@"
 EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
-if [ -n "$PLATFORM_DIGEST" ]; then
-  configured_ref="digest=$PLATFORM_DIGEST"
-else
-  configured_ref="tag=$PLATFORM_TAG"
-fi
-LIFEMODEL_HISTORY="$LIFEMODEL_STATE_DIR/platform-history" "$cli_bin_dir/lifemodel" record-applied "$configured_ref"
+LIFEMODEL_LOCKED=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
+  "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
 
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

@@ -1,136 +1,131 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, openSync, readFileSync, renameSync, closeSync, fsyncSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { unlinkSync } from 'node:fs';
 
-const historyFile = process.env.LIFEMODEL_HISTORY || '/var/lib/lifemodel/platform-history';
+const stateDir = process.env.LIFEMODEL_STATE_DIR || '/var/lib/lifemodel';
+const historyFile = process.env.LIFEMODEL_HISTORY || `${stateDir}/platform-history`;
+const overrideFile = `${stateDir}/platform-override`;
 const kubeconfig = '/etc/rancher/k3s/k3s.yaml';
 const kubectl = process.env.LIFEMODEL_KUBECTL;
-
+const script = fileURLToPath(import.meta.url);
+const validRef = /^(?:tag=[A-Za-z0-9_][A-Za-z0-9._-]{0,127}|digest=sha256:[a-f0-9]{64})$/;
 function help() {
-  console.log(`Usage: lifemodel doctor [--repin previous]
+  console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel --help
 
 Diagnose Flux sources, Kustomizations and the lifemodel loader.
-  --repin previous  Restore the previous successfully applied platform ref and reconcile Flux.`);
+  --repin previous  Persist an override to the previous successfully applied ref and rerun bootstrap.
+  --repin clear     Remove the override and rerun bootstrap.`);
 }
 function runKubectl(args, input) {
-  try {
-    const executable = kubectl || 'k3s';
-    const prefix = kubectl ? [] : ['kubectl'];
-    return execFileSync(executable, [...prefix, '--kubeconfig', kubeconfig, ...args], { encoding: 'utf8', input });
-  } catch (error) {
-    const detail = error?.stderr?.toString().trim() || error?.message || String(error);
-    throw new Error(`kubectl ${args.join(' ')} failed: ${detail}`);
-  }
+  try { return execFileSync(kubectl || 'k3s', [...(kubectl ? [] : ['kubectl']), '--kubeconfig', kubeconfig, ...args], { encoding: 'utf8', input }); }
+  catch (error) { throw new Error(`kubectl ${args.join(' ')} failed: ${error?.stderr?.toString().trim() || error?.message || String(error)}`); }
 }
-function get(resource, namespace) {
-  return JSON.parse(runKubectl(['get', resource, '-n', namespace, '-o', 'json']));
-}
-function condition(item) {
-  return (item.status?.conditions || []).find((entry) => entry.type === 'Ready') || {};
-}
+function get(resource, namespace) { return JSON.parse(runKubectl(['get', resource, '-n', namespace, '-o', 'json'])); }
+function condition(item) { return (item.status?.conditions || []).find((entry) => entry.type === 'Ready') || {}; }
 function clean(value) { return String(value ?? 'unknown').replace(/[\r\n\t]+/g, ' ').trim() || 'unknown'; }
+function current(item) { return item.metadata?.generation != null && item.status?.observedGeneration === item.metadata.generation; }
 function checkResources(kind, items, revisionFor) {
-  if (items.length === 0) {
-    console.log(`${kind}: none found`);
-    return [`${kind} (none found)`];
-  }
+  if (!items.length) { console.log(`${kind}: none found`); return [`${kind} (none found)`]; }
   const failures = [];
   for (const item of items) {
-    const name = item.metadata?.name || 'unnamed';
-    const ready = condition(item);
-    const revision = revisionFor(item);
-    console.log(`${kind}/${name} Ready=${clean(ready.status)} reason=${clean(ready.reason)} message=${clean(ready.message)} revision=${clean(revision)}`);
-    if (ready.status !== 'True') failures.push(`${kind}/${name}`);
+    const name = item.metadata?.name || 'unnamed', ready = condition(item), revision = revisionFor(item);
+    const generation = current(item);
+    console.log(`${kind}/${name} Ready=${clean(ready.status)} generationCurrent=${generation ? 'yes' : 'no'} reason=${clean(ready.reason)} message=${clean(ready.message)} revision=${clean(revision)}`);
+    if (ready.status !== 'True' || !generation) failures.push(`${kind}/${name}`);
   }
   return failures;
 }
+function readOverride() {
+  if (!existsSync(overrideFile)) return null;
+  const value = JSON.parse(readFileSync(overrideFile, 'utf8'));
+  if (!value || !validRef.test(value.ref) || !validRef.test(value.configuredRef)) throw new Error('Corrupt platform override; refusing action.');
+  return value;
+}
 function report() {
+  const override = readOverride();
+  if (override) console.log(`ACTIVE PLATFORM OVERRIDE: ${override.ref} (recorded against ${override.configuredRef})`);
   const failures = [];
-  for (const [resource, kind, revision] of [
-    ['ocirepositories', 'OCIRepository', (item) => item.status?.artifact?.revision],
-    ['gitrepositories', 'GitRepository', (item) => item.status?.artifact?.revision],
-  ]) {
+  for (const [resource, kind, revision] of [['ocirepositories','OCIRepository',i=>i.status?.artifact?.revision],['gitrepositories','GitRepository',i=>i.status?.artifact?.revision]]) {
     const items = get(resource, 'flux-system').items || [];
-    if (kind === 'GitRepository' && items.length === 0) {
-      console.log('GitRepository: none (expected before the first start)');
-    } else {
-      failures.push(...checkResources(kind, items, revision));
-    }
+    if (kind === 'GitRepository' && !items.length) console.log('GitRepository: none (expected before the first loader start)');
+    else failures.push(...checkResources(kind, items, revision));
   }
-  const kustomizations = get('kustomizations', 'flux-system').items || [];
-  failures.push(...checkResources('Kustomization', kustomizations, (item) => item.status?.lastAppliedRevision));
-
-  const deployments = get('deployments', 'lifemodel-system').items || [];
-  const loader = deployments.find((item) => item.metadata?.name === 'loader');
-  const pods = (get('pods', 'lifemodel-system').items || []).filter((pod) =>
-    pod.metadata?.labels?.['app.kubernetes.io/name'] === 'loader' || pod.metadata?.labels?.app === 'loader' || pod.metadata?.name?.startsWith('loader-'));
-  const statuses = pods.flatMap((pod) => pod.status?.containerStatuses || []);
-  const desiredReplicas = loader?.spec?.replicas ?? 1;
-  const ready = Boolean(loader && (loader.status?.readyReplicas || 0) >= desiredReplicas && pods.length >= desiredReplicas &&
-    pods.every((pod) => pod.status?.phase === 'Running' && (pod.status?.containerStatuses || []).length > 0 &&
-      (pod.status?.containerStatuses || []).every((entry) => entry.ready)));
-  const restarts = statuses.reduce((sum, entry) => sum + (entry.restartCount || 0), 0);
-  const allEvents = get('events', 'lifemodel-system').items || [];
-  const eventTime = (event) => Date.parse(event.eventTime || event.lastTimestamp || event.metadata?.creationTimestamp || 0);
-  for (const pod of pods) {
-    const podStatuses = pod.status?.containerStatuses || [];
-    const podReady = pod.status?.phase === 'Running' && podStatuses.length > 0 && podStatuses.every((entry) => entry.ready);
-    const podEvents = allEvents.filter((event) => event.involvedObject?.name === pod.metadata?.name).sort((a, b) => eventTime(a) - eventTime(b));
-    const podRestarts = podStatuses.reduce((sum, entry) => sum + (entry.restartCount || 0), 0);
-    console.log(`Pod/${clean(pod.metadata?.name)} phase=${clean(pod.status?.phase)} ready=${podReady ? 'yes' : 'no'} restarts=${podRestarts} lastEventReason=${clean(podEvents.at(-1)?.reason || 'none')}`);
-  }
-  const events = allEvents.filter((event) => pods.some((pod) => event.involvedObject?.name === pod.metadata?.name)).sort((a, b) => eventTime(a) - eventTime(b));
-  const lastReason = events.at(-1)?.reason || 'none';
-  console.log(`Deployment/loader ready=${ready ? 'yes' : 'no'} restarts=${restarts} lastEventReason=${clean(lastReason)}`);
-  if (!ready) failures.push('Deployment/loader');
-  if (failures.length) {
-    console.error(`Not ready: ${failures.join(', ')}`);
-    return 1;
-  }
-  return 0;
+  failures.push(...checkResources('Kustomization', get('kustomizations','flux-system').items || [], i=>i.status?.lastAppliedRevision));
+  const deployments = get('deployments','lifemodel-system').items || [], loader = deployments.find(i=>i.metadata?.name==='loader');
+  const pods = (get('pods','lifemodel-system').items || []).filter(p=>p.metadata?.labels?.['app.kubernetes.io/name']==='loader'||p.metadata?.labels?.app==='loader'||p.metadata?.name?.startsWith('loader-'));
+  const statuses = pods.flatMap(p=>p.status?.containerStatuses||[]), desired = loader?.spec?.replicas ?? 1;
+  const generation = Boolean(loader && current(loader));
+  const ready = Boolean(loader && generation && desired > 0 && (loader.status?.readyReplicas||0)>0 && (loader.status?.readyReplicas||0)>=desired && pods.length>0 && pods.length>=desired && pods.every(p=>p.status?.phase==='Running'&&(p.status?.containerStatuses||[]).length>0&&(p.status?.containerStatuses||[]).every(c=>c.ready)));
+  const restarts=statuses.reduce((n,s)=>n+(s.restartCount||0),0), allEvents=get('events','lifemodel-system').items||[];
+  const eventTime=e=>Date.parse(e.eventTime||e.lastTimestamp||e.metadata?.creationTimestamp||0);
+  for (const pod of pods) { const ps=pod.status?.containerStatuses||[], ok=pod.status?.phase==='Running'&&ps.length>0&&ps.every(s=>s.ready); const ev=allEvents.filter(e=>e.involvedObject?.name===pod.metadata?.name).sort((a,b)=>eventTime(a)-eventTime(b)); console.log(`Pod/${clean(pod.metadata?.name)} phase=${clean(pod.status?.phase)} ready=${ok?'yes':'no'} restarts=${ps.reduce((n,s)=>n+(s.restartCount||0),0)} lastEventReason=${clean(ev.at(-1)?.reason||'none')}`); }
+  const events=allEvents.filter(e=>pods.some(p=>e.involvedObject?.name===p.metadata?.name)).sort((a,b)=>eventTime(a)-eventTime(b));
+  console.log(`Deployment/loader ready=${ready?'yes':'no'} generationCurrent=${generation?'yes':'no'} desiredReplicas=${desired} restarts=${restarts} lastEventReason=${clean(events.at(-1)?.reason||'none')}`);
+  if(!ready) failures.push('Deployment/loader');
+  if(failures.length){console.error(`Not ready: ${failures.join(', ')}`);return 1;} return 0;
 }
 function readHistory() {
   if (!existsSync(historyFile)) return [];
-  return readFileSync(historyFile, 'utf8').split(/\r?\n/).filter(Boolean).slice(0, 2);
+  const lines=readFileSync(historyFile,'utf8').split(/\r?\n/).filter(Boolean);
+  if(lines.length>2 || lines.some(line=>!validRef.test(line))) throw new Error('Corrupt platform history; refusing action.');
+  return lines;
 }
-function writeHistory(ref) {
-  if (!/^(tag|digest)=.+$/.test(ref) || /[\r\n]/.test(ref)) throw new Error('Applied platform ref must be tag=<value> or digest=<value>');
-  const history = [ref, ...readHistory().filter((entry) => entry !== ref)].slice(0, 2);
-  mkdirSync(dirname(historyFile), { recursive: true, mode: 0o700 });
-  const temporary = `${historyFile}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${history.join('\n')}\n`, { mode: 0o600 });
-  renameSync(temporary, historyFile);
+function durableWrite(path, data) {
+  mkdirSync(dirname(path),{recursive:true,mode:0o700}); const tmp=`${path}.${process.pid}.tmp`;
+  const fd=openSync(tmp,'w',0o600); try { writeFileSync(fd,data); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(tmp,path); const dir=openSync(dirname(path),'r'); try { fsyncSync(dir); } finally { closeSync(dir); }
 }
-function repinPrevious() {
-  const previous = readHistory()[1];
-  if (!previous) throw new Error('No previous platform release is recorded; a second successful apply is needed before re-pinning.');
-  const split = previous.indexOf('=');
-  const field = previous.slice(0, split);
-  const value = previous.slice(split + 1);
-  const ref = { [field]: value };
-  runKubectl(['apply', '--server-side', '--field-manager=lifemodel-doctor', '--force-conflicts', '-f', '-'], JSON.stringify({
-    apiVersion: 'source.toolkit.fluxcd.io/v1',
-    kind: 'OCIRepository',
-    metadata: { name: 'platform', namespace: 'flux-system' },
-    spec: { ref },
-  }));
-  runKubectl(['annotate', 'ocirepository', 'platform', '-n', 'flux-system', `reconcile.fluxcd.io/requestedAt=${Date.now()}`, '--overwrite']);
-  console.log(`Re-pinned platform to ${previous} and requested Flux reconciliation.`);
-  if (field === 'digest') console.log(`To keep this after nixos-rebuild switch, set services.lifemodel.platform.digest = ${JSON.stringify(value)}; and remove services.lifemodel.platform.tag.`);
-  else console.log(`To keep this after nixos-rebuild switch, set services.lifemodel.platform.tag = ${JSON.stringify(value)}; and set services.lifemodel.platform.digest = null.`);
+function durableUnlink(path) { unlinkSync(path); const dir=openSync(dirname(path),'r'); try { fsyncSync(dir); } finally { closeSync(dir); } }
+function writeHistory(ref) { if(!validRef.test(ref)) throw new Error('Applied platform ref must be tag=<OCI tag> or digest=sha256:<64 hex>'); const history=[ref,...readHistory().filter(e=>e!==ref)].slice(0,2); durableWrite(historyFile,`${history.join('\n')}\n`); }
+function reapply() {
+  if(process.env.LIFEMODEL_NIXOS==='1') execFileSync('systemctl',['restart','--no-block','lifemodel-flux-bootstrap.service'],{stdio:'inherit'});
+  else {
+    const executable=process.env.LIFEMODEL_APPLY_SCRIPT, args=JSON.parse(process.env.LIFEMODEL_APPLY_ARGS||'[]');
+    if(!executable || !Array.isArray(args)) throw new Error('Cannot rerun bootstrap: installer arguments are not configured.');
+    execFileSync(executable,args,{stdio:'inherit',env:process.env});
+  }
 }
-
-const args = process.argv.slice(2);
+function repin(mode) {
+  const history=readHistory(); const configured=process.env.LIFEMODEL_CONFIGURED_REF;
+  if(!configured || !validRef.test(configured)) throw new Error('Configured platform ref is not available to doctor.');
+  if(mode==='previous') { const previous=history[1]; if(!previous) throw new Error('No previous platform release is recorded; a second successful apply is needed before re-pinning.'); durableWrite(overrideFile,`${JSON.stringify({ref:previous,configuredRef:configured})}\n`); }
+  else { if(existsSync(overrideFile)) { readOverride(); durableUnlink(overrideFile); } }
+  console.log(mode==='clear'?'Cleared platform override and reran bootstrap.':`Requested bootstrap with platform override ${history[1]}.`);
+}
+function renderRef(path, configured) {
+  const ref=effectiveRef(configured); const [field,value]=ref.split('=');
+  const yaml=readFileSync(path,'utf8'); const replacement=`  ref:\n    ${field}: ${field==='tag'?JSON.stringify(value):value}\n`;
+  const rendered=yaml.replace(/^  ref:\n(?:    (?:tag|digest):.*\n)+/m,replacement);
+  if(rendered===yaml) throw new Error('Could not find the complete OCI spec.ref block to render.');
+  process.stdout.write(rendered);
+}
+function effectiveRef(configured) {
+  if(!validRef.test(configured)) throw new Error('Configured platform ref must be tag=<OCI tag> or digest=sha256:<64 hex>');
+  const override=readOverride(); if(!override) return configured;
+  if(override.configuredRef===configured) return override.ref;
+  durableUnlink(overrideFile); return configured;
+}
+function locked(args) {
+  if(process.env.LIFEMODEL_LOCKED==='1') return false;
+  mkdirSync(stateDir,{recursive:true,mode:0o700});
+  const result=spawnSync('flock',['-x',`${stateDir}/lock`,process.execPath,script,...args],{stdio:'inherit',env:{...process.env,LIFEMODEL_LOCKED:'1'}});
+  if(result.error) throw result.error;
+  if(result.status === 0 && args[0] === 'doctor' && args[1] === '--repin') {
+    process.env.LIFEMODEL_LOCKED='1'; reapply();
+  }
+  process.exit(result.status ?? 1);
+}
+const args=process.argv.slice(2);
 try {
-  if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) { help(); process.exit(0); }
-  if (args.length === 2 && args[0] === 'record-applied') { writeHistory(args[1]); process.exit(0); }
-  if (args.length === 1 && args[0] === 'doctor') process.exit(report());
-  if (args.length === 3 && args[0] === 'doctor' && args[1] === '--repin' && args[2] === 'previous') { repinPrevious(); process.exit(0); }
-  if (args.length === 0) { help(); process.exit(0); }
-  throw new Error(`Unknown command or option: ${args.join(' ')}`);
-} catch (error) {
-  console.error(`lifemodel doctor: ${error.message}`);
-  process.exit(1);
-}
+  if(args.length===1&&(args[0]==='--help'||args[0]==='-h')){help();process.exit(0);}
+  if(args[0]==='record-applied'&&args.length===2){locked(args);writeHistory(args[1]);process.exit(0);}
+  if(args[0]==='effective-ref'&&args.length===2){locked(args);console.log(effectiveRef(args[1]));process.exit(0);}
+  if(args[0]==='render-ref'&&args.length===3){locked(args);renderRef(args[1],args[2]);process.exit(0);}
+  if(args.length===1&&args[0]==='doctor'){locked(args);process.exit(report());}
+  if(args.length===3&&args[0]==='doctor'&&args[1]==='--repin'&&['previous','clear'].includes(args[2])){locked(args);repin(args[2]);process.exit(0);}
+  if(args.length===0){help();process.exit(0);} throw new Error(`Unknown command or option: ${args.join(' ')}`);
+} catch(error){console.error(`lifemodel doctor: ${error.message}`);process.exit(1);}
