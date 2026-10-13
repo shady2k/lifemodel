@@ -129,10 +129,29 @@ describe('platform manifests', () => {
     expect(container.livenessProbe).toBeDefined();
     expect(object(objects, 'Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
     expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
-    expect(object(objects, 'ServiceAccount').automountServiceAccountToken).toBe(false);
+    expect(object(objects, 'ServiceAccount').automountServiceAccountToken).toBe(true);
+    expect(objects.some((item) => ['Role', 'RoleBinding'].includes(item.kind))).toBe(true);
     expect(object(objects, 'Ingress').spec.rules[0].host).toBe('boot.localhost');
-    expect(objects.some((item) => ['Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'].includes(item.kind))).toBe(false);
+    expect(objects.some((item) => ['ClusterRole', 'ClusterRoleBinding'].includes(item.kind))).toBe(false);
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
+  });
+
+  it('protects loader bootstrap Secrets from Flux overwrite and pruning', () => {
+    const objects = sourceObjects();
+    const bootstrap = objects.filter((item) => item.kind === 'Secret' &&
+      ['loader-bootstrap-state', 'openbao-unseal-custody'].includes(item.metadata?.name));
+    expect(bootstrap).toHaveLength(2);
+    for (const secret of bootstrap) {
+      expect(secret.metadata.namespace).toBe('lifemodel-system');
+      expect(secret.type).toBe('Opaque');
+      expect(secret.data).toBeUndefined();
+      expect(secret.metadata.annotations).toMatchObject({
+        'kustomize.toolkit.fluxcd.io/ssa': 'IfNotPresent',
+        'kustomize.toolkit.fluxcd.io/prune': 'disabled',
+      });
+    }
+    const a0Kustomization = YAML.parse(readFileSync(join(platformRoot, 'a0/kustomization.yaml'), 'utf8')) as { resources: string[] };
+    expect(a0Kustomization.resources).toContain('bootstrap-secrets.yaml');
   });
 
   it('bounds platform-a0 health checks with an explicit timeout', () => {
