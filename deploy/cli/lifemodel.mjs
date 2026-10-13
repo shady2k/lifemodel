@@ -53,7 +53,11 @@ function report() {
     ['gitrepositories', 'GitRepository', (item) => item.status?.artifact?.revision],
   ]) {
     const items = get(resource, 'flux-system').items || [];
-    failures.push(...checkResources(kind, items, revision));
+    if (kind === 'GitRepository' && items.length === 0) {
+      console.log('GitRepository: none (expected before the first start)');
+    } else {
+      failures.push(...checkResources(kind, items, revision));
+    }
   }
   const kustomizations = get('kustomizations', 'flux-system').items || [];
   failures.push(...checkResources('Kustomization', kustomizations, (item) => item.status?.lastAppliedRevision));

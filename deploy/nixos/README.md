@@ -28,7 +28,9 @@ SSH to the dedicated VM and run `sudo lifemodel doctor`. It reports Flux source
 and Kustomization readiness, revisions, and loader pod health. To restore the
 previous successfully applied platform release, run
 `sudo lifemodel doctor --repin previous`. This patches the root `platform`
-OCIRepository and requests a Flux reconcile. On NixOS, a later
+OCIRepository and requests a Flux reconcile. Recovery completes within the
+A0 Kustomization's 2-minute timeout plus the loader's start time. The old
+loader keeps serving during a broken rollout. On NixOS, a later
 `nixos-rebuild switch` reapplies the configured pin, so copy the exact
 `services.lifemodel.platform.tag` or `.digest` setting printed by the command
 into the host configuration before rebuilding. The previous pin is kept in

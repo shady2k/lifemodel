@@ -8,6 +8,10 @@ metadata:
   namespace: flux-system
 spec:
   interval: 10m0s
+  # Flux's Kustomization timeout bounds the wait/health check, so a broken
+  # rollout cannot hold recovery until the 10m reconciliation interval.
+  # https://fluxcd.io/flux/components/kustomize/kustomizations/#timeout
+  timeout: 2m0s
   path: ./a0
   prune: true
   wait: true

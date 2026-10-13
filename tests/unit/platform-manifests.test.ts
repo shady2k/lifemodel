@@ -67,6 +67,8 @@ esac`);
     K3S_LOG: log,
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
+    LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
+    LIFEMODEL_STATE_DIR: join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
   const result = spawnSync('sh', [installer, '--platform-url', 'oci://example.test/platform', '--tag', 'v1.0.0', '--root-templates', rootTemplates], { encoding: 'utf8', env });
@@ -112,6 +114,12 @@ describe('platform manifests', () => {
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
+  it('bounds platform-a0 health checks with an explicit timeout', () => {
+    const a0 = sourceObjects().find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a0');
+    expect(a0, 'missing platform-a0 Kustomization').toBeDefined();
+    expect(a0!.spec.timeout).toBe('2m0s');
+  });
+
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
     const parsed = YAML.parse(readFileSync(customOCI, 'utf8'));
     expect(parsed.spec.ref.tag).toBe('20261013');
@@ -130,8 +138,9 @@ describe('platform manifests', () => {
       expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8').split('\n')[0]).toBe('namespace');
       const second = runInstallerHarness(false, false, first.root);
       try {
-        expect(second.status).toBe(0);
+        expect(second.status, second.output).toBe(0);
         expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
+        expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v1.0.0\n');
       } finally { /* the shared root is removed by the outer finally */ }
     } finally {
       rmSync(first.root, { recursive: true, force: true });
