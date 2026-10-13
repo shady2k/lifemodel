@@ -75,15 +75,9 @@ in
       package = lifemodelK3s;
     };
     environment.systemPackages = [ lifemodelK3s lifemodelCli ];
-    system.activationScripts.lifemodel-bootstrap = {
-      # Run synchronously on every switch, including when the unit is inactive
-      # after a failed oneshot. systemctl's failure must fail activation.
-      text = ''
-        ${pkgs.systemd}/bin/systemctl restart lifemodel-flux-bootstrap.service
-      '';
-    };
     systemd.services.lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
+      restartIfChanged = true;
       wantedBy = [ "multi-user.target" ];
       wants = [ "k3s.service" ];
       after = [ "k3s.service" ];
