@@ -168,16 +168,16 @@
       renderedGitea = pkgs.runCommand "lifemodel-gitea-platform-render" {
         nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
       } ''
-        set -eu
+        set -eux
         helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
           -f ${./deploy/platform/a/gitea/values.yaml} > gitea.yaml
-        grep -F 'database: DB_TYPE=sqlite3' gitea.yaml >/dev/null
+        grep -F 'DB_TYPE=sqlite3' gitea.yaml >/dev/null
         grep -F 'PATH=/data/gitea/gitea.db' gitea.yaml >/dev/null
         grep -F 'ROOT=/data/git/repositories' gitea.yaml >/dev/null
         grep -F 'mountPath: /data' gitea.yaml >/dev/null
         grep -F 'name: gitea-admin' gitea.yaml >/dev/null
-        grep -F 'key: username' gitea.yaml >/dev/null
-        grep -F 'key: password' gitea.yaml >/dev/null
+        grep -E 'key:[[:space:]]+username' gitea.yaml >/dev/null
+        grep -E 'key:[[:space:]]+password' gitea.yaml >/dev/null
         grep -F 'claimName: gitea-shared-storage' gitea.yaml >/dev/null
         test "$(grep -F -c 'kind: PersistentVolumeClaim' gitea.yaml)" -eq 1
         grep -F 'host: "git.localhost"' gitea.yaml >/dev/null
