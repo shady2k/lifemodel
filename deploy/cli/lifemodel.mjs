@@ -47,7 +47,7 @@ function readOverride() {
 }
 function assertRootOwnership() {
   let root;
-  try { root=JSON.parse(runKubectl(['get','ocirepository','platform','-n','flux-system','-o','json'])); }
+  try { root=JSON.parse(runKubectl(['get','ocirepository','platform','-n','flux-system','-o','json','--show-managed-fields'])); }
   catch(error) { if(/not found/i.test(error.message)) return; throw error; }
   const owned = (root.metadata?.managedFields || []).filter(entry => entry.manager !== 'lifemodel-bootstrap' && entry.fieldsV1?.['f:spec']?.['f:ref']).map(entry => clean(entry.manager));
   if(owned.length) throw new Error(`Root OCIRepository spec.ref is owned by ${[...new Set(owned)].join(', ')}. To reset ownership, delete the root object and let the writer recreate it: sudo kubectl --kubeconfig ${kubeconfig} delete ocirepository platform -n flux-system (Flux keeps its applied state).`);
