@@ -15,9 +15,14 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
 
 Then run `sudo nixos-rebuild switch --flake .#HOST`. The module starts k3s
 with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
-the verified platform source and root Kustomization. Keyless verification is
-the default. The recovery CLI requires Node.js 18 or newer; the generic installer
-checks this before any cluster writes. For key verification set
+the verified platform source and root Kustomization. The bootstrap is a systemd
+oneshot: an unchanged switch does not rerun it. Changing the configured platform
+ref changes its unit script, so NixOS restarts the unit during the switch; a
+failed bootstrap makes the switch fail. To re-apply without changing the
+configuration, run `sudo systemctl restart lifemodel-flux-bootstrap` or
+`sudo lifemodel doctor --repin clear`. Keyless verification is the default. The
+recovery CLI requires Node.js 18 or newer; the generic installer checks this
+before any cluster writes. For key verification set
 `verify.mode = "key"` and `verify.publicKey` to the PEM public key text. Use `platform.digest` instead of
 a mutable tag when pinning an artifact by digest. `platform.insecureRegistry`
 is only for a VM-local plain-HTTP registry.

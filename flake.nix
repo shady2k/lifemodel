@@ -134,18 +134,21 @@
         touch $out
       '';
       bootstrapScript = keyless.config.systemd.services.lifemodel-flux-bootstrap.script;
-      bootstrapActivation = keyless.config.system.activationScripts.lifemodel-bootstrap.text;
+      changedTag = evaluate ({ ... }: {
+        services.lifemodel.platform.tag = lib.mkForce "v1.0.1";
+      });
+      bootstrapExecStart = keyless.config.systemd.services.lifemodel-flux-bootstrap.serviceConfig.ExecStart;
+      changedBootstrapExecStart = changedTag.config.systemd.services.lifemodel-flux-bootstrap.serviceConfig.ExecStart;
       bootstrapActivationCheck =
-        assert lib.hasInfix "restart lifemodel-flux-bootstrap.service" bootstrapActivation;
-        assert !(lib.hasInfix "is-active" bootstrapActivation);
-        pkgs.runCommand "lifemodel-bootstrap-activation" {} "touch $out";
+        assert !(builtins.hasAttr "lifemodel-bootstrap" keyless.config.system.activationScripts);
+        assert bootstrapExecStart != changedBootstrapExecStart;
+        pkgs.runCommand "lifemodel-bootstrap-unit-restart" {} "touch $out";
       bootstrapOwnership =
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"'' bootstrapScript;
         assert lib.hasInfix
           (builtins.unsafeDiscardStringContext ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${toString keyless.config.services.lifemodel.generatedRootKustomization}'')
           bootstrapScript;
         assert !(lib.hasInfix "--force-conflicts" bootstrapScript);
-        assert lib.hasInfix "systemctl restart lifemodel-flux-bootstrap.service" keyless.config.system.activationScripts.lifemodel-bootstrap.text;
         assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -" bootstrapScript;
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"'' installScript;
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"'' installScript;
