@@ -74,6 +74,22 @@ export interface AgentVaultConfig {
 }
 
 /**
+ * The two shapes the loader runs in (ADR-010, platform step A0).
+ *
+ * "instance" is the shape this repo ships today: the loader is the container's
+ * main process, it starts the front door, Agent Vault and the egress rule, and
+ * it seeds, builds and supervises lifemodel on the volume. "platform" is the
+ * shape ADR-010 deploys on k3s (task lut.2.1): Flux brings the loader into
+ * `lifemodel-system` with NO Docker socket and nothing to supervise - no
+ * lifemodel, no Agent Vault - so the loader starts only its own web interface
+ * and login. The mode is read once, at start: a shape the deployment chose is
+ * not a runtime toggle.
+ */
+export const LOADER_MODES = ['instance', 'platform'] as const;
+
+export type LoaderMode = (typeof LOADER_MODES)[number];
+
+/**
  * The kernel rule that confines lifemodel's egress (lifemodel-q4x.3.2, story
  * S5): uid 1000 reaches loopback and nothing else, installed by the loader
  * before lifemodel starts. The chain is the loader's own, so a start replaces
@@ -127,6 +143,12 @@ export interface LoaderConfig {
   agentVault: AgentVaultConfig;
   /** The rule that confines lifemodel's egress to the proxy. */
   egress: EgressConfig;
+  /**
+   * The shape this loader runs in (LOADER_MODES): the whole supervisor half of
+   * the loader - the front door, Agent Vault, the egress rule, seeding,
+   * building, lifemodel itself - belongs to "instance" only.
+   */
+  mode: LoaderMode;
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
   /**
@@ -152,6 +174,7 @@ const DEFAULTS = {
   seedBundle: '/opt/lifemodel/seed.bundle',
   upstreamUrl: 'https://github.com/shady2k/lifemodel.git',
   httpPort: 7000,
+  mode: 'instance',
   uid: 1000,
   gid: 1000,
   caddyBinary: '/usr/bin/caddy',
@@ -185,10 +208,28 @@ function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number
   return value;
 }
 
+/**
+ * The mode out of the environment, one name at a time: anything else than the
+ * two named shapes is a deployment the loader cannot be, and is said so - it
+ * is never read as today's shape.
+ */
+function readLoaderMode(env: NodeJS.ProcessEnv): LoaderMode {
+  const raw = env['LIFEMODEL_LOADER_MODE'];
+  if (raw === undefined || raw === '') return DEFAULTS.mode;
+  const mode = (LOADER_MODES as readonly string[]).find((named) => named === raw);
+  if (mode === undefined) {
+    throw new LoaderFatalError(
+      `LIFEMODEL_LOADER_MODE must be one of ${LOADER_MODES.map((m) => `"${m}"`).join(', ')}, got "${raw}"`
+    );
+  }
+  return mode;
+}
+
 /** The loader's configuration, from the environment and the contract's defaults. */
 export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
   const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? DEFAULTS.volumeRoot;
   return {
+    mode: readLoaderMode(env),
     volumeRoot,
     repoDir: join(volumeRoot, 'repo'),
     dataDir: join(volumeRoot, 'data'),
