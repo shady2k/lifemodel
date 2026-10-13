@@ -136,7 +136,9 @@
       bootstrapScript = keyless.config.systemd.services.lifemodel-flux-bootstrap.script;
       bootstrapOwnership =
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"'' bootstrapScript;
-        assert lib.hasInfix (builtins.unsafeDiscardStringContext (lib.baseNameOf (toString keyless.config.services.lifemodel.generatedRootKustomization))) bootstrapScript;
+        assert lib.hasInfix
+          (builtins.unsafeDiscardStringContext ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${toString keyless.config.services.lifemodel.generatedRootKustomization}'')
+          bootstrapScript;
         assert !(lib.hasInfix "--force-conflicts" bootstrapScript);
         assert lib.hasInfix "systemctl restart lifemodel-flux-bootstrap.service" keyless.config.system.activationScripts.lifemodel-bootstrap.text;
         assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -" bootstrapScript;

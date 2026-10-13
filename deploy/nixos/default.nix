@@ -131,11 +131,12 @@ in
         flock -x 9
         effectiveOCI=$(mktemp)
         trap 'rm -f "$effectiveOCI"' EXIT
-        LIFEMODEL_LOCKED=1 lifemodel render-ref ${renderedOCI} ${lib.escapeShellArg platformRef} > "$effectiveOCI"
-        effectiveRef=$(LIFEMODEL_LOCKED=1 lifemodel effective-ref ${lib.escapeShellArg platformRef})
+        LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel render-ref ${renderedOCI} ${lib.escapeShellArg platformRef} > "$effectiveOCI"
+        effectiveRef=$(LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel effective-ref ${lib.escapeShellArg platformRef})
+        LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel assert-root-ownership
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
-        LIFEMODEL_LOCKED=1 lifemodel record-applied "$effectiveRef"
+        LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
       '';
     };
   };

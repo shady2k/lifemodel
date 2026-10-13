@@ -261,15 +261,20 @@ LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
 # The verified root platform source, rendered from the shared templates.
 render_root_objects "$render_dir"
 mkdir -p "$LIFEMODEL_STATE_DIR"
-if [ "${LIFEMODEL_LOCKED:-0}" != 1 ]; then
+if [ -n "${LIFEMODEL_LOCK_FD:-}" ] && [ "${LIFEMODEL_LOCK_HELD:-0}" = 1 ]; then
+  flock -x "$LIFEMODEL_LOCK_FD"
+else
   exec 9>"$LIFEMODEL_STATE_DIR/lock"
   flock -x 9
+  LIFEMODEL_LOCK_FD=9
+  LIFEMODEL_LOCK_HELD=1
 fi
 if [ -n "$PLATFORM_DIGEST" ]; then configured_ref="digest=$PLATFORM_DIGEST"; else configured_ref="tag=$PLATFORM_TAG"; fi
-cli_source="$SCRIPT_DIR/../deploy/cli/lifemodel.mjs"
+if [ -f "$SCRIPT_DIR/deploy/cli/lifemodel.mjs" ]; then cli_source="$SCRIPT_DIR/deploy/cli/lifemodel.mjs"; else cli_source="$SCRIPT_DIR/../deploy/cli/lifemodel.mjs"; fi
 effective_oci="$render_dir/ocirepository-effective.yaml"
-LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCKED=1 node "$cli_source" render-ref "$render_dir/ocirepository.yaml" "$configured_ref" > "$effective_oci"
-effective_ref=$(LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCKED=1 node "$cli_source" effective-ref "$configured_ref")
+LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 node "$cli_source" render-ref "$render_dir/ocirepository.yaml" "$configured_ref" > "$effective_oci"
+effective_ref=$(LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 node "$cli_source" effective-ref "$configured_ref")
+LIFEMODEL_KUBECTL="${KUBECTL%% *}" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" node "$cli_source" assert-root-ownership
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"
 
@@ -278,6 +283,10 @@ $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir
 # path without writing into the host's /usr/local or /var/lib directories.
 cli_lib_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/lib/lifemodel"
 cli_bin_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/bin"
+bundle_dir="$cli_lib_dir/bootstrap"
+bundle_templates="$bundle_dir/root"
+bundle_script="$bundle_dir/install.sh"
+bundle_key="$bundle_dir/verification/public-key.pem"
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 newline='
 '
@@ -286,16 +295,27 @@ quoted_cli=$(shell_quote "$cli_lib_dir/lifemodel.mjs")
 quoted_state=$(shell_quote "$LIFEMODEL_STATE_DIR")
 quoted_install_root=$(shell_quote "$LIFEMODEL_INSTALL_ROOT")
 quoted_ref=$(shell_quote "$configured_ref")
-apply_args=$(node -e 'const [script,url,tag,digest,mode,issuer,subject,key,insecure]=process.argv.slice(1); const a=[script,"--platform-url",url]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); process.stdout.write(JSON.stringify(a));' -- "$SCRIPT_DIR/install.sh" "$PLATFORM_URL" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$PUBLIC_KEY_FILE" "$INSECURE_REGISTRY")
+install -d -m 0755 "$bundle_dir" "$bundle_templates" "$bundle_dir/verification"
+if [ "$ROOT_TEMPLATES" != "$bundle_templates" ]; then
+  cp "$ROOT_TEMPLATES/ocirepository.yaml" "$bundle_templates/ocirepository.yaml"
+  cp "$ROOT_TEMPLATES/kustomization.yaml" "$bundle_templates/kustomization.yaml"
+fi
+if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
+install -d -m 0755 "$bundle_dir/deploy/cli"
+if [ "$cli_source" != "$bundle_dir/deploy/cli/lifemodel.mjs" ]; then
+  install -m 0644 "$cli_source" "$bundle_dir/deploy/cli/lifemodel.mjs"
+fi
+if [ "$VERIFY_MODE" = "key" ] && [ "$PUBLIC_KEY_FILE" != "$bundle_key" ]; then install -m 0600 "$PUBLIC_KEY_FILE" "$bundle_key"; fi
+apply_args=$(node -e 'const [script,url,tag,digest,mode,issuer,subject,key,insecure,templates]=process.argv.slice(1); const a=[script,"--platform-url",url]; if(digest) a.push("--digest",digest); else a.push("--tag",tag); a.push("--verify",mode); if(mode==="key") a.push("--public-key-file",key); if(mode==="keyless") a.push("--issuer",issuer,"--subject-regex",subject); if(insecure==="true") a.push("--insecure-registry"); a.push("--root-templates",templates); process.stdout.write(JSON.stringify(a));' -- "$bundle_script" "$PLATFORM_URL" "$PLATFORM_TAG" "$PLATFORM_DIGEST" "$VERIFY_MODE" "$ISSUER" "$SUBJECT_REGEX" "$bundle_key" "$INSECURE_REGISTRY" "$bundle_templates")
 quoted_args=$(shell_quote "$apply_args")
 install -d -m 0755 "$cli_lib_dir" "$cli_bin_dir" "$LIFEMODEL_STATE_DIR"
-install -m 0644 "$SCRIPT_DIR/../deploy/cli/lifemodel.mjs" "$cli_lib_dir/lifemodel.mjs"
+install -m 0644 "$cli_source" "$cli_lib_dir/lifemodel.mjs"
 cat > "$cli_bin_dir/lifemodel" <<EOF
 #!/bin/sh
 LIFEMODEL_STATE_DIR=$quoted_state LIFEMODEL_INSTALL_ROOT=$quoted_install_root LIFEMODEL_CONFIGURED_REF=$quoted_ref LIFEMODEL_APPLY_SCRIPT=/bin/sh LIFEMODEL_APPLY_ARGS=$quoted_args exec node $quoted_cli "\$@"
 EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
-LIFEMODEL_LOCKED=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
+LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
   "$cli_bin_dir/lifemodel" record-applied "$effective_ref"
 
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"

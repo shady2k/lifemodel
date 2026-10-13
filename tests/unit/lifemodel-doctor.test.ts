@@ -24,7 +24,7 @@ printf '%s\n' "$*" >> "$FAKE_KUBECTL_CALLS"
 if [ "$1" = apply ]; then cat > "$FAKE_KUBECTL_INPUT"; exit 0; fi
 if [ "$1" = get ]; then
   case "$2" in
-    ocirepositories) file=ocirepositories;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; *) exit 9;;
+    ocirepositories) file=ocirepositories;; ocirepository) file=ocirepository;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; *) exit 9;;
   esac
   cat "$FAKE_KUBECTL_RESPONSES/$file.json"
 fi
@@ -96,12 +96,46 @@ describe('lifemodel doctor', () => {
     expect(run.stderr).toContain('Not ready: Kustomization/platform');
   });
 
+  it('rejects competing managedFields ownership with a reset command before success', () => {
+    const competing = structuredClone(healthy);
+    competing.ocirepositories.items[0].metadata.managedFields = [{ manager: 'kubectl-patch', fieldsV1: { 'f:spec': { 'f:ref': { 'f:digest': {} } } } }];
+    competing.ocirepository = competing.ocirepositories.items[0];
+    const env = setup(competing);
+    const run = spawnSync(process.execPath, [cli, 'assert-root-ownership'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain('owned by kubectl-patch');
+    expect(run.stderr).toContain('delete ocirepository platform');
+  });
+
   it('persists the previous ref as an override and reruns bootstrap without writing the cluster', () => {
     const env = setup(healthy, 'tag=v2.0.0\ntag=v1.0.0\n');
     const run = spawnSync(process.execPath, [cli, 'doctor', '--repin', 'previous'], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(0);
     expect(JSON.parse(readFileSync(join(env.dir, 'platform-override'), 'utf8'))).toEqual({ ref: 'tag=v1.0.0', configuredRef: 'tag=v2.0.0' });
     expect(existsSync(env.calls) ? readFileSync(env.calls, 'utf8') : '').toBe('');
+  });
+
+  it('keeps the writer lock through doctor recovery when an installer overlaps', async () => {
+    const env = setup(healthy, 'tag=v2.0.0\ntag=v1.0.0\n');
+    const apply = join(env.dir, 'apply.sh');
+    const applied = join(env.dir, 'reapplied');
+    writeFileSync(apply, `#!/bin/sh\nflock -n "$LIFEMODEL_LOCK_FD" || exit 17\nprintf locked > '${applied}'\n`);
+    chmodSync(apply, 0o755);
+    env.env.LIFEMODEL_APPLY_SCRIPT = apply;
+    const installer = spawn('flock', ['-x', join(env.dir, 'lock'), 'sh', '-c', 'printf locked; sleep 0.2'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise<void>((resolve, reject) => {
+      installer.once('error', reject);
+      installer.stdout?.once('data', () => resolve());
+    });
+    const recovery = runAsync([cli, 'doctor', '--repin', 'previous'], env.env);
+    const [installerStatus, recoveryStatus] = await Promise.all([
+      new Promise<number | null>((resolve, reject) => { installer.once('error', reject); installer.once('close', resolve); }),
+      recovery,
+    ]);
+    expect(installerStatus).toBe(0);
+    expect(recoveryStatus).toBe(0);
+    expect(readFileSync(applied, 'utf8')).toBe('locked');
+    expect(JSON.parse(readFileSync(join(env.dir, 'platform-override'), 'utf8')).ref).toBe('tag=v1.0.0');
   });
 
   it('records each successfully applied ref and keeps the prior distinct ref', () => {
@@ -134,6 +168,21 @@ describe('lifemodel doctor', () => {
     const run = spawnSync(process.execPath, [cli, 'render-ref', source, configuredRef], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(0);
     expect((run.stdout.match(/^    (?:tag|digest):.*$/gm) || []).map((line) => line.trim())).toEqual([expected.trim()]);
+  });
+
+
+  it.each([
+    ['fresh configured digest', `digest=sha256:${'a'.repeat(64)}`, undefined],
+    ['unchanged digest override', `digest=sha256:${'a'.repeat(64)}`, `digest=sha256:${'a'.repeat(64)}`],
+    ['clear back to configured digest', `digest=sha256:${'a'.repeat(64)}`, `tag=v1.0.0`],
+  ])('renders %s even when the complete ref block is textually unchanged', (_name, configuredRef, overrideRef) => {
+    const env = setup(healthy);
+    const source = join(env.dir, 'oci.yaml');
+    writeFileSync(source, `spec:\n  ref:\n    digest: sha256:${'a'.repeat(64)}\n  verify: {}\n`);
+    if (overrideRef) writeFileSync(join(env.dir, 'platform-override'), JSON.stringify({ ref: overrideRef, configuredRef: _name.startsWith('clear') ? 'tag=v0.9.0' : configuredRef }));
+    const run = spawnSync(process.execPath, [cli, 'render-ref', source, configuredRef], { env: env.env, encoding: 'utf8' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain(`    digest: sha256:${'a'.repeat(64)}`);
   });
 
   it('supports digest pins in a previous-release override', () => {

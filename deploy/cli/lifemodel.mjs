@@ -45,6 +45,13 @@ function readOverride() {
   if (!value || !validRef.test(value.ref) || !validRef.test(value.configuredRef)) throw new Error('Corrupt platform override; refusing action.');
   return value;
 }
+function assertRootOwnership() {
+  let root;
+  try { root=JSON.parse(runKubectl(['get','ocirepository','platform','-n','flux-system','-o','json'])); }
+  catch(error) { if(/not found/i.test(error.message)) return; throw error; }
+  const owned = (root.metadata?.managedFields || []).filter(entry => entry.manager !== 'lifemodel-bootstrap' && entry.fieldsV1?.['f:spec']?.['f:ref']).map(entry => clean(entry.manager));
+  if(owned.length) throw new Error(`Root OCIRepository spec.ref is owned by ${[...new Set(owned)].join(', ')}. To reset ownership, delete the root object and let the writer recreate it: sudo kubectl --kubeconfig ${kubeconfig} delete ocirepository platform -n flux-system (Flux keeps its applied state).`);
+}
 function report() {
   const override = readOverride();
   if (override) console.log(`ACTIVE PLATFORM OVERRIDE: ${override.ref} (recorded against ${override.configuredRef})`);
@@ -86,7 +93,10 @@ function reapply() {
   else {
     const executable=process.env.LIFEMODEL_APPLY_SCRIPT, args=JSON.parse(process.env.LIFEMODEL_APPLY_ARGS||'[]');
     if(!executable || !Array.isArray(args)) throw new Error('Cannot rerun bootstrap: installer arguments are not configured.');
-    execFileSync(executable,args,{stdio:'inherit',env:process.env});
+    const lockFd=Number(process.env.LIFEMODEL_LOCK_FD);
+    const stdio=Number.isInteger(lockFd)&&lockFd>=3?Array(lockFd+1).fill('ignore'): 'inherit';
+    if(Array.isArray(stdio)){stdio[0]='inherit';stdio[1]='inherit';stdio[2]='inherit';stdio[lockFd]=lockFd;}
+    execFileSync(executable,args,{stdio,env:process.env});
   }
 }
 function repin(mode) {
@@ -95,13 +105,14 @@ function repin(mode) {
   if(mode==='previous') { const previous=history[1]; if(!previous) throw new Error('No previous platform release is recorded; a second successful apply is needed before re-pinning.'); durableWrite(overrideFile,`${JSON.stringify({ref:previous,configuredRef:configured})}\n`); }
   else { if(existsSync(overrideFile)) { readOverride(); durableUnlink(overrideFile); } }
   console.log(mode==='clear'?'Cleared platform override and reran bootstrap.':`Requested bootstrap with platform override ${history[1]}.`);
+  if(process.env.LIFEMODEL_NIXOS!=='1') reapply();
 }
 function renderRef(path, configured) {
   const ref=effectiveRef(configured); const [field,value]=ref.split('=');
   const yaml=readFileSync(path,'utf8'); const replacement=`  ref:\n    ${field}: ${field==='tag'?JSON.stringify(value):value}\n`;
-  const rendered=yaml.replace(/^  ref:\n(?:    (?:tag|digest):.*\n)+/m,replacement);
-  if(rendered===yaml) throw new Error('Could not find the complete OCI spec.ref block to render.');
-  process.stdout.write(rendered);
+  const refBlock=/^  ref:\n(?:    (?:tag|digest):.*\n)+/m;
+  if(!refBlock.test(yaml)) throw new Error('Could not find the complete OCI spec.ref block to render.');
+  process.stdout.write(yaml.replace(refBlock,replacement));
 }
 function effectiveRef(configured) {
   if(!validRef.test(configured)) throw new Error('Configured platform ref must be tag=<OCI tag> or digest=sha256:<64 hex>');
@@ -110,18 +121,17 @@ function effectiveRef(configured) {
   durableUnlink(overrideFile); return configured;
 }
 function locked(args) {
-  if(process.env.LIFEMODEL_LOCKED==='1') return false;
+  if(process.env.LIFEMODEL_LOCK_HELD==='1' && /^\d+$/.test(process.env.LIFEMODEL_LOCK_FD||'')) return false;
   mkdirSync(stateDir,{recursive:true,mode:0o700});
-  const result=spawnSync('flock',['-x',`${stateDir}/lock`,process.execPath,script,...args],{stdio:'inherit',env:{...process.env,LIFEMODEL_LOCKED:'1'}});
+  const result=spawnSync('flock',['-x',`${stateDir}/lock`,process.execPath,script,...args],{stdio:'inherit',env:{...process.env,LIFEMODEL_LOCK_FD:'3',LIFEMODEL_LOCK_HELD:'1'}});
   if(result.error) throw result.error;
-  if(result.status === 0 && args[0] === 'doctor' && args[1] === '--repin') {
-    process.env.LIFEMODEL_LOCKED='1'; reapply();
-  }
+  if(result.status === 0 && args[0] === 'doctor' && args[1] === '--repin' && process.env.LIFEMODEL_NIXOS==='1') reapply();
   process.exit(result.status ?? 1);
 }
 const args=process.argv.slice(2);
 try {
   if(args.length===1&&(args[0]==='--help'||args[0]==='-h')){help();process.exit(0);}
+  if(args[0]==='assert-root-ownership'&&args.length===1){locked(args);assertRootOwnership();process.exit(0);}
   if(args[0]==='record-applied'&&args.length===2){locked(args);writeHistory(args[1]);process.exit(0);}
   if(args[0]==='effective-ref'&&args.length===2){locked(args);console.log(effectiveRef(args[1]));process.exit(0);}
   if(args[0]==='render-ref'&&args.length===3){locked(args);renderRef(args[1],args[2]);process.exit(0);}

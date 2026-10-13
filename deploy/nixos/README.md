@@ -34,7 +34,7 @@ The writer uses the override only while the configured tag or digest still
 matches the configuration recorded with it. An unchanged NixOS switch keeps
 the override. Setting a new configured tag or digest makes that configured ref
 win and removes the override. Run `sudo lifemodel doctor --repin clear` to
-remove an override explicitly. Doctor reports an active override prominently.
+remove an override explicitly. Doctor reports an active override prominently. If the root OCIRepository `spec.ref` is owned by a different field manager, the writer refuses to apply and reports the manager. Reset it with `sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml delete ocirepository platform -n flux-system`; the writer then recreates it, while Flux keeps its applied state.
 
 On the test VM, recovery was measured at 82 seconds. The A0 Kustomization's
 two-minute timeout covers its reconciliation and health check; it does not
