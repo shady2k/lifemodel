@@ -152,11 +152,12 @@
         grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
         test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 4
         test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 6
-        test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 1
+        test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 2
         test "$(grep -F -c 'app.kubernetes.io/name: loader' step-a.yaml)" -eq 1
         test "$(grep -F -c 'port: 8200' step-a.yaml)" -eq 1
         ! grep -F 'ipBlock:' step-a.yaml >/dev/null
-        ! grep -F 'egress:' step-a.yaml >/dev/null
+        test "$(grep -F -c 'egress:' step-a.yaml)" -eq 1
+        grep -F 'egress: []' step-a.yaml >/dev/null
         grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
         grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
         grep -F 'name: platform' step-a.yaml >/dev/null
