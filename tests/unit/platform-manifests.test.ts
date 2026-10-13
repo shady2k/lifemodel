@@ -302,16 +302,17 @@ describe('platform manifests', () => {
   });
 
   it('limits loader ingress to Traefik pods in kube-system', () => {
-    const policy = object(sourceObjects(), 'NetworkPolicy');
-    expect(policy.spec.podSelector).toEqual({});
-    expect(policy.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
-    expect(policy.spec.ingress).toEqual([expect.objectContaining({
+    const policy = sourceObjects().find((item) => item.kind === 'NetworkPolicy' && item.metadata.namespace === 'lifemodel-system');
+    expect(policy, 'missing loader NetworkPolicy').toBeDefined();
+    expect(policy!.spec.podSelector).toEqual({});
+    expect(policy!.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
+    expect(policy!.spec.ingress).toEqual([expect.objectContaining({
       from: [{
         namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
         podSelector: { matchLabels: { 'app.kubernetes.io/name': 'traefik' } },
       }],
       ports: [expect.objectContaining({ port: 7000 })],
     })]);
-    expect(policy.spec.egress).toEqual([]);
+    expect(policy!.spec.egress).toEqual([]);
   });
 });
