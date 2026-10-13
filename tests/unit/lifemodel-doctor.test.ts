@@ -16,10 +16,12 @@ function setup(responses: Record<string, unknown>, history?: string) {
   const data = join(dir, 'responses'); mkdirSync(data);
   for (const [name, body] of Object.entries(responses)) writeFileSync(join(data, `${name}.json`), JSON.stringify(body));
   const calls = join(dir, 'calls');
+  const input = join(dir, 'input');
   const fake = join(dir, 'kubectl');
   writeFileSync(fake, `#!/bin/sh
 if [ "$1" = --kubeconfig ]; then shift 2; fi
 printf '%s\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+if [ "$1" = apply ]; then cat > "$FAKE_KUBECTL_INPUT"; exit 0; fi
 if [ "$1" = get ]; then
   case "$2" in
     ocirepositories) file=ocirepositories;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; *) exit 9;;
@@ -31,8 +33,8 @@ fi
   const historyPath = join(dir, 'history');
   if (history !== undefined) writeFileSync(historyPath, history);
   const env = { ...process.env, LIFEMODEL_KUBECTL: 'kubectl', LIFEMODEL_HISTORY: historyPath, PATH: `${dir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
-    FAKE_KUBECTL_CALLS: calls, FAKE_KUBECTL_RESPONSES: data };
-  return { dir, calls, env };
+    FAKE_KUBECTL_CALLS: calls, FAKE_KUBECTL_INPUT: input, FAKE_KUBECTL_RESPONSES: data };
+  return { dir, calls, input, env };
 }
 
 const healthy = {
@@ -91,7 +93,9 @@ describe('lifemodel doctor', () => {
     const run = spawnSync(process.execPath, [cli, 'doctor', '--repin', 'previous'], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(0);
     const calls = readFileSync(env.calls, 'utf8').trim().split('\n');
-    expect(calls).toContain('patch ocirepository platform -n flux-system --type=merge -p {"spec":{"ref":{"tag":"v1.0.0"}}}');
+    expect(calls).toContain('apply --server-side --field-manager=lifemodel-doctor --force-conflicts -f -');
+    expect(readFileSync(env.input, 'utf8')).toContain('\"ref\":{\"tag\":\"v1.0.0\"}');
+    expect(calls.some((call) => call.startsWith('patch '))).toBe(false);
     expect(calls.some((call) => call.startsWith('annotate ocirepository platform -n flux-system reconcile.fluxcd.io/requestedAt='))).toBe(true);
   });
 

@@ -14,11 +14,11 @@ function help() {
 Diagnose Flux sources, Kustomizations and the lifemodel loader.
   --repin previous  Restore the previous successfully applied platform ref and reconcile Flux.`);
 }
-function runKubectl(args) {
+function runKubectl(args, input) {
   try {
     const executable = kubectl || 'k3s';
     const prefix = kubectl ? [] : ['kubectl'];
-    return execFileSync(executable, [...prefix, '--kubeconfig', kubeconfig, ...args], { encoding: 'utf8' });
+    return execFileSync(executable, [...prefix, '--kubeconfig', kubeconfig, ...args], { encoding: 'utf8', input });
   } catch (error) {
     const detail = error?.stderr?.toString().trim() || error?.message || String(error);
     throw new Error(`kubectl ${args.join(' ')} failed: ${detail}`);
@@ -110,7 +110,12 @@ function repinPrevious() {
   const field = previous.slice(0, split);
   const value = previous.slice(split + 1);
   const ref = { [field]: value };
-  runKubectl(['patch', 'ocirepository', 'platform', '-n', 'flux-system', '--type=merge', '-p', JSON.stringify({ spec: { ref } })]);
+  runKubectl(['apply', '--server-side', '--field-manager=lifemodel-doctor', '--force-conflicts', '-f', '-'], JSON.stringify({
+    apiVersion: 'source.toolkit.fluxcd.io/v1',
+    kind: 'OCIRepository',
+    metadata: { name: 'platform', namespace: 'flux-system' },
+    spec: { ref },
+  }));
   runKubectl(['annotate', 'ocirepository', 'platform', '-n', 'flux-system', `reconcile.fluxcd.io/requestedAt=${Date.now()}`, '--overwrite']);
   console.log(`Re-pinned platform to ${previous} and requested Flux reconciliation.`);
   if (field === 'digest') console.log(`To keep this after nixos-rebuild switch, set services.lifemodel.platform.digest = ${JSON.stringify(value)}; and remove services.lifemodel.platform.tag.`);
