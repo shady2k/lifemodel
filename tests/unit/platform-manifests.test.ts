@@ -104,7 +104,7 @@ describe('platform manifests', () => {
     const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
     expect(kustomization.resources).toContain('gitea');
     const release = YAML.parse(readFileSync(join(giteaRoot, 'release.yaml'), 'utf8')) as { spec: { chart: { spec: { chart: string; version: string; sourceRef: { name: string } } }; valuesFrom: Record<string, any>[] } };
-    expect(release.spec.chart.spec).toMatchObject({ chart: './charts/gitea', version: '12.7.0', sourceRef: { name: 'platform' } });
+    expect(release.spec.chart.spec).toMatchObject({ chart: './charts/gitea', version: '12.7.0', sourceRef: { kind: 'OCIRepository', name: 'platform', namespace: 'flux-system' } });
     expect(release.spec.valuesFrom[0]).toMatchObject({ kind: 'ConfigMap', name: 'gitea-values', valuesKey: 'values.yaml' });
     const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
     expect(values).toMatchObject({
@@ -119,7 +119,7 @@ describe('platform manifests', () => {
       persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
       ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },
       podSecurityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
-      containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
+      containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } },
     });
     const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
     expect(namespace.metadata.name).toBe('lifemodel-git');
@@ -128,6 +128,11 @@ describe('platform manifests', () => {
     expect(policy.spec.ingress).toHaveLength(3);
     const admitted = policy.spec.ingress.map((rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']);
     expect(admitted).toEqual(['lifemodel-system', 'flux-system', 'kube-system']);
+    expect(policy.spec.ingress.map((rule: any) => rule.from[0].podSelector.matchLabels)).toEqual([
+      { 'app.kubernetes.io/name': 'loader' },
+      { app: 'source-controller' },
+      { 'app.kubernetes.io/name': 'traefik' },
+    ]);
     expect(policy.spec.ingress.map((rule: any) => rule.ports[0].port)).toEqual([3000, 3000, 3000]);
     expect(policy.spec.egress).toEqual([]);
     expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
