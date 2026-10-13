@@ -69,6 +69,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   };
 
   const state = createLoaderState({ fs, config, logger });
+  // Platform mode (ADR-010, platform step A0): the loader supervises nothing.
+  // Its pieces are still constructed - the interface reads their status - but
+  // nothing of the instance half is ever ASKED to start, so a deployment
+  // without a front-door binary, without Agent Vault and without a Docker
+  // socket comes up all the same. Instance mode is unchanged: it starts them.
+  const platform = config.mode === 'platform';
   const agentVault = createAgentVault({
     launcher,
     runner,
@@ -188,27 +194,29 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   async function bringUp(): Promise<void> {
     try {
       await state.ensureLayout();
-      // The code the image carries, for a volume that holds no repository
-      // yet: without it this instance can never be seeded, so it is one of
-      // the loader's own inputs and is checked before it serves.
-      await requireSeedBundleForFirstStart({ fs, config });
-      if (stopping) return;
-      // The front door first: it is what the owner reaches, and it must be
-      // up while lifemodel is still being seeded, built or panicked.
-      await frontDoor.start();
-      if (stopping) return;
-      // Agent Vault next, and before lifemodel: lifemodel's proxy credential
-      // comes from the vault the loader creates here, and the vault must be
-      // ready to answer before the process that uses it runs.
-      await agentVault.start();
-      if (stopping) return;
-      // Then the kernel rule: uid 1000 may reach the named loopback services
-      // and nothing else, so the proxy above is the only way out for
-      // lifemodel AND for the build of its code. A container that cannot
-      // carry the rule does not start lifemodel at all (a missing input of
-      // the loader's own).
-      await egress.install();
-      if (stopping) return;
+      if (!platform) {
+        // The code the image carries, for a volume that holds no repository
+        // yet: without it this instance can never be seeded, so it is one of
+        // the loader's own inputs and is checked before it serves.
+        await requireSeedBundleForFirstStart({ fs, config });
+        if (stopping) return;
+        // The front door first: it is what the owner reaches, and it must be
+        // up while lifemodel is still being seeded, built or panicked.
+        await frontDoor.start();
+        if (stopping) return;
+        // Agent Vault next, and before lifemodel: lifemodel's proxy credential
+        // comes from the vault the loader creates here, and the vault must be
+        // ready to answer before the process that uses it runs.
+        await agentVault.start();
+        if (stopping) return;
+        // Then the kernel rule: uid 1000 may reach the named loopback services
+        // and nothing else, so the proxy above is the only way out for
+        // lifemodel AND for the build of its code. A container that cannot
+        // carry the rule does not start lifemodel at all (a missing input of
+        // the loader's own).
+        await egress.install();
+        if (stopping) return;
+      }
       http = createLoaderHttp({
         state,
         supervisor,
@@ -239,6 +247,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       );
       if ((await state.readAuth()) === null) {
         logger.info({}, 'no password is set: the owner is asked at /setup');
+        return;
+      }
+      if (platform) {
+        // There is nothing to continue: no instance lives on this volume.
         return;
       }
       // A password is set, so this start continues where the last one left
