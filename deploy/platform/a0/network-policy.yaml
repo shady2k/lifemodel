@@ -20,6 +20,28 @@ spec:
         - protocol: TCP
           port: 7000
   egress:
+    # CoreDNS for openbao.openbao.svc; kube-dns label is used by k3s.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # k3s kube-proxy DNATs kubernetes.default.svc to the API endpoint on a node.
+    # Nodes must use 10.0.0.0/8; narrow this CIDR if the cluster uses another node range.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 6443
+    # OpenBao is the only permitted application service egress.
     - to:
         - namespaceSelector:
             matchLabels:

@@ -36,11 +36,12 @@ export function createPlatformPhaseRunner(store: PlatformPhaseStore): (phases: P
   };
 }
 
-interface Secret { metadata?: { resourceVersion?: string }; data?: { phase?: string } }
+interface Secret { metadata?: Record<string, unknown> & { resourceVersion?: string }; data?: { phase?: string } }
 export interface KubernetesSecretStoreOptions {
   apiServer?: string; namespace?: string; tokenFile?: string; caFile?: string;
   /** Override HTTP for tests; production uses the in-cluster HTTPS endpoint. */
   request?: (url: URL, method: string, token: string, body: string | undefined, ca: Buffer | undefined) => Promise<{ status: number; body: string }>;
+  timeoutMs?: number;
 }
 
 const SECRET_NAME = 'loader-bootstrap-state';
@@ -53,11 +54,13 @@ export function createKubernetesPhaseStore(options: KubernetesSecretStoreOptions
   const tokenFile = options.tokenFile ?? `${SERVICE_ACCOUNT}/token`;
   const caFile = options.caFile ?? `${SERVICE_ACCOUNT}/ca.crt`;
   const url = new URL(`/api/v1/namespaces/${encodeURIComponent(namespace)}/secrets/${SECRET_NAME}`, host);
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const call = options.request ?? ((target, method, token, body, ca) => new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = httpsRequest(target, { method, ca, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }) } }, (res) => {
-      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: response }));
+      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode ?? 0, body: response }); }); res.on('aborted', () => { clearTimeout(timer); reject(new Error('Kubernetes API response was truncated')); });
     });
-    req.on('error', reject); if (body !== undefined) req.write(body); req.end();
+    const timer = setTimeout(() => req.destroy(new Error(`Kubernetes API request exceeded ${timeoutMs} ms`)), timeoutMs);
+    req.on('error', (error) => { clearTimeout(timer); reject(error); }); if (body !== undefined) req.write(body); req.end();
   }));
   async function readRecord(): Promise<PlatformPhaseRecord | null> {
     const response = await send('GET');
@@ -82,7 +85,7 @@ export function createKubernetesPhaseStore(options: KubernetesSecretStoreOptions
       if (current.status !== 200) throw new Error(`Kubernetes phase Secret must be platform-created before loader startup (${current.status}): ${current.body}`);
       const old = JSON.parse(current.body) as Secret;
       if (old.metadata?.resourceVersion === undefined) throw new Error('Kubernetes phase Secret has no resourceVersion');
-      const payload = { apiVersion: 'v1', kind: 'Secret', metadata: { name: SECRET_NAME, namespace, resourceVersion: old.metadata.resourceVersion }, type: 'Opaque', data: { phase: Buffer.from(JSON.stringify(record)).toString('base64') } };
+      const payload = { apiVersion: 'v1', kind: 'Secret', metadata: { ...old.metadata, name: SECRET_NAME, namespace, resourceVersion: old.metadata.resourceVersion }, type: 'Opaque', data: { phase: Buffer.from(JSON.stringify(record)).toString('base64') } };
       const response = await send('PUT', payload);
       if (response.status !== 200) throw new Error(`Kubernetes Secret write failed (${response.status}): ${response.body}`);
       const verified = await readRecord();

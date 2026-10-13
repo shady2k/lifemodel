@@ -11,7 +11,8 @@ export interface BaoApi {
   init(): Promise<{ keys: string[]; rootToken: string }>;
   unseal(key: string): Promise<void>;
   rootTokenActive(rootToken: string): Promise<boolean>;
-  ensureLoaderPolicy(rootToken: string): Promise<void>;
+  ensureLoaderPolicy(rootToken: string, loaderJwt: string): Promise<void>;
+  loginLoader(loaderJwt: string): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
 }
 export interface BaoCustody { read(): Promise<BaoKeys | null>; write(value: BaoKeys): Promise<void> }
@@ -19,6 +20,7 @@ export interface OpenBaoBootstrapDeps {
   bao: BaoApi;
   custody: BaoCustody;
   runPhases(phases: Array<{ name: string; run(): Promise<void> }>): Promise<void>;
+  loaderJwt?(): Promise<string>;
 }
 
 function assertKeys(value: BaoKeys | null): asserts value is BaoKeys {
@@ -33,6 +35,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
   unsealIfSealed(): Promise<void>;
 } {
   const { bao, custody } = deps;
+  const loaderJwt = deps.loaderJwt ?? (async () => (await readFile(`${SA_DIR}/token`, 'utf8')).trim());
   const initialize = async (): Promise<void> => {
     const status = await bao.status();
     if (!status.initialized) {
@@ -47,33 +50,55 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
   const unseal = async (): Promise<void> => {
     const status = await bao.status();
     if (!status.initialized) throw new Error('OpenBao is not initialized after its init phase');
-    if (!status.sealed) return;
+    // Custody is an independent readiness invariant, even while Bao is unsealed.
     const saved = await custody.read();
     assertKeys(saved);
+    if (!status.sealed) return;
     await bao.unseal(saved.keys[0]!);
     if ((await bao.status()).sealed) throw new Error('OpenBao remains sealed after submitting its custody key');
+  };
+  const validateAndUnsealBeforeResume = async (): Promise<void> => {
+    const status = await bao.status();
+    if (!status.initialized) return;
+    const saved = await custody.read();
+    assertKeys(saved);
+    if (status.sealed) await unseal();
+    if (saved.rootToken === null) {
+      const jwt = await loaderJwt();
+      if (jwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
+      await bao.loginLoader(jwt);
+    }
   };
   const provisionAndRetire = async (): Promise<void> => {
     const saved = await custody.read();
     assertKeys(saved);
-    if (saved.rootToken === null) return; // already retired on an earlier run
+    const jwt = await loaderJwt();
+    if (jwt === '') throw new Error('Kubernetes loader ServiceAccount JWT is empty');
+    if (saved.rootToken === null) {
+      await bao.loginLoader(jwt);
+      return; // root already retired; restore the steady-state identity
+    }
     // A crash can land after revoke-self but before the Secret update. Detect
     // that cut so a retry can remove the revoked token without using it again.
     if (await bao.rootTokenActive(saved.rootToken)) {
-      await bao.ensureLoaderPolicy(saved.rootToken);
+      await bao.ensureLoaderPolicy(saved.rootToken, jwt);
       await bao.revokeRootToken(saved.rootToken);
     }
+    if (!(await bao.rootTokenActive(saved.rootToken))) await bao.loginLoader(jwt);
     await custody.write({ keys: saved.keys, rootToken: null });
     const verified = await custody.read();
     assertKeys(verified);
     if (verified.rootToken !== null) throw new Error('OpenBao root token remains in custody Secret after retirement');
   };
   return {
-    runInitial: () => deps.runPhases([
+    runInitial: async () => {
+      await validateAndUnsealBeforeResume();
+      await deps.runPhases([
       { name: 'openbao-init', run: initialize },
       { name: 'openbao-unseal', run: unseal },
       { name: 'openbao-policy', run: provisionAndRetire },
-    ]),
+      ]);
+    },
     unsealIfSealed: unseal,
   };
 }
@@ -81,6 +106,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
 interface KubernetesSecretStoreOptions {
   apiServer?: string; namespace?: string; tokenFile?: string; caFile?: string;
   request?: (url: URL, method: string, token: string, body: string | undefined, ca: Buffer | undefined) => Promise<{ status: number; body: string }>;
+  timeoutMs?: number;
 }
 const SECRET = 'openbao-unseal-custody';
 const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
@@ -92,11 +118,13 @@ export function createKubernetesBaoCustody(options: KubernetesSecretStoreOptions
   const url = new URL(`/api/v1/namespaces/${encodeURIComponent(namespace)}/secrets/${SECRET}`, host);
   const tokenFile = options.tokenFile ?? `${SA_DIR}/token`;
   const caFile = options.caFile ?? `${SA_DIR}/ca.crt`;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const call = options.request ?? ((target, method, token, body, ca) => new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = httpsRequest(target, { method, ca, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }) } }, (res) => {
-      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: response }));
+      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode ?? 0, body: response }); }); res.on('aborted', () => { clearTimeout(timer); reject(new Error('Kubernetes API response was truncated')); });
     });
-    req.on('error', reject); if (body !== undefined) req.write(body); req.end();
+    const timer = setTimeout(() => req.destroy(new Error(`Kubernetes API request exceeded ${timeoutMs} ms`)), timeoutMs);
+    req.on('error', (error) => { clearTimeout(timer); reject(error); }); if (body !== undefined) req.write(body); req.end();
   }));
   async function send(method: string, body?: string): Promise<{ status: number; body: string }> {
     const token = (await readFile(tokenFile, 'utf8')).trim();
@@ -124,7 +152,7 @@ export function createKubernetesBaoCustody(options: KubernetesSecretStoreOptions
       const { secret } = await decode(current.body);
       const metadata = secret['metadata'] as Record<string, unknown> | undefined;
       if (typeof metadata?.['resourceVersion'] !== 'string') throw new Error('Kubernetes custody Secret has no resourceVersion');
-      const payload = { apiVersion: 'v1', kind: 'Secret', metadata: { name: SECRET, namespace, resourceVersion: metadata['resourceVersion'] }, type: 'Opaque', data: { custody: Buffer.from(JSON.stringify(value)).toString('base64') } };
+      const payload = { apiVersion: 'v1', kind: 'Secret', metadata: { ...metadata, name: SECRET, namespace, resourceVersion: metadata['resourceVersion'] }, type: 'Opaque', data: { custody: Buffer.from(JSON.stringify(value)).toString('base64') } };
       const response = await send('PUT', JSON.stringify(payload));
       if (response.status !== 200) throw new Error(`Kubernetes custody Secret write failed (${response.status}): ${response.body}`);
       const verified = await send('GET');
@@ -133,25 +161,34 @@ export function createKubernetesBaoCustody(options: KubernetesSecretStoreOptions
   };
 }
 
-interface OpenBaoApiOptions { address: string; request?: (url: URL, method: string, token: string | undefined, body: string | undefined) => Promise<{ status: number; body: string }> }
+interface OpenBaoApiOptions { address: string; timeoutMs?: number; request?: (url: URL, method: string, token: string | undefined, body: string | undefined) => Promise<{ status: number; body: string }> }
 /** OpenBao HTTP API client. The address is configuration, not a hard-coded route. */
 export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
   const base = new URL(options.address);
+  let loaderToken: string | undefined;
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const call = options.request ?? ((url, method, token, body) => new Promise<{ status: number; body: string }>((resolve, reject) => {
     const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
     const req = request(url, { method, headers: { ...(token === undefined ? {} : { 'x-vault-token': token }), ...(body === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }) } }, (res) => {
-      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: response }));
+      let response = ''; res.setEncoding('utf8'); res.on('data', (chunk: string) => { response += chunk; }); res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode ?? 0, body: response }); }); res.on('aborted', () => { clearTimeout(timer); reject(new Error('OpenBao response was truncated')); });
     });
-    req.on('error', reject); if (body !== undefined) req.write(body); req.end();
+    const timer = setTimeout(() => req.destroy(new Error(`OpenBao request exceeded ${timeoutMs} ms`)), timeoutMs);
+    req.on('error', (error) => { clearTimeout(timer); reject(error); }); if (body !== undefined) req.write(body); req.end();
   }));
-  async function api(path: string, method: string, token?: string, payload?: unknown): Promise<Record<string, unknown>> {
-    const response = await call(new URL(`/v1/${path}`, base), method, token, payload === undefined ? undefined : JSON.stringify(payload));
+  async function api(path: string, method: string, token?: string, payload?: unknown, useLoader = true): Promise<Record<string, unknown>> {
+    const response = await call(new URL(`/v1/${path}`, base), method, token ?? (useLoader ? loaderToken : undefined), payload === undefined ? undefined : JSON.stringify(payload));
     if (response.status < 200 || response.status >= 300) throw new Error(`OpenBao ${method} ${path} failed (${response.status}): ${response.body}`);
     return response.body ? JSON.parse(response.body) as Record<string, unknown> : {};
   }
+  async function loginLoader(loaderJwt: string): Promise<void> {
+    const response = await api('auth/kubernetes/login', 'POST', undefined, { role: 'loader', jwt: loaderJwt }, false);
+    const auth = response['auth'] as Record<string, unknown> | undefined;
+    if (typeof auth?.['client_token'] !== 'string' || auth['client_token'] === '') throw new Error('OpenBao Kubernetes auth login returned no client token');
+    loaderToken = auth['client_token'];
+  }
   return {
     status: async () => {
-      const data = await api('sys/seal-status', 'GET');
+      const data = await api('sys/seal-status', 'GET', undefined, undefined, false);
       return { initialized: data['initialized'] === true, sealed: data['sealed'] === true };
     },
     init: async () => {
@@ -160,18 +197,40 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       if (!Array.isArray(keys) || typeof response['root_token'] !== 'string') throw new Error('OpenBao sys/init response has no key shares or root token');
       return { keys: keys as string[], rootToken: response['root_token'] };
     },
-    unseal: async (key) => { await api('sys/unseal', 'POST', undefined, { key }); },
+    unseal: async (key) => { await api('sys/unseal', 'POST', undefined, { key }, false); },
     rootTokenActive: async (rootToken) => {
       const response = await call(new URL('/v1/auth/token/lookup-self', base), 'GET', rootToken, undefined);
       if (response.status === 200) return true;
       if (response.status === 403) return false;
       throw new Error(`OpenBao GET auth/token/lookup-self failed (${response.status}): ${response.body}`);
     },
-    ensureLoaderPolicy: async (rootToken) => {
+    ensureLoaderPolicy: async (rootToken, loaderJwt) => {
       const policy = 'path "sys/seal-status" { capabilities = ["read"] }\npath "sys/unseal" { capabilities = ["update"] }';
-      await api('sys/policies/acl/loader-bootstrap', 'PUT', rootToken, { policy });
-      await api('auth/token/roles/loader-bootstrap', 'POST', rootToken, { allowed_policies: ['loader-bootstrap'], token_ttl: '1h', token_max_ttl: '24h' });
+      await api('sys/policies/acl/loader', 'PUT', rootToken, { policy }, false);
+      const mounts = await api('sys/auth', 'GET', rootToken, undefined, false);
+      const auth = mounts['kubernetes/'];
+      if (auth === undefined) await api('sys/auth/kubernetes', 'POST', rootToken, { type: 'kubernetes' }, false);
+      // OpenBao uses its own pod ServiceAccount token for TokenReview when
+      // token_reviewer_jwt is omitted (https://openbao.org/docs/auth/kubernetes/).
+      await api('auth/kubernetes/config', 'POST', rootToken, { kubernetes_host: 'https://kubernetes.default.svc:443' }, false);
+      await api('auth/kubernetes/role/loader', 'POST', rootToken, {
+        bound_service_account_names: ['loader'],
+        bound_service_account_namespaces: ['lifemodel-system'],
+        policies: ['loader'],
+        ttl: '1h',
+      }, false);
+      await loginLoader(loaderJwt);
+      const capabilities = await api('sys/capabilities-self', 'POST', loaderToken, {
+        paths: ['sys/seal-status', 'sys/unseal', 'sys/init'],
+      }, false);
+      const result = capabilities['sys/seal-status'] as string[] | undefined;
+      const unseal = capabilities['sys/unseal'] as string[] | undefined;
+      const init = capabilities['sys/init'] as string[] | undefined;
+      if (!result?.includes('read') || !unseal?.includes('update') || init?.some((capability) => capability !== 'deny')) {
+        throw new Error('OpenBao Kubernetes loader login did not have the expected minimal permitted and denied capabilities');
+      }
     },
+    loginLoader,
     revokeRootToken: async (rootToken) => { await api('auth/token/revoke-self', 'POST', rootToken, {}); },
   };
 }
