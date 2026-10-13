@@ -4,13 +4,6 @@ resources:
   - namespace.yaml
   - service-account.yaml
   - auth-delegator.yaml
-  - openbao-release.yaml
+  - openbao/rendered.yaml
   - gitea
   - network-policy.yaml
-configMapGenerator:
-  - name: openbao-values
-    namespace: openbao
-    files:
-      - values.yaml=openbao-values.yaml
-generatorOptions:
-  disableNameSuffixHash: true

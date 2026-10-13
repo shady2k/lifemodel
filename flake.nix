@@ -128,28 +128,32 @@
         touch $out
       '';
       renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
-        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
       } ''
         set -eux
         helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
-          -f ${./deploy/platform/a/openbao-values.yaml} > openbao.yaml
-        grep -F 'kind: StatefulSet' openbao.yaml >/dev/null
-        grep -F 'volumeClaimTemplates:' openbao.yaml >/dev/null
-        grep -F 'storage "raft"' openbao.yaml >/dev/null
-        grep -F 'serviceAccountName: openbao' openbao.yaml >/dev/null
-        grep -A2 -F 'capabilities:' openbao.yaml | grep -F -- '- ALL' >/dev/null
-        if grep -F 'automountServiceAccountToken: false' openbao.yaml >/dev/null; then
+          -f ${./deploy/platform/a/openbao-values.yaml} > openbao-generated.yaml
+        cmp openbao-generated.yaml ${./deploy/platform/a/openbao/rendered.yaml}
+        grep -F 'kind: StatefulSet' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'volumeClaimTemplates:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'storage "raft"' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'serviceAccountName: openbao' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -A2 -F 'capabilities:' ${./deploy/platform/a/openbao/rendered.yaml} | grep -F -- '- ALL' >/dev/null
+        if grep -F 'automountServiceAccountToken: false' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null; then
           echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
         fi
         grep -F 'pod-security.kubernetes.io/enforce: restricted' ${./deploy/platform/a/namespace.yaml} >/dev/null
-        if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' openbao.yaml >/dev/null; then
+        if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null; then
           echo 'OpenBao injector or auto-unseal rendered unexpectedly' >&2; exit 1
         fi
         kustomize build ${./deploy/platform} > platform.yaml
         grep -F 'name: platform-a' platform.yaml >/dev/null
         grep -F 'name: platform-a0' platform.yaml >/dev/null
         kustomize build ${./deploy/platform/a} > step-a.yaml
-        grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
+        if grep -F 'kind: HelmRelease' step-a.yaml >/dev/null; then
+          echo 'step A must not contain HelmRelease objects' >&2
+          exit 1
+        fi
         test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 4
         test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 6
         test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 2
