@@ -175,6 +175,10 @@
         grep -F 'PATH=/data/gitea/gitea.db' gitea.yaml >/dev/null
         grep -F 'ROOT=/data/git/repositories' gitea.yaml >/dev/null
         grep -F 'mountPath: /data' gitea.yaml >/dev/null
+        grep -F 'runAsNonRoot: true' gitea.yaml >/dev/null
+        grep -F 'allowPrivilegeEscalation: false' gitea.yaml >/dev/null
+        grep -F 'seccompProfile:' gitea.yaml >/dev/null
+        grep -F -- '- ALL' gitea.yaml >/dev/null
         grep -F 'name: gitea-admin' gitea.yaml >/dev/null
         grep -E 'key:[[:space:]]+username' gitea.yaml >/dev/null
         grep -E 'key:[[:space:]]+password' gitea.yaml >/dev/null

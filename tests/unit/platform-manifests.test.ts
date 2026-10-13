@@ -118,6 +118,8 @@ describe('platform manifests', () => {
       },
       persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
       ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },
+      podSecurityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
+      containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
     });
     const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
     expect(namespace.metadata.name).toBe('lifemodel-git');
