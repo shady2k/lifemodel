@@ -1,10 +1,22 @@
 # Platform OCI artifact — A0
 
 This directory is the root of the platform OCI artifact. Flux's root
-`OCIRepository` applies the `platform` Kustomization here. At this stage the
-only reconciled step is A0, the loader in `lifemodel-system`; later platform
-steps must be added as Flux Kustomizations with explicit `dependsOn` edges to
-A0 (and to any required earlier step).
+`OCIRepository` applies the `platform` Kustomization here. The root artifact declares A0 and step A. A0 deploys the loader first; A
+deploys OpenBao and depends on A0, but does not gate A0 or loader startup.
+Step A's chart is the official OpenBao chart 0.30.3, vendored under
+`charts/openbao` from its upstream archive (SHA-256
+`d50ed31b8305f430df308c342dd3c1efa877222380e99cb480f74f070d6beaa8`).
+The HelmRelease uses the same platform OCIRepository as its chart source.
+OpenBao runs one standalone server using integrated Raft storage on a retained
+PVC, with no injector or auto-unseal. Its explicit ServiceAccount enables the
+projected Kubernetes token, and a ClusterRoleBinding grants only the built-in
+`system:auth-delegator` role for TokenReview. The chart does not create or label the
+namespace; `a/namespace.yaml` applies the PSA `restricted` labels. The chart's
+server pod security context renders to restricted-compatible settings.
+`a/network-policy.yaml` defaults OpenBao ingress to deny and allows TCP 8200
+only from the loader pod in `lifemodel-system` (other ingress, including Raft
+cluster port 8201, is denied). Egress is not constrained by this ingress-only
+policy, so later Kubernetes-auth TokenReview and DNS can work.
 
 ## Loader image release pin
 

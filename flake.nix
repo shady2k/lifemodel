@@ -127,6 +127,44 @@
         fi
         touch $out
       '';
+      renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+      } ''
+        set -eux
+        helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
+          -f ${./deploy/platform/a/openbao-values.yaml} > openbao.yaml
+        grep -F 'kind: StatefulSet' openbao.yaml >/dev/null
+        grep -F 'volumeClaimTemplates:' openbao.yaml >/dev/null
+        grep -F 'storage "raft"' openbao.yaml >/dev/null
+        grep -F 'serviceAccountName: openbao' openbao.yaml >/dev/null
+        grep -A2 -F 'capabilities:' openbao.yaml | grep -F -- '- ALL' >/dev/null
+        if grep -F 'automountServiceAccountToken: false' openbao.yaml >/dev/null; then
+          echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
+        fi
+        grep -F 'pod-security.kubernetes.io/enforce: restricted' ${./deploy/platform/a/namespace.yaml} >/dev/null
+        if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' openbao.yaml >/dev/null; then
+          echo 'OpenBao injector or auto-unseal rendered unexpectedly' >&2; exit 1
+        fi
+        kustomize build ${./deploy/platform} > platform.yaml
+        grep -F 'name: platform-a' platform.yaml >/dev/null
+        grep -F 'name: platform-a0' platform.yaml >/dev/null
+        kustomize build ${./deploy/platform/a} > step-a.yaml
+        grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
+        test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 1
+        test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 2
+        test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 1
+        test "$(grep -F -c 'app.kubernetes.io/name: loader' step-a.yaml)" -eq 1
+        test "$(grep -F -c 'port: 8200' step-a.yaml)" -eq 1
+        ! grep -F 'ipBlock:' step-a.yaml >/dev/null
+        ! grep -F 'egress:' step-a.yaml >/dev/null
+        grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
+        grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
+        grep -F 'name: platform' step-a.yaml >/dev/null
+        grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        touch $out
+      '';
       cliHelp = pkgs.runCommand "lifemodel-cli-help" { nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep ]; } ''
         node ${./deploy/cli/lifemodel.mjs} --help > help.txt
         grep -F 'Usage: lifemodel doctor' help.txt > /dev/null
@@ -179,6 +217,7 @@
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
         platform-kustomize-wiring = renderedPlatform;
+        openbao-platform-render = renderedOpenBao;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
