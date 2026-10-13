@@ -60,6 +60,24 @@ describe('OpenBao bootstrap', () => {
     expect(calls.filter(({ path }) => !path.endsWith('/auth/kubernetes/login') && !path.endsWith('/sys/capabilities-self')).slice(2).every(({ token }) => token === 'root')).toBe(true);
     expect(JSON.parse(calls.find(({ path }) => path.endsWith('/auth/kubernetes/role/loader'))?.body ?? '{}')).toMatchObject({ bound_service_account_names: ['loader'], bound_service_account_namespaces: ['lifemodel-system'], policies: ['loader'] });
     expect(JSON.parse(calls.find(({ path }) => path.endsWith('/auth/kubernetes/login'))?.body ?? '{}')).toMatchObject({ role: 'loader', jwt: 'loader-jwt' });
+    expect(calls.find(({ path }) => path.endsWith('/sys/capabilities-self'))?.token).toBe('loader-token');
+  });
+
+  it('refuses to retire root when the authenticated loader lacks its required capabilities', async () => {
+    const api = createOpenBaoApi({
+      address: 'http://openbao.test:8200',
+      request: async (url, _method, token) => {
+        if (url.pathname.endsWith('/auth/kubernetes/login')) {
+          return { status: 200, body: JSON.stringify({ auth: { client_token: 'loader-token' } }) };
+        }
+        if (url.pathname.endsWith('/sys/capabilities-self')) {
+          expect(token).toBe('loader-token');
+          return { status: 200, body: JSON.stringify({ 'sys/seal-status': ['read'], 'sys/unseal': ['update'], 'sys/init': ['update'] }) };
+        }
+        return { status: 204, body: '' };
+      },
+    });
+    await expect(api.ensureLoaderPolicy('root', 'projected-loader-jwt')).rejects.toThrow(/minimal permitted and denied capabilities/);
   });
 
   it('aborts a request whose server accepts but never completes the response', async () => {
