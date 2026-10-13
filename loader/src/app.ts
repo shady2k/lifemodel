@@ -35,7 +35,11 @@ import {
   type BaoApi,
   type BaoCustody,
 } from './openbao.js';
-import { createKubernetesPhaseStore, createPlatformPhaseRunner, type PlatformPhaseStore } from './platform-bootstrap.js';
+import {
+  createKubernetesPhaseStore,
+  createPlatformPhaseRunner,
+  type PlatformPhaseStore,
+} from './platform-bootstrap.js';
 
 export interface LoaderAppDeps {
   config: LoaderConfig;
@@ -163,7 +167,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformStop = new Promise<void>((resolve) => {
     resolvePlatformStop = resolve;
   });
-  const waitForPlatform = (ms: number): Promise<void> => Promise.race([clock.sleep(ms), platformStop]);
+  const waitForPlatform = (ms: number): Promise<void> =>
+    Promise.race([clock.sleep(ms), platformStop]);
 
   /** Keep the interface live while durable first-start work retries and sealed restarts are repaired. */
   async function runPlatformBootstrap(): Promise<void> {
@@ -184,7 +189,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       } catch (error) {
         logger.error(
           { error: describe(error) },
-          `OpenBao platform bootstrap failed; retrying in ${delayMs} ms`
+          `OpenBao platform bootstrap failed; retrying in ${String(delayMs)} ms`
         );
         await waitForPlatform(delayMs);
         delayMs = Math.min(delayMs * 2, 30_000);
