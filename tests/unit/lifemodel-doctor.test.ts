@@ -56,6 +56,26 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('Deployment/loader ready=yes restarts=0 lastEventReason=none');
   });
 
+  it('allows no GitRepository before the first loader start', () => {
+    const beforeFirstStart = structuredClone(healthy);
+    beforeFirstStart.gitrepositories.items = [];
+    const env = setup(beforeFirstStart);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('GitRepository: none (expected before the first start)');
+    expect(run.stderr).toBe('');
+  });
+
+  it('names an existing non-ready GitRepository and exits non-zero', () => {
+    const bad = structuredClone(healthy);
+    bad.gitrepositories.items[0].status.conditions[0] = { type: 'Ready', status: 'False', reason: 'FetchFailed', message: 'source unavailable' };
+    const env = setup(bad);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).toContain('GitRepository/apps Ready=False reason=FetchFailed message=source unavailable');
+    expect(run.stderr).toContain('Not ready: GitRepository/apps');
+  });
+
   it('names a failing Kustomization and exits non-zero', () => {
     const bad = structuredClone(healthy);
     bad.kustomizations.items[0].status.conditions[0] = { type: 'Ready', status: 'False', reason: 'BuildFailed', message: 'bad path' };
