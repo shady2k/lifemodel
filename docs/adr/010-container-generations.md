@@ -97,13 +97,20 @@ or a measurement; none changes a mechanism below):
    BuildKit build of one module inside the cluster's 2-CPU envelope needs
    its own measurement. The rule carries: the operator refuses a build that
    writes no image.
-7. **k3d's CI scope.** k3d is the dev/CI test environment for
-   module-level cluster-mechanics walks against Flux/CNPG/Traefik/OpenBao.
-   It does not prove clean-VM installation (R5-17). The dedicated-VM
-   delivery path has its own bounded clean-VM walk,
-   `generations/clean-vm-install`; it remains UNPROVED-in-CI until its first
-   recorded run. Existing-cluster installation and its `helm install` walk
-   are removed from this milestone and deferred to lifemodel-xc9.
+7. **VM delivery acceptance (owner, 2026-10-13).** The supported shapes
+   are NixOS first, through the repository flake's `services.lifemodel`
+   module (`nixos-rebuild switch`), and generic Linux (Ubuntu/Debian), through
+   `scripts/install.sh`. Both install only k3s with embedded etcd, pinned
+   Flux, and the root OCIRepository plus platform Kustomization, rendered
+   from the same `deploy/root/` templates (byte-equal, checked by
+   `nix flake check`). The coordinator performs the end-to-end
+   `generations/clean-vm-install` manual acceptance check over SSH on
+   owner-provided test VMs: NixOS first, then Ubuntu for the script. The
+   owner restores each VM's clean hypervisor snapshot before the
+   from-scratch check. This is not a CI walk or a k3d delivery walk;
+   k3d remains for dev/CI cluster-mechanics checks. Existing-cluster
+   installation and its `helm install` walk are removed from this milestone
+   and deferred to lifemodel-xc9.
 
 The migration tool is NOT open: simplification point 5 picks dbmate +
 squawk. The core stop deadline is NOT open: the values fix 5 s
@@ -988,13 +995,17 @@ the deploy branch.**
   over a managed signing key because the release workflow needs no exportable
   long-lived private key; the certificate is short-lived and tied to the
   workflow identity. The bootstrap `OCIRepository.spec.verify` pins
-  `provider: cosign` and the single issuer/subject matcher defined in P15
-  below. That matcher is part of the installer-bundled root source manifest
+  supports both verification modes: keyless `matchOIDCIdentity` (the
+  default) and key verification via `secretRef` to a public key. The selected
+  verification policy is part of the installer-bundled root source manifest
   and cannot be supplied by the artifact it authenticates. The installer
-  also pins the release OCI reference/digest; Flux refuses an
-  unsigned artifact, a changed digest, or a signature from any other
-  identity before applying manifests. The CI publisher has no credentials
-  in the VM. Flux OCIRepository/Cosign verification:
+  also pins the release OCI reference/digest; Flux refuses an unsigned
+  artifact, a changed digest, or a signature that does not match the selected
+  policy before applying manifests. During development, tests sign with a
+  throwaway cosign key and use a registry local to the test VM; nothing is
+  published. The keyless `release.yml` path is first proven at the first real
+  platform release through ship-release (owner, 2026-10-13). Flux
+  OCIRepository/Cosign verification:
   https://fluxcd.io/flux/components/source/ocirepositories/;
   artifact publication:
   https://fluxcd.io/flux/cmd/flux_push_artifact/; Cosign container
@@ -1161,10 +1172,18 @@ the deploy branch.**
   no existing Job, and the operator stays control-only, never a Job
   deleter), and an interrupted cleanup is re-driven from the registry
   with the cut walked.
-- **The one command (F7, amended 2026-10-13).** On a clean VM the
-  installer installs only k3s, Flux, and the platform source: the signed
-  OCI artifact's pinned `OCIRepository` plus its root `Kustomization` in
-  `flux-system`. The OCIRepository verifies the artifact signature before
+- **The one command (F7, amended 2026-10-13; VM shapes and acceptance by
+  owner, 2026-10-13).** NixOS is first: the repository flake exports
+  `services.lifemodel`, and `nixos-rebuild switch` is the one command.
+  Generic Linux (Ubuntu/Debian) uses `scripts/install.sh`. Both install
+  only k3s with embedded etcd, pinned Flux, and the root OCI artifact's
+  pinned `OCIRepository` plus platform `Kustomization` in `flux-system`,
+  rendered from the same `deploy/root/` templates (byte-equal, checked by
+  `nix flake check`). The coordinator runs the end-to-end check manually
+  over SSH on owner-provided test VMs (NixOS first; Ubuntu for the script);
+  the owner restores the clean hypervisor snapshot before each from-scratch
+  check. There is no CI walk and no k3d delivery walk. The OCIRepository
+  verifies the artifact signature before
   Flux applies it. There is no installer-owned Helm release and no
   installer-held credential. Flux then installs all platform resources,
   including the loader and Gitea. The loader's first start performs the
@@ -1667,7 +1686,7 @@ A platform upgrade is a durable, owner-commanded attempt record containing exact
 
 A prior digest is safe to select only when the attempt proves no irreversible schema/data migration occurred and component compatibility remains valid. Otherwise the system refuses pin rollback and holds for explicit forward repair or owner recovery; it never downgrades Gitea/SQLite or prunes durable state to recover. Helm failure remediation is configured to retry/report without implicit Helm rollback or uninstall after a potentially irreversible migration; owner recovery is required. Any upgrade that can migrate Gitea SQLite or other durable storage requires verified, restorable recovery material for the exact source revision before execution. Since the one-volume Gitea backup/restore is deferred, such Gitea/storage upgrades are refused/deferred in this milestone. Walk success, partial apply, crash/restart, loader/UI loss, concurrent app writes, a safe prior-pin return, and refusal of an unsafe downgrade.
 
-P15 is the complete Flux source path under default-deny egress. The Flux release pinned by the installer at implementation must be at least Flux 2.2.0 (source-controller 1.2.0), which supports `OCIRepository.spec.verify.matchOIDCIdentity`. The root `OCIRepository` uses `spec.verify.provider: cosign` and the single keyless identity: issuer `^https://token.actions.githubusercontent.com$`; subject regexp `^https://github.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$`. The `release.yml` publisher signs the same artifact digest with this identity; no second publisher/verifier identity is permitted. This is verification against the Sigstore public-good instance, online; Rekor and TUF must be reachable. The exact world-facing signed-fetch hosts on TCP 443 are `ghcr.io`, GHCR's blob host `pkg-containers.githubusercontent.com`, `tuf-repo-cdn.sigstore.dev`, and `rekor.sigstore.dev`, plus the configured GHCR token endpoint (normally `ghcr.io`). DNS is also required. For in-cluster delivery, `kustomize-controller` and `helm-controller` fetch artifacts from the `source-controller` Service in `flux-system` on TCP 80, forwarded to container port 9090. These platform-owned routes do not traverse application egress. Test a real signed artifact fetch and re-verification after policy installation and source-controller restart, plus cache-loss behavior. Sources: [Flux OCIRepository verification/keyless docs](https://fluxcd.io/flux/components/source/ocirepositories/#verification); [source-controller Service, port 80](https://github.com/fluxcd/source-controller/blob/v1.2.0/config/manager/service.yaml) and [container port 9090](https://github.com/fluxcd/source-controller/blob/v1.2.0/config/manager/deployment.yaml); feature commit https://github.com/fluxcd/source-controller/commit/d855805b8f6f85ce07224052455fb925a05e6149 and minimum Flux distribution release https://github.com/fluxcd/flux2/releases/tag/v2.2.0; GitHub container-registry and hosted-runner network docs https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry and https://docs.github.com/en/actions/concepts/runners/github-hosted-runners; Sigstore public-good/TUF docs https://docs.sigstore.dev/cosign/system_config/installation/.
+P15 is the complete Flux source path under default-deny egress. The Flux release pinned by the installer at implementation must be at least Flux 2.2.0 (source-controller 1.2.0), which supports `OCIRepository.spec.verify.matchOIDCIdentity`. For keyless verification, the root `OCIRepository` uses `spec.verify.provider: cosign` and the single identity: issuer `^https://token\.actions\.githubusercontent\.com$`; subject regexp `^https://github\.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$`. The `release.yml` publisher signs the same artifact digest with this identity; no second keyless publisher/verifier identity is permitted. The installer also supports public-key verification through `secretRef`. Keyless verification uses the Sigstore public-good instance, online; Rekor and TUF must be reachable. The exact world-facing signed-fetch hosts on TCP 443 are `ghcr.io`, GHCR's blob host `pkg-containers.githubusercontent.com`, `tuf-repo-cdn.sigstore.dev`, and `rekor.sigstore.dev`, plus the configured GHCR token endpoint (normally `ghcr.io`). DNS is also required. For in-cluster delivery, `kustomize-controller` and `helm-controller` fetch artifacts from the `source-controller` Service in `flux-system` on TCP 80, forwarded to container port 9090. These platform-owned routes do not traverse application egress. Test a real signed artifact fetch and re-verification after policy installation and source-controller restart, plus cache-loss behavior. Sources: [Flux OCIRepository verification/keyless docs](https://fluxcd.io/flux/components/source/ocirepositories/#verification); [source-controller Service, port 80](https://github.com/fluxcd/source-controller/blob/v1.2.0/config/manager/service.yaml) and [container port 9090](https://github.com/fluxcd/source-controller/blob/v1.2.0/config/manager/deployment.yaml); feature commit https://github.com/fluxcd/source-controller/commit/d855805b8f6f85ce07224052455fb925a05e6149 and minimum Flux distribution release https://github.com/fluxcd/flux2/releases/tag/v2.2.0; GitHub container-registry and hosted-runner network docs https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry and https://docs.github.com/en/actions/concepts/runners/github-hosted-runners; Sigstore public-good/TUF docs https://docs.sigstore.dev/cosign/system_config/installation/.
 
 
 
@@ -2053,4 +2072,4 @@ NetworkPolicies or RBAC.
 - R7-06 — Fixed: P15 includes registry/auth/verifier/internal delivery paths independent of app egress; exact pinned endpoint/bundle validation and live signed-fetch walk remain unverified.
 - R7-07 — Fixed: separately authenticated identity transition, strict outage/cache behavior and fail-closed clean install recorded; transition/outage walks remain unverified.
 - R7-08 — Fixed: application stop set and platform leave-running set, field ownership and upgrade precedence recorded; competing reconcile/panic walk remains unverified.
-- R7-09 — Fixed: init-to-custody visible-recovery limit restored and F7/G3/N-19 marked UNPROVED-IN-CI; dedicated-VM evidence is still absent.
+- R7-09 — Fixed: init-to-custody visible-recovery limit restored; F7/G3/N-19 await the manual acceptance check on the owner's test VM.

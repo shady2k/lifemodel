@@ -50,6 +50,8 @@ export interface LoaderApp {
   start(): Promise<void>;
   /** The port the loader actually listens on (a test asks for 0 and reads this). */
   port(): number;
+  /** The address the server actually bound, or null before it is listening. */
+  host(): string | null;
   /** Stop intake, give lifemodel its drain; the code the process should leave with. */
   shutdown(reason: string): Promise<number>;
   /** The pieces, for a test that drives them directly. */
@@ -69,6 +71,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   };
 
   const state = createLoaderState({ fs, config, logger });
+  // Platform mode (ADR-010, platform step A0): the loader supervises nothing.
+  // Its instance pieces are constructed for the app contract, but are not
+  // passed to HTTP or asked to start. A deployment without a front-door binary,
+  // Agent Vault or Docker socket still serves authentication. Instance mode
+  // is unchanged: it starts them and exposes their controls.
+  const platform = config.mode === 'platform';
   const agentVault = createAgentVault({
     launcher,
     runner,
@@ -131,7 +139,11 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         return;
       }
       server.once('error', reject);
-      server.listen(config.httpPort, '127.0.0.1', () => {
+      // Instance mode: loopback, inside the container that owns the front
+      // door. Platform mode: every interface - the pod's Service reaches the
+      // loader over the pod IP, and no front door sits beside it.
+      const host = platform ? '0.0.0.0' : '127.0.0.1';
+      server.listen(config.httpPort, host, () => {
         server.removeListener('error', reject);
         resolve();
       });
@@ -188,34 +200,37 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   async function bringUp(): Promise<void> {
     try {
       await state.ensureLayout();
-      // The code the image carries, for a volume that holds no repository
-      // yet: without it this instance can never be seeded, so it is one of
-      // the loader's own inputs and is checked before it serves.
-      await requireSeedBundleForFirstStart({ fs, config });
-      if (stopping) return;
-      // The front door first: it is what the owner reaches, and it must be
-      // up while lifemodel is still being seeded, built or panicked.
-      await frontDoor.start();
-      if (stopping) return;
-      // Agent Vault next, and before lifemodel: lifemodel's proxy credential
-      // comes from the vault the loader creates here, and the vault must be
-      // ready to answer before the process that uses it runs.
-      await agentVault.start();
-      if (stopping) return;
-      // Then the kernel rule: uid 1000 may reach the named loopback services
-      // and nothing else, so the proxy above is the only way out for
-      // lifemodel AND for the build of its code. A container that cannot
-      // carry the rule does not start lifemodel at all (a missing input of
-      // the loader's own).
-      await egress.install();
-      if (stopping) return;
+      if (!platform) {
+        // The code the image carries, for a volume that holds no repository
+        // yet: without it this instance can never be seeded, so it is one of
+        // the loader's own inputs and is checked before it serves.
+        await requireSeedBundleForFirstStart({ fs, config });
+        if (stopping) return;
+        // The front door first: it is what the owner reaches, and it must be
+        // up while lifemodel is still being seeded, built or panicked.
+        await frontDoor.start();
+        if (stopping) return;
+        // Agent Vault next, and before lifemodel: lifemodel's proxy credential
+        // comes from the vault the loader creates here, and the vault must be
+        // ready to answer before the process that uses it runs.
+        await agentVault.start();
+        if (stopping) return;
+        // Then the kernel rule: uid 1000 may reach the named loopback services
+        // and nothing else, so the proxy above is the only way out for
+        // lifemodel AND for the build of its code. A container that cannot
+        // carry the rule does not start lifemodel at all (a missing input of
+        // the loader's own).
+        await egress.install();
+        if (stopping) return;
+      }
       http = createLoaderHttp({
         state,
-        supervisor,
-        bootstrap,
+        ...(platform
+          ? {}
+          : { supervisor, bootstrap, vaultAccount: () => agentVault.ownerAccount() }),
+        mode: platform ? 'platform' : 'instance',
         logger,
         clock,
-        vaultAccount: () => agentVault.ownerAccount(),
       });
       await listen();
       if (stopping) {
@@ -228,7 +243,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       http.server.on('error', (error) => {
         fatal(
           new LoaderFatalError(
-            `the loader's own server failed on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+            `the loader's own server failed on port ${String(config.httpPort)}: ${describe(error)}`,
             { cause: error }
           )
         );
@@ -239,6 +254,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       );
       if ((await state.readAuth()) === null) {
         logger.info({}, 'no password is set: the owner is asked at /setup');
+        return;
+      }
+      if (platform) {
+        // There is nothing to continue: no instance lives on this volume.
         return;
       }
       // A password is set, so this start continues where the last one left
@@ -258,7 +277,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         error instanceof LoaderFatalError
           ? error
           : new LoaderFatalError(
-              `the loader cannot listen on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+              `the loader cannot listen on port ${String(config.httpPort)}: ${describe(error)}`,
               { cause: error }
             )
       );
@@ -278,6 +297,13 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       return address === null || address === undefined || typeof address === 'string'
         ? config.httpPort
         : address.port;
+    },
+
+    host: () => {
+      const address = http?.server.address();
+      return address === null || address === undefined || typeof address === 'string'
+        ? null
+        : address.address;
     },
 
     start: async () => {

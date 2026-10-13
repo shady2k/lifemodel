@@ -1,0 +1,20 @@
+# Flux v2.9.6 Kustomization API: path, prune and wait are supported fields;
+# dependsOn is optional, so A0 deliberately has no dependency.
+# https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-a0
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  # Flux's Kustomization timeout bounds the wait/health check, so a broken
+  # rollout cannot hold recovery until the 10m reconciliation interval.
+  # https://fluxcd.io/flux/components/kustomize/kustomizations/#timeout
+  timeout: 2m0s
+  path: ./a0
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: platform

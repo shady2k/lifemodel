@@ -40,6 +40,7 @@ type Report = {
   closed: boolean;
   seen: Identity[];
 };
+type MemberResult = { pid: number; signal: string | null; finalizedBy: 'signal' | 'disconnect' | 'timeout' };
 function bounded<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
@@ -201,6 +202,7 @@ async function prove(caseName: 'loader' | 'supervisor', scenario: Scenario) {
       expect(report?.groupSignal?.beforeSignalling).toEqual(live?.required);
       const member = JSON.parse(readFileSync(`${proof}.member.json`, 'utf8'));
       expect(member.signal).toBe(scenario);
+      expect(member.finalizedBy).toBe('signal');
       expect(member.pid).toBe(report?.runnerMember?.pid);
       expect(report?.runnerMember?.group).toBe(runner.pid);
     }
@@ -301,6 +303,42 @@ async function prove(caseName: 'loader' | 'supervisor', scenario: Scenario) {
   }
 }
 describe('owned real signal fixtures', () => {
+  it('a witness that receives SIGTERM instead of SIGINT fails the witness check', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'loader-signal-negative-'));
+    const proof = join(root, 'settled.json');
+    const ownedRoot = mkdtempSync(join(root, 'member-'));
+    const member = spawn(process.execPath,
+      [guard, 'member', proof, 'SIGINT', 'loader', root, ownedRoot], {
+        env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: root, LANG: 'C' },
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      });
+    let stderr = '';
+    member.stderr!.on('data', chunk => { stderr += chunk.toString(); });
+    try {
+      await bounded(new Promise<void>((resolve, reject) => {
+        member.once('error', reject);
+        member.once('message', message => {
+          if ((message as { type?: string }).type === 'memberReady') resolve();
+        });
+      }), 2_000, 'negative witness readiness');
+      const exited = new Promise<void>((resolve, reject) => {
+        member.once('error', reject);
+        member.once('close', resolve);
+      });
+      member.kill('SIGTERM');
+      await bounded(exited, 3_000, 'negative witness exit');
+      const result = JSON.parse(readFileSync(`${proof}.member.json`, 'utf8')) as MemberResult;
+      expect(result.signal).toBe('SIGTERM');
+      expect(result.finalizedBy).toBe('signal');
+      expect(() => {
+        if (result.signal !== 'SIGINT') throw new Error('witness did not receive SIGINT');
+      }).toThrow('witness did not receive SIGINT');
+      expect(stderr).toBe('');
+    } finally {
+      if (member.connected) member.disconnect();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   for (const caseName of ['loader', 'supervisor'] as const)
     for (const scenario of ['pass', 'failure', 'SIGINT', 'SIGTERM'] as const)
       // Allow body deadlines, all three final waits, and directory cleanup.

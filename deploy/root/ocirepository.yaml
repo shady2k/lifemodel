@@ -1,0 +1,29 @@
+# The installer's one platform source: a Flux OCIRepository pinning the
+# signed platform artifact (ADR-010, "the one command"). Rendered from the
+# templates in this directory by the NixOS module (deploy/nixos/) and, later,
+# by the generic-Linux installer; both MUST render the same objects.
+#
+# spec.verify field names per the Flux docs of the pinned version
+# (Flux v2.9.6, source-controller v1.9.6, source.toolkit.fluxcd.io/v1,
+# https://fluxcd.io/flux/components/source/ocirepositories/):
+#   spec.verify.provider             - the verification provider
+#   spec.verify.matchOIDCIdentity[]  - {issuer, subject} Go regular
+#     expressions (keyless verification); OR semantics, one entry here
+#   spec.verify.secretRef.name       - Secret whose data keys end in
+#     ".pub" (key verification)
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: platform
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: lifemodel
+spec:
+  interval: 5m0s
+  url: "@PLATFORM_URL@"
+  insecure: @PLATFORM_INSECURE@
+  ref:
+@REF_BLOCK@
+  verify:
+    provider: cosign
+@VERIFY_BLOCK@

@@ -362,7 +362,9 @@ Tests live under `tests/` (unit, integration, helpers) — never inside `src/`. 
 Local and ordinary CI suites never start on the host. `npm test` and `npm run check` start
 `scripts/test-isolated.mjs`, which runs the checks and the suite one-shot and
 bounded inside a disposable Node 24 container built from a selective snapshot
-of the tree. The run never sees your `.env`, your `data/` state, your git
+of the tree. Real Kubernetes server-side apply ownership transitions are accepted
+against `managedFields` on the owner's VM; the local installer double does not
+emulate an API server. The run never sees your `.env`, your `data/` state, your git
 credentials or your Docker daemon — nothing of your checkout is bind-mounted
 and no Docker socket is mounted — and the launcher stops and removes the
 containers it started when the run ends, fails, times out or is interrupted

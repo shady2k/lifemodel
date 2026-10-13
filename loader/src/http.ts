@@ -1,8 +1,9 @@
 /**
  * The loader's own web interface (lifemodel-q4x.2.1, stories S1, S2, S6).
  *
- * It listens on loopback only and is always up, independent of lifemodel:
- * that is what makes it the way back when lifemodel has become a brick. It
+ * It is always up, independent of lifemodel: that is what makes it the way
+ * back when lifemodel has become a brick. Instance mode binds loopback only;
+ * platform mode binds every interface for the pod Service. It
  * answers three kinds of caller:
  *
  *   - a browser without a session: /setup (only while no password is set) and
@@ -62,8 +63,10 @@ export const CLI_TOKEN_HEADER = 'x-loader-cli-token';
 
 export interface LoaderHttpDeps {
   state: LoaderState;
-  supervisor: Supervisor;
-  bootstrap: Bootstrap;
+  /** Instance controls are absent when the HTTP interface serves platform auth only. */
+  bootstrap?: Bootstrap;
+  supervisor?: Supervisor;
+  mode?: 'instance' | 'platform';
   logger: LoaderLogger;
   clock: Clock;
   /**
@@ -260,6 +263,15 @@ ${where}
  * token, so a form served by another page of the instance (lifemodel's own
  * root host) cannot drive panic, resume or logout with the owner's cookie.
  */
+function platformDashboardPage(csrf: string): string {
+  return page(
+    'lifemodel loader',
+    `<h2>Platform mode</h2>
+<p class="note">This loader provides authentication only. It does not run a lifemodel instance.</p>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="${csrf}"><button type="submit">Log out</button></form>`
+  );
+}
+
 function dashboardPage(status: InstanceStatus, csrf: string, vault: VaultSection): string {
   const failed = status.failed;
   // The process state as it is - `stopping` included, so a stop that has not
@@ -284,7 +296,25 @@ ${vaultBlock(vault)}
 }
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
-  const { state, supervisor, bootstrap, logger, clock } = deps;
+  const { state, logger, clock } = deps;
+  const platform = deps.mode === 'platform';
+  const bootstrap = deps.bootstrap;
+  const supervisor = deps.supervisor;
+  if (!platform && (bootstrap === undefined || supervisor === undefined)) {
+    throw new LoaderFatalError('instance mode needs bootstrap and supervisor');
+  }
+  const requireBootstrap = (): Bootstrap => {
+    if (bootstrap === undefined) {
+      throw new LoaderFatalError('instance controls are unavailable in platform mode');
+    }
+    return bootstrap;
+  };
+  const requireSupervisor = (): Supervisor => {
+    if (supervisor === undefined) {
+      throw new LoaderFatalError('instance controls are unavailable in platform mode');
+    }
+    return supervisor;
+  };
 
   /** One request header, as a string (a repeated one is not a value here). */
   function header(req: IncomingMessage, name: string): string | undefined {
@@ -404,11 +434,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     const record = await hashPassword(password);
     await state.writeAuth(record);
     const host = req.headers.host ?? 'localhost';
-    logger.info({ host }, "the loader's password is set: seeding and starting the instance");
+    logger.info(
+      { host },
+      platform
+        ? "the loader's password is set: platform authentication is ready"
+        : "the loader's password is set: seeding and starting the instance"
+    );
     // The browser is answered at once; the first start takes minutes and the
     // loader's own page reports where it is - a failure among them included
     // (rework 1: it is recorded in the state, it does not end the loader).
-    void bootstrap.ensureReady('setup');
+    if (!platform) void requireBootstrap().ensureReady('setup');
     redirect(res, '/', { 'set-cookie': sessionCookie(createSession(record, clock.now()), host) });
   }
 
@@ -489,8 +524,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     if (req.method !== 'POST') {
+      if (platform) {
+        sendHtml(res, 200, platformDashboardPage(csrfToken(record, token)));
+        return;
+      }
       const vault = await vaultSection(header(req, 'host') ?? '');
-      sendHtml(res, 200, dashboardPage(await bootstrap.status(), csrfToken(record, token), vault));
+      sendHtml(
+        res,
+        200,
+        dashboardPage(await requireBootstrap().status(), csrfToken(record, token), vault)
+      );
       return;
     }
     const form = await readForm(req);
@@ -500,11 +543,16 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       sendHtml(res, 403, refusalPage(refusal));
       return;
     }
+    // Platform mode has no instance controls, even if a caller crafts the URL.
+    if (platform) {
+      sendJson(res, 409, { error: 'instance controls are unavailable in platform mode' });
+      return;
+    }
     // Only /panic and /resume act: a POST to / is not a resume alias.
     const action = (req.url ?? '').split('?')[0] === '/panic' ? 'panic' : 'resume';
     if (action === 'panic') {
       await state.setPanic('the loader page');
-      const outcome = await supervisor.stop('panic');
+      const outcome = await requireSupervisor().stop('panic');
       panicLine('the loader page', outcome);
       if (outcome.pending !== null) {
         // Panic is set, but the stop did not finish: the owner who pressed the
@@ -522,7 +570,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     } else {
       await state.clearPanic();
       logger.info({}, 'panic cleared from the loader page: starting lifemodel');
-      void bootstrap.ensureReady('resume');
+      void requireBootstrap().ensureReady('resume');
     }
     redirect(res, '/');
   }
@@ -557,13 +605,19 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       return;
     }
     const path = (req.url ?? '').split('?')[0];
+    if (platform) {
+      sendJson(res, 409, {
+        error: 'instance controls and status are unavailable in platform mode',
+      });
+      return;
+    }
     if (path === '/_api/status') {
-      sendJson(res, 200, await bootstrap.status());
+      sendJson(res, 200, await requireBootstrap().status());
       return;
     }
     if (path === '/_api/panic') {
       await state.setPanic('the command line');
-      const outcome = await supervisor.stop('panic');
+      const outcome = await requireSupervisor().stop('panic');
       panicLine('the command line', outcome);
       if (outcome.pending !== null) {
         // Panic is set, but the stop did not finish: never answered as success.
@@ -572,14 +626,14 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         });
         return;
       }
-      sendJson(res, 200, await bootstrap.status());
+      sendJson(res, 200, await requireBootstrap().status());
       return;
     }
     if (path === '/_api/resume') {
       await state.clearPanic();
       logger.info({}, 'panic cleared from the command line: starting lifemodel');
-      await bootstrap.ensureReady('resume');
-      sendJson(res, 200, await bootstrap.status());
+      await requireBootstrap().ensureReady('resume');
+      sendJson(res, 200, await requireBootstrap().status());
       return;
     }
     sendJson(res, 404, { error: `no such loader command: ${path ?? '/'}` });
