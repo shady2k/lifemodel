@@ -58,6 +58,110 @@ function platformApp(world: LoaderWorld): {
 }
 
 describe('the loader in platform mode', () => {
+  it('sets up authentication without starting an instance and keeps it across restart', async () => {
+    const world = createLoaderWorld();
+    const first = platformApp(world);
+
+    await first.app.start();
+    const setup = await fetch(`http://127.0.0.1:${String(first.app.port())}/setup`, {
+      method: 'POST',
+      headers: {
+        origin: `http://127.0.0.1:${String(first.app.port())}`,
+        host: `127.0.0.1:${String(first.app.port())}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
+    expect(setup.status, await setup.text()).toBe(303);
+    const cookie = setup.headers.get('set-cookie')?.split(';')[0];
+    expect(cookie).toBeDefined();
+
+    const dashboard = await fetch(`http://127.0.0.1:${String(first.app.port())}/`, {
+      headers: { host: 'boot.localhost', cookie: cookie ?? '' },
+    });
+    const dashboardHtml = await dashboard.text();
+    expect(dashboard.status).toBe(200);
+    expect(dashboardHtml).toContain('Platform mode');
+    expect(dashboardHtml).not.toMatch(/Panic:|Resume:|Agent Vault|failed:/);
+    expect(world.launcher.spawns).toEqual([]);
+    expect(world.runner.lines()).toEqual([]);
+    expect(await first.app.bootstrap.status()).toMatchObject({ failed: false });
+
+    const outcome = await first.app.shutdown('test');
+    expect(outcome).toBe(0);
+
+    const restarted = platformApp(world);
+    await restarted.app.start();
+    const afterRestart = await fetch(
+      `http://127.0.0.1:${String(restarted.app.port())}/`,
+      { headers: { host: 'boot.localhost', cookie: cookie ?? '' } }
+    );
+    expect(afterRestart.status).toBe(200);
+    expect(await afterRestart.text()).toContain('Platform mode');
+    expect(await restarted.app.state.readAuth()).not.toBeNull();
+    expect(world.launcher.spawns).toEqual([]);
+    expect(world.runner.lines()).toEqual([]);
+    expect(await restarted.app.shutdown('test')).toBe(0);
+  });
+
+  it('refuses browser and CLI resume in platform mode', async () => {
+    const world = createLoaderWorld();
+    const { app } = platformApp(world);
+    const state = createLoaderState({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      logger: createRecordingLogger([]),
+    });
+    await state.ensureLayout();
+    await state.writeAuth(await hashPassword('secret'));
+    await app.start();
+    const cliToken = await state.ensureCliToken();
+
+    const login = await fetch(`http://127.0.0.1:${String(app.port())}/login`, {
+      method: 'POST',
+      headers: {
+        host: `127.0.0.1:${String(app.port())}`,
+        origin: `http://127.0.0.1:${String(app.port())}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret',
+      redirect: 'manual',
+    });
+    const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
+    expect(login.status, await login.clone().text()).toBe(303);
+    const dashboard = await fetch(`http://127.0.0.1:${String(app.port())}/`, {
+      headers: { host: 'boot.localhost', cookie },
+    });
+    const html = await dashboard.text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? '';
+    const browser = await fetch(`http://127.0.0.1:${String(app.port())}/resume`, {
+      method: 'POST',
+      headers: {
+        host: `127.0.0.1:${String(app.port())}`,
+        origin: `http://127.0.0.1:${String(app.port())}`,
+        cookie,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: `csrf=${encodeURIComponent(csrf)}`,
+      redirect: 'manual',
+    });
+    expect(browser.status).toBe(409);
+
+    const cli = await fetch(`http://127.0.0.1:${String(app.port())}/_api/resume`, {
+      method: 'POST',
+      headers: { host: 'boot.localhost', 'x-loader-cli-token': cliToken },
+    });
+    expect(cli.status).toBe(409);
+    const cliStatus = await fetch(`http://127.0.0.1:${String(app.port())}/_api/status`, {
+      headers: { host: 'boot.localhost', 'x-loader-cli-token': cliToken },
+    });
+    expect(cliStatus.status).toBe(409);
+    expect(world.launcher.spawns).toEqual([]);
+    expect(world.runner.lines()).toEqual([]);
+    expect(await app.shutdown('test')).toBe(0);
+  });
+
   it('serves the login page with no Docker socket, and starts nothing beside it', async () => {
     // The world simulates the cluster: nothing but the volume exists - no
     // caddy, no agent-vault binary, no seed bundle, no repository.
@@ -67,6 +171,7 @@ describe('the loader in platform mode', () => {
     await app.start();
     const port = app.port();
     expect(port).toBeGreaterThan(0);
+    expect(app.host()).toBe('0.0.0.0');
 
     const response = await fetch(`http://127.0.0.1:${String(port)}/login`, {
       headers: { host: 'boot.localhost' },
@@ -171,6 +276,7 @@ describe('the loader in instance mode (unchanged)', () => {
     ownLoaderApp(world, app);
 
     await app.start();
+    expect(app.host()).toBeNull();
     await waitUntil(() => exits.length > 0, 'the loader left');
 
     expect(exits).toEqual([1]);
@@ -201,6 +307,7 @@ describe('the loader in instance mode (unchanged)', () => {
     ownLoaderApp(world, app);
 
     await app.start();
+    expect(app.host()).toBe('127.0.0.1');
     await waitUntil(() => lifemodelSpawn(world) !== undefined, 'lifemodel is started');
 
     expect(caddySpawn(world)).toBeDefined();
