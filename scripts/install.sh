@@ -33,8 +33,8 @@ PLATFORM_TAG=""
 PLATFORM_DIGEST=""
 VERIFY_MODE="keyless"
 PUBLIC_KEY_FILE=""
-ISSUER="^https://token\\\\.actions\\\\.githubusercontent\\\\.com$"
-SUBJECT_REGEX="^https://github\\\\.com/shady2k/lifemodel/\\\\.github/workflows/release\\\\.yml@refs/tags/v.*$"
+ISSUER="^https://token\\.actions\\.githubusercontent\\.com$"
+SUBJECT_REGEX="^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$"
 INSECURE_REGISTRY=false
 RENDER_ONLY_DIR=""
 KUBECTL=""
@@ -121,15 +121,27 @@ render_root_objects() {
   [ -f "$templates_dir/ocirepository.yaml" ] || die "missing template: $templates_dir/ocirepository.yaml"
   [ -f "$templates_dir/kustomization.yaml" ] || die "missing template: $templates_dir/kustomization.yaml"
 
+  yaml_quote() {
+    case "$1" in
+      *'
+'*) die "YAML scalar values must not contain a newline" ;;
+    esac
+    printf "'"
+    printf '%s' "$1" | sed "s/'/''/g"
+    printf "'"
+  }
   if [ -n "$PLATFORM_DIGEST" ]; then
     ref_block="    digest: $PLATFORM_DIGEST"
   else
-    ref_block="    tag: $PLATFORM_TAG"
+    quoted_tag=$(yaml_quote "$PLATFORM_TAG")
+    ref_block="    tag: $quoted_tag"
   fi
   if [ "$VERIFY_MODE" = "keyless" ]; then
+    quoted_issuer=$(yaml_quote "$ISSUER")
+    quoted_subject=$(yaml_quote "$SUBJECT_REGEX")
     verify_block="    matchOIDCIdentity:
-      - issuer: \"$ISSUER\"
-        subject: \"$SUBJECT_REGEX\""
+      - issuer: $quoted_issuer
+        subject: $quoted_subject"
   else
     verify_block="    secretRef:
       name: platform-cosign"
@@ -213,9 +225,18 @@ trap 'rm -rf "$flux_manifest" "$render_dir"' EXIT INT TERM
 curl -fsSL "$FLUX_INSTALL_URL" -o "$flux_manifest"
 printf '%s  %s\n' "$FLUX_INSTALL_SHA256" "$flux_manifest" | sha256sum -c - >/dev/null \
   || die "Flux manifest sha256 mismatch for $FLUX_INSTALL_URL (expected $FLUX_INSTALL_SHA256)"
-$KUBECTL apply --server-side -f "$flux_manifest"
+# Claim the namespace before applying Flux so a partial or interrupted apply
+# can be retried. This field manager owns only the lifemodel marker.
+printf '%s\n' \
+  'apiVersion: v1' \
+  'kind: Namespace' \
+  'metadata:' \
+  '  name: flux-system' \
+  '  labels:' \
+  '    app.kubernetes.io/managed-by: lifemodel' \
+  | $KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -
 
-$KUBECTL label namespace flux-system app.kubernetes.io/managed-by=lifemodel --overwrite
+$KUBECTL apply --server-side -f "$flux_manifest"
 
 # Key mode: create the platform-cosign Secret from the trusted public key.
 if [ "$VERIFY_MODE" = "key" ]; then

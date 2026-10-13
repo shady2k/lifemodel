@@ -10,6 +10,12 @@
       keylessSubject = "^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$";
       releaseWorkflow = builtins.readFile ./.github/workflows/release.yml;
       module = ./deploy/nixos;
+      exportedModule = { pkgs, ... }:
+        let lockedK3s = nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}.k3s;
+        in {
+          imports = [ module ];
+          _module.args.lifemodelK3s = lockedK3s;
+        };
       baseModule = { ... }: {
         system.stateVersion = "26.05";
         fileSystems."/" = { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
@@ -20,7 +26,7 @@
           platform.tag = "v1.0.0";
         };
       };
-      evaluate = extra: lib.nixosSystem { inherit system; modules = [ module baseModule extra ]; };
+      evaluate = extra: lib.nixosSystem { inherit system; modules = [ exportedModule baseModule extra ]; };
       keyless = evaluate {};
       verifyKey = "-----BEGIN PUBLIC KEY-----\nZm9v\n-----END PUBLIC KEY-----";
       keyMode = evaluate ({ ... }: {
@@ -41,17 +47,28 @@
       # the module's byte for byte (the check the suite cannot reach - the
       # heavy vitest boundary builds a Node container, not a Nix one).
       platformUrl = "oci://ghcr.io/shady2k/lifemodel-platform";
-      renderOnly = mode: url: extraArgs:
-        pkgs.runCommand "lifemodel-install-sh-render-${mode}" { nativeBuildInputs = [ pkgs.busybox ]; } ''
+      renderOnly = mode: url: tag: extraArgs:
+        pkgs.runCommand "lifemodel-install-sh-render-${mode}-${tag}" { nativeBuildInputs = [ pkgs.busybox ]; } ''
           mkdir -p $out $TMPDIR/work/scripts $TMPDIR/work/deploy
           cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
           cp -r ${./deploy/root} $TMPDIR/work/deploy/root
-          busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${url} --tag v1.0.0 \
+          busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${url} --tag ${lib.escapeShellArg tag} \
             --verify ${mode} ${lib.optionalString (mode == "key") "--public-key-file ${pkgs.writeText "platform-cosign.pub" verifyKey}"} \
             --render-only $out ${extraArgs}
         '';
-      scriptKeyless = renderOnly "keyless" platformUrl "";
-      scriptKey = renderOnly "key" platformUrl "";
+      scriptKeyless = renderOnly "keyless" platformUrl "v1.0.0" "";
+      scriptKey = renderOnly "key" platformUrl "v1.0.0" "";
+      customTag = "20261013";
+      customIssuer = ''^issuer\.path/'quoted"$'';
+      customSubject = ''^subject\\literal/'quote"$'';
+      customVerify = evaluate ({ ... }: {
+        services.lifemodel.platform.tag = lib.mkForce customTag;
+        services.lifemodel.verify.issuer = customIssuer;
+        services.lifemodel.verify.subjectRegex = customSubject;
+      });
+      customScript = renderOnly "keyless" platformUrl customTag
+        "--issuer ${lib.escapeShellArg customIssuer} --subject-regex ${lib.escapeShellArg customSubject}";
+      customOCI = builtins.readFile customVerify.config.services.lifemodel.generatedRootOCI;
       missingKeyFile = pkgs.runCommand "lifemodel-install-sh-key-requires-key-file" { nativeBuildInputs = [ pkgs.busybox ]; } ''
         mkdir -p $TMPDIR/work/scripts $TMPDIR/work/deploy
         cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
@@ -75,7 +92,42 @@
         assert lib.hasInfix "--certificate-oidc-issuer-regexp '${keylessIssuer}'" releaseWorkflow;
         assert lib.hasInfix "--certificate-identity-regexp '${keylessSubject}'" releaseWorkflow;
         pkgs.runCommand "lifemodel-keyless-identity-agreement" {} "touch $out";
-      moduleEvaluation = assert pkgs.k3s.version == "1.35.8+k3s1";
+      installScript = builtins.readFile ./scripts/install.sh;
+      installK3sVersionLine = lib.findFirst (line: lib.hasPrefix "K3S_VERSION=" line) "" (lib.splitString "\n" installScript);
+      installK3sVersion = builtins.elemAt (builtins.match "K3S_VERSION=\"([^\"]+)\"" installK3sVersionLine) 0;
+      consumerOverride = evaluate ({ ... }: { services.k3s.package = pkgs.hello; });
+      consumerOverrideFails = !(builtins.tryEval consumerOverride.config.system.build.toplevel.drvPath).success;
+      renderedPlatform = pkgs.runCommand "lifemodel-platform-kustomize-wiring" {
+        nativeBuildInputs = [ pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+      } ''
+        set -eu
+        # Flux first applies the parent source, then reconciles its ./a0 path.
+        kustomize build ${./deploy/platform} > parent.yaml
+        grep -F 'kind: Kustomization' parent.yaml >/dev/null
+        grep -F 'name: platform-a0' parent.yaml >/dev/null
+        kustomize build ${./deploy/platform/a0} > a0.yaml
+        validate_a0() {
+          for kind in Namespace ServiceAccount PersistentVolumeClaim Deployment Service NetworkPolicy Ingress; do
+            grep -F "kind: $kind" "$1" >/dev/null || return 1
+          done
+          grep -E 'image: ghcr.io/shady2k/lifemodel-loader@sha256:[a-f0-9]{64}' "$1" >/dev/null
+        }
+        validate_a0 a0.yaml
+        cp -r ${./deploy/platform/a0} missing-resource
+        chmod -R u+w missing-resource
+        sed '/- deployment.yaml/d' missing-resource/kustomization.yaml > missing-resource/kustomization.tmp
+        mv missing-resource/kustomization.tmp missing-resource/kustomization.yaml
+        kustomize build missing-resource > missing-resource.yaml
+        if validate_a0 missing-resource.yaml; then
+          echo 'A0 resource validation accepted a missing deployment reference' >&2
+          exit 1
+        fi
+        touch $out
+      '';
+      moduleEvaluation = assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
+        assert keyless.config.services.k3s.package.version == installK3sVersion;
+        assert customVerify.config.services.lifemodel.platform.tag == customTag;
+        assert consumerOverrideFails;
         assert keyless.config.services.k3s.enable;
         assert keyless.config.system.build.toplevel.drvPath != "";
         assert keyMode.config.services.lifemodel.verify.mode == "key";
@@ -83,7 +135,7 @@
         assert missingKeyFails;
         pkgs.runCommand "lifemodel-nixos-module-evaluation" {} "touch $out";
     in {
-      nixosModules.default = import module;
+      nixosModules.default = exportedModule;
       checks.${system} = {
         keyless-defaults = compare "lifemodel-keyless-root" keylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         key-mode = compare "lifemodel-key-root" keyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
@@ -91,11 +143,15 @@
           (builtins.readFile keyless.config.services.lifemodel.generatedRootKustomization)
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
+        platform-kustomize-wiring = renderedPlatform;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         install-sh-kustomization = compare "lifemodel-install-sh-root-kustomization" scriptKustomization ./tests/fixtures/nixos/kustomization.yaml;
         install-sh-key-requires-public-key = missingKeyFile;
+        custom-rendered-strings = compare "lifemodel-custom-rendered-scalars" customOCI ./tests/fixtures/nixos/custom-ocirepository.yaml;
+        custom-script-rendered-strings = compare "lifemodel-custom-script-rendered-scalars"
+          (builtins.readFile (customScript + "/ocirepository.yaml")) ./tests/fixtures/nixos/custom-ocirepository.yaml;
       };
     };
 }

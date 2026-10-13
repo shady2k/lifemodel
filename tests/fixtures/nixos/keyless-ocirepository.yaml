@@ -23,9 +23,9 @@ spec:
   url: "oci://ghcr.io/shady2k/lifemodel-platform"
   insecure: false
   ref:
-    tag: v1.0.0
+    tag: 'v1.0.0'
   verify:
     provider: cosign
     matchOIDCIdentity:
-      - issuer: "^https://token\\.actions\\.githubusercontent\\.com$"
-        subject: "^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$"
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$'

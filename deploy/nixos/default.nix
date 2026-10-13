@@ -1,13 +1,14 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, lifemodelK3s ? pkgs.k3s, ... }:
 let
   cfg = config.services.lifemodel;
   inherit (lib) mkEnableOption mkOption types;
   rootDir = ../root;
+  yamlQuote = value: "'${lib.replaceStrings [ "'" ] [ "''" ] value}'";
   refBlock = if cfg.platform.digest != null
     then "    digest: ${cfg.platform.digest}"
-    else "    tag: ${cfg.platform.tag}";
+    else "    tag: ${yamlQuote cfg.platform.tag}";
   verifyBlock = if cfg.verify.mode == "keyless" then
-    "    matchOIDCIdentity:\n      - issuer: ${builtins.toJSON cfg.verify.issuer}\n        subject: ${builtins.toJSON cfg.verify.subjectRegex}"
+    "    matchOIDCIdentity:\n      - issuer: ${yamlQuote cfg.verify.issuer}\n        subject: ${yamlQuote cfg.verify.subjectRegex}"
   else "    secretRef:\n      name: platform-cosign";
   renderedOCI = pkgs.writeText "lifemodel-platform-ocirepository.yaml"
     (lib.replaceStrings
@@ -20,7 +21,7 @@ let
     url = "https://github.com/fluxcd/flux2/releases/download/v2.9.6/install.yaml";
     hash = "sha256-nB/afkAUKVMe0UePZ7oGs+3/ZRO3XafuR73p8cTUJRw=";
   };
-  kubectl = "${pkgs.k3s}/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml";
+  kubectl = "${lifemodelK3s}/bin/k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml";
   keyFile = "/run/lifemodel/platform-cosign.pub";
   otherFlux = (config.services.fluxcd.enable or false) || (config.fluxcd.enable or false);
 in
@@ -51,6 +52,9 @@ in
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
       { assertion = cfg.platform.digest != null || cfg.platform.tag != null;
         message = "services.lifemodel.platform.tag or services.lifemodel.platform.digest is required"; }
+      { assertion = (cfg.platform.tag == null || !(lib.hasInfix "\n" cfg.platform.tag))
+          && !(lib.hasInfix "\n" cfg.verify.issuer) && !(lib.hasInfix "\n" cfg.verify.subjectRegex);
+        message = "platform tags and verification regexes must not contain newlines"; }
       { assertion = cfg.verify.mode != "key" || cfg.verify.publicKey != null;
         message = "services.lifemodel.verify.publicKey is required when verify.mode = key"; }
       { assertion = !otherFlux; message = "services.lifemodel cannot be enabled with another Flux installation"; }
@@ -59,8 +63,9 @@ in
       enable = true;
       role = "server";
       clusterInit = true;
+      package = lifemodelK3s;
     };
-    environment.systemPackages = [ pkgs.k3s ];
+    environment.systemPackages = [ lifemodelK3s ];
     systemd.services.lifemodel-flux-bootstrap = {
       description = "Install pinned Flux and lifemodel platform root objects";
       wantedBy = [ "multi-user.target" ];
@@ -71,7 +76,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      path = [ pkgs.coreutils pkgs.gnugrep pkgs.k3s ];
+      path = [ pkgs.coreutils pkgs.gnugrep lifemodelK3s ];
       script = ''
         set -euo pipefail
         KUBECTL='${kubectl}'
@@ -87,8 +92,17 @@ in
             exit 1
           fi
         fi
+        # Claim this namespace before Flux so an interrupted apply is resumable.
+        # A dedicated field manager owns only the lifemodel marker.
+        cat <<'EOF' | $KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: flux-system
+          labels:
+            app.kubernetes.io/managed-by: lifemodel
+        EOF
         $KUBECTL apply --server-side -f ${fluxManifest}
-        $KUBECTL label namespace flux-system app.kubernetes.io/managed-by=lifemodel --overwrite
         ${lib.optionalString (cfg.verify.mode == "key") ''
           install -d -m 0700 /run/lifemodel
           printf '%s\n' ${lib.escapeShellArg cfg.verify.publicKey} > ${keyFile}
