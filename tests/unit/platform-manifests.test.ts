@@ -36,7 +36,7 @@ function object(objects: Record<string, any>[], kind: string): Record<string, an
   return found!;
 }
 
-function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string): { status: number | null; output: string; root: string } {
+function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string, tag = 'v1.0.0'): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
   const bin = join(root, 'bin');
   const state = join(root, 'namespace-state');
@@ -55,8 +55,13 @@ case "$*" in
   *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
   *'get namespace flux-system'*) [ -f "$K3S_STATE" ] ;;
   *'--field-manager=lifemodel-namespace'*) cat >/dev/null; echo namespace >> "$K3S_LOG"; touch "$K3S_STATE" ;;
+  *'--field-manager=lifemodel-bootstrap'*)
+    file=''; for arg do file=$arg; done
+    echo "root:$*" >> "$K3S_LOG"
+    if grep 'tag:' "$file" >/dev/null; then grep 'tag:' "$file" | awk -F"'" '{print $2}' > "$K3S_APPLIED_TAG"; fi
+    ;;
   *' -f -'*) cat >/dev/null ;;
-  *) echo flux >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux$' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
+  *) echo "flux:$*" >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux:' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
 esac`);
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
   command('sha256sum', 'read expected file; echo "$file: OK"');
@@ -65,13 +70,14 @@ esac`);
     PATH: `${bin}:${process.env.PATH}`,
     K3S_STATE: state,
     K3S_LOG: log,
+    K3S_APPLIED_TAG: join(root, 'applied-tag'),
     K3S_FAIL_FLUX: failFlux ? '1' : '0',
     K3S_FOREIGN: foreign ? '1' : '0',
     LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
     LIFEMODEL_STATE_DIR: join(root, 'state'),
   };
   delete (env as NodeJS.ProcessEnv).KUBECONFIG;
-  const result = spawnSync('sh', [installer, '--platform-url', 'oci://example.test/platform', '--tag', 'v1.0.0', '--root-templates', rootTemplates], { encoding: 'utf8', env });
+  const result = spawnSync('sh', [installer, '--platform-url', 'oci://example.test/platform', '--tag', tag, '--root-templates', rootTemplates], { encoding: 'utf8', env });
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
@@ -145,6 +151,21 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
+  });
+
+  it('lets a second installer run reclaim doctor-pinned root fields and record its configured tag', () => {
+    const first = runInstallerHarness(false);
+    try {
+      expect(first.status, first.output).toBe(0);
+      const second = runInstallerHarness(false, false, first.root, 'v2.0.0');
+      expect(second.status, second.output).toBe(0);
+      const log = readFileSync(join(second.root, 'kubectl.log'), 'utf8');
+      const rootApplies = log.split('\n').filter((line) => line.startsWith('root:'));
+      expect(rootApplies).toHaveLength(4);
+      expect(rootApplies.every((line) => line.includes('--server-side --field-manager=lifemodel-bootstrap --force-conflicts'))).toBe(true);
+      expect(readFileSync(join(second.root, 'applied-tag'), 'utf8').trim()).toBe('v2.0.0');
+      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe('tag=v2.0.0\ntag=v1.0.0\n');
+    } finally { rmSync(first.root, { recursive: true, force: true }); }
   });
 
   it('still refuses a foreign flux-system namespace', () => {

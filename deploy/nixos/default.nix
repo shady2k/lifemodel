@@ -116,8 +116,8 @@ in
           $KUBECTL create secret generic platform-cosign --namespace flux-system \
             --from-file=cosign.pub=${keyFile} --dry-run=client -o yaml | $KUBECTL apply --server-side -f -
         ''}
-        $KUBECTL apply --server-side -f ${renderedOCI}
-        $KUBECTL apply --server-side -f ${renderedKustomization}
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f ${renderedOCI}
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f ${renderedKustomization}
         lifemodel record-applied ${lib.escapeShellArg platformRef}
       '';
     };

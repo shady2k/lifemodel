@@ -133,6 +133,15 @@
         grep -F -- '--repin previous' help.txt > /dev/null
         touch $out
       '';
+      bootstrapScript = keyless.config.systemd.services.lifemodel-flux-bootstrap.script;
+      bootstrapOwnership =
+        assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f " bootstrapScript;
+        assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f " bootstrapScript;
+        assert lib.hasInfix "$KUBECTL apply --server-side --field-manager=lifemodel-namespace -f -" bootstrapScript;
+        assert lib.hasInfix "$KUBECTL apply --server-side -f " bootstrapScript;
+        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/ocirepository.yaml"'' installScript;
+        assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/kustomization.yaml"'' installScript;
+        pkgs.runCommand "lifemodel-bootstrap-field-ownership" {} "touch $out";
       moduleEvaluation = assert toString keyless.config.services.k3s.package
           == toString nixpkgs.legacyPackages.${system}.k3s;
         assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
@@ -149,6 +158,7 @@
       nixosModules.default = exportedModule;
       checks.${system} = {
         cli-help = cliHelp;
+        bootstrap-field-ownership = bootstrapOwnership;
         keyless-defaults = compare "lifemodel-keyless-root" keylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         key-mode = compare "lifemodel-key-root" keyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         kustomization = compare "lifemodel-root-kustomization"
