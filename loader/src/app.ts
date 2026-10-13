@@ -137,7 +137,11 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         return;
       }
       server.once('error', reject);
-      server.listen(config.httpPort, '127.0.0.1', () => {
+      // Instance mode: loopback, inside the container that owns the front
+      // door. Platform mode: every interface - the pod's Service reaches the
+      // loader over the pod IP, and no front door sits beside it.
+      const host = platform ? '0.0.0.0' : '127.0.0.1';
+      server.listen(config.httpPort, host, () => {
         server.removeListener('error', reject);
         resolve();
       });
@@ -236,7 +240,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       http.server.on('error', (error) => {
         fatal(
           new LoaderFatalError(
-            `the loader's own server failed on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+            `the loader's own server failed on port ${String(config.httpPort)}: ${describe(error)}`,
             { cause: error }
           )
         );
@@ -270,7 +274,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         error instanceof LoaderFatalError
           ? error
           : new LoaderFatalError(
-              `the loader cannot listen on 127.0.0.1:${String(config.httpPort)}: ${describe(error)}`,
+              `the loader cannot listen on port ${String(config.httpPort)}: ${describe(error)}`,
               { cause: error }
             )
       );

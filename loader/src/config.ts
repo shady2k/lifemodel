@@ -174,7 +174,7 @@ const DEFAULTS = {
   seedBundle: '/opt/lifemodel/seed.bundle',
   upstreamUrl: 'https://github.com/shady2k/lifemodel.git',
   httpPort: 7000,
-  mode: 'instance',
+  mode: 'instance' as const,
   uid: 1000,
   gid: 1000,
   caddyBinary: '/usr/bin/caddy',
@@ -215,8 +215,8 @@ function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number
  */
 function readLoaderMode(env: NodeJS.ProcessEnv): LoaderMode {
   const raw = env['LIFEMODEL_LOADER_MODE'];
-  if (raw === undefined || raw === '') return DEFAULTS.mode;
-  const mode = (LOADER_MODES as readonly string[]).find((named) => named === raw);
+  if (raw === undefined) return DEFAULTS.mode;
+  const mode = LOADER_MODES.find((named) => named === raw);
   if (mode === undefined) {
     throw new LoaderFatalError(
       `LIFEMODEL_LOADER_MODE must be one of ${LOADER_MODES.map((m) => `"${m}"`).join(', ')}, got "${raw}"`

@@ -74,6 +74,7 @@ describe('the contract with the image', () => {
 
     const refusing = () => loadConfig({ LIFEMODEL_LOADER_MODE: 'swarm' });
     expect(refusing).toThrow(LoaderFatalError);
+    expect(() => loadConfig({ LIFEMODEL_LOADER_MODE: '' })).toThrow(LoaderFatalError);
     // The same wrong input, the same answer: the words name the two shapes and
     // the value refused, never today's defaults read in its place.
     expect(refusing).toThrow(
