@@ -35,7 +35,11 @@ import {
   type BaoApi,
   type BaoCustody,
 } from './openbao.js';
-import { createKubernetesPhaseStore, createPlatformPhaseRunner } from './platform-bootstrap.js';
+import {
+  createKubernetesPhaseStore,
+  createPlatformPhaseRunner,
+  type PlatformPhaseStore,
+} from './platform-bootstrap.js';
 
 export interface LoaderAppDeps {
   config: LoaderConfig;
@@ -53,6 +57,8 @@ export interface LoaderAppDeps {
   agentVaultProbe?: HealthProbe;
   /** Test boundary for platform bootstrap; production uses in-cluster APIs. */
   openBao?: { api: BaoApi; custody: BaoCustody };
+  platformPhaseStore?: PlatformPhaseStore;
+  platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
 }
 
@@ -88,7 +94,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   // Agent Vault or Docker socket still serves authentication. Instance mode
   // is unchanged: it starts them and exposes their controls.
   const platform = config.mode === 'platform';
-  const platformPhaseStore = createKubernetesPhaseStore();
+  const platformPhaseStore = deps.platformPhaseStore ?? createKubernetesPhaseStore();
   const baoParts =
     deps.openBao ??
     ({
@@ -98,8 +104,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformBootstrap =
     deps.platformBootstrap ??
     createOpenBaoBootstrap({
-      ...baoParts,
+      bao: baoParts.api,
+      custody: baoParts.custody,
       runPhases: createPlatformPhaseRunner(platformPhaseStore),
+      ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
     });
   const agentVault = createAgentVault({
     launcher,
@@ -159,7 +167,8 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   const platformStop = new Promise<void>((resolve) => {
     resolvePlatformStop = resolve;
   });
-  const waitForPlatform = (ms: number): Promise<void> => Promise.race([clock.sleep(ms), platformStop]);
+  const waitForPlatform = (ms: number): Promise<void> =>
+    Promise.race([clock.sleep(ms), platformStop]);
 
   /** Keep the interface live while durable first-start work retries and sealed restarts are repaired. */
   async function runPlatformBootstrap(): Promise<void> {
@@ -180,7 +189,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       } catch (error) {
         logger.error(
           { error: describe(error) },
-          `OpenBao platform bootstrap failed; retrying in ${delayMs} ms`
+          `OpenBao platform bootstrap failed; retrying in ${String(delayMs)} ms`
         );
         await waitForPlatform(delayMs);
         delayMs = Math.min(delayMs * 2, 30_000);

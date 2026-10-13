@@ -364,6 +364,15 @@ describe('platform manifests', () => {
       }],
       ports: [expect.objectContaining({ port: 7000 })],
     })]);
-    expect(policy!.spec.egress).toEqual([]);
+    expect(policy!.spec.egress).toHaveLength(3);
+    expect(policy!.spec.egress[1]).toEqual({
+      to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
+      ports: [{ protocol: 'TCP', port: 6443 }],
+    });
+    const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
+    expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
+    expect(yaml).toContain('The API port is the only egress restriction');
+    expect(yaml).toContain('The Kubernetes API server authenticates the projected ServiceAccount token');
+    expect(policy!.spec.egress.flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`)).sort()).toEqual(['TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
   });
 });
