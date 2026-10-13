@@ -126,6 +126,12 @@
         fi
         touch $out
       '';
+      cliHelp = pkgs.runCommand "lifemodel-cli-help" { nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep ]; } ''
+        node ${./deploy/cli/lifemodel.mjs} --help > help.txt
+        grep -F 'Usage: lifemodel doctor' help.txt > /dev/null
+        grep -F -- '--repin previous' help.txt > /dev/null
+        touch $out
+      '';
       moduleEvaluation = assert toString keyless.config.services.k3s.package
           == toString nixpkgs.legacyPackages.${system}.k3s;
         assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
@@ -141,6 +147,7 @@
     in {
       nixosModules.default = exportedModule;
       checks.${system} = {
+        cli-help = cliHelp;
         keyless-defaults = compare "lifemodel-keyless-root" keylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         key-mode = compare "lifemodel-key-root" keyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         kustomization = compare "lifemodel-root-kustomization"
