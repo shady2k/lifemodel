@@ -150,8 +150,8 @@
         grep -F 'name: platform-a0' platform.yaml >/dev/null
         kustomize build ${./deploy/platform/a} > step-a.yaml
         grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
-        test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 1
-        test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 2
+        test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 4
+        test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 6
         test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 1
         test "$(grep -F -c 'app.kubernetes.io/name: loader' step-a.yaml)" -eq 1
         test "$(grep -F -c 'port: 8200' step-a.yaml)" -eq 1
@@ -163,6 +163,32 @@
         grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        touch $out
+      '';
+      renderedGitea = pkgs.runCommand "lifemodel-gitea-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+      } ''
+        set -eu
+        helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
+          -f ${./deploy/platform/a/gitea/values.yaml} > gitea.yaml
+        grep -F 'database: DB_TYPE=sqlite3' gitea.yaml >/dev/null
+        grep -F 'name: gitea-admin' gitea.yaml >/dev/null
+        grep -F 'key: username' gitea.yaml >/dev/null
+        grep -F 'key: password' gitea.yaml >/dev/null
+        grep -F 'claimName: gitea-shared-storage' gitea.yaml >/dev/null
+        test "$(grep -F -c 'kind: PersistentVolumeClaim' gitea.yaml)" -eq 1
+        grep -F 'host: "git.localhost"' gitea.yaml >/dev/null
+        if grep -Ei '^  name: [^ ]*(postgresql|valkey)|^kind: StatefulSet$' gitea.yaml >/dev/null; then
+          echo 'Gitea rendered a bundled PostgreSQL or Valkey workload' >&2
+          exit 1
+        fi
+        kustomize build ${./deploy/platform/a/gitea} > gitea-platform.yaml
+        test "$(grep -F -c 'namespaceSelector:' gitea-platform.yaml)" -eq 3
+        test "$(grep -F -c 'podSelector:' gitea-platform.yaml)" -eq 4
+        grep -F 'kubernetes.io/metadata.name: lifemodel-system' gitea-platform.yaml >/dev/null
+        grep -F 'kubernetes.io/metadata.name: flux-system' gitea-platform.yaml >/dev/null
+        grep -F 'kubernetes.io/metadata.name: kube-system' gitea-platform.yaml >/dev/null
+        grep -F 'egress: []' gitea-platform.yaml >/dev/null
         touch $out
       '';
       cliHelp = pkgs.runCommand "lifemodel-cli-help" { nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep ]; } ''
@@ -218,6 +244,7 @@
         module-evaluation = moduleEvaluation;
         platform-kustomize-wiring = renderedPlatform;
         openbao-platform-render = renderedOpenBao;
+        gitea-platform-render = renderedGitea;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
