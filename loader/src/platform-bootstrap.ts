@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 
-export interface PlatformPhaseRecord { phase: string; status: 'running' | 'complete' }
+export interface PlatformPhaseRecord { phase: string; status: 'running' | 'complete' | 'failed' }
 export interface PlatformPhaseStore { read(): Promise<PlatformPhaseRecord | null>; write(record: PlatformPhaseRecord): Promise<void> }
 export interface PlatformPhase { name: string; run(): Promise<void> }
 
@@ -23,7 +23,12 @@ export function createPlatformPhaseRunner(store: PlatformPhaseStore): (phases: P
       await store.write({ phase: phase.name, status: 'running' });
       const before = await store.read();
       if (before?.phase !== phase.name || before.status !== 'running') throw new Error(`platform phase ${phase.name} was not durably recorded before its action`);
-      await phase.run();
+      try {
+        await phase.run();
+      } catch (error) {
+        await store.write({ phase: phase.name, status: 'failed' });
+        throw error;
+      }
       await store.write({ phase: phase.name, status: 'complete' });
       const after = await store.read();
       if (after?.phase !== phase.name || after.status !== 'complete') throw new Error(`platform phase ${phase.name} was not durably recorded after its action`);
@@ -61,7 +66,7 @@ export function createKubernetesPhaseStore(options: KubernetesSecretStoreOptions
     const secret = JSON.parse(response.body) as Secret;
     const encoded = secret.data?.phase; if (encoded === undefined) return null;
     const record = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as PlatformPhaseRecord;
-    if (typeof record.phase !== 'string' || (record.status !== 'running' && record.status !== 'complete')) throw new Error('Kubernetes phase Secret has an invalid record');
+    if (typeof record.phase !== 'string' || (record.status !== 'running' && record.status !== 'complete' && record.status !== 'failed')) throw new Error('Kubernetes phase Secret has an invalid record');
     return record;
   }
   async function send(method: string, payload?: unknown): Promise<{ status: number; body: string }> {

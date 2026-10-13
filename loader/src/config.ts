@@ -175,6 +175,7 @@ const DEFAULTS = {
   upstreamUrl: 'https://github.com/shady2k/lifemodel.git',
   httpPort: 7000,
   mode: 'instance' as const,
+  openBaoAddress: 'http://openbao.openbao.svc:8200',
   uid: 1000,
   gid: 1000,
   caddyBinary: '/usr/bin/caddy',
@@ -230,6 +231,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
   const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? DEFAULTS.volumeRoot;
   return {
     mode: readLoaderMode(env),
+    openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? DEFAULTS.openBaoAddress,
     volumeRoot,
     repoDir: join(volumeRoot, 'repo'),
     dataDir: join(volumeRoot, 'data'),
