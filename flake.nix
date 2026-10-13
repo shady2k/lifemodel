@@ -40,19 +40,34 @@
       platformUrl = "oci://ghcr.io/shady2k/lifemodel-platform";
       renderOnly = mode: url: extraArgs:
         pkgs.runCommand "lifemodel-install-sh-render-${mode}" { nativeBuildInputs = [ pkgs.busybox ]; } ''
-          mkdir -p $out
-          busybox sh ${./scripts/install.sh} --platform-url ${url} --tag v1.0.0 \
+          mkdir -p $out $TMPDIR/work/scripts $TMPDIR/work/deploy
+          cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
+          cp -r ${./deploy/root} $TMPDIR/work/deploy/root
+          busybox sh $TMPDIR/work/scripts/install.sh --platform-url ${url} --tag v1.0.0 \
             --verify ${mode} ${lib.optionalString (mode == "key") "--public-key-file ${pkgs.writeText "platform-cosign.pub" verifyKey}"} \
             --render-only $out ${extraArgs}
         '';
       scriptKeyless = renderOnly "keyless" platformUrl "";
       scriptKey = renderOnly "key" platformUrl "";
+      missingKeyFile = pkgs.runCommand "lifemodel-install-sh-key-requires-key-file" { nativeBuildInputs = [ pkgs.busybox ]; } ''
+        mkdir -p $TMPDIR/work/scripts $TMPDIR/work/deploy
+        cp ${./scripts/install.sh} $TMPDIR/work/scripts/install.sh
+        cp -r ${./deploy/root} $TMPDIR/work/deploy/root
+        if output=$(busybox sh $TMPDIR/work/scripts/install.sh \
+          --platform-url ${platformUrl} --tag v1.0.0 --verify key --render-only $TMPDIR/out 2>&1); then
+          echo "installer accepted key mode without --public-key-file" >&2
+          exit 1
+        fi
+        printf '%s\n' "$output" | busybox grep -F -- "--public-key-file is required when --verify key"
+        touch $out
+      '';
       compare = name: actual: fixture: pkgs.runCommand name {} ''
         printf %s ${lib.escapeShellArg actual} > actual.yaml
         diff -u ${fixture} actual.yaml
         touch $out
       '';
-      moduleEvaluation = assert keyless.config.services.k3s.enable;
+      moduleEvaluation = assert pkgs.k3s.version == "1.35.8+k3s1";
+        assert keyless.config.services.k3s.enable;
         assert keyless.config.system.build.toplevel.drvPath != "";
         assert keyMode.config.services.lifemodel.verify.mode == "key";
         assert keyMode.config.system.build.toplevel.drvPath != "";
@@ -70,6 +85,7 @@
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         install-sh-kustomization = compare "lifemodel-install-sh-root-kustomization" scriptKustomization ./tests/fixtures/nixos/kustomization.yaml;
+        install-sh-key-requires-public-key = missingKeyFile;
       };
     };
 }

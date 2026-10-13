@@ -21,7 +21,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT_TEMPLATES="$SCRIPT_DIR/../deploy/root"
+ROOT_TEMPLATES=${ROOT_TEMPLATES:-"$SCRIPT_DIR/../deploy/root"}
 
 K3S_VERSION="1.35.8+k3s1"
 FLUX_VERSION="v2.9.6"
@@ -58,6 +58,7 @@ Cluster:
   --insecure-registry      render insecure: true (plain-HTTP registry)
   --render-only DIR        write the rendered root objects to DIR and exit
                            without touching the host
+  --root-templates DIR     use shared templates from DIR (for packaging/checks)
   -h, --help               show this help
 EOF
 }
@@ -84,6 +85,7 @@ while [ "$#" -gt 0 ]; do
     --subject-regex)     require_value "$@"; SUBJECT_REGEX=$2; shift 2 ;;
     --insecure-registry) INSECURE_REGISTRY=true; shift ;;
     --render-only)       require_value "$@"; RENDER_ONLY_DIR=$2; shift 2 ;;
+    --root-templates)    require_value "$@"; ROOT_TEMPLATES=$2; shift 2 ;;
     -h|--help)           usage; exit 0 ;;
     *)                   die "unknown option: $1" ;;
   esac
@@ -115,8 +117,9 @@ esac
 
 render_root_objects() {
   render_dir=$1
-  [ -f "$ROOT_TEMPLATES/ocirepository.yaml" ] || die "missing template: $ROOT_TEMPLATES/ocirepository.yaml"
-  [ -f "$ROOT_TEMPLATES/kustomization.yaml" ] || die "missing template: $ROOT_TEMPLATES/kustomization.yaml"
+  templates_dir="${ROOT_TEMPLATES:-$SCRIPT_DIR/../deploy/root}"
+  [ -f "$templates_dir/ocirepository.yaml" ] || die "missing template: $templates_dir/ocirepository.yaml"
+  [ -f "$templates_dir/kustomization.yaml" ] || die "missing template: $templates_dir/kustomization.yaml"
 
   if [ -n "$PLATFORM_DIGEST" ]; then
     ref_block="    digest: $PLATFORM_DIGEST"
@@ -151,8 +154,8 @@ render_root_objects() {
         printf '%s\n' "$rendered"
         ;;
     esac
-  done < "$ROOT_TEMPLATES/ocirepository.yaml" > "$render_dir/ocirepository.yaml"
-  cp "$ROOT_TEMPLATES/kustomization.yaml" "$render_dir/kustomization.yaml"
+  done < "$templates_dir/ocirepository.yaml" > "$render_dir/ocirepository.yaml"
+  cp "$templates_dir/kustomization.yaml" "$render_dir/kustomization.yaml"
 }
 
 # Render-only mode: write the rendered objects and exit, touching nothing.
