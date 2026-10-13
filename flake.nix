@@ -1,6 +1,6 @@
 {
   description = "lifemodel NixOS platform bootstrap module";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
@@ -8,7 +8,9 @@
       lib = nixpkgs.lib;
       module = ./deploy/nixos;
       baseModule = { ... }: {
-        system.stateVersion = "24.11";
+        system.stateVersion = "26.05";
+        fileSystems."/" = { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+        boot.loader.grub.devices = [ "nodev" ];
         services.lifemodel = {
           enable = true;
           platform.url = "oci://ghcr.io/shady2k/lifemodel-platform";
@@ -33,7 +35,9 @@
         touch $out
       '';
       moduleEvaluation = assert keyless.config.services.k3s.enable;
+        assert keyless.config.system.build.toplevel.drvPath != "";
         assert keyMode.config.services.lifemodel.verify.mode == "key";
+        assert keyMode.config.system.build.toplevel.drvPath != "";
         assert missingKeyFails;
         pkgs.runCommand "lifemodel-nixos-module-evaluation" {} "touch $out";
     in {
