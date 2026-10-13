@@ -128,7 +128,7 @@
         touch $out
       '';
       renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
-        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.yq-go pkgs.gnugrep pkgs.coreutils ];
       } ''
         set -eux
         helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
@@ -146,11 +146,10 @@
         fi
         kustomize build ${./deploy/platform} > platform.yaml
         grep -F 'name: platform-a' platform.yaml >/dev/null
+        grep -F 'name: platform-a0' platform.yaml >/dev/null
         kustomize build ${./deploy/platform/a} > step-a.yaml
         grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
-        grep -F 'kind: NetworkPolicy' step-a.yaml >/dev/null
-        grep -F 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml >/dev/null
-        grep -F 'app.kubernetes.io/name: loader' step-a.yaml >/dev/null
+        yq -e 'select(.kind == "NetworkPolicy" and .metadata.name == "openbao-api-from-loader-only") | .spec.policyTypes == ["Ingress"] and (.spec.ingress | length == 1) and (.spec.ingress[0].from | length == 1) and (.spec.ingress[0].ports == [{"protocol":"TCP","port":8200}]) and (.spec.ingress[0].from[0].namespaceSelector.matchLabels."kubernetes.io/metadata.name" == "lifemodel-system") and (.spec.ingress[0].from[0].podSelector.matchLabels."app.kubernetes.io/name" == "loader")' step-a.yaml >/dev/null
         grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
         grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
         grep -F 'name: platform' step-a.yaml >/dev/null
