@@ -51,6 +51,13 @@ function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: 
   command('id', 'echo 0');
   if (options.unsupportedNode) command('node', 'echo 14');
   command('k3s', `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
+if [ "$1" != kubectl ] || [ "$2" != --kubeconfig ]; then
+  printf 'fake k3s rejected argv:' >&2
+  printf ' <%s>' "$@" >&2
+  printf '\n' >&2
+  exit 64
+fi
+shift 2
 case "$*" in
   *'get nodes'*) exit 0 ;;
   *'get ocirepository platform'*) printf '{"metadata":{"managedFields":[%s]}}\n' "$K3S_MANAGED_FIELDS" ;;
