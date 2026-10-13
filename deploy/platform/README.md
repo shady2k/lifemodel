@@ -6,7 +6,10 @@ deploys OpenBao and depends on A0, but does not gate A0 or loader startup.
 Step A's chart is the official OpenBao chart 0.30.3, vendored under
 `charts/openbao` from its upstream archive (SHA-256
 `d50ed31b8305f430df308c342dd3c1efa877222380e99cb480f74f070d6beaa8`).
-The HelmRelease uses the same platform OCIRepository as its chart source.
+The vendored chart and values stay in the repository; the pinned Helm version
+renders `a/openbao/rendered.yaml` before release. Step A applies this committed
+manifest directly, avoiding a HelmRelease source reference that Flux v2.9.6's
+CRD does not accept. `nix flake check` re-renders the chart and rejects drift.
 OpenBao runs one standalone server using integrated Raft storage on a retained
 PVC, with no injector or auto-unseal. Its explicit ServiceAccount enables the
 projected Kubernetes token, and a ClusterRoleBinding grants only the built-in

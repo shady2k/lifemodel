@@ -99,13 +99,58 @@ esac`);
 }
 
 describe('platform manifests', () => {
+  it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
+    const giteaRoot = join(platformRoot, 'a/gitea');
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
+    expect(kustomization.resources).toContain('gitea');
+    const giteaKustomization = YAML.parse(readFileSync(join(giteaRoot, 'kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
+    expect(giteaKustomization.resources).toContain('rendered.yaml');
+    expect(giteaKustomization.resources).not.toContain('release.yaml');
+    expect(giteaKustomization.configMapGenerator).toBeUndefined();
+    const rendered = parseYamlFiles([join(giteaRoot, 'rendered.yaml')]);
+    expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')).toBe(true);
+    expect(sourceObjects().some((item) => item.kind === 'HelmRelease')).toBe(false);
+    const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
+    expect(values).toMatchObject({
+      postgresql: { enabled: false },
+      'postgresql-ha': { enabled: false },
+      valkey: { enabled: false },
+      'valkey-cluster': { enabled: false },
+      gitea: {
+        admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
+        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
+      },
+      persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
+      ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },
+      podSecurityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
+      containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } },
+    });
+    const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
+    expect(namespace.metadata.name).toBe('lifemodel-git');
+    const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
+    expect(policy.spec.policyTypes).toEqual(['Ingress', 'Egress']);
+    expect(policy.spec.ingress).toHaveLength(3);
+    const admitted = policy.spec.ingress.map((rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']);
+    expect(admitted).toEqual(['lifemodel-system', 'flux-system', 'kube-system']);
+    expect(policy.spec.ingress.map((rule: any) => rule.from[0].podSelector.matchLabels)).toEqual([
+      { 'app.kubernetes.io/name': 'loader' },
+      { app: 'source-controller' },
+      { 'app.kubernetes.io/name': 'traefik' },
+    ]);
+    expect(policy.spec.ingress.map((rule: any) => rule.ports[0].port)).toEqual([3000, 3000, 3000]);
+    expect(policy.spec.egress).toEqual([]);
+    expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
+  });
   it('keeps the platform workload confined and digest-pinned', () => {
     const sourceFiles = yamlFiles(platformRoot);
     const objects = sourceObjects();
     expect(objects.length).toBeGreaterThan(0);
-    const deployment = object(objects, 'Deployment');
-    expect(deployment.spec.replicas).toBe(1);
-    const pod = deployment.spec.template.spec;
+    const deployment = objects.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'loader');
+    expect(deployment, 'missing loader Deployment').toBeDefined();
+    expect(deployment!.spec.replicas).toBe(1);
+    const pod = deployment!.spec.template.spec;
     const container = pod.containers[0];
     expect(container.image).toBe('ghcr.io/shady2k/lifemodel-loader:release-placeholder');
     expect(container.env).toContainEqual({ name: 'LIFEMODEL_LOADER_MODE', value: 'platform' });
@@ -129,12 +174,13 @@ describe('platform manifests', () => {
     ]));
     expect(container.readinessProbe).toBeDefined();
     expect(container.livenessProbe).toBeDefined();
-    expect(object(objects, 'Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
+    const loaderNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'lifemodel-system');
+    expect(loaderNamespace?.metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
     expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system')?.automountServiceAccountToken).toBe(true);
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao')?.automountServiceAccountToken).toBe(true);
     expect(objects.some((item) => ['Role', 'RoleBinding'].includes(item.kind) && item.metadata.namespace === 'lifemodel-system')).toBe(true);
-    expect(object(objects, 'Ingress').spec.rules[0].host).toBe('boot.localhost');
+    expect(objects.find((item) => item.kind === 'Ingress' && item.metadata?.namespace === 'lifemodel-system')?.spec.rules[0].host).toBe('boot.localhost');
     expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
     const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
     expect(clusterRoleBindings).toEqual([expect.objectContaining({
@@ -168,16 +214,19 @@ describe('platform manifests', () => {
     expect(a0!.spec.timeout).toBe('2m0s');
   });
 
-  it('orders OpenBao step A after A0 and uses the platform OCI source for its vendored chart', () => {
+  it('orders OpenBao step A after A0 and applies the committed chart render', () => {
     const objects = sourceObjects();
     const stepA = objects.find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a');
     expect(stepA?.spec).toMatchObject({ dependsOn: [{ name: 'platform-a0' }], wait: true, timeout: '10m0s' });
-    const release = objects.find((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao');
-    expect(release?.spec.chart.spec).toMatchObject({
-      chart: './charts/openbao',
-      version: '0.30.3',
-      sourceRef: { kind: 'OCIRepository', name: 'platform', namespace: 'flux-system' },
-    });
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
+    expect(kustomization.resources).toContain('openbao/rendered.yaml');
+    expect(kustomization.resources).not.toContain('openbao-release.yaml');
+    expect(kustomization.configMapGenerator).toBeUndefined();
+    const rendered = parseYamlFiles([join(platformRoot, 'a/openbao/rendered.yaml')]);
+    expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')).toBe(true);
+    expect(objects.some((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao')).toBe(false);
   });
 
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
