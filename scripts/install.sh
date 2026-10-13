@@ -255,8 +255,8 @@ fi
 
 # The verified root platform source, rendered from the shared templates.
 render_root_objects "$render_dir"
-$KUBECTL apply --server-side -f "$render_dir/ocirepository.yaml"
-$KUBECTL apply --server-side -f "$render_dir/kustomization.yaml"
+$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/ocirepository.yaml"
+$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap --force-conflicts -f "$render_dir/kustomization.yaml"
 
 # Install the recovery CLI and durably retain this successfully applied pin.
 # These roots are configurable so installer tests can exercise the real install
