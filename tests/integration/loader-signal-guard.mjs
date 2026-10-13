@@ -29,20 +29,27 @@ function disconnect(target) {
 
 if (mode === 'member') {
   // Inherit the runner group. This member proves group, rather than PID, delivery.
-  function finish(signal) {
+  const DISCONNECT_SIGNAL_GRACE_MS = 1_000;
+  let disconnectTimer;
+  function finish(signal, finalizedBy) {
+    clearTimeout(disconnectTimer);
     try {
-      writeFileSync(`${proof}.member.json`, JSON.stringify({ pid: process.pid, signal }));
+      writeFileSync(`${proof}.member.json`, JSON.stringify({ pid: process.pid, signal, finalizedBy }));
     } catch { process.exit(1); }
     process.exit(signal ? 0 : 1);
   }
-  process.on('SIGINT', () => finish('SIGINT'));
-  process.on('SIGTERM', () => finish('SIGTERM'));
-  process.on('disconnect', () => finish(null));
-  process.on('error', () => finish(null));
-  process.stdout.on('error', () => finish(null));
-  process.stderr.on('error', () => finish(null));
+  process.on('SIGINT', () => finish('SIGINT', 'signal'));
+  process.on('SIGTERM', () => finish('SIGTERM', 'signal'));
+  process.on('disconnect', () => {
+    // Runner death closes IPC as part of group SIGINT delivery. Give the queued
+    // signal handler a bounded chance to record the observation first.
+    disconnectTimer = setTimeout(() => finish(null, 'timeout'), DISCONNECT_SIGNAL_GRACE_MS);
+  });
+  process.on('error', () => finish(null, 'disconnect'));
+  process.stdout.on('error', () => finish(null, 'disconnect'));
+  process.stderr.on('error', () => finish(null, 'disconnect'));
   setInterval(() => undefined, 1000);
-  send(process, { type: 'memberReady', pid: process.pid }, () => finish(null));
+  send(process, { type: 'memberReady', pid: process.pid }, () => finish(null, 'disconnect'));
 } else if (mode === 'runner') {
   // Spawned detached by the observer: process.pid is our private, live PGID.
   // Keep default signal dispositions. The detached guard is outside this group.
