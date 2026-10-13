@@ -9,7 +9,7 @@ const stateDir = process.env.LIFEMODEL_STATE_DIR || '/var/lib/lifemodel';
 const historyFile = process.env.LIFEMODEL_HISTORY || `${stateDir}/platform-history`;
 const overrideFile = `${stateDir}/platform-override`;
 const kubeconfig = '/etc/rancher/k3s/k3s.yaml';
-const kubectl = process.env.LIFEMODEL_KUBECTL;
+const kubectl = (process.env.LIFEMODEL_KUBECTL || `k3s kubectl --kubeconfig ${kubeconfig}`).split(' ');
 const script = fileURLToPath(import.meta.url);
 const validRef = /^(?:tag=[A-Za-z0-9_][A-Za-z0-9._-]{0,127}|digest=sha256:[a-f0-9]{64})$/;
 function help() {
@@ -21,7 +21,7 @@ Diagnose Flux sources, Kustomizations and the lifemodel loader.
   --repin clear     Remove the override and rerun bootstrap.`);
 }
 function runKubectl(args, input) {
-  try { return execFileSync(kubectl || 'k3s', [...(kubectl ? [] : ['kubectl']), '--kubeconfig', kubeconfig, ...args], { encoding: 'utf8', input }); }
+  try { return execFileSync(kubectl[0], [...kubectl.slice(1), ...args], { encoding: 'utf8', input }); }
   catch (error) { throw new Error(`kubectl ${args.join(' ')} failed: ${error?.stderr?.toString().trim() || error?.message || String(error)}`); }
 }
 function get(resource, namespace) { return JSON.parse(runKubectl(['get', resource, '-n', namespace, '-o', 'json'])); }

@@ -274,7 +274,7 @@ if [ -f "$SCRIPT_DIR/deploy/cli/lifemodel.mjs" ]; then cli_source="$SCRIPT_DIR/d
 effective_oci="$render_dir/ocirepository-effective.yaml"
 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 node "$cli_source" render-ref "$render_dir/ocirepository.yaml" "$configured_ref" > "$effective_oci"
 effective_ref=$(LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 node "$cli_source" effective-ref "$configured_ref")
-LIFEMODEL_KUBECTL="${KUBECTL%% *}" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" node "$cli_source" assert-root-ownership
+LIFEMODEL_KUBECTL="$KUBECTL" LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" node "$cli_source" assert-root-ownership
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effective_oci"
 $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$render_dir/kustomization.yaml"
 
@@ -295,6 +295,7 @@ quoted_cli=$(shell_quote "$cli_lib_dir/lifemodel.mjs")
 quoted_state=$(shell_quote "$LIFEMODEL_STATE_DIR")
 quoted_install_root=$(shell_quote "$LIFEMODEL_INSTALL_ROOT")
 quoted_ref=$(shell_quote "$configured_ref")
+quoted_kubectl=$(shell_quote "$KUBECTL")
 install -d -m 0755 "$bundle_dir" "$bundle_templates" "$bundle_dir/verification"
 if [ "$ROOT_TEMPLATES" != "$bundle_templates" ]; then
   cp "$ROOT_TEMPLATES/ocirepository.yaml" "$bundle_templates/ocirepository.yaml"
@@ -312,7 +313,7 @@ install -d -m 0755 "$cli_lib_dir" "$cli_bin_dir" "$LIFEMODEL_STATE_DIR"
 install -m 0644 "$cli_source" "$cli_lib_dir/lifemodel.mjs"
 cat > "$cli_bin_dir/lifemodel" <<EOF
 #!/bin/sh
-LIFEMODEL_STATE_DIR=$quoted_state LIFEMODEL_INSTALL_ROOT=$quoted_install_root LIFEMODEL_CONFIGURED_REF=$quoted_ref LIFEMODEL_APPLY_SCRIPT=/bin/sh LIFEMODEL_APPLY_ARGS=$quoted_args exec node $quoted_cli "\$@"
+LIFEMODEL_STATE_DIR=$quoted_state LIFEMODEL_INSTALL_ROOT=$quoted_install_root LIFEMODEL_CONFIGURED_REF=$quoted_ref LIFEMODEL_KUBECTL=$quoted_kubectl LIFEMODEL_APPLY_SCRIPT=/bin/sh LIFEMODEL_APPLY_ARGS=$quoted_args exec node $quoted_cli "\$@"
 EOF
 chmod 0755 "$cli_bin_dir/lifemodel"
 LIFEMODEL_LOCK_FD="$LIFEMODEL_LOCK_FD" LIFEMODEL_LOCK_HELD=1 LIFEMODEL_STATE_DIR="$LIFEMODEL_STATE_DIR" LIFEMODEL_CONFIGURED_REF="$configured_ref" \
