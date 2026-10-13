@@ -14,6 +14,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
+import type { BaoApi, BaoKeys } from '../../loader/src/openbao.js';
+import type { PlatformPhaseRecord, PlatformPhaseStore } from '../../loader/src/platform-bootstrap.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
 import {
@@ -104,6 +106,43 @@ describe('the loader in platform mode', () => {
     expect(world.launcher.spawns).toEqual([]);
     expect(world.runner.lines()).toEqual([]);
     expect(await restarted.app.shutdown('test')).toBe(0);
+  });
+
+  it('runs the real OpenBao bootstrap composition with only API and stores faked', async () => {
+    const world = createLoaderWorld();
+    const events: string[] = [];
+    let secret: BaoKeys | null = null;
+    let phase: PlatformPhaseRecord | null = null;
+    let initialized = false;
+    const bao: BaoApi = {
+      status: async () => { events.push('status'); return { initialized, sealed: false }; },
+      init: async () => { events.push('init'); initialized = true; return { keys: ['share'], rootToken: 'root' }; },
+      unseal: async () => { events.push('unseal'); },
+      rootTokenActive: async () => false,
+      ensureLoaderPolicy: async () => { events.push('policy'); },
+      loginLoader: async () => { events.push('login'); },
+      revokeRootToken: async () => { events.push('revoke'); },
+    };
+    const custody = {
+      read: async () => secret,
+      write: async (value: BaoKeys) => { events.push('custody'); secret = structuredClone(value); },
+    };
+    const phases: PlatformPhaseStore = {
+      read: async () => phase,
+      write: async (next) => { phase = next; },
+    };
+    const lines: RecordedLine[] = [];
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' }, fs: world.fs, runner: world.runner,
+      launcher: world.launcher, logger: createRecordingLogger(lines), clock: world.clock,
+      exit: () => {}, openBao: { api: bao, custody }, platformPhaseStore: phases, platformLoaderJwt: async () => 'loader-jwt',
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(() => (phase?.phase === 'openbao-policy' && phase.status === 'complete') || lines.some((line) => line.level === 'error'), 'OpenBao composition');
+    expect(events).toContain('init');
+    expect(phase?.phase).toBe('openbao-policy');
+    await app.shutdown('test');
   });
 
   it('starts OpenBao phases only after its HTTP interface is listening', async () => {

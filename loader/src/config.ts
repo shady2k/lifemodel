@@ -149,6 +149,8 @@ export interface LoaderConfig {
    * building, lifemodel itself - belongs to "instance" only.
    */
   mode: LoaderMode;
+  /** OpenBao HTTP API endpoint used by the platform loader. */
+  openBaoAddress: string;
   /** How long lifemodel's drain may take before the loader gives up on it. */
   drainWaitMs: number;
   /**
