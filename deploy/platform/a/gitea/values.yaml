@@ -39,6 +39,9 @@ gitea:
   config:
     database:
       DB_TYPE: sqlite3
+      PATH: /data/gitea/gitea.db
+    repository:
+      ROOT: /data/git/repositories
     queue:
       TYPE: level
     cache:

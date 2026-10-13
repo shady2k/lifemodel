@@ -114,7 +114,7 @@ describe('platform manifests', () => {
       'valkey-cluster': { enabled: false },
       gitea: {
         admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
-        config: { database: { DB_TYPE: 'sqlite3' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
+        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
       },
       persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
       ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },

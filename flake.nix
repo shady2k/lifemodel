@@ -172,6 +172,9 @@
         helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
           -f ${./deploy/platform/a/gitea/values.yaml} > gitea.yaml
         grep -F 'database: DB_TYPE=sqlite3' gitea.yaml >/dev/null
+        grep -F 'PATH=/data/gitea/gitea.db' gitea.yaml >/dev/null
+        grep -F 'ROOT=/data/git/repositories' gitea.yaml >/dev/null
+        grep -F 'mountPath: /data' gitea.yaml >/dev/null
         grep -F 'name: gitea-admin' gitea.yaml >/dev/null
         grep -F 'key: username' gitea.yaml >/dev/null
         grep -F 'key: password' gitea.yaml >/dev/null
