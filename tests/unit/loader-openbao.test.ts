@@ -3,10 +3,10 @@ import { createServer } from 'node:http';
 import { createOpenBaoApi, createOpenBaoBootstrap, type BaoApi, type BaoCustody, type BaoKeys } from '../../loader/src/openbao.js';
 import { createPlatformPhaseRunner, type PlatformPhaseRecord, type PlatformPhaseStore } from '../../loader/src/platform-bootstrap.js';
 
-function fixture(initialized = false, crashAfterRevoke = false) {
+function fixture(initialized = false, crashAfterRevoke = false, initialRecord: PlatformPhaseRecord | null = null) {
   const events: string[] = [];
   let keys: BaoKeys | null = null;
-  let record: PlatformPhaseRecord | null = null;
+  let record: PlatformPhaseRecord | null = initialRecord;
   let isInitialized = initialized;
   let sealed = true;
   let tokenActive = true;
@@ -26,7 +26,7 @@ function fixture(initialized = false, crashAfterRevoke = false) {
   };
   const store: PlatformPhaseStore = { read: async () => record, write: async (r) => { record = r; } };
   const bootstrap = createOpenBaoBootstrap({ bao, custody, loaderJwt: async () => 'loader-jwt', runPhases: createPlatformPhaseRunner(store) });
-  return { bootstrap, events, get keys() { return keys; }, set keys(v) { keys = v; }, get sealed() { return sealed; }, get initialized() { return isInitialized; }, get tokenActive() { return tokenActive; } };
+  return { bootstrap, events, get keys() { return keys; }, set keys(v) { keys = v; }, get sealed() { return sealed; }, set sealed(v) { sealed = v; }, get initialized() { return isInitialized; }, get tokenActive() { return tokenActive; } };
 }
 
 describe('OpenBao bootstrap', () => {
@@ -111,12 +111,16 @@ describe('OpenBao bootstrap', () => {
     expect(f.tokenActive).toBe(false);
   });
 
-  it('resumes after root revocation but before the custody token is removed', async () => {
+  it('resumes after root revocation and reseal before the custody token is removed', async () => {
     const f = fixture(false, true);
     await expect(f.bootstrap.runInitial()).rejects.toThrow('crash during custody update');
     expect(f.tokenActive).toBe(false);
     // The custody token remains, but lookup-self identifies the exact crash cut.
+    f.sealed = true;
+    const recoveryStart = f.events.length;
     await f.bootstrap.runInitial();
+    const recoveryEvents = f.events.slice(recoveryStart);
+    expect(recoveryEvents).toEqual(['unseal:key-1', 'login', 'custody-write']);
     expect(f.events.filter((event) => event === 'init')).toHaveLength(1);
     expect(f.events.filter((event) => event === 'policy')).toHaveLength(1);
     expect(f.keys).toEqual({ keys: ['key-1'], rootToken: null });
@@ -153,11 +157,22 @@ describe('OpenBao bootstrap', () => {
     expect(events).not.toContain('lookup');
   });
 
-  it('rejects missing custody on a completed, unsealed bootstrap without reinitializing', async () => {
-    const f = fixture(true);
+  it('rejects missing custody on a completed, unsealed bootstrap before resuming', async () => {
+    const f = fixture(true, false, { phase: 'openbao-policy', status: 'complete' });
+    f.sealed = false;
     f.keys = null;
-    await expect(f.bootstrap.unsealIfSealed()).rejects.toThrow(/Secret openbao-unseal-custody is missing/);
+    await expect(f.bootstrap.runInitial()).rejects.toThrow(/Secret openbao-unseal-custody is missing/);
     expect(f.events).not.toContain('init');
+    expect(f.events).not.toContain('login');
+  });
+
+  it('rejects invalid custody on a completed, unsealed bootstrap before resuming', async () => {
+    const f = fixture(true, false, { phase: 'openbao-policy', status: 'complete' });
+    f.sealed = false;
+    f.keys = { keys: [], rootToken: null };
+    await expect(f.bootstrap.runInitial()).rejects.toThrow(/Secret openbao-unseal-custody is missing or invalid/);
+    expect(f.events).not.toContain('init');
+    expect(f.events).not.toContain('login');
   });
 
   it('unseals a sealed restart without reinitializing', async () => {
