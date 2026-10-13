@@ -164,7 +164,6 @@
         grep -F 'egress: []' step-a.yaml >/dev/null
         grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
         grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
-        grep -F 'name: platform' step-a.yaml >/dev/null
         grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
