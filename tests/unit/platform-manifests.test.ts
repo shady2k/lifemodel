@@ -103,9 +103,14 @@ describe('platform manifests', () => {
     const giteaRoot = join(platformRoot, 'a/gitea');
     const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
     expect(kustomization.resources).toContain('gitea');
-    const release = YAML.parse(readFileSync(join(giteaRoot, 'release.yaml'), 'utf8')) as { spec: { chart: { spec: { chart: string; version: string; sourceRef: { name: string } } }; valuesFrom: Record<string, any>[] } };
-    expect(release.spec.chart.spec).toMatchObject({ chart: './charts/gitea', version: '12.7.0', sourceRef: { kind: 'OCIRepository', name: 'platform', namespace: 'flux-system' } });
-    expect(release.spec.valuesFrom[0]).toMatchObject({ kind: 'ConfigMap', name: 'gitea-values', valuesKey: 'values.yaml' });
+    const giteaKustomization = YAML.parse(readFileSync(join(giteaRoot, 'kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
+    expect(giteaKustomization.resources).toContain('rendered.yaml');
+    expect(giteaKustomization.resources).not.toContain('release.yaml');
+    expect(giteaKustomization.configMapGenerator).toBeUndefined();
+    const rendered = parseYamlFiles([join(giteaRoot, 'rendered.yaml')]);
+    expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')).toBe(true);
     const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
     expect(values).toMatchObject({
       postgresql: { enabled: false },
@@ -206,16 +211,19 @@ describe('platform manifests', () => {
     expect(a0!.spec.timeout).toBe('2m0s');
   });
 
-  it('orders OpenBao step A after A0 and uses the platform OCI source for its vendored chart', () => {
+  it('orders OpenBao step A after A0 and applies the committed chart render', () => {
     const objects = sourceObjects();
     const stepA = objects.find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a');
     expect(stepA?.spec).toMatchObject({ dependsOn: [{ name: 'platform-a0' }], wait: true, timeout: '10m0s' });
-    const release = objects.find((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao');
-    expect(release?.spec.chart.spec).toMatchObject({
-      chart: './charts/openbao',
-      version: '0.30.3',
-      sourceRef: { kind: 'OCIRepository', name: 'platform', namespace: 'flux-system' },
-    });
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[]; configMapGenerator?: any[] };
+    expect(kustomization.resources).toContain('openbao/rendered.yaml');
+    expect(kustomization.resources).not.toContain('openbao-release.yaml');
+    expect(kustomization.configMapGenerator).toBeUndefined();
+    const rendered = parseYamlFiles([join(platformRoot, 'a/openbao/rendered.yaml')]);
+    expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')).toBe(false);
+    expect(rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')).toBe(true);
+    expect(objects.some((item) => item.kind === 'HelmRelease')).toBe(false);
   });
 
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
