@@ -107,6 +107,7 @@
         kustomize build ${./deploy/platform} > parent.yaml
         grep -F 'kind: Kustomization' parent.yaml >/dev/null
         grep -F 'name: platform-a0' parent.yaml >/dev/null
+        grep -F 'timeout: 2m0s' parent.yaml >/dev/null
         kustomize build ${./deploy/platform/a0} > a0.yaml
         validate_a0() {
           for kind in Namespace ServiceAccount PersistentVolumeClaim Deployment Service NetworkPolicy Ingress; do

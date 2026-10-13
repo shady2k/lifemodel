@@ -112,6 +112,12 @@ describe('platform manifests', () => {
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
+  it('bounds platform-a0 health checks with an explicit timeout', () => {
+    const a0 = sourceObjects().find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a0');
+    expect(a0, 'missing platform-a0 Kustomization').toBeDefined();
+    expect(a0!.spec.timeout).toBe('2m0s');
+  });
+
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
     const parsed = YAML.parse(readFileSync(customOCI, 'utf8'));
     expect(parsed.spec.ref.tag).toBe('20261013');
