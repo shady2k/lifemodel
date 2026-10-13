@@ -10,6 +10,7 @@ export interface BaoApi {
   status(): Promise<BaoStatus>;
   init(): Promise<{ keys: string[]; rootToken: string }>;
   unseal(key: string): Promise<void>;
+  rootTokenActive(rootToken: string): Promise<boolean>;
   ensureLoaderPolicy(rootToken: string): Promise<void>;
   revokeRootToken(rootToken: string): Promise<void>;
 }
@@ -56,8 +57,12 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
     const saved = await custody.read();
     assertKeys(saved);
     if (saved.rootToken === null) return; // already retired on an earlier run
-    await bao.ensureLoaderPolicy(saved.rootToken);
-    await bao.revokeRootToken(saved.rootToken);
+    // A crash can land after revoke-self but before the Secret update. Detect
+    // that cut so a retry can remove the revoked token without using it again.
+    if (await bao.rootTokenActive(saved.rootToken)) {
+      await bao.ensureLoaderPolicy(saved.rootToken);
+      await bao.revokeRootToken(saved.rootToken);
+    }
     await custody.write({ keys: saved.keys, rootToken: null });
     const verified = await custody.read();
     assertKeys(verified);
@@ -156,6 +161,12 @@ export function createOpenBaoApi(options: OpenBaoApiOptions): BaoApi {
       return { keys: keys as string[], rootToken: response['root_token'] };
     },
     unseal: async (key) => { await api('sys/unseal', 'POST', undefined, { key }); },
+    rootTokenActive: async (rootToken) => {
+      const response = await call(new URL('/v1/auth/token/lookup-self', base), 'GET', rootToken, undefined);
+      if (response.status === 200) return true;
+      if (response.status === 403) return false;
+      throw new Error(`OpenBao GET auth/token/lookup-self failed (${response.status}): ${response.body}`);
+    },
     ensureLoaderPolicy: async (rootToken) => {
       const policy = 'path "sys/seal-status" { capabilities = ["read"] }\npath "sys/unseal" { capabilities = ["update"] }';
       await api('sys/policies/acl/loader-bootstrap', 'PUT', rootToken, { policy });
