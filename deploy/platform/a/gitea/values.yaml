@@ -1,0 +1,45 @@
+# Explicit ADR-010 R7-03 choices for the vendored Gitea 12.7.0 chart.
+postgresql-ha:
+  enabled: false
+postgresql:
+  enabled: false
+valkey-cluster:
+  enabled: false
+valkey:
+  enabled: false
+
+persistence:
+  enabled: true
+  create: true
+  mount: true
+  claimName: gitea-shared-storage
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  storageClass: local-path
+  annotations:
+    helm.sh/resource-policy: keep
+
+ingress:
+  enabled: true
+  className: traefik
+  hosts:
+    - host: git.localhost
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+gitea:
+  admin:
+    username: ""
+    password: ""
+    existingSecret: gitea-admin
+    passwordMode: initialOnlyNoReset
+  config:
+    database:
+      DB_TYPE: sqlite3
+    queue:
+      TYPE: level
+    cache:
+      ADAPTER: memory

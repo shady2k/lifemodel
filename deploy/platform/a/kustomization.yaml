@@ -5,6 +5,7 @@ resources:
   - service-account.yaml
   - auth-delegator.yaml
   - openbao-release.yaml
+  - gitea
   - network-policy.yaml
 configMapGenerator:
   - name: openbao-values

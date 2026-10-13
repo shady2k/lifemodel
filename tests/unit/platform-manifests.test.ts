@@ -124,6 +124,9 @@ describe('platform manifests', () => {
     const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
     expect(policy.spec.policyTypes).toEqual(['Ingress', 'Egress']);
     expect(policy.spec.ingress).toHaveLength(3);
+    const admitted = policy.spec.ingress.map((rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']);
+    expect(admitted).toEqual(['lifemodel-system', 'flux-system', 'kube-system']);
+    expect(policy.spec.ingress.map((rule: any) => rule.ports[0].port)).toEqual([3000, 3000, 3000]);
     expect(policy.spec.egress).toEqual([]);
     expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
   });
