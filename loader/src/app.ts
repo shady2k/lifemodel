@@ -28,6 +28,14 @@ import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import { requireSeedBundleForFirstStart } from './repo.js';
 import { createSupervisor, type Supervisor } from './supervisor.js';
+import {
+  createKubernetesBaoCustody,
+  createOpenBaoApi,
+  createOpenBaoBootstrap,
+  type BaoApi,
+  type BaoCustody,
+} from './openbao.js';
+import { createKubernetesPhaseStore, createPlatformPhaseRunner } from './platform-bootstrap.js';
 
 export interface LoaderAppDeps {
   config: LoaderConfig;
@@ -43,6 +51,9 @@ export interface LoaderAppDeps {
    * gets the server's own `/health` route.
    */
   agentVaultProbe?: HealthProbe;
+  /** Test boundary for platform bootstrap; production uses in-cluster APIs. */
+  openBao?: { api: BaoApi; custody: BaoCustody };
+  platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
 }
 
 export interface LoaderApp {
@@ -77,6 +88,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   // Agent Vault or Docker socket still serves authentication. Instance mode
   // is unchanged: it starts them and exposes their controls.
   const platform = config.mode === 'platform';
+  const platformPhaseStore = createKubernetesPhaseStore();
+  const baoParts =
+    deps.openBao ??
+    ({
+      api: createOpenBaoApi({ address: config.openBaoAddress }),
+      custody: createKubernetesBaoCustody(),
+    } satisfies { api: BaoApi; custody: BaoCustody });
+  const platformBootstrap =
+    deps.platformBootstrap ??
+    createOpenBaoBootstrap({
+      ...baoParts,
+      runPhases: createPlatformPhaseRunner(platformPhaseStore),
+    });
   const agentVault = createAgentVault({
     launcher,
     runner,
@@ -130,6 +154,41 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
   let stopping = false;
   /** The startup running now, for the stop to wait for and re-run against before it answers. */
   let startup: Promise<void> | null = null;
+  let platformBootstrapStarted = false;
+  let resolvePlatformStop!: () => void;
+  const platformStop = new Promise<void>((resolve) => {
+    resolvePlatformStop = resolve;
+  });
+  const waitForPlatform = (ms: number): Promise<void> => Promise.race([clock.sleep(ms), platformStop]);
+
+  /** Keep the interface live while durable first-start work retries and sealed restarts are repaired. */
+  async function runPlatformBootstrap(): Promise<void> {
+    if (platformBootstrapStarted) return;
+    platformBootstrapStarted = true;
+    let delayMs = 1_000;
+    while (!stopping) {
+      try {
+        await platformBootstrap.runInitial();
+        try {
+          await platformBootstrap.unsealIfSealed();
+        } catch (error) {
+          await platformPhaseStore.write({ phase: 'openbao-unseal', status: 'failed' });
+          throw error;
+        }
+        logger.info({}, 'OpenBao bootstrap is ready');
+        delayMs = 30_000;
+      } catch (error) {
+        logger.error(
+          { error: describe(error) },
+          `OpenBao platform bootstrap failed; retrying in ${delayMs} ms`
+        );
+        await waitForPlatform(delayMs);
+        delayMs = Math.min(delayMs * 2, 30_000);
+        continue;
+      }
+      await waitForPlatform(delayMs);
+    }
+  }
 
   function listen(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -252,12 +311,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         { port: config.httpPort, volume: config.volumeRoot, repo: config.repoDir },
         'the loader is up'
       );
-      if ((await state.readAuth()) === null) {
-        logger.info({}, 'no password is set: the owner is asked at /setup');
+      if (platform) {
+        void runPlatformBootstrap();
         return;
       }
-      if (platform) {
-        // There is nothing to continue: no instance lives on this volume.
+      if ((await state.readAuth()) === null) {
+        logger.info({}, 'no password is set: the owner is asked at /setup');
         return;
       }
       // A password is set, so this start continues where the last one left
@@ -336,6 +395,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       // The latch comes first: no startup continues past its fences, and
       // nothing starts from here on (not a start in flight, not a restart).
       stopping = true;
+      resolvePlatformStop();
       // Nothing starts from here on: not a start in flight, not a restart.
       supervisor.close();
       const pending: string[] = [];

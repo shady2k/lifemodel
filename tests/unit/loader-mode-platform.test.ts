@@ -37,7 +37,7 @@ import {
 registerLoaderLifecycle();
 
 /** A platform app over `world`, with its lines and exits captured. */
-function platformApp(world: LoaderWorld): {
+function platformApp(world: LoaderWorld, bootstrap = { runInitial: async () => {}, unsealIfSealed: async () => {} }): {
   app: LoaderApp;
   lines: RecordedLine[];
   exits: number[];
@@ -52,6 +52,7 @@ function platformApp(world: LoaderWorld): {
     logger: createRecordingLogger(lines),
     clock: world.clock,
     exit: (code) => exits.push(code),
+    platformBootstrap: bootstrap,
   });
   ownLoaderApp(world, app);
   return { app, lines, exits };
@@ -103,6 +104,19 @@ describe('the loader in platform mode', () => {
     expect(world.launcher.spawns).toEqual([]);
     expect(world.runner.lines()).toEqual([]);
     expect(await restarted.app.shutdown('test')).toBe(0);
+  });
+
+  it('starts OpenBao phases only after its HTTP interface is listening', async () => {
+    const world = createLoaderWorld();
+    const observed: string[] = [];
+    const { app } = platformApp(world, {
+      runInitial: async () => { observed.push(`initial:${app.host() ?? 'down'}`); },
+      unsealIfSealed: async () => { observed.push(`unseal:${app.host() ?? 'down'}`); },
+    });
+    await app.start();
+    await waitUntil(() => observed.length === 2, 'platform bootstrap ran');
+    expect(observed).toEqual(['initial:0.0.0.0', 'unseal:0.0.0.0']);
+    expect(await app.shutdown('test')).toBe(0);
   });
 
   it('refuses browser and CLI resume in platform mode', async () => {
