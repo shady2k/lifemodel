@@ -7,8 +7,8 @@ let
     then "    digest: ${cfg.platform.digest}"
     else "    tag: ${cfg.platform.tag}";
   verifyBlock = if cfg.verify.mode == "keyless" then
-    "    matchOIDCIdentity:\n      - issuer: ${builtins.toJSON cfg.verify.issuer}\n        subject: ${builtins.toJSON cfg.verify.subjectRegex}\n"
-  else "    secretRef:\n      name: platform-cosign\n";
+    "    matchOIDCIdentity:\n      - issuer: ${builtins.toJSON cfg.verify.issuer}\n        subject: ${builtins.toJSON cfg.verify.subjectRegex}"
+  else "    secretRef:\n      name: platform-cosign";
   renderedOCI = pkgs.writeText "lifemodel-platform-ocirepository.yaml"
     (lib.replaceStrings
       [ "@PLATFORM_URL@" "@PLATFORM_INSECURE@" "@REF_BLOCK@" "@VERIFY_BLOCK@" ]
@@ -29,7 +29,7 @@ in
     enable = mkEnableOption "lifemodel GitOps platform bootstrap";
     platform = {
       url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
-      tag = mkOption { type = types.nullOr types.str; default = "latest"; description = "OCI artifact tag (ignored when digest is set)."; };
+      tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
       digest = mkOption { type = types.nullOr types.str; default = null; description = "Optional immutable OCI artifact digest."; };
       insecureRegistry = mkOption { type = types.bool; default = false; description = "Allow a VM-local plain HTTP OCI registry."; };
     };
@@ -49,6 +49,8 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
+      { assertion = cfg.platform.digest != null || cfg.platform.tag != null;
+        message = "services.lifemodel.platform.tag or services.lifemodel.platform.digest is required"; }
       { assertion = cfg.verify.mode != "key" || cfg.verify.publicKey != null;
         message = "services.lifemodel.verify.publicKey is required when verify.mode = key"; }
       { assertion = !otherFlux; message = "services.lifemodel cannot be enabled with another Flux installation"; }
