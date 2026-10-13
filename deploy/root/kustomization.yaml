@@ -1,0 +1,21 @@
+# The root Kustomization: applies the platform artifact's manifests once the
+# verified OCIRepository above has published its artifact (ADR-010, Q5).
+# Rendered from the templates in this directory by the NixOS module
+# (deploy/nixos/) and, later, by the generic-Linux installer.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: lifemodel
+spec:
+  interval: 10m0s
+  retryInterval: 1m0s
+  timeout: 5m0s
+  sourceRef:
+    kind: OCIRepository
+    name: platform
+  path: ./
+  prune: true
+  wait: true
