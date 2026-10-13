@@ -50,6 +50,8 @@ export interface LoaderApp {
   start(): Promise<void>;
   /** The port the loader actually listens on (a test asks for 0 and reads this). */
   port(): number;
+  /** The address the server actually bound, or null before it is listening. */
+  host(): string | null;
   /** Stop intake, give lifemodel its drain; the code the process should leave with. */
   shutdown(reason: string): Promise<number>;
   /** The pieces, for a test that drives them directly. */
@@ -70,10 +72,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
 
   const state = createLoaderState({ fs, config, logger });
   // Platform mode (ADR-010, platform step A0): the loader supervises nothing.
-  // Its pieces are still constructed - the interface reads their status - but
-  // nothing of the instance half is ever ASKED to start, so a deployment
-  // without a front-door binary, without Agent Vault and without a Docker
-  // socket comes up all the same. Instance mode is unchanged: it starts them.
+  // Its instance pieces are constructed for the app contract, but are not
+  // passed to HTTP or asked to start. A deployment without a front-door binary,
+  // Agent Vault or Docker socket still serves authentication. Instance mode
+  // is unchanged: it starts them and exposes their controls.
   const platform = config.mode === 'platform';
   const agentVault = createAgentVault({
     launcher,
@@ -223,11 +225,12 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       }
       http = createLoaderHttp({
         state,
-        supervisor,
-        bootstrap,
+        ...(platform
+          ? {}
+          : { supervisor, bootstrap, vaultAccount: () => agentVault.ownerAccount() }),
+        mode: platform ? 'platform' : 'instance',
         logger,
         clock,
-        vaultAccount: () => agentVault.ownerAccount(),
       });
       await listen();
       if (stopping) {
@@ -294,6 +297,13 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       return address === null || address === undefined || typeof address === 'string'
         ? config.httpPort
         : address.port;
+    },
+
+    host: () => {
+      const address = http?.server.address();
+      return address === null || address === undefined || typeof address === 'string'
+        ? null
+        : address.address;
     },
 
     start: async () => {
