@@ -4,6 +4,8 @@ Date: 2026-10-12 (rewritten 2026-10-12 on the owner's platform decision).
 
 ## Status
 
+Accepted 2026-10-13 by the owner's merge of PR #28 (295f067).
+
 Proposed (rewritten 2026-10-13 on the owner's fixed two-layer GitOps
 architecture, task lifemodel-b0r.9.16). The platform layer is installed
 from a per-release signed OCI artifact through a signature-verifying Flux
