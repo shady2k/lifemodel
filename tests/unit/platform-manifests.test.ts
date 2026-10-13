@@ -99,6 +99,34 @@ esac`);
 }
 
 describe('platform manifests', () => {
+  it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
+    const giteaRoot = join(platformRoot, 'a/gitea');
+    const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
+    expect(kustomization.resources).toContain('gitea');
+    const release = YAML.parse(readFileSync(join(giteaRoot, 'release.yaml'), 'utf8')) as { spec: { chart: { spec: { chart: string; version: string; sourceRef: { name: string } } }; valuesFrom: Record<string, any>[] } };
+    expect(release.spec.chart.spec).toMatchObject({ chart: './charts/gitea', version: '12.7.0', sourceRef: { name: 'platform' } });
+    expect(release.spec.valuesFrom[0]).toMatchObject({ kind: 'ConfigMap', name: 'gitea-values', valuesKey: 'values.yaml' });
+    const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
+    expect(values).toMatchObject({
+      postgresql: { enabled: false },
+      'postgresql-ha': { enabled: false },
+      valkey: { enabled: false },
+      'valkey-cluster': { enabled: false },
+      gitea: {
+        admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
+        config: { database: { DB_TYPE: 'sqlite3' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
+      },
+      persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
+      ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },
+    });
+    const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
+    expect(namespace.metadata.name).toBe('lifemodel-git');
+    const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
+    expect(policy.spec.policyTypes).toEqual(['Ingress', 'Egress']);
+    expect(policy.spec.ingress).toHaveLength(3);
+    expect(policy.spec.egress).toEqual([]);
+    expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
+  });
   it('keeps the platform workload confined and digest-pinned', () => {
     const sourceFiles = yamlFiles(platformRoot);
     const objects = sourceObjects();
