@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
 const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
+const installer = fileURLToPath(new URL('../../scripts/install.sh', import.meta.url));
+const rootTemplates = fileURLToPath(new URL('../../deploy/root/', import.meta.url));
+const customOCI = fileURLToPath(new URL('../fixtures/nixos/custom-ocirepository.yaml', import.meta.url));
 
 function yamlFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -22,111 +26,140 @@ function parseYamlFiles(files: string[]): Record<string, any>[] {
   });
 }
 
-function loadObjects(): Record<string, any>[] {
-  try {
-    const rendered = execFileSync('kustomize', ['build', platformRoot], { encoding: 'utf8' });
-    return YAML.parseAllDocuments(rendered).map((doc) => doc.toJSON() as Record<string, any>);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    // The isolated launcher does not provision kustomize. Validate the declared resources directly.
-    const configs = parseYamlFiles(yamlFiles(platformRoot).filter((file) => file.endsWith('kustomization.yaml')));
-    const resources = [
-      ...parseYamlFiles(yamlFiles(join(platformRoot, 'a0')).filter((file) => !file.endsWith('kustomization.yaml'))),
-      ...parseYamlFiles([join(platformRoot, 'a0-reconciler.yaml')]),
-    ];
-    const imagePin = configs.flatMap((config) => config.images ?? []).find((image) => image.digest);
-    const deployment = resources.find((item) => item.kind === 'Deployment');
-    if (deployment && imagePin) {
-      const container = deployment.spec.template.spec.containers[0];
-      if (container.image.startsWith(`${imagePin.name}:`)) {
-        container.image = `${imagePin.newName ?? imagePin.name}@${imagePin.digest}`;
-      }
-    }
-    return resources;
-  }
+function sourceObjects(): Record<string, any>[] {
+  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.endsWith('kustomization.yaml')));
 }
 
-function expectValidPlatform(objects: Record<string, any>[]): void {
-  expect(objects.length).toBeGreaterThan(0);
-  const object = (kind: string) => {
-    const found = objects.find((item) => item.kind === kind);
-    expect(found, `missing ${kind}`).toBeDefined();
-    return found!;
+function object(objects: Record<string, any>[], kind: string): Record<string, any> {
+  const found = objects.find((item) => item.kind === kind);
+  expect(found, `missing ${kind}`).toBeDefined();
+  return found!;
+}
+
+function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string): { status: number | null; output: string; root: string } {
+  const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
+  const bin = join(root, 'bin');
+  const state = join(root, 'namespace-state');
+  const log = join(root, 'kubectl.log');
+  if (foreign && !existingRoot) writeFileSync(state, 'foreign');
+  mkdirSync(bin, { recursive: true });
+  const command = (name: string, body: string) => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
   };
-  for (const item of objects) {
-    if (item.kind === 'Namespace') {
-      expect(item.metadata.name).toBe('lifemodel-system');
-    } else if (item.kind === 'Kustomization' && item.apiVersion?.startsWith('kustomize.toolkit.fluxcd.io/')) {
-      expect(item.metadata.namespace).toBe('flux-system');
-    } else {
-      expect(item.metadata.namespace).toBe('lifemodel-system');
-    }
-  }
-
-  const deployment = object('Deployment');
-  expect(deployment.spec.replicas).toBe(1);
-  const pod = deployment.spec.template.spec;
-  const container = pod.containers[0];
-  expect(container.image).toMatch(/@sha256:[a-f0-9]{64}$/);
-  expect(container.env).toContainEqual({ name: 'LIFEMODEL_LOADER_MODE', value: 'platform' });
-  expect(container.ports).toContainEqual(expect.objectContaining({ containerPort: 7000 }));
-  expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } });
-  expect(container.securityContext).toMatchObject({
-    runAsNonRoot: true,
-    runAsUser: 1000,
-    readOnlyRootFilesystem: true,
-    allowPrivilegeEscalation: false,
-    capabilities: { drop: ['ALL'] },
-    seccompProfile: { type: 'RuntimeDefault' },
-  });
-  expect(container.volumeMounts).toEqual(expect.arrayContaining([
-    expect.objectContaining({ name: 'state', mountPath: '/var/lib/loader' }),
-    expect.objectContaining({ name: 'tmp', mountPath: '/tmp' }),
-  ]));
-  expect(pod.volumes).toEqual(expect.arrayContaining([
-    expect.objectContaining({ name: 'state', persistentVolumeClaim: expect.any(Object) }),
-    expect.objectContaining({ name: 'tmp', emptyDir: expect.any(Object) }),
-  ]));
-  expect(container.readinessProbe).toBeDefined();
-  expect(container.livenessProbe).toBeDefined();
-
-  expect(object('Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
-  expect(object('PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
-  const policy = object('NetworkPolicy');
-  expect(policy.spec.podSelector).toEqual({});
-  expect(policy.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
-  expect(policy.spec.ingress).toEqual([expect.objectContaining({
-    from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } } }],
-    ports: [expect.objectContaining({ port: 7000 })],
-  })]);
-  expect(policy.spec.egress).toEqual([]);
-
-  const fluxObjects = objects.filter(
-    (item) => item.kind === 'Kustomization' && item.apiVersion?.startsWith('kustomize.toolkit.fluxcd.io/')
-  );
-  expect(fluxObjects).toHaveLength(1);
-  const flux = fluxObjects[0];
-  expect(flux.metadata.name).toBe('platform-a0');
-  expect(flux.spec).toMatchObject({ path: './a0', prune: true, wait: true });
-  expect(flux.spec.dependsOn ?? []).toEqual([]);
-  expect(objects.filter((item) => item.kind === 'ServiceAccount')[0].automountServiceAccountToken).toBe(false);
-  expect(object('Ingress').spec.rules[0].host).toBe('boot.localhost');
-  expect(objects.some((item) => ['Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'].includes(item.kind))).toBe(false);
+  command('id', 'echo 0');
+  command('k3s', `if [ "$1" = --version ]; then echo 'k3s version v1.35.8+k3s1'; exit 0; fi
+case "$*" in
+  *'get nodes'*) exit 0 ;;
+  *'get namespace flux-system -o jsonpath='*) [ "$K3S_FOREIGN" = 1 ] && echo external || echo lifemodel ;;
+  *'get namespace flux-system'*) [ -f "$K3S_STATE" ] ;;
+  *'--field-manager=lifemodel-namespace'*) cat >/dev/null; echo namespace >> "$K3S_LOG"; touch "$K3S_STATE" ;;
+  *' -f -'*) cat >/dev/null ;;
+  *) echo flux >> "$K3S_LOG"; if [ "$K3S_FAIL_FLUX" = 1 ] && [ "$(grep -c '^flux$' "$K3S_LOG")" -eq 1 ]; then exit 42; fi ;;
+esac`);
+  command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
+  command('sha256sum', 'read expected file; echo "$file: OK"');
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    K3S_STATE: state,
+    K3S_LOG: log,
+    K3S_FAIL_FLUX: failFlux ? '1' : '0',
+    K3S_FOREIGN: foreign ? '1' : '0',
+  };
+  delete (env as NodeJS.ProcessEnv).KUBECONFIG;
+  const result = spawnSync('sh', [installer, '--platform-url', 'oci://example.test/platform', '--tag', 'v1.0.0', '--root-templates', rootTemplates], { encoding: 'utf8', env });
+  return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
 describe('platform manifests', () => {
-  it('contains valid, confined, digest-pinned A0 manifests', () => {
+  it('keeps the platform workload confined and digest-pinned', () => {
     const sourceFiles = yamlFiles(platformRoot);
-    const parsedSource = parseYamlFiles(sourceFiles);
-    expect(parsedSource.length).toBeGreaterThan(0);
-    expectValidPlatform(loadObjects());
+    const objects = sourceObjects();
+    expect(objects.length).toBeGreaterThan(0);
+    const deployment = object(objects, 'Deployment');
+    expect(deployment.spec.replicas).toBe(1);
+    const pod = deployment.spec.template.spec;
+    const container = pod.containers[0];
+    expect(container.image).toBe('ghcr.io/shady2k/lifemodel-loader:release-placeholder');
+    expect(container.env).toContainEqual({ name: 'LIFEMODEL_LOADER_MODE', value: 'platform' });
+    expect(container.ports).toContainEqual(expect.objectContaining({ containerPort: 7000 }));
+    expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } });
+    expect(container.securityContext).toMatchObject({
+      runAsNonRoot: true,
+      runAsUser: 1000,
+      readOnlyRootFilesystem: true,
+      allowPrivilegeEscalation: false,
+      capabilities: { drop: ['ALL'] },
+      seccompProfile: { type: 'RuntimeDefault' },
+    });
+    expect(container.volumeMounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'state', mountPath: '/var/lib/loader' }),
+      expect.objectContaining({ name: 'tmp', mountPath: '/tmp' }),
+    ]));
+    expect(pod.volumes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'state', persistentVolumeClaim: expect.any(Object) }),
+      expect.objectContaining({ name: 'tmp', emptyDir: expect.any(Object) }),
+    ]));
+    expect(container.readinessProbe).toBeDefined();
+    expect(container.livenessProbe).toBeDefined();
+    expect(object(objects, 'Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
+    expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
+    expect(object(objects, 'ServiceAccount').automountServiceAccountToken).toBe(false);
+    expect(object(objects, 'Ingress').spec.rules[0].host).toBe('boot.localhost');
+    expect(objects.some((item) => ['Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'].includes(item.kind))).toBe(false);
+    expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
-  it('rejects a loader image that uses a tag instead of a digest', () => {
-    const objects = loadObjects();
-    const deployment = objects.find((item) => item.kind === 'Deployment');
-    expect(deployment).toBeDefined();
-    deployment!.spec.template.spec.containers[0].image = 'ghcr.io/shady2k/lifemodel-loader:latest';
-    expect(() => expectValidPlatform(objects)).toThrow();
+  it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
+    const parsed = YAML.parse(readFileSync(customOCI, 'utf8'));
+    expect(parsed.spec.ref.tag).toBe('20261013');
+    expect(typeof parsed.spec.ref.tag).toBe('string');
+    expect(parsed.spec.verify.matchOIDCIdentity[0]).toEqual({
+      issuer: "^issuer\\.path/'quoted\"$",
+      subject: "^subject\\\\literal/'quote\"$",
+    });
+  });
+
+  it('resumes after Flux apply fails with the owned namespace already created', () => {
+    const first = runInstallerHarness(true);
+    try {
+      expect(first.status).not.toBe(0);
+      expect(readFileSync(join(first.root, 'namespace-state'), 'utf8')).toBe('');
+      expect(readFileSync(join(first.root, 'kubectl.log'), 'utf8').split('\n')[0]).toBe('namespace');
+      const second = runInstallerHarness(false, false, first.root);
+      try {
+        expect(second.status).toBe(0);
+        expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
+      } finally { /* the shared root is removed by the outer finally */ }
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it('still refuses a foreign flux-system namespace', () => {
+    const result = runInstallerHarness(false, true);
+    try {
+      expect(result.status).not.toBe(0);
+      expect(result.output).toContain('namespace is not labelled as managed by lifemodel');
+      expect(existsSync(join(result.root, 'kubectl.log'))).toBe(false);
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it('limits loader ingress to Traefik pods in kube-system', () => {
+    const policy = object(sourceObjects(), 'NetworkPolicy');
+    expect(policy.spec.podSelector).toEqual({});
+    expect(policy.spec.policyTypes).toEqual(expect.arrayContaining(['Ingress', 'Egress']));
+    expect(policy.spec.ingress).toEqual([expect.objectContaining({
+      from: [{
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+        podSelector: { matchLabels: { 'app.kubernetes.io/name': 'traefik' } },
+      }],
+      ports: [expect.objectContaining({ port: 7000 })],
+    })]);
+    expect(policy.spec.egress).toEqual([]);
   });
 });

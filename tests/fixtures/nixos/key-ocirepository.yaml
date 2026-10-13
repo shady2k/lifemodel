@@ -23,7 +23,7 @@ spec:
   url: "oci://ghcr.io/shady2k/lifemodel-platform"
   insecure: false
   ref:
-    tag: v1.0.0
+    tag: 'v1.0.0'
   verify:
     provider: cosign
     secretRef:
