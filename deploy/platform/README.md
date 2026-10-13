@@ -8,7 +8,9 @@ Step A's chart is the official OpenBao chart 0.30.3, vendored under
 `d50ed31b8305f430df308c342dd3c1efa877222380e99cb480f74f070d6beaa8`).
 The HelmRelease uses the same platform OCIRepository as its chart source.
 OpenBao runs one standalone server using integrated Raft storage on a retained
-PVC, with no injector or auto-unseal. The chart does not create or label the
+PVC, with no injector or auto-unseal. Its explicit ServiceAccount enables the
+projected Kubernetes token, and a ClusterRoleBinding grants only the built-in
+`system:auth-delegator` role for TokenReview. The chart does not create or label the
 namespace; `a/namespace.yaml` applies the PSA `restricted` labels. The chart's
 server pod security context renders to restricted-compatible settings.
 `a/network-policy.yaml` defaults OpenBao ingress to deny and allows TCP 8200

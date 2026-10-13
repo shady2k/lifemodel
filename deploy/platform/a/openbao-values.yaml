@@ -31,5 +31,8 @@ server:
       whenScaled: Retain
   authDelegator:
     enabled: false
+  serviceAccount:
+    create: false
+    name: openbao
 ui:
   enabled: false

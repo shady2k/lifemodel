@@ -130,15 +130,16 @@
       renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
         nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
       } ''
-        set -eu
+        set -eux
         helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
           -f ${./deploy/platform/a/openbao-values.yaml} > openbao.yaml
         grep -F 'kind: StatefulSet' openbao.yaml >/dev/null
         grep -F 'volumeClaimTemplates:' openbao.yaml >/dev/null
         grep -F 'storage "raft"' openbao.yaml >/dev/null
-        grep -F 'kind: NetworkPolicy' openbao.yaml >/dev/null
-        grep -F 'kubernetes.io/metadata.name: lifemodel-system' openbao.yaml >/dev/null
-        grep -F 'port: 8200' openbao.yaml >/dev/null
+        grep -F 'serviceAccountName: openbao' openbao.yaml >/dev/null
+        if grep -F 'automountServiceAccountToken: false' openbao.yaml >/dev/null; then
+          echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
+        fi
         grep -F 'pod-security.kubernetes.io/enforce: restricted' ${./deploy/platform/a/namespace.yaml} >/dev/null
         if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' openbao.yaml >/dev/null; then
           echo 'OpenBao injector or auto-unseal rendered unexpectedly' >&2; exit 1
@@ -147,6 +148,11 @@
         grep -F 'name: platform-a' platform.yaml >/dev/null
         kustomize build ${./deploy/platform/a} > step-a.yaml
         grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
+        grep -F 'kind: NetworkPolicy' step-a.yaml >/dev/null
+        grep -F 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml >/dev/null
+        grep -F 'app.kubernetes.io/name: loader' step-a.yaml >/dev/null
+        grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
+        grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
         grep -F 'name: platform' step-a.yaml >/dev/null
         grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
