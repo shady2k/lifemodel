@@ -137,6 +137,7 @@
         grep -F 'volumeClaimTemplates:' openbao.yaml >/dev/null
         grep -F 'storage "raft"' openbao.yaml >/dev/null
         grep -F 'serviceAccountName: openbao' openbao.yaml >/dev/null
+        grep -A2 -F 'capabilities:' openbao.yaml | grep -F -- '- ALL' >/dev/null
         if grep -F 'automountServiceAccountToken: false' openbao.yaml >/dev/null; then
           echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
         fi
