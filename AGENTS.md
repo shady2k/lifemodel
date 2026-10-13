@@ -28,6 +28,15 @@ tick), Energy & state are physiology. Start with `README.md` and
 ## Repository layout
 
 - `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
+- `flake.nix`, `flake.lock` — Nix flake exporting the NixOS module and defining flake checks
+- `deploy/root/` — Flux root OCIRepository and Kustomization templates
+- `deploy/nixos/` — the `services.lifemodel` NixOS module and setup guide
+- `deploy/platform/` — the versioned platform artifact applied by Flux, starting with A0
+- `deploy/cli/` — `lifemodel doctor` recovery and health-diagnosis CLI
+- `docker/loader/` — the loader's OCI image, including platform-mode packaging
+- `scripts/install.sh` — generic-Linux platform installer
+- `scripts/release/` and `.github/workflows/release.yml` — signed platform release workflow and digest pinning helper
+- `scripts/test-isolated.mjs` — disposable test boundary; its source snapshot allowlist includes `deploy/`
 - `src/core/` — the heart: CoreLoop tick, Agent, energy model, scheduler,
   plugin loader and discovery, container (dependency wiring), event bus and
   queue, intent application, metrics, tracing, the bounded shutdown-drain
@@ -86,6 +95,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 | `npm run connect` | connect this clone: git hooks, backlog import, gate check |
 | `npm run backlog` | the backlog gate (`npm run backlog:json` for JSON output) |
 | `npm run present` | the present-documents check |
+| `nix flake check` | checks the exported NixOS module and platform installer rendering; needs Nix; CI does not run it yet (lifemodel-lut.3.6) |
 | `npm run ready` | open leaves ready to claim |
 | `npm run browser:auth` | browser authentication (`cli/browser-auth.ts`) |
 
@@ -156,8 +166,9 @@ in the separate main-push `ci-image-publish` job. No other job inherits this
 exception; `ci-product` remains on the isolated Node 24 launcher.
 
 Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
-locally, including through `test:docker`. The completed isolated Docker
-backend is retained; this exception requires no new VM, DinD or controller.
+locally, including through `test:docker`. The NixOS test VM walk is manual.
+The completed isolated Docker backend is retained; this exception requires no
+new VM, DinD or controller.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
