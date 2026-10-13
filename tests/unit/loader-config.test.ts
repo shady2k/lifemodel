@@ -8,7 +8,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { SESSION_COOKIE_NAME } from '../../loader/src/auth.js';
-import { loadConfig } from '../../loader/src/config.js';
+import { LoaderFatalError } from '../../loader/src/errors.js';
+import { loadConfig, LOADER_MODES } from '../../loader/src/config.js';
 
 describe('the contract with the image', () => {
   it('has the volume, the ports, the identity and the drain the image is built to', () => {
@@ -58,9 +59,27 @@ describe('the contract with the image', () => {
       chain: 'LIFEMODEL_EGRESS',
       resolver: '127.0.0.11',
     });
+    // The default is the image that supervises lifemodel (ADR-010's instance
+    // shape); the platform loader says so itself.
+    expect(config.mode).toBe('instance');
     expect(SESSION_COOKIE_NAME).toBe('lm_session');
     // A test is not root; the image's loader is, and that is what sets this.
     expect(config.privileged).toBe(false);
+  });
+
+  it('reads the mode from the environment, and refuses an unnamed one', () => {
+    for (const mode of LOADER_MODES) {
+      expect(loadConfig({ LIFEMODEL_LOADER_MODE: mode }).mode).toBe(mode);
+    }
+
+    const refusing = () => loadConfig({ LIFEMODEL_LOADER_MODE: 'swarm' });
+    expect(refusing).toThrow(LoaderFatalError);
+    expect(() => loadConfig({ LIFEMODEL_LOADER_MODE: '' })).toThrow(LoaderFatalError);
+    // The same wrong input, the same answer: the words name the two shapes and
+    // the value refused, never today's defaults read in its place.
+    expect(refusing).toThrow(
+      'LIFEMODEL_LOADER_MODE must be one of "instance", "platform", got "swarm"'
+    );
   });
 
   it('can be placed elsewhere through the environment, and refuses a nonsense number', () => {

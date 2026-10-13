@@ -1,8 +1,9 @@
 /**
  * The loader's own web interface (lifemodel-q4x.2.1, stories S1, S2, S6).
  *
- * It listens on loopback only and is always up, independent of lifemodel:
- * that is what makes it the way back when lifemodel has become a brick. It
+ * It is always up, independent of lifemodel: that is what makes it the way
+ * back when lifemodel has become a brick. Instance mode binds loopback only;
+ * platform mode binds every interface for the pod Service. It
  * answers three kinds of caller:
  *
  *   - a browser without a session: /setup (only while no password is set) and
