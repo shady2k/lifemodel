@@ -1,0 +1,18 @@
+# Step A contains platform services. Keep this independent from A0 readiness:
+# the loader must start before Bao is initialized or unsealed.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-a
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  timeout: 10m0s
+  dependsOn:
+    - name: platform-a0
+  path: ./a
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: platform

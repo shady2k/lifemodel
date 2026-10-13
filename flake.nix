@@ -127,6 +127,32 @@
         fi
         touch $out
       '';
+      renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+      } ''
+        set -eu
+        helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
+          -f ${./deploy/platform/a/openbao-values.yaml} > openbao.yaml
+        grep -F 'kind: StatefulSet' openbao.yaml >/dev/null
+        grep -F 'volumeClaimTemplates:' openbao.yaml >/dev/null
+        grep -F 'storage "raft"' openbao.yaml >/dev/null
+        grep -F 'kind: NetworkPolicy' openbao.yaml >/dev/null
+        grep -F 'kubernetes.io/metadata.name: lifemodel-system' openbao.yaml >/dev/null
+        grep -F 'port: 8200' openbao.yaml >/dev/null
+        grep -F 'pod-security.kubernetes.io/enforce: restricted' ${./deploy/platform/a/namespace.yaml} >/dev/null
+        if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' openbao.yaml >/dev/null; then
+          echo 'OpenBao injector or auto-unseal rendered unexpectedly' >&2; exit 1
+        fi
+        kustomize build ${./deploy/platform} > platform.yaml
+        grep -F 'name: platform-a' platform.yaml >/dev/null
+        kustomize build ${./deploy/platform/a} > step-a.yaml
+        grep -F 'kind: HelmRelease' step-a.yaml >/dev/null
+        grep -F 'name: platform' step-a.yaml >/dev/null
+        grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        touch $out
+      '';
       cliHelp = pkgs.runCommand "lifemodel-cli-help" { nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep ]; } ''
         node ${./deploy/cli/lifemodel.mjs} --help > help.txt
         grep -F 'Usage: lifemodel doctor' help.txt > /dev/null
@@ -179,6 +205,7 @@
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
         platform-kustomize-wiring = renderedPlatform;
+        openbao-platform-render = renderedOpenBao;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;

@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - a0-reconciler.yaml
+  - a-reconciler.yaml
 
 # Future platform steps belong here after A0. A and B must each declare
 # dependsOn: [{ name: platform-a0 }] (and later dependencies as required).
