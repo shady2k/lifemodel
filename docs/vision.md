@@ -16,7 +16,8 @@ One owner. lifemodel is the owner's personal companion and agent.
 - Not a multi-user service.
 - Not a public chatbot.
 - Not a hosted service: each person runs their own instance, with one owner.
-  lifemodel ships only as a Docker image, the same for everyone.
+  lifemodel ships as signed releases, the same for everyone, and runs on a
+  dedicated VM installed by one command.
 
 ## Roadmap
 
@@ -28,7 +29,7 @@ tracker, never from this page.
 
 | Milestone | What becomes possible | Design |
 |---|---|---|
-| `instance-1` — Your own lifemodel that changes itself | A person starts their own instance from the Docker image; the owner asks in the web interface and lifemodel changes its own code, applies it and reports; a new generation takes over from the running one and a broken one reverts itself. Restart without loss, gates, an up-to-date map of the code, a trusted loader that runs generations as containers, state in Valkey (bus, tick snapshot) and Postgres with pgvector, Agent Vault and OpenBao for keys and credentials, a task executor with per-task limits, the change-yourself tool | ADR-006 (simplified: git generations and a loader); containers switched as Kubernetes does (owner, 2026-10-11); razzant/ouroboros for the instance shape |
+| `instance-1` — Your own lifemodel that changes itself | A person installs their own instance with one command; the owner asks in the web interface and lifemodel changes its own code, applies it and reports; a new generation takes over from the running one and a broken one reverts itself. Restart without loss, gates, an up-to-date map of the code, a trusted loader that rolls out generations on k3s by GitOps, state in Valkey (bus, tick snapshot) and Postgres with pgvector, Agent Vault and OpenBao for keys and credentials, a task executor with per-task limits, the change-yourself tool | ADR-006 (simplified: git generations and a loader); containers switched as Kubernetes does (owner, 2026-10-11); k3s + GitOps (owner, 2026-10-12; ADR-010); razzant/ouroboros for the instance shape |
 | `upstream-1` — The instance lives next to upstream | An instance takes upstream updates by a three-way merge behind the gates; the owner's fork is its personal remote; it proposes its own changes to upstream as pull requests without its owner's data | razzant/ouroboros (managed updates) |
 | `evolution-1` — It decides on its own | Pressure, repeated failures and reflection start a self-change without a request; the owner's development process (tracker, roles, review) runs inside the agent | ADR-006 C; ADR-009 |
 | `memory-1` — Memory behind a port | Our own memory moves behind a port with a tick cache: facts superseded over time, hybrid search, structured records in Postgres | `docs/research/memory-service.md` (option E) |

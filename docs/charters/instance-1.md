@@ -2,53 +2,77 @@
 
 **Agreed:** 2026-10-07 by the owner as `self-change-1`; reshaped and renamed
 2026-10-08 by the owner; re-cut 2026-10-11 by the owner around container
-generations and a web interface (below). **Design:** ADR-006 (`docs/adr/006-self-evolution.md`,
+generations and a web interface (below); amended 2026-10-13 to the owner's
+platform decisions of 2026-10-12/13 (two-layer GitOps on a dedicated VM,
+ADR-010). **Design:** ADR-006 (`docs/adr/006-self-evolution.md`,
 not yet on main), simplified: git, restart and a loader instead of
 generations and cutover. The instance shape follows razzant/ouroboros: the
 instance's code is a git repository it changes by commits.
 
 The walking skeleton of evolution, delivered as a personal instance: a person
-starts their own lifemodel from the Docker image, and it changes its own code
+installs their own lifemodel with one command, and it changes its own code
 without a human step, with a broken change cheap to undo. In this milestone the
 owner's request starts a change; deciding on its own comes next.
 
-**Delivery:** lifemodel ships only as a Docker image, the same for everyone,
-built by CI. Inside it a trusted layer that lifemodel and its tasks can neither
-see nor change: the **loader** (the owner's always-on web interface; panic;
+**Delivery:** lifemodel ships as signed releases built by CI: container
+images and a platform release artifact, the same for everyone. It runs on a
+dedicated VM: one command installs k3s, Flux and one source, the signed
+platform release, and from it Flux deploys the whole trusted layer by GitOps.
+lifemodel and its tasks can neither see nor change that layer: the
+**loader** (the owner's always-on web interface and login; panic;
 generations, self-healing and a maintenance mode like BIOS/UEFI; the first
-start), the **task executor** (each task a prime-agent confined by its profile
-under the owner's ceilings) and **Agent Vault** (keys and the network allowlist;
-keys are injected into requests, lifemodel and tasks see placeholders). The
-instance's code is a git repository on a volume next to its data; a self-change
-is a commit that becomes a new generation, with no image rebuild. Only what
-lifemodel must not change sits in the loader; model settings, Telegram,
-embeddings and the rest are lifemodel's own settings in its own web interface,
-which it can extend. Data is never rolled back: format changes are expanding,
-or carry an up/down migration pair the loader runs when switching generations.
-The decisions and their evidence are on the outcome-4 feature's decision log.
+start; it runs the generations as their operator in the cluster), the
+**task executor** (each task a prime-agent confined by its profile under the
+owner's ceilings) and **Agent Vault** (keys and the network allowlist; keys
+are injected into requests, lifemodel and tasks see placeholders). A
+platform upgrade is a new signed release, taken on the owner's command; if
+the loader itself is broken, the owner repairs the VM over SSH with
+`lifemodel doctor`. The instance's code repository lives in an internal **Gitea** in the
+cluster (owner, 2026-10-13), part of the trusted layer and outside the
+generations it serves, with an
+optional push mirror to an outside remote. A self-change is a task's branch
+and pull request there; the operator merges it after the gates, builds the
+images of the modules the commit changed inside the cluster and writes them
+to the deploy branch, which Flux applies. Only what lifemodel must not change sits in the trusted
+layer; model settings, Telegram, embeddings and the rest are lifemodel's own
+settings in its own web interface, which it can extend. Data is never rolled
+back: format changes are expanding only (expand/contract), and every
+generation reads everything its successor writes, checked at every rollout
+(owner, 2026-10-12: no down migrations). The decisions and their evidence are
+on the outcome-4 feature's decision log.
 
-**Generations as containers (owner, 2026-10-11).** The self-development loop
-is the milestone's aim and comes first. Generations switch the way Kubernetes
-rolls out a stateless service: the existing loader (extended, not rewritten)
-runs in its own container, the only one with access to Docker, and starts each
-generation of lifemodel as its own container beside the running one; liveness
-and readiness probes, then the switch of the epoch, the health window, the
-rollback and the maintenance mode. A generation keeps no state of its own:
-**Valkey** holds the event bus (streams) and one current snapshot of the tick,
-committed atomically with the epoch check and flushed to disk on every write;
-**Postgres with pgvector** holds memory and configuration (no shared folder:
-the configuration lives in the store); **OpenBao**, beside Agent Vault, issues
-the credentials. The tick is the only boundary: asynchronous results arrive on
-the bus and are handled in later ticks; a planned switch lets the old
-generation finish its tick and leave, and the new one continues from the
-current snapshot. Nothing exists to migrate: the instance starts greenfield.
-The core is not split into modules now; the bus and the external state are the
-seams that later let modules be cut out and written in any language. This
-replaces the earlier owner direction of an initialized candidate promoted
-inside the same container (`lifemodel-b0r.8`, its documents kept as the record
-of that direction); reversible format migrations and "refuse when uncertain"
-carry over. The channel of this milestone is a web interface; Telegram comes
-later.
+**Generations on k3s (owner, 2026-10-11; platform 2026-10-12).** The
+self-development loop is the milestone's aim and comes first. A generation is
+a commit: the desired state in the deploy branch of the instance's repository
+in Gitea, which Flux applies to the cluster. The generation operator replaces only the modules whose image
+changed, one by one, the way Kubernetes rolls out a service: keyed writers by
+rolling update (the new pod joins before the old one leaves), the core as a
+one-replica StatefulSet (the old core finishes its tick and leaves, the new one
+takes the epoch and continues from the current snapshot); readiness probes,
+then a health window after the switch (completed work, not a live process). A
+broken generation is reverted, with a report, by reverting the deploy branch
+to the previous healthy revision within the rollback deadline (if the
+revert cannot finish in time, the maintenance mode opens); two consecutive failed generations open the
+maintenance mode, where the owner boots any generation the current data
+allows. Panic suspends the GitOps sync and scales the modules to zero, and
+holds across restarts until the owner resumes. A generation keeps no state of
+its own: **Valkey** holds the event bus (streams) and one current snapshot of
+the tick, committed atomically with the epoch check and flushed to disk on
+every write; **Postgres with pgvector** (CloudNativePG) holds memory and
+configuration; **OpenBao**, beside Agent Vault, issues the credentials, which
+the Bank-Vaults secrets webhook delivers into each module's process. Only the
+egress gateway reaches the world (default-deny network policy), and nothing in
+the cluster has Docker access. The tick is the only boundary: asynchronous
+results arrive on the bus and are handled in later ticks. Nothing exists to
+migrate: the instance starts greenfield. The core is not split further now;
+the bus and the external state are the seams that later let modules be cut out
+and written in any language. The design is ADR-010
+(`docs/adr/010-container-generations.md`) with its views
+(`docs/features/instance/containers-design.md`). This replaces the earlier
+owner direction of an initialized candidate promoted inside the same container
+(`lifemodel-b0r.8`, its documents kept as the record of that direction);
+"refuse when uncertain" carries over. The channel of this milestone is a web
+interface; Telegram comes later.
 
 ## Outcomes
 
@@ -77,17 +101,20 @@ development test environment, never on somebody's real instance.
    across a restart of the container and of Docker until it is resumed.
 5. **A new generation takes over from the running one, and a broken one
    reverts itself** (re-cut 2026-10-11; was "A broken version reverts itself,
-   and the owner can boot any generation"). *Check:* in the test environment
-   the loader, in its own container, starts generation N+1 as a container
-   beside N; N+1 passes its readiness probe and the epoch switches; the
-   conversation continues from the current snapshot with no message lost or
-   answered twice; a generation that never becomes healthy is replaced,
-   without the owner, by the previous healthy one with a report; in the
-   loader's maintenance mode the owner boots an older generation, and data
-   changed by a breaking migration is brought back to that generation's
-   format. Outcome 4's check is walked again on this shape: one command still
-   starts the instance, no key is in lifemodel's process, panic holds across
-   restarts.
+   and the owner can boot any generation"). *Check:* in the test environment a commit that changes a module becomes
+   generation N+1: the operator builds only the changed modules' images, Flux
+   replaces them one by one beside N, each passes its readiness probe and the
+   core's replacement carries the epoch; the conversation continues from the
+   current snapshot with no message lost or answered twice; a generation that
+   never becomes healthy is reverted, without the owner, to the previous healthy
+   revision with a report; after two consecutive failed generations the
+   maintenance mode opens and the owner boots an older generation on the current
+   data, and one the current data no longer allows is refused with the reason.
+   Outcome 4's check is walked again on this shape: one command still installs
+   the instance on a clean VM, a tampered or unsigned platform release is
+   refused, no key is in lifemodel's process, panic holds
+   across restarts of the pods and of the node.
+
 6. **Tasks run in parallel, each within its own limits.** *Check:* two tasks
    run at once with different profiles; each sees only its own files and its
    allowed domains, no key is present in its process, and a task asking for
@@ -114,7 +141,12 @@ other; 7 needs 5, 6 and 8. The numbers are names, not an order.
 - Updates from upstream, proposals back to upstream, the owner's fork as the
   instance's personal remote (`upstream-1`). Outcome 4 keeps the instance's
   code a plain git repository so they fit on top.
-- Any delivery form other than the Docker image.
+- Any delivery form other than a dedicated VM installed by one command (k3s,
+  Flux and the signed platform release). Installing into an existing cluster,
+  inside lifemodel's own namespace with each platform dependency switchable
+  to an external one, is a separate feature (lifemodel-xc9, `platform-1`).
+  k3s inside a Docker container is not a delivery form; k3d serves only as
+  the development and CI test environment.
 - Remote embeddings (the image keeps local ones; it is a lifemodel setting
   that can be added later, even by a self-change); microsandbox as a second
   task executor where KVM exists; Infisical as a source of short-lived keys.
@@ -156,6 +188,11 @@ candidate-first stages of outcome 5 (`lifemodel-b0r.4`-`.7`) and its design
 stage (`lifemodel-b0r.8`) are closed as replaced by that decision; the
 vector-memory storage finding (`lifemodel-ww8`) is closed as moot, since
 LanceDB leaves for Postgres with pgvector.
+
+The amendment of 2026-10-13 carries nothing over and defers nothing open: it
+moves the milestone onto k3s + GitOps on the owner's platform decision of
+2026-10-12. Outcome 4, accepted on the Docker image, is walked again on k3s
+inside outcome 5's check.
 
 ## Finding budget
 
