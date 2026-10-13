@@ -124,21 +124,26 @@ describe('platform bootstrap phases', () => {
     expect(record).toEqual({ phase: 'bao', status: 'complete' });
   });
 
-  it('allows only DNS, the documented k3s API node range, and OpenBao egress', async () => {
+  it('allows DNS, port-restricted k3s API egress, and OpenBao only', async () => {
     const policy = await readFile('deploy/platform/a0/network-policy.yaml', 'utf8');
     const egress = policy.split('  egress:\n')[1] ?? '';
     expect(egress).toContain('k8s-app: kube-dns');
     expect(egress).toContain('protocol: UDP\n          port: 53');
     expect(egress).toContain('protocol: TCP\n          port: 53');
-    expect(egress).toContain('cidr: 10.0.0.0/8');
+    expect(egress).toContain('cidr: 0.0.0.0/0');
     expect(egress).toContain('port: 6443');
+    expect(policy).toContain('k3s DNATs the in-cluster API Service to the node address');
+    expect(policy).toContain('The API port is the only egress restriction');
+    expect(policy).toContain('The Kubernetes API server authenticates the projected ServiceAccount token');
     expect(egress).toContain('kubernetes.io/metadata.name: openbao');
     expect(egress).toContain('port: 8200');
     const parsed = YAML.parse(policy);
     expect(parsed.spec.egress).toHaveLength(3);
     expect(parsed.spec.egress.flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`)).sort())
       .toEqual(['TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
-    expect(egress).not.toMatch(/0\.0\.0\.0\/0|port: 80\b|port: 443\b/);
+    expect(egress).not.toMatch(/port: (?!53\b|6443\b|8200\b)\d+/);
+    expect(parsed.spec.egress[1].to).toEqual([{ ipBlock: { cidr: '0.0.0.0/0' } }]);
+    expect(parsed.spec.egress[1].ports).toEqual([{ protocol: 'TCP', port: 6443 }]);
   });
 
   it('declares only phase and custody Secret grants for the loader ServiceAccount and mounts its token', async () => {

@@ -33,11 +33,12 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # k3s kube-proxy DNATs kubernetes.default.svc to the API endpoint on a node.
-    # Nodes must use 10.0.0.0/8; narrow this CIDR if the cluster uses another node range.
+    # k3s DNATs the in-cluster API Service to the node address; static platform
+    # manifests cannot know that address. Allow any destination on TCP 6443:
+    # The API port is the only egress restriction. The Kubernetes API server authenticates the projected ServiceAccount token.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/8
+            cidr: 0.0.0.0/0
       ports:
         - protocol: TCP
           port: 6443
