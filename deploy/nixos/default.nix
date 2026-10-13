@@ -35,10 +35,10 @@ in
     };
     verify = {
       mode = mkOption { type = types.enum [ "keyless" "key" ]; default = "keyless"; };
-      issuer = mkOption { type = types.str; default = "https://token.actions.githubusercontent.com"; };
+      issuer = mkOption { type = types.str; default = "^https://token\\.actions\\.githubusercontent\\.com$"; };
       subjectRegex = mkOption {
         type = types.str;
-        default = "https://github.com/shady2k/lifemodel/.github/workflows/release.yml@refs/tags/v.*";
+        default = "^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$";
       };
       publicKey = mkOption { type = types.nullOr types.str; default = null; description = "PEM public key used for cosign verification."; };
     };

@@ -6,6 +6,9 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       lib = nixpkgs.lib;
+      keylessIssuer = "^https://token\\.actions\\.githubusercontent\\.com$";
+      keylessSubject = "^https://github\\.com/shady2k/lifemodel/\\.github/workflows/release\\.yml@refs/tags/v.*$";
+      releaseWorkflow = builtins.readFile ./.github/workflows/release.yml;
       module = ./deploy/nixos;
       baseModule = { ... }: {
         system.stateVersion = "26.05";
@@ -66,6 +69,12 @@
         diff -u ${fixture} actual.yaml
         touch $out
       '';
+      keylessIdentityAgreement =
+        assert keyless.config.services.lifemodel.verify.issuer == keylessIssuer;
+        assert keyless.config.services.lifemodel.verify.subjectRegex == keylessSubject;
+        assert lib.hasInfix "--certificate-oidc-issuer-regexp '${keylessIssuer}'" releaseWorkflow;
+        assert lib.hasInfix "--certificate-identity-regexp '${keylessSubject}'" releaseWorkflow;
+        pkgs.runCommand "lifemodel-keyless-identity-agreement" {} "touch $out";
       moduleEvaluation = assert pkgs.k3s.version == "1.35.8+k3s1";
         assert keyless.config.services.k3s.enable;
         assert keyless.config.system.build.toplevel.drvPath != "";
@@ -82,6 +91,7 @@
           (builtins.readFile keyless.config.services.lifemodel.generatedRootKustomization)
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
+        keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         install-sh-kustomization = compare "lifemodel-install-sh-root-kustomization" scriptKustomization ./tests/fixtures/nixos/kustomization.yaml;
