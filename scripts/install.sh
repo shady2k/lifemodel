@@ -259,18 +259,24 @@ $KUBECTL apply --server-side -f "$render_dir/ocirepository.yaml"
 $KUBECTL apply --server-side -f "$render_dir/kustomization.yaml"
 
 # Install the recovery CLI and durably retain this successfully applied pin.
-install -d -m 0755 /usr/local/lib/lifemodel /usr/local/bin /var/lib/lifemodel
-install -m 0644 "$SCRIPT_DIR/../deploy/cli/lifemodel.mjs" /usr/local/lib/lifemodel/lifemodel.mjs
-cat > /usr/local/bin/lifemodel <<'EOF'
+# These roots are configurable so installer tests can exercise the real install
+# path without writing into the host's /usr/local or /var/lib directories.
+LIFEMODEL_INSTALL_ROOT=${LIFEMODEL_INSTALL_ROOT:-}
+LIFEMODEL_STATE_DIR=${LIFEMODEL_STATE_DIR:-/var/lib/lifemodel}
+cli_lib_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/lib/lifemodel"
+cli_bin_dir="$LIFEMODEL_INSTALL_ROOT/usr/local/bin"
+install -d -m 0755 "$cli_lib_dir" "$cli_bin_dir" "$LIFEMODEL_STATE_DIR"
+install -m 0644 "$SCRIPT_DIR/../deploy/cli/lifemodel.mjs" "$cli_lib_dir/lifemodel.mjs"
+cat > "$cli_bin_dir/lifemodel" <<EOF
 #!/bin/sh
-exec node /usr/local/lib/lifemodel/lifemodel.mjs "$@"
+exec node "$cli_lib_dir/lifemodel.mjs" "\$@"
 EOF
-chmod 0755 /usr/local/bin/lifemodel
+chmod 0755 "$cli_bin_dir/lifemodel"
 if [ -n "$PLATFORM_DIGEST" ]; then
   configured_ref="digest=$PLATFORM_DIGEST"
 else
   configured_ref="tag=$PLATFORM_TAG"
 fi
-LIFEMODEL_HISTORY=/var/lib/lifemodel/platform-history lifemodel record-applied "$configured_ref"
+LIFEMODEL_HISTORY="$LIFEMODEL_STATE_DIR/platform-history" "$cli_bin_dir/lifemodel" record-applied "$configured_ref"
 
 printf 'install.sh: done (k3s v%s, Flux %s, platform source applied)\n' "$K3S_VERSION" "$FLUX_VERSION"
