@@ -246,7 +246,7 @@ Wait — one correction to this section: beads_rust's `--merge` tombstone bug
 
 ### 4.1 beads — `bd`, Dolt-backed (github.com/gastownhall/beads)
 
-**Sources and commit read.** Lane: `research-lanes/beads.md`. Main @
+**Sources and commit read.** Lane: `swarm-tracker-lanes/beads.md`. Main @
 85464f567aecc736059602dd0eab561bde7612b9, latest stable v1.3.1 (2026-09-30),
 rc 1.3.2 (2026-10-10). MIT, Go. 108 top-level commands
 (docs/cli-reference/index.md).
@@ -298,7 +298,7 @@ not the right one (§1).
 
 ### 4.2 beads_rust — `br` (github.com/Dicklesworthstone/beads_rust)
 
-**Sources and commit read.** Lane: `research-lanes/beads_rust.md`. main @
+**Sources and commit read.** Lane: `swarm-tracker-lanes/beads_rust.md`. main @
 8f26d4211e7a (pushed 2026-10-12), releases through v0.7.4 (2026-10-01).
 We run br 0.7 here (`.backlog/config.json`, docs/backlog-integration.md).
 
@@ -363,7 +363,7 @@ arrangement, avoid `--merge`, watch #541.
 
 ### 4.3 File-based trackers — Backlog.md and Claude Task Master
 
-**Sources and read.** Lane: `research-lanes/file-based.md`; both repos read
+**Sources and read.** Lane: `swarm-tracker-lanes/file-based.md`; both repos read
 at `main`, 2026-10-13.
 
 ### Backlog.md (MrLesk/Backlog.md)
@@ -813,7 +813,7 @@ completely (§5, migration).
 **Beads (gastownhall/beads) — repository docs/engineering docs at main
 @85464f5 (2026-10-13), fetched via raw.githubusercontent.com and the GitHub
 API; releases and CHANGELOG at HEAD; all issue bodies read on 2026-10-13
-via the GitHub API (all URLs in the lane file research-lanes/beads.md).**
+via the GitHub API (all URLs in the lane file swarm-tracker-lanes/beads.md).**
 Directly cited from the lane:
 
 - docs/architecture/dolt.md — storage modes (embedded/server/shared),
@@ -844,7 +844,7 @@ Directly cited from the lane:
   https://github.com/gastownhall/beads
 
 **Beads_rust (Dicklesworthstone/beads_rust) — main @8f26d4 (2026-10-13),
-releases through v0.7.4; all URLs in research-lanes/beads_rust.md.**
+releases through v0.7.4; all URLs in swarm-tracker-lanes/beads_rust.md.**
 
 - README.md — storage/fsqlite/lock story, MCP stdio, Limitations table.
   https://github.com/Dicklesworthstone/beads_rust/blob/main/README.md
@@ -859,8 +859,8 @@ releases through v0.7.4; all URLs in research-lanes/beads_rust.md.**
   (corruption history), #268, #548.
 
 **Backlog.md / Claude Task Master / Plane / Gitea / Gas Town / MCP Agent
-Mail / bead-forge — all URLs in research-lanes/file-based.md and
-research-lanes/api-trackers.md, read 2026-10-13.**
+Mail / bead-forge — all URLs in swarm-tracker-lanes/file-based.md and
+swarm-tracker-lanes/api-trackers.md, read 2026-10-13.**
 
 Directly cited: MrLesk/Backlog.md #843/#860/#937/#997 and README;
 eyaltoledano/claude-task-master PR #1566/#1569, issue #1637, PR #1619,
@@ -882,5 +882,5 @@ LICENSE; jedarden/bead-forge README + LICENSE.
   (the k3s platform: CloudNativePG, Valkey bus, namespaces, threat model).
 - docs/charters/instance-1.md (charter outcome 6 per-task pods).
 
-**Lane files kept on the branch as evidence: research-lanes/*.md
+**Lane files kept on the branch as evidence: swarm-tracker-lanes/*.md
 (five lane files, committed beside this report).**
