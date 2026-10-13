@@ -27,7 +27,9 @@ function parseYamlFiles(files: string[]): Record<string, any>[] {
 }
 
 function sourceObjects(): Record<string, any>[] {
-  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.endsWith('kustomization.yaml')));
+  // Helm chart templates are Go templates, not standalone Kubernetes YAML.
+  // Render the vendored chart in the Nix platform check instead.
+  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml')));
 }
 
 function object(objects: Record<string, any>[], kind: string): Record<string, any> {
@@ -129,9 +131,14 @@ describe('platform manifests', () => {
     expect(container.livenessProbe).toBeDefined();
     expect(object(objects, 'Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
     expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
-    expect(object(objects, 'ServiceAccount').automountServiceAccountToken).toBe(false);
+    expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system')?.automountServiceAccountToken).toBe(false);
+    expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao')?.automountServiceAccountToken).toBe(true);
     expect(object(objects, 'Ingress').spec.rules[0].host).toBe('boot.localhost');
-    expect(objects.some((item) => ['Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding'].includes(item.kind))).toBe(false);
+    const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
+    expect(clusterRoleBindings).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ name: 'openbao-auth-delegator' }),
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'system:auth-delegator' },
+    })]);
     expect(sourceFiles.some((file) => file.endsWith('/a0/kustomization.yaml'))).toBe(true);
   });
 
@@ -139,6 +146,18 @@ describe('platform manifests', () => {
     const a0 = sourceObjects().find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a0');
     expect(a0, 'missing platform-a0 Kustomization').toBeDefined();
     expect(a0!.spec.timeout).toBe('2m0s');
+  });
+
+  it('orders OpenBao step A after A0 and uses the platform OCI source for its vendored chart', () => {
+    const objects = sourceObjects();
+    const stepA = objects.find((item) => item.kind === 'Kustomization' && item.metadata?.name === 'platform-a');
+    expect(stepA?.spec).toMatchObject({ dependsOn: [{ name: 'platform-a0' }], wait: true, timeout: '10m0s' });
+    const release = objects.find((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao');
+    expect(release?.spec.chart.spec).toMatchObject({
+      chart: './charts/openbao',
+      version: '0.30.3',
+      sourceRef: { kind: 'OCIRepository', name: 'platform', namespace: 'flux-system' },
+    });
   });
 
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
