@@ -14,6 +14,16 @@ a deployable image. The artifact release process must replace it with the
 built loader image's immutable `sha256:<64 hex digits>` digest. Do not set an
 image tag: deployments must identify the exact image bytes.
 
+## Cutting a platform release
+
+The owner cuts a release by pushing a version tag such as `vX.Y.Z`. The
+`release.yml` workflow builds and pushes the loader image, substitutes its
+immutable digest in the platform manifests, then pushes and keyless-signs the
+platform OCI artifact. It verifies that signature against the pinned release
+workflow identity before the release completes. Cutting and pushing the tag is
+the owner's action through `ship-release`; this workflow does not run on
+branches or provide a manual dispatch.
+
 ## Reaching the loader on a test VM
 
 The loader accepts only its compiled-in `boot.localhost` host at this point.
