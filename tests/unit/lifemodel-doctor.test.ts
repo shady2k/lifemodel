@@ -26,7 +26,11 @@ if [ "$1" = get ]; then
   case "$2" in
     ocirepositories) file=ocirepositories;; ocirepository) file=ocirepository;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; *) exit 9;;
   esac
-  cat "$FAKE_KUBECTL_RESPONSES/$file.json"
+  if printf '%s\n' "$*" | grep -q -- --show-managed-fields; then
+    cat "$FAKE_KUBECTL_RESPONSES/$file.json"
+  else
+    node -e 'const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (value.metadata) delete value.metadata.managedFields; process.stdout.write(JSON.stringify(value));' "$FAKE_KUBECTL_RESPONSES/$file.json"
+  fi
 fi
 `);
   chmodSync(fake, 0o755);
@@ -105,6 +109,7 @@ describe('lifemodel doctor', () => {
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain('owned by kubectl-patch');
     expect(run.stderr).toContain('delete ocirepository platform');
+    expect(readFileSync(env.calls, 'utf8')).toContain('get ocirepository platform -n flux-system -o json --show-managed-fields');
   });
 
   it('persists the previous ref as an override and reruns bootstrap without writing the cluster', () => {

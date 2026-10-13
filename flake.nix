@@ -134,6 +134,11 @@
         touch $out
       '';
       bootstrapScript = keyless.config.systemd.services.lifemodel-flux-bootstrap.script;
+      bootstrapActivation = keyless.config.system.activationScripts.lifemodel-bootstrap.text;
+      bootstrapActivationCheck =
+        assert lib.hasInfix "restart lifemodel-flux-bootstrap.service" bootstrapActivation;
+        assert !(lib.hasInfix "is-active" bootstrapActivation);
+        pkgs.runCommand "lifemodel-bootstrap-activation" {} "touch $out";
       bootstrapOwnership =
         assert lib.hasInfix ''$KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"'' bootstrapScript;
         assert lib.hasInfix
@@ -163,6 +168,7 @@
       checks.${system} = {
         cli-help = cliHelp;
         bootstrap-field-ownership = bootstrapOwnership;
+        bootstrap-activation = bootstrapActivationCheck;
         keyless-defaults = compare "lifemodel-keyless-root" keylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         key-mode = compare "lifemodel-key-root" keyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
         kustomization = compare "lifemodel-root-kustomization"
