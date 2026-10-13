@@ -1,4 +1,4 @@
-{ config, lib, pkgs, lifemodelK3s ? pkgs.k3s, ... }:
+{ config, lib, pkgs, lifemodelK3s, ... }:
 let
   cfg = config.services.lifemodel;
   inherit (lib) mkEnableOption mkOption types;
@@ -58,6 +58,8 @@ in
       { assertion = cfg.verify.mode != "key" || cfg.verify.publicKey != null;
         message = "services.lifemodel.verify.publicKey is required when verify.mode = key"; }
       { assertion = !otherFlux; message = "services.lifemodel cannot be enabled with another Flux installation"; }
+      { assertion = toString config.services.k3s.package == toString lifemodelK3s;
+        message = "services.k3s.package must be the pinned lifemodelK3s package"; }
     ];
     services.k3s = {
       enable = true;

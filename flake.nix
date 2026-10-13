@@ -95,8 +95,10 @@
       installScript = builtins.readFile ./scripts/install.sh;
       installK3sVersionLine = lib.findFirst (line: lib.hasPrefix "K3S_VERSION=" line) "" (lib.splitString "\n" installScript);
       installK3sVersion = builtins.elemAt (builtins.match "K3S_VERSION=\"([^\"]+)\"" installK3sVersionLine) 0;
-      consumerOverride = evaluate ({ ... }: { services.k3s.package = pkgs.hello; });
-      consumerOverrideFails = !(builtins.tryEval consumerOverride.config.system.build.toplevel.drvPath).success;
+      forcedConsumerOverride = evaluate ({ ... }: {
+        services.k3s.package = lib.mkForce pkgs.hello;
+      });
+      forcedConsumerOverrideFails = !(builtins.tryEval forcedConsumerOverride.config.system.build.toplevel.drvPath).success;
       renderedPlatform = pkgs.runCommand "lifemodel-platform-kustomize-wiring" {
         nativeBuildInputs = [ pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
       } ''
@@ -124,10 +126,12 @@
         fi
         touch $out
       '';
-      moduleEvaluation = assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
+      moduleEvaluation = assert toString keyless.config.services.k3s.package
+          == toString nixpkgs.legacyPackages.${system}.k3s;
+        assert keyless.config.services.k3s.package.version == pkgs.k3s.version;
         assert keyless.config.services.k3s.package.version == installK3sVersion;
         assert customVerify.config.services.lifemodel.platform.tag == customTag;
-        assert consumerOverrideFails;
+        assert forcedConsumerOverrideFails;
         assert keyless.config.services.k3s.enable;
         assert keyless.config.system.build.toplevel.drvPath != "";
         assert keyMode.config.services.lifemodel.verify.mode == "key";
