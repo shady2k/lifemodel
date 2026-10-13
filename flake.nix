@@ -171,32 +171,37 @@
         touch $out
       '';
       renderedGitea = pkgs.runCommand "lifemodel-gitea-platform-render" {
-        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils ];
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
       } ''
         set -eux
         helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
-          -f ${./deploy/platform/a/gitea/values.yaml} > gitea.yaml
-        grep -F 'DB_TYPE=sqlite3' gitea.yaml >/dev/null
-        grep -F 'PATH=/data/gitea/gitea.db' gitea.yaml >/dev/null
-        grep -F 'ROOT=/data/git/repositories' gitea.yaml >/dev/null
-        grep -F 'mountPath: /data' gitea.yaml >/dev/null
-        grep -F 'runAsNonRoot: true' gitea.yaml >/dev/null
-        grep -F 'allowPrivilegeEscalation: false' gitea.yaml >/dev/null
-        grep -F 'seccompProfile:' gitea.yaml >/dev/null
-        grep -F -- '- ALL' gitea.yaml >/dev/null
-        grep -F 'name: gitea-admin' gitea.yaml >/dev/null
-        grep -E 'key:[[:space:]]+username' gitea.yaml >/dev/null
-        grep -E 'key:[[:space:]]+password' gitea.yaml >/dev/null
-        grep -F 'claimName: gitea-shared-storage' gitea.yaml >/dev/null
-        test "$(grep -F -c 'kind: PersistentVolumeClaim' gitea.yaml)" -eq 1
-        grep -F 'host: "git.localhost"' gitea.yaml >/dev/null
-        if grep -Ei '^  name: [^ ]*(postgresql|valkey)|^kind: StatefulSet$' gitea.yaml >/dev/null; then
+          -f ${./deploy/platform/a/gitea/values.yaml} > gitea-generated.yaml
+        cmp gitea-generated.yaml ${./deploy/platform/a/gitea/rendered.yaml}
+        grep -F 'DB_TYPE=sqlite3' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'PATH=/data/gitea/gitea.db' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'ROOT=/data/git/repositories' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'mountPath: /data' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'runAsNonRoot: true' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'allowPrivilegeEscalation: false' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'seccompProfile:' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F -- '- ALL' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'name: gitea-admin' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -E 'key:[[:space:]]+username' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -E 'key:[[:space:]]+password' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'claimName: gitea-shared-storage' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        test "$(grep -F -c 'kind: PersistentVolumeClaim' ${./deploy/platform/a/gitea/rendered.yaml})" -eq 1
+        grep -F 'host: "git.localhost"' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        if grep -Ei '^  name: [^ ]*(postgresql|valkey)|^kind: StatefulSet$' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null; then
           echo 'Gitea rendered a bundled PostgreSQL or Valkey workload' >&2
           exit 1
         fi
         kustomize build ${./deploy/platform/a/gitea} > gitea-platform.yaml
         test "$(grep -F -c 'namespaceSelector:' gitea-platform.yaml)" -eq 3
         test "$(grep -F -c 'podSelector:' gitea-platform.yaml)" -eq 4
+        if grep -F 'kind: HelmRelease' gitea-platform.yaml >/dev/null; then
+          echo 'Gitea component must not contain HelmRelease objects' >&2
+          exit 1
+        fi
         grep -F 'kubernetes.io/metadata.name: lifemodel-system' gitea-platform.yaml >/dev/null
         grep -F 'kubernetes.io/metadata.name: flux-system' gitea-platform.yaml >/dev/null
         grep -F 'kubernetes.io/metadata.name: kube-system' gitea-platform.yaml >/dev/null

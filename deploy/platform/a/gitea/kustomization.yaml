@@ -3,11 +3,4 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - network-policy.yaml
-  - release.yaml
-configMapGenerator:
-  - name: gitea-values
-    namespace: lifemodel-git
-    files:
-      - values.yaml=values.yaml
-generatorOptions:
-  disableNameSuffixHash: true
+  - rendered.yaml

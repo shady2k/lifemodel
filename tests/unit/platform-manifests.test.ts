@@ -111,6 +111,7 @@ describe('platform manifests', () => {
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
     expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')).toBe(false);
     expect(rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')).toBe(true);
+    expect(sourceObjects().some((item) => item.kind === 'HelmRelease')).toBe(false);
     const values = YAML.parse(readFileSync(join(giteaRoot, 'values.yaml'), 'utf8')) as Record<string, any>;
     expect(values).toMatchObject({
       postgresql: { enabled: false },
@@ -146,9 +147,10 @@ describe('platform manifests', () => {
     const sourceFiles = yamlFiles(platformRoot);
     const objects = sourceObjects();
     expect(objects.length).toBeGreaterThan(0);
-    const deployment = object(objects, 'Deployment');
-    expect(deployment.spec.replicas).toBe(1);
-    const pod = deployment.spec.template.spec;
+    const deployment = objects.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'loader');
+    expect(deployment, 'missing loader Deployment').toBeDefined();
+    expect(deployment!.spec.replicas).toBe(1);
+    const pod = deployment!.spec.template.spec;
     const container = pod.containers[0];
     expect(container.image).toBe('ghcr.io/shady2k/lifemodel-loader:release-placeholder');
     expect(container.env).toContainEqual({ name: 'LIFEMODEL_LOADER_MODE', value: 'platform' });
@@ -172,12 +174,13 @@ describe('platform manifests', () => {
     ]));
     expect(container.readinessProbe).toBeDefined();
     expect(container.livenessProbe).toBeDefined();
-    expect(object(objects, 'Namespace').metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
+    const loaderNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'lifemodel-system');
+    expect(loaderNamespace?.metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
     expect(object(objects, 'PersistentVolumeClaim').spec.storageClassName).toBe('local-path');
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'lifemodel-system')?.automountServiceAccountToken).toBe(true);
     expect(objects.find((item) => item.kind === 'ServiceAccount' && item.metadata.namespace === 'openbao')?.automountServiceAccountToken).toBe(true);
     expect(objects.some((item) => ['Role', 'RoleBinding'].includes(item.kind) && item.metadata.namespace === 'lifemodel-system')).toBe(true);
-    expect(object(objects, 'Ingress').spec.rules[0].host).toBe('boot.localhost');
+    expect(objects.find((item) => item.kind === 'Ingress' && item.metadata?.namespace === 'lifemodel-system')?.spec.rules[0].host).toBe('boot.localhost');
     expect(objects.some((item) => item.kind === 'ClusterRole')).toBe(false);
     const clusterRoleBindings = objects.filter((item) => item.kind === 'ClusterRoleBinding');
     expect(clusterRoleBindings).toEqual([expect.objectContaining({
@@ -223,7 +226,7 @@ describe('platform manifests', () => {
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
     expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')).toBe(false);
     expect(rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')).toBe(true);
-    expect(objects.some((item) => item.kind === 'HelmRelease')).toBe(false);
+    expect(objects.some((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao')).toBe(false);
   });
 
   it('parses the numeric OCI tag as a string and preserves custom regex text', () => {
