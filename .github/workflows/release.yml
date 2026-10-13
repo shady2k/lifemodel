@@ -85,5 +85,5 @@ jobs:
           DIGEST: ${{ steps.platform.outputs.digest }}
         run: >-
           cosign verify "ghcr.io/$OWNER/lifemodel-platform@$DIGEST"
-          --certificate-oidc-issuer-regexp '^https://token.actions.githubusercontent.com$'
-          --certificate-identity-regexp '^https://github.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$'
+          --certificate-oidc-issuer-regexp '^https://token\.actions\.githubusercontent\.com$'
+          --certificate-identity-regexp '^https://github\.com/shady2k/lifemodel/\.github/workflows/release\.yml@refs/tags/v.*$'
