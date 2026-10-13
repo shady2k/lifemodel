@@ -76,7 +76,9 @@ interface; Telegram comes later.
 
 ## Outcomes
 
-Each outcome is one feature issue labelled `instance-1`. Checks run in a
+Each outcome is one feature issue labelled `instance-1`, except outcome 5,
+which is too large for one pull request and is delivered by seven features
+(owner, 2026-10-13; below). Checks run in a
 development test environment, never on somebody's real instance.
 
 1. **`AGENTS.md` is the one agent doc and describes the code as it is**,
@@ -130,6 +132,17 @@ development test environment, never on somebody's real instance.
    web chat and gets lifemodel's answer, and the conversation survives a
    switch of generations.
 
+Outcome 5 is delivered by seven features, each one pull request, in this
+order: the platform by one command on a clean VM (`lifemodel-lut`); the
+loader's first start with OpenBao and Gitea (`lifemodel-ryr`); the core
+without state of its own, on Valkey and Postgres (`lifemodel-avy`);
+credentials and isolation (`lifemodel-2t5`); a commit becoming a generation
+(`lifemodel-pwe`); rollback, maintenance and panic (`lifemodel-u8t`); the
+five feature plugins as functions (`lifemodel-e64`, may start once the core
+has its bus). The outcome's check is walked once all seven are accepted
+(`lifemodel-b0r`); the clean-VM walk runs on a fresh CI runner VM, and the
+node-reboot cut by hand on a throwaway VM.
+
 Outcome 4 is needed by all the others; 5, 6 and 8 are independent of each
 other; 7 needs 5, 6 and 8. The numbers are names, not an order.
 
@@ -158,8 +171,9 @@ other; 7 needs 5, 6 and 8. The numbers are names, not an order.
   versioned, and data is never rolled back.
 - Telegram on the new shape (owner, 2026-10-11): until it is ported, the
   owner talks to lifemodel through the web interface only.
-- Replaying the bus journal, a hot standby generation, functions and
-  several versions running at once, cutting the core into modules, modules
+- Replaying the bus journal, a hot standby generation, several versions
+  running at once (the five feature plugins do become functions in this
+  milestone: owner, 2026-10-12), cutting the core into modules, modules
   in other languages, rewriting lifemodel in Go or Rust (owner, 2026-10-11:
   later, on the same seams).
 - Steer and `/stop` (`dialogue-1`).
