@@ -30,8 +30,17 @@ is only for a VM-local plain-HTTP registry.
 
 ## When the loader is broken
 
-SSH to the dedicated VM and run `sudo lifemodel doctor`. It reports Flux source
-and Kustomization readiness, revisions, and loader pod health. To restore the
+SSH to the dedicated VM and run `sudo lifemodel doctor`. It reports OpenBao
+initialization and seal state (by running `bao status -format=json` in
+`openbao-0`; exit code 2 means sealed), Gitea Deployment readiness, Flux source
+and Kustomization readiness and generations, the two per-namespace application
+GitRepositories and Kustomizations, the loader's first-start phase, and loader
+pod health. Missing application sources or Kustomizations are expected while
+the loader first-start phase is still in progress, which is reported without
+failing the doctor; after `gitea-application-kustomizations` is complete, their
+absence fails the doctor. An in-progress first start by itself does not fail
+the doctor; non-ready resources and loader health still do. Secret values are
+never displayed. To restore the
 previous successfully applied platform release, run
 `sudo lifemodel doctor --repin previous`. Doctor stores a durable override and
 restarts the single bootstrap writer; it does not patch the cluster itself.

@@ -22,15 +22,16 @@ function setup(responses: Record<string, unknown>, history?: string) {
 if [ "$1" = --kubeconfig ]; then shift 2; fi
 printf '%s\n' "$*" >> "$FAKE_KUBECTL_CALLS"
 if [ "$1" = apply ]; then cat > "$FAKE_KUBECTL_INPUT"; exit 0; fi
+if [ "$1" = exec ]; then
+  cat "$FAKE_KUBECTL_RESPONSES/bao-status.json"
+  exit "\${FAKE_BAO_EXIT:-0}"
+fi
 if [ "$1" = get ]; then
   case "$2" in
-    ocirepositories) file=ocirepositories;; ocirepository) file=ocirepository;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; *) exit 9;;
+    ocirepositories) file=ocirepositories;; ocirepository) file=ocirepository;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; secrets*) file=secret;; secret) file=secret;; *) exit 9;;
   esac
-  if printf '%s\n' "$*" | grep -q -- --show-managed-fields; then
-    cat "$FAKE_KUBECTL_RESPONSES/$file.json"
-  else
-    node -e 'const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (value.metadata) delete value.metadata.managedFields; process.stdout.write(JSON.stringify(value));' "$FAKE_KUBECTL_RESPONSES/$file.json"
-  fi
+  case "$*" in *"-n lifemodel-system "*) :;; *"-n lifemodel-motor "*) file=$file-lifemodel-motor;; *"-n lifemodel-git "*) file=$file-lifemodel-git;; *"-n lifemodel "*) file=$file-lifemodel;; esac
+  cat "$FAKE_KUBECTL_RESPONSES/$file.json"
 fi
 `);
   chmodSync(fake, 0o755);
@@ -48,6 +49,13 @@ const healthy = {
   deployments: { items: [{ metadata: { name: 'loader', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1, replicas: 1 } }] },
   pods: { items: [{ metadata: { name: 'loader-abc', labels: { app: 'loader' } }, status: { phase: 'Running', containerStatuses: [{ restartCount: 0, ready: true }] } }] },
   events: { items: [] },
+  'gitrepositories-lifemodel': { items: [{ metadata: { name: 'lifemodel', namespace: 'lifemodel', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
+  'gitrepositories-lifemodel-motor': { items: [{ metadata: { name: 'lifemodel-motor', namespace: 'lifemodel-motor', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
+  'kustomizations-lifemodel': { items: [{ metadata: { name: 'lifemodel', namespace: 'lifemodel', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
+  'kustomizations-lifemodel-motor': { items: [{ metadata: { name: 'lifemodel-motor', namespace: 'lifemodel-motor', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
+  'deployments-lifemodel-git': { items: [{ metadata: { name: 'gitea', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1 } }] },
+  secret: { data: { phase: Buffer.from(JSON.stringify({ phase: 'gitea-application-kustomizations', status: 'complete' })).toString('base64') } },
+  'bao-status': { initialized: true, sealed: false },
 };
 
 function runAsync(args: string[], env: NodeJS.ProcessEnv): Promise<number | null> {
@@ -66,8 +74,47 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('OCIRepository/platform Ready=True generationCurrent=yes reason=Succeeded message=stored artifact revision=sha256:root');
     expect(run.stdout).toContain('GitRepository/apps Ready=True');
     expect(run.stdout).toContain('Kustomization/platform Ready=True');
+    expect(run.stdout).toContain('GitRepository/lifemodel/lifemodel Ready=True generationCurrent=yes');
+    expect(run.stdout).toContain('Kustomization/lifemodel-motor/lifemodel-motor Ready=True generationCurrent=yes');
     expect(run.stdout).toContain('Pod/loader-abc phase=Running ready=yes restarts=0');
     expect(run.stdout).toContain('Deployment/loader ready=yes generationCurrent=yes desiredReplicas=1 restarts=0 lastEventReason=none');
+  });
+
+  it.each([
+    ['sealed OpenBao', (data: any) => { data['bao-status'] = { initialized: true, sealed: true }; }, 2, 'OpenBao (sealed)'],
+    ['uninitialised OpenBao', (data: any) => { data['bao-status'] = { initialized: false, sealed: false }; }, 0, 'OpenBao (uninitialised)'],
+    ['unready Gitea', (data: any) => { data['deployments-lifemodel-git'].items[0].status.readyReplicas = 0; }, 0, 'Deployment/gitea'],
+    ['a failing application source', (data: any) => { data['gitrepositories-lifemodel'].items[0].status.conditions[0].status = 'False'; }, 0, 'GitRepository/lifemodel/lifemodel'],
+    ['a stale application Kustomization', (data: any) => { data['kustomizations-lifemodel'].items[0].status.observedGeneration = 0; }, 0, 'Kustomization/lifemodel/lifemodel'],
+  ])('names %s', (_name, alter, baoExit, expected) => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    alter(data);
+    const env = setup(data);
+    env.env.FAKE_BAO_EXIT = String(baoExit);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(`${run.stdout}${run.stderr}`).toContain(expected);
+  });
+
+  it('reports a missing source as expected while first start is incomplete', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase: 'gitea-ready', status: 'running' })).toString('base64');
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('first start in progress at gitea-ready');
+  });
+
+  it('reports missing application resources as failures after first start completes', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data['gitrepositories-lifemodel'].items = [];
+    data['kustomizations-lifemodel-motor'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('GitRepository/lifemodel/lifemodel (missing)');
+    expect(run.stderr).toContain('Kustomization/lifemodel-motor/lifemodel-motor (missing)');
   });
 
   it('allows no GitRepository before the first loader start', () => {
