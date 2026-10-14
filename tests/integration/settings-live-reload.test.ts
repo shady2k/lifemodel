@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createContainerAsync } from '../../src/core/container.js';
+import { createContainerAsync, createSettingsReloadHandler } from '../../src/core/container.js';
 import { createSettingsServer, type SettingsServer } from '../../src/settings/server.js';
 import { createConfigLoader } from '../../src/config/config-loader.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
@@ -86,14 +86,11 @@ describe('settings reload in a running core', () => {
       });
       expect(requestedModels).toEqual(['fast-old']);
 
-      let reload: Promise<void> | undefined;
       server = createSettingsServer({
         config: core.configLoader,
         logger: createTestLogger('silent'),
         port: 0,
-        onSaved: () => {
-          reload = core?.reloadConfig();
-        },
+        onSaved: createSettingsReloadHandler(core),
       });
       await server.listen();
       const addressText = server.address();
@@ -112,7 +109,6 @@ describe('settings reload in a running core', () => {
       });
       expect(result.status).toBe(200);
       await result.text();
-      await reload;
       await core.llmProvider.complete({
         role: 'fast',
         messages: [{ role: 'user', content: 'next' }],

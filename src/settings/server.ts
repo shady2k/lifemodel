@@ -64,7 +64,7 @@ export interface SettingsServerOptions {
    * exiting (src/index.ts) - the interface has no power over the process
    * itself.
    */
-  onSaved: () => void;
+  onSaved: () => void | Promise<void>;
   /**
    * How long `close` waits for an outstanding request before destroying its
    * socket. Kept SMALL on purpose: the close runs INSIDE lifemodel's one stop
@@ -257,7 +257,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     // page that says so, and a process that left mid-answer would leave the
     // browser with nothing.
     reply.raw.once('finish', () => {
-      onSaved();
+      await onSaved();
     });
     return reply
       .code(200)

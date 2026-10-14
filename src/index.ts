@@ -6,7 +6,12 @@
 
 import 'dotenv/config';
 
-import { createContainerAsync, type Container, type StopStep } from './core/container.js';
+import {
+  createContainerAsync,
+  createSettingsReloadHandler,
+  type Container,
+  type StopStep,
+} from './core/container.js';
 import type { StopReport } from './core/core-loop.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
 import {
@@ -42,14 +47,7 @@ async function main(): Promise<void> {
   // instance the configuration document is empty, and this page is how it gets filled.
   await startSettingsInterface(logger, {
     config: container.configLoader,
-    onSaved: () => {
-      void container?.reloadConfig().catch((error: unknown) => {
-        container?.logger.error(
-          { error: error instanceof Error ? error.message : String(error) },
-          'Saved settings could not be applied to the running core'
-        );
-      });
-    },
+    onSaved: createSettingsReloadHandler(container),
   });
 
   logger.info('Lifemodel starting...');
@@ -111,7 +109,7 @@ export interface StopTargets {
  */
 export interface SettingsStartOptions {
   config: SettingsServerOptions['config'];
-  onSaved: () => void;
+  onSaved: SettingsServerOptions['onSaved'];
   onConnection?: SettingsServerOptions['onConnection'];
   closeGraceMs?: number;
   port?: number;
