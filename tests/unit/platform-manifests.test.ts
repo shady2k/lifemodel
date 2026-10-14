@@ -38,6 +38,50 @@ function object(objects: Record<string, any>[], kind: string): Record<string, an
   return found!;
 }
 
+function assertRestrictedNamespace(namespace: Record<string, any>): void {
+  for (const level of ['enforce', 'audit', 'warn']) {
+    if (namespace.metadata?.labels?.[`pod-security.kubernetes.io/${level}`] !== 'restricted') {
+      throw new Error(`namespace is missing restricted ${level} label`);
+    }
+  }
+}
+
+function assertAllowedPolicyPorts(policy: Record<string, any>, allowed: number[]): void {
+  const ports = [...(policy.spec?.ingress ?? []), ...(policy.spec?.egress ?? [])]
+    .flatMap((rule: any) => rule.ports ?? []).map((port: any) => port.port);
+  if (JSON.stringify(ports) !== JSON.stringify(allowed)) throw new Error('NetworkPolicy ports differ from allowlist');
+}
+
+function assertRestrictedContainers(podSpec: Record<string, any>): void {
+  const pod = podSpec.securityContext ?? {};
+  if (pod.runAsNonRoot !== true) throw new Error('pod security context is not restricted-compatible');
+  for (const container of [...(podSpec.initContainers ?? []), ...(podSpec.containers ?? [])]) {
+    const context = container.securityContext ?? {};
+    const seccompType = (context.seccompProfile ?? pod.seccompProfile)?.type;
+    const runAsUser = context.runAsUser ?? pod.runAsUser;
+    if ((context.runAsNonRoot ?? pod.runAsNonRoot) !== true || runAsUser === 0 ||
+        context.privileged === true || context.allowPrivilegeEscalation !== false ||
+        (context.capabilities?.add?.length ?? 0) > 0 || context.capabilities?.drop?.includes('ALL') !== true ||
+        !['RuntimeDefault', 'Localhost'].includes(seccompType)) {
+      throw new Error(`container ${container.name} is not restricted-compatible`);
+    }
+  }
+}
+
+function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
+  const expected = {
+    openbao: ['openbao-default-deny', 'openbao-server-access'],
+    'lifemodel-git': ['gitea-default-deny'],
+  };
+  for (const [namespace, names] of Object.entries(expected)) {
+    const actual = objects.filter((item) => item.kind === 'NetworkPolicy' && item.metadata?.namespace === namespace)
+      .map((item) => item.metadata.name).sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...names].sort())) {
+      throw new Error(`NetworkPolicy inventory differs in ${namespace}`);
+    }
+  }
+}
+
 function runInstallerHarness(failFlux: boolean, foreign = false, existingRoot?: string, tag = 'v1.0.0', options: { unsupportedNode?: boolean; metacharState?: boolean; digest?: string; owner?: string; sourceDir?: string } = {}): { status: number | null; output: string; root: string } {
   const root = existingRoot ?? mkdtempSync(join(tmpdir(), 'lifemodel-installer-test-'));
   const bin = join(root, 'bin');
@@ -106,6 +150,36 @@ describe('platform manifests', () => {
     ]);
     expect(rendered.filter((item) => item.metadata?.annotations?.['helm.sh/hook'] !== undefined)).toEqual([]);
   });
+  it('rejects privileged, added-capability, and root-user containers', () => {
+    const rendered = parseYamlFiles([join(platformRoot, 'a/gitea/rendered.yaml')]);
+    const pod = rendered.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')!.spec.template.spec;
+    const cases = [
+      (copy: any) => { copy.containers[0].securityContext.privileged = true; },
+      (copy: any) => { copy.containers[0].securityContext.capabilities.add = ['SYS_ADMIN']; },
+      (copy: any) => { copy.containers[0].securityContext.runAsUser = 0; },
+      (copy: any) => { delete copy.containers[0].securityContext.runAsUser; copy.securityContext.runAsUser = 0; },
+    ];
+    for (const mutate of cases) {
+      const copy = structuredClone(pod);
+      mutate(copy);
+      expect(() => assertRestrictedContainers(copy)).toThrow();
+    }
+  });
+
+  it('rejects extra step-A NetworkPolicies in either protected namespace', () => {
+    const objects = sourceObjects();
+    expect(() => assertStepANetworkPolicies(objects)).not.toThrow();
+    for (const namespace of ['openbao', 'lifemodel-git']) {
+      const mutated = structuredClone(objects);
+      mutated.push({
+        apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
+        metadata: { name: 'unexpected-allow', namespace },
+        spec: { podSelector: {}, policyTypes: ['Ingress'], ingress: [{ from: [{}] }] },
+      });
+      expect(() => assertStepANetworkPolicies(mutated)).toThrow(/inventory/);
+    }
+  });
+
   it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
     const giteaRoot = join(platformRoot, 'a/gitea');
     const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
@@ -115,6 +189,8 @@ describe('platform manifests', () => {
     expect(giteaKustomization.resources).not.toContain('release.yaml');
     expect(giteaKustomization.configMapGenerator).toBeUndefined();
     const rendered = parseYamlFiles([join(giteaRoot, 'rendered.yaml')]);
+    const giteaPodSpec = rendered.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')!.spec.template.spec;
+    assertRestrictedContainers(giteaPodSpec);
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
     expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'gitea-values')).toBe(false);
     expect(rendered.some((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')).toBe(true);
@@ -127,27 +203,49 @@ describe('platform manifests', () => {
       'valkey-cluster': { enabled: false },
       gitea: {
         admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
-        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
+        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' }, server: { DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', SSH_DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', ROOT_URL: 'http://gitea-http.lifemodel-git.svc.cluster.local:3000/' } },
       },
-      persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage' },
-      ingress: { enabled: true, hosts: [{ host: 'git.localhost' }] },
+      persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage', annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } },
+      ingress: { enabled: false },
       podSecurityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } },
       containerSecurityContext: { runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } },
     });
     const namespace = YAML.parse(readFileSync(join(giteaRoot, 'namespace.yaml'), 'utf8')) as Record<string, any>;
     expect(namespace.metadata.name).toBe('lifemodel-git');
+    expect(namespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
+    expect(namespace.metadata.labels['pod-security.kubernetes.io/enforce']).toBe('restricted');
+    expect(namespace.metadata.labels['pod-security.kubernetes.io/audit']).toBe('restricted');
+    expect(namespace.metadata.labels['pod-security.kubernetes.io/warn']).toBe('restricted');
+    expect(() => assertRestrictedNamespace(namespace)).not.toThrow();
+    const missingEnforce = structuredClone(namespace);
+    delete missingEnforce.metadata.labels['pod-security.kubernetes.io/enforce'];
+    expect(() => assertRestrictedNamespace(missingEnforce)).toThrow(/enforce/);
+    expect(rendered.some((item) => item.kind === 'Ingress')).toBe(false);
+    const inlineConfig = rendered.find((item) => item.kind === 'Secret' && item.metadata?.name === 'gitea-inline-config');
+    expect(inlineConfig?.stringData?.server).toContain('ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/');
+    const pvc = rendered.find((item) => item.kind === 'PersistentVolumeClaim');
+    expect(pvc?.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
     const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
     expect(policy.spec.policyTypes).toEqual(['Ingress', 'Egress']);
-    expect(policy.spec.ingress).toHaveLength(3);
+    expect(policy.spec.ingress).toHaveLength(2);
     const admitted = policy.spec.ingress.map((rule: any) => rule.from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name']);
-    expect(admitted).toEqual(['lifemodel-system', 'flux-system', 'kube-system']);
+    expect(admitted).toEqual(['lifemodel-system', 'flux-system']);
     expect(policy.spec.ingress.map((rule: any) => rule.from[0].podSelector.matchLabels)).toEqual([
       { 'app.kubernetes.io/name': 'loader' },
       { app: 'source-controller' },
-      { 'app.kubernetes.io/name': 'traefik' },
     ]);
-    expect(policy.spec.ingress.map((rule: any) => rule.ports[0].port)).toEqual([3000, 3000, 3000]);
-    expect(policy.spec.egress).toEqual([]);
+    expect(policy.spec.ingress.map((rule: any) => rule.ports)).toEqual([[{ protocol: 'TCP', port: 3000 }], [{ protocol: 'TCP', port: 3000 }]]);
+    expect(policy.spec).toEqual({
+      podSelector: {}, policyTypes: ['Ingress', 'Egress'],
+      ingress: [
+        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } } }], ports: [{ protocol: 'TCP', port: 3000 }] },
+        { from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'flux-system' } }, podSelector: { matchLabels: { app: 'source-controller' } } }], ports: [{ protocol: 'TCP', port: 3000 }] },
+      ], egress: [],
+    });
+    assertAllowedPolicyPorts(policy, [3000, 3000]);
+    const extraPort = structuredClone(policy);
+    extraPort.spec.ingress[0].ports.push({ protocol: 'TCP', port: 3001 });
+    expect(() => assertAllowedPolicyPorts(extraPort, [3000, 3000])).toThrow(/allowlist/);
     expect(readFileSync(join(platformRoot, 'charts/gitea/Chart.yaml'), 'utf8')).toContain('version: 12.7.0');
   });
   it('keeps the platform workload confined and digest-pinned', () => {
@@ -230,9 +328,30 @@ describe('platform manifests', () => {
     expect(kustomization.resources).not.toContain('openbao-release.yaml');
     expect(kustomization.configMapGenerator).toBeUndefined();
     const rendered = parseYamlFiles([join(platformRoot, 'a/openbao/rendered.yaml')]);
+    const openbaoPodSpec = rendered.find((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')!.spec.template.spec;
+    assertRestrictedContainers(openbaoPodSpec);
     expect(rendered.some((item) => item.kind === 'HelmRelease')).toBe(false);
     expect(rendered.some((item) => item.kind === 'ConfigMap' && item.metadata?.name === 'openbao-values')).toBe(false);
     expect(rendered.some((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')).toBe(true);
+    const statefulSet = rendered.find((item) => item.kind === 'StatefulSet' && item.metadata?.name === 'openbao')!;
+    expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy).toEqual({ whenDeleted: 'Retain', whenScaled: 'Retain' });
+    expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy.whenDeleted).toBe('Retain');
+    expect(statefulSet.spec.persistentVolumeClaimRetentionPolicy.whenScaled).toBe('Retain');
+    const openbaoNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'openbao')!;
+    assertRestrictedNamespace(openbaoNamespace);
+    expect(openbaoNamespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
+    assertStepANetworkPolicies(objects);
+    const stepANetworkPolicies = objects.filter((item) => item.kind === 'NetworkPolicy' && ['openbao', 'lifemodel-git'].includes(item.metadata?.namespace));
+    expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-default-deny')?.spec).toEqual({ podSelector: {}, policyTypes: ['Ingress', 'Egress'], ingress: [], egress: [] });
+    expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-server-access')?.spec).toEqual({
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'openbao', 'app.kubernetes.io/instance': 'openbao', component: 'server' } },
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [{ from: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-system' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'loader' } } }], ports: [{ protocol: 'TCP', port: 8200 }] }],
+      egress: [
+        { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }], ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }] },
+        { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
+      ],
+    });
     expect(objects.some((item) => item.kind === 'HelmRelease' && item.metadata?.name === 'openbao')).toBe(false);
   });
 

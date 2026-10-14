@@ -38,16 +38,10 @@ persistence:
   storageClass: local-path
   annotations:
     helm.sh/resource-policy: keep
+    kustomize.toolkit.fluxcd.io/prune: disabled
 
 ingress:
-  enabled: true
-  className: traefik
-  hosts:
-    - host: git.localhost
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  enabled: false
 
 gitea:
   admin:
@@ -65,3 +59,7 @@ gitea:
       TYPE: level
     cache:
       ADAPTER: memory
+    server:
+      DOMAIN: gitea-http.lifemodel-git.svc.cluster.local
+      SSH_DOMAIN: gitea-http.lifemodel-git.svc.cluster.local
+      ROOT_URL: http://gitea-http.lifemodel-git.svc.cluster.local:3000/

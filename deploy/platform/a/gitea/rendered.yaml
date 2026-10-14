@@ -31,12 +31,12 @@ stringData:
   security: INSTALL_LOCK=true
   server: |-
     APP_DATA_PATH=/data
-    DOMAIN=git.localhost
+    DOMAIN=gitea-http.lifemodel-git.svc.cluster.local
     ENABLE_PPROF=false
     HTTP_PORT=3000
     PROTOCOL=http
-    ROOT_URL=http://git.localhost
-    SSH_DOMAIN=git.localhost
+    ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/
+    SSH_DOMAIN=gitea-http.lifemodel-git.svc.cluster.local
     SSH_LISTEN_PORT=2222
     SSH_PORT=22
     START_SSH_SERVER=true
@@ -342,6 +342,7 @@ metadata:
   namespace: lifemodel-git
   annotations:
     helm.sh/resource-policy: keep
+    kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     {}
 spec:
@@ -438,7 +439,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: 670de5173111a3e49ea34dbe9cac83de778141c730ebd1b78808a5c6b149d35f
+        checksum/config: cb5f3dba92c187235efeadacb2f83a412f072f7a2c02bbef62d7901c931db618
       labels:
         helm.sh/chart: gitea-12.7.0
         app: gitea
@@ -667,32 +668,3 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: gitea-shared-storage
----
-# Source: gitea/templates/gitea/ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: gitea
-  namespace: lifemodel-git
-  labels:
-    helm.sh/chart: gitea-12.7.0
-    app: gitea
-    app.kubernetes.io/name: gitea
-    app.kubernetes.io/instance: gitea
-    app.kubernetes.io/version: "1.27.0"
-    version: "1.27.0"
-    app.kubernetes.io/managed-by: Helm
-  annotations:
-spec:
-  ingressClassName: traefik
-  rules:
-    - host: "git.localhost"
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: gitea-http
-                port:
-                  number: 3000

@@ -101,6 +101,9 @@ spec:
   replicas: 1
   updateStrategy:
     type: OnDelete
+  persistentVolumeClaimRetentionPolicy: 
+    whenDeleted: Retain
+    whenScaled: Retain
   selector:
     matchLabels:
       app.kubernetes.io/name: openbao

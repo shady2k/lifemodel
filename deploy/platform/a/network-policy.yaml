@@ -1,7 +1,20 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: openbao-api-from-loader-only
+  name: openbao-default-deny
+  namespace: openbao
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openbao-server-access
   namespace: openbao
 spec:
   podSelector:
@@ -11,6 +24,7 @@ spec:
       component: server
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - namespaceSelector:
@@ -22,3 +36,22 @@ spec:
       ports:
         - protocol: TCP
           port: 8200
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
