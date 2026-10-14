@@ -70,6 +70,21 @@ describe('Postgres configuration persistence', () => {
     }
   });
 
+  it('does not publish a settings write cancelled while blocked on the row lock', async () => {
+    const loader = createConfigLoader(stores.postgres);
+    await loader.writeConfig(config('http://before/v1'));
+    const holder = await stores.postgres.connect();
+    await holder.query('BEGIN');
+    await holder.query("SELECT * FROM core.settings WHERE id = 'agent-config' FOR UPDATE");
+    const controller = new AbortController();
+    const saving = loader.writeConfig(config('http://after/v1'), { signal: controller.signal });
+    controller.abort();
+    await holder.query('COMMIT');
+    holder.release();
+    await expect(saving).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await loader.readConfig())?.llm?.endpoint?.baseUrl).toBe('http://before/v1');
+  });
+
   it('replaces the document atomically as one JSON value', async () => {
     const loader = createConfigLoader(stores.postgres);
     await loader.writeConfig(config('http://first/v1'));
