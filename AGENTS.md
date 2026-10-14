@@ -31,7 +31,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `flake.nix`, `flake.lock` — Nix flake exporting the NixOS module and defining flake checks
 - `deploy/root/` — Flux root OCIRepository and Kustomization templates
 - `deploy/nixos/` — the `services.lifemodel` NixOS module and setup guide
-- `deploy/platform/` — the versioned platform artifact applied by Flux, starting with A0
+- `deploy/platform/` — the signed platform OCI artifact applied by Flux: A0 starts the loader before dependent step A creates OpenBao, Gitea and application namespaces; loader first-start phases establish Bao custody, seed protected Gitea branches and create the application sources and Kustomizations (ADR-010)
 - `deploy/cli/` — `lifemodel doctor` recovery and health-diagnosis CLI
 - `docker/loader/` — the loader's OCI image, including platform-mode packaging
 - `scripts/install.sh` — generic-Linux platform installer
