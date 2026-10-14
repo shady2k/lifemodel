@@ -1,4 +1,5 @@
 import Redis from 'iovalkey';
+import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 
 export interface TestStores {
@@ -16,9 +17,8 @@ export function testStoreUrls(env: NodeJS.ProcessEnv = process.env): { valkeyUrl
   return { valkeyUrl, databaseUrl };
 }
 
-export async function createTestStores(): Promise<TestStores> {
+export async function createTestStores(workerId = process.env.VITEST_WORKER_ID): Promise<TestStores> {
   const { valkeyUrl, databaseUrl } = testStoreUrls();
-  const workerId = process.env.VITEST_WORKER_ID;
   if (!workerId || !/^\d+$/.test(workerId)) throw new Error('VITEST_WORKER_ID must identify the current test worker');
   const databaseName = `lifemodel_test_worker_${workerId}`;
   const adminUrl = new URL(databaseUrl);
@@ -35,12 +35,11 @@ export async function createTestStores(): Promise<TestStores> {
   }
   const workerDatabaseUrl = new URL(databaseUrl);
   workerDatabaseUrl.pathname = `/${databaseName}`;
-  const workerIndex = Number(workerId) % 16;
   const workerValkeyUrl = new URL(valkeyUrl);
-  workerValkeyUrl.pathname = `/${workerIndex}`;
+  workerValkeyUrl.pathname = '/0';
   return {
     workerId,
     postgres: new Pool({ connectionString: workerDatabaseUrl.toString() }),
-    redis: new Redis(workerValkeyUrl.toString()),
+    redis: new Redis(workerValkeyUrl.toString(), { keyPrefix: `lifemodel:test:${workerId}:${randomUUID()}:` }),
   };
 }

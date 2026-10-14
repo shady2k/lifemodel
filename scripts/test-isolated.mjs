@@ -227,31 +227,33 @@ export function command(program, args, { timeoutMs = 60_000, signal, live = fals
 
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
 
-export async function run(argv) {
+export async function run(argv, dependencies = {}) {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { log(error.message); return 2; }
   let release;
-  try { release = acquireLock(); } catch (error) { log(error.message); return 2; }
+  try { release = acquireLock(dependencies.lockDirectory); } catch (error) { log(error.message); return 2; }
   const controller = new AbortController();
   const owned = new Set();
   const ownedImages = new Set();
   const ownedNetworks = new Set();
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lifemodel-test-'));
+  const temporary = fs.mkdtempSync(path.join(dependencies.tempRoot ?? os.tmpdir(), 'lifemodel-test-'));
+  const runCommand = dependencies.command ?? command;
+  const root = dependencies.root ?? ROOT;
   const stop = (exitCode, reason) => controller.abort(Object.assign(new Error(reason), { exitCode }));
   const onInt = () => stop(130, 'Interrupted (SIGINT)');
   const onTerm = () => stop(143, 'Interrupted (SIGTERM)');
   process.once('SIGINT', onInt); process.once('SIGTERM', onTerm);
   const deadline = setTimeout(() => stop(124, 'Overall isolation deadline exceeded'), parsed.timeoutMs);
   async function docker(args, { mustSucceed = true, ...options } = {}) {
-    const result = await command('docker', args, { timeoutMs: 10 * 60_000, signal: controller.signal, ...options });
+    const result = await runCommand('docker', args, { timeoutMs: 10 * 60_000, signal: controller.signal, ...options });
     if (mustSucceed && result.code) throw new Error(`docker ${args[0]} failed (${result.code}): ${result.stderr}`);
     return result;
   }
   let result = 1;
   try {
-    const snapshot = stageSnapshot(ROOT, path.join(temporary, 'source'));
+    const snapshot = stageSnapshot(root, path.join(temporary, 'source'));
     if (parsed.mode === 'docker') {
-      const backend = path.join(ROOT, 'scripts/test-docker-isolated.mjs');
+      const backend = path.join(root, 'scripts/test-docker-isolated.mjs');
       if (!fs.existsSync(backend)) throw new Error('Private Docker backend is unavailable; no owner-daemon fallback');
       const execution = await command(process.execPath, [backend, '--snapshot', snapshot, '--timeout', String(Math.max(1, parsed.timeoutMs - 60_000)), '--', ...parsed.vitestArgs],
         { timeoutMs: parsed.timeoutMs + 60_000, signal: controller.signal, live: true, killGraceMs: 75_000 });
@@ -344,6 +346,7 @@ export async function run(argv) {
         + 'git init -q -b main; git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null add -A; '
         + 'git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null commit -qm snapshot; ' + steps;
       await docker([...containerArgs(name, sourceImage, true, { network, storeEnv: testStoreEnv(network, storePassword) }), 'sh', '-ec', script]);
+      await dependencies.beforeTestStart?.({ onInt, onTerm });
       log(`Running ${parsed.mode} in disposable offline Node 24 container`);
       const execution = await docker(['start', '-a', name], { mustSucceed: false, live: true, timeoutMs: TIMEOUT });
       // docker start -a normally propagates the container code; inspect it explicitly.
@@ -356,19 +359,19 @@ export async function run(argv) {
     process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm);
     for (const name of owned) {
       try {
-        const cleanup = await command('docker', ['rm', '-f', name], { timeoutMs: 15_000 });
+        const cleanup = await runCommand('docker', ['rm', '-f', name], { timeoutMs: 15_000 });
         if (cleanup.code && !/No such container/.test(cleanup.stderr)) { log(`Cleanup failed for ${name}: ${cleanup.stderr}`); if (!result) result = 1; }
       } catch (error) { log(`Cleanup failed for ${name}: ${error.message}`); if (!result) result = 1; }
     }
     for (const network of ownedNetworks) {
       try {
-        const cleanup = await command('docker', ['network', 'rm', network], { timeoutMs: 15_000 });
+        const cleanup = await runCommand('docker', ['network', 'rm', network], { timeoutMs: 15_000 });
         if (cleanup.code && !/not found|does not exist/i.test(cleanup.stderr)) { log(`Network cleanup failed for ${network}: ${cleanup.stderr}`); if (!result) result = 1; }
       } catch (error) { log(`Network cleanup failed for ${network}: ${error.message}`); if (!result) result = 1; }
     }
     for (const image of ownedImages) {
       try {
-        const cleanup = await command('docker', ['image', 'rm', image], { timeoutMs: 15_000 });
+        const cleanup = await runCommand('docker', ['image', 'rm', image], { timeoutMs: 15_000 });
         if (cleanup.code && !/No such image/.test(cleanup.stderr)) { log(`Snapshot cleanup failed: ${cleanup.stderr}`); if (!result) result = 1; }
       } catch (error) { log(`Snapshot cleanup failed: ${error.message}`); if (!result) result = 1; }
     }
