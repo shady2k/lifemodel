@@ -22,6 +22,7 @@ export type { StateManagerConfig } from './state-manager.js';
 export { StateManager, createStateManager } from './state-manager.js';
 export type { ConversationMessage, GetHistoryOptions } from './conversation-manager.js';
 export { ConversationManager, createConversationManager } from './conversation-manager.js';
+export { PostgresConversationStore } from './postgres-conversation-store.js';
 export type {
   VectorStore,
   VectorSearchOptions,
