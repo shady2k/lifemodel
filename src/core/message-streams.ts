@@ -287,13 +287,10 @@ export function startOutboundDelivery(
             { eventId: event.eventId, channel: payload.channel },
             'Outbound event committed for the future gateway; no channel is registered'
           );
-          await redis.set(offsetKey, streamId);
+          // Advance only this process's scan position. Persisting the channel
+          // delivery cursor here would let trimming discard events before the
+          // future gateway has delivered them.
           offset = streamId;
-          try {
-            await trimOutboundEvents(redis, { streamKey, deliveryOffsetKey: offsetKey });
-          } catch (trimError) {
-            logger.warn({ err: trimError }, 'Could not trim completed outbound events');
-          }
           continue;
         }
         try {

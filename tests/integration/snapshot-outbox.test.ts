@@ -272,7 +272,7 @@ describe('inbound message stream', () => {
     }
     worker.stop();
     await worker.done;
-    expect(await stores.redis.get(`${prefix}delivery-offset`)).not.toBeNull();
+    expect(await stores.redis.get(`${prefix}delivery-offset`)).toBeNull();
     expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(1);
   });
 });
