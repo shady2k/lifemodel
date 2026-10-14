@@ -74,6 +74,7 @@ describe('the image jobs of CI', () => {
     // The walk boots the image this job built, not a second build (rework 3).
     expect(runs).toContain('LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA"');
     expect(runs).toContain('scripts/build-image.sh "ci-$SHA"');
+    expect(runs).toContain('scripts/build-core-image.sh "ci-core-$SHA"');
     // It needs the repository's own node_modules for that test.
     expect(runs).toContain('npm ci');
     // And it is bounded: the walk builds an image and starts an instance.
@@ -90,6 +91,9 @@ describe('the image jobs of CI', () => {
     expect(runs).toContain('docker login ghcr.io');
     expect(runs).toContain('ghcr.io/shady2k/lifemodel:main');
     expect(runs).toContain('ghcr.io/shady2k/lifemodel:$SHA');
+    expect(runs).toContain('ghcr.io/shady2k/lifemodel-core:main');
+    expect(runs).toContain('ghcr.io/shady2k/lifemodel-core:$SHA');
+    expect(runs).toContain('scripts/build-core-image.sh main "$SHA"');
     // Push only: a pull request never reaches it.
     expect(job.if).toContain("github.event_name == 'push'");
     // NO classifier gate on a push: every main push publishes, a documents-only

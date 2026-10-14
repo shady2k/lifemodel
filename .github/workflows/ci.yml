@@ -15,17 +15,17 @@
 #      product=true (or when the `changes` job did not succeed, see its
 #      comment) and the pull request is not a draft;
 #   3. ci-backlog: the backlog gate below, on every change, for everyone;
-#   4. ci-image: the instance image (story S9) on a PULL REQUEST — the same
+#   4. ci-image: the instance and core images on a PULL REQUEST — the same
 #      scripts/build-image.sh a person runs, and then a REAL first start inside
 #      the image it just built. It holds no write token: the workflow's own
 #      read-only permissions, and a checkout that keeps no credential. It is
 #      not a required check (owner decision 17, below), so it too fails
 #      closed on a failed `changes` job to say what happened rather than a
 #      green skip;
-#   5. ci-image-publish: the same build on a PUSH TO MAIN, and the only job
-#      that asks for packages: write. It publishes
-#      ghcr.io/shady2k/lifemodel:main and :<sha> on EVERY push to main —
-#      documents-only pushes included, which is what story S9 asks for — so it
+#   5. ci-image-publish: both builds on a PUSH TO MAIN, and the only job
+#      that asks for packages: write. It publishes the instance and core
+#      images at :main and :<sha> on EVERY push to main — documents-only
+#      pushes included, which is what story S9 asks for — so it
 #      has no classifier gate.
 #
 # Why the image work is split in two (rework 2, findings 2 and 4): one job that
@@ -328,7 +328,7 @@ jobs:
   # host test dependencies and runs only the built-image first-start file.
   # Local heavy image acceptance is forbidden; ordinary suites stay isolated.
   #
-  # The full history is an input, not a convenience: scripts/build-image.sh
+  # The full history is an input, not a convenience for the instance image: scripts/build-image.sh
   # makes the seed bundle the instance's repository is cloned from, and it
   # refuses a shallow checkout by name rather than shipping one whose history
   # could never be merged with upstream.
@@ -358,13 +358,18 @@ jobs:
       - name: Install what the first-start walk runs on
         run: npm ci
 
-      - name: Build the image
+      - name: Build the instance image
         env:
           SHA: ${{ github.sha }}
         run: |
           set -eu
           # The tag is this run's own: nothing is pushed.
           scripts/build-image.sh "ci-$SHA"
+
+      - name: Build the core image
+        env:
+          SHA: ${{ github.sha }}
+        run: scripts/build-core-image.sh "ci-core-$SHA"
 
       # The walk boots THE image built above, not a second build of its own
       # (rework 3, review round 2 finding 3).
@@ -376,13 +381,13 @@ jobs:
           LIFEMODEL_DOCKER_TESTS=1 LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA" \
             npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts
 
-  # Publishing, on a push to main. It is the only job that asks for
-  # `packages: write`, and the only one that logs in to ghcr.io.
+  # Publishing both images, on a push to main. It is the only job that asks
+  # for `packages: write`, and the only one that logs in to ghcr.io.
   #
   # It has NO classifier gate: story S9 wants `main` and the commit published on
   # every push to main, and a documents-only push used to skip the job and leave
   # `:main` at an older revision (rework 2, finding 4). The push already passed
-  # the checks that gate a merge; this job's business is the image.
+  # the checks that gate a merge; this job's business is both images.
   ci-image-publish:
     if: ${{ !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-latest
@@ -415,5 +420,8 @@ jobs:
           # Built and pushed in one step: the tag the build makes is the tag
           # `docker push` names, so the two cannot disagree.
           scripts/build-image.sh main "$SHA"
+          scripts/build-core-image.sh main "$SHA"
           docker push "ghcr.io/shady2k/lifemodel:main"
           docker push "ghcr.io/shady2k/lifemodel:$SHA"
+          docker push "ghcr.io/shady2k/lifemodel-core:main"
+          docker push "ghcr.io/shady2k/lifemodel-core:$SHA"
