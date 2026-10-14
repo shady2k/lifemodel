@@ -508,15 +508,28 @@ describe('platform manifests', () => {
       }],
       ports: [expect.objectContaining({ port: 7000 })],
     })]);
-    expect(policy!.spec.egress).toHaveLength(3);
-    expect(policy!.spec.egress[1]).toEqual({
-      to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
-      ports: [{ protocol: 'TCP', port: 6443 }],
-    });
+    expect(policy!.spec.egress).toEqual([
+      {
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }],
+        ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }],
+      },
+      {
+        to: [{ ipBlock: { cidr: '0.0.0.0/0' } }],
+        ports: [{ protocol: 'TCP', port: 6443 }],
+      },
+      {
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'openbao' } } }],
+        ports: [{ protocol: 'TCP', port: 8200 }],
+      },
+      {
+        to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-git' } }, podSelector: { matchLabels: { 'app.kubernetes.io/name': 'gitea', 'app.kubernetes.io/instance': 'gitea' } } }],
+        ports: [{ protocol: 'TCP', port: 3000 }],
+      },
+    ]);
     const yaml = readFileSync(join(platformRoot, 'a0/network-policy.yaml'), 'utf8');
     expect(yaml).toContain('k3s DNATs the in-cluster API Service to the node address');
     expect(yaml).toContain('The API port is the only egress restriction');
     expect(yaml).toContain('The Kubernetes API server authenticates the projected ServiceAccount token');
-    expect(policy!.spec.egress.flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`)).sort()).toEqual(['TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
+    expect(policy!.spec.egress.flatMap((rule: any) => rule.ports.map((port: any) => `${port.protocol}/${port.port}`)).sort()).toEqual(['TCP/3000', 'TCP/53', 'TCP/6443', 'TCP/8200', 'UDP/53']);
   });
 });

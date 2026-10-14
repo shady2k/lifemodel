@@ -49,6 +49,8 @@ RUN groupmod --new-name loader node \
 # sources, not the toolchain. Root-owned; the `loader` user runs it and
 # cannot change it.
 COPY --from=build --chown=root:root /build /opt/lifemodel/loader
+# Release builds provide this full-history bundle in their build context.
+COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle
 
 USER loader
 WORKDIR /var/lib/loader

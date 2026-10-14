@@ -39,7 +39,13 @@ import {
   createKubernetesPhaseStore,
   createPlatformPhaseRunner,
   type PlatformPhaseStore,
+  type PlatformPhase,
 } from './platform-bootstrap.js';
+import {
+  createGiteaBootstrap,
+  createGiteaHttpApi,
+  createKubernetesGiteaAdminSecret,
+} from './gitea.js';
 
 export interface LoaderAppDeps {
   config: LoaderConfig;
@@ -58,6 +64,8 @@ export interface LoaderAppDeps {
   /** Test boundary for platform bootstrap; production uses in-cluster APIs. */
   openBao?: { api: BaoApi; custody: BaoCustody };
   platformPhaseStore?: PlatformPhaseStore;
+  /** Test seam for later first-start phases; production uses the Gitea plan. */
+  platformGiteaPhases?: PlatformPhase[];
   platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
 }
@@ -107,6 +115,19 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       bao: baoParts.api,
       custody: baoParts.custody,
       runPhases: createPlatformPhaseRunner(platformPhaseStore),
+      extraPhases:
+        deps.platformGiteaPhases ??
+        createGiteaBootstrap({
+          api: {
+            ...createGiteaHttpApi({
+              address: 'http://gitea-http.lifemodel-git.svc:3000',
+              seedBundle: '/opt/lifemodel/seed.bundle',
+              runner,
+            }),
+            ensureAdminSecret: createKubernetesGiteaAdminSecret(),
+          },
+          runPhases: createPlatformPhaseRunner(platformPhaseStore),
+        }).phases(),
       ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
     });
   const agentVault = createAgentVault({

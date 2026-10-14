@@ -50,3 +50,16 @@ spec:
       ports:
         - protocol: TCP
           port: 8200
+
+    # The platform loader's only Gitea route: its HTTP API and Git over HTTP.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-git
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gitea
+              app.kubernetes.io/instance: gitea
+      ports:
+        - protocol: TCP
+          port: 3000

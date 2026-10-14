@@ -15,13 +15,13 @@ import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
 import type { BaoApi, BaoKeys } from '../../loader/src/openbao.js';
-import type { PlatformPhaseRecord, PlatformPhaseStore } from '../../loader/src/platform-bootstrap.js';
+import type {
+  PlatformPhaseRecord,
+  PlatformPhaseStore,
+} from '../../loader/src/platform-bootstrap.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
-import {
-  ownLoaderApp,
-  registerLoaderLifecycle,
-} from '../helpers/loader-lifecycle.js';
+import { ownLoaderApp, registerLoaderLifecycle } from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
   caddySpawn,
@@ -39,7 +39,10 @@ import {
 registerLoaderLifecycle();
 
 /** A platform app over `world`, with its lines and exits captured. */
-function platformApp(world: LoaderWorld, bootstrap = { runInitial: async () => {}, unsealIfSealed: async () => {} }): {
+function platformApp(
+  world: LoaderWorld,
+  bootstrap = { runInitial: async () => {}, unsealIfSealed: async () => {} }
+): {
   app: LoaderApp;
   lines: RecordedLine[];
   exits: number[];
@@ -96,10 +99,9 @@ describe('the loader in platform mode', () => {
 
     const restarted = platformApp(world);
     await restarted.app.start();
-    const afterRestart = await fetch(
-      `http://127.0.0.1:${String(restarted.app.port())}/`,
-      { headers: { host: 'boot.localhost', cookie: cookie ?? '' } }
-    );
+    const afterRestart = await fetch(`http://127.0.0.1:${String(restarted.app.port())}/`, {
+      headers: { host: 'boot.localhost', cookie: cookie ?? '' },
+    });
     expect(afterRestart.status).toBe(200);
     expect(await afterRestart.text()).toContain('Platform mode');
     expect(await restarted.app.state.readAuth()).not.toBeNull();
@@ -115,31 +117,64 @@ describe('the loader in platform mode', () => {
     let phase: PlatformPhaseRecord | null = null;
     let initialized = false;
     const bao: BaoApi = {
-      status: async () => { events.push('status'); return { initialized, sealed: false }; },
-      init: async () => { events.push('init'); initialized = true; return { keys: ['share'], rootToken: 'root' }; },
-      unseal: async () => { events.push('unseal'); },
+      status: async () => {
+        events.push('status');
+        return { initialized, sealed: false };
+      },
+      init: async () => {
+        events.push('init');
+        initialized = true;
+        return { keys: ['share'], rootToken: 'root' };
+      },
+      unseal: async () => {
+        events.push('unseal');
+      },
       rootTokenActive: async () => false,
-      ensureLoaderPolicy: async () => { events.push('policy'); },
-      loginLoader: async () => { events.push('login'); },
-      revokeRootToken: async () => { events.push('revoke'); },
+      ensureLoaderPolicy: async () => {
+        events.push('policy');
+      },
+      loginLoader: async () => {
+        events.push('login');
+      },
+      revokeRootToken: async () => {
+        events.push('revoke');
+      },
     };
     const custody = {
       read: async () => secret,
-      write: async (value: BaoKeys) => { events.push('custody'); secret = structuredClone(value); },
+      write: async (value: BaoKeys) => {
+        events.push('custody');
+        secret = structuredClone(value);
+      },
     };
     const phases: PlatformPhaseStore = {
       read: async () => phase,
-      write: async (next) => { phase = next; },
+      write: async (next) => {
+        phase = next;
+      },
     };
     const lines: RecordedLine[] = [];
     const app = createLoaderApp({
-      config: { ...world.config, mode: 'platform' }, fs: world.fs, runner: world.runner,
-      launcher: world.launcher, logger: createRecordingLogger(lines), clock: world.clock,
-      exit: () => {}, openBao: { api: bao, custody }, platformPhaseStore: phases, platformLoaderJwt: async () => 'loader-jwt',
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      openBao: { api: bao, custody },
+      platformPhaseStore: phases,
+      platformLoaderJwt: async () => 'loader-jwt',
+      platformGiteaPhases: [],
     });
     ownLoaderApp(world, app);
     await app.start();
-    await waitUntil(() => (phase?.phase === 'openbao-policy' && phase.status === 'complete') || lines.some((line) => line.level === 'error'), 'OpenBao composition');
+    await waitUntil(
+      () =>
+        (phase?.phase === 'openbao-policy' && phase.status === 'complete') ||
+        lines.some((line) => line.level === 'error'),
+      'OpenBao composition'
+    );
     expect(events).toContain('init');
     expect(phase?.phase).toBe('openbao-policy');
     await app.shutdown('test');
@@ -149,8 +184,12 @@ describe('the loader in platform mode', () => {
     const world = createLoaderWorld();
     const observed: string[] = [];
     const { app } = platformApp(world, {
-      runInitial: async () => { observed.push(`initial:${app.host() ?? 'down'}`); },
-      unsealIfSealed: async () => { observed.push(`unseal:${app.host() ?? 'down'}`); },
+      runInitial: async () => {
+        observed.push(`initial:${app.host() ?? 'down'}`);
+      },
+      unsealIfSealed: async () => {
+        observed.push(`unseal:${app.host() ?? 'down'}`);
+      },
     });
     await app.start();
     await waitUntil(() => observed.length === 2, 'platform bootstrap ran');

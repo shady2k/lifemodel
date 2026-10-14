@@ -28,6 +28,8 @@ export interface OpenBaoBootstrapDeps {
   bao: BaoApi;
   custody: BaoCustody;
   runPhases(phases: { name: string; run(): Promise<void> }[]): Promise<void>;
+  /** Later first-start work shares this durable phase plan and store. */
+  extraPhases?: { name: string; run(): Promise<void> }[];
   loaderJwt?(): Promise<string>;
 }
 
@@ -127,6 +129,7 @@ export function createOpenBaoBootstrap(deps: OpenBaoBootstrapDeps): {
         { name: 'openbao-init', run: initialize },
         { name: 'openbao-unseal', run: unseal },
         { name: 'openbao-policy', run: provisionAndRetire },
+        ...(deps.extraPhases ?? []),
       ]);
     },
     unsealIfSealed: unseal,
