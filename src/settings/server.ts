@@ -47,8 +47,6 @@ const OVERRIDING_VARIABLES = [
   'LLM_ENDPOINT_FAST_MODEL',
   'LLM_ENDPOINT_SMART_MODEL',
   'LLM_ENDPOINT_MOTOR_MODEL',
-  'PRIMARY_USER_CHAT_ID',
-  'TELEGRAM_BOT_TOKEN',
 ] as const;
 
 export interface SettingsServerOptions {

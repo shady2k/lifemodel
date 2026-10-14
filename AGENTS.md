@@ -296,57 +296,40 @@ Common issues:
 
 ## Restart guarantees
 
-A restart is never allowed to lose a turn or to answer a message twice by
-accident. The durable inbound log (`src/core/inbound-log.ts`) is the boundary
-that makes the distinction, and it is deliberately simple: the entry is
-written and flushed on receipt, and it LEAVES the log when its turn recorded
-an OUTCOME - answered, deliberately silent (`core.defer` / explicit
-no-reply), failed send, failed turn (`error` disposition). The four are
-mutually exclusive: an `error` disposition wins, otherwise the turn's FINAL
-send decides answered against failed send (an acknowledgement through
-`core.say` counts only when the turn ends with no further message). A failed
-outcome is reported at warn with the recipient and the reason and is NEVER
-retried. Only a message whose turn recorded no outcome is replayed, once, at
-the next start.
+The Valkey streams and the committed tick snapshot are the core's durable
+boundary. There is no file-based inbound log and no channel-specific replay.
+Gateways append messages to `inbound`; the core reads them as signals. A tick
+commit atomically stores the epoch-checked snapshot (including the internal
+bus offset, inbound read and per-recipient offsets, bounded recent-message-id
+dedup ring, pending messages, and outbound snapshot outbox). Only a committed
+tick advances these offsets. The Valkey commit rejects a stale generation by
+epoch. Postgres writes are fenced by the active holder.
 
-The stop (`shutdownSequence` in `src/core/container.ts`) is BOUNDED and BEST
-EFFORT, under ONE deadline (`CoreLoopConfig.shutdownDrainTimeoutMs`, default
-90 s): intake stops first, the turn in flight and the sends it scheduled are
-drained, state and registries persist, the channels are released, the loop is
-closed for durable writes and storage flushes last (so a send that settles
-behind the flush keeps its message in the log for a single replay instead of
-writing where nothing would flush it). The stop persists NOTHING for the next
-run: what is queued but unprocessed is dropped. The guarantee covers the TURN
-IN FLIGHT and INBOUND TELEGRAM MESSAGES (the log above); everything else that
-was only queued in memory is LOST on a restart, as before this feature - a
-schedule firing (one-shot or recurring), a Motor Cortex result, a Telegram
-reaction, an internal signal. Reminders and Motor Cortex results become tasks
-with their own durable record and outcome later (`lifemodel-ten`); the
-pressures and neurons the ticks produce are simply recomputed. `src/index.ts` arms a hard
-exit at the same deadline (`src/core/hard-exit.ts`, REFERENCED until it is
-disarmed - an unref'd timer lets a hung process leave with code 0 before the
-deadline): whatever still hangs there - a stalled intake stop, a stalled tick,
-a hung send, a stalled flush - is abandoned and the process leaves with a
-non-zero code and one error line naming the step and the loop's live work it
-never finished.
+A committed outbound event is the answer boundary. The Postgres message-row
+consumer applies outbound events idempotently by event id; its cursor advances
+after the row write. Deliberate silence is recorded by the committed tick with
+no outbound event. A failed turn does not commit its partial result, so its
+inbound messages remain available to a fresh core. Failed sends are not a core
+outcome: the gateway owns delivery and retry. With no channel registered, the
+core logs the committed event once at info and advances its in-process delivery
+cursor; the event remains in Valkey for the gateway's independent cursor.
 
-- **Graceful restart (SIGINT/SIGTERM) - strict, while the stop fits its
-  deadline.** When the sequence completes: no message is lost and none is
-  answered twice - an entry removed by a recorded outcome cannot replay, an
-  entry without one replays exactly once at the next start. A stop that hits
-  the deadline is best effort like a crash: the steps after it did not run.
-- **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
-  turn recorded no outcome replay once at start. Signals that were only queued
-  in memory are lost, as on main.
+A hard stop or crash during a tick leaves the previous snapshot authoritative.
+The fresh core reads from its committed offsets and processes uncommitted
+messages again. After a commit, those messages are past the committed offsets
+and do not replay. The dedup ring is bounded; it is not an unbounded history.
+A stop that completes a tick commits by the same rule; a stop that kills the
+process does not drain or commit the in-flight tick. Queued non-inbound work
+that was not included in a committed snapshot can be lost and is regenerated
+or recovered according to its own durable store.
 
-Known crash windows (named, not fixed; one debt item): an update lost between
-receipt and the emit-time flush; an answer delivered while its removal is not
-yet on disk (or any outcome recorded only in memory at the crash) - the
-message may be answered twice; a send in flight at the crash - the message
-replays once and the user may get the late send and the replay; a failed send
-or failed turn removes the message for good by decision. The same windows
-cover the stop that hits its deadline. `docs/architecture.md`
-carries the same list in context.
+Remaining windows are explicit: a Postgres message row may be applied before
+its cursor advances, so restart can reapply it (the event-id key makes that
+idempotent). A gateway may deliver an answer before its delivery cursor
+advances, so restart can deliver it again (delivery is at-least-once). An
+inbound gateway append that never reaches Valkey is outside the core's durable
+boundary. The Valkey epoch fence protects snapshot commits; the Postgres active
+holder fence protects Postgres writes. Neither makes a cross-store transaction.
 
 ## Design Principles
 

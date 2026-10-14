@@ -26,11 +26,6 @@ import {
   createAggregationProcessor,
   createCognitionProcessor,
 } from '../layers/index.js';
-import {
-  type TelegramChannel,
-  createTelegramChannel,
-  type TelegramConfig,
-} from '../channels/index.js';
 import { type UserModel, createUserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import type { LLMProvider } from '../llm/provider.js';
@@ -136,14 +131,10 @@ export interface AppConfig {
   };
   /** Core loop configuration */
   coreLoop?: Partial<CoreLoopConfig>;
-  /** Telegram configuration */
-  telegram?: TelegramConfig;
   /** Primary user configuration (for proactive contact) */
   primaryUser?: {
     /** User's name */
     name?: string;
-    /** Telegram chat ID to send proactive messages to */
-    telegramChatId?: string;
     /** User's timezone offset from UTC in hours (e.g., -5 for EST), null = unknown */
     timezoneOffset?: number | null;
   };
@@ -179,8 +170,6 @@ export interface Container {
   layers: CoreLoopLayers;
   /** The core loop (heartbeat) */
   coreLoop: CoreLoop;
-  /** Telegram channel (optional, depends on config) */
-  telegramChannel: TelegramChannel | null;
   /** All registered channels */
   channels: Map<string, Channel>;
   /** User model for tracking user beliefs (optional) */
@@ -197,8 +186,6 @@ export interface Container {
   memoryConsolidator: MemoryConsolidator | null;
   /** Soul provider (for identity awareness) */
   soulProvider: SoulProvider | null;
-  /** Primary user's Telegram chat ID (for proactive messages) */
-  primaryUserChatId: string | null;
   /** Storage backend */
   storage: Storage | null;
   /** State manager for persistence */
@@ -616,9 +603,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create event bus
   const eventBus = createEventBus(logger);
 
-  // Get primary user chat ID
-  const primaryUserChatId =
-    configOverrides.primaryUser?.telegramChatId ?? mergedConfig.primaryUser.telegramChatId ?? null;
+  const primaryUserChatId: string | null = null;
 
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
@@ -1176,50 +1161,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create channels registry
   const channels = new Map<string, Channel>();
 
-  // Create Telegram channel if configured
-  let telegramChannel: TelegramChannel | null = null;
-  const telegramBotToken =
-    configOverrides.telegram?.botToken ?? mergedConfig.telegramBotToken ?? '';
-
-  if (telegramBotToken) {
-    // Build base config with allowed chat IDs filter if primary user is configured
-    const telegramConfig: TelegramConfig = primaryUserChatId
-      ? {
-          botToken: telegramBotToken,
-          allowedChatIds: [primaryUserChatId],
-          ...configOverrides.telegram,
-        }
-      : { botToken: telegramBotToken, ...configOverrides.telegram };
-    telegramChannel = createTelegramChannel(telegramConfig, logger, recipientRegistry);
-    channels.set('telegram', telegramChannel);
-    coreLoop.registerChannel(telegramChannel);
-
-    // Telegram is a temporary ingress adapter. Its messages enter the same
-    // durable inbound stream that the future gateway will write.
-    telegramChannel.setSignalCallback((signal) => coreLoop.pushInboundSignal(signal));
-
-    logger.info('Telegram channel configured');
-  }
+  // Outbound events are retained for the future gateway; no channel is registered in this core.
 
   const outboundDelivery = startOutboundDelivery(snapshotRedis, channels, logger);
   void outboundDelivery.done.catch((error: unknown) => {
     logger.error({ err: error }, 'Outbound delivery worker stopped unexpectedly');
   });
 
-  // Prime the core queue before its first tick. Photo receipts are completed
-  // while Telegram is constructed but has not started polling, as before.
-  const replayedInbound = await inboundStream.readNew(true);
-  for (const entry of replayedInbound) {
-    const data = entry.signal.data as { pendingPhoto?: { fileId?: unknown } | undefined };
-    if (typeof data.pendingPhoto?.fileId === 'string' && telegramChannel) {
-      const completed = await telegramChannel.completePhotoReceipt(entry.signal);
-      if (completed) {
-        for (const replaced of await inboundStream.readNew()) coreLoop.pushSignal(replaced.signal);
-        continue;
-      }
-    }
-    coreLoop.pushSignal(entry.signal);
-  }
+  // Prime the core queue with messages committed to the inbound stream.
+  const replayedInbound = await inboundStream.readNew();
+  for (const entry of replayedInbound) coreLoop.pushSignal(entry.signal);
   if (replayedInbound.length > 0) {
     logger.info({ count: replayedInbound.length }, 'Replayed pending inbound stream messages');
   }
@@ -1286,7 +1237,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     agent,
     layers,
     coreLoop,
-    telegramChannel,
     channels,
     userModel,
     llmProvider,
@@ -1295,7 +1245,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryProvider,
     memoryConsolidator,
     soulProvider,
-    primaryUserChatId,
     storage,
     stateManager,
     conversationManager,

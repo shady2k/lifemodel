@@ -9,7 +9,6 @@
 import { isEndpointComplete, isEndpointFieldSet } from '../config/model-endpoint.js';
 import {
   SETTINGS_FIELDS,
-  TELEGRAM_BOT_TOKEN_PLACEHOLDER,
   redactEndpointUrl,
   settingsEndpoint,
   type SettingsErrors,
@@ -85,27 +84,15 @@ function endpointState(values: SettingsInput): string[] {
 function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)[number]): string {
   const { field, label } = formField;
   const error = options.errors?.[field];
-  // A refused bot token is NEVER echoed back: the owner may have pasted the
-  // real one, and a page (or a browser cache, or a log of the exchange) must
-  // not hold it. An accepted one is a placeholder by the rule above.
-  // The endpoint base URL is ALWAYS echoed by its safe representation
-  // (origin + path, no credentials, no query, no fragment), whatever the
-  // validation said: a stored config document must not leak its
-  // secret parts on a plain GET either (review round 2, finding F).
+  // Endpoint URLs are rendered in a redacted form.
   const value =
-    field === 'telegramBotToken' && error !== undefined
-      ? ''
-      : field === 'endpointBaseUrl'
-        ? redactEndpointUrl(options.values[field])
-        : options.values[field];
+    field === 'endpointBaseUrl' ? redactEndpointUrl(options.values[field]) : options.values[field];
   const hints: Partial<Record<typeof field, string>> = {
     endpointBaseUrl:
       'The OpenAI-compatible endpoint lifemodel talks to, e.g. http://127.0.0.1:1234/v1',
     fastModel: 'The model for classification and quick decisions',
     smartModel: 'The model for reasoning and composing messages',
     motorModel: 'The model for Motor Cortex runs',
-    telegramChatId: 'Your Telegram chat id (@userinfobot gives it)',
-    telegramBotToken: `The Agent Vault placeholder that stands for your token (default ${TELEGRAM_BOT_TOKEN_PLACEHOLDER}). The token itself goes into Agent Vault, never here.`,
   };
   const hint = hints[field];
   return [
@@ -153,11 +140,11 @@ export function renderSettingsPage(options: SettingsPageOptions): string {
   <body>
     <h1>lifemodel settings</h1>
     <p>These settings belong to this lifemodel instance, and they are its own: the model
-    endpoint and the Telegram fields below. Saving them writes the instance's configuration to Postgres and
+    endpoint below. Saving them writes the instance's configuration to Postgres and
     applies the new model endpoint and models to the running core.</p>
     <p>Keys are not kept here. Put them into Agent Vault, reached through the loader
     (<a href="${escapeHtml(loader)}">${escapeHtml(loader)}</a>) - the same place panic and resume live.
-    lifemodel holds the Agent Vault placeholder only, never a key.</p>
+    lifemodel holds no key.</p>
 ${savedBlock}${missingBlock}${overrideBlock}
     <h2>The model endpoint</h2>
     <p>One OpenAI-compatible endpoint, with the model for each role. lifemodel holds no key:

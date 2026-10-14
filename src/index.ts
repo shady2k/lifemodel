@@ -26,15 +26,7 @@ async function main(): Promise<void> {
   boundStopContainer(active);
   container = active;
 
-  const {
-    logger,
-    agent,
-    coreLoop,
-    telegramChannel,
-    messageComposer,
-    primaryUserChatId,
-    stateManager,
-  } = container;
+  const { logger, agent, coreLoop, messageComposer, stateManager } = container;
 
   // lifemodel's own settings interface, on the port Caddy's root host reaches
   // (127.0.0.1:7100). It is started BEFORE the loop, so the instance is
@@ -68,24 +60,7 @@ async function main(): Promise<void> {
     logger.info('State persistence enabled (auto-save every 5 minutes)');
   }
 
-  // Log proactive messaging capability
-  if (messageComposer && primaryUserChatId && telegramChannel) {
-    logger.info({ chatId: primaryUserChatId }, 'Proactive messaging enabled');
-  } else {
-    logger.info(
-      {
-        hasComposer: !!messageComposer,
-        hasChatId: !!primaryUserChatId,
-        hasTelegram: !!telegramChannel,
-      },
-      'Proactive messaging not fully configured'
-    );
-  }
-
-  // Start Telegram channel if configured
-  if (telegramChannel) {
-    void telegramChannel.start();
-  }
+  // This core has no delivery channel; outbound events remain committed for the gateway.
 
   // Start the core loop (heartbeat)
   coreLoop.start();

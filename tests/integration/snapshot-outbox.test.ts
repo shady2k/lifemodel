@@ -246,4 +246,33 @@ describe('inbound message stream', () => {
       1
     );
   });
+
+  it('commits delivery progress when no channel is registered', async () => {
+    const prefix = `outbound-no-channel:${stores.workerId}:`;
+    const event = {
+      eventId: 'answer:no-channel',
+      type: 'send.command',
+      payload: {
+        text: 'answer',
+        recipientId: 'recipient-no-channel',
+        channel: 'future-gateway',
+        destination: 'recipient-no-channel',
+      },
+    };
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const epoch = await store.takeEpoch();
+    await store.commitOwners(epoch, 1, [event]);
+    const worker = startOutboundDelivery(stores.redis, new Map(), createTestLogger(), {
+      streamKey: `${prefix}outbound`,
+      offsetKey: `${prefix}delivery-offset`,
+    });
+    const deadline = Date.now() + 2_000;
+    while ((await stores.redis.get(`${prefix}delivery-offset`)) === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    worker.stop();
+    await worker.done;
+    expect(await stores.redis.get(`${prefix}delivery-offset`)).not.toBeNull();
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(1);
+  });
 });
