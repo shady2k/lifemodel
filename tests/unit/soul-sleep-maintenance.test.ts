@@ -1,27 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { runSleepMaintenance } from '../../src/layers/cognition/soul/sleep-maintenance.js';
 import { createSoulProvider, type SoulProviderConfig } from '../../src/storage/soul-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import type { SoulStateStore } from '../../src/storage/soul-provider.js';
+import { createInMemorySoulStore } from '../helpers/in-memory-soul-store.js';
 import type { MemoryEntry, MemoryProvider } from '../../src/layers/cognition/tools/registry.js';
 import { createMockLogger } from '../helpers/factories.js';
-
-// In-memory storage for testing
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => {
-      store.set(key, data);
-    },
-    delete: async (key: string) => {
-      const existed = store.has(key);
-      store.delete(key);
-      return existed;
-    },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
 
 // Create a mock memory provider
 function createMockMemoryProvider(entries: MemoryEntry[] = []): MemoryProvider {
@@ -63,13 +46,13 @@ function createThought(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
 }
 
 describe('Soul Sleep Maintenance', () => {
-  let storage: Storage;
+  let storage: SoulStateStore;
   let soulConfig: SoulProviderConfig;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
-    storage = createMockStorage();
-    soulConfig = { storage, storageKey: 'soul-test' };
+    storage = createInMemorySoulStore();
+    soulConfig = { store: storage };
     logger = createMockLogger();
     vi.clearAllMocks();
   });
