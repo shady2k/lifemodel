@@ -38,6 +38,51 @@ export function migrationUpSql(source, filename) {
   return sql;
 }
 
+function concurrentIndexName(statement) {
+  const match = statement.match(
+    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:[a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*)/i
+  );
+  return match?.[1];
+}
+
+function quoteQualifiedIdentifier(identifier) {
+  return identifier
+    .split('.')
+    .map((part) => `"${part.replaceAll('"', '""')}"`)
+    .join('.');
+}
+
+async function concurrentIndexState(client, indexName) {
+  const [schema, name] = indexName.split('.');
+  const qualified = name === undefined ? [null, schema] : [schema, name];
+  const { rows } = await client.query(
+    `SELECT i.indisvalid, index_namespace.nspname AS schema
+     FROM pg_index i
+     JOIN pg_class index_relation ON index_relation.oid = i.indexrelid
+     JOIN pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
+     WHERE index_relation.relname = $2 AND ($1::text IS NULL OR index_namespace.nspname = $1)`,
+    qualified
+  );
+  return rows[0];
+}
+
+async function dropInvalidConcurrentIndex(client, indexName) {
+  const index = await concurrentIndexState(client, indexName);
+  if (index?.indisvalid === false) {
+    const [, name] = indexName.split('.');
+    const indexIdentifier = name ?? indexName;
+    await client.query(
+      `DROP INDEX CONCURRENTLY IF EXISTS ${quoteQualifiedIdentifier(`${index.schema}.${indexIdentifier}`)}`
+    );
+  }
+}
+
+async function assertConcurrentIndexValid(client, indexName, filename) {
+  const index = await concurrentIndexState(client, indexName);
+  if (index?.indisvalid !== true)
+    throw new Error(`Migration ${filename} did not create a valid concurrent index: ${indexName}`);
+}
+
 export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_DIR) {
   const files = (await readdir(migrationsDir)).filter((name) => name.endsWith('.sql')).sort();
   const migrations = files.map((filename) => {
@@ -60,9 +105,10 @@ export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_D
   `);
   for (const { version, filename } of migrations) {
     const client = await pool.connect();
+    let nonTransactional = false;
     try {
       const source = await readFile(path.join(migrationsDir, filename), 'utf8');
-      const nonTransactional = source
+      nonTransactional = source
         .split(/\r?\n/)
         .some((line) => line.trim() === '-- migrate:no-transaction');
       if (nonTransactional) {
@@ -79,7 +125,12 @@ export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_D
               .split(';')
               .map((sql) => sql.trim())
               .filter(Boolean);
-            for (const statement of statements) await client.query(statement);
+            for (const statement of statements) {
+              const indexName = concurrentIndexName(statement);
+              if (indexName) await dropInvalidConcurrentIndex(client, indexName);
+              await client.query(statement);
+              if (indexName) await assertConcurrentIndexValid(client, indexName, filename);
+            }
             await client.query('INSERT INTO public.schema_migrations (version) VALUES ($1)', [
               version,
             ]);
@@ -103,7 +154,7 @@ export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_D
       await client.query('INSERT INTO public.schema_migrations (version) VALUES ($1)', [version]);
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK');
+      if (!nonTransactional) await client.query('ROLLBACK');
       throw error;
     } finally {
       client.release();

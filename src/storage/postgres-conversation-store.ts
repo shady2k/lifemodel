@@ -163,8 +163,14 @@ export class PostgresConversationStore implements Storage {
           {}
         );
       }
+      const { rows: clearRows } = await client.query<{ generation: string }>(
+        `SELECT COALESCE(MAX(sequence), 0)::text AS generation
+         FROM core.conversation_messages WHERE recipient_id = $1 AND kind = 'actions_clear'`,
+        [recipientId]
+      );
+      const actionGeneration = clearRows[0]?.generation ?? '0';
       for (const action of snapshot.completedActions ?? []) {
-        const id = `action:${this.digest({ tool: action.tool, summary: action.summary })}`;
+        const id = `action:${this.digest({ tool: action.tool, summary: action.summary })}:${actionGeneration}`;
         await client.query(
           `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
            VALUES ($1, $2, 'action', $3::jsonb)
