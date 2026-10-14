@@ -736,9 +736,9 @@ export class CoreLoop {
    * Settle a turn that reached an outcome: its entries are REMOVED from the
    * durable log, so it is never replayed. A failed outcome - a failed turn
    * (error disposition) or a send that did not reach the chat - is never
-   * retried; it is reported at warn with the recipient and the reason (owner
-   * decision, comment 54). A resolved turn with NO outcome leaves its entries
-   * in the log for a single replay at the next start.
+   * retried for inbound work, which follows its own durable policy. Internal
+   * bus entries retry once in this core and then complete with a warning. A
+   * resolved turn with NO outcome leaves its entries for replay at next start.
    */
   private settleTurn(state: PendingTurnCommits): void {
     if (state.settled || this.deadForTest) return;
@@ -779,6 +779,34 @@ export class CoreLoop {
     this.dropTurnCommit(state);
     if (outcome === undefined || outcome === 'failed_turn') {
       this.busSignalStream?.markFailed(ownedBusIds);
+      const retryBusIds: string[] = [];
+      const exhaustedBusIds: string[] = [];
+      if (outcome === 'failed_turn') {
+        for (const id of ownedBusIds) {
+          const failed = this.busSignalStream?.stateFor(id);
+          if (failed?.status !== 'failed') continue;
+          if (failed.retries < 2) {
+            this.busSignalStream?.markOwned([id], failed.turnId);
+            retryBusIds.push(id);
+          } else {
+            exhaustedBusIds.push(id);
+          }
+        }
+        this.busSignalStream?.markCompleted(exhaustedBusIds);
+        const retrySignals = [...state.turn.triggerSignals, ...state.turn.absorbedSignals];
+        for (const signal of retrySignals.reverse()) {
+          const streamId = this.signalStreamIds.get(signal.id);
+          if (!streamId || !retryBusIds.includes(streamId)) continue;
+          this.knownBusEntries.add(streamId);
+          this.pendingSignals.unshift({ signal, timestamp: signal.timestamp, streamId });
+        }
+        if (exhaustedBusIds.length > 0) {
+          this.logger.warn(
+            { entries: exhaustedBusIds.length },
+            'Internal signals failed twice and were completed with their recorded failure'
+          );
+        }
+      }
       const exhaustedIds =
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
       if (state.finalErrorAttempt && exhaustedIds.length > 0)
@@ -1754,7 +1782,13 @@ export class CoreLoop {
           const signalId = [...this.signalStreamIds.entries()].find(
             ([, streamId]) => streamId === id
           )?.[0];
-          return !deferredBusIds.has(id) && (!signalId || !turnOwnedSignalIds.has(signalId));
+          const busState = this.busSignalStream?.stateFor(id);
+          const belongsToTurn = busState?.status === 'owned' && busState.turnId !== `pending:${id}`;
+          return (
+            !deferredBusIds.has(id) &&
+            !belongsToTurn &&
+            (!signalId || !turnOwnedSignalIds.has(signalId))
+          );
         });
         this.busSignalStream?.markCompleted(tickLocalCompleted);
 
