@@ -39,6 +39,7 @@ const image = `    needs: changes
         run: |
           set -eu
           scripts/build-image.sh "ci-$SHA"
+          scripts/build-core-image.sh "ci-core-$SHA"
       - name: A real first start inside the image
         env:
           SHA: \${{ github.sha }}

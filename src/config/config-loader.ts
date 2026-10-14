@@ -263,6 +263,11 @@ export class ConfigLoader {
       }
     }
 
+    // Motor Cortex
+    if (file.motorCortex?.enabled !== undefined) {
+      config.motorCortex.enabled = file.motorCortex.enabled;
+    }
+
     // Plugins
     if (file.plugins) {
       if (file.plugins.externalDir) {
@@ -316,6 +321,16 @@ export class ConfigLoader {
     const endpointMotorModel = process.env['LLM_ENDPOINT_MOTOR_MODEL'];
     if (endpointMotorModel !== undefined) {
       config.llm.endpoint.motorModel = endpointMotorModel;
+    }
+
+    // Motor Cortex is an explicit boolean switch; reject misspellings rather than
+    // silently enabling code execution.
+    const motorCortexEnabled = process.env['MOTOR_CORTEX_ENABLED'];
+    if (motorCortexEnabled !== undefined) {
+      if (motorCortexEnabled !== 'true' && motorCortexEnabled !== 'false') {
+        throw new Error('MOTOR_CORTEX_ENABLED must be exactly true or false');
+      }
+      config.motorCortex.enabled = motorCortexEnabled === 'true';
     }
 
     // Log level
