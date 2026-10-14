@@ -360,3 +360,20 @@ src/
 ├── config/         # Configuration loading (the config file, and the model endpoint's shape)
 └── settings/       # lifemodel's own web settings (the root host), and the restart code
 ```
+
+## Platform deployment and loader first start
+
+The platform artifact is a signed OCI source applied by Flux. Its root
+Kustomization applies A0 and step A in order: A0 creates and starts the loader
+and Gitea namespace, while A depends on A0 and creates OpenBao, Gitea and the
+application namespaces. A0 does not create any namespace owned by A. The
+loader's platform mode stores restart-safe phase records in a platform-created
+Secret, initializes OpenBao and retains its unseal key, then verifies
+Kubernetes-auth handoff before revoking and removing the root token. It seeds
+protected `main` and `deploy` branches in Gitea from the release bundle, creates
+a read-only source account and namespace-local source credentials, then creates
+the two application Kustomizations with their restricted appliers. Admission
+policies constrain loader-managed Secrets and application Kustomizations.
+The Gitea admin Secret stays while its chart reference exists. See
+[ADR-010](adr/010-container-generations.md) for the platform decision and
+[the loader guide](features/instance/loader.md) for the phase details.
