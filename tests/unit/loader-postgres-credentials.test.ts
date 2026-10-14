@@ -41,6 +41,22 @@ describe('CNPG core credential copy phase', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('fails when a Kubernetes API response stalls past the total deadline', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
+    try {
+      const tokenFile = join(directory, 'token');
+      await writeFile(tokenFile, 'test-token');
+      const phase = createKubernetesPostgresSecretPhase({
+        tokenFile,
+        timeoutMs: 20,
+        request: () => new Promise(() => undefined),
+      });
+      await expect(phase.run()).rejects.toThrow(/timed out/i);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed until the generated CNPG application Secret exists', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cnpg-credentials-'));
     try {

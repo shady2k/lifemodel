@@ -1,0 +1,65 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cnpg-system-default-deny
+  namespace: cnpg-system
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cnpg-operator-routes
+  namespace: cnpg-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-pg
+      app.kubernetes.io/instance: cloudnative-pg
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The vendored CNPG Service maps webhook port 443 to container port 9443.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 9443
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # k3s DNATs the in-cluster API Service to the node address; static platform
+    # manifests cannot know that address. Allow any destination on TCP 6443:
+    # The API port is the only egress restriction. The Kubernetes API server authenticates the projected ServiceAccount token.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: lifemodel
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000

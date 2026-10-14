@@ -7,6 +7,7 @@ export interface KubernetesPostgresSecretOptions {
   apiServer?: string;
   tokenFile?: string;
   caFile?: string;
+  timeoutMs?: number;
   request?: (
     url: URL,
     method: string,
@@ -31,6 +32,8 @@ export function createKubernetesPostgresSecretPhase(
     `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`;
   const tokenFile = options.tokenFile ?? `${SERVICE_ACCOUNT}/token`;
   const caFile = options.caFile ?? `${SERVICE_ACCOUNT}/ca.crt`;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const customRequest = options.request;
   const call =
     options.request ??
     ((url, method, token, body, ca) =>
@@ -57,14 +60,26 @@ export function createKubernetesPostgresSecretPhase(
               response += chunk;
             });
             res.on('end', () => {
+              clearTimeout(timer);
               resolve({ status: res.statusCode ?? 0, body: response });
             });
             res.on('aborted', () => {
+              clearTimeout(timer);
               reject(new Error('Kubernetes API response was truncated'));
             });
           }
         );
-        req.on('error', reject);
+        const timer = setTimeout(
+          () =>
+            req.destroy(
+              new Error(`Kubernetes API request timed out after ${String(timeoutMs)} ms`)
+            ),
+          timeoutMs
+        );
+        req.on('error', (error) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        });
         if (body !== undefined) req.write(body);
         req.end();
       }));
@@ -77,7 +92,31 @@ export function createKubernetesPostgresSecretPhase(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    return call(url, method, token, body === undefined ? undefined : JSON.stringify(body), ca);
+    const requestBody = body === undefined ? undefined : JSON.stringify(body);
+    if (!customRequest) return call(url, method, token, requestBody, ca);
+    return new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Kubernetes API request timed out after ${String(timeoutMs)} ms`));
+      }, timeoutMs);
+      let result: Promise<{ status: number; body: string }>;
+      try {
+        result = customRequest(url, method, token, requestBody, ca);
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      result.then(
+        (response) => {
+          clearTimeout(timer);
+          resolve(response);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      );
+    });
   }
   const sourceUrl = new URL(`/api/v1/namespaces/${SOURCE_NAMESPACE}/secrets/${SOURCE_NAME}`, host);
   const targetUrl = new URL(`/api/v1/namespaces/${TARGET_NAMESPACE}/secrets/${TARGET_NAME}`, host);
