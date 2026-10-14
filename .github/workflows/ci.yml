@@ -14,7 +14,8 @@
 #      checks and the suite never run in this checkout, when the answer is
 #      product=true (or when the `changes` job did not succeed, see its
 #      comment) and the pull request is not a draft;
-#   3. ci-backlog: the backlog gate below, on every change, for everyone;
+#   3. ci-backlog: the backlog gate, commit-link and present-document checks,
+#      plus the expanding-only migration lint, on every change;
 #   4. ci-image: the instance image (story S9) on a PULL REQUEST — the same
 #      scripts/build-image.sh a person runs, and then a REAL first start inside
 #      the image it just built. It holds no write token: the workflow's own
@@ -57,9 +58,11 @@
 # a `package.json` that agrees with `package-lock.json` — the suite itself now
 # proves, in tests/unit/test-entrypoints.test.ts, inside the boundary.
 #
-# ci-backlog needs node and a full history and nothing else. Its three steps
-# mirror the local hooks (.githooks/pre-commit, .githooks/commit-msg), which a
-# push is one --no-verify away from skipping:
+# ci-backlog needs node and a full history. Its backlog, commit-link and
+# present-document steps mirror the local hooks (.githooks/pre-commit,
+# .githooks/commit-msg), which a push is one --no-verify away from skipping.
+# The same required job also owns the pinned, checksum-verified expanding-only
+# migration lint, so a red squawk result blocks the documented merge path:
 #
 #   1. the backlog gate: the export at the head of the change judged against
 #      the export at its baseline, under the config's strength (block-new),
@@ -193,28 +196,6 @@ jobs:
       - name: Typecheck, lint, the format check and the suite, inside the isolated test boundary
         run: node scripts/test-isolated.mjs check
 
-  # Migration lint is separate from ci-product so the product job continues
-  # to run only the isolated check; this job is owed by product changes.
-  ci-migrations:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Lint expanding-only Postgres migrations with squawk
-        run: |
-          set -eu
-          squawk="$RUNNER_TEMP/squawk"
-          curl --proto '=https' --tlsv1.2 -fsSL \
-            https://github.com/sbdchd/squawk/releases/download/v2.69.0/squawk-linux-x64 \
-            -o "$squawk"
-          printf '%s  %s\n' \
-            9af8b2b54135ab236389122bce6c9edc40a8db4347e77d19079f19dcceddc737 \
-            "$squawk" | sha256sum --check
-          chmod +x "$squawk"
-          "$squawk" db/migrations/*.sql
-
   ci-backlog:
     runs-on: ubuntu-latest
     steps:
@@ -228,6 +209,19 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+
+      - name: Lint expanding-only Postgres migrations with squawk
+        run: |
+          set -eu
+          squawk="$RUNNER_TEMP/squawk"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://github.com/sbdchd/squawk/releases/download/v2.69.0/squawk-linux-x64 \
+            -o "$squawk"
+          printf '%s  %s\n' \
+            9af8b2b54135ab236389122bce6c9edc40a8db4347e77d19079f19dcceddc737 \
+            "$squawk" | sha256sum --check
+          chmod +x "$squawk"
+          "$squawk" db/migrations/*.sql
 
       - name: Product documents follow their form
         env:
