@@ -59,3 +59,7 @@ gitea:
       TYPE: level
     cache:
       ADAPTER: memory
+    server:
+      DOMAIN: gitea-http.lifemodel-git.svc.cluster.local
+      SSH_DOMAIN: gitea-http.lifemodel-git.svc.cluster.local
+      ROOT_URL: http://gitea-http.lifemodel-git.svc.cluster.local:3000/

@@ -31,12 +31,12 @@ stringData:
   security: INSTALL_LOCK=true
   server: |-
     APP_DATA_PATH=/data
-    DOMAIN=git.example.com
+    DOMAIN=gitea-http.lifemodel-git.svc.cluster.local
     ENABLE_PPROF=false
     HTTP_PORT=3000
     PROTOCOL=http
-    ROOT_URL=http://git.example.com
-    SSH_DOMAIN=git.example.com
+    ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/
+    SSH_DOMAIN=gitea-http.lifemodel-git.svc.cluster.local
     SSH_LISTEN_PORT=2222
     SSH_PORT=22
     START_SSH_SERVER=true
@@ -439,7 +439,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: 12f18c8ee803cadbc58139753947f3fd02faef36d084156618be3c5dbdbc9aa1
+        checksum/config: cb5f3dba92c187235efeadacb2f83a412f072f7a2c02bbef62d7901c931db618
       labels:
         helm.sh/chart: gitea-12.7.0
         app: gitea

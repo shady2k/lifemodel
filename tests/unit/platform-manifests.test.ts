@@ -156,7 +156,7 @@ describe('platform manifests', () => {
       'valkey-cluster': { enabled: false },
       gitea: {
         admin: { username: '', password: '', existingSecret: 'gitea-admin', passwordMode: 'initialOnlyNoReset' },
-        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' } },
+        config: { database: { DB_TYPE: 'sqlite3', PATH: '/data/gitea/gitea.db' }, repository: { ROOT: '/data/git/repositories' }, queue: { TYPE: 'level' }, cache: { ADAPTER: 'memory' }, server: { DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', SSH_DOMAIN: 'gitea-http.lifemodel-git.svc.cluster.local', ROOT_URL: 'http://gitea-http.lifemodel-git.svc.cluster.local:3000/' } },
       },
       persistence: { enabled: true, create: true, claimName: 'gitea-shared-storage', annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } },
       ingress: { enabled: false },
@@ -174,6 +174,8 @@ describe('platform manifests', () => {
     delete missingEnforce.metadata.labels['pod-security.kubernetes.io/enforce'];
     expect(() => assertRestrictedNamespace(missingEnforce)).toThrow(/enforce/);
     expect(rendered.some((item) => item.kind === 'Ingress')).toBe(false);
+    const inlineConfig = rendered.find((item) => item.kind === 'Secret' && item.metadata?.name === 'gitea-inline-config');
+    expect(inlineConfig?.stringData?.server).toContain('ROOT_URL=http://gitea-http.lifemodel-git.svc.cluster.local:3000/');
     const pvc = rendered.find((item) => item.kind === 'PersistentVolumeClaim');
     expect(pvc?.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
     const policy = YAML.parse(readFileSync(join(giteaRoot, 'network-policy.yaml'), 'utf8')) as Record<string, any>;
