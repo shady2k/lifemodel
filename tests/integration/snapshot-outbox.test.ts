@@ -179,8 +179,8 @@ describe('snapshot outbox commit', () => {
       maxLength: 5,
       maxAgeMs: 60_000,
     });
-    expect(await stores.redis.xlen(streamKey)).toBe(1);
-    expect(await stores.redis.hlen(eventKeysKey)).toBe(1);
+    expect(await stores.redis.xlen(streamKey)).toBe(0);
+    expect(await stores.redis.hlen(eventKeysKey)).toBe(0);
     expect(ids.length).toBe(12);
   });
 });
@@ -416,8 +416,8 @@ describe('outbound retention with delivery consumers', () => {
     worker.stop();
     await worker.done;
     expect(sends).toBe(events.length);
-    expect(await stores.redis.xlen(streamKey)).toBe(1);
-    expect(await stores.redis.hlen(eventKeysKey)).toBe(1);
+    expect(await stores.redis.xlen(streamKey)).toBe(0);
+    expect(await stores.redis.hlen(eventKeysKey)).toBe(0);
   }, 15_000);
 });
 
