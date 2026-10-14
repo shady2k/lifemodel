@@ -68,7 +68,7 @@ describe('per-namespace application topology', () => {
         },
       ]);
     }
-    const loaderRoles = ['deploy/platform/a0/application-rbac.yaml']
+    const loaderRoles = ['deploy/platform/a/loader-app-rbac.yaml']
       .flatMap(docs)
       .filter((o) => o.kind === 'Role');
     expect(loaderRoles).toHaveLength(2);
