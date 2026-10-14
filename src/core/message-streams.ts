@@ -21,6 +21,7 @@ interface InboundSnapshot {
   recipientOffsets: Record<string, string>;
   recentMessageIds: string[];
   pending: InboundMessage[];
+  errorRetries: Record<string, number>;
 }
 
 const emptySnapshot = (): InboundSnapshot => ({
@@ -29,6 +30,7 @@ const emptySnapshot = (): InboundSnapshot => ({
   recipientOffsets: {},
   recentMessageIds: [],
   pending: [],
+  errorRetries: {},
 });
 
 /** Durable inbound stream reader and snapshot-owned offsets/dedup state. */
@@ -123,6 +125,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   private takeUndelivered(includePhotoReceipts: boolean): InboundMessage[] {
     const result = this.snapshot.pending.filter((item) => {
       if (this.queuedIds.has(item.signal.id)) return false;
+      if ((this.snapshot.errorRetries[item.messageId] ?? 0) >= 2) return false;
       const data = item.signal.data as { pendingPhoto?: unknown };
       return includePhotoReceipts || data.pendingPhoto == null;
     });
@@ -140,10 +143,26 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       }
       this.snapshot.recipientOffsets[message.recipientId] = message.streamId;
       this.snapshot.recentMessageIds.push(message.messageId);
+      this.snapshot.errorRetries = Object.fromEntries(
+        Object.entries(this.snapshot.errorRetries).filter(
+          ([messageId]) => messageId !== message.messageId
+        )
+      );
       this.queuedIds.delete(message.signal.id);
     }
     this.snapshot.pending = remains;
     this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+  }
+
+  /** Record an error-disposition attempt without settling the input. */
+  markFailedTurn(signalIds: string[]): void {
+    const failed = new Set(signalIds);
+    for (const message of this.snapshot.pending) {
+      if (failed.has(message.signal.id)) {
+        this.snapshot.errorRetries[message.messageId] =
+          (this.snapshot.errorRetries[message.messageId] ?? 0) + 1;
+      }
+    }
   }
 
   exportSnapshot(): InboundSnapshot {
@@ -165,7 +184,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     ) {
       throw new Error('Invalid inbound snapshot section');
     }
-    this.snapshot = structuredClone(value);
+    this.snapshot = structuredClone({ ...value, errorRetries: value.errorRetries ?? {} });
     this.queuedIds.clear();
   }
 
