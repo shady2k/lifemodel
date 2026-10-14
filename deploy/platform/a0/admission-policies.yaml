@@ -49,18 +49,25 @@ spec:
     resourceRules:
       - apiGroups: [kustomize.toolkit.fluxcd.io]
         apiVersions: [v1]
-        operations: [CREATE, UPDATE]
+        operations: [CREATE, UPDATE, DELETE]
         resources: [kustomizations]
   validations:
     - expression: >-
-        has(object.spec.serviceAccountName) && object.spec.serviceAccountName == request.namespace + '-applier' &&
-        has(object.spec.sourceRef) && object.spec.sourceRef.kind == 'GitRepository' &&
-        object.spec.sourceRef.name == request.namespace &&
-        (!has(object.spec.sourceRef.namespace) || object.spec.sourceRef.namespace == request.namespace) &&
-        !has(object.spec.kubeConfig) &&
-        (!has(object.spec.targetNamespace) || object.spec.targetNamespace == request.namespace) &&
-        (!has(object.spec.dependsOn) || object.spec.dependsOn.all(dependency, !has(dependency.namespace) || dependency.namespace == request.namespace))
+        request.operation == 'DELETE' ||
+        (has(object.spec.serviceAccountName) && object.spec.serviceAccountName == request.namespace + '-applier' &&
+         has(object.spec.sourceRef) && object.spec.sourceRef.kind == 'GitRepository' &&
+         object.spec.sourceRef.name == request.namespace &&
+         (!has(object.spec.sourceRef.namespace) || object.spec.sourceRef.namespace == request.namespace) &&
+         !has(object.spec.kubeConfig) &&
+         has(object.spec.targetNamespace) && object.spec.targetNamespace == request.namespace &&
+         (!has(object.spec.dependsOn) || object.spec.dependsOn.all(dependency, !has(dependency.namespace) || dependency.namespace == request.namespace)))
       message: application Kustomizations must use their local GitRepository and applier
+    - expression: >-
+        request.userInfo.username != 'system:serviceaccount:lifemodel-system:loader' ||
+        (request.operation != 'DELETE' &&
+         has(object.metadata.name) && object.metadata.name == request.namespace &&
+         has(object.spec.path) && object.spec.path == './deploy/platform/applications/' + request.namespace)
+      message: loader may only create or update the namespace's pinned application Kustomization
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
