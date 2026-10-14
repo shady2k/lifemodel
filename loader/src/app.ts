@@ -42,6 +42,7 @@ import {
   type PlatformPhase,
 } from './platform-bootstrap.js';
 import { createKubernetesPostgresSecretPhase } from './postgres.js';
+import { createKubernetesValkeySecretPhase } from './valkey.js';
 import {
   createGiteaBootstrap,
   createGiteaHttpApi,
@@ -137,6 +138,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         extraPhases: deps.platformGiteaPhases ?? [
           ...giteaBootstrap.phases(),
           createKubernetesPostgresSecretPhase(),
+          createKubernetesValkeySecretPhase(),
         ],
         ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
       });

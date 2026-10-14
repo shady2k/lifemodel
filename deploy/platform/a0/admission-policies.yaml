@@ -10,7 +10,7 @@ spec:
       matchExpressions:
         - key: kubernetes.io/metadata.name
           operator: In
-          values: [lifemodel-git, lifemodel, lifemodel-motor]
+          values: [lifemodel-git, lifemodel, lifemodel-motor, lifemodel-state]
     resourceRules:
       - apiGroups: [""]
         apiVersions: [v1]
@@ -23,7 +23,7 @@ spec:
     - expression: >-
         request.operation != 'DELETE' &&
         ((request.namespace == 'lifemodel-git' && object.metadata.name == 'gitea-admin') ||
-         ((request.namespace == 'lifemodel' && (object.metadata.name == 'deploy-source-credential' || object.metadata.name == 'lifemodel-db-credentials')) || (request.namespace == 'lifemodel-motor' && object.metadata.name == 'deploy-source-credential')))
+         ((request.namespace == 'lifemodel' && (object.metadata.name == 'deploy-source-credential' || object.metadata.name == 'lifemodel-db-credentials' || object.metadata.name == 'lifemodel-valkey-credentials')) || (request.namespace == 'lifemodel-motor' && object.metadata.name == 'deploy-source-credential') || (request.namespace == 'lifemodel-state' && object.metadata.name == 'lifemodel-valkey-credentials')))
       message: loader may only create or update the platform's named bootstrap and core database credential Secrets; deletion is forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

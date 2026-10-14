@@ -6,8 +6,8 @@ This directory is the root of the signed platform OCI artifact. The root
 `dependsOn`; it deploys the loader and the Gitea namespace first. Step A
 `dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
 can start. Step B installs CloudNativePG with its CRDs; step C depends on B
-and applies shared state resources, including the Postgres Cluster. The C
-step is the home for Valkey to be added beside Postgres. A0 creates no namespace that step A creates. This order
+and applies shared state resources, including the Postgres Cluster and Valkey
+StatefulSet. A0 creates no namespace that step A creates. This order
 lets the loader initialize OpenBao rather than requiring an already running
 Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
@@ -99,16 +99,20 @@ version 0.29.1 (operator 1.30.1). Its release archive SHA-256 is recorded in
 value; the operator image is pinned to
 `ghcr.io/cloudnative-pg/cloudnative-pg@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07`.
 Step B applies the CRDs and waits for the operator. Step C owns
-`lifemodel-state`, its default-deny policies and the one-instance `lifemodel`
-Cluster. Step A also allows the core namespace to egress to the state Postgres
-Service on TCP 5432; the state policy allows only that source namespace and
-the CNPG operator ports. The bootstrap creates database `lifemodel` and owner role `lifemodel`
-with CNPG's generated `lifemodel-app` Secret. The post-init SQL enables
-pgvector in the application database.
+`lifemodel-state`, its default-deny policies, the one-instance `lifemodel`
+Cluster and the one-replica Valkey StatefulSet. Valkey uses a plain Kubernetes
+manifest rather than a chart: its small, fixed resource set stays explicit and
+adds no chart packaging. Step A permits core egress to Postgres on TCP 5432 and
+Valkey on TCP 6379; the state policies admit only the core namespace on those
+store ports, plus the CNPG operator ports. The bootstrap creates database
+`lifemodel` and owner role `lifemodel` with CNPG's generated `lifemodel-app` Secret.
+The post-init SQL enables pgvector in the application database.
 
 The loader copies only the generated username and password to a fixed Secret
-`lifemodel/lifemodel-db-credentials`, in a resumable first-start phase. This
-uses the existing loader ServiceAccount; it adds no controller. The copy is
-static until lifemodel-2t5 moves credentials to OpenBao. The platform admission
-policy allows this one loader Secret while application Kustomizations remain
+`lifemodel/lifemodel-db-credentials`, in a resumable first-start phase. It also
+generates a random Valkey password only if the retained source Secret is
+absent, then copies it to `lifemodel/lifemodel-valkey-credentials`. This uses
+the existing loader ServiceAccount; it adds no controller. The credentials are
+static until lifemodel-2t5 moves them to OpenBao. The platform admission policy
+allows only these named loader Secrets while application Kustomizations remain
 confined to their own namespaces.
