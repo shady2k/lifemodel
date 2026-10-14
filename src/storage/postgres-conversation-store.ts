@@ -11,12 +11,14 @@ interface ConversationMessageRow {
   channelMessageId?: string;
   channel?: string;
   messageId?: string;
+  sequence?: string;
 }
 interface CompactionMarker {
   id?: string;
   summary: string;
   retainedMessageIds: string[];
   timestamp: string;
+  coveredThroughSequence?: string;
 }
 interface ConversationSnapshot {
   messages: ConversationMessageRow[];
@@ -47,7 +49,9 @@ export class PostgresConversationStore implements Storage {
     const markerRow = active.filter((row) => row.kind === 'compaction').at(-1);
     const marker = markerRow?.payload as CompactionMarker | undefined;
     const retainedIds = new Set(marker?.retainedMessageIds ?? []);
-    const markerSequence = markerRow ? BigInt(markerRow.sequence) : 0n;
+    const markerSequence = markerRow
+      ? BigInt(marker?.coveredThroughSequence ?? markerRow.sequence)
+      : 0n;
     const result: ConversationSnapshot = { messages: [] };
     if (marker) result.compactionMarker = { ...marker };
     for (const row of active) {
@@ -58,6 +62,7 @@ export class PostgresConversationStore implements Storage {
         result.messages.push({
           ...(row.payload as ConversationMessageRow),
           messageId: row.message_id,
+          sequence: row.sequence,
         });
       }
       if (row.kind === 'status') {
@@ -73,6 +78,13 @@ export class PostgresConversationStore implements Storage {
         );
       }
     }
+    if (result.completedActions) {
+      const cutoff = Date.now() - 4 * 60 * 60 * 1000;
+      result.completedActions = result.completedActions
+        .filter((action) => new Date(action.timestamp).getTime() > cutoff)
+        .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+        .slice(0, 20);
+    }
     return active.length ? result : null;
   }
 
@@ -82,6 +94,7 @@ export class PostgresConversationStore implements Storage {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [recipientId]);
       for (const message of snapshot.messages ?? []) {
         const messageId = message.messageId ?? this.messageId(message);
         message.messageId = messageId;
@@ -116,8 +129,13 @@ export class PostgresConversationStore implements Storage {
         );
       }
       for (const action of snapshot.completedActions ?? []) {
-        const id = `action:${this.digest(action)}`;
-        await this.insertEvent(client, recipientId, id, 'action', action);
+        const id = `action:${this.digest({ tool: action.tool, summary: action.summary })}`;
+        await client.query(
+          `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
+           VALUES ($1, $2, 'action', $3::jsonb)
+           ON CONFLICT (recipient_id, message_id) DO UPDATE SET payload = EXCLUDED.payload`,
+          [recipientId, id, JSON.stringify(action)]
+        );
       }
       await client.query('COMMIT');
     } catch (error) {
@@ -150,6 +168,9 @@ export class PostgresConversationStore implements Storage {
     if (message.channelMessageId && message.channel)
       return `channel:${message.channel}:${message.channelMessageId}`;
     if (message.role === 'tool' && message.tool_call_id) return `tool:${message.tool_call_id}`;
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      return `turn:${this.digest(message.tool_calls.map((call) => call.id).sort())}`;
+    }
     return randomUUID();
   }
 

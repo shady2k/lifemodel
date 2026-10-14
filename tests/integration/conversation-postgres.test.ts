@@ -124,4 +124,99 @@ describe('Postgres conversation history', () => {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
+
+  it('preserves messages appended after the compaction snapshot', async () => {
+    const stores = await createTestStores();
+    const recipientId = 'recipient-compaction-overlap';
+    try {
+      await applyTestMigrations(stores.postgres);
+      const store = new PostgresConversationStore(stores.postgres);
+      const first = createConversationManager(store, createTestLogger());
+      for (let i = 0; i < 11; i++) {
+        await first.addMessage(recipientId, { role: 'user', content: `Q${i}` });
+        await first.addMessage(recipientId, { role: 'assistant', content: `A${i}` });
+      }
+      const compacting = createConversationManager(
+        {
+          load: store.load.bind(store),
+          delete: store.delete.bind(store),
+          exists: store.exists.bind(store),
+          save: async (key, value) => {
+            const snapshot = value as { compactionMarker?: unknown };
+            if (snapshot.compactionMarker) {
+              await first.addMessage(recipientId, { role: 'user', content: 'new user' });
+              await first.addMessage(recipientId, { role: 'assistant', content: 'new answer' });
+            }
+            await store.save(key, value);
+          },
+        },
+        createTestLogger()
+      );
+      expect(await compacting.compactMessages(recipientId, 22, 'summary')).toBe(true);
+      const history = await first.getFullHistory(recipientId);
+      expect(history.some(({ content }) => content === 'new user')).toBe(true);
+      expect(history.some(({ content }) => content === 'new answer')).toBe(true);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('deduplicates a replayed tool turn after store recreation', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const call = {
+        id: 'replay-call',
+        type: 'function' as const,
+        function: { name: 'core.time', arguments: '{}' },
+      };
+      const first = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      await first.addMessage('recipient-replay', { role: 'user', content: 'do it' });
+      await first.addTurn('recipient-replay', { content: null, tool_calls: [call] }, [
+        { tool_call_id: call.id, content: 'done' },
+      ]);
+      const restarted = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      await restarted.addTurn('recipient-replay', { content: null, tool_calls: [call] }, [
+        { tool_call_id: call.id, content: 'done' },
+      ]);
+      expect((await restarted.getHistory('recipient-replay')).map(({ role }) => role)).toEqual([
+        'user',
+        'assistant',
+        'tool',
+      ]);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('projects completed actions as a capped, refreshed logical set', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const manager = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      await manager.addCompletedAction('recipient-actions', { tool: 'core.same', summary: 'same' });
+      const before = (await manager.getRecentActions('recipient-actions'))[0]?.timestamp;
+      await manager.addCompletedAction('recipient-actions', { tool: 'core.same', summary: 'same' });
+      expect(await manager.getRecentActions('recipient-actions')).toHaveLength(1);
+      expect((await manager.getRecentActions('recipient-actions'))[0]?.timestamp).toBeDefined();
+      for (let i = 0; i < 22; i++)
+        await manager.addCompletedAction('recipient-actions', {
+          tool: 'core.test',
+          summary: `action-${i}`,
+        });
+      expect(await manager.getRecentActions('recipient-actions')).toHaveLength(20);
+      expect(before).toBeDefined();
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
 });
