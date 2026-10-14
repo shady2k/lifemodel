@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { type PlatformPhase, type PlatformPhaseStore } from './platform-bootstrap.js';
+import type { PlatformPhase } from './platform-bootstrap.js';
 import type { CommandRunner } from './exec.js';
 
 export interface GiteaCredentials { username: string; password: string }
@@ -60,8 +60,8 @@ export function createKubernetesGiteaAdminSecret(options: KubernetesOptions = {}
     }
     if(response.status!==200) throw new Error(`Gitea admin Secret read failed (${response.status}): ${response.body}`);
     const data=(JSON.parse(response.body) as {data?:Record<string,string>}).data;
-    if(!data?.username||!data.password) throw new Error('existing gitea-admin Secret has no username/password custody');
-    return {username:Buffer.from(data.username,'base64').toString(),password:Buffer.from(data.password,'base64').toString()};
+    if(!data?.['username']||!data['password']) throw new Error('existing gitea-admin Secret has no username/password custody');
+    return {username:Buffer.from(data['username'],'base64').toString(),password:Buffer.from(data['password'],'base64').toString()};
   };
 }
 
