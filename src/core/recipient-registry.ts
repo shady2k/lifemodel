@@ -444,7 +444,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
         }
         if (failure !== undefined) {
           if (failure instanceof Error) throw failure;
-          throw new Error(String(failure));
+          throw new Error('Recipient registry save failed', { cause: failure });
         }
       }
     })();
