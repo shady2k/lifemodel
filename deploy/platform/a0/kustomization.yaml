@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - service-account.yaml
   - bootstrap-secrets.yaml
+  - admission-policies.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml
