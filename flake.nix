@@ -197,6 +197,8 @@
         fi
         grep -F 'name: lifemodel-state' state.yaml >/dev/null
         grep -F 'name: lifemodel-postgres-egress' step-a.yaml >/dev/null
+        grep -A25 -F 'name: lifemodel-dns-egress' step-a.yaml | grep -F 'k8s-app: kube-dns' >/dev/null
+        grep -A25 -F 'name: lifemodel-dns-egress' step-a.yaml | grep -F 'port: 53' >/dev/null
         grep -F 'name: lifemodel-state-postgres-access' state.yaml >/dev/null
         grep -F 'cnpg.io/cluster: lifemodel' state.yaml >/dev/null
         grep -F 'port: 6443' state.yaml >/dev/null
