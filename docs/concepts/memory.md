@@ -30,7 +30,7 @@ Responsible for:
 - **Semantic vector search**: queries and entries are embedded locally and searched with pgvector cosine distance
 - Two-phase search: vector retrieval from Postgres/pgvector → re-ranking in JS with recency/confidence/salience boosts
 
-**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). Model cache lives under `/tmp` in the cluster image (~50MB).
+**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). The model is baked into the core image at `/opt/model-cache` and read in place in the cluster (~50MB).
 
 **Storage:** vectors and their metadata are persisted in the core Postgres schema (`core.memory_vectors`, migration `20261015000003_create_memory_vectors.sql`). Configuration also lives in Postgres (`core.settings`); neither store depends on a local file directory.
 

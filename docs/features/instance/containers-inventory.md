@@ -107,7 +107,7 @@ the design, not decided here.
 | 15 | Configuration | Postgres `core.settings`; `PostgresConfigStore` reads and writes configuration | Postgres (configuration); endpoint changes reload in place |
 | 16 | LLM keys | Secret values are not stored in configuration; platform credentials are injected at the egress boundary | OpenBao / Agent Vault |
 | 17 | Motor run registry | Motor Cortex is disabled in the cluster; the registry is owned by lifemodel-653 | no cluster state home in this stage |
-| 18 | Motor artifacts/workspaces, skills, ONNX model cache, logs | Motor directories are disabled in the cluster; ONNX cache is `/tmp/lifemodel-models`; logs are stdout | image/runtime ephemeral storage; stdout |
+| 18 | Motor run/workspace artifacts, skills, ONNX model, logs | Motor directories are disabled in the cluster; skill definitions are Postgres rows; ONNX model is read-only at `/opt/model-cache`; logs are stdout | Postgres; image; stdout |
 | 19 | Loader four files + vault store | `<volume>/loader/*` root-only, `<volume>/vault` | loader-owned |
 | 20 | Repository (the instance's code) | `<volume>/repo` git clone, dist/ overwritten by build | git repository on the volume (unchanged); generations select commits — no version store exists today (state.json holds ONE builtCommit, state.ts:28-32) |
 

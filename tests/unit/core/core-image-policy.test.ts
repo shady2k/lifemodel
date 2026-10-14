@@ -13,7 +13,9 @@ describe('core image policy', () => {
     expect(dockerfile).toContain('DATA_PATH=/tmp/lifemodel');
     expect(dockerfile).toContain('COPY --from=model /opt/model-cache');
     expect(dockerfile).toContain('.npmrc');
-    expect(entrypoint).toContain('\"$DATA_PATH/models/\"');
+    expect(dockerfile).toContain('LIFEMODEL_MODEL_DIR=/opt/model-cache');
+    expect(entrypoint).not.toMatch(/(mkdir|cp).*model|DATA_PATH\/models/);
+    expect(entrypoint).toContain('exec node /opt/lifemodel/dist/index.js');
     expect(dockerfile).not.toMatch(/(loader|caddy|seed\.bundle)/i);
   });
 

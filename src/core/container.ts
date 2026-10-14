@@ -700,7 +700,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Long-lived memory and its graph live only in the core Postgres schema.
-  const embedder = createEmbedder({ cacheDir: '/tmp/lifemodel-models' });
+  const embedder = createEmbedder();
   const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
   const graphStore = new PostgresGraphStore(postgres, logger);
   const memoryProvider = new MemoryProviderImpl(logger, { vectorStore, graphStore });

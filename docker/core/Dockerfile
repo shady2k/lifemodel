@@ -19,6 +19,7 @@ ENV NODE_ENV=production \
     DATA_PATH=/tmp/lifemodel \
     LOG_LEVEL=info \
     MOTOR_CORTEX_ENABLED=false \
+    LIFEMODEL_MODEL_DIR=/opt/model-cache \
     HOME=/tmp
 WORKDIR /opt/lifemodel
 COPY --from=build --chown=node:node /opt/lifemodel/package.json ./package.json
