@@ -112,16 +112,18 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       api: createOpenBaoApi({ address: config.openBaoAddress }),
       custody: createKubernetesBaoCustody(),
     } satisfies { api: BaoApi; custody: BaoCustody });
+  const giteaApi =
+    deps.platformGiteaApi ??
+    ({
+      ...createGiteaHttpApi({
+        address: 'http://gitea-http.lifemodel-git.svc:3000',
+        seedBundle: '/opt/lifemodel/seed.bundle',
+        runner,
+      }),
+      ensureAdminSecret: createKubernetesGiteaAdminSecret(),
+    } satisfies GiteaApi);
   const giteaBootstrap = createGiteaBootstrap({
-    api:
-      deps.platformGiteaApi ?? {
-        ...createGiteaHttpApi({
-          address: 'http://gitea-http.lifemodel-git.svc:3000',
-          seedBundle: '/opt/lifemodel/seed.bundle',
-          runner,
-        }),
-        ensureAdminSecret: createKubernetesGiteaAdminSecret(),
-      },
+    api: giteaApi,
     runPhases: createPlatformPhaseRunner(platformPhaseStore),
   });
   const platformBootstrap =
