@@ -279,15 +279,22 @@ export interface StopReport {
  * CoreLoop - orchestrates the 4-layer pipeline.
  */
 function compareStreamIds(left: string, right: string): number {
-  const [leftMs, leftSeq] = left.split('-').map(BigInt);
-  const [rightMs, rightSeq] = right.split('-').map(BigInt);
-  return leftMs! < rightMs!
+  const leftParts = left.split('-');
+  const rightParts = right.split('-');
+  if (leftParts.length !== 2 || rightParts.length !== 2) {
+    throw new Error('Invalid Valkey stream ID');
+  }
+  const leftMillis = BigInt(leftParts[0] ?? '');
+  const leftSequence = BigInt(leftParts[1] ?? '');
+  const rightMillis = BigInt(rightParts[0] ?? '');
+  const rightSequence = BigInt(rightParts[1] ?? '');
+  return leftMillis < rightMillis
     ? -1
-    : leftMs! > rightMs!
+    : leftMillis > rightMillis
       ? 1
-      : leftSeq! < rightSeq!
+      : leftSequence < rightSequence
         ? -1
-        : leftSeq! > rightSeq!
+        : leftSequence > rightSequence
           ? 1
           : 0;
 }

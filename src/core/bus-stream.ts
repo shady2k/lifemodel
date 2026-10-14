@@ -67,7 +67,7 @@ export class ValkeyBusSignalStream implements BusSignalStream {
 
   hydrateSnapshot(value: string | undefined): void {
     if (value !== undefined && !/^\d+-\d+$/.test(value)) {
-      throw new Error(`Invalid bus offset: ${String(value)}`);
+      throw new Error(`Invalid bus offset: ${value}`);
     }
     this.offset = value ?? '0-0';
   }
