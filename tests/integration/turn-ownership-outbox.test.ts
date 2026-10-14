@@ -274,9 +274,22 @@ describe('turn ownership and outbox durability', () => {
       });
       await inbound.append(signal);
       await waitFor(() => instance.cognition.calls.length === 1, 'input reaches cognition');
+      instance.coreLoop.applyImmediateIntent({
+        type: 'SEND_MESSAGE',
+        payload: { recipientId: instance.recipientId, text: 'acknowledged before failure' },
+      });
       (instance.cognition as { settleAll(result: unknown): void }).settleAll({
         confidence: 0,
-        intents: [],
+        intents: [
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId: instance.recipientId, text: 'partial 1' },
+          },
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId: instance.recipientId, text: 'partial 2' },
+          },
+        ],
         response: undefined,
         disposition: 'error',
       });
@@ -297,6 +310,7 @@ describe('turn ownership and outbox durability', () => {
         expect.objectContaining({ messageId: 'error-input' })
       );
       expect(section?.errorRetries['error-input']).toBe(1);
+      expect(await stores.redis.xlen(`${prefix}outbound`)).toBe(0);
 
       const retry = new InboundMessageStream(stores.redis, `${prefix}inbound`);
       retry.hydrateSnapshot(section);
@@ -502,7 +516,18 @@ describe('turn ownership and outbox durability', () => {
           await inbound.append(signal);
         }
         (instance.cognition as { result: unknown }).result = {
-          ...answer(instance.recipientId, 'failure notice'),
+          confidence: 0,
+          intents: [
+            {
+              type: 'SEND_MESSAGE',
+              payload: { recipientId: instance.recipientId, text: 'partial 1' },
+            },
+            {
+              type: 'SEND_MESSAGE',
+              payload: { recipientId: instance.recipientId, text: 'partial 2' },
+            },
+          ],
+          response: undefined,
           disposition: 'error',
         };
         if (attempt === 1) {
@@ -545,7 +570,8 @@ describe('turn ownership and outbox durability', () => {
             payload: { text: string };
           };
           expect(event.eventId).toMatch(/^error-notice:/);
-          expect(event.payload.text).toBe('failure notice');
+          expect(event.payload.text).toBe('I could not complete that request after two attempts.');
+          expect(event.payload.text).not.toMatch(/partial [12]/);
           expect(rows).toHaveLength(1);
         }
       } finally {
