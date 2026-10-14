@@ -194,10 +194,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   willExhaustRetries(signalIds: string[]): boolean {
     const ids = new Set(signalIds);
     const owned = this.snapshot.pending.filter((message) => ids.has(message.signal.id));
-    return (
-      owned.length > 0 &&
-      owned.every((message) => (this.snapshot.errorRetries[message.messageId] ?? 0) + 1 >= 2)
-    );
+    return owned.some((message) => (this.snapshot.errorRetries[message.messageId] ?? 0) + 1 >= 2);
   }
 
   /** Record an error-disposition attempt without settling the input. */

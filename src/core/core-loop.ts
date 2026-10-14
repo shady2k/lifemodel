@@ -370,6 +370,7 @@ export class CoreLoop {
 
   /** Pending COGNITION operation (non-blocking) */
   private pendingCognition: PendingCognition | null = null;
+  private pendingCognitionStart: (() => void) | null = null;
 
   /**
    * Commit bookkeeping for snapshot-owned inbound entries, keyed by the turn's
@@ -397,10 +398,9 @@ export class CoreLoop {
   private readonly busSignalStream: BusSignalStream | undefined;
   private readonly pendingBusWrites: Promise<void>[] = [];
   private readonly knownBusEntries = new Set<string>();
-  private tickConsumedBusOffset: string | undefined;
+  private readonly signalStreamIds = new Map<string, string>();
+  private tickConsumedBusEntries: string[] = [];
   /** Highest bus entry not yet covered by a committed turn outcome. */
-  private heldBusOffset: string | undefined;
-  private busOffsetBlockedByFailedTurn = false;
   private readonly onStaleSnapshot:
     | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
     | undefined;
@@ -602,7 +602,7 @@ export class CoreLoop {
           : [];
         // The first owned trigger is the immutable identity. Absorbing later
         // triggers on replay must not alter effect keys for the same turn.
-        const turnIdentity = triggerIds[0] ?? turnKey ?? randomUUID();
+        const turnIdentity = state?.turn.tickId ?? triggerIds[0] ?? turnKey ?? randomUUID();
         const ordinal = state ? state.outboundCount++ : 0;
         const effectKind = state?.disposition === 'error' ? 'error-notice' : 'answer';
         const eventHash = createHash('sha256')
@@ -775,9 +775,12 @@ export class CoreLoop {
     const inboundIds =
       recipientId === undefined ? [] : this.ownedInboundIds(state.turn, recipientId);
     const outcome = this.turnOutcome(state);
+    const ownedBusIds = [...state.turn.triggerSignals, ...state.turn.absorbedSignals]
+      .map((signal) => this.signalStreamIds.get(signal.id))
+      .filter((id): id is string => id !== undefined);
     this.dropTurnCommit(state);
     if (outcome === undefined || outcome === 'failed_turn') {
-      this.busOffsetBlockedByFailedTurn = true;
+      this.busSignalStream?.markFailed(ownedBusIds);
       const exhaustedIds =
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
       if (state.finalErrorAttempt && exhaustedIds.length > 0)
@@ -797,6 +800,7 @@ export class CoreLoop {
       }
       return;
     }
+    this.busSignalStream?.markCompleted(ownedBusIds);
     if (recipientId === undefined || inboundIds.length === 0) return;
     this.logger.info(
       { recipientId, entries: inboundIds.length, outcome },
@@ -857,6 +861,22 @@ export class CoreLoop {
     if (this.activeTurnCommits?.tickId === tickId) {
       this.activeTurnCommits = null;
     }
+  }
+
+  private finalErrorNotice(state: PendingTurnCommits): Intent[] {
+    if (!state.finalErrorAttempt) return [];
+    const recipientId = this.answeredRecipientOf(state);
+    if (!recipientId) return [];
+    return [
+      {
+        type: 'SEND_MESSAGE',
+        payload: { recipientId, text: 'I could not complete that request after two attempts.' },
+        trace: {
+          tickId: state.tickId,
+          parentSignalId: state.turn.primaryTrigger?.id ?? state.turn.triggerSignals[0]?.id ?? '',
+        },
+      },
+    ];
   }
 
   /**
@@ -989,19 +1009,10 @@ export class CoreLoop {
     // Wait for the COGNITION turn in flight, bounded by the same deadline;
     // a turn that overruns is abandoned (its inbound log entries recorded no
     // outcome, so they replay once at the next start).
+    const previousBusSnapshot = this.busSignalStream?.exportSnapshot();
     await this.drainPendingCognition(deadline);
     if (this.commitSnapshot && (this.finalDrainNeedsCommit || this.tickOutbox.length > 0)) {
       const batch = [...this.tickOutbox];
-      const previousBusOffset = this.busSignalStream?.committedOffset();
-      const candidateBusOffset = this.heldBusOffset;
-      const canAdvanceBus =
-        candidateBusOffset !== undefined &&
-        this.turnCommits.size === 0 &&
-        this.pendingSignals.length === 0 &&
-        !this.busOffsetBlockedByFailedTurn;
-      if (canAdvanceBus && candidateBusOffset !== undefined) {
-        this.busSignalStream?.setCommittedOffset(candidateBusOffset);
-      }
       try {
         const result = await awaitWithinDeadline(
           this.commitSnapshot(this.tickCount, batch),
@@ -1015,17 +1026,19 @@ export class CoreLoop {
             const event = this.tickOutbox[index];
             if (event && committed.has(event)) this.tickOutbox.splice(index, 1);
           }
-          if (canAdvanceBus) this.heldBusOffset = undefined;
+          if (this.busSignalStream) {
+            await this.busSignalStream.trimBefore(this.busSignalStream.committedOffset());
+          }
         } else {
-          if (previousBusOffset !== undefined)
-            this.busSignalStream?.setCommittedOffset(previousBusOffset);
+          if (previousBusSnapshot && this.busSignalStream)
+            await this.busSignalStream.hydrateSnapshot(previousBusSnapshot);
           this.logger.warn(
             'Final drained-turn commit missed the stop deadline; owned triggers will replay'
           );
         }
       } catch (error) {
-        if (previousBusOffset !== undefined)
-          this.busSignalStream?.setCommittedOffset(previousBusOffset);
+        if (previousBusSnapshot && this.busSignalStream)
+          await this.busSignalStream.hydrateSnapshot(previousBusSnapshot);
         this.logger.error(
           { err: error },
           'Final drained-turn snapshot commit failed; owned triggers will replay'
@@ -1236,7 +1249,12 @@ export class CoreLoop {
           'COGNITION rejected unexpectedly during the stop drain'
         );
       });
-      this.evictTurnCommit(pending.tickId);
+      this.resolveTurnCommit(pending.tickId, 'error', []);
+      const state = this.turnCommits.get(pending.tickId);
+      const notice = state ? this.finalErrorNotice(state) : [];
+      if (notice.length > 0) this.applyIntents(notice, pending.traceContext);
+      this.evaluateTurnCommits();
+      this.finalDrainNeedsCommit = true;
     } finally {
       // An abandoned turn keeps its name in the stop report: it is still
       // running, and the hard exit must be able to say so.
@@ -1316,6 +1334,8 @@ export class CoreLoop {
     if (this.busSignalStream && !(signal.type === 'user_message' && this.inboundStream)) {
       const write = this.busSignalStream.append(signal).then((id) => {
         entry.streamId = id;
+        this.busSignalStream?.ensureOwned(id, `pending:${id}`);
+        this.signalStreamIds.set(signal.id, id);
         this.knownBusEntries.add(id);
       });
       this.pendingBusWrites.push(write);
@@ -1349,8 +1369,9 @@ export class CoreLoop {
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
+    const previousBusSnapshot = this.busSignalStream?.exportSnapshot();
 
-    this.tickConsumedBusOffset = undefined;
+    this.tickConsumedBusEntries = [];
     try {
       // Pull durable inbound entries after the snapshot offset. Pending entries
       // hydrated from an earlier snapshot are replayed by the same call.
@@ -1486,7 +1507,12 @@ export class CoreLoop {
         for (let i = toDefer.length - 1; i >= 0; i--) {
           const signal = toDefer[i];
           if (signal) {
-            this.pendingSignals.unshift({ signal, timestamp: signal.timestamp });
+            const streamId = this.signalStreamIds.get(signal.id);
+            this.pendingSignals.unshift({
+              signal,
+              timestamp: signal.timestamp,
+              ...(streamId !== undefined ? { streamId } : {}),
+            });
           }
         }
         allSignals = otherSignals;
@@ -1701,6 +1727,23 @@ export class CoreLoop {
         // Settle the durable inbound log entries of a turn that reached its
         // outcome in this tick (its sends settle after, through the applicator).
         this.evaluateTurnCommits();
+        const turnOwnedSignalIds = new Set(
+          [...this.turnCommits.values()].flatMap((state) =>
+            [...state.turn.triggerSignals, ...state.turn.absorbedSignals].map((signal) => signal.id)
+          )
+        );
+        const deferredBusIds = new Set(
+          this.pendingSignals
+            .map((entry) => entry.streamId)
+            .filter((id): id is string => id !== undefined)
+        );
+        const tickLocalCompleted = this.tickConsumedBusEntries.filter((id) => {
+          const signalId = [...this.signalStreamIds.entries()].find(
+            ([, streamId]) => streamId === id
+          )?.[0];
+          return !deferredBusIds.has(id) && (!signalId || !turnOwnedSignalIds.has(signalId));
+        });
+        this.busSignalStream?.markCompleted(tickLocalCompleted);
 
         // Periodic maintenance
         if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {
@@ -1737,18 +1780,6 @@ export class CoreLoop {
 
         // This awaited CAS is the tick's durability boundary. The next tick
         // cannot start until the complete snapshot is committed.
-        const previousOffset = this.busSignalStream?.committedOffset();
-        const consumedOffset = this.tickConsumedBusOffset;
-        if (consumedOffset) this.heldBusOffset = consumedOffset;
-        const hasUncommittedBusWork =
-          this.pendingCognition !== null ||
-          this.turnCommits.size > 0 ||
-          this.pendingSignals.length > 0 ||
-          this.busOffsetBlockedByFailedTurn;
-        const candidateOffset = this.heldBusOffset;
-        if (this.busSignalStream && candidateOffset && !hasUncommittedBusWork) {
-          this.busSignalStream.setCommittedOffset(candidateOffset);
-        }
         const committingOutbox = [...this.tickOutbox];
         this.snapshotCommitStarted = true;
         try {
@@ -1761,27 +1792,32 @@ export class CoreLoop {
             }
           }
         } catch (error) {
-          if (this.busSignalStream && previousOffset !== undefined) {
-            this.busSignalStream.setCommittedOffset(previousOffset);
-            if (candidateOffset && !hasUncommittedBusWork) {
-              for (const id of this.knownBusEntries) {
-                if (compareStreamIds(id, candidateOffset) <= 0) {
-                  this.knownBusEntries.delete(id);
-                }
-              }
-            }
+          if (this.busSignalStream && previousBusSnapshot) {
+            await this.busSignalStream.hydrateSnapshot(previousBusSnapshot);
+          }
+          if (this.pendingCognitionStart) {
+            const pending = this.pendingCognition;
+            this.pendingCognitionStart = null;
+            this.pendingCognition = null;
+            if (pending) this.evictTurnCommit(pending.tickId);
           }
           throw error;
         }
         this.snapshotCommitStarted = false;
-        if (this.busSignalStream && candidateOffset && !hasUncommittedBusWork) {
+        if (this.busSignalStream) {
+          const committedOffset = this.busSignalStream.committedOffset();
           for (const id of this.knownBusEntries) {
-            if (compareStreamIds(id, candidateOffset) <= 0) this.knownBusEntries.delete(id);
+            if (compareStreamIds(id, committedOffset) <= 0) this.knownBusEntries.delete(id);
           }
-          await this.busSignalStream.trimBefore(candidateOffset);
-          this.heldBusOffset = undefined;
+          for (const [signalId, streamId] of this.signalStreamIds) {
+            if (compareStreamIds(streamId, committedOffset) <= 0)
+              this.signalStreamIds.delete(signalId);
+          }
+          await this.busSignalStream.trimBefore(committedOffset);
         }
-        this.tickConsumedBusOffset = undefined;
+        this.tickConsumedBusEntries = [];
+        this.pendingCognitionStart?.();
+        this.pendingCognitionStart = null;
         await this.afterSnapshotCommit?.();
         this.scheduleTick();
       });
@@ -1827,6 +1863,9 @@ export class CoreLoop {
     await this.busSignalStream.trimBefore(offset);
     const entries = await this.busSignalStream.readAfter(offset, this.config.maxSignalsPerTick);
     for (const entry of entries) {
+      if (this.busSignalStream.stateFor(entry.id)?.status === 'completed') continue;
+      this.busSignalStream.ensureOwned(entry.id, `pending:${entry.id}`);
+      this.signalStreamIds.set(entry.signal.id, entry.id);
       if (this.knownBusEntries.has(entry.id)) continue;
       this.knownBusEntries.add(entry.id);
       this.pendingSignals.push({
@@ -1854,7 +1893,7 @@ export class CoreLoop {
       const pending = this.pendingSignals.shift();
       if (pending) {
         signals.push(pending.signal);
-        if (pending.streamId) this.tickConsumedBusOffset = pending.streamId;
+        if (pending.streamId) this.tickConsumedBusEntries.push(pending.streamId);
       }
     }
 
@@ -2110,7 +2149,7 @@ export class CoreLoop {
           if (signalData?.recipientId !== recipientId) break;
           this.pendingSignals.shift();
           drained.push(entry.signal);
-          if (entry.streamId) this.tickConsumedBusOffset = entry.streamId;
+          if (entry.streamId) this.tickConsumedBusEntries.push(entry.streamId);
         }
       } else {
         // Iterate backwards to safely splice while iterating
@@ -2135,9 +2174,17 @@ export class CoreLoop {
       // owned signals, which the durable inbound log commits with its answer.
       // The owner is the ACTIVE turn bookkeeping (finding 9): it survives the
       // stop drain clearing pendingCognition.
-      this.activeTurnCommits?.turn.absorbedSignals.push(...drained);
-      if (!this.activeTurnCommits && this.pendingCognition) {
-        this.pendingCognition.absorbedSignals.push(...drained);
+      const owner =
+        this.activeTurnCommits ??
+        (this.pendingCognition ? this.turnCommits.get(this.pendingCognition.tickId) : undefined);
+      if (owner) {
+        owner.turn.absorbedSignals.push(...drained);
+        this.busSignalStream?.markOwned(
+          drained
+            .map((signal) => this.signalStreamIds.get(signal.id))
+            .filter((id): id is string => id !== undefined),
+          owner.turn.tickId
+        );
       }
 
       return drained;
@@ -2154,8 +2201,35 @@ export class CoreLoop {
     traceContext: TraceContext
   ): void {
     const startedAt = Date.now();
+    const triggerIds = triggerSignals
+      .map((signal) => this.signalStreamIds.get(signal.id))
+      .filter((id): id is string => id !== undefined);
+    const existingTurnId = triggerIds
+      .map((id) => ({ id, state: this.busSignalStream?.stateFor(id) }))
+      .find(
+        ({ id, state }) =>
+          (state?.status === 'owned' || state?.status === 'failed') &&
+          state.turnId !== `pending:${id}`
+      )?.state;
+    const triggerSignalId = triggerSignals[0];
+    const data = triggerSignalId?.data as { updateId?: unknown } | undefined;
+    const stableTurnId =
+      existingTurnId && existingTurnId.status !== 'completed'
+        ? existingTurnId.turnId
+        : triggerIds.length > 0
+          ? randomUUID()
+          : typeof data?.updateId === 'string' && data.updateId
+            ? data.updateId
+            : `signal:${triggerSignalId?.id ?? context.tickId}`;
+    context.tickId = stableTurnId;
+    if (triggerIds.length > 0) this.busSignalStream?.markOwned(triggerIds, stableTurnId);
 
-    const promise = this.layers.cognition.process(context);
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const promise = startGate.then(() => this.layers.cognition.process(context));
+    this.pendingCognitionStart = releaseStart;
 
     this.pendingCognition = {
       promise,
@@ -2190,13 +2264,6 @@ export class CoreLoop {
             'COGNITION failed (async)'
           );
         });
-        const rejected =
-          this.pendingCognition?.tickId === context.tickId ? this.pendingCognition : undefined;
-        if (rejected) {
-          this.resolveTurnCommit(context.tickId, 'error', []);
-          this.pendingCognition = null;
-          this.evaluateTurnCommits();
-        }
       });
   }
 
@@ -2272,6 +2339,10 @@ export class CoreLoop {
     } catch (error) {
       this.resolveTurnCommit(pending.tickId, 'error', []);
       this.pendingCognition = null;
+      const state = this.turnCommits.get(pending.tickId);
+      const notice = state ? this.finalErrorNotice(state) : [];
+      if (notice.length > 0) this.applyIntents(notice, pending.traceContext);
+      this.evaluateTurnCommits();
       withTraceContext(pending.traceContext, () => {
         this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
       });

@@ -70,13 +70,20 @@ gateway appends messages to the Valkey `inbound` stream. The core consumes
 these messages through the ordinary signal pipeline.
 
 Each tick commits one Valkey snapshot atomically under the current epoch. It
-contains the agent/core state, internal bus offset, inbound stream read offset,
-per-recipient offsets, bounded recent-message-id dedup ring, pending inbound
-messages and outbound snapshot outbox. Inbound entries have one queue owner:
-they are not copied to the internal bus. An internal bus offset remains before
-triggers owned by unresolved cognition; turn outcome and owned offsets are
-committed together. The Valkey epoch check rejects commits from a stale core.
-Postgres writes use the active-holder fence.
+contains the agent/core state, the internal bus watermark and a per-entry
+ledger beyond it, inbound stream read offset, per-recipient offsets, bounded
+recent-message-id dedup ring, pending inbound messages and outbound snapshot
+outbox. Inbound entries have one queue owner: they are not copied to the
+internal bus. Each bus entry is owned by a persisted turn id, completed, or
+failed with a retry count. The turn id is fixed when the turn starts and is
+reused on replay even if replay groups in more triggers. Entries complete only
+in the CAS that commits their outcome. The watermark advances only across a
+contiguous completed prefix; completed entries beyond a gap are skipped on
+restart, while owned and failed entries replay under their saved turn id. The
+ledger is bounded by the watermark: entries are removed as the watermark passes
+them, and stream trimming occurs only through that watermark after a successful
+CAS. The Valkey epoch check rejects commits from a stale core. Postgres writes
+use the active-holder fence.
 
 A tick killed before commit leaves the previous snapshot and offsets
 unchanged. On restart, inbound messages not covered by that snapshot are
@@ -92,15 +99,20 @@ The Postgres consumer writes its message row with the event id as an idempotency
 key, then advances its cursor.
 If a crash happens between those operations, the row is applied again safely.
 Deliberate silence is represented by a committed tick with no outbound event.
-An error-disposition turn has no committed result, so its inbound messages
-remain unsettled for one retry by the next core. The inbound snapshot tracks
-that retry; a second error leaves the input pending without automatically
-restarting it again. Distinct turns derive outbound
-idempotency keys from their persisted trigger identities and effect ordinal.
+An error-disposition or rejected turn commits no partial sends, including
+immediate acknowledgements. Inbound failures are retried once by the next core
+(two failed attempts total). Only the final exhausted attempt commits one error
+notice as the input outcome; its effect key is distinct from a successful
+answer, and the input then completes. Distinct turns derive outbound
+idempotency keys from their persisted turn identity and effect ordinal.
 Delivery belongs to the future gateway. If
 there is no channel registered, this core reports the event once at info and
 advances its own delivery cursor; the outbound event remains available to the
 gateway's separate cursor.
+
+Outbound retention trims stream rows and removes their event-key deduplication
+entries in one Valkey Lua script. The warning count reflects actual dropped
+rows; an interrupted cleanup cannot orphan keys.
 
 Delivery is at-least-once: a gateway can deliver an answer and crash before
 advancing its cursor, causing a repeat. An append that never reaches Valkey is

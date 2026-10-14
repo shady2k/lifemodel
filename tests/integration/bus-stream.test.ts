@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
-import { createBusSignalStream } from '../../src/core/bus-stream.js';
+import { createBusSignalStream, type BusSnapshot } from '../../src/core/bus-stream.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { SendMessageIntent } from '../../src/types/intent.js';
 import {
@@ -39,7 +39,7 @@ describe('Valkey bus signal stream', () => {
       tickIntervalMs: 5,
       cognitionMode: 'hang',
       busSignalStream: stream,
-      initialBusOffset: '0-0',
+      initialBusOffset: { version: 1, watermark: '0-0', entries: {} },
       commitSnapshot: async (tick, outbox) => {
         commitAttempts += 1;
         if (commitAttempts === 1) {
@@ -74,12 +74,16 @@ describe('Valkey bus signal stream', () => {
     expect(attemptedOutbox).toHaveLength(1);
     expect((await stores.redis.xrange(`${prefix}bus`, '-', '+')).map(([id]) => id)).toHaveLength(2);
     const restartBus = createBusSignalStream(stores.redis, prefix);
-    restartBus.hydrateSnapshot((await store.read())?.sections['busOffset'] as string | undefined);
+    restartBus.hydrateSnapshot(
+      (await store.read())?.sections['busOffset'] as BusSnapshot | undefined
+    );
     expect(
       (await restartBus.readAfter(restartBus.committedOffset(), 10)).map((entry) => entry.signal.id)
     ).toEqual([firstSignal.id, secondSignal.id]);
     expect(stream.committedOffset()).toBe(committedOffset);
-    expect(await store.read()).toMatchObject({ sections: { busOffset: committedOffset } });
+    expect(await store.read()).toMatchObject({
+      sections: { busOffset: { watermark: committedOffset } },
+    });
     expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toEqual([]);
     await instance.coreLoop.stop();
   });
@@ -118,7 +122,9 @@ describe('Valkey bus signal stream', () => {
     const second = await startInstance(secondPath, {
       tickIntervalMs: 5,
       busSignalStream: secondStream,
-      initialBusOffset: (await secondStore.read())?.sections['busOffset'] as string | undefined,
+      initialBusOffset: (await secondStore.read())?.sections['busOffset'] as
+        | BusSnapshot
+        | undefined,
       commitSnapshot: async (tick) => {
         await secondStore.commitOwners(secondEpoch, tick);
       },
@@ -130,7 +136,10 @@ describe('Valkey bus signal stream', () => {
     await waitFor(() => second.coreLoop.getTickCount() >= 3, 'committed follow-up ticks');
     expect(second.autonomic.seen.flat().filter((seen) => seen.id === signal.id)).toHaveLength(1);
     const snapshot = await secondStore.read();
-    expect(snapshot?.sections['busOffset']).toMatch(/^\d+-\d+$/);
+    expect(snapshot?.sections['busOffset']).toMatchObject({
+      version: 1,
+      watermark: expect.stringMatching(/^\d+-\d+$/),
+    });
     await second.coreLoop.stop();
   });
 
@@ -149,7 +158,6 @@ describe('Valkey bus signal stream', () => {
     for (const signal of signals) ids.push(await originalBus.append(signal));
     const consumed = await originalBus.readAfter('0-0', 10);
     expect(consumed.map((entry) => entry.signal.id)).toEqual(signals.map((signal) => signal.id));
-    originalBus.setCommittedOffset(consumed[1]!.id);
     await originalStore.takeEpoch();
     await expect(originalStore.commitOwners(epoch, 2)).rejects.toThrow(/epoch mismatch/i);
     expect(await stores.redis.xrange(`${prefix}bus`, '-', '+')).toHaveLength(2);
@@ -164,5 +172,34 @@ describe('Valkey bus signal stream', () => {
     expect((await restartedBus.readAfter('0-0', 10)).map((entry) => entry.signal.id)).toEqual(
       signals.map((signal) => signal.id)
     );
+  });
+  it('keeps sparse completed entries beyond the contiguous watermark and advances only across a completed prefix', async () => {
+    const prefix = `bus-progress:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const bus = createBusSignalStream(stores.redis, prefix);
+    store.register(bus);
+    const epoch = await store.takeEpoch();
+    const first = thoughtSignal('A', 'recipient');
+    const second = thoughtSignal('B', 'recipient');
+    const firstId = await bus.append(first);
+    const secondId = await bus.append(second);
+    bus.ensureOwned(firstId, 'turn-A');
+    bus.ensureOwned(secondId, 'turn-B');
+    bus.markCompleted([secondId]);
+    expect(bus.committedOffset()).toBe('0-0');
+    expect(bus.exportSnapshot().entries[secondId]).toEqual({ status: 'completed' });
+    await store.commitOwners(epoch, 1);
+
+    const restarted = createBusSignalStream(stores.redis, prefix);
+    const restartedStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    restartedStore.register(restarted);
+    await restartedStore.hydrate(await restartedStore.read());
+    const replay = await restarted.readAfter(restarted.committedOffset(), 10);
+    expect(replay.map((entry) => entry.id)).toEqual([firstId, secondId]);
+    expect(restarted.stateFor(secondId)?.status).toBe('completed');
+
+    restarted.markCompleted([firstId]);
+    expect(restarted.committedOffset()).toBe(secondId);
+    expect(restarted.exportSnapshot().entries).toEqual({});
   });
 });

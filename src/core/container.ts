@@ -76,7 +76,7 @@ import {
   applyCommittedOutboundEvents,
   startOutboundDelivery,
 } from './message-streams.js';
-import { createBusSignalStream } from './bus-stream.js';
+import { createBusSignalStream, type BusSnapshot } from './bus-stream.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -536,7 +536,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   const initialSnapshot = await snapshotStore.read();
-  busSignalStream.hydrateSnapshot(initialSnapshot?.sections['busOffset'] as string | undefined);
+  busSignalStream.hydrateSnapshot(
+    initialSnapshot?.sections['busOffset'] as BusSnapshot | undefined
+  );
 
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(

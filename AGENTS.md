@@ -296,25 +296,36 @@ The Valkey streams and the committed tick snapshot are the core's durable
 boundary. Local files do not define inbound replay.
 Gateways append messages to `inbound`; the core reads them as signals. Inbound
 messages remain owned by that stream and are never copied into the internal bus.
-Internal bus entries stay before the committed offset while a turn owns them.
-A tick commit atomically stores the epoch-checked snapshot (including the
-internal bus offset, inbound read and per-recipient offsets, bounded
-recent-message-id dedup ring, pending inbound messages, and outbox events). A
-turn's owned inputs advance only in the CAS that commits its answer or
-intentional silence. The Valkey commit rejects a stale generation by epoch.
-Postgres writes are fenced by the active holder.
+The bus snapshot stores a contiguous watermark and a per-entry ledger for
+entries beyond it. Each ledger entry is owned by a persisted turn id, completed,
+or failed with a retry count. A turn id is fixed when the turn starts, saved in
+the epoch-checked snapshot before any effect, and reused when its owned entries
+replay; absorbing more triggers later does not change its effect keys. A tick
+commit atomically stores this ledger with the inbound read and per-recipient
+offsets, bounded recent-message-id dedup ring, pending inbound messages, and
+outbox events. An entry is completed only in the CAS that commits its outcome.
+The watermark advances only over the contiguous completed prefix. Completed
+entries beyond a gap stay in the ledger and are skipped on restart; owned and
+failed entries replay under their recorded turn id. Entries leave the bounded
+ledger only when the watermark passes them, and the stream is trimmed only
+through that watermark after the snapshot CAS succeeds. The Valkey commit
+rejects a stale generation by epoch. Postgres writes are fenced by the active
+holder.
 
-The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the drop count. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
+The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. One Valkey Lua script trims rows and removes their event-key deduplication entries atomically, so an interrupted cleanup cannot orphan keys. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
 
 The outbox persists across tick boundaries. A CAS retires only the exact batch
 it accepted; sends arriving while the CAS is in flight remain queued for a
 later commit. A committed outbound event is the answer boundary. The Postgres
 message-row consumer applies outbound events idempotently by event id; its
 cursor advances after the row write. Deliberate silence is recorded by the
-committed tick with no outbound event. An error-disposition turn commits no
-partial result and leaves its inputs unsettled for one retry by a fresh core.
-The inbound snapshot records that retry; a second error leaves the input pending
-but does not automatically restart it again.
+committed tick with no outbound event. Error-disposition and rejected turns
+commit no partial sends; acknowledgements emitted before the failure are
+withdrawn with the turn. Inbound failures are counted and retried once by a
+fresh core (two failed attempts total). On the exhausted attempt only, one error
+notice is committed as the input's outcome, with an effect key distinct from a
+successful answer, and the input completes. An internal bus failure remains
+failed with its retry count and recorded turn id until a later outcome commits.
 Failed sends are not a core outcome: the gateway owns delivery and retry. With
 no channel registered, the core logs the committed event once at info and
 advances its in-process delivery cursor; the event remains in Valkey for the
