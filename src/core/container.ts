@@ -494,6 +494,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create logger
   const logger = createLogger(loggerConfig);
   logger.info('Loaded configuration');
+  if (!mergedConfig.motorCortex.enabled) {
+    logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
+  }
 
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
@@ -694,7 +697,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
   const credentialStore = createEnvCredentialStore();
   const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
-  if (llmProvider) {
+  if (llmProvider && mergedConfig.motorCortex.enabled) {
     containerMgr = createContainerManager(logger);
 
     // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape

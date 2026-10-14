@@ -102,6 +102,9 @@ export interface AgentConfigFile {
     pretty?: boolean;
   };
 
+  /** Motor Cortex execution setting */
+  motorCortex?: { enabled?: boolean };
+
   /** Plugin configuration */
   plugins?: {
     /** Directory for external plugins (default: data/plugins) */
@@ -184,6 +187,9 @@ export interface MergedConfig {
     logs: string;
   };
 
+  /** Motor Cortex execution setting */
+  motorCortex: { enabled: boolean };
+
   /** Plugin configuration */
   plugins: {
     /** Directory for external plugins */
@@ -259,6 +265,8 @@ export const DEFAULT_CONFIG: MergedConfig = {
     maxFiles: 10,
   },
   telegramBotToken: null,
+  // Motor Cortex remains enabled unless explicitly disabled.
+  motorCortex: { enabled: true },
   paths: {
     data: 'data',
     config: 'data/config',
