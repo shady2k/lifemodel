@@ -39,6 +39,7 @@ import type { Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { Channel } from '../../src/types/index.js';
 import type { AgentState, SleepState } from '../../src/types/agent/state.js';
+import type { BusSignalStream } from '../../src/core/bus-stream.js';
 
 export function makeDeferred<T>(): {
   promise: Promise<T>;
@@ -366,6 +367,8 @@ export interface HarnessOptions {
   initialSleepState?: Partial<SleepState>;
   commitSnapshot?: (tick: number) => Promise<void>;
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
+  busSignalStream?: BusSignalStream;
+  initialBusOffset?: string;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -426,6 +429,7 @@ export async function startInstance(
       recipientRegistry: registry as never,
       ...cognitionDeps,
       initialTickCount: opts.initialTickCount,
+      busSignalStream: opts.busSignalStream,
       commitSnapshot: opts.commitSnapshot,
       onStaleSnapshot: opts.onStaleSnapshot,
     } as CoreLoopDeps
@@ -433,6 +437,8 @@ export async function startInstance(
   coreLoop.registerChannel(channel as never);
   const recipientId = registry.getOrCreate('test', 'chat-42');
 
+  if (opts.initialBusOffset !== undefined)
+    opts.busSignalStream?.hydrateSnapshot(opts.initialBusOffset);
   coreLoop.start();
   return {
     agent,
