@@ -38,6 +38,29 @@ describe('SoulProvider', () => {
       expect(state.unanswerableCore).toBeDefined();
     });
 
+    it('shares one initialization and serializes concurrent saves on the same provider', async () => {
+      let loads = 0;
+      const base = createInMemorySoulStore();
+      const store: SoulStateStore = {
+        load: async () => {
+          loads++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return base.load();
+        },
+        save: (version, document) => base.save(version, document),
+      };
+      const provider = createSoulProvider(mockLogger as any, { store });
+      const [a, b] = await Promise.all([provider.getState(), provider.getState()]);
+      expect(a).toBe(b);
+      expect(loads).toBe(1);
+      a.selfModel.narrative.currentStory = 'concurrent mutation';
+      await Promise.all([provider.persist(), provider.persist()]);
+      const restarted = createSoulProvider(mockLogger as any, { store });
+      expect((await restarted.getState()).selfModel.narrative.currentStory).toBe(
+        'concurrent mutation'
+      );
+    });
+
     it('loads existing state from storage', async () => {
       // First, create and persist state
       const provider1 = createSoulProvider(mockLogger as any, config);
