@@ -49,3 +49,5 @@ export type {
   SnapshotSectionOwner,
   SnapshotStoreConfig,
 } from './snapshot-store.js';
+
+export { PostgresStorage } from './postgres-storage.js';

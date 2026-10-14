@@ -41,6 +41,7 @@ import {
   type ConversationManager,
   createJSONStorage,
   createDeferredStorage,
+  PostgresStorage,
   createStateManager,
   createConversationManager,
   migrateToHierarchical,
@@ -557,6 +558,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Conversation history lives in the core Postgres schema, not DATA_PATH.
   const postgres = new Pool({ connectionString: databaseUrl });
+  const coreStorage = new PostgresStorage(postgres);
   const conversationManager = createConversationManager(
     new PostgresConversationStore(postgres),
     logger
@@ -807,7 +809,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
     motorCortex = createMotorCortex({
       llm: llmProvider,
-      storage,
+      storage: coreStorage,
       logger,
       energyModel: agent.getEnergyModel(),
       skillsDir,
@@ -840,7 +842,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const schedulerService = createSchedulerService(logger);
 
   // 2. Create plugin loader with per-plugin config support
-  const pluginLoader = createPluginLoader(logger, storage, schedulerService, {
+  const pluginLoader = createPluginLoader(logger, coreStorage, schedulerService, {
     pluginConfigs: mergedConfig.plugins.configs,
   });
 
@@ -994,7 +996,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // 7. Discover and load plugins (triggers dynamic neuron registration via callbacks)
   // Load persisted disabled plugins list from storage
   const persistedDisabled =
-    ((await storage.load('core:disabled_plugins')) as string[] | null) ?? [];
+    ((await coreStorage.load('core:disabled_plugins')) as string[] | null) ?? [];
   const runtimeDisabledIds = new Set(persistedDisabled);
 
   const pluginConfig = mergedConfig.plugins;
@@ -1065,7 +1067,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryConsolidator,
     recipientRegistry,
     soulProvider,
-    storage,
+    storage: coreStorage,
     pluginLoader,
     inboundStream,
     busSignalStream,
