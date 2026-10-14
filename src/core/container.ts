@@ -259,7 +259,12 @@ export interface ShutdownSequenceDeps {
  * when the deadline hit (`StopPendingReport.step`).
  */
 export type StopStep =
-  'intake_stop' | 'loop_drain' | 'state_flush' | 'channel_stop' | 'storage_flush' | 'done';
+  | 'intake_stop'
+  | 'loop_drain'
+  | 'state_flush'
+  | 'channel_stop'
+  | 'storage_flush'
+  | 'done';
 
 /** Live progress of one stop (see ShutdownSequenceDeps.progress). */
 export interface StopProgress {
@@ -1190,7 +1195,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     // completing channel (or on re-fetch failure) the receipt itself is
     // queued as its caption text.
     const photoData = entry.signal.data as
-      { pendingPhoto?: { fileId?: unknown } | undefined } | undefined;
+      | { pendingPhoto?: { fileId?: unknown } | undefined }
+      | undefined;
     if (typeof photoData?.pendingPhoto?.fileId === 'string' && telegramChannel !== null) {
       const completed = await telegramChannel.completePhotoReceipt(entry.signal);
       if (completed) {
