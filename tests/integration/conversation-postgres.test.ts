@@ -235,4 +235,31 @@ describe('Postgres conversation history', () => {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
+
+  it('shows an identical completed action again after clear, including after restart', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const manager = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      const action = { tool: 'core.time', summary: 'checked time' };
+      await manager.addCompletedAction('recipient-action-clear', action);
+      await manager.clearCompletedActions('recipient-action-clear');
+      expect(await manager.getRecentActions('recipient-action-clear')).toEqual([]);
+      await manager.addCompletedAction('recipient-action-clear', action);
+
+      const restarted = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      expect(await restarted.getRecentActions('recipient-action-clear')).toHaveLength(1);
+      expect(await restarted.getRecentActions('recipient-action-clear')).toMatchObject([
+        { tool: action.tool, summary: action.summary },
+      ]);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
 });
