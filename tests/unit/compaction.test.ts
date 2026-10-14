@@ -13,10 +13,7 @@ import {
   ConversationManager,
   createConversationManager,
 } from '../../src/storage/conversation-manager.js';
-import {
-  JsonMemoryProvider,
-  createJsonMemoryProvider,
-} from '../../src/storage/memory-provider.js';
+import { JsonMemoryProvider, createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
 import type { Storage } from '../../src/storage/storage.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/core/memory.js';
 
@@ -200,13 +197,14 @@ describe('ConversationManager.compactMessages', () => {
 
     await setConversationData(storage, 'user-1', messages);
 
-    const result = await manager.compactMessages('user-1', 12);
+    const result = await manager.compactMessages('user-1', 12, 'A rolling summary');
     expect(result).toBe(true);
 
     // Should keep last 3 turns = 6 messages
     const history = await manager.getHistory('user-1', { maxRecentTurns: 100 });
-    expect(history).toHaveLength(6);
-    expect(history[0]?.content).toBe('User 3');
+    expect(history).toHaveLength(7);
+    expect(history[0]?.content).toBe('Conversation summary:\nA rolling summary');
+    expect(history[1]?.content).toBe('User 3');
   });
 
   it('returns false when count is stale (concurrent compaction)', async () => {
@@ -227,7 +225,7 @@ describe('ConversationManager.compactMessages', () => {
     await setConversationData(storage, 'user-1', messages);
 
     // Pass wrong expected count
-    const result = await manager.compactMessages('user-1', 999);
+    const result = await manager.compactMessages('user-1', 999, 'A rolling summary');
     expect(result).toBe(false);
 
     // Messages should be unchanged
@@ -244,14 +242,14 @@ describe('ConversationManager.compactMessages', () => {
 
     await setConversationData(storage, 'user-1', messages);
 
-    const result = await manager.compactMessages('user-1', 2);
+    const result = await manager.compactMessages('user-1', 2, 'A rolling summary');
     expect(result).toBe(true);
   });
 });
 
 // ─── getHistory no longer injects compactedSummary ──────────────────────────
 
-describe('ConversationManager.getHistory (no compactedSummary)', () => {
+describe('ConversationManager.getHistory with legacy summary field', () => {
   let storage: Storage;
   let manager: ConversationManager;
 
@@ -261,13 +259,13 @@ describe('ConversationManager.getHistory (no compactedSummary)', () => {
     manager = createConversationManager(storage, createTestLogger());
   });
 
-  it('does not inject compactedSummary even when present in storage', async () => {
+  it('ignores the legacy compactedSummary storage field', async () => {
     const messages: StoredMessage[] = [
       { role: 'user', content: 'Hello', timestamp: new Date().toISOString() },
       { role: 'assistant', content: 'Hi!', timestamp: new Date().toISOString() },
     ];
 
-    // Simulate old data with compactedSummary still in storage
+    // Legacy compactedSummary data does not create a logical marker.
     await setConversationData(storage, 'user-1', messages, {
       compactedSummary: 'Old summary from before migration',
     });

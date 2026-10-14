@@ -12,14 +12,22 @@ interface ConversationMessageRow {
   channel?: string;
   messageId?: string;
 }
+interface CompactionMarker {
+  id?: string;
+  summary: string;
+  retainedMessageIds: string[];
+  timestamp: string;
+}
 interface ConversationSnapshot {
   messages: ConversationMessageRow[];
   status?: string;
   statusUpdatedAt?: string;
   completedActions?: { tool: string; summary: string; timestamp: string }[];
+  compactionMarker?: CompactionMarker;
 }
 interface EventRow {
   message_id: string;
+  sequence: string;
   kind: string;
   payload: ConversationSnapshot | ConversationMessageRow;
 }
@@ -31,18 +39,27 @@ export class PostgresConversationStore implements Storage {
   async load(key: string): Promise<unknown> {
     const recipientId = this.recipientId(key);
     const { rows } = await this.pool.query<EventRow>(
-      'SELECT message_id, kind, payload FROM core.conversation_messages WHERE recipient_id = $1 ORDER BY sequence',
+      'SELECT message_id, sequence, kind, payload FROM core.conversation_messages WHERE recipient_id = $1 ORDER BY sequence',
       [recipientId]
     );
     const lastClear = rows.reduce((last, row, index) => (row.kind === 'clear' ? index : last), -1);
     const active = rows.slice(lastClear + 1);
+    const markerRow = active.filter((row) => row.kind === 'compaction').at(-1);
+    const marker = markerRow?.payload as CompactionMarker | undefined;
+    const retainedIds = new Set(marker?.retainedMessageIds ?? []);
+    const markerSequence = markerRow ? BigInt(markerRow.sequence) : 0n;
     const result: ConversationSnapshot = { messages: [] };
+    if (marker) result.compactionMarker = { ...marker };
     for (const row of active) {
-      if (row.kind === 'message')
+      if (
+        row.kind === 'message' &&
+        (!markerRow || BigInt(row.sequence) > markerSequence || retainedIds.has(row.message_id))
+      ) {
         result.messages.push({
           ...(row.payload as ConversationMessageRow),
           messageId: row.message_id,
         });
+      }
       if (row.kind === 'status') {
         const state = row.payload as { status: string; statusUpdatedAt: string };
         result.status = state.status;
@@ -73,6 +90,11 @@ export class PostgresConversationStore implements Storage {
            VALUES ($1, $2, 'message', $3::jsonb) ON CONFLICT (recipient_id, message_id) DO NOTHING`,
           [recipientId, messageId, JSON.stringify(message)]
         );
+      }
+      if (snapshot.compactionMarker) {
+        const marker = snapshot.compactionMarker;
+        marker.id ??= `compaction:${randomUUID()}`;
+        await this.insertEvent(client, recipientId, marker.id, 'compaction', marker);
       }
       if (snapshot.status && snapshot.statusUpdatedAt) {
         const payload = { status: snapshot.status, statusUpdatedAt: snapshot.statusUpdatedAt };

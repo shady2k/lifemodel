@@ -821,7 +821,11 @@ Rules:
       });
 
       // CAS trim — if stale, log and skip (summary is already saved)
-      const trimmed = await this.conversationManager.compactMessages(chatId, expectedMessageCount);
+      const trimmed = await this.conversationManager.compactMessages(
+        chatId,
+        expectedMessageCount,
+        summary.trim()
+      );
       if (!trimmed) {
         this.logger.info({ chatId }, 'Compaction trim skipped (stale), summary saved to memory');
       } else {
@@ -855,8 +859,13 @@ Rules:
 
       const result: ConversationMessage[] = [];
 
-      // Inject latest conversation summary from memory (isolated — failure doesn't drop history)
-      if (this.memoryProvider) {
+      // The Postgres conversation store includes its latest logical compaction
+      // summary. Use memory only as a fallback for summaries without a marker.
+      const hasCompactionMarkerSummary = history.some(
+        (message) =>
+          message.role === 'system' && message.content?.startsWith('Conversation summary:\n')
+      );
+      if (this.memoryProvider && !hasCompactionMarkerSummary) {
         try {
           const summary = await this.memoryProvider.getLatestByKind('conversation_summary', chatId);
           if (summary) {
