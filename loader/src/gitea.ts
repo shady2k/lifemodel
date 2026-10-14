@@ -270,7 +270,9 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-            throw new Error(`required git binary is unavailable (${git}): ${detail}`, { cause: error });
+            throw new Error(`required git binary is unavailable (${git}): ${detail}`, {
+              cause: error,
+            });
           throw error;
         }
         const clone = await options.runner.run(git, ['clone', options.seedBundle, directory], {
