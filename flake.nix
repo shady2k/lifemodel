@@ -132,7 +132,7 @@
       } ''
         set -eux
         helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
-          -f ${./deploy/platform/a/openbao-values.yaml} > openbao-generated.yaml
+          --skip-tests -f ${./deploy/platform/a/openbao-values.yaml} > openbao-generated.yaml
         cmp openbao-generated.yaml ${./deploy/platform/a/openbao/rendered.yaml}
         grep -F 'kind: StatefulSet' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
         grep -F 'volumeClaimTemplates:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
@@ -174,7 +174,7 @@
       } ''
         set -eux
         helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
-          -f ${./deploy/platform/a/gitea/values.yaml} > gitea-generated.yaml
+          --skip-tests -f ${./deploy/platform/a/gitea/values.yaml} > gitea-generated.yaml
         cmp gitea-generated.yaml ${./deploy/platform/a/gitea/rendered.yaml}
         grep -F 'DB_TYPE=sqlite3' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
         grep -F 'PATH=/data/gitea/gitea.db' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
