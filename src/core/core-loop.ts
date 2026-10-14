@@ -73,6 +73,7 @@ import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 import type { InboundMessageStream } from './message-streams.js';
 import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
+import { StalePostgresEpochError } from '../storage/fenced-postgres.js';
 import type { BusSignalStream } from './bus-stream.js';
 
 /**
@@ -162,7 +163,9 @@ export interface CoreLoopDeps {
   /** Apply projections after the atomic snapshot/outbox commit succeeds. */
   afterSnapshotCommit?: (() => Promise<void>) | undefined;
   initialTickCount?: number | undefined;
-  onStaleSnapshot?: ((error: StaleSnapshotEpochError) => void) | undefined;
+  onStaleSnapshot?:
+    | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
+    | undefined;
 }
 
 /**
@@ -390,7 +393,9 @@ export class CoreLoop {
   private readonly pendingBusWrites: Promise<void>[] = [];
   private readonly knownBusEntries = new Set<string>();
   private tickConsumedBusOffset: string | undefined;
-  private readonly onStaleSnapshot: ((error: StaleSnapshotEpochError) => void) | undefined;
+  private readonly onStaleSnapshot:
+    | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
+    | undefined;
 
   /**
    * Set by haltForTest(): this object emulates a process that was killed. A
@@ -1693,18 +1698,14 @@ export class CoreLoop {
           ? { message: error.message, stack: error.stack, name: error.name }
           : { raw: String(error), type: typeof error };
 
-      if (error instanceof StaleSnapshotEpochError) {
+      if (error instanceof StaleSnapshotEpochError || error instanceof StalePostgresEpochError) {
         this.running = false;
         if (this.tickTimeout) clearTimeout(this.tickTimeout);
         this.tickTimeout = null;
         withTraceContext(tickCtx, () => {
           this.logger.error(
-            {
-              committerEpoch: error.committerEpoch,
-              storedEpoch: error.storedEpoch,
-              tick: this.tickCount,
-            },
-            'Snapshot epoch fenced; stopping core writer'
+            { error: error.message, tick: this.tickCount },
+            'Postgres or snapshot epoch fenced; stopping core writer'
           );
         });
         setTimeout(() => this.onStaleSnapshot?.(error), 0);

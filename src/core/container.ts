@@ -56,6 +56,7 @@ import {
 import { getEffectiveTimezone } from '../utils/date.js';
 import { MemoryProviderImpl } from '../storage/memory-provider.js';
 import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
+import { createFencedPostgres } from '../storage/fenced-postgres.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
 import { createReloadableLLMProvider } from './reloadable-llm-provider.js';
@@ -496,7 +497,20 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const databaseUrl = process.env['LIFEMODEL_DATABASE_URL'];
   if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
 
-  const postgres = new Pool({ connectionString: databaseUrl });
+  const rawPostgres = new Pool({ connectionString: databaseUrl });
+
+  const snapshotRedis = new Redis(valkeyUrl);
+  const snapshotStore = createSnapshotStore(snapshotRedis);
+  const busSignalStream = createBusSignalStream(snapshotRedis);
+  snapshotStore.register(busSignalStream);
+  const snapshotEpoch = await snapshotStore.takeEpoch();
+  await rawPostgres.query(
+    `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
+     ON CONFLICT (id) DO UPDATE SET epoch = EXCLUDED.epoch
+     WHERE core.active_holder.epoch < EXCLUDED.epoch`,
+    [snapshotEpoch]
+  );
+  const postgres = createFencedPostgres(rawPostgres, snapshotEpoch);
   const configLoader = createConfigLoader(postgres);
   const mergedConfig = await configLoader.load();
 
@@ -517,11 +531,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
   }
 
-  const snapshotRedis = new Redis(valkeyUrl);
-  const snapshotStore = createSnapshotStore(snapshotRedis);
-  const busSignalStream = createBusSignalStream(snapshotRedis);
-  snapshotStore.register(busSignalStream);
-  const snapshotEpoch = await snapshotStore.takeEpoch();
   const initialSnapshot = await snapshotStore.read();
   busSignalStream.hydrateSnapshot(initialSnapshot?.sections['busOffset'] as string | undefined);
 
