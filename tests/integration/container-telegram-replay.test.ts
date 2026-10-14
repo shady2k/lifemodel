@@ -137,6 +137,8 @@ describe(
 
       // The container: its replay runs inside createContainerAsync, i.e. while
       // index.ts has not called start() on the channel yet.
+      process.env['LIFEMODEL_DATABASE_URL'] = process.env['LIFEMODEL_TEST_DATABASE_URL'];
+      process.env['LIFEMODEL_VALKEY_URL'] = process.env['LIFEMODEL_TEST_VALKEY_URL'];
       const container = await createContainerAsync({
         logDir: join(dataPath, 'logs'),
         // No log FILE: a pino file target writes from a worker thread, which
@@ -183,6 +185,8 @@ describe(
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 404 })));
       await seedPhotoReceipt(dataPath, 'u-photo-2', 'photo-file-2');
 
+      process.env['LIFEMODEL_DATABASE_URL'] = process.env['LIFEMODEL_TEST_DATABASE_URL'];
+      process.env['LIFEMODEL_VALKEY_URL'] = process.env['LIFEMODEL_TEST_VALKEY_URL'];
       const container = await createContainerAsync({
         logDir: join(dataPath, 'logs'),
         // No log FILE: a pino file target writes from a worker thread, which

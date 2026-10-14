@@ -86,6 +86,15 @@ interface StoredMessage {
   channelMessageId?: string;
   /** Which channel sent this message */
   channel?: string;
+  /** Stable Postgres natural key, not exposed to the model. */
+  messageId?: string;
+}
+
+interface ConversationCompactionMarker {
+  id?: string;
+  summary: string;
+  retainedMessageIds: string[];
+  timestamp: string;
 }
 
 /**
@@ -99,6 +108,8 @@ interface StoredConversation {
   statusUpdatedAt?: string;
   /** Recent completed actions for preventing re-execution */
   completedActions?: CompletedAction[];
+  /** Latest logical compaction marker; older rows remain append-only in storage. */
+  compactionMarker?: ConversationCompactionMarker;
 }
 
 /**
@@ -400,6 +411,14 @@ export class ConversationManager {
       result.push(convMsg);
     }
 
+    if (stored.compactionMarker) {
+      result.unshift({
+        role: 'system',
+        content: `Conversation summary:\n${stored.compactionMarker.summary}`,
+        timestamp: new Date(stored.compactionMarker.timestamp),
+      });
+    }
+
     this.logger.debug(
       {
         userId,
@@ -420,7 +439,7 @@ export class ConversationManager {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    return stored.messages.map((msg) => {
+    const history = stored.messages.map((msg) => {
       const convMsg: ConversationMessage = {
         role: msg.role,
         content: msg.content,
@@ -440,6 +459,14 @@ export class ConversationManager {
       }
       return convMsg;
     });
+    if (stored.compactionMarker) {
+      history.unshift({
+        role: 'system',
+        content: `Conversation summary:\n${stored.compactionMarker.summary}`,
+        timestamp: new Date(stored.compactionMarker.timestamp),
+      });
+    }
+    return history;
   }
 
   /**
@@ -480,13 +507,18 @@ export class ConversationManager {
    * Uses a CAS guard: if the current message count doesn't match expectedMessageCount,
    * another compaction ran concurrently and this one is stale — returns false.
    *
-   * Summaries are stored externally in the memory system (not here).
+   * The summary is kept in an append-only logical marker; older message rows remain durable.
    *
    * @param userId User ID
    * @param expectedMessageCount Expected message count at time of compaction decision
    * @returns true if trimmed successfully, false if stale (concurrent compaction)
    */
-  async compactMessages(userId: string, expectedMessageCount: number): Promise<boolean> {
+  async compactMessages(
+    userId: string,
+    expectedMessageCount: number,
+    summary: string
+  ): Promise<boolean> {
+    if (!summary.trim()) throw new Error('Compaction summary is required');
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
@@ -510,8 +542,16 @@ export class ConversationManager {
       return true;
     }
 
-    // Update stored data — only trim messages, no summary stored here
+    // Persist a logical marker. Postgres keeps prior rows, but reads project the
+    // summary plus these retained messages and rows written after this marker.
     stored.messages = recentMessages;
+    stored.compactionMarker = {
+      summary: summary.trim(),
+      retainedMessageIds: recentMessages.flatMap((message) =>
+        message.messageId ? [message.messageId] : []
+      ),
+      timestamp: new Date().toISOString(),
+    };
 
     await this.storage.save(key, stored);
 
@@ -546,7 +586,8 @@ export class ConversationManager {
     }
 
     // Check total content size (new: handles bloated tool results)
-    const totalSize = this.calculateContentSize(stored.messages);
+    const totalSize =
+      this.calculateContentSize(stored.messages) + (stored.compactionMarker?.summary.length ?? 0);
     if (totalSize > this.maxContentSizeBeforeCompaction) {
       this.logger.debug(
         { userId, totalSize, threshold: this.maxContentSizeBeforeCompaction },

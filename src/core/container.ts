@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import type { PersistableState } from '../storage/persistable-state.js';
 import type { PersistedAckRegistryState } from '../layers/aggregation/ack-registry.js';
 import { Redis } from 'iovalkey';
+import { Pool } from 'pg';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
@@ -54,6 +55,7 @@ import {
 } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
 import { JsonMemoryProvider } from '../storage/memory-provider.js';
+import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
 import {
@@ -479,6 +481,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Load configuration from file and environment. The config file's directory
   // is resolved HERE, before anything else applies: a path is an input, not a
   // value the config itself decides (lifemodel-q4x.4.1).
+  const valkeyUrl = process.env['LIFEMODEL_VALKEY_URL'];
+  if (!valkeyUrl) throw new Error('LIFEMODEL_VALKEY_URL is required');
+  const databaseUrl = process.env['LIFEMODEL_DATABASE_URL'];
+  if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
+
   const configDir = configOverrides.configDir ?? resolveConfigDir();
   const mergedConfig = await loadConfig(configDir);
 
@@ -499,9 +506,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
   }
 
-  const valkeyUrl = process.env['LIFEMODEL_VALKEY_URL'];
-  if (!valkeyUrl) throw new Error('LIFEMODEL_VALKEY_URL is required');
-  if (!process.env['LIFEMODEL_DATABASE_URL']) throw new Error('LIFEMODEL_DATABASE_URL is required');
   const snapshotRedis = new Redis(valkeyUrl);
   const snapshotStore = createSnapshotStore(snapshotRedis);
   const snapshotEpoch = await snapshotStore.takeEpoch();
@@ -542,8 +546,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const snapshotState = initialSnapshot?.sections['agentState'] as PersistableState | undefined;
   stateManager.setSnapshotState(snapshotState ?? null);
 
-  // Create conversation manager for history
-  const conversationManager = createConversationManager(storage, logger);
+  // Conversation history lives in the core Postgres schema, not DATA_PATH.
+  const postgres = new Pool({ connectionString: databaseUrl });
+  const conversationManager = createConversationManager(
+    new PostgresConversationStore(postgres),
+    logger
+  );
   logger.info('ConversationManager configured');
 
   // Load persisted state
@@ -1267,6 +1275,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       progress: stopProgress,
     }).finally(async () => {
       await snapshotRedis.quit();
+      await postgres.end();
     });
   });
 
