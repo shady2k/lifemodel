@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate rendered resources against schemas from vendored CRDs."""
+"""Validate rendered resources, including OpenAPI primitive types, against vendored CRDs."""
 import sys
 from pathlib import Path
 
@@ -13,6 +13,31 @@ def documents(paths):
 
 
 def check(value, schema, path, root):
+    schema_type = schema.get("type")
+    if schema_type is not None and not (value is None and schema.get("nullable") is True):
+        types = schema_type if isinstance(schema_type, list) else [schema_type]
+
+        def matches(type_name):
+            if type_name == "object":
+                return isinstance(value, dict)
+            if type_name == "array":
+                return isinstance(value, list)
+            if type_name == "string":
+                return isinstance(value, str)
+            if type_name == "boolean":
+                return isinstance(value, bool)
+            if type_name == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            if type_name == "number":
+                return isinstance(value, (int, float)) and not isinstance(value, bool)
+            if type_name == "null":
+                return value is None
+            raise ValueError(f"unsupported schema type {type_name} at {path}")
+
+        if not any(matches(type_name) for type_name in types):
+            expected = " or ".join(str(type_name) for type_name in types)
+            actual = type(value).__name__
+            raise ValueError(f"{path}: expected {expected}, got {actual}")
     if "$ref" in schema:
         ref = schema["$ref"]
         if not ref.startswith("#/"):

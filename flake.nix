@@ -195,6 +195,15 @@
           echo 'vendored CRD schema check accepted a planted unknown Cluster field' >&2
           exit 1
         fi
+        cp -r ${./deploy/platform/state} planted-scalar
+        chmod -R u+w planted-scalar
+        sed 's/^  instances: 1$/  instances: not-an-integer/' planted-scalar/cluster/cluster.yaml > planted-scalar/cluster/cluster.tmp
+        mv planted-scalar/cluster/cluster.tmp planted-scalar/cluster/cluster.yaml
+        kustomize build planted-scalar > planted-scalar.yaml
+        if python ${./scripts/check-platform-crd-schemas.py} ${./deploy/platform/b/operator/rendered.yaml} planted-scalar.yaml; then
+          echo 'vendored CRD schema check accepted a scalar with the wrong type' >&2
+          exit 1
+        fi
         grep -F 'name: lifemodel-state' state.yaml >/dev/null
         grep -F 'name: lifemodel-postgres-egress' step-a.yaml >/dev/null
         grep -A25 -F 'name: lifemodel-dns-egress' step-a.yaml | grep -F 'k8s-app: kube-dns' >/dev/null
