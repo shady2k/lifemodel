@@ -65,7 +65,11 @@ import {
 import { LLMEntityExtractor } from '../storage/entity-extractor.js';
 import { createEmbedder } from '../storage/embedder.js';
 import { PostgresVectorStore, PostgresGraphStore } from '../storage/postgres-memory-store.js';
-import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
+import {
+  type SoulProvider,
+  createSoulProvider,
+  PostgresSoulStore,
+} from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { createInboundLog, type InboundLog } from './inbound-log.js';
@@ -689,8 +693,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create soul provider (for identity awareness in system prompt)
   const soulProvider = createSoulProvider(logger, {
-    storage,
-    storageKey: 'soul',
+    store: new PostgresSoulStore(postgres),
   });
   logger.info('SoulProvider configured');
 
@@ -813,7 +816,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Create recipient registry for message routing (with persistence)
-  const recipientRegistry = createPersistentRecipientRegistry(storage, logger);
+  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
   await recipientRegistry.init();
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 

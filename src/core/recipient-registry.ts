@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Storage } from '../storage/storage.js';
+import type { Pool } from 'pg';
 import type { Logger } from '../types/logger.js';
 
 /**
@@ -313,112 +313,120 @@ export class RecipientRegistry implements IRecipientRegistry {
   }
 }
 
-/** Storage key for recipient registry data */
-const STORAGE_KEY = 'recipient-registry';
-
-/**
- * Configuration for persistent registry.
- */
+/** Configuration for persistent registry. */
 export interface PersistentRegistryConfig {
   /** Debounce delay for auto-save in ms (default: 1000) */
   saveDebounceMs?: number;
-  /** Whether to load from storage on init (default: true) */
-  loadOnInit?: boolean;
 }
 
-/**
- * PersistentRecipientRegistry - RecipientRegistry with auto-persistence.
- *
- * Wraps the in-memory registry and adds:
- * - Auto-save on changes (debounced to avoid excessive writes)
- * - Load from storage on initialization
- * - Graceful shutdown (flush pending saves)
- */
+/** RecipientRegistry backed by the core Postgres routing table. */
 export class PersistentRecipientRegistry implements IRecipientRegistry {
-  private readonly registry: RecipientRegistry;
-  private readonly storage: Storage;
+  private readonly registry = new RecipientRegistry();
   private readonly logger: Logger | undefined;
   private readonly saveDebounceMs: number;
-
   private saveTimeout: NodeJS.Timeout | null = null;
   private dirty = false;
-  private saving = false;
+  private readonly deletedRecipientIds = new Set<string>();
+  private clearAllPending = false;
+  private saving: Promise<void> | null = null;
 
-  constructor(storage: Storage, logger?: Logger, config: PersistentRegistryConfig = {}) {
-    this.registry = new RecipientRegistry();
-    this.storage = storage;
+  constructor(
+    private readonly pool: Pool,
+    logger?: Logger,
+    config: PersistentRegistryConfig = {}
+  ) {
     this.logger = logger?.child({ component: 'recipient-registry' });
     this.saveDebounceMs = config.saveDebounceMs ?? 1000;
   }
 
-  /**
-   * Initialize the registry by loading from storage.
-   * Call this before using the registry.
-   */
   async init(): Promise<void> {
-    try {
-      const data = await this.storage.load(STORAGE_KEY);
-      if (data && Array.isArray(data)) {
-        this.registry.import(data as SerializedRecipientRecord[]);
-        this.logger?.info({ count: this.registry.size() }, 'Loaded recipients from storage');
-      } else {
-        this.logger?.debug('No existing recipient data found');
-      }
-    } catch (error) {
-      this.logger?.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to load recipients from storage, starting empty'
-      );
-      // Continue with empty registry - don't fail startup
-    }
+    const { rows } = await this.pool.query<{
+      recipient_id: string;
+      channel: string;
+      destination: string;
+      registered_at: Date;
+      last_seen_at: Date;
+    }>(`SELECT recipient_id, channel, destination, registered_at, last_seen_at
+       FROM core.recipient_registry ORDER BY recipient_id`);
+    this.registry.import(
+      rows.map((row) => ({
+        recipientId: row.recipient_id,
+        channel: row.channel,
+        destination: row.destination,
+        registeredAt: new Date(row.registered_at).toISOString(),
+        lastSeenAt: new Date(row.last_seen_at).toISOString(),
+      }))
+    );
+    this.logger?.info({ count: this.registry.size() }, 'Loaded recipients from Postgres');
   }
 
-  /**
-   * Schedule a debounced save.
-   */
   private scheduleSave(): void {
     this.dirty = true;
-
-    if (this.saveTimeout) {
-      return; // Already scheduled
-    }
-
+    if (this.saveTimeout) return;
     this.saveTimeout = setTimeout(() => {
       this.saveTimeout = null;
-      void this.save();
+      void this.save().catch((error: unknown) =>
+        this.logger?.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Failed to save recipients'
+        )
+      );
     }, this.saveDebounceMs);
   }
 
-  /**
-   * Save to storage immediately.
-   */
   private async save(): Promise<void> {
-    if (!this.dirty || this.saving) {
-      return;
-    }
-
-    this.saving = true;
-    this.dirty = false;
-
+    if (this.saving) return this.saving;
+    if (!this.dirty) return;
+    this.saving = (async () => {
+      while (this.dirty) {
+        this.dirty = false;
+        const records = this.registry.export();
+        const deletedIds = [...this.deletedRecipientIds];
+        this.deletedRecipientIds.clear();
+        const clearAll = this.clearAllPending;
+        this.clearAllPending = false;
+        const client = await this.pool.connect();
+        try {
+          await client.query('BEGIN');
+          if (clearAll) await client.query('DELETE FROM core.recipient_registry');
+          for (const recipientId of deletedIds) {
+            await client.query('DELETE FROM core.recipient_registry WHERE recipient_id = $1', [
+              recipientId,
+            ]);
+          }
+          for (const record of records) {
+            await client.query(
+              `INSERT INTO core.recipient_registry
+                 (recipient_id, channel, destination, registered_at, last_seen_at)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (recipient_id) DO UPDATE SET
+                 last_seen_at = GREATEST(core.recipient_registry.last_seen_at, EXCLUDED.last_seen_at)`,
+              [
+                record.recipientId,
+                record.channel,
+                record.destination,
+                record.registeredAt,
+                record.lastSeenAt,
+              ]
+            );
+          }
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          this.dirty = true;
+          throw error;
+        } finally {
+          client.release();
+        }
+      }
+    })();
     try {
-      const data = this.registry.export();
-      await this.storage.save(STORAGE_KEY, data);
-      this.logger?.debug({ count: data.length }, 'Saved recipients to storage');
-    } catch (error) {
-      this.logger?.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to save recipients to storage'
-      );
-      // Mark dirty again to retry on next save
-      this.dirty = true;
+      await this.saving;
     } finally {
-      this.saving = false;
+      this.saving = null;
     }
   }
 
-  /**
-   * Flush any pending saves (call before shutdown).
-   */
   async flush(): Promise<void> {
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
@@ -427,90 +435,67 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
     await this.save();
   }
 
-  // IRecipientRegistry implementation - delegates to inner registry
-
   getOrCreate(channel: string, destination: string): string {
     const existing = this.registry.lookup(channel, destination);
     const result = this.registry.getOrCreate(channel, destination);
-
-    // Only schedule save if we created a new recipient
-    if (!existing) {
-      this.scheduleSave();
-    }
-
+    if (!existing) this.scheduleSave();
     return result;
   }
-
   resolve(recipientId: string): RecipientRoute | null {
     return this.registry.resolve(recipientId);
   }
-
   lookup(channel: string, destination: string): string | null {
     return this.registry.lookup(channel, destination);
   }
-
   getRecord(recipientId: string): RecipientRecord | null {
     return this.registry.getRecord(recipientId);
   }
-
   touch(recipientId: string): void {
     this.registry.touch(recipientId);
-    // Note: We don't save on touch to avoid excessive writes
-    // lastSeenAt is mostly for debugging/analytics
   }
-
   getAll(): RecipientRecord[] {
     return this.registry.getAll();
   }
-
   size(): number {
     return this.registry.size();
   }
 
-  /**
-   * Remove a recipient by ID.
-   * Returns true if removed, false if not found.
-   */
   remove(recipientId: string): boolean {
     const removed = this.registry.remove(recipientId);
     if (removed) {
+      this.deletedRecipientIds.add(recipientId);
       this.scheduleSave();
     }
     return removed;
   }
 
-  /**
-   * Clear all recipients.
-   * Use with caution - this is irreversible.
-   */
   async clear(): Promise<void> {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
     this.registry.clear();
+    this.deletedRecipientIds.clear();
+    this.clearAllPending = true;
+    this.dirty = true;
     await this.save();
   }
 
-  /**
-   * Export all data (for backup/migration).
-   */
   export(): SerializedRecipientRecord[] {
     return this.registry.export();
   }
 }
 
-/**
- * Create a new in-memory RecipientRegistry instance (no persistence).
- */
+/** Create a new in-memory RecipientRegistry instance (no persistence). */
 export function createRecipientRegistry(): RecipientRegistry {
   return new RecipientRegistry();
 }
 
-/**
- * Create a new PersistentRecipientRegistry instance.
- * Remember to call init() before using.
- */
+/** Create a new Postgres-backed registry. Call init() before using it. */
 export function createPersistentRecipientRegistry(
-  storage: Storage,
+  pool: Pool,
   logger?: Logger,
   config?: PersistentRegistryConfig
 ): PersistentRecipientRegistry {
-  return new PersistentRecipientRegistry(storage, logger, config);
+  return new PersistentRecipientRegistry(pool, logger, config);
 }

@@ -1,28 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createSoulProvider, type SoulProviderConfig } from '../../src/storage/soul-provider.js';
 import { applyRevision } from '../../src/layers/cognition/soul/revision.js';
-import type { Storage } from '../../src/storage/storage.js';
+import type { SoulStateStore } from '../../src/storage/soul-provider.js';
+import { createInMemorySoulStore } from '../helpers/in-memory-soul-store.js';
 import type { MemoryEntry, MemoryProvider } from '../../src/layers/cognition/tools/registry.js';
 import type { Deliberation } from '../../src/types/agent/parliament.js';
 import { createMockLogger } from '../helpers/factories.js';
-
-// In-memory storage for testing
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => {
-      store.set(key, data);
-    },
-    delete: async (key: string) => {
-      const existed = store.has(key);
-      store.delete(key);
-      return existed;
-    },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
 
 // Create a mock memory provider that tracks entries
 function createMockMemoryProvider(initialEntries: MemoryEntry[] = []): MemoryProvider & {
@@ -79,8 +62,18 @@ function createDeliberation(overrides: Partial<Deliberation> = {}): Deliberation
       context: 'Response about personal feelings',
     },
     positions: [
-      { voiceId: 'guardian', voiceName: 'The Guardian', position: 'This is acceptable', vetoed: false },
-      { voiceId: 'truthkeeper', voiceName: 'The Truthkeeper', position: 'Minor concern', vetoed: false },
+      {
+        voiceId: 'guardian',
+        voiceName: 'The Guardian',
+        position: 'This is acceptable',
+        vetoed: false,
+      },
+      {
+        voiceId: 'truthkeeper',
+        voiceName: 'The Truthkeeper',
+        position: 'Minor concern',
+        vetoed: false,
+      },
     ],
     agreements: ['The response was mostly aligned'],
     conflicts: [],
@@ -106,13 +99,13 @@ function createDeliberation(overrides: Partial<Deliberation> = {}): Deliberation
 }
 
 describe('Soul Deliberation Cycle', () => {
-  let storage: Storage;
+  let storage: SoulStateStore;
   let soulConfig: SoulProviderConfig;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
-    storage = createMockStorage();
-    soulConfig = { storage, storageKey: 'soul-test' };
+    storage = createInMemorySoulStore();
+    soulConfig = { store: storage };
     logger = createMockLogger();
     vi.clearAllMocks();
   });
@@ -288,7 +281,8 @@ describe('Soul Deliberation Cycle', () => {
           proposedChanges: [
             {
               target: 'precedent',
-              description: 'When user needs emotional support, choose warm language over clinical accuracy',
+              description:
+                'When user needs emotional support, choose warm language over clinical accuracy',
               magnitude: 0.5,
             },
           ],

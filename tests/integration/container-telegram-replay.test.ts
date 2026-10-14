@@ -50,7 +50,8 @@ import { createInboundLog } from '../../src/core/inbound-log.js';
 import { createRecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import { openStorage, rmDir } from '../helpers/core-loop-drain-harness.js';
-import { testStoreUrls } from '../helpers/test-stores.js';
+import { createTestStores, testStoreUrls, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 
 /** A logger that keeps the seeded log quiet (the container logs itself). */
 const quiet = {
@@ -66,11 +67,15 @@ const quiet = {
 const mockBots = (Bot as unknown as { instances: MockBotLike[] }).instances;
 const scratch: string[] = [];
 const containers: Container[] = [];
+const stores: TestStores[] = [];
 
 afterEach(async () => {
   mockBots.length = 0;
   for (const container of containers.splice(0)) {
     await container.shutdown().catch(() => undefined);
+  }
+  for (const store of stores.splice(0)) {
+    await Promise.all([store.postgres.end(), store.redis.quit()]);
   }
   for (const dir of scratch.splice(0)) {
     await rmDir(dir);
@@ -113,9 +118,12 @@ async function freshDataPath(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   scratch.push(dir);
   process.env['DATA_PATH'] = dir;
+  const testStores = await createTestStores();
+  stores.push(testStores);
+  await applyTestMigrations(testStores.postgres);
   const urls = testStoreUrls();
   process.env['LIFEMODEL_VALKEY_URL'] = urls.valkeyUrl;
-  process.env['LIFEMODEL_DATABASE_URL'] = urls.databaseUrl;
+  process.env['LIFEMODEL_DATABASE_URL'] = testStores.postgres.options.connectionString;
   return dir;
 }
 
@@ -137,7 +145,6 @@ describe(
 
       // The container: its replay runs inside createContainerAsync, i.e. while
       // index.ts has not called start() on the channel yet.
-      process.env['LIFEMODEL_DATABASE_URL'] = process.env['LIFEMODEL_TEST_DATABASE_URL'];
       process.env['LIFEMODEL_VALKEY_URL'] = process.env['LIFEMODEL_TEST_VALKEY_URL'];
       const container = await createContainerAsync({
         logDir: join(dataPath, 'logs'),
@@ -185,7 +192,6 @@ describe(
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 404 })));
       await seedPhotoReceipt(dataPath, 'u-photo-2', 'photo-file-2');
 
-      process.env['LIFEMODEL_DATABASE_URL'] = process.env['LIFEMODEL_TEST_DATABASE_URL'];
       process.env['LIFEMODEL_VALKEY_URL'] = process.env['LIFEMODEL_TEST_VALKEY_URL'];
       const container = await createContainerAsync({
         logDir: join(dataPath, 'logs'),
