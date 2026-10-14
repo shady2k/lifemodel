@@ -38,11 +38,11 @@ export function migrationUpSql(source, filename) {
   return sql;
 }
 
-function concurrentIndexName(statement) {
+function concurrentIndexTarget(statement) {
   const match = statement.match(
-    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:[a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*)/i
+    /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:[a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*)\s+ON\s+(?:ONLY\s+)?((?:[a-z_][a-z0-9_$]*\.)?[a-z_][a-z0-9_$]*)/i
   );
-  return match?.[1];
+  return match ? { indexName: match[1], targetTable: match[2] } : undefined;
 }
 
 function quoteQualifiedIdentifier(identifier) {
@@ -52,22 +52,25 @@ function quoteQualifiedIdentifier(identifier) {
     .join('.');
 }
 
-async function concurrentIndexState(client, indexName) {
+async function concurrentIndexState(client, indexName, targetTable) {
   const [schema, name] = indexName.split('.');
-  const qualified = name === undefined ? [null, schema] : [schema, name];
+  const indexSchema = name === undefined ? null : schema;
+  const indexNameOnly = name ?? schema;
   const { rows } = await client.query(
     `SELECT i.indisvalid, index_namespace.nspname AS schema
      FROM pg_index i
      JOIN pg_class index_relation ON index_relation.oid = i.indexrelid
      JOIN pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
-     WHERE index_relation.relname = $2 AND ($1::text IS NULL OR index_namespace.nspname = $1)`,
-    qualified
+     WHERE index_relation.relname = $1
+       AND i.indrelid = to_regclass($2)::oid
+       AND ($3::text IS NULL OR index_namespace.nspname = $3)`,
+    [indexNameOnly, targetTable, indexSchema]
   );
   return rows[0];
 }
 
-async function dropInvalidConcurrentIndex(client, indexName) {
-  const index = await concurrentIndexState(client, indexName);
+async function dropInvalidConcurrentIndex(client, indexName, targetTable) {
+  const index = await concurrentIndexState(client, indexName, targetTable);
   if (index?.indisvalid === false) {
     const [, name] = indexName.split('.');
     const indexIdentifier = name ?? indexName;
@@ -77,8 +80,8 @@ async function dropInvalidConcurrentIndex(client, indexName) {
   }
 }
 
-async function assertConcurrentIndexValid(client, indexName, filename) {
-  const index = await concurrentIndexState(client, indexName);
+async function assertConcurrentIndexValid(client, indexName, targetTable, filename) {
+  const index = await concurrentIndexState(client, indexName, targetTable);
   if (index?.indisvalid !== true)
     throw new Error(`Migration ${filename} did not create a valid concurrent index: ${indexName}`);
 }
@@ -126,10 +129,21 @@ export async function applyMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_D
               .map((sql) => sql.trim())
               .filter(Boolean);
             for (const statement of statements) {
-              const indexName = concurrentIndexName(statement);
-              if (indexName) await dropInvalidConcurrentIndex(client, indexName);
+              const concurrentIndex = concurrentIndexTarget(statement);
+              if (concurrentIndex)
+                await dropInvalidConcurrentIndex(
+                  client,
+                  concurrentIndex.indexName,
+                  concurrentIndex.targetTable
+                );
               await client.query(statement);
-              if (indexName) await assertConcurrentIndexValid(client, indexName, filename);
+              if (concurrentIndex)
+                await assertConcurrentIndexValid(
+                  client,
+                  concurrentIndex.indexName,
+                  concurrentIndex.targetTable,
+                  filename
+                );
             }
             await client.query('INSERT INTO public.schema_migrations (version) VALUES ($1)', [
               version,

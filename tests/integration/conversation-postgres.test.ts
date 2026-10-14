@@ -236,6 +236,31 @@ describe('Postgres conversation history', () => {
     }
   });
 
+  it('shows an identical completed action again after full clear and restart', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const manager = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      const action = { tool: 'core.time', summary: 'checked time' };
+      await manager.addCompletedAction('recipient-full-action-clear', action);
+      await manager.clear('recipient-full-action-clear');
+      await manager.addCompletedAction('recipient-full-action-clear', action);
+
+      const restarted = createConversationManager(
+        new PostgresConversationStore(stores.postgres),
+        createTestLogger()
+      );
+      expect(await restarted.getRecentActions('recipient-full-action-clear')).toMatchObject([
+        { tool: action.tool, summary: action.summary },
+      ]);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('shows an identical completed action again after clear, including after restart', async () => {
     const stores = await createTestStores();
     try {

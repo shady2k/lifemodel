@@ -165,7 +165,8 @@ export class PostgresConversationStore implements Storage {
       }
       const { rows: clearRows } = await client.query<{ generation: string }>(
         `SELECT COALESCE(MAX(sequence), 0)::text AS generation
-         FROM core.conversation_messages WHERE recipient_id = $1 AND kind = 'actions_clear'`,
+         FROM core.conversation_messages
+         WHERE recipient_id = $1 AND kind IN ('actions_clear', 'clear')`,
         [recipientId]
       );
       const actionGeneration = clearRows[0]?.generation ?? '0';
