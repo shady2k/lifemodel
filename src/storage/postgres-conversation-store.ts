@@ -19,6 +19,7 @@ interface CompactionMarker {
   retainedMessageIds: string[];
   timestamp: string;
   coveredThroughSequence?: string;
+  expectedMessageCount?: number;
 }
 interface ConversationSnapshot {
   messages: ConversationMessageRow[];
@@ -32,6 +33,12 @@ interface EventRow {
   sequence: string;
   kind: string;
   payload: ConversationSnapshot | ConversationMessageRow;
+}
+
+export class ConversationCompactionConflictError extends Error {
+  constructor() {
+    super('Conversation changed while compaction was being prepared');
+  }
 }
 
 /** Storage adapter for conversations. Each save inserts keyed events; it never rewrites or deletes rows. */
@@ -95,6 +102,34 @@ export class PostgresConversationStore implements Storage {
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [recipientId]);
+      if (
+        snapshot.compactionMarker &&
+        snapshot.compactionMarker.id === undefined &&
+        snapshot.compactionMarker.expectedMessageCount !== undefined
+      ) {
+        const { rows } = await client.query<EventRow>(
+          'SELECT message_id, sequence, kind, payload FROM core.conversation_messages WHERE recipient_id = $1 ORDER BY sequence',
+          [recipientId]
+        );
+        const clearIndex = rows.reduce(
+          (last, row, index) => (row.kind === 'clear' ? index : last),
+          -1
+        );
+        const activeRows = rows.slice(clearIndex + 1);
+        const existingMarkerRow = activeRows.filter((row) => row.kind === 'compaction').at(-1);
+        const existingMarker = existingMarkerRow?.payload as CompactionMarker | undefined;
+        const cutoff = existingMarkerRow
+          ? BigInt(existingMarker?.coveredThroughSequence ?? existingMarkerRow.sequence)
+          : 0n;
+        const retained = new Set(existingMarker?.retainedMessageIds ?? []);
+        const count = activeRows.filter(
+          (row) =>
+            row.kind === 'message' &&
+            (BigInt(row.sequence) > cutoff || retained.has(row.message_id))
+        ).length;
+        if (count !== snapshot.compactionMarker.expectedMessageCount)
+          throw new ConversationCompactionConflictError();
+      }
       for (const message of snapshot.messages ?? []) {
         const messageId = message.messageId ?? this.messageId(message);
         message.messageId = messageId;

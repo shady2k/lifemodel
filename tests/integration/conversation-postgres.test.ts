@@ -152,7 +152,7 @@ describe('Postgres conversation history', () => {
         },
         createTestLogger()
       );
-      expect(await compacting.compactMessages(recipientId, 22, 'summary')).toBe(true);
+      expect(await compacting.compactMessages(recipientId, 22, 'summary')).toBe(false);
       const history = await first.getFullHistory(recipientId);
       expect(history.some(({ content }) => content === 'new user')).toBe(true);
       expect(history.some(({ content }) => content === 'new answer')).toBe(true);
@@ -214,6 +214,22 @@ describe('Postgres conversation history', () => {
           summary: `action-${i}`,
         });
       expect(await manager.getRecentActions('recipient-actions')).toHaveLength(20);
+      await stores.postgres.query(
+        `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
+         VALUES ('recipient-actions', 'action:expired', 'action', $1::jsonb)`,
+        [
+          JSON.stringify({
+            tool: 'core.old',
+            summary: 'expired',
+            timestamp: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+          }),
+        ]
+      );
+      expect(
+        (await manager.getRecentActions('recipient-actions')).some(
+          ({ summary }) => summary === 'expired'
+        )
+      ).toBe(false);
       expect(before).toBeDefined();
     } finally {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);

@@ -1,4 +1,5 @@
 import type { Storage } from './storage.js';
+import { ConversationCompactionConflictError } from './postgres-conversation-store.js';
 import type { Logger } from '../types/index.js';
 
 /**
@@ -97,6 +98,7 @@ interface ConversationCompactionMarker {
   retainedMessageIds: string[];
   timestamp: string;
   coveredThroughSequence?: string;
+  expectedMessageCount?: number;
 }
 
 /**
@@ -565,10 +567,16 @@ export class ConversationManager {
         message.messageId ? [message.messageId] : []
       ),
       coveredThroughSequence,
+      expectedMessageCount,
       timestamp: new Date().toISOString(),
     };
 
-    await this.storage.save(key, stored);
+    try {
+      await this.storage.save(key, stored);
+    } catch (error) {
+      if (error instanceof ConversationCompactionConflictError) return false;
+      throw error;
+    }
 
     this.logger.info(
       {
