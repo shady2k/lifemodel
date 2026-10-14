@@ -170,7 +170,7 @@
         touch $out
       '';
       renderedCNPG = pkgs.runCommand "lifemodel-cnpg-platform-render" {
-        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils (pkgs.python3.withPackages (ps: [ ps.pyyaml ])) ];
       } ''
         set -eux
         helm template cloudnative-pg ${./deploy/platform/charts/cloudnative-pg} \
@@ -182,8 +182,26 @@
         kustomize build ${./deploy/platform/b} > cnpg-operator.yaml
         kustomize build ${./deploy/platform/state} > state.yaml
         kustomize build ${./deploy/platform/a} > step-a.yaml
+        kustomize build ${./deploy/platform} > parent.yaml
+        kustomize build ${./deploy/platform/a0} > a0.yaml
+        python ${./scripts/check-platform-crd-schemas.py} ${./deploy/platform/b/operator/rendered.yaml} \
+          cnpg-operator.yaml parent.yaml a0.yaml step-a.yaml state.yaml
+        cp -r ${./deploy/platform/state} planted-state
+        chmod -R u+w planted-state
+        sed '/^  instances:/a\  plantedUnknownField: true' planted-state/cluster/cluster.yaml > planted-state/cluster/cluster.tmp
+        mv planted-state/cluster/cluster.tmp planted-state/cluster/cluster.yaml
+        kustomize build planted-state > planted-state.yaml
+        if python ${./scripts/check-platform-crd-schemas.py} ${./deploy/platform/b/operator/rendered.yaml} planted-state.yaml; then
+          echo 'vendored CRD schema check accepted a planted unknown Cluster field' >&2
+          exit 1
+        fi
         grep -F 'name: lifemodel-state' state.yaml >/dev/null
         grep -F 'name: lifemodel-postgres-egress' step-a.yaml >/dev/null
+        grep -A25 -F 'name: lifemodel-dns-egress' step-a.yaml | grep -F 'k8s-app: kube-dns' >/dev/null
+        grep -A25 -F 'name: lifemodel-dns-egress' step-a.yaml | grep -F 'port: 53' >/dev/null
+        grep -F 'name: lifemodel-state-postgres-access' state.yaml >/dev/null
+        grep -F 'cnpg.io/cluster: lifemodel' state.yaml >/dev/null
+        grep -F 'port: 6443' state.yaml >/dev/null
         grep -F 'imageName: ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b' ${./deploy/platform/state/cluster/cluster.yaml} >/dev/null
         grep -F 'name: platform-b' ${./deploy/platform/b-reconciler.yaml} >/dev/null
         grep -F 'name: platform-c' ${./deploy/platform/c-reconciler.yaml} >/dev/null
