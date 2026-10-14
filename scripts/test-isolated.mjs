@@ -19,7 +19,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
-const DIRS = ['src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
+const DIRS = ['db', 'src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
 const FORBIDDEN = new Set(['.git', 'node_modules', 'dist', 'data', 'coverage', '.DS_Store', '.npmrc']);
 const log = (text) => console.error(`[test-isolated] ${text}`);
 
