@@ -54,7 +54,7 @@ describe('CloudNativePG platform state', () => {
       },
     });
     expect(cluster.spec.imageName).toMatch(/@sha256:[a-f0-9]{64}$/);
-    expect(cluster.spec.postInitApplicationSQL).toEqual(['CREATE EXTENSION IF NOT EXISTS vector;']);
+    expect(cluster.spec.bootstrap.initdb.postInitApplicationSQL).toEqual(['CREATE EXTENSION IF NOT EXISTS vector;']);
     expect(cluster.spec.bootstrap.initdb).not.toHaveProperty('secret');
     expect(readFileSync(join(root, 'README.md'), 'utf8')).toContain('generated `lifemodel-app` Secret');
     expect(readFileSync(fileURLToPath(new URL('../../loader/src/postgres.ts', import.meta.url)), 'utf8')).toContain("const SOURCE_NAME = 'lifemodel-app'");
@@ -70,7 +70,16 @@ describe('CloudNativePG platform state', () => {
       expect.objectContaining({ ports: expect.arrayContaining([{ protocol: 'TCP', port: 5432 }, { protocol: 'TCP', port: 8000 }]) }),
     ]));
     expect(database?.spec.policyTypes).toEqual(['Ingress', 'Egress']);
-    expect(database?.spec.egress).toEqual([]);
+    expect(database?.spec.egress).toEqual([
+      expect.objectContaining({
+        to: [expect.objectContaining({
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+          podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
+        })],
+        ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }],
+      }),
+      { to: [{ ipBlock: { cidr: '0.0.0.0/0' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
+    ]);
   });
 
   it('allows core egress to the state Postgres Service through its namespace default deny', () => {
@@ -81,6 +90,15 @@ describe('CloudNativePG platform state', () => {
       podSelector: {}, policyTypes: ['Egress'], ingress: [],
       egress: [{ to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-state' } } }], ports: [{ protocol: 'TCP', port: 5432 }] }],
     });
+    const dns = objects.find((item) => item.kind === 'NetworkPolicy' && item.metadata.name === 'lifemodel-dns-egress');
+    expect(dns?.metadata.namespace).toBe('lifemodel');
+    expect(dns?.spec.egress).toEqual([{
+      to: [{
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+        podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
+      }],
+      ports: [{ protocol: 'UDP', port: 53 }, { protocol: 'TCP', port: 53 }],
+    }]);
   });
 
   it('refuses application Kustomizations that target platform-owned state', () => {

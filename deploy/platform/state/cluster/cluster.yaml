@@ -13,7 +13,7 @@ spec:
       database: lifemodel
       owner: lifemodel
       postInitApplicationSQL:
-        - CREATE EXTENSION IF NOT EXISTS vector
+        - CREATE EXTENSION IF NOT EXISTS vector;
   storage:
     size: 4Gi
     storageClass: local-path
