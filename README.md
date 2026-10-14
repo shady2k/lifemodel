@@ -24,7 +24,7 @@ The guiding metaphor is the human body, taken seriously as an engineering constr
 
 | Body | lifemodel |
 |------|-----------|
-| 👂 Senses | **Channels** (Telegram, …) |
+| 👂 Senses | **Inbound stream** (gateway adapters are separate) |
 | ⚡ Neural impulses | **Signals** (one unified data model for everything) |
 | 🧠 Brain regions | **Layers** (autonomic → aggregation → cognition) |
 | ❤️ Heartbeat | **CoreLoop** (a fixed 1-second tick) |
@@ -39,7 +39,7 @@ This isn't just naming. The metaphor drives real architectural decisions — ene
 
 - **🔋 Energy-conserving cognition.** Every tick runs free, zero-LLM "autonomic" and "aggregation" layers. The expensive LLM-powered **cognition** layer only wakes up when accumulated pressure crosses a threshold (or you message it directly). No wasteful polling, no burning tokens to do nothing.
 - **🌱 Emergence over polling.** The agent doesn't run on timers asking "should I do something now?". State *accumulates*, pressure builds, and actions **emerge** when thresholds are crossed — proactive messages, thoughts, reminders.
-- **⚡ Signals, not events.** Everything that flows through the system — a Telegram message, an internal urge, an overdue commitment — is a single unified `Signal` type. One model for all data flow.
+- **⚡ Signals, not events.** Everything that flows through the system — an inbound message, an internal urge, an overdue commitment — is a single unified `Signal` type. One model for all data flow.
 - **🧠 Two-speed thinking (System 1 + System 2).** A cheap **fast model** handles classification and quick reactions; an expensive **smart model** is escalated to only on low confidence (and only when it's safe to retry). Inspired by Kahneman's dual-process theory.
 - **💪 Sandboxed Motor Cortex.** When the agent needs to *act* (run code, fetch data, use a skill), it dispatches to a separate agentic runtime that executes inside **per-run Docker containers** — `--read-only`, `--network none`, `--cap-drop ALL`, strict resource limits. Results flow back as signals.
 - **🗂️ Dual-layer long-term memory.** A **vector store** (semantic recall, salience decay) backed by [LanceDB](https://lancedb.com/) combined with a **graph store** (entities, relations, spreading activation) for associative context.
@@ -56,7 +56,7 @@ Signals enter through channels and flow up through progressively more expensive 
 
 ```mermaid
 flowchart TD
-    TG["📡 Channels (Telegram, …)<br/>— the senses"] -->|Signals| AUT
+    GW["📥 Inbound stream<br/>— gateway input"] -->|Signals| AUT
 
     subgraph BRAIN [" "]
         direction TB
@@ -100,7 +100,6 @@ Cognition uses **native OpenAI tool-calling** with *Codex-style natural terminat
 - **Node.js ≥ 24**
 - **Docker** — required for the Motor Cortex's agentic (code-executing) runs
   and for the isolated test boundary (see [Test isolation](#-development))
-- A **Telegram bot token** ([@BotFather](https://t.me/BotFather))
 - An OpenAI-compatible endpoint with a model per role — LM Studio, Ollama, vLLM, [OpenRouter](https://openrouter.ai/), …
 
 ### Install & run
@@ -132,8 +131,6 @@ lifemodel is configured via a `.env` file. The essentials:
 
 | Variable | Description |
 |----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from [@BotFather](https://t.me/BotFather) |
-| `PRIMARY_USER_CHAT_ID` | Your Telegram chat ID (DM [@userinfobot](https://t.me/userinfobot) to get it) — enables proactive messaging |
 | `TZ` | Your timezone (e.g. `Europe/Moscow`) |
 | `LOG_LEVEL` | `info`, `debug`, … |
 
@@ -219,7 +216,6 @@ The codebase is heavily documented. Start here:
 **Language & runtime:** TypeScript (strict, ESM) on Node.js ≥ 24
 **LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · OpenAI-compatible providers
 **Memory:** [LanceDB](https://lancedb.com/) (vector store) + a custom graph store · [Transformers.js](https://huggingface.co/docs/transformers.js) embeddings
-**Channels:** [grammY](https://grammy.dev/) (Telegram)
 **Sandbox:** Docker-isolated runtime + IPC
 **Infra:** [Fastify](https://fastify.dev/) · [Pino](https://getpino.io/) logging · [Zod](https://zod.dev/) validation · [Luxon](https://moment.github.io/luxon/) time
 

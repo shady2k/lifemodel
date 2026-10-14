@@ -27,7 +27,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 
 ## Repository layout
 
-- `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
+- `src/index.ts` — entry point: builds the container and starts CoreLoop
 - `flake.nix`, `flake.lock` — Nix flake exporting the NixOS module and defining flake checks
 - `deploy/root/` — Flux root OCIRepository and Kustomization templates
 - `deploy/nixos/` — the `services.lifemodel` NixOS module and setup guide
@@ -43,11 +43,8 @@ tick), Energy & state are physiology. Start with `README.md` and
   sequence (one overall stop deadline; intake stop first, sends of the drained
   turn awaited, channels released after, storage flushed last) with its hard
   exit at the deadline (`hard-exit.ts`), and the durable
-  inbound log (`inbound-log.ts`), which persists inbound user messages on
-  receipt, removes an entry once its turn reached a recorded outcome
-  (answered, deliberately silent, failed send, failed turn - a failed outcome
-  is never retried), replays the entries whose turn recorded none at start
-  and dedups by Telegram update_id
+  stream-backed inbound messages, included in the tick snapshot and deduplicated
+  by external message id
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus
@@ -55,8 +52,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/runtime/` — Motor Cortex (the sandboxed agentic act loop), Docker
   container management, sandbox and shell runners, the Agent Skills loader
   (`skills/`), built-in skills (`builtin-skills/`), locks, credentials
-- `src/channels/` — sensory organs; the Telegram channel lives in
-  `src/plugins/channels/telegram.ts`
+- `src/channels/` — shared channel interfaces; gateways deliver through the inbound stream
 - `src/plugins/` — plugins proper (alertness, calories, contact-pressure,
   desire-pressure, energy, news, reminder, social-debt, thoughts, time-neuron,
   web-fetch, web-search) and shared helper libraries (`providers/`,
@@ -219,7 +215,7 @@ Created at runtime relative to the working directory; the root is `data/`
   `src/llm/provider.ts`
 - `data/state/` — persisted state: JSON state files (written through
   DeferredStorage), conversations, `data/state/memory/` (vector store),
-  soul, graph, the durable inbound log (`core/inbound_log.json`) and its backup/corrupted siblings (written through DeferredStorage); next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
+  soul, graph, the tick snapshot and message streams; next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
   `data/plugins/`. These logs and `data/state/` hold personal messages and
   tool content: do not paste them outside this machine, and back up
   `data/state/` before cleaning conversation history
@@ -297,7 +293,7 @@ Common issues:
 ## Restart guarantees
 
 The Valkey streams and the committed tick snapshot are the core's durable
-boundary. There is no file-based inbound log and no channel-specific replay.
+boundary. Local files do not define inbound replay.
 Gateways append messages to `inbound`; the core reads them as signals. A tick
 commit atomically stores the epoch-checked snapshot (including the internal
 bus offset, inbound read and per-recipient offsets, bounded recent-message-id
@@ -381,4 +377,4 @@ These are requirements, not suggestions.
    (`getMaxPublishedAt` in `src/plugins/news/index.ts`)
 6. **Stop Conditions Handle Gaps** — Stop on exact match with the last seen
    id, never on `<=`. IDs may have gaps from deletions.
-   (`fetchTelegramChannelUntil` in `src/plugins/news/fetchers/telegram.ts`)
+   (`getMaxPublishedAt` in `src/plugins/news/index.ts`)

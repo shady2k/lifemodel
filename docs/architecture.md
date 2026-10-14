@@ -5,7 +5,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  ┌─────────────┐    Sensory Organs (Channels)                  │
-│  │  Telegram   │────┐                                          │
+│  │  Inbound    │────┐                                          │
 │  └─────────────┘    ▼                                          │
 │              ┌──────────────┐                                  │
 │              │   SIGNALS    │                                  │
@@ -168,7 +168,7 @@ src/
 │   └── skills/     # Agent Skills standard: loader, types, policy.json, index.json
 ├── llm/            # LLM provider interface, tool schema conversion
 ├── plugins/        # Modular extensions
-├── channels/       # Sensory organs (Telegram, etc.)
+├── channels/       # Channel contracts; external gateways use streams
 ├── ports/          # External service adapters
 ├── storage/        # Persistence, memory (LanceDB VectorStore + GraphStore), conversations
 ├── types/          # Signal, Intent, Cognition, Commitment, Desire, Perspective types

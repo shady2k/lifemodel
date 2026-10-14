@@ -1,34 +1,11 @@
-# Channels
+# Gateway and channel boundary
 
-Sensory organs - how the agent perceives the outside world.
+The core does not configure a delivery channel. External gateways append user
+messages to the Valkey `inbound` stream. The core commits answers to the
+Valkey `outbound` stream and message rows to Postgres. A gateway can consume
+outbound events with its own delivery cursor.
 
-## Role
-
-Channels receive external input and convert it to signals:
-- Telegram message → `user_message` signal
-- Connection lost → `channel_disconnected` signal
-- Error occurred → `channel_error` signal
-
-## Available Channels
-
-| Channel | Input |
-|---------|-------|
-| Telegram | User messages, commands |
-| Discord | Server messages |
-
-## Output
-
-Channels also handle outbound messages when CoreLoop applies `SEND_MESSAGE` intents.
-
-## Lifecycle
-
-- `connect()` - Establish connection
-- `disconnect()` - Clean shutdown
-- Event handlers emit signals to brain
-
-## Adding Channels
-
-Implement the Channel interface:
-- Register with core
-- Emit signals for incoming events
-- Handle outbound message intents
+The shared `Channel` interface remains for channel adapters. No channel
+adapter is registered by the core in this stage. An outbound event without a
+registered adapter remains committed for the future gateway; the core logs it
+once and advances only its own delivery cursor.
