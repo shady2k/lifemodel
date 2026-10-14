@@ -388,6 +388,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
         let client: PoolClient | null = null;
         let transactionStarted = false;
         let committed = false;
+        let failure: unknown;
         try {
           client = await this.pool.connect();
           await client.query('BEGIN');
@@ -419,6 +420,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
           for (const recipientId of deletedIds) this.deletedRecipientIds.delete(recipientId);
           if (clearAll && this.clearGeneration === clearGeneration) this.clearAllPending = false;
         } catch (error) {
+          failure = error;
           if (transactionStarted && client) {
             try {
               await client.query('ROLLBACK');
@@ -427,21 +429,20 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
             }
           }
           this.dirty = true;
-          throw error;
-        } finally {
-          if (client) {
-            try {
-              client.release();
-            } catch (error) {
-              if (committed) {
-                this.dirty = true;
-                for (const recipientId of deletedIds) this.deletedRecipientIds.add(recipientId);
-                if (clearAll) this.clearAllPending = true;
-              }
-              throw error;
+        }
+        if (client) {
+          try {
+            client.release();
+          } catch (error) {
+            if (committed) {
+              this.dirty = true;
+              for (const recipientId of deletedIds) this.deletedRecipientIds.add(recipientId);
+              if (clearAll) this.clearAllPending = true;
             }
+            failure ??= error;
           }
         }
+        if (failure !== undefined) throw failure;
       }
     })();
     try {
