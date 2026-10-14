@@ -482,7 +482,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.43.0';
+const RULES_VERSION = '0.45.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
@@ -574,6 +574,23 @@ function withAgesFrom(backlog, agesFrom, agesThrough) {
   };
 }
 
+/**
+ * A read at a code revision must say which revision it stands for. The store
+ * lives outside the code branches, so "the tracker at this revision" is a read
+ * of the newest snapshot published at or before it, and nothing in the input's
+ * own tree can be checked against the revision. What CAN be checked is that the
+ * state being judged was read for the revision that was asked for: without it a
+ * stale export, or one from another revision, passes silently as this one, and
+ * the gate reports on a state nobody asked about.
+ */
+function atRevision(backlog, at, where) {
+  const said = /@\s*(\S+)\s*$/.exec(String(backlog.source || ''));
+  if (!said)
+    throw new Misuse(`${where}: --at ${at} asks for the tracker at a code revision, and the input does not say which revision it reads; the source names it as "<store> <where it was read> @ <revision>"`);
+  if (said[1] !== at)
+    throw new Misuse(`${where}: --at ${at} asks for the tracker at ${at}, and the input reads it at ${said[1]}; a read at a revision is the newest snapshot published at or before it, and one read for another revision cannot stand for it`);
+}
+
 function evaluate(backlog, cfg, only, clock) {
   const m = index(backlog);
   const now = clock || Date.parse(backlog.generatedAt) || Date.now();
@@ -625,7 +642,7 @@ function judge(report, baseline, strength) {
 function render(report) {
   const lines = [
     `gate ${RULES_VERSION} (${report.strength}) — milestone ${report.milestone}, ${report.live} live of ${report.total}`,
-    `source: ${report.source}`,
+    `source: ${report.source}${report.at ? ` (read at the code revision ${report.at})` : ''}`,
     '',
   ];
   for (const r of report.results) {
@@ -784,6 +801,13 @@ function runSelftest(cfg, projectConfigPath) {
     ['no strength chosen anywhere', 2, ['--config', fixtureCfg, stale]],
     ['an unpaired age snapshot', 2, ['--config', fixtureCfg, '--strength', 'block', '--ages-from', stale, stale]],
     ['a config with only a strength, on a violating backlog', 1, ['--config', put('min.json', { strength: 'block' }), stale]],
+    // The store lives outside the code branches, so a read at a code revision
+    // is the only place the gate can still tell "the tracker at this revision"
+    // from a state that was read for another one or for none. Both failures are
+    // misuse, and the read that does say which revision it stands for passes.
+    ['a read at a revision with no revision in the source', 2, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', stale]],
+    ['a read at a revision that read another one', 2, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', put('at-other.json', { ...load('bad', 'stale-hold.json'), source: 'fixture bad/stale-hold @ rev-b' })]],
+    ['a read at the revision it stands for', 1, ['--config', fixtureCfg, '--strength', 'block', '--at', 'rev-a', put('at-same.json', { ...load('bad', 'stale-hold.json'), source: 'fixture bad/stale-hold @ rev-a' })]],
   ]) {
     const got = run(...argv).status;
     say(got === want, `cli: ${what} → exit ${got}${got === want ? '' : `, expected ${want}`}`);
@@ -802,7 +826,7 @@ function runSelftest(cfg, projectConfigPath) {
 
 function main() {
   const argv = process.argv.slice(2);
-  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null };
+  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null, at: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--json') args.json = true;
     else if (argv[i] === '--only') args.only = argv[++i].split(',');
@@ -812,6 +836,7 @@ function main() {
     else if (argv[i] === '--strength') args.strength = argv[++i];
     else if (argv[i] === '--ages-from') args.agesFrom = argv[++i];
     else if (argv[i] === '--ages-through') args.agesThrough = argv[++i];
+    else if (argv[i] === '--at') args.at = argv[++i];
     else if (argv[i] === '--selftest') args.selftest = true;
     else if (argv[i] === '--help' || argv[i] === '-h') args.help = true;
     else if (argv[i] === '--version') args.version = true;
@@ -826,12 +851,16 @@ function main() {
       'check.mjs --config <project config> [<normalized.json>|-]\n' +
         '          [--baseline <normalized.json> [--baseline-config <config as it was then>]]\n' +
         '          [--strength block|block-new|report] [--ages-from <before.json> --ages-through <after.json>]\n' +
+        '          [--at <code revision>]\n' +
         '          [--only <id,id>] [--json]\n' +
         'check.mjs --selftest [--config <project config>]\n' +
         'check.mjs --version\n\n' +
         'Applies the backlog invariants to the normalized backlog on stdin or at <path>.\n' +
         'Strength comes from the config unless given; block-new needs --baseline.\n' +
         '--ages-from and --ages-through correct only timestamps still matching the bulk edit.\n' +
+        '--at says which code revision the input was read for, and refuses one read\n' +
+        'for another: the store is off the branches, so the input is the only thing\n' +
+        'that can say which revision it stands for.\n' +
         '--baseline-config judges the baseline by the rules of its own day, so a\n' +
         'config change that creates violations shows up as new errors.\n' +
         'Exit 0 green, 1 red, 2 misuse.\n\n' +
@@ -861,7 +890,10 @@ function main() {
   const ages = args.agesFrom ? checkedBacklog(readJson(args.agesFrom, 'the ages snapshot'), 'ages snapshot') : null;
   if (Boolean(args.agesFrom) !== Boolean(args.agesThrough)) throw new Misuse('--ages-from and --ages-through must be supplied together');
   const after = args.agesThrough ? checkedBacklog(readJson(args.agesThrough, 'the after snapshot'), 'after snapshot') : null;
-  const report = evaluate(withAgesFrom(checkedBacklog(readJson(args.input, 'the backlog'), 'backlog'), ages, after), cfg, args.only);
+  const backlog = checkedBacklog(readJson(args.input, 'the backlog'), 'backlog');
+  if (args.at) atRevision(backlog, args.at, 'the backlog');
+  const report = evaluate(withAgesFrom(backlog, ages, after), cfg, args.only);
+  if (args.at) report.at = args.at;
   // The baseline is judged by the config of ITS day when one is given. With
   // the current config, lowering a budget or renaming the milestone creates
   // violations that look like old debt, and block-new waves them through.

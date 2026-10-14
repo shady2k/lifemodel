@@ -78,7 +78,7 @@ the repository's installation, and each person's plugin and hooks are their own.
 - **Rules:** `.backlog/rules/check.mjs` with `time-format.mjs` beside it,
   `check-commits.mjs`, `check-docs.mjs`, `check-product.mjs`, and `check-present.mjs` with
   `document-format.mjs` beside it — byte-for-byte copies of shady2k-skills
-  0.97.0's `skills/backlog/setup-shady2k-skills/` at setup version 0.43.0,
+  0.107.3's `skills/backlog/setup-shady2k-skills/` at setup version 0.45.0,
   never edited here. Their `--version` is the installation. Proving it: `cmp`
   each against the plugin copy.
 - **Present documents:** the config's `presentDocuments` — `AGENTS.md`,

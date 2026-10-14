@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const RULES_VERSION = '0.43.0';
+const RULES_VERSION = '0.45.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 function evaluate(input) {
@@ -24,8 +24,16 @@ function evaluate(input) {
     if (!commit || typeof commit.id !== 'string' || !commit.id.trim() || seen.has(commit.id) ||
         !Array.isArray(commit.taskIds) || commit.taskIds.some((id) => typeof id !== 'string' || !id.trim()))
       throw new Error('commits need unique ids and a taskIds list of nonempty strings');
+    if (commit.recordsOnly !== undefined && typeof commit.recordsOnly !== 'boolean')
+      throw new Error('a commit\'s recordsOnly flag must be true or false');
     seen.add(commit.id);
     if (!commit.taskIds.length) violations.push({ id: commit.id, task: null, reason: 'no task link' });
+    // A commit that carries only records of what already happened delivers
+    // nothing to the work it names: the records belong with the landing they
+    // describe, and a commit of their own is bookkeeping the owner's watch
+    // reads as progress. The adapter knows the message and the paths, so it
+    // marks the commit; the checker refuses it.
+    if (commit.recordsOnly) violations.push({ id: commit.id, task: null, reason: 'carries only records; they ride with the landing' });
     for (const id of new Set(commit.taskIds)) {
       const issue = issues.get(id);
       if (!issue) violations.push({ id: commit.id, task: id, reason: 'task does not exist' });

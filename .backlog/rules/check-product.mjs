@@ -6,8 +6,11 @@
  * The forms are the protocol's (references/product.md): a vision, sources,
  * hypotheses, user stories, use cases, product requirements, open questions,
  * prototypes and their results, each a Markdown file under docs/ whose first
- * line is its id and title, then its fields, then its sections. A repository
- * with no product document has nothing to check here and passes.
+ * line is its id and title, then its fields, then its sections. A practice
+ * record (references/keeping.md) is not a product document and takes no part
+ * in the chain, but one file per practice stands under docs/practices/ and is
+ * checked here too, for lack of a second reader. A repository with no product
+ * document and no practice has nothing to check here and passes.
  *
  * IT KNOWS NO PROJECT AND NO WIKI. It reads files and says what is wrong with
  * them, file and line, in words a contributor who never heard of the set can
@@ -46,7 +49,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.43.0';
+export const RULES_VERSION = '0.45.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class Misuse extends Error {}
@@ -61,13 +64,17 @@ const WHY = {
   'written-status': 'status is computed from the links and the checks: remove the Status: field',
   'system-part-in-requirement': 'a product requirement says what a user can observe and names no part of the system; how the system does it is a capability requirement that serves this one',
   'unverified-quote': 'the quote must stand, as written, at the lines or times the citation names in that source: correct the place or the quote',
+  'wrong-folder': 'a practice record stands under docs/practices/, one file per practice: that folder is what the agent doc and the retrospective look in',
   'outside-quote': 'the source is kept outside the repository, so this quote cannot be verified here',
 };
 const NOTES = new Set(['outside-quote']);
 
-const PREFIXES = ['S', 'H', 'US', 'UC', 'FR', 'Q', 'P', 'R'];
-const ID = /^(S|H|US|UC|FR|Q|P|R)-\d{3,}$/;
-const MENTION = /(?<![\w-])(?:S|H|US|UC|FR|Q|P|R)-\d{3,}(?![\w-])/g;
+// PRA is the practice kind, outside the product chain; it is listed first so
+// that PRA-001 is never read as a P-… id with something after it.
+const PRACTICE = 'PRA';
+const PREFIXES = ['PRA', 'S', 'H', 'US', 'UC', 'FR', 'Q', 'P', 'R'];
+const ID = /^(PRA|S|H|US|UC|FR|Q|P|R)-\d{3,}$/;
+const MENTION = /(?<![\w-])(?:PRA|S|H|US|UC|FR|Q|P|R)-\d{3,}(?![\w-])/g;
 const PLACEHOLDER = /\b(TODO|TBD|TKTK)\b|\[NEEDS CLARIFICATION|<[^>\n]+>/i;
 
 const list = (...values) => ({ list: values });
@@ -123,6 +130,15 @@ const KINDS = {
   },
 };
 const COMMON = { Supersedes: { supersedes: true, optional: true } };
+
+// A practice: not a product document, so not in KINDS, and its Status is
+// written, not computed -- it is the one field the rule below lets through.
+const PRACTICES = {
+  name: 'practice',
+  fields: { Status: list('active', 'retired'), Since: date, Evidence: text },
+  sections: { Class: {}, Mechanism: {}, Practice: {}, 'How we will know': {} },
+};
+const kindFor = (prefix) => KINDS[prefix] ?? (prefix === PRACTICE ? PRACTICES : null);
 
 // ---- where the files come from -------------------------------------------
 
@@ -186,13 +202,13 @@ function parse(path, body, finding) {
   const head = first && first.structural && first.raw.match(/^# (\S+) — (.+)$/);
   if (!head || !ID.test(head[1])) {
     // A first line that starts with an id is a product document out of form.
-    const near = first && first.structural && first.raw.match(/^#\s*((?:S|H|US|UC|FR|Q|P|R)-\d{3,})(?![\w-])/);
+    const near = first && first.structural && first.raw.match(/^#\s*((?:PRA|S|H|US|UC|FR|Q|P|R)-\d{3,})(?![\w-])/);
     if (near) finding('document-form', path, first.line, `the identity line is "# ${near[1]} — <title>", with a dash between the id and the title`);
     return near ? { broken: first.line } : null;
   }
   const id = head[1];
   const prefix = id.split('-')[0];
-  const kind = KINDS[prefix];
+  const kind = kindFor(prefix);
   const doc = { id, prefix, kind, path, line: first.line, title: head[2].trim(), fields: {}, sections: {}, lines: all };
   const at = (line, rule, what) => finding(rule, path, line, what);
   if (PLACEHOLDER.test(doc.title)) at(first.line, 'unfinished-content', 'the title is a placeholder');
@@ -214,7 +230,7 @@ function parse(path, body, finding) {
     const f = l.raw.match(/^([A-Z][A-Za-z ]*?):\s*(.*)$/);
     if (!f) { at(l.line, 'document-form', 'between the identity line and the first section only fields stand, one per line as "Name: value"'); continue; }
     const [, name, value] = f;
-    if (name === 'Status') { at(l.line, 'written-status', 'status is not written'); continue; }
+    if (name === 'Status' && !Object.hasOwn(kind.fields, 'Status')) { at(l.line, 'written-status', 'status is not written'); continue; }
     if (!Object.hasOwn(kind.fields, name) && !Object.hasOwn(COMMON, name)) {
       at(l.line, 'document-form', `a ${kind.name} has no field "${name}"; its fields are ${Object.keys(kind.fields).join(', ')}`); continue;
     }
@@ -347,6 +363,11 @@ export function checkProduct(source) {
   for (const d of docs) {
     if (byId.has(d.id)) finding('duplicate-id', d.path, d.line, `${d.id} is also ${byId.get(d.id).path}`);
     else byId.set(d.id, d);
+    // A practice record has one folder, and it is the one the agent doc and
+    // the retrospective read: the product documents' folders are defaults,
+    // this one is a rule.
+    if (d.prefix === PRACTICE && !/^docs\/practices\/[^/]+\.md$/.test(d.path))
+      finding('wrong-folder', d.path, d.line, 'a practice record stands under docs/practices/, one file per practice');
   }
   if (!docs.length) return found.sort(order);
   const hasVision = source.files.includes('docs/vision.md');
@@ -406,24 +427,30 @@ export function selftest() {
   show(checkProduct({ files: ['docs/notes.md'], read: () => '# Notes\n\nUS-East is a region, FR-12 a form.\n' }).length === 0,
     'product/a repository with no product document passes, whatever its text says');
   // Each template names exactly its kind's fields and sections, so a document
-  // written from one is never refused for its shape.
+  // written from one is never refused for its shape. A practice's template
+  // stands beside its kind at templates/practice.md, not among the product's.
+  const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+  const templateOk = (file, kind, label) => {
+    const t = readFileSync(file, 'utf8').split('\n');
+    const firstSection = t.findIndex((l) => l.startsWith('## '));
+    const fields = t.slice(1, firstSection < 0 ? t.length : firstSection).map((l) => l.match(/^([A-Z][A-Za-z ]*?):/)?.[1]).filter(Boolean);
+    const sections = t.map((l) => l.match(/^## (.+)$/)?.[1]).filter(Boolean);
+    const ok = sameSet(fields, Object.keys(kind.fields)) && sameSet(sections, Object.keys(kind.sections));
+    show(ok, `${label} has the ${kind.name}'s fields and sections${ok ? '' : `: ${JSON.stringify({ fields, sections })}`}`);
+    return ok;
+  };
   const folder = join(HERE, 'templates', 'product');
   const templates = readdirSync(folder).filter((f) => f.endsWith('.md'));
   const covered = new Set();
   for (const name of templates) {
-    const t = readFileSync(join(folder, name), 'utf8').split('\n');
-    const prefix = t[0].match(/^# ([A-Z]+)-<NNN> — /)?.[1];
-    const kind = KINDS[prefix];
-    if (!kind) { show(false, `product/template ${name} opens with a kind's identity line`); continue; }
+    const prefix = readFileSync(join(folder, name), 'utf8').split('\n')[0].match(/^# ([A-Z]+)-<NNN> — /)?.[1];
+    const kind = kindFor(prefix);
+    if (!kind || prefix === PRACTICE) { show(false, `product/template ${name} opens with a kind's identity line`); continue; }
     covered.add(prefix);
-    const firstSection = t.findIndex((l) => l.startsWith('## '));
-    const fields = t.slice(1, firstSection < 0 ? t.length : firstSection).map((l) => l.match(/^([A-Z][A-Za-z ]*?):/)?.[1]).filter(Boolean);
-    const sections = t.map((l) => l.match(/^## (.+)$/)?.[1]).filter(Boolean);
-    const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
-    show(same(fields, Object.keys(kind.fields)) && same(sections, Object.keys(kind.sections)),
-      `product/template ${name} has the ${kind.name}'s fields and sections`);
+    templateOk(join(folder, name), kind, `product/template ${name}`);
   }
-  show(Object.keys(KINDS).every((k) => covered.has(k)), 'product/every kind has its template');
+  const practiceTemplate = templateOk(join(HERE, 'templates', 'practice.md'), PRACTICES, 'practice/template practice.md');
+  show(Object.keys(KINDS).every((k) => covered.has(k)) && practiceTemplate, 'every kind has its template');
   return failures ? 1 : 0;
 }
 
