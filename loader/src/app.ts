@@ -109,27 +109,38 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       api: createOpenBaoApi({ address: config.openBaoAddress }),
       custody: createKubernetesBaoCustody(),
     } satisfies { api: BaoApi; custody: BaoCustody });
+  const giteaBootstrap = createGiteaBootstrap({
+    api: {
+      ...createGiteaHttpApi({
+        address: 'http://gitea-http.lifemodel-git.svc:3000',
+        seedBundle: '/opt/lifemodel/seed.bundle',
+        runner,
+      }),
+      ensureAdminSecret: createKubernetesGiteaAdminSecret(),
+    },
+    runPhases: createPlatformPhaseRunner(platformPhaseStore),
+  });
   const platformBootstrap =
     deps.platformBootstrap ??
-    createOpenBaoBootstrap({
-      bao: baoParts.api,
-      custody: baoParts.custody,
-      runPhases: createPlatformPhaseRunner(platformPhaseStore),
-      extraPhases:
-        deps.platformGiteaPhases ??
-        createGiteaBootstrap({
-          api: {
-            ...createGiteaHttpApi({
-              address: 'http://gitea-http.lifemodel-git.svc:3000',
-              seedBundle: '/opt/lifemodel/seed.bundle',
-              runner,
-            }),
-            ensureAdminSecret: createKubernetesGiteaAdminSecret(),
-          },
-          runPhases: createPlatformPhaseRunner(platformPhaseStore),
-        }).phases(),
-      ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
-    });
+    (() => {
+      const bootstrap = createOpenBaoBootstrap({
+        bao: baoParts.api,
+        custody: baoParts.custody,
+        runPhases: createPlatformPhaseRunner(platformPhaseStore),
+        extraPhases: deps.platformGiteaPhases ?? giteaBootstrap.phases(),
+        ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
+      });
+      return {
+        runInitial: async () => {
+          // The durable phase runner may skip the historical login phase on a
+          // fresh process. Rehydrate and prove the Secret-backed admin login
+          // before it resumes any unfinished Gitea phase.
+          if (deps.platformGiteaPhases === undefined) await giteaBootstrap.prepareResume();
+          await bootstrap.runInitial();
+        },
+        unsealIfSealed: () => bootstrap.unsealIfSealed(),
+      };
+    })();
   const agentVault = createAgentVault({
     launcher,
     runner,
