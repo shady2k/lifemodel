@@ -26,8 +26,8 @@ export function createKubernetesPostgresSecretPhase(options: KubernetesPostgresS
       let response = '';
       res.setEncoding('utf8');
       res.on('data', (chunk: string) => { response += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: response }));
-      res.on('aborted', () => reject(new Error('Kubernetes API response was truncated')));
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, body: response }); });
+      res.on('aborted', () => { reject(new Error('Kubernetes API response was truncated')); });
     });
     req.on('error', reject);
     if (body !== undefined) req.write(body);
