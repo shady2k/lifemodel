@@ -88,7 +88,6 @@ describe('container shutdown sequence', () => {
       'coreLoop.stop',
       'stateManager.shutdown',
       'recipientRegistry.flush',
-      'ackRegistry.flush',
       'channel.stop',
       // the fence is closed just before the LAST step: nothing writes after it
       'coreLoop.closeDurableWrites',

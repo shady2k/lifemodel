@@ -50,6 +50,7 @@ import { createInboundLog } from '../../src/core/inbound-log.js';
 import { createRecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import { openStorage, rmDir } from '../helpers/core-loop-drain-harness.js';
+import { testStoreUrls } from '../helpers/test-stores.js';
 
 /** A logger that keeps the seeded log quiet (the container logs itself). */
 const quiet = {
@@ -75,6 +76,8 @@ afterEach(async () => {
     await rmDir(dir);
   }
   delete process.env['DATA_PATH'];
+  delete process.env['LIFEMODEL_VALKEY_URL'];
+  delete process.env['LIFEMODEL_DATABASE_URL'];
   vi.unstubAllGlobals();
 });
 
@@ -110,6 +113,9 @@ async function freshDataPath(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   scratch.push(dir);
   process.env['DATA_PATH'] = dir;
+  const urls = testStoreUrls();
+  process.env['LIFEMODEL_VALKEY_URL'] = urls.valkeyUrl;
+  process.env['LIFEMODEL_DATABASE_URL'] = urls.databaseUrl;
   return dir;
 }
 
