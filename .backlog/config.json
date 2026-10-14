@@ -40,7 +40,7 @@
   "timeRecordsExempt": [],
   "presentDocuments": [
     "AGENTS.md",
-    "README.md",
+    "/README.md",
     "docs/architecture.md",
     "docs/concepts/*.md",
     "docs/features/**/*.md",
