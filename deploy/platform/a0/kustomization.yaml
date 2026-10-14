@@ -3,7 +3,6 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - service-account.yaml
-  - application-rbac.yaml
   - bootstrap-secrets.yaml
   - pvc.yaml
   - deployment.yaml
