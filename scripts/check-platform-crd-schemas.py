@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Validate rendered resources against schemas from vendored CRDs."""
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def documents(paths):
+    for name in paths:
+        with Path(name).open(encoding="utf-8") as stream:
+            yield from (item for item in yaml.safe_load_all(stream) if item)
+
+
+def check(value, schema, path, root):
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if not ref.startswith("#/"):
+            raise ValueError(f"unsupported schema reference {ref} at {path}")
+        target = root
+        for part in ref[2:].split("/"):
+            target = target[part.replace("~1", "/").replace("~0", "~")]
+        check(value, target, path, root)
+    for branch in schema.get("allOf", []):
+        check(value, branch, path, root)
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key, [])
+        if branches:
+            errors = []
+            for branch in branches:
+                try:
+                    check(value, branch, path, root)
+                    break
+                except ValueError as error:
+                    errors.append(str(error))
+            else:
+                raise ValueError(f"{path} matches no {key} schema: {'; '.join(errors)}")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        preserve = schema.get("x-kubernetes-preserve-unknown-fields") is True
+        additional = schema.get("additionalProperties", False)
+        for required in schema.get("required", []):
+            if required not in value:
+                raise ValueError(f"{path}.{required}: required field is missing")
+        for key, child in value.items():
+            if key in properties:
+                check(child, properties[key], f"{path}.{key}", root)
+            elif preserve:
+                continue
+            elif isinstance(additional, dict):
+                check(child, additional, f"{path}.{key}", root)
+            elif additional is True:
+                continue
+            else:
+                raise ValueError(f"{path}.{key}: unknown field")
+    elif isinstance(value, list) and "items" in schema:
+        for index, child in enumerate(value):
+            check(child, schema["items"], f"{path}[{index}]", root)
+
+
+def main(paths):
+    crds = {}
+    resources = []
+    for item in documents(paths):
+        if item.get("kind") == "CustomResourceDefinition":
+            spec = item["spec"]
+            group = spec["group"]
+            kind = spec["names"]["kind"]
+            for version in spec["versions"]:
+                crds[(group, version["name"], kind)] = version["schema"]["openAPIV3Schema"]
+        else:
+            resources.append(item)
+    checked = 0
+    for item in resources:
+        api = item.get("apiVersion", "")
+        if "/" not in api:
+            continue
+        group, version = api.split("/", 1)
+        schema = crds.get((group, version, item.get("kind")))
+        if schema is not None:
+            resource = f"{item.get('kind')}/{item.get('metadata', {}).get('name', '?')}"
+            if "spec" in item:
+                check(item["spec"], schema["properties"]["spec"], f"{resource}.spec", schema)
+            checked += 1
+    if not checked:
+        raise ValueError("no rendered resources matched a vendored CRD")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (KeyError, ValueError, yaml.YAMLError) as error:
+        print(f"platform CRD schema validation failed: {error}", file=sys.stderr)
+        sys.exit(1)
