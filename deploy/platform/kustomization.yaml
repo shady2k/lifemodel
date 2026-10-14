@@ -3,6 +3,8 @@ kind: Kustomization
 resources:
   - a0-reconciler.yaml
   - a-reconciler.yaml
+  - b-reconciler.yaml
+  - c-reconciler.yaml
 
-# Future platform steps belong here after A0. A and B must each declare
-# dependsOn: [{ name: platform-a0 }] (and later dependencies as required).
+# Platform order: A0 -> A -> B (CNPG CRDs/operator) -> C (shared state).
+# Each later step declares its dependency in its reconciler.

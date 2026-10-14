@@ -169,6 +169,26 @@
         grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
         touch $out
       '';
+      renderedCNPG = pkgs.runCommand "lifemodel-cnpg-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
+      } ''
+        set -eux
+        helm template cloudnative-pg ${./deploy/platform/charts/cloudnative-pg} \
+          --namespace cnpg-system --include-crds -f ${./deploy/platform/b/operator-values.yaml} > cnpg-generated.yaml
+        cmp cnpg-generated.yaml ${./deploy/platform/b/operator/rendered.yaml}
+        grep -F 'kind: CustomResourceDefinition' ${./deploy/platform/b/operator/rendered.yaml} >/dev/null
+        grep -F 'name: clusters.postgresql.cnpg.io' ${./deploy/platform/b/operator/rendered.yaml} >/dev/null
+        grep -F 'image: "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"' ${./deploy/platform/b/operator/rendered.yaml} >/dev/null
+        kustomize build ${./deploy/platform/b} > cnpg-operator.yaml
+        kustomize build ${./deploy/platform/state} > state.yaml
+        grep -F 'name: lifemodel-state' state.yaml >/dev/null
+        grep -F 'imageName: ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b' ${./deploy/platform/state/cluster/cluster.yaml} >/dev/null
+        grep -F 'name: platform-b' ${./deploy/platform/b-reconciler.yaml} >/dev/null
+        grep -F 'name: platform-c' ${./deploy/platform/c-reconciler.yaml} >/dev/null
+        grep -F 'name: platform-a' ${./deploy/platform/b-reconciler.yaml} >/dev/null
+        grep -F 'name: platform-b' ${./deploy/platform/c-reconciler.yaml} >/dev/null
+        touch $out
+      '';
       renderedGitea = pkgs.runCommand "lifemodel-gitea-platform-render" {
         nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
       } ''
@@ -264,6 +284,7 @@
         module-evaluation = moduleEvaluation;
         platform-kustomize-wiring = renderedPlatform;
         openbao-platform-render = renderedOpenBao;
+        cnpg-platform-render = renderedCNPG;
         gitea-platform-render = renderedGitea;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
