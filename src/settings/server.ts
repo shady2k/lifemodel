@@ -6,12 +6,12 @@
  * it is proxied here (forward_auth on the root host), and the session cookie is
  * the loader's. Two routes and nothing else:
  *
- *   GET  /          the form, with the values in lifemodel's config file
- *   POST /settings  validate, write the config file, then restart lifemodel
+ *   GET  /          the form, with the values in lifemodel's Postgres configuration
+ *   POST /settings  validate, write Postgres configuration, then reload it in the running core
  *
  * A save that is refused answers 400 with the page again, every bad field named
  * beside it and nothing written. A save that is accepted answers 200 first, and
- * only then does the restart run: the answer is what proves the write, and a
+ * only then does the reload run: the answer is what proves the write, and a
  * response the process never sent because it exited would be nobody's.
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
@@ -29,12 +29,12 @@ import {
 /**
  * The config boundary the interface serves: what the page reads and what a
  * save writes, with the write's stop options (`signal`, see
- * `ConfigLoader.writeFile`). Structural, so a test can hold a save in flight
+ * `ConfigLoader.writeConfig`). Structural, so a test can hold a save in flight
  * with its own writer while the publication contract stays the product's.
  */
 export interface SettingsConfig {
-  readFile(): Promise<AgentConfigFile | null>;
-  writeFile(file: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void>;
+  readConfig(): Promise<AgentConfigFile | null>;
+  writeConfig(document: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void>;
 }
 import { renderSettingsPage } from './page.js';
 
@@ -52,14 +52,14 @@ const OVERRIDING_VARIABLES = [
 ] as const;
 
 export interface SettingsServerOptions {
-  /** The loader of lifemodel's config file: the page reads and writes through it. */
+  /** The Postgres-backed config document read and written by the page. */
   config: SettingsConfig;
   logger: Logger;
   /** Where lifemodel listens; Caddy reaches it here (default 7100). */
   port?: number;
   host?: string;
   /**
-   * Asked for after a save was written: this is the restart path. It is called
+   * Asked for after a save was written: this reloads endpoint settings. It is called
    * once the answer has gone out, and the caller does the stopping and the
    * exiting (src/index.ts) - the interface has no power over the process
    * itself.
@@ -128,7 +128,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   );
 
   app.get('/', async (request, reply) => {
-    const file = await config.readFile();
+    const file = await config.readConfig();
     const values = settingsInputFromFile(file);
     // The GET runs the SAVE's rules on what the file holds: a config an older
     // interface (or a hand edit) wrote is REFUSED with its field named and
@@ -146,7 +146,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
   });
 
   // ONE save runs at a time, and its whole read-modify-write is inside the
-  // chain: a save that is still running holds the config file alone, and the
+  // chain: a save that is still running holds configuration updates in order, and the
   // next save reads what it actually published - never a half-applied mix of
   // the two. The serialized body below is the answer each save describes.
   let saveChain: Promise<unknown> = Promise.resolve();
@@ -166,7 +166,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     reply
       .code(503)
       .type('text/plain; charset=utf-8')
-      .send('lifemodel is restarting; save again when it is up\n');
+      .send('lifemodel is stopping; save again when it is up\n');
 
   /** The request's socket is gone: no answer can reach anybody. */
   const responseGone = (request: FastifyRequest): boolean => request.raw.socket.destroyed;
@@ -204,17 +204,17 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
         );
     }
 
-    const existing = await config.readFile();
+    const existing = await config.readConfig();
     try {
       // The write carries the interface's one stop signal: an abandoned
       // close has it aborted, and the writer stops at its publication point
       // instead of publishing under a process that is leaving (finding A).
-      await config.writeFile(applySettings(existing, input), { signal: stopSignal.signal });
+      await config.writeConfig(applySettings(existing, input), { signal: stopSignal.signal });
     } catch (error) {
       // Nothing was published (the write is atomic, and its publication point
       // is one rename it did not reach or did not pass): the owner is told,
-      // and the running lifemodel is left alone rather than restarted onto a
-      // config that is not there.
+      // and the running core is left alone rather than reloading values that were
+      // not published.
       const socketGone = responseGone(request);
       logger.error(
         {
@@ -250,10 +250,10 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     // line is no place to gamble on it.
     logger.info(
       { endpoint: redactEndpointUrl(input.endpointBaseUrl), roles: 3 },
-      'Settings saved: lifemodel asks the loader to start it again'
+      'Settings saved: reloading model settings in the running core'
     );
 
-    // The restart runs AFTER the answer is on the wire: the owner sees the
+    // The reload runs AFTER the answer is on the wire: the owner sees the
     // page that says so, and a process that left mid-answer would leave the
     // browser with nothing.
     reply.raw.once('finish', () => {
@@ -310,13 +310,13 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     }
     // The drain has asked the interface to close (a save started THIS stop, or
     // the process is leaving): a save that arrives now would write a config the
-    // exiting process never applies, and the restart it asks for would be
+    // exiting core never applies, and the reload it asks for would be
     // swallowed by the stop already running. Named, not silent.
     if (closing) {
       return reply
         .code(503)
         .type('text/plain; charset=utf-8')
-        .send('lifemodel is restarting; save again when it is up\n');
+        .send('lifemodel is stopping; save again when it is up\n');
     }
     // This request's work is the chain's tail: it starts only after the save
     // before it has written (or failed), so its read-modify-write sees the

@@ -61,7 +61,7 @@ export interface SettingsPageOptions {
   host?: string | undefined;
   /** Environment variables that override the saved values, by name only. */
   overriddenBy?: string[];
-  /** Set after a save: the page says lifemodel is restarting. */
+  /** Set after a save: the page confirms the config is applied. */
   saved?: boolean;
 }
 
@@ -90,7 +90,7 @@ function field(options: SettingsPageOptions, formField: (typeof SETTINGS_FIELDS)
   // not hold it. An accepted one is a placeholder by the rule above.
   // The endpoint base URL is ALWAYS echoed by its safe representation
   // (origin + path, no credentials, no query, no fragment), whatever the
-  // validation said: a config file an older interface wrote must not leak its
+  // validation said: a stored config document must not leak its
   // secret parts on a plain GET either (review round 2, finding F).
   const value =
     field === 'telegramBotToken' && error !== undefined
@@ -132,8 +132,8 @@ export function renderSettingsPage(options: SettingsPageOptions): string {
 
   const savedBlock =
     options.saved === true
-      ? `      <p class="missing"><strong>Saved.</strong> lifemodel is restarting with these
-      settings; the loader starts it again at once. Reload this page in a moment to see them at work.</p>`
+      ? `      <p class="missing"><strong>Saved.</strong> lifemodel is using these
+      settings for future model requests. Reload this page in a moment to see them at work.</p>`
       : '';
 
   const overrideBlock =
@@ -153,8 +153,8 @@ export function renderSettingsPage(options: SettingsPageOptions): string {
   <body>
     <h1>lifemodel settings</h1>
     <p>These settings belong to this lifemodel instance, and they are its own: the model
-    endpoint and the Telegram fields below. Saving them writes the instance's config file and
-    restarts lifemodel through the loader, so the next start runs with them.</p>
+    endpoint and the Telegram fields below. Saving them writes the instance's configuration to Postgres and
+    applies the new model endpoint and models to the running core.</p>
     <p>Keys are not kept here. Put them into Agent Vault, reached through the loader
     (<a href="${escapeHtml(loader)}">${escapeHtml(loader)}</a>) - the same place panic and resume live.
     lifemodel holds the Agent Vault placeholder only, never a key.</p>
@@ -164,7 +164,7 @@ ${savedBlock}${missingBlock}${overrideBlock}
     the key is injected on the way out.</p>
     <form method="post" action="/settings">
 ${SETTINGS_FIELDS.map((formField) => field(options, formField)).join('\n')}
-      <button type="submit">Save and restart lifemodel</button>
+      <button type="submit">Save settings</button>
     </form>
     <p class="hint">This page is behind the loader's login: no session, no request.</p>
   </body>
