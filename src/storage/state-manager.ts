@@ -1,13 +1,7 @@
-import { createHash } from 'node:crypto';
 import type { Logger } from '../types/index.js';
 import type { Storage } from './storage.js';
-import type { JSONStorage } from './json-storage.js';
 import type { PersistableState, PersistableNeuronWeights } from './persistable-state.js';
-import {
-  PERSISTABLE_STATE_VERSION,
-  createEmptyPersistableState,
-  serializeState,
-} from './persistable-state.js';
+import { PERSISTABLE_STATE_VERSION, createEmptyPersistableState } from './persistable-state.js';
 import type { Agent } from '../core/agent.js';
 import type { UserModel } from '../models/user-model.js';
 /**
@@ -16,14 +10,7 @@ import type { UserModel } from '../models/user-model.js';
 export interface StateManagerConfig {
   /** Storage key for state */
   stateKey?: string;
-  /** Auto-save interval in ms (default: 5 minutes, 0 to disable) */
-  autoSaveInterval?: number;
 }
-
-const DEFAULT_CONFIG: Required<StateManagerConfig> = {
-  stateKey: 'state',
-  autoSaveInterval: 2 * 60 * 1000, // 2 minutes
-};
 
 /**
  * StateManager - coordinates persistence of application state.
@@ -35,24 +22,17 @@ const DEFAULT_CONFIG: Required<StateManagerConfig> = {
  * - Migrate state between versions
  */
 export class StateManager {
-  private readonly storage: Storage & Partial<Pick<JSONStorage, 'loadWithFallback'>>;
   private readonly logger: Logger;
-  private readonly config: Required<StateManagerConfig>;
 
-  private autoSaveTimer: ReturnType<typeof setInterval> | null = null;
-
-  /** Hash of last saved state (for change detection) */
-  private lastSavedHash: string | null = null;
+  private snapshotState: PersistableState | null = null;
 
   // References to components for state collection
   private agent: Agent | null = null;
   private userModel: UserModel | null = null;
   private neuronWeights: PersistableNeuronWeights | null = null;
 
-  constructor(storage: Storage, logger: Logger, config: Partial<StateManagerConfig> = {}) {
-    this.storage = storage;
+  constructor(_storage: Storage, logger: Logger, _config: Partial<StateManagerConfig> = {}) {
     this.logger = logger.child({ component: 'state-manager' });
-    this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
   /**
@@ -68,41 +48,17 @@ export class StateManager {
     if (components.neuronWeights) this.neuronWeights = components.neuronWeights;
   }
 
-  /**
-   * Start auto-save timer.
-   * Checks for state changes on each interval and saves if changed.
-   */
+  /** State is written only by the core's per-tick snapshot commit. */
   startAutoSave(): void {
-    if (this.config.autoSaveInterval <= 0) {
-      this.logger.debug('Auto-save disabled');
-      return;
-    }
-
-    this.autoSaveTimer = setInterval(() => {
-      void this.saveIfChanged().catch((err: unknown) => {
-        this.logger.error({ error: err }, 'Auto-save failed');
-      });
-    }, this.config.autoSaveInterval);
-
-    this.logger.info({ intervalMs: this.config.autoSaveInterval }, 'Auto-save started');
+    // No timer or file writer: the snapshot commit is the sole state home.
   }
 
-  /**
-   * Stop auto-save timer.
-   */
   stopAutoSave(): void {
-    if (this.autoSaveTimer) {
-      clearInterval(this.autoSaveTimer);
-      this.autoSaveTimer = null;
-      this.logger.debug('Auto-save stopped');
-    }
+    // Kept as the shutdown lifecycle hook; there is no background writer.
   }
 
-  /**
-   * Compute hash of serialized state for change detection.
-   */
-  private computeHash(serialized: string): string {
-    return createHash('sha256').update(serialized).digest('hex');
+  setSnapshotState(state: PersistableState | null): void {
+    this.snapshotState = state;
   }
 
   /**
@@ -125,80 +81,28 @@ export class StateManager {
     return state;
   }
 
-  /**
-   * Save current state to storage if it has changed.
-   * Compares hash of current state with last saved state.
-   * Returns true if saved, false if skipped (no changes).
-   */
-  async saveIfChanged(): Promise<boolean> {
-    const state = this.collectState();
-    const serialized = serializeState(state);
-    const hash = this.computeHash(serialized);
-
-    if (hash === this.lastSavedHash) {
-      this.logger.trace('State unchanged, skipping save');
-      return false;
-    }
-
-    await this.storage.save(this.config.stateKey, JSON.parse(serialized));
-    this.lastSavedHash = hash;
-    this.logger.trace({ savedAt: state.savedAt }, 'State saved (auto)');
-    return true;
+  /** Export the current application state for the atomic tick snapshot. */
+  exportSnapshot(): PersistableState {
+    return this.collectState();
   }
 
-  /**
-   * Force save current state to storage (always writes).
-   */
-  async save(): Promise<void> {
-    const state = this.collectState();
-    const serialized = serializeState(state);
-
-    await this.storage.save(this.config.stateKey, JSON.parse(serialized));
-    this.lastSavedHash = this.computeHash(serialized);
-    this.logger.debug({ savedAt: state.savedAt }, 'State saved');
-  }
-
-  /**
-   * Load state from storage.
-   * Returns null if no saved state exists.
-   */
-  async load(): Promise<PersistableState | null> {
-    try {
-      // Try loadWithFallback if available (JSONStorage)
-      let data: unknown = null;
-
-      if (
-        'loadWithFallback' in this.storage &&
-        typeof this.storage.loadWithFallback === 'function'
-      ) {
-        data = await this.storage.loadWithFallback(this.config.stateKey);
-      } else {
-        data = await this.storage.load(this.config.stateKey);
-      }
-
-      if (!data) {
-        this.logger.info('No saved state found, starting fresh');
-        return null;
-      }
-
-      // Cast and migrate
-      const state = data as PersistableState;
-      const migrated = this.migrateState(state);
-
-      // Ensure Date fields are proper Date objects (JSON deserialization yields strings)
-      if (migrated.agent?.state?.lastTickAt && !(migrated.agent.state.lastTickAt instanceof Date)) {
-        migrated.agent.state.lastTickAt = new Date(
-          migrated.agent.state.lastTickAt as unknown as string
-        );
-      }
-
-      this.logger.info({ version: migrated.version, savedAt: migrated.savedAt }, 'State loaded');
-
-      return migrated;
-    } catch (error) {
-      this.logger.error({ error }, 'Failed to load state');
-      return null;
+  /** Load a state envelope supplied by Valkey before components are constructed. */
+  load(): Promise<PersistableState | null> {
+    if (!this.snapshotState) {
+      this.logger.info('No saved state found, starting fresh');
+      return Promise.resolve(null);
     }
+    const migrated = this.migrateState(this.snapshotState);
+    if (migrated.agent?.state?.lastTickAt && !(migrated.agent.state.lastTickAt instanceof Date)) {
+      migrated.agent.state.lastTickAt = new Date(
+        migrated.agent.state.lastTickAt as unknown as string
+      );
+    }
+    this.logger.info(
+      { version: migrated.version, savedAt: migrated.savedAt },
+      'State loaded from snapshot'
+    );
+    return Promise.resolve(migrated);
   }
 
   /**
@@ -232,18 +136,11 @@ export class StateManager {
     return state;
   }
 
-  /**
-   * Shutdown - save state and cleanup.
-   */
-  async shutdown(): Promise<void> {
+  /** Shutdown hook; tick commits have already made state durable. */
+  shutdown(): Promise<void> {
     this.stopAutoSave();
-
-    if (this.agent) {
-      this.logger.info('Saving state before shutdown...');
-      await this.save();
-    }
-
     this.logger.info('State manager shutdown complete');
+    return Promise.resolve();
   }
 }
 

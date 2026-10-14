@@ -71,6 +71,7 @@ import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 import type { InboundLog } from './inbound-log.js';
+import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
 
 /**
  * Core loop configuration.
@@ -152,6 +153,10 @@ export interface CoreLoopDeps {
    * durability).
    */
   inboundLog?: InboundLog | undefined;
+  /** Commit the complete state envelope after every completed tick. */
+  commitSnapshot?: ((tick: number) => Promise<void>) | undefined;
+  initialTickCount?: number | undefined;
+  onStaleSnapshot?: ((error: StaleSnapshotEpochError) => void) | undefined;
 }
 
 /**
@@ -348,6 +353,8 @@ export class CoreLoop {
 
   /** Durable inbound log (see CoreLoopDeps.inboundLog). */
   private readonly inboundLog: InboundLog | undefined;
+  private readonly commitSnapshot: ((tick: number) => Promise<void>) | undefined;
+  private readonly onStaleSnapshot: ((error: StaleSnapshotEpochError) => void) | undefined;
 
   /**
    * Set by haltForTest(): this object emulates a process that was killed. A
@@ -395,6 +402,9 @@ export class CoreLoop {
     this.layers = layers;
     this.logger = logger.child({ component: 'core-loop' });
     this.inboundLog = deps.inboundLog;
+    this.commitSnapshot = deps.commitSnapshot;
+    this.onStaleSnapshot = deps.onStaleSnapshot;
+    this.tickCount = deps.initialTickCount ?? 0;
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.conversationManager = deps.conversationManager;
@@ -1637,6 +1647,9 @@ export class CoreLoop {
         this.metrics.gauge('system_elu', health.eventLoopUtilization);
         this.metrics.gauge('system_stress_level', this.stressLevelToNumber(stressLevel));
 
+        // This awaited CAS is the tick's durability boundary. The next tick
+        // cannot start until the complete snapshot is committed.
+        await this.commitSnapshot?.(this.tickCount);
         this.scheduleTick();
       });
     } catch (error) {
@@ -1645,11 +1658,27 @@ export class CoreLoop {
           ? { message: error.message, stack: error.stack, name: error.name }
           : { raw: String(error), type: typeof error };
 
-      withTraceContext(tickCtx, () => {
-        this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
-      });
-
-      this.scheduleTick();
+      if (error instanceof StaleSnapshotEpochError) {
+        this.running = false;
+        if (this.tickTimeout) clearTimeout(this.tickTimeout);
+        this.tickTimeout = null;
+        withTraceContext(tickCtx, () => {
+          this.logger.error(
+            {
+              committerEpoch: error.committerEpoch,
+              storedEpoch: error.storedEpoch,
+              tick: this.tickCount,
+            },
+            'Snapshot epoch fenced; stopping core writer'
+          );
+        });
+        setTimeout(() => this.onStaleSnapshot?.(error), 0);
+      } else {
+        withTraceContext(tickCtx, () => {
+          this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
+        });
+        this.scheduleTick();
+      }
     } finally {
       this.tickInFlight--;
     }
@@ -1788,8 +1817,7 @@ export class CoreLoop {
    */
   private processUserMessageSignal(signal: Signal): void {
     const data = signal.data as
-      | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
-      | undefined;
+      { text?: string; recipientId?: string; sideEffectsApplied?: boolean } | undefined;
 
     // Idempotency guard: skip if already applied (signal was re-queued after deferral)
     if (data?.sideEffectsApplied) return;
@@ -1809,8 +1837,7 @@ export class CoreLoop {
     // Save to conversation history (text only — base64 images are NOT persisted)
     if (this.conversationManager) {
       const data = signal.data as
-        | { text?: string; recipientId?: string; images?: unknown[] }
-        | undefined;
+        { text?: string; recipientId?: string; images?: unknown[] } | undefined;
       if (data?.text && data.recipientId) {
         const photoPrefix = data.images?.length
           ? `[Photo${data.images.length > 1 ? ` x${String(data.images.length)}` : ''} attached] `

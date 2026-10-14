@@ -46,3 +46,15 @@ export type {
   JsonGraphStoreConfig,
 } from './graph-store.js';
 export { JsonGraphStore } from './graph-store.js';
+
+export {
+  SnapshotStore,
+  createSnapshotStore,
+  SNAPSHOT_VERSION,
+  StaleSnapshotEpochError,
+} from './snapshot-store.js';
+export type {
+  SnapshotEnvelope,
+  SnapshotSectionOwner,
+  SnapshotStoreConfig,
+} from './snapshot-store.js';

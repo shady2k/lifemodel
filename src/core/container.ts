@@ -1,4 +1,7 @@
 import type { Logger } from 'pino';
+import type { PersistableState } from '../storage/persistable-state.js';
+import type { PersistedAckRegistryState } from '../layers/aggregation/ack-registry.js';
+import { Redis } from 'iovalkey';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
@@ -40,6 +43,9 @@ import {
   createStateManager,
   createConversationManager,
   migrateToHierarchical,
+  createSnapshotStore,
+  type SnapshotEnvelope,
+  StaleSnapshotEpochError,
 } from '../storage/index.js';
 import {
   type MergedConfig,
@@ -243,8 +249,6 @@ export interface ShutdownSequenceDeps {
   stateManager: { shutdown: () => Promise<void> };
   /** Recipient registry (flushes its pending writes) */
   recipientRegistry: { flush: () => Promise<void> };
-  /** Ack registry (flushes its pending writes) */
-  ackRegistry: { flush: () => Promise<void> };
   /**
    * The step the stop reached (mutated here, read by the hard exit).
    * Optional: a caller that does not arm a stop deadline does not need it.
@@ -257,12 +261,7 @@ export interface ShutdownSequenceDeps {
  * when the deadline hit (`StopPendingReport.step`).
  */
 export type StopStep =
-  | 'intake_stop'
-  | 'loop_drain'
-  | 'state_flush'
-  | 'channel_stop'
-  | 'storage_flush'
-  | 'done';
+  'intake_stop' | 'loop_drain' | 'state_flush' | 'channel_stop' | 'storage_flush' | 'done';
 
 /** Live progress of one stop (see ShutdownSequenceDeps.progress). */
 export interface StopProgress {
@@ -328,7 +327,6 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   if (progress) progress.step = 'state_flush';
   await deps.stateManager.shutdown();
   await deps.recipientRegistry.flush();
-  await deps.ackRegistry.flush();
 
   // 4. Channels stop fully (clients released; after this a send refuses).
   if (progress) progress.step = 'channel_stop';
@@ -498,6 +496,14 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
   }
 
+  const valkeyUrl = process.env['LIFEMODEL_VALKEY_URL'];
+  if (!valkeyUrl) throw new Error('LIFEMODEL_VALKEY_URL is required');
+  if (!process.env['LIFEMODEL_DATABASE_URL']) throw new Error('LIFEMODEL_DATABASE_URL is required');
+  const snapshotRedis = new Redis(valkeyUrl);
+  const snapshotStore = createSnapshotStore(snapshotRedis);
+  const snapshotEpoch = await snapshotStore.takeEpoch();
+  const initialSnapshot = await snapshotStore.read();
+
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
     configOverrides.logDir ?? mergedConfig.logging.logDir,
@@ -530,6 +536,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create state manager
   const stateManager = createStateManager(storage, logger);
+  const snapshotState = initialSnapshot?.sections['agentState'] as PersistableState | undefined;
+  stateManager.setSnapshotState(snapshotState ?? null);
 
   // Create conversation manager for history
   const conversationManager = createConversationManager(storage, logger);
@@ -815,8 +823,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
   // Create persistent ack registry for deferrals (must be loaded before use)
-  const ackRegistry = new PersistentAckRegistry(logger, storage);
-  await ackRegistry.load();
+  const ackRegistry = new PersistentAckRegistry(logger);
+  await ackRegistry.load(
+    initialSnapshot?.sections['ackRegistry'] as PersistedAckRegistryState | undefined
+  );
   logger.info('AckRegistry configured with persistence');
 
   // === PLUGIN SYSTEM INITIALIZATION ===
@@ -1039,6 +1049,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }
 
+  let shutdown: (() => Promise<void>) | null = null;
   // Create core loop
   const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
     messageComposer: messageComposer ?? undefined,
@@ -1053,6 +1064,24 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     storage,
     pluginLoader,
     inboundLog,
+    initialTickCount: Number(
+      initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
+    ),
+    commitSnapshot: async (tick) => {
+      const sections = {
+        agentState: stateManager.exportSnapshot(),
+        ackRegistry: ackRegistry.exportSnapshot(),
+        tickCounter: tick,
+      };
+      const envelope: SnapshotEnvelope = { version: 1, epoch: snapshotEpoch, tick, sections };
+      if (!(await snapshotStore.commit(snapshotEpoch, envelope))) {
+        throw new StaleSnapshotEpochError(snapshotEpoch, await snapshotStore.currentEpoch());
+      }
+    },
+    onStaleSnapshot: () => {
+      process.exitCode = 1;
+      void shutdown?.();
+    },
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },
@@ -1171,8 +1200,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     // completing channel (or on re-fetch failure) the receipt itself is
     // queued as its caption text.
     const photoData = entry.signal.data as
-      | { pendingPhoto?: { fileId?: unknown } | undefined }
-      | undefined;
+      { pendingPhoto?: { fileId?: unknown } | undefined } | undefined;
     if (typeof photoData?.pendingPhoto?.fileId === 'string' && telegramChannel !== null) {
       const completed = await telegramChannel.completePhotoReceipt(entry.signal);
       if (completed) {
@@ -1203,6 +1231,23 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     stateManagerComponents.userModel = userModel;
   }
   stateManager.registerComponents(stateManagerComponents);
+  snapshotStore.register({
+    section: 'agentState',
+    exportSnapshot: () => stateManager.exportSnapshot(),
+    hydrateSnapshot: () => undefined,
+  });
+  snapshotStore.register({
+    section: 'ackRegistry',
+    exportSnapshot: () => ackRegistry.exportSnapshot(),
+    hydrateSnapshot: async (value) => {
+      await ackRegistry.load(value as PersistedAckRegistryState | undefined);
+    },
+  });
+  snapshotStore.register({
+    section: 'tickCounter',
+    exportSnapshot: () => coreLoop.getTickCount(),
+    hydrateSnapshot: () => undefined,
+  });
 
   // Start auto-save
   stateManager.startAutoSave();
@@ -1213,7 +1258,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Idempotent (see makeIdempotentShutdown): the first call wins; a later
   // caller gets the same promise.
   const stopProgress: StopProgress = { step: 'done' };
-  const shutdown = makeIdempotentShutdown(() => {
+  shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
     return shutdownSequence({
       logger,
@@ -1223,8 +1268,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       storage,
       stateManager,
       recipientRegistry,
-      ackRegistry,
       progress: stopProgress,
+    }).finally(async () => {
+      await snapshotRedis.quit();
     });
   });
 
