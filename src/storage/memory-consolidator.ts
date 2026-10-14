@@ -281,9 +281,15 @@ export class MemoryConsolidator {
 
     if (this.deps.entityExtractor && this.deps.graphStore) {
       try {
-        const extractionResult = await this.extractEntities(consolidated, provider);
+        const extractionResult = await this.deps.graphStore.transaction((graphStore) =>
+          this.extractEntities(consolidated, graphStore)
+        );
         entitiesExtracted = extractionResult.entities;
         relationsExtracted = extractionResult.relations;
+        for (const entry of extractionResult.entriesToMark) {
+          entry.metadata = { ...entry.metadata, graphExtracted: true };
+          await provider.save(entry);
+        }
       } catch (error) {
         this.logger.error(
           { error: error instanceof Error ? error.message : String(error) },
@@ -310,18 +316,17 @@ export class MemoryConsolidator {
    */
   private async extractEntities(
     allEntries: MemoryEntry[],
-    provider: MemoryProvider & { save(entry: MemoryEntry): Promise<void> }
-  ): Promise<{ entities: number; relations: number }> {
+    graphStore: GraphStore
+  ): Promise<{ entities: number; relations: number; entriesToMark: MemoryEntry[] }> {
     const extractor = this.deps.entityExtractor;
-    const graphStore = this.deps.graphStore;
-    if (!extractor || !graphStore) return { entities: 0, relations: 0 };
+    if (!extractor) return { entities: 0, relations: 0, entriesToMark: [] };
 
     // Filter entries not yet extracted
     const unextracted = allEntries.filter((e) => !e.metadata?.['graphExtracted']);
 
     if (unextracted.length === 0) {
       this.logger.debug('No unextracted entries for entity extraction');
-      return { entities: 0, relations: 0 };
+      return { entities: 0, relations: 0, entriesToMark: [] };
     }
 
     // Get existing entity names for dedup
@@ -391,15 +396,6 @@ export class MemoryConsolidator {
       });
     }
 
-    // Mark entries as extracted
-    for (const entry of unextracted) {
-      entry.metadata = { ...entry.metadata, graphExtracted: true };
-      await provider.save(entry);
-    }
-
-    // Persist graph
-    await graphStore.persist();
-
     this.logger.info(
       {
         unextracted: unextracted.length,
@@ -409,7 +405,11 @@ export class MemoryConsolidator {
       'Entity extraction complete'
     );
 
-    return { entities: result.entities.length, relations: result.relations.length };
+    return {
+      entities: result.entities.length,
+      relations: result.relations.length,
+      entriesToMark: unextracted,
+    };
   }
 
   /**

@@ -1,26 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import { createTestMemoryProvider } from '../helpers/memory-provider-fixture.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/registry.js';
 import { createMockLogger } from '../helpers/factories.js';
 
 // In-memory storage for testing
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => {
-      store.set(key, data);
-    },
-    delete: async (key: string) => {
-      const existed = store.has(key);
-      store.delete(key);
-      return existed;
-    },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
 
 // Create a memory entry for testing
 function createMemoryEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
@@ -37,22 +20,16 @@ function createMemoryEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
 }
 
 describe('Soul Memory Retention Rules', () => {
-  let storage: Storage;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
-    storage = createMockStorage();
     logger = createMockLogger();
     vi.clearAllMocks();
   });
 
   describe('Protected soul thoughts', () => {
     it('protects unresolved soul:reflection thoughts from pruning', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 5, // Low limit to trigger pruning
-      });
+      const provider = createTestMemoryProvider(logger as any, 5);
 
       // Add an unresolved soul reflection (should be protected)
       const protectedThought = createMemoryEntry({
@@ -82,11 +59,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('allows resolved soul thoughts to be pruned', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 5,
-      });
+      const provider = createTestMemoryProvider(logger as any, 5);
 
       // Add a resolved soul thought (should NOT be protected)
       const resolvedThought = createMemoryEntry({
@@ -115,11 +88,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('expires oldest protected thoughts when exceeding max protected limit', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 20, // Higher limit to focus on protection logic
-      });
+      const provider = createTestMemoryProvider(logger as any, 20);
 
       // Add 12 unresolved soul thoughts (limit is 10)
       for (let i = 0; i < 12; i++) {
@@ -162,11 +131,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('only protects soul:reflection (not soul:question)', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 10, // Higher limit so max protected = min(10, 5) = 5
-      });
+      const provider = createTestMemoryProvider(logger as any, 10);
 
       // Add different types of unresolved soul thoughts
       await provider.save(
@@ -211,11 +176,7 @@ describe('Soul Memory Retention Rules', () => {
 
   describe('Pruning behavior', () => {
     it('prunes oldest non-protected entries first', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 3,
-      });
+      const provider = createTestMemoryProvider(logger as any, 3);
 
       // Add entries in order: old → new
       await provider.save(
@@ -255,11 +216,7 @@ describe('Soul Memory Retention Rules', () => {
     });
 
     it('honors maxEntries even with protected entries', async () => {
-      const provider = createJsonMemoryProvider(logger as any, {
-        storage,
-        storageKey: 'memory-test',
-        maxEntries: 20, // Higher limit so max protected = min(10, 10) = 10
-      });
+      const provider = createTestMemoryProvider(logger as any, 20);
 
       // Add 3 protected entries
       for (let i = 0; i < 3; i++) {
