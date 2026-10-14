@@ -86,11 +86,15 @@ describe('settings reload in a running core', () => {
       });
       expect(requestedModels).toEqual(['fast-old']);
 
+      let reloadFinished: Promise<void> | undefined;
       server = createSettingsServer({
         config: core.configLoader,
         logger: createTestLogger('silent'),
         port: 0,
-        onSaved: createSettingsReloadHandler(core),
+        onSaved: () => {
+          reloadFinished = createSettingsReloadHandler(core!)();
+          return reloadFinished;
+        },
       });
       await server.listen();
       const addressText = server.address();
@@ -109,6 +113,7 @@ describe('settings reload in a running core', () => {
       });
       expect(result.status).toBe(200);
       await result.text();
+      await reloadFinished;
       await core.llmProvider.complete({
         role: 'fast',
         messages: [{ role: 'user', content: 'next' }],

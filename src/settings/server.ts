@@ -257,7 +257,7 @@ export function createSettingsServer(options: SettingsServerOptions): SettingsSe
     // page that says so, and a process that left mid-answer would leave the
     // browser with nothing.
     reply.raw.once('finish', () => {
-      await onSaved();
+      void onSaved();
     });
     return reply
       .code(200)
