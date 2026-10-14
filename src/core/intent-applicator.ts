@@ -7,13 +7,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import type {
   SignalType,
   SignalSource,
   Logger,
   Metrics,
   Channel,
-  SendOptions,
   Event,
   ThoughtData,
   InterestIntensity,
@@ -43,7 +43,6 @@ import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { MemoryProvider, MemoryEntry } from '../layers/cognition/tools/registry.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
-import { markdownToTelegramHtml } from '../utils/telegram-html.js';
 import type { StatusUpdateService } from './status-update-service.js';
 import type { DomainTrackerService } from './domain-trackers.js';
 import type { Storage } from '../storage/storage.js';
@@ -81,15 +80,9 @@ export interface IntentApplicatorDeps {
    * still to come.
    */
   onSendStarted?: (turnKey: string, recipientId: string, final: boolean) => void;
-  /**
-   * A send of that turn settled. The turn's durable-log entries leave the log
-   * when the turn records an outcome and a send's fate is part of it, so the
-   * outcome is reported here - once per SEND_MESSAGE intent, whether the send
-   * ran, was skipped or could not start. It carries NO per-entry identity and
-   * NO delivery evidence. The return value (the commit of the turn's entries,
-   * when any) is chained into the send chain, so the stop drain awaits its
-   * flush too.
-   */
+  /** Called when the turn's send event is added to its outbox. This is not
+   * delivery evidence; the gateway owns the later send.settled event. */
+  enqueueOutbound?: (event: SnapshotOutboxEvent) => void;
   onSendSettled?: (
     turnKey: string,
     recipientId: string,
@@ -117,20 +110,12 @@ export interface SendTurnRef {
    * two different inbound questions can legitimately need the same reply.
    */
   answersInbound: boolean;
+  eventId: string;
 }
 
-/**
- * How one send of a turn ended (lifemodel-ctc.2.1, owner decision comment 54:
- * the turn's OUTCOME settles its messages, a failed outcome is never retried).
- */
+/** Whether the event was admitted to this tick's transactional outbox. */
 export interface SendOutcome {
-  /**
-   * The text reached the chat (or was already there: a send skipped as a
-   * verbatim repeat of the last assistant message is not a failure).
-   */
   delivered: boolean;
-  /** When not delivered: why - reported at warn with the recipient. */
-  reason?: string;
 }
 
 /**
@@ -153,7 +138,6 @@ export class IntentApplicator {
    * is delivered before the channels are released; a failed send is logged in
    * its chain, never silently dropped.
    */
-  private readonly inFlightSends = new Set<Promise<void>>();
 
   /**
    * Intensity-to-delta mapping for SET_INTEREST intent.
@@ -296,204 +280,48 @@ export class IntentApplicator {
   // ──────────────────────────────────────────────────────────────────────────
 
   private applySendMessage(intent: SendMessageIntent): void {
-    const { recipientId, text, replyTo, conversationStatus } = intent.payload;
-
-    // Which durable-log turn this send belongs to (lifemodel-ctc.2.1), and
-    // whether it is one of the turn's final answers or an acknowledgement.
-    // Its entries leave the log when the turn records an outcome, and this
-    // send's fate is part of that outcome.
+    const { recipientId, text, replyTo } = intent.payload;
     const send = this.deps.resolveSendTurn?.(intent);
     const turnKey = send?.turnKey;
     const finalSend = send?.final ?? false;
-    // Does this send answer a logged inbound message? Then it is no proactive
-    // repeat, whatever its text (lifemodel-q4f).
-    const answersInbound = send?.answersInbound ?? false;
-    let delivered = false;
-    let failureReason: string | undefined;
-    const reportSettled = (outcome: SendOutcome): void => {
-      if (!turnKey) return;
-      const settled = this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
-      if (settled && typeof settled.then === 'function') {
-        void settled;
-      }
-    };
-    // Registered before anything else can fail: the turn waits for this send.
-    if (turnKey) {
-      this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
-    }
-    // A send that cannot start never reaches the chat: the turn's outcome is a
-    // FAILED send, which is reported and deliberately NOT retried (owner
-    // decision, comment 54).
-    const reportUndeliverable = (reason: string): void => {
-      this.deps.metrics.counter('messages_failed', { reason });
-      reportSettled({ delivered: false, reason });
-    };
+    if (turnKey) this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
 
-    if (!this.deps.recipientRegistry) {
-      this.deps.logger.error({ recipientId }, 'RecipientRegistry not configured');
-      reportUndeliverable('no_registry');
-      return;
-    }
-
-    const route = this.deps.recipientRegistry.resolve(recipientId);
+    const route = this.deps.recipientRegistry?.resolve(recipientId);
     if (!route) {
-      this.deps.logger.error({ recipientId }, 'Could not resolve recipientId');
-      reportUndeliverable('unresolved_recipient');
-      return;
-    }
-
-    const channelImpl = this.deps.channels.get(route.channel);
-    if (!channelImpl) {
-      this.deps.logger.error(
-        {
-          recipientId,
-          channel: route.channel,
-          registeredChannels: Array.from(this.deps.channels.keys()),
-        },
-        'Channel not found'
-      );
-      reportUndeliverable('channel_not_found');
-      return;
-    }
-
-    const htmlText = markdownToTelegramHtml(text);
-    const sendOptions: SendOptions = {
-      ...(replyTo && { replyTo }),
-      parseMode: 'HTML',
-    };
-
-    const sendChain = Promise.resolve()
-      .then(async () => {
-        // The pre-existing duplicate guard, PROACTIVE sends only
-        // (lifemodel-q4f): a message that repeats the last assistant message
-        // verbatim is not sent again - but never when this send answers a
-        // logged inbound message. Two ordinary questions can need the same
-        // reply; suppressing the second would leave that user with nothing
-        // while the turn reported the entry answered. A skipped send is not a
-        // failure - the text is already in the chat, so it counts as
-        // delivered for the turn's outcome (no endless replay).
-        if (this.deps.conversationManager && !answersInbound) {
-          const lastMessage =
-            await this.deps.conversationManager.getLastAssistantMessage(recipientId);
-          if (lastMessage && lastMessage === text) {
-            this.deps.logger.warn(
-              { recipientId, textLength: text.length },
-              'Skipping duplicate message - identical to last assistant message'
-            );
-            this.deps.metrics.counter('messages_skipped', { reason: 'duplicate' });
-            return { success: false, skipped: true, reason: 'identical_text' as const };
-          }
-        }
-        return channelImpl.sendMessage(route.destination, htmlText, sendOptions);
-      })
-      .then((result) => {
-        if (result.success) {
-          delivered = true;
-          this._lastMessageSentAt = Date.now();
-          this._lastMessageRecipientId = recipientId;
-          this.deps.metrics.counter('messages_sent', { channel: route.channel });
-          this.deps.agent.onMessageSent();
-
-          if (this.deps.conversationManager) {
-            // Type guard: messageId only exists on actual send results, not on skipped results
-            const messageId = 'messageId' in result ? result.messageId : undefined;
-            // Note: toolCalls and toolResults are NOT saved to history
-            // They're kept in agentic loop memory only to prevent pollution across triggers
-            void this.saveAgentMessage(
-              recipientId,
-              text,
-              conversationStatus,
-              messageId ? { channelMessageId: messageId, channel: route.channel } : undefined
-            );
-          }
-        } else if ('skipped' in result && result.skipped) {
-          // Skipped on purpose, never because a send failed: the identical
-          // text is already the last assistant message, so the user has it.
-          delivered = true;
-          this.deps.logger.debug(
-            { recipientId, textLength: text.length, reason: result.reason },
-            'Send skipped as a duplicate; counted as delivered for the turn outcome'
-          );
-        } else {
-          failureReason = 'returned_false';
-          this.deps.logger.warn(
-            { recipientId, channel: route.channel, textLength: text.length },
-            'Message send returned false'
-          );
-          this.deps.metrics.counter('messages_failed', {
-            channel: route.channel,
-            reason: 'returned_false',
-          });
-        }
-      })
-      .catch((error: unknown) => {
-        failureReason = 'exception';
-        this.deps.logger.error({ err: error, recipientId }, 'Message send threw an error');
-        this.deps.metrics.counter('messages_failed', {
-          channel: route.channel,
-          reason: 'exception',
+      this.deps.logger.error({ recipientId }, 'Could not resolve outbound recipient');
+      if (turnKey) {
+        void this.deps.onSendSettled?.(turnKey, recipientId, finalSend, {
+          delivered: false,
         });
-      });
-
-    // Track the whole chain so the stop drain can await its completion
-    // (bounded by the stop deadline) before the channels are released; the
-    // turn's settlement rides on the same chain, so its flush is awaited too.
-    const tracked = sendChain
-      .then(() => {
-        if (!turnKey) return undefined;
-        const outcome: SendOutcome = delivered
-          ? { delivered: true }
-          : { delivered: false, reason: failureReason ?? 'unknown' };
-        return this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
-      })
-      .finally(() => {
-        this.inFlightSends.delete(tracked);
-      });
-    this.inFlightSends.add(tracked);
+      }
+      return;
+    }
+    if (!this.deps.enqueueOutbound) {
+      throw new Error('Outbound event queue is required for SEND_MESSAGE');
+    }
+    const eventId = send?.eventId ?? randomUUID();
+    this.deps.enqueueOutbound({
+      eventId,
+      type: 'send.command',
+      payload: {
+        recipientId,
+        channel: route.channel,
+        destination: route.destination,
+        text,
+        ...(replyTo ? { replyTo } : {}),
+      },
+    });
+    this.deps.metrics.counter('outbound_events_queued', { channel: route.channel });
+    if (turnKey) {
+      // The core outcome is the committed outbound event, not delivery. The
+      // gateway owns send.settled and any later delivery failure.
+      void this.deps.onSendSettled?.(turnKey, recipientId, finalSend, { delivered: true });
+    }
   }
 
-  /** Number of SEND_MESSAGE chains still running. */
+  /** The core has no network send in flight; messages are outbox events. */
   pendingSendCount(): number {
-    return this.inFlightSends.size;
-  }
-
-  /**
-   * Await every in-flight send (bounded when a deadline is given; the caller
-   * reports what outlives it). Each chain logs its own failure - 'Message
-   * send returned false' / 'Message send threw an error' - so a failed send
-   * is reported, never silently dropped.
-   */
-  async drainPendingSends(deadlineMs?: number): Promise<void> {
-    while (this.inFlightSends.size > 0) {
-      if (deadlineMs === undefined) {
-        await Promise.race([...this.inFlightSends]);
-        continue;
-      }
-      if (Date.now() >= deadlineMs) {
-        return;
-      }
-      // A never-settling send must not block the stop forever: race the
-      // current chains against the remaining budget (review finding A).
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const cap = new Promise<'deadline'>((resolve) => {
-          timer = setTimeout(
-            () => {
-              resolve('deadline');
-            },
-            Math.max(0, deadlineMs - Date.now())
-          );
-        });
-        const settled = Promise.allSettled([...this.inFlightSends]).then(() => 'settled' as const);
-        if ((await Promise.race([settled, cap])) === 'deadline') {
-          return;
-        }
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    }
+    return 0;
   }
 
   private applyScheduleEvent(intent: ScheduleEventIntent): void {
@@ -1217,48 +1045,5 @@ export class IntentApplicator {
     if (Number.isNaN(num)) return null;
     // Clamp delta to reasonable range (-1 to +1)
     return Math.max(-1, Math.min(1, num));
-  }
-
-  /**
-   * Save agent message to conversation history.
-   * When tool call data is present, saves as a full turn (assistant + tool results).
-   */
-  private async saveAgentMessage(
-    chatId: string,
-    text: string,
-    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle',
-    channelMeta?: {
-      channelMessageId?: string;
-      channel?: string;
-    }
-  ): Promise<void> {
-    if (!this.deps.conversationManager) return;
-
-    try {
-      // Only save the final response text - tool calls are internal to the agentic loop
-      // This keeps conversation history clean: user messages, reactions, and assistant responses
-      await this.deps.conversationManager.addMessage(
-        chatId,
-        {
-          role: 'assistant',
-          content: text,
-        },
-        channelMeta
-      );
-
-      // Use inline status if provided, otherwise fall back to LLM classification
-      if (conversationStatus) {
-        await this.deps.conversationManager.setStatus(chatId, conversationStatus);
-      } else if (this.deps.messageComposer) {
-        // Fallback: classify via separate LLM call (legacy path)
-        const classification = await this.deps.messageComposer.classifyConversationStatus(text);
-        await this.deps.conversationManager.setStatus(chatId, classification.status);
-      }
-    } catch (error) {
-      this.deps.logger.warn(
-        { error: error instanceof Error ? error.message : String(error), chatId },
-        'Failed to save agent message'
-      );
-    }
   }
 }

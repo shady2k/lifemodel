@@ -69,7 +69,11 @@ import { JsonGraphStore } from '../storage/graph-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
-import { createInboundLog, type InboundLog } from './inbound-log.js';
+import {
+  InboundMessageStream,
+  applyCommittedOutboundEvents,
+  startOutboundDelivery,
+} from './message-streams.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -209,7 +213,7 @@ export interface Container {
   /** Motor Cortex service for code execution */
   motorCortex: MotorCortex | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
-  inboundLog: InboundLog | null;
+  inboundStream: InboundMessageStream | null;
   /**
    * The step the stop reached ('done' while the agent runs). `src/index.ts`
    * reads it at the stop deadline for the hard exit's error line
@@ -533,13 +537,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   storage.startAutoFlush();
   logger.info({ storagePath }, 'Storage initialized');
 
-  // Create the durable inbound log (lifemodel-ctc.2.1): inbound user
-  // messages are written and flushed HERE at emit time; an entry leaves the
-  // log when its turn reached a recorded outcome (owner decision, comment
-  // 54), and a start replays the entries whose turn recorded none (see the
-  // replay block below, after the core loop exists).
-  const inboundLog = createInboundLog({ storage, logger, storagePath });
-  await inboundLog.load();
+  // Inbound offsets, pending entries and the bounded dedup ring are owned by
+  // the Valkey snapshot. Existing stream entries replay from that snapshot.
+  const inboundStream = new InboundMessageStream(snapshotRedis);
+  inboundStream.hydrateSnapshot(
+    initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]
+  );
 
   // Create state manager
   const stateManager = createStateManager(storage, logger);
@@ -553,6 +556,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger
   );
   logger.info('ConversationManager configured');
+  // Re-apply all committed outbound message rows after restart. The independent
+  // cursor advances only after Postgres accepts the natural-keyed row.
+  await applyCommittedOutboundEvents(snapshotRedis, conversationManager);
 
   // Load persisted state
   const persistedState = await stateManager.load();
@@ -1074,12 +1080,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     soulProvider,
     storage,
     pluginLoader,
-    inboundLog,
+    inboundStream,
     initialTickCount: Number(
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
-    commitSnapshot: async (tick) => {
-      await snapshotStore.commitOwners(snapshotEpoch, tick);
+    commitSnapshot: async (tick, outbox) => {
+      await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
+      await applyCommittedOutboundEvents(snapshotRedis, conversationManager);
     },
     onStaleSnapshot: () => {
       process.exitCode = 1;
@@ -1175,56 +1182,35 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     channels.set('telegram', telegramChannel);
     coreLoop.registerChannel(telegramChannel);
 
-    // When telegram receives messages, write them to the durable inbound log
-    // FIRST (flushed at emit time through the awaited callback) and queue the
-    // accepted ones; duplicates by update_id are dropped.
-    telegramChannel.setSignalCallback((signal) => {
-      return coreLoop.pushInboundSignal(signal);
-    });
+    // Telegram is a temporary ingress adapter. Its messages enter the same
+    // durable inbound stream that the future gateway will write.
+    telegramChannel.setSignalCallback((signal) => coreLoop.pushInboundSignal(signal));
 
     logger.info('Telegram channel configured');
   }
 
-  // Replay every uncommitted inbound message (its answer was never
-  // DELIVERED, so the offset did not advance) as signals, in log order.
-  // The entries STAY in the log: a crash before they are processed cannot
-  // lose them - the next start replays them again (lifemodel-ctc.2.1).
-  const replayEntries = inboundLog.replayable();
-  for (const entry of replayEntries) {
-    // A first message of a new chat can outlive the registry's debounced
-    // save (review round 2, finding 1): replay re-registers the route the
-    // entry carries, deterministically, before anything is queued.
-    if (entry.routing && recipientRegistry.resolve(entry.recipientId) === null) {
-      recipientRegistry.getOrCreate(entry.routing.channel, entry.routing.destination);
-    }
+  const outboundDelivery = startOutboundDelivery(snapshotRedis, channels, logger);
+  void outboundDelivery.done.catch((error: unknown) => {
+    logger.error({ err: error }, 'Outbound delivery worker stopped unexpectedly');
+  });
 
-    // A durable photo receipt whose download never finished: the channel
-    // re-fetches it and emits the full signal (finding 7). Without a
-    // completing channel (or on re-fetch failure) the receipt itself is
-    // queued as its caption text.
-    const photoData = entry.signal.data as
-      | { pendingPhoto?: { fileId?: unknown } | undefined }
-      | undefined;
-    if (typeof photoData?.pendingPhoto?.fileId === 'string' && telegramChannel !== null) {
+  // Prime the core queue before its first tick. Photo receipts are completed
+  // while Telegram is constructed but has not started polling, as before.
+  const replayedInbound = await inboundStream.readNew(true);
+  for (const entry of replayedInbound) {
+    const data = entry.signal.data as { pendingPhoto?: { fileId?: unknown } | undefined };
+    if (typeof data.pendingPhoto?.fileId === 'string' && telegramChannel) {
       const completed = await telegramChannel.completePhotoReceipt(entry.signal);
       if (completed) {
+        for (const replaced of await inboundStream.readNew()) coreLoop.pushSignal(replaced.signal);
         continue;
       }
     }
     coreLoop.pushSignal(entry.signal);
   }
-  if (replayEntries.length > 0) {
-    logger.info(
-      { count: replayEntries.length },
-      'Replayed uncommitted inbound messages from the durable log'
-    );
+  if (replayedInbound.length > 0) {
+    logger.info({ count: replayedInbound.length }, 'Replayed pending inbound stream messages');
   }
-
-  // Nothing else is restored: internal signals are NOT persisted across a stop
-  // (the ticks of this run regenerate the pressures and neurons; a schedule
-  // firing, a Motor Cortex result or a reaction that was only queued is lost)
-  // and every inbound user message is carried by the durable log replayed
-  // above (lifemodel-ctc.1.2).
   await storage.flush();
 
   // Register components with state manager
@@ -1247,6 +1233,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       await ackRegistry.load(value as PersistedAckRegistryState | undefined);
     },
   });
+  snapshotStore.register(inboundStream);
   snapshotStore.register({
     section: 'tickCounter',
     exportSnapshot: () => coreLoop.getTickCount(),
@@ -1264,6 +1251,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const stopProgress: StopProgress = { step: 'done' };
   shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
+    outboundDelivery.stop();
     return shutdownSequence({
       logger,
       deadline: Date.now() + budget,
@@ -1304,7 +1292,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     pluginLoader,
     recipientRegistry,
     motorCortex,
-    inboundLog,
+    inboundStream,
     stopProgress: () => stopProgress.step,
     shutdown,
   };

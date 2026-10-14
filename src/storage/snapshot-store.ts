@@ -29,8 +29,9 @@ local current_epoch = redis.call('GET', KEYS[1])
 if current_epoch ~= ARGV[1] then return 0 end
 local events = cjson.decode(ARGV[3])
 for _, event in ipairs(events) do
-  if redis.call('HSETNX', KEYS[4], event.eventId, '1') == 1 then
+  if redis.call('HEXISTS', KEYS[4], event.eventId) == 0 then
     redis.call('XADD', KEYS[3], '*', 'eventId', event.eventId, 'event', cjson.encode(event))
+    redis.call('HSET', KEYS[4], event.eventId, '1')
   end
 end
 redis.call('SET', KEYS[2], ARGV[2])

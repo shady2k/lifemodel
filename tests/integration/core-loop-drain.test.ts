@@ -10,7 +10,7 @@
  * 2. An internal signal is NOT persisted across a stop: a turn the deadline
  *    cut loose is abandoned and nothing replays (the ticks of the next run
  *    regenerate internal signals; inbound messages are carried by the durable
- *    inbound log - tests/integration/inbound-log-restart.test.ts).
+ *    inbound log - tests/integration/snapshot-outbox.test.ts).
  * 3. A hang the deadline cuts loose does not hang the stop, and neither a
  *    slow nor a hung send outlives the release by accident.
  * 4. The stop is idempotent.
@@ -186,13 +186,13 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
     // without the log (this harness has none) the message is not replayed -
-    // with the log it is, exactly once (inbound-log-restart.test.ts)
+    // with stream offsets, exactly once (snapshot-outbox.test.ts)
     expect(h2.cognition.triggerIds()).toEqual([]);
     await h2.coreLoop.stop();
     h2.cognition.settleAll();
   });
 
-  it('a turn that finishes during the drain delivers its answer through a channel that has stopped intake (sent once, success)', async () => {
+  it('a turn finishing during drain commits an outbound event; the core does not call the channel', async () => {
     const storagePath = await freshScratch('ctc-drain-deliver-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -213,20 +213,14 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     };
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
-    // a SLOW send: the stop must await the in-flight chain before releasing
-    h1.channel.sendDelayMs = 80;
     await stopInstance(h1, await openStorage(storagePath));
-
-    // Intake stopped before the send; the slow send was awaited and delivered;
-    // the full stop came after it
-    expect(h1.channel.events).toEqual(['stopIntake', 'send', 'stop']);
-    expect(h1.channel.sent).toEqual([
-      { target: 'chat-42', text: expect.stringContaining(text), messageId: 'test-msg-1' },
-    ]);
+    expect(h1.channel.events).toEqual(['stopIntake', 'stop']);
+    expect(h1.channel.sent).toEqual([]);
     expect(h1.channel.failed).toEqual([]);
+    expect(h1.coreLoop.getOutboxForTest().map((event) => event.payload['text'])).toContain(text);
   });
 
-  it('a FAILED send during the drain is reported, not silently dropped', async () => {
+  it('channel delivery failure is outside the core turn outcome', async () => {
     const storagePath = await freshScratch('ctc-drain-failsend-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -240,18 +234,15 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     };
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
-    // the send itself fails (like Telegram: transport error) - the drain must
-    // surface the failure, not swallow it
     h1.channel.failNextSend = 'transport-error';
     await stopInstance(h1, await openStorage(storagePath));
 
     expect(h1.channel.sent).toEqual([]);
-    expect(h1.channel.failed).toEqual([
-      { target: 'chat-42', text: expect.any(String), reason: 'transport-error' },
-    ]);
+    expect(h1.channel.failed).toEqual([]);
+    expect(h1.coreLoop.getOutboxForTest()).toHaveLength(1);
   });
 
-  it('a HUNG send does not hang the stop: the deadline releases the channels', async () => {
+  it('a pending outbound event does not hold core shutdown', async () => {
     const storagePath = await freshScratch('ctc-drain-hungsend-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -259,8 +250,6 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
     h1.coreLoop.pushSignal(thoughtSignal('turn trigger', h1.recipientId));
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
-    // the send never returns
-    h1.channel.sendGate = new Promise<void>(() => undefined);
     h1.cognition.settleAll({
       confidence: 1,
       intents: [
@@ -272,10 +261,10 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     const started = Date.now();
     await stopInstance(h1, await openStorage(storagePath));
     expect(Date.now() - started).toBeLessThan(5_000); // the deadline, not the hang
-    // the stop finished its own steps: the channels were released and the
-    // sends were abandoned (the hard exit leaves the process at the deadline)
+    // The channel is not called from intent application or held open by the core.
     expect(h1.channel.fullyStopped).toBe(true);
-    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(1);
+    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(0);
+    expect(h1.coreLoop.getOutboxForTest()).toHaveLength(1);
   });
 
   it('stop past the overall deadline continues: a stalled tick and a stalled scheduler do not hang it', async () => {
@@ -316,7 +305,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
 
   // ── real cognition (agentic loop) with a scripted fake LLM provider ──
 
-  it('REAL cognition: a turn completing during the stop drain delivers its reply', async () => {
+  it('REAL cognition: a turn completing during the stop drain produces an outbound event', async () => {
     const storagePath = await freshScratch('ctc-real-finish-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
@@ -334,14 +323,12 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     // the real agentic loop ran exactly once (one LLM completion) ...
     await waitFor(() => h1.cognition.provider.requests.length === 1, 'LLM called once');
-    // ... and its reply is delivered through the channel exactly once
-    await waitFor(() => h1.channel.sent.length === 1, 'reply delivered');
-    expect(h1.channel.sent[0]?.text).toBe('The real loop reply');
+    // ... its reply is placed in the tick's outbox, not sent by intent application
+    await waitFor(() => h1.coreLoop.getOutboxForTest().length === 1, 'outbound event committed');
+    expect(h1.coreLoop.getOutboxForTest()[0]?.payload['text']).toBe('The real loop reply');
 
     await stopInstance(h1, await openStorage(storagePath));
-    // delivered (before the full release) and never refused
-    expect(h1.channel.events).not.toContain('send-refused');
-    expect(h1.channel.events.indexOf('send')).toBeLessThan(h1.channel.events.indexOf('stop'));
+    expect(h1.channel.events).not.toContain('send');
     expect(existsSync(journalPath(storagePath))).toBe(false);
   });
 
@@ -367,7 +354,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.cognition.settleHangingTurn();
 
     // fresh start: nothing is redone (this harness has no inbound log; with
-    // one, the message replays exactly once - inbound-log-restart.test.ts)
+    // one, the message replays from the inbound stream)
     const h2 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
