@@ -365,7 +365,7 @@ export interface HarnessOptions {
   initialTickCount?: number;
   initialState?: Partial<AgentState>;
   initialSleepState?: Partial<SleepState>;
-  commitSnapshot?: (tick: number) => Promise<void>;
+  commitSnapshot?: CoreLoopDeps['commitSnapshot'];
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
   busSignalStream?: BusSignalStream;
   initialBusOffset?: string;

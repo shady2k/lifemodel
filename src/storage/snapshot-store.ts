@@ -12,6 +12,12 @@ export interface SnapshotEnvelope {
   sections: Record<string, unknown>;
 }
 
+export interface SnapshotOutboxEvent {
+  eventId: string;
+  type: string;
+  payload: Record<string, unknown>;
+}
+
 export interface SnapshotSectionOwner<T = unknown> {
   readonly section: string;
   exportSnapshot(): T;
@@ -21,6 +27,13 @@ export interface SnapshotSectionOwner<T = unknown> {
 const COMMIT_SCRIPT = `
 local current_epoch = redis.call('GET', KEYS[1])
 if current_epoch ~= ARGV[1] then return 0 end
+local events = cjson.decode(ARGV[3])
+for _, event in ipairs(events) do
+  if redis.call('HEXISTS', KEYS[4], event.eventId) == 0 then
+    redis.call('XADD', KEYS[3], '*', 'eventId', event.eventId, 'event', cjson.encode(event))
+    redis.call('HSET', KEYS[4], event.eventId, '1')
+  end
+end
 redis.call('SET', KEYS[2], ARGV[2])
 return 1
 `;
@@ -45,6 +58,8 @@ export interface SnapshotStoreConfig {
 export class SnapshotStore {
   private readonly epochKey: string;
   private readonly snapshotKey: string;
+  private readonly outboundKey: string;
+  private readonly outboundKeysKey: string;
   private readonly scriptSha: string;
   private readonly owners = new Map<string, SnapshotSectionOwner>();
 
@@ -55,6 +70,8 @@ export class SnapshotStore {
     const prefix = config.keyPrefix ?? 'lifemodel:core:snapshot:';
     this.epochKey = `${prefix}${SNAPSHOT_EPOCH_KEY}`;
     this.snapshotKey = `${prefix}${SNAPSHOT_KEY}`;
+    this.outboundKey = `${prefix}outbound`;
+    this.outboundKeysKey = `${prefix}outbound:event-keys`;
     this.scriptSha = createHash('sha1').update(COMMIT_SCRIPT).digest('hex');
   }
 
@@ -102,7 +119,11 @@ export class SnapshotStore {
     }
   }
 
-  async commit(epoch: number, envelope: SnapshotEnvelope): Promise<boolean> {
+  async commit(
+    epoch: number,
+    envelope: SnapshotEnvelope,
+    outbox: SnapshotOutboxEvent[] = []
+  ): Promise<boolean> {
     if (envelope.epoch !== epoch)
       throw new Error(
         `Snapshot epoch ${String(envelope.epoch)} does not match committer epoch ${String(epoch)}`
@@ -111,11 +132,14 @@ export class SnapshotStore {
     try {
       const result = await this.redis.evalsha(
         this.scriptSha,
-        2,
+        4,
         this.epochKey,
         this.snapshotKey,
+        this.outboundKey,
+        this.outboundKeysKey,
         String(epoch),
-        serialized
+        serialized,
+        JSON.stringify(outbox)
       );
       return Number(result) === 1;
     } catch (error) {
@@ -123,21 +147,28 @@ export class SnapshotStore {
       await this.redis.script('LOAD', COMMIT_SCRIPT);
       const result = await this.redis.evalsha(
         this.scriptSha,
-        2,
+        4,
         this.epochKey,
         this.snapshotKey,
+        this.outboundKey,
+        this.outboundKeysKey,
         String(epoch),
-        serialized
+        serialized,
+        JSON.stringify(outbox)
       );
       return Number(result) === 1;
     }
   }
 
-  async commitOwners(epoch: number, tick: number): Promise<boolean> {
+  async commitOwners(
+    epoch: number,
+    tick: number,
+    outbox: SnapshotOutboxEvent[] = []
+  ): Promise<boolean> {
     const sections: Record<string, unknown> = {};
     for (const [name, owner] of this.owners) sections[name] = owner.exportSnapshot();
     const envelope: SnapshotEnvelope = { version: SNAPSHOT_VERSION, epoch, tick, sections };
-    if (!(await this.commit(epoch, envelope))) {
+    if (!(await this.commit(epoch, envelope, outbox))) {
       throw new StaleSnapshotEpochError(epoch, await this.currentEpoch());
     }
     return true;

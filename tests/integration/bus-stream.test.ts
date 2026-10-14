@@ -3,10 +3,12 @@ import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream } from '../../src/core/bus-stream.js';
 import { createSignal } from '../../src/types/signal.js';
+import type { SendMessageIntent } from '../../src/types/intent.js';
 import {
   makeScratchDir,
   rmDir,
   startInstance,
+  thoughtSignal,
   waitFor,
 } from '../helpers/core-loop-drain-harness.js';
 
@@ -20,6 +22,55 @@ describe('Valkey bus signal stream', () => {
     for (const path of scratch) await rmDir(path);
     await stores.redis.quit();
     await stores.postgres.end();
+  });
+
+  it('rolls the bus offset back and leaves the outbox uncommitted when the snapshot commit fails', async () => {
+    const prefix = `bus-rollback:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const stream = createBusSignalStream(stores.redis, prefix);
+    store.register(stream);
+    const epoch = await store.takeEpoch();
+    let commitAttempts = 0;
+    let attemptedOffset: string | undefined;
+    let attemptedOutbox: unknown[] = [];
+    const path = await makeScratchDir('lifemodel-bus-rollback-');
+    scratch.push(path);
+    const instance = await startInstance(path, {
+      tickIntervalMs: 5,
+      cognitionMode: 'hang',
+      busSignalStream: stream,
+      initialBusOffset: '0-0',
+      commitSnapshot: async (tick, outbox) => {
+        commitAttempts += 1;
+        if (commitAttempts === 1) {
+          await store.commitOwners(epoch, tick, outbox);
+          return;
+        }
+        attemptedOffset = stream.committedOffset();
+        attemptedOutbox = outbox;
+        throw new Error('snapshot commit refused');
+      },
+    });
+    const firstSignal = thoughtSignal('start cognition', instance.recipientId);
+    instance.coreLoop.pushSignal(firstSignal);
+    await waitFor(() => instance.cognition.calls.length === 1, 'cognition started');
+    await waitFor(() => stream.committedOffset() !== '0-0', 'first bus offset committed');
+    const committedOffset = stream.committedOffset();
+    instance.coreLoop.pushSignal(thoughtSignal('consume with answer', instance.recipientId));
+    const send: SendMessageIntent = {
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: instance.recipientId, text: 'must not commit' },
+    };
+    if (!('settleAll' in instance.cognition)) throw new Error('Expected fake cognition');
+    instance.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
+    await waitFor(() => attemptedOffset !== undefined, 'second snapshot commit attempted');
+    await waitFor(() => instance.coreLoop.stopReport().loopStopped, 'core stopped after failure');
+    expect(attemptedOffset).not.toBe(committedOffset);
+    expect(attemptedOutbox).toHaveLength(1);
+    expect(stream.committedOffset()).toBe(committedOffset);
+    expect(await store.read()).toMatchObject({ sections: { busOffset: committedOffset } });
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toEqual([]);
+    await instance.coreLoop.stop();
   });
 
   it('replays a queued signal after a crash and never processes a committed signal twice', async () => {

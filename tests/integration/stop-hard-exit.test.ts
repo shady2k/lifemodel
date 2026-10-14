@@ -213,20 +213,14 @@ describe('hard exit at the stop deadline (lifemodel-ctc.1.2)', () => {
     release.resolve();
   });
 
-  it('a hung send: the exit is requested at the deadline and the log names the outstanding send', async () => {
+  it('an outbound intent does not run a channel send inside the core', async () => {
     const storagePath = await freshScratch('ctc-hard-send-');
-    const recorded: RecordedLog[] = [];
-    const logger = recordingLogger(createTestLogger('warn'), recorded);
     const h1 = await startInstance(storagePath, {
-      cognitionMode: 'hang',
+      cognitionMode: 'immediate',
       drainTimeoutMs: BUDGET_MS,
-      logger,
     });
     h1.coreLoop.pushSignal(thoughtSignal('turn trigger', h1.recipientId));
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
-
-    // the send never returns: the stop can neither deliver nor report it
-    h1.channel.sendGate = new Promise<void>(() => undefined);
     h1.cognition.settleAll({
       confidence: 1,
       intents: [
@@ -234,19 +228,10 @@ describe('hard exit at the stop deadline (lifemodel-ctc.1.2)', () => {
       ],
       response: undefined,
     });
-
-    const spy = exitSpy();
-    const armed = spy.arm(logger, () => ({ step: 'loop_drain', ...h1.coreLoop.stopReport() }));
-    await stopInstance(h1, await openStorage(storagePath, logger));
-    await waitFor(() => spy.codes.length === 1, 'the hard exit was requested at the deadline');
-    armed.disarm();
-
-    expect(spy.codes).toEqual([1]);
+    await waitFor(() => h1.coreLoop.getTickCount() > 1, 'outbound intent tick completed');
     expect(h1.channel.sent).toEqual([]);
-    const line = deadlineLine(recorded);
-    const pending = line?.obj['pending'] as StopPendingReport & { step: string };
-    expect(pending.sendsOutstanding).toBe(1);
-    h1.cognition.settleAll();
+    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(0);
+    await stopInstance(h1, await openStorage(storagePath, createTestLogger('warn')));
   });
 
   it('REAL cognition: a turn that overruns the drain leaves the process at the deadline, named', async () => {
@@ -305,7 +290,7 @@ describe('hard exit at the stop deadline (lifemodel-ctc.1.2)', () => {
 });
 
 describe('StopReport: what the hard exit names (lifemodel-ctc.1.2)', () => {
-  it('names a turn in flight, an outstanding send and a queued signal', async () => {
+  it('names a turn in flight and a queued signal; sends belong to the outbound applier', async () => {
     const storagePath = await freshScratch('ctc-stopreport-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -332,9 +317,9 @@ describe('StopReport: what the hard exit names (lifemodel-ctc.1.2)', () => {
     });
 
     const stopping = stopInstance(h1, await openStorage(storagePath));
-    await waitFor(() => h1.coreLoop.stopReport().sendsOutstanding === 1, 'the send is outstanding');
-    expect(h1.coreLoop.stopReport().loopStopped).toBe(true);
+    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(0);
     await stopping;
+    expect(h1.coreLoop.stopReport().loopStopped).toBe(true);
     h1.cognition.settleAll();
   });
 });

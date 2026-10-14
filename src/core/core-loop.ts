@@ -16,7 +16,7 @@
  * Note: SMART layer merged into COGNITION - smart retry is internal to COGNITION.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   Signal,
   SignalSource,
@@ -70,7 +70,8 @@ import { IntentApplicator, type SendOutcome } from './intent-applicator.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
 import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
-import type { InboundLog } from './inbound-log.js';
+import type { InboundMessageStream } from './message-streams.js';
+import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
 import type { BusSignalStream } from './bus-stream.js';
 
@@ -153,11 +154,13 @@ export interface CoreLoopDeps {
    * Optional - without it inbound user messages behave as before (no
    * durability).
    */
-  inboundLog?: InboundLog | undefined;
+  inboundStream?: InboundMessageStream | undefined;
   /** Durable internal signal stream; omitted only by isolated logic tests. */
   busSignalStream?: BusSignalStream | undefined;
   /** Commit the complete state envelope after every completed tick. */
-  commitSnapshot?: ((tick: number) => Promise<void>) | undefined;
+  commitSnapshot?: ((tick: number, outbox: SnapshotOutboxEvent[]) => Promise<void>) | undefined;
+  /** Apply projections after the atomic snapshot/outbox commit succeeds. */
+  afterSnapshotCommit?: (() => Promise<void>) | undefined;
   initialTickCount?: number | undefined;
   onStaleSnapshot?: ((error: StaleSnapshotEpochError) => void) | undefined;
 }
@@ -205,7 +208,7 @@ interface PendingCognition {
  * a crash mid-turn, a rejected turn, a turn overrunning the stop deadline -
  * leaves its entries for a single replay at the next start.
  */
-type TurnLogOutcome = 'answered' | 'deliberate_no_reply' | 'failed_send' | 'failed_turn';
+type TurnLogOutcome = 'answered' | 'deliberate_no_reply' | 'failed_turn';
 
 /**
  * Commit bookkeeping for one cognition turn (the durable inbound log).
@@ -242,8 +245,6 @@ interface PendingTurnCommits {
    * makes a turn whose only message WAS the acknowledgement answered.
    */
   anyDelivered: boolean;
-  /** Why a send that did not reach the chat failed (the warn names it). */
-  failureReason?: string | undefined;
   /**
    * How the turn ended (see {@link TurnDisposition}): `error` is a failed
    * turn, `no_reply`/`defer` a deliberate silence. Undefined means the turn
@@ -252,6 +253,7 @@ interface PendingTurnCommits {
   disposition?: TurnDisposition | undefined;
   /** Its entries were settled (guards a second commit from a later send). */
   settled: boolean;
+  outboundCount: number;
 }
 
 /**
@@ -363,7 +365,7 @@ export class CoreLoop {
   private pendingCognition: PendingCognition | null = null;
 
   /**
-   * Commit bookkeeping for the durable inbound log, keyed by the turn's
+   * Commit bookkeeping for snapshot-owned inbound entries, keyed by the turn's
    * tick id (see PendingTurnCommits).
    */
   private readonly turnCommits = new Map<string, PendingTurnCommits>();
@@ -376,9 +378,14 @@ export class CoreLoop {
    */
   private activeTurnCommits: PendingTurnCommits | null = null;
 
-  /** Durable inbound log (see CoreLoopDeps.inboundLog). */
-  private readonly inboundLog: InboundLog | undefined;
-  private readonly commitSnapshot: ((tick: number) => Promise<void>) | undefined;
+  /** Snapshot-owned inbound stream offsets and pending entries. */
+  private readonly inboundStream: InboundMessageStream | undefined;
+  private tickOutbox: SnapshotOutboxEvent[] = [];
+  private readonly commitSnapshot:
+    | ((tick: number, outbox: SnapshotOutboxEvent[]) => Promise<void>)
+    | undefined;
+  private snapshotCommitStarted = false;
+  private readonly afterSnapshotCommit: (() => Promise<void>) | undefined;
   private readonly busSignalStream: BusSignalStream | undefined;
   private readonly pendingBusWrites: Promise<void>[] = [];
   private readonly knownBusEntries = new Set<string>();
@@ -430,8 +437,9 @@ export class CoreLoop {
     this.eventBus = eventBus;
     this.layers = layers;
     this.logger = logger.child({ component: 'core-loop' });
-    this.inboundLog = deps.inboundLog;
+    this.inboundStream = deps.inboundStream;
     this.commitSnapshot = deps.commitSnapshot;
+    this.afterSnapshotCommit = deps.afterSnapshotCommit;
     this.busSignalStream = deps.busSignalStream;
     if (this.busSignalStream && !deps.commitSnapshot) {
       throw new Error('A bus signal stream requires a snapshot commit callback');
@@ -534,6 +542,7 @@ export class CoreLoop {
         this.enqueueThoughtSignal(data, source);
       },
       running: () => this.running,
+      enqueueOutbound: (event) => this.tickOutbox.push(event),
       storage: deps.storage,
       pluginLoader: deps.pluginLoader,
       resolveSendTurn: (intent) => {
@@ -549,99 +558,62 @@ export class CoreLoop {
             : (this.activeTurnCommits?.tickId ?? this.pendingCognition?.tickId);
         if (turnKey === undefined) return undefined;
         const state = this.turnCommits.get(turnKey);
+        const inboundIds = state
+          ? this.ownedInboundIds(state.turn, intent.payload.recipientId)
+          : [];
+        const messageKeys = state
+          ? this.ownedMessageKeys(state.turn, intent.payload.recipientId)
+          : [];
+        const ordinal = state ? state.outboundCount++ : 0;
+        const eventId = createHash('sha256')
+          .update(
+            `${intent.payload.recipientId}|${messageKeys.sort().join(',')}|${String(ordinal)}`
+          )
+          .digest('hex');
         return {
           turnKey,
           final: state?.resolved ?? false,
-          // The logged inbound messages of THIS recipient the turn owns
-          // (lifemodel-q4f): a send that answers one of them is never a
-          // proactive repeat, however it reads.
-          answersInbound:
-            state !== undefined &&
-            this.ownedSeqs(state.turn, intent.payload.recipientId).length > 0,
+          answersInbound: inboundIds.length > 0,
+          eventId: `send:${eventId}`,
         };
       },
       onSendStarted: (turnKey, recipientId, final) => {
         this.onTurnSendStarted(turnKey, recipientId, final);
       },
       onSendSettled: (turnKey, recipientId, final, outcome) => {
-        return this.onTurnSendSettled(turnKey, recipientId, final, outcome);
+        this.onTurnSendSettled(turnKey, recipientId, final, outcome);
       },
     });
   }
 
-  /** Durable inbound log accessor (observability/tests). */
-  getInboundLog(): InboundLog | undefined {
-    return this.inboundLog;
-  }
-
-  /**
-   * Accept a signal that came from a sensory organ. Inbound user messages go
-   * through the durable log FIRST: the entry is written and flushed before
-   * the signal is queued, so a crash anywhere after receipt still has it.
-   * A duplicate update_id is dropped instead of queued. Other signals behave
-   * as before (queued immediately, not persisted - internal ones are
-   * regenerated by ticks).
-   *
-   * A pendingPhoto receipt is written durably but NOT queued: it is replayed
-   * by the next start, which completes (or re-fetches) the download (review
-   * round 2, finding 7). A failed durable append throws - the update is not
-   * acknowledged as handled (finding 8).
-   *
-   * The entry stays in the log until its turn records an OUTCOME (answered,
-   * deliberately silent, failed send, failed turn) - see settleTurn(). A
-   * crash before that replays it once at the next start.
-   */
+  /** Admit a user message into the durable Valkey inbound stream. */
   async pushInboundSignal(signal: Signal): Promise<void> {
-    if (!this.inboundLog || signal.type !== 'user_message') {
+    if (signal.type !== 'user_message' || !this.inboundStream) {
       this.pushSignal(signal);
       return;
     }
-    const data = signal.data as { recipientId?: unknown; pendingPhoto?: unknown } | undefined;
-    if (typeof data?.recipientId !== 'string') {
-      this.logger.warn(
-        { signalId: signal.id },
-        'user_message without recipientId accepted without the durable inbound log'
-      );
-      this.pushSignal(signal);
-      return;
-    }
-
-    // Routing the answer needs after a restart (finding 1): the registry may
-    // not have persisted its debounce yet when the process dies.
-    let routing = null;
-    const route = this.recipientRegistry?.resolve(data.recipientId);
-    if (route) {
-      routing = { channel: route.channel, destination: route.destination };
-    }
-
-    const accepted = await this.inboundLog.record(signal, routing);
-    if (!accepted) {
-      this.logger.debug(
-        { signalId: signal.id },
-        'Duplicate inbound update dropped by the durable log'
-      );
-      return;
-    }
-    if (typeof data.pendingPhoto === 'object' && data.pendingPhoto !== null) {
-      // Durable receipt only - the completed photo message queues later.
-      this.logger.debug({ signalId: signal.id }, 'Photo receipt logged durably (not queued)');
-      return;
-    }
-    this.pushSignal(signal);
+    await this.inboundStream.append(signal);
   }
 
-  /** Map a log-owned seq for every user-message signal of a recipient. */
-  private ownedSeqs(turn: PendingCognition, recipientId: string): number[] {
-    if (!this.inboundLog) return [];
-    const seqs: number[] = [];
-    for (const signal of [...turn.triggerSignals, ...turn.absorbedSignals]) {
-      const data = signal.data as { recipientId?: unknown } | undefined;
-      if (signal.type !== 'user_message') continue;
-      if (typeof data?.recipientId !== 'string' || data.recipientId !== recipientId) continue;
-      const seq = this.inboundLog.seqForSignal(signal.id);
-      if (seq !== undefined) seqs.push(seq);
-    }
-    return seqs;
+  /** Signal ids owned by this turn for the recipient it answers. */
+  private ownedInboundIds(turn: PendingCognition, recipientId: string): string[] {
+    if (!this.inboundStream) return [];
+    return [...turn.triggerSignals, ...turn.absorbedSignals]
+      .filter((signal) => {
+        const data = signal.data as { recipientId?: unknown } | undefined;
+        return signal.type === 'user_message' && data?.recipientId === recipientId;
+      })
+      .map((signal) => signal.id);
+  }
+
+  private ownedMessageKeys(turn: PendingCognition, recipientId: string): string[] {
+    if (!this.inboundStream) return [];
+    return [...turn.triggerSignals, ...turn.absorbedSignals]
+      .filter((signal) => {
+        const data = signal.data as { recipientId?: unknown } | undefined;
+        return signal.type === 'user_message' && data?.recipientId === recipientId;
+      })
+      .map((signal) => this.inboundStream?.messageIdForSignal(signal) ?? signal.id);
   }
 
   /**
@@ -666,12 +638,11 @@ export class CoreLoop {
   private turnOutcome(state: PendingTurnCommits): TurnLogOutcome | undefined {
     if (state.disposition === 'error') return 'failed_turn';
     if (state.finalSendsStarted > 0) {
-      return state.finalDelivered ? 'answered' : 'failed_send';
+      return state.finalDelivered ? 'answered' : undefined;
     }
     // The turn ends with no final send: only an acknowledgement went out (an
     // empty final response after core.say is a valid answer).
     if (state.anyDelivered) return 'answered';
-    if (state.failureReason !== undefined) return 'failed_send';
     if (state.disposition === 'no_reply' || state.disposition === 'defer') {
       return 'deliberate_no_reply';
     }
@@ -701,12 +672,12 @@ export class CoreLoop {
    * promise is chained into the send chain, so the stop drain awaits the
    * commit's flush too.
    */
-  private async onTurnSendSettled(
+  private onTurnSendSettled(
     turnKey: string,
     recipientId: string,
     final: boolean,
     outcome: SendOutcome
-  ): Promise<void> {
+  ): void {
     const state = this.turnCommits.get(turnKey);
     if (!state) {
       // The turn is gone (evicted, or already settled): a later send of it
@@ -724,10 +695,8 @@ export class CoreLoop {
       if (final) {
         state.finalDelivered = true;
       }
-    } else {
-      state.failureReason ??= outcome.reason ?? 'unknown';
     }
-    await this.settleTurn(state);
+    this.settleTurn(state);
   }
 
   /**
@@ -738,7 +707,7 @@ export class CoreLoop {
    * decision, comment 54). A resolved turn with NO outcome leaves its entries
    * in the log for a single replay at the next start.
    */
-  private async settleTurn(state: PendingTurnCommits): Promise<void> {
+  private settleTurn(state: PendingTurnCommits): void {
     if (state.settled || this.deadForTest) return;
     if (this.durableWritesClosed) {
       // The stop ran its final flush: a write made now reaches a storage that
@@ -746,7 +715,7 @@ export class CoreLoop {
       // replays once at the next start (lifemodel-ctc.1.2).
       state.settled = true;
       const owner = this.answeredRecipientOf(state);
-      const owned = owner === undefined ? [] : this.ownedSeqs(state.turn, owner);
+      const owned = owner === undefined ? [] : this.ownedInboundIds(state.turn, owner);
       this.dropTurnCommit(state);
       if (owned.length > 0) {
         this.logger.warn(
@@ -768,37 +737,35 @@ export class CoreLoop {
     if (state.finalSendsStarted < state.finalSendsExpected) return;
     state.settled = true;
     const recipientId = this.answeredRecipientOf(state);
-    const seqs = recipientId === undefined ? [] : this.ownedSeqs(state.turn, recipientId);
+    const inboundIds =
+      recipientId === undefined ? [] : this.ownedInboundIds(state.turn, recipientId);
     const outcome = this.turnOutcome(state);
     this.dropTurnCommit(state);
-    if (recipientId === undefined || seqs.length === 0) return;
+    if (recipientId === undefined || inboundIds.length === 0) return;
     if (outcome === undefined) {
       this.logger.warn(
-        { recipientId, entries: seqs.length, disposition: state.disposition ?? 'none' },
+        { recipientId, entries: inboundIds.length, disposition: state.disposition ?? 'none' },
         'Turn reached no outcome (no answer sent, no deliberate silence); its inbound messages stay in the log and replay once after a restart'
       );
       return;
     }
-    if (outcome === 'failed_turn' || outcome === 'failed_send') {
+    if (outcome === 'failed_turn') {
       this.logger.warn(
         {
           recipientId,
-          entries: seqs.length,
+          entries: inboundIds.length,
           outcome,
-          reason: state.failureReason ?? null,
           disposition: state.disposition ?? null,
         },
         'Inbound messages settled by a FAILED outcome; they are not retried'
       );
     } else {
       this.logger.info(
-        { recipientId, entries: seqs.length, outcome },
+        { recipientId, entries: inboundIds.length, outcome },
         "Inbound messages settled by the turn's outcome"
       );
     }
-    if (this.inboundLog) {
-      await this.inboundLog.commit(seqs);
-    }
+    this.inboundStream?.settle(inboundIds);
   }
 
   /** The turn is over: its bookkeeping goes (a settled/undecided turn waits on nothing). */
@@ -821,6 +788,7 @@ export class CoreLoop {
       finalDelivered: false,
       anyDelivered: false,
       settled: false,
+      outboundCount: 0,
     };
     this.turnCommits.set(tickId, state);
     this.activeTurnCommits = state;
@@ -884,9 +852,9 @@ export class CoreLoop {
    * send that settled; awaited so the commit's flush lands before the stop
    * goes on.
    */
-  private async evaluateTurnCommits(): Promise<void> {
+  private evaluateTurnCommits(): void {
     for (const state of [...this.turnCommits.values()]) {
-      await this.settleTurn(state);
+      this.settleTurn(state);
     }
   }
 
@@ -976,10 +944,6 @@ export class CoreLoop {
     // outcome, so they replay once at the next start).
     await this.drainPendingCognition(deadline);
 
-    // Sends the drained turn scheduled must be delivered (or reported failed)
-    // BEFORE the container releases the channels.
-    await this.awaitPendingSends(deadline);
-
     // The stop is over: the turn in flight (if it overran) may not apply
     // further intents through its later immediate callbacks.
     this.lateEffectsFenced = true;
@@ -996,25 +960,14 @@ export class CoreLoop {
     return this.config.shutdownDrainTimeoutMs;
   }
 
-  /**
-   * Wait until no SEND_MESSAGE chain is in flight (or the deadline passes);
-   * what remains is logged, and the stop proceeds (the container releases the
-   * channels next).
-   */
-  private async awaitPendingSends(deadline: number): Promise<void> {
-    await this.intentApplicator.drainPendingSends(deadline);
-    const remaining = this.intentApplicator.pendingSendCount();
-    if (remaining > 0) {
-      this.logger.warn(
-        { remaining },
-        'Sends still in flight at the stop deadline; releasing the channels anyway'
-      );
-    }
-  }
-
   /** How many signals are queued (accepted, not yet processed). Observable for tests. */
   pendingSignalCount(): number {
     return this.pendingSignals.length;
+  }
+
+  /** TEST-ONLY: events waiting for the current tick's snapshot commit. */
+  getOutboxForTest(): SnapshotOutboxEvent[] {
+    return [...this.tickOutbox];
   }
 
   /**
@@ -1187,7 +1140,7 @@ export class CoreLoop {
       // Commit what is decidable now; sends still in flight turn the rest
       // through their outcome callbacks (each flush is chained onto its
       // send chain, so stop()'s awaitPendingSends waits for it too).
-      await this.evaluateTurnCommits();
+      this.evaluateTurnCommits();
     } catch (error: unknown) {
       withTraceContext(pending.traceContext, () => {
         this.logger.error(
@@ -1305,12 +1258,19 @@ export class CoreLoop {
     this.tickInFlight++;
     const tickStart = Date.now();
     this.tickCount++;
+    this.tickOutbox = [];
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
 
     this.tickConsumedBusOffset = undefined;
     try {
+      // Pull durable inbound entries after the snapshot offset. Pending entries
+      // hydrated from an earlier snapshot are replayed by the same call.
+      for (const entry of (await this.inboundStream?.readNew()) ?? []) {
+        this.pushSignal(entry.signal);
+      }
+
       // ============================================================================
       // TICK-INITIATED OPERATIONS (run every tick regardless of signals)
       // Uses tickId as trace root for grouping housekeeping work
@@ -1657,7 +1617,7 @@ export class CoreLoop {
         this.applyIntents(allIntents, tickCtx);
         // Settle the durable inbound log entries of a turn that reached its
         // outcome in this tick (its sends settle after, through the applicator).
-        await this.evaluateTurnCommits();
+        this.evaluateTurnCommits();
 
         // Periodic maintenance
         if (activeLayers.aggregation && this.tickCount % this.config.pruneInterval === 0) {
@@ -1698,8 +1658,9 @@ export class CoreLoop {
         if (this.busSignalStream && this.tickConsumedBusOffset) {
           this.busSignalStream.setCommittedOffset(this.tickConsumedBusOffset);
         }
+        this.snapshotCommitStarted = true;
         try {
-          await this.commitSnapshot?.(this.tickCount);
+          await this.commitSnapshot?.(this.tickCount, [...this.tickOutbox]);
         } catch (error) {
           if (this.busSignalStream && previousOffset !== undefined) {
             this.busSignalStream.setCommittedOffset(previousOffset);
@@ -1713,14 +1674,17 @@ export class CoreLoop {
           }
           throw error;
         }
+        this.snapshotCommitStarted = false;
         if (this.busSignalStream && this.tickConsumedBusOffset) {
-          await this.busSignalStream.trimBefore(this.tickConsumedBusOffset);
           for (const id of this.knownBusEntries) {
-            if (compareStreamIds(id, this.tickConsumedBusOffset) <= 0)
+            if (compareStreamIds(id, this.tickConsumedBusOffset) <= 0) {
               this.knownBusEntries.delete(id);
+            }
           }
+          await this.busSignalStream.trimBefore(this.tickConsumedBusOffset);
         }
         this.tickConsumedBusOffset = undefined;
+        await this.afterSnapshotCommit?.();
         this.scheduleTick();
       });
     } catch (error) {
@@ -1748,6 +1712,12 @@ export class CoreLoop {
         withTraceContext(tickCtx, () => {
           this.logger.error({ error: errorDetails, tick: this.tickCount }, 'Tick failed');
         });
+        // Once a snapshot attempt starts, its in-memory section state may be
+        // ahead of durable state. Stop and let restart hydrate the last commit.
+        if (this.snapshotCommitStarted) {
+          this.running = false;
+          return;
+        }
         this.scheduleTick();
       }
     } finally {
