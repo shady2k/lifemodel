@@ -202,4 +202,34 @@ describe('Gitea first-start bootstrap', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it('reports a missing git binary before trying to clone the seed bundle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'gitea-missing-git-'));
+    try {
+      const server = createServer((_req, res) => {
+        res.statusCode = 200;
+        res.end('{}');
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (address === null || typeof address === 'string')
+        throw new Error('fake Gitea server has no TCP port');
+      const api = createGiteaHttpApi({
+        address: `http://127.0.0.1:${address.port}`,
+        seedBundle: join(root, 'seed.bundle'),
+        runner: createNodeRunner(),
+        gitPath: join(root, 'missing-git'),
+      });
+      try {
+        await api.verifyAdmin({ username: 'admin', password: 'test-password' });
+        await expect(api.seedBundle()).rejects.toThrow(/git binary is unavailable/);
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve()))
+        );
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 });

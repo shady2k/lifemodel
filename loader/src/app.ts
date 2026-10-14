@@ -208,9 +208,16 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         logger.info({}, 'OpenBao bootstrap is ready');
         delayMs = 30_000;
       } catch (error) {
+        let failedPhase = 'unknown';
+        try {
+          const record = await platformPhaseStore.read();
+          if (record?.status === 'failed') failedPhase = record.phase;
+        } catch {
+          // Keep the original bootstrap failure visible if reading its phase also fails.
+        }
         logger.error(
-          { error: describe(error) },
-          `OpenBao platform bootstrap failed; retrying in ${String(delayMs)} ms`
+          { error: describe(error), phase: failedPhase },
+          `platform bootstrap failed during ${failedPhase}; retrying in ${String(delayMs)} ms`
         );
         await waitForPlatform(delayMs);
         delayMs = Math.min(delayMs * 2, 30_000);

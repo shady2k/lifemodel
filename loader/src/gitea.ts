@@ -177,6 +177,7 @@ export interface GiteaHttpOptions {
   seedBundle: string;
   runner: CommandRunner;
   gitRemote?: string;
+  gitPath?: string;
   timeoutMs?: number;
   kubernetes?: KubernetesOptions;
 }
@@ -478,7 +479,18 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
       const remote = options.gitRemote ?? `${base.origin}/admin/lifemodel.git`;
       const directory = await mkdtemp(join(tmpdir(), 'gitea-seed-'));
       try {
-        const clone = await options.runner.run('git', ['clone', options.seedBundle, directory], {
+        const git = options.gitPath ?? 'git';
+        try {
+          await options.runner.run(git, ['--version'], { timeoutMs: timeout });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+            throw new Error(`required git binary is unavailable (${git}): ${detail}`, {
+              cause: error,
+            });
+          throw error;
+        }
+        const clone = await options.runner.run(git, ['clone', options.seedBundle, directory], {
           timeoutMs: timeout,
         });
         if (clone.code !== 0)
@@ -486,7 +498,7 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
             `git clone of release seed bundle failed: ${clone.stderr.trim().split('\n')[0] ?? 'no output'}`
           );
         const header = `Authorization: Basic ${Buffer.from(`${credentialsNow.username}:${credentialsNow.password}`).toString('base64')}`;
-        const push = await options.runner.run('git', ['push', '--mirror', remote], {
+        const push = await options.runner.run(git, ['push', '--mirror', remote], {
           cwd: directory,
           env: {
             ...process.env,

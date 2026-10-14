@@ -36,6 +36,10 @@ LABEL org.opencontainers.image.title="lifemodel-loader" \
       org.opencontainers.image.source="https://github.com/shady2k/lifemodel" \
       org.opencontainers.image.licenses="MIT"
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # One unprivileged identity for the runtime. The base image already carries a
 # user and group named `node` with uid and gid 1000; renaming them keeps the
 # image free of a second identity and the loader free of a fixed uid choice.
