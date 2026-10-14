@@ -50,12 +50,31 @@ describe('platform admission policies', () => {
     expect(policyObject.spec.matchConstraints.resourceRules[0]).toMatchObject({
       apiGroups: ['kustomize.toolkit.fluxcd.io'],
       resources: ['kustomizations'],
-      operations: ['CREATE', 'UPDATE'],
+      operations: ['CREATE', 'UPDATE', 'DELETE'],
     });
     const expression = policyObject.spec.validations.map((item: any) => item.expression).join(' ');
     for (const fragment of ['serviceAccountName', 'applier', 'sourceRef', 'GitRepository', 'kubeConfig', 'targetNamespace', 'dependsOn', 'request.namespace']) {
       expect(expression).toContain(fragment);
     }
+    expect(expression).toContain('has(object.spec.targetNamespace) && object.spec.targetNamespace == request.namespace');
+    expect(expression).toContain("request.userInfo.username != 'system:serviceaccount:lifemodel-system:loader' ||");
+    expect(expression).toContain("request.operation != 'DELETE'");
+    expect(expression).toContain('has(object.metadata.name) && object.metadata.name == request.namespace');
+    expect(expression).toContain("has(object.spec.path) && object.spec.path == './deploy/platform/applications/' + request.namespace");
+    const applications = [...loaderSource.matchAll(/namespace: '(lifemodel(?:-motor)?)',[\s\S]*?path: '(\.\/deploy\/platform\/applications\/[^']+)'/g)];
+    expect(applications).toHaveLength(2);
+    for (const [, namespace, path] of applications) {
+      expect(path).toBe(`./deploy/platform/applications/${namespace}`);
+      expect(namespace).toBe(namespace === 'lifemodel' ? 'lifemodel' : 'lifemodel-motor');
+    }
+    const loaderRequestAllowed = (request: { namespace: string; name?: string; path?: string; targetNamespace?: string }) =>
+      ['lifemodel', 'lifemodel-motor'].includes(request.namespace) &&
+      request.name === request.namespace &&
+      request.path === `./deploy/platform/applications/${request.namespace}` &&
+      request.targetNamespace === request.namespace;
+    expect(loaderRequestAllowed({ namespace: 'lifemodel', name: 'extra', path: './deploy/platform/applications/lifemodel', targetNamespace: 'lifemodel' })).toBe(false);
+    expect(loaderRequestAllowed({ namespace: 'lifemodel', name: 'lifemodel', path: '.', targetNamespace: 'lifemodel' })).toBe(false);
+    expect(loaderRequestAllowed({ namespace: 'lifemodel', name: 'lifemodel', path: './deploy/platform/applications/lifemodel' })).toBe(false);
     for (const objectName of ['loader-secret-admission', 'application-kustomization-admission']) {
       expect(policy(objectName).spec.failurePolicy).toBe('Fail');
     }
@@ -65,8 +84,10 @@ describe('platform admission policies', () => {
       ['has(object.spec.sourceRef)', 'object.spec.sourceRef.name'],
       ['!has(object.spec.sourceRef.namespace)', 'object.spec.sourceRef.namespace =='],
       ['!has(object.spec.kubeConfig)', '!has(object.spec.kubeConfig)'],
-      ['!has(object.spec.targetNamespace)', 'object.spec.targetNamespace =='],
+      ['has(object.spec.targetNamespace)', 'object.spec.targetNamespace =='],
       ['!has(object.spec.dependsOn)', 'object.spec.dependsOn.all'],
+      ['has(object.metadata.name)', 'object.metadata.name =='],
+      ['has(object.spec.path)', 'object.spec.path =='],
       ['!has(dependency.namespace)', 'dependency.namespace =='],
     ];
     for (const [guard, access] of guardedAccesses) {
