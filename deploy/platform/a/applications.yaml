@@ -1,0 +1,235 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel-motor
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel-releases
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lifemodel-motor-releases
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: lifemodel
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: lifemodel-motor
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: lifemodel-releases
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: lifemodel-motor-releases
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lifemodel-applier
+  namespace: lifemodel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lifemodel-applier
+  namespace: lifemodel
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lifemodel-applier
+  namespace: lifemodel
+subjects:
+  - kind: ServiceAccount
+    name: lifemodel-applier
+    namespace: lifemodel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lifemodel-applier
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: lifemodel
+  namespace: lifemodel
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  interval: 1m
+  url: http://gitea-http.lifemodel-git.svc.cluster.local:3000/admin/lifemodel.git
+  ref:
+    branch: deploy
+  secretRef:
+    name: deploy-source-credential
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lifemodel-helm-storage
+  namespace: lifemodel-releases
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lifemodel-helm-storage
+  namespace: lifemodel-releases
+subjects:
+  - kind: ServiceAccount
+    name: lifemodel-applier
+    namespace: lifemodel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lifemodel-helm-storage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lifemodel-motor-applier
+  namespace: lifemodel-motor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lifemodel-motor-applier
+  namespace: lifemodel-motor
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lifemodel-motor-applier
+  namespace: lifemodel-motor
+subjects:
+  - kind: ServiceAccount
+    name: lifemodel-motor-applier
+    namespace: lifemodel-motor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lifemodel-motor-applier
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: lifemodel-motor
+  namespace: lifemodel-motor
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  interval: 1m
+  url: http://gitea-http.lifemodel-git.svc.cluster.local:3000/admin/lifemodel.git
+  ref:
+    branch: deploy
+  secretRef:
+    name: deploy-source-credential
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lifemodel-motor-helm-storage
+  namespace: lifemodel-motor-releases
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lifemodel-motor-helm-storage
+  namespace: lifemodel-motor-releases
+subjects:
+  - kind: ServiceAccount
+    name: lifemodel-motor-applier
+    namespace: lifemodel-motor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lifemodel-motor-helm-storage

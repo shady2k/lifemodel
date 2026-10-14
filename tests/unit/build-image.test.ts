@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 /** This checkout: the script and the docker/instance files under test. */
 const checkout = fileURLToPath(new URL('../..', import.meta.url));
 const script = join(checkout, 'scripts/build-image.sh');
+const seedPreparer = join(checkout, 'scripts/release/prepare-loader-context.sh');
 
 interface Refusal {
   status: number;
@@ -58,6 +59,7 @@ function runInClone(
     cpSync(join(checkout, 'docker/instance'), join(clone, 'docker/instance'), { recursive: true });
     cpSync(join(checkout, '.dockerignore'), join(clone, '.dockerignore'));
     cpSync(script, join(clone, 'scripts/build-image.sh'));
+    cpSync(seedPreparer, join(clone, 'scripts/release/prepare-loader-context.sh'));
     if (options.withoutLoader === true) {
       rmSync(join(clone, 'loader'), { recursive: true, force: true });
     }

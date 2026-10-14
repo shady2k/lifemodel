@@ -1,0 +1,45 @@
+# Official OpenBao chart 0.30.3; chart archive SHA-256:
+# d50ed31b8305f430df308c342dd3c1efa877222380e99cb480f74f070d6beaa8
+injector:
+  enabled: false
+csi:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      storage "raft" {
+        path = "/openbao/data/raft"
+        node_id = "openbao-0"
+      }
+  ha:
+    enabled: false
+  dataStorage:
+    enabled: true
+    size: 10Gi
+    accessMode: ReadWriteOnce
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  authDelegator:
+    enabled: false
+  serviceAccount:
+    create: false
+    name: openbao
+  statefulSet:
+    securityContext:
+      container:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+ui:
+  enabled: false

@@ -14,7 +14,6 @@ spec:
         app.kubernetes.io/name: loader
     spec:
       serviceAccountName: loader
-      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

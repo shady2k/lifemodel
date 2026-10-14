@@ -1,0 +1,275 @@
+---
+# Source: openbao/templates/server-config-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-config
+  namespace: openbao
+  labels:
+    helm.sh/chart: openbao-0.30.3
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    app.kubernetes.io/managed-by: Helm
+data:
+  extraconfig-from-values.hcl: |-
+    
+    ui = true
+    
+    listener "tcp" {
+      tls_disable = 1
+      address = "[::]:8200"
+      cluster_address = "[::]:8201"
+    }
+    
+    storage "raft" {
+      path = "/openbao/data/raft"
+      node_id = "openbao-0"
+    }
+---
+# Source: openbao/templates/server-headless-service.yaml
+# Service for OpenBao cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao-internal
+  namespace: openbao
+  labels:
+    helm.sh/chart: openbao-0.30.3
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    app.kubernetes.io/managed-by: Helm
+    openbao-internal: "true"
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: "http"
+      port: 8200
+      targetPort: 8200
+      appProtocol: HTTP
+    - name: https-internal
+      port: 8201
+      targetPort: 8201
+  selector:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    component: server
+---
+# Source: openbao/templates/server-service.yaml
+# Service for OpenBao cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+  namespace: openbao
+  labels:
+    helm.sh/chart: openbao-0.30.3
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # We want the servers to become available even if they're not ready
+  # since this DNS is also used for join operations.
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+      appProtocol: HTTP
+    - name: https-internal
+      port: 8201
+      targetPort: 8201
+  selector:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    component: server
+---
+# Source: openbao/templates/server-statefulset.yaml
+# StatefulSet to run the actual openbao server cluster.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openbao
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/instance: openbao
+    app.kubernetes.io/managed-by: Helm
+spec:
+  serviceName: openbao-internal
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  updateStrategy:
+    type: OnDelete
+  persistentVolumeClaimRetentionPolicy: 
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+      app.kubernetes.io/instance: openbao
+      component: server
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: openbao-0.30.3
+        app.kubernetes.io/name: openbao
+        app.kubernetes.io/instance: openbao
+        component: server
+    spec:
+      
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: openbao
+                  app.kubernetes.io/instance: "openbao"
+                  component: server
+              topologyKey: kubernetes.io/hostname
+  
+      
+      
+      
+      terminationGracePeriodSeconds: 10
+      serviceAccountName: openbao
+      
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+        runAsGroup: 1000
+        runAsUser: 100
+        fsGroup: 1000
+      hostNetwork: false
+      volumes:
+        
+        - name: config
+          configMap:
+            name: openbao-config
+  
+        - name: home
+          emptyDir: {}
+      containers:
+        - name: openbao
+          
+          image: "quay.io/openbao/openbao:2.7.1"
+          imagePullPolicy: IfNotPresent
+          command:
+          - "/bin/sh"
+          - "-ec"
+          args: 
+          - |
+            cp /openbao/config/extraconfig-from-values.hcl /tmp/storageconfig.hcl;
+            [ -n "${HOST_IP}" ] && sed -Ei "s|HOST_IP|${HOST_IP?}|g" /tmp/storageconfig.hcl;
+            [ -n "${POD_IP}" ] && sed -Ei "s|POD_IP|${POD_IP?}|g" /tmp/storageconfig.hcl;
+            [ -n "${HOSTNAME}" ] && sed -Ei "s|HOSTNAME|${HOSTNAME?}|g" /tmp/storageconfig.hcl;
+            [ -n "${API_ADDR}" ] && sed -Ei "s|API_ADDR|${API_ADDR?}|g" /tmp/storageconfig.hcl;
+            [ -n "${TRANSIT_ADDR}" ] && sed -Ei "s|TRANSIT_ADDR|${TRANSIT_ADDR?}|g" /tmp/storageconfig.hcl;
+            [ -n "${RAFT_ADDR}" ] && sed -Ei "s|RAFT_ADDR|${RAFT_ADDR?}|g" /tmp/storageconfig.hcl;
+            /usr/local/bin/docker-entrypoint.sh bao server -config=/tmp/storageconfig.hcl 
+   
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: BAO_K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BAO_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: BAO_ADDR
+              value: "http://127.0.0.1:8200"
+            - name: BAO_API_ADDR
+              value: "http://$(POD_IP):8200"
+            - name: SKIP_CHOWN
+              value: "true"
+            - name: SKIP_SETCAP
+              value: "true"
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BAO_CLUSTER_ADDR
+              value: "https://$(HOSTNAME).openbao-internal:8201"
+            - name: HOME
+              value: "/home/openbao"
+            
+            
+            
+          volumeMounts:
+          
+  
+    
+            - name: data
+              mountPath: /openbao/data
+    
+  
+  
+            - name: config
+              mountPath: /openbao/config
+  
+            - name: home
+              mountPath: /home/openbao
+          ports:
+            - containerPort: 8200
+              name: http
+            - containerPort: 8201
+              name: https-internal
+            - containerPort: 8202
+              name: http-rep
+          readinessProbe:
+            # Check status; unsealed openbao servers return 0
+            # The exit code reflects the seal status:
+            #   0 - unsealed
+            #   1 - error
+            #   2 - sealed
+            exec:
+              command: ["/bin/sh", "-ec", "bao status -tls-skip-verify"]
+            failureThreshold: 2
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 3
+          lifecycle:
+            # openbao container doesn't receive SIGTERM from Kubernetes
+            # and after the grace period ends, Kube sends SIGKILL.  This
+            # causes issues with graceful shutdowns such as deregistering itself
+            # from Consul (zombie services).
+            preStop:
+              exec:
+                command: [
+                    "/bin/sh", "-c",
+                    # Adding a sleep here to give the pod eviction a
+                    # chance to propagate, so requests will not be made
+                    # to this pod while it's terminating
+                    "sleep 5 && kill -SIGTERM $(pidof bao)",
+                  ]
+      
+  
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      
+      
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

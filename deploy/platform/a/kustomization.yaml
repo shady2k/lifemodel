@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - applications.yaml
+  - loader-app-rbac.yaml
+  - service-account.yaml
+  - auth-delegator.yaml
+  - openbao/rendered.yaml
+  - gitea
+  - network-policy.yaml

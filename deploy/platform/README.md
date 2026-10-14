@@ -1,50 +1,90 @@
-# Platform OCI artifact — A0
+# Platform OCI artifact
 
-This directory is the root of the platform OCI artifact. Flux's root
-`OCIRepository` applies the `platform` Kustomization here. At this stage the
-only reconciled step is A0, the loader in `lifemodel-system`; later platform
-steps must be added as Flux Kustomizations with explicit `dependsOn` edges to
-A0 (and to any required earlier step).
+This directory is the root of the signed platform OCI artifact. The root
+`OCIRepository` and `platform` Kustomization apply the artifact in
+`flux-system`. The artifact declares two ordered steps: A0 and A. A0 has no
+`dependsOn`; it deploys the loader and the Gitea namespace first. Step A
+`dependsOn: platform-a0`, so OpenBao and the rest of step A arrive only after
+the loader can start. A0 creates no namespace that step A creates. This order
+lets the loader initialize OpenBao rather than requiring an already running
+Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
-## Loader image release pin
+## A0: loader and admission
 
-`a0/kustomization.yaml` pins the loader image with Kustomize's `images[].digest`
-field. The all-zero SHA-256 digest is an intentional release placeholder, not
-a deployable image. The artifact release process must replace it with the
-built loader image's immutable `sha256:<64 hex digits>` digest. Do not set an
-image tag: deployments must identify the exact image bytes.
+A0 creates the restricted `lifemodel-system` and `lifemodel-git` namespaces,
+the loader ServiceAccount and its narrowly scoped bootstrap permissions, the
+loader Deployment, Service and `boot.localhost` Ingress. The loader image is
+pinned by digest in `a0/kustomization.yaml`; its zero digest is a release
+placeholder. The loader Deployment runs non-root with a read-only root
+filesystem. `loader-default-deny` denies ingress and egress except Traefik to
+port 7000, DNS, the Kubernetes API on TCP 6443, OpenBao on TCP 8200 and Gitea
+on TCP 3000.
 
-## Cutting a platform release
+A0 also creates two Flux-prune-protected Secrets for durable loader phase
+records and OpenBao key custody. Its ValidatingAdmissionPolicies fail closed:
+the loader can create or update only `gitea-admin` in `lifemodel-git` and
+`deploy-source-credential` in the two application namespaces, and cannot
+delete them. Application Kustomizations must use their namespace's named
+GitRepository and applier, cannot use kubeconfig, and cannot target or depend
+on another namespace.
 
-The owner cuts a release by pushing a version tag such as `vX.Y.Z`. The
-`release.yml` workflow builds and pushes the loader image, substitutes its
-immutable digest in the platform manifests, then pushes and keyless-signs the
-platform OCI artifact. It verifies that signature against the pinned release
-workflow identity before the release completes. Cutting and pushing the tag is
-the owner's action through `ship-release`; this workflow does not run on
-branches or provide a manual dispatch.
+## Step A: OpenBao, Gitea and applications
 
-## Reaching the loader on a test VM
+Step A applies OpenBao and Gitea as committed rendered manifests, application
+namespaces and their appliers, and default-deny policies. OpenBao uses
+integrated Raft storage on a retained PVC, has no injector or auto-unseal, and
+allows only loader ingress on TCP 8200, DNS and Kubernetes API TCP 6443 for
+TokenReview; its ServiceAccount has the built-in `system:auth-delegator` role.
+Gitea uses SQLite on its retained PVC, has no Ingress, and its
+chart references the `gitea-admin` Secret. Flux pruning is disabled for the
+stateful namespaces and the Gitea PVC.
 
-The loader accepts only its compiled-in `boot.localhost` host at this point.
-For a VM at `VM_IP`, send that Host header while connecting to the VM address:
+The loader initializes OpenBao and stores the 1-of-1 unseal key and root token
+in `openbao-unseal-custody` before using them. It verifies Kubernetes-auth
+handoff, revokes the root token and removes it from custody. The unseal key
+remains in custody so later starts can unseal Bao. It then creates or reuses
+Gitea's admin Secret, verifies Gitea, seeds `main` from the release git bundle
+in the loader image, creates `deploy`, protects both branches and creates a
+read-only source user. It creates the two namespace-local
+`deploy-source-credential` Secrets. Step A's namespace-local GitRepositories
+use those credentials. The loader then creates the two application
+Kustomizations with their matching restricted appliers. Phase progress is
+stored and read back after each durable phase; failures are recorded and
+retried by the loader while its interface remains available.
+
+The `gitea-admin` Secret remains while the chart references it. Its Bao-held
+retirement is lifemodel-2t5.2. The Gitea and OpenBao charts are vendored at
+pinned versions and rendered into committed manifests; `nix flake check`
+re-renders them and rejects drift. The Flux resources are plain manifests, not
+Helm releases, and rendered Helm test hooks are excluded.
+
+## Rendering the charts
+
+Render both committed files with:
+
+```sh
+tmp=$(mktemp deploy/platform/a/openbao/rendered.yaml.XXXXXX) && nix shell --inputs-from . nixpkgs#kubernetes-helm -c helm template openbao deploy/platform/charts/openbao --namespace openbao --skip-tests -f deploy/platform/a/openbao-values.yaml > "$tmp" && test -s "$tmp" && mv "$tmp" deploy/platform/a/openbao/rendered.yaml || { status=$?; rm -f "$tmp"; exit "$status"; }
+tmp=$(mktemp deploy/platform/a/gitea/rendered.yaml.XXXXXX) && nix shell --inputs-from . nixpkgs#kubernetes-helm -c helm template gitea deploy/platform/charts/gitea --namespace lifemodel-git --skip-tests -f deploy/platform/a/gitea/values.yaml > "$tmp" && test -s "$tmp" && mv "$tmp" deploy/platform/a/gitea/rendered.yaml || { status=$?; rm -f "$tmp"; exit "$status"; }
+```
+
+## Releasing and reaching the loader
+
+The release workflow builds and pushes the loader image, substitutes its
+immutable digest in the platform manifests, and signs the OCI artifact. A0's
+digest is therefore resolved from the release image, not from a mutable tag.
+The owner cuts a release by pushing a version tag; the workflow verifies its
+signature against the pinned release-workflow identity. The `boot.localhost`
+loader is reached on a test VM with:
 
 ```sh
 curl --resolve boot.localhost:80:VM_IP http://boot.localhost/login
 ```
 
-Replace `VM_IP` with the VM's reachable IP. In a browser, add a hosts-file
-entry mapping `boot.localhost` to the VM IP, then open
-`http://boot.localhost/login`. The Ingress publishes only this host through
-k3s' bundled Traefik; the NetworkPolicy allows Traefik (`kube-system`) to reach
-port 7000 and denies all egress.
+Replace `VM_IP` with the VM's reachable IP, or map `boot.localhost` to that IP
+in the browser host file. Traefik publishes this host to port 7000.
 
-## Flux API source
-
-The A0 reconciler uses Flux `kustomize.toolkit.fluxcd.io/v1` fields documented
-by Flux v2.9.6's kustomize-controller v1.9.6 API: `path`, `prune`, and `wait`
-are supported `spec` fields, while `dependsOn` is optional. Therefore A0 has no
-`dependsOn`; future ordered steps must add it. Source: [Flux v2.9.6 API
-reference](https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md);
-the [Flux v2.9.6 release notes](https://github.com/fluxcd/flux2/releases/tag/v2.9.6)
-identify kustomize-controller v1.9.6.
+The A0 reconciler uses the Flux v2.9.6 Kustomization API, which supports
+`path`, `prune` and `wait` but not a required `dependsOn`; it has no dependency.
+Step A uses `dependsOn` to enforce the A0-to-A order. See the [Flux v2.9.6
+API](https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md)
+and [release notes](https://github.com/fluxcd/flux2/releases/tag/v2.9.6).

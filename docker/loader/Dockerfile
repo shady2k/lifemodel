@@ -36,6 +36,10 @@ LABEL org.opencontainers.image.title="lifemodel-loader" \
       org.opencontainers.image.source="https://github.com/shady2k/lifemodel" \
       org.opencontainers.image.licenses="MIT"
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # One unprivileged identity for the runtime. The base image already carries a
 # user and group named `node` with uid and gid 1000; renaming them keeps the
 # image free of a second identity and the loader free of a fixed uid choice.
@@ -49,6 +53,8 @@ RUN groupmod --new-name loader node \
 # sources, not the toolchain. Root-owned; the `loader` user runs it and
 # cannot change it.
 COPY --from=build --chown=root:root /build /opt/lifemodel/loader
+# Release builds provide this full-history bundle in their build context.
+COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle
 
 USER loader
 WORKDIR /var/lib/loader

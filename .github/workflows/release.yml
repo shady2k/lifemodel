@@ -17,6 +17,7 @@ jobs:
       - name: Check out the tagged source without persisted credentials
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Log in to GitHub Container Registry
@@ -26,6 +27,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Prepare the full-history loader seed bundle
+        id: prepare-seed
+        run: scripts/release/prepare-loader-context.sh
+
       - name: Build and push loader image
         id: loader
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
@@ -34,6 +39,10 @@ jobs:
           file: docker/loader/Dockerfile
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/lifemodel-loader:${{ github.ref_name }}
+
+      - name: Remove the temporary loader build context
+        if: always()
+        run: rm -rf .docker-context
 
       - name: Pin the loader image to its pushed digest
         env:

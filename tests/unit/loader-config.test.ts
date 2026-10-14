@@ -62,6 +62,7 @@ describe('the contract with the image', () => {
     // The default is the image that supervises lifemodel (ADR-010's instance
     // shape); the platform loader says so itself.
     expect(config.mode).toBe('instance');
+    expect(config.openBaoAddress).toBe('http://openbao.openbao.svc:8200');
     expect(SESSION_COOKIE_NAME).toBe('lm_session');
     // A test is not root; the image's loader is, and that is what sets this.
     expect(config.privileged).toBe(false);
@@ -91,6 +92,7 @@ describe('the contract with the image', () => {
       LIFEMODEL_GID: '1235',
       LIFEMODEL_DRAIN_WAIT_MS: '5000',
       LIFEMODEL_STOP_BUDGET_MS: '6000',
+      LIFEMODEL_OPENBAO_ADDRESS: 'http://bao.test:8200',
     });
 
     expect(moved.volumeRoot).toBe('/tmp/elsewhere');
@@ -101,6 +103,7 @@ describe('the contract with the image', () => {
     expect(moved.lifemodel).toEqual({ uid: 1234, gid: 1235 });
     expect(moved.drainWaitMs).toBe(5000);
     expect(moved.stopBudgetMs).toBe(6000);
+    expect(moved.openBaoAddress).toBe('http://bao.test:8200');
 
     expect(() => loadConfig({ LIFEMODEL_HTTP_PORT: 'soon' })).toThrow(
       /LIFEMODEL_HTTP_PORT must be a whole number/

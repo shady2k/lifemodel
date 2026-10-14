@@ -14,12 +14,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
+import type { BaoApi, BaoKeys } from '../../loader/src/openbao.js';
+import type { GiteaApi } from '../../loader/src/gitea.js';
+import type {
+  PlatformPhaseRecord,
+  PlatformPhaseStore,
+} from '../../loader/src/platform-bootstrap.js';
 import { hashPassword } from '../../loader/src/auth.js';
 import { createLoaderState } from '../../loader/src/state.js';
-import {
-  ownLoaderApp,
-  registerLoaderLifecycle,
-} from '../helpers/loader-lifecycle.js';
+import { ownLoaderApp, registerLoaderLifecycle } from '../helpers/loader-lifecycle.js';
 import { createRecordingLogger, type RecordedLine } from '../../loader/src/logger.js';
 import {
   caddySpawn,
@@ -37,7 +40,10 @@ import {
 registerLoaderLifecycle();
 
 /** A platform app over `world`, with its lines and exits captured. */
-function platformApp(world: LoaderWorld): {
+function platformApp(
+  world: LoaderWorld,
+  bootstrap = { runInitial: async () => {}, unsealIfSealed: async () => {} }
+): {
   app: LoaderApp;
   lines: RecordedLine[];
   exits: number[];
@@ -52,6 +58,7 @@ function platformApp(world: LoaderWorld): {
     logger: createRecordingLogger(lines),
     clock: world.clock,
     exit: (code) => exits.push(code),
+    platformBootstrap: bootstrap,
   });
   ownLoaderApp(world, app);
   return { app, lines, exits };
@@ -93,16 +100,171 @@ describe('the loader in platform mode', () => {
 
     const restarted = platformApp(world);
     await restarted.app.start();
-    const afterRestart = await fetch(
-      `http://127.0.0.1:${String(restarted.app.port())}/`,
-      { headers: { host: 'boot.localhost', cookie: cookie ?? '' } }
-    );
+    const afterRestart = await fetch(`http://127.0.0.1:${String(restarted.app.port())}/`, {
+      headers: { host: 'boot.localhost', cookie: cookie ?? '' },
+    });
     expect(afterRestart.status).toBe(200);
     expect(await afterRestart.text()).toContain('Platform mode');
     expect(await restarted.app.state.readAuth()).not.toBeNull();
     expect(world.launcher.spawns).toEqual([]);
     expect(world.runner.lines()).toEqual([]);
     expect(await restarted.app.shutdown('test')).toBe(0);
+  });
+
+  it('runs the real OpenBao bootstrap composition with only API and stores faked', async () => {
+    const world = createLoaderWorld();
+    const events: string[] = [];
+    let secret: BaoKeys | null = null;
+    let phase: PlatformPhaseRecord | null = null;
+    let initialized = false;
+    const bao: BaoApi = {
+      status: async () => {
+        events.push('status');
+        return { initialized, sealed: false };
+      },
+      init: async () => {
+        events.push('init');
+        initialized = true;
+        return { keys: ['share'], rootToken: 'root' };
+      },
+      unseal: async () => {
+        events.push('unseal');
+      },
+      rootTokenActive: async () => false,
+      ensureLoaderPolicy: async () => {
+        events.push('policy');
+      },
+      loginLoader: async () => {
+        events.push('login');
+      },
+      revokeRootToken: async () => {
+        events.push('revoke');
+      },
+    };
+    const custody = {
+      read: async () => secret,
+      write: async (value: BaoKeys) => {
+        events.push('custody');
+        secret = structuredClone(value);
+      },
+    };
+    const phases: PlatformPhaseStore = {
+      read: async () => phase,
+      write: async (next) => {
+        phase = next;
+      },
+    };
+    const lines: RecordedLine[] = [];
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      openBao: { api: bao, custody },
+      platformPhaseStore: phases,
+      platformLoaderJwt: async () => 'loader-jwt',
+      platformGiteaPhases: [],
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(
+      () =>
+        (phase?.phase === 'openbao-policy' && phase.status === 'complete') ||
+        lines.some((line) => line.level === 'error'),
+      'OpenBao composition'
+    );
+    expect(events).toContain('init');
+    expect(phase?.phase).toBe('openbao-policy');
+    await app.shutdown('test');
+  });
+
+  it('unseals OpenBao before a resumed Gitea phase can fail', async () => {
+    const world = createLoaderWorld();
+    const events: string[] = [];
+    let sealed = true;
+    let phase: PlatformPhaseRecord = { phase: 'gitea-admin-login', status: 'complete' };
+    const bao: BaoApi = {
+      status: async () => ({ initialized: true, sealed }),
+      init: async () => {
+        throw new Error('already initialized');
+      },
+      unseal: async () => {
+        events.push('unseal');
+        sealed = false;
+      },
+      rootTokenActive: async () => false,
+      ensureLoaderPolicy: async () => {},
+      loginLoader: async () => {},
+      revokeRootToken: async () => {},
+    };
+    const custody = {
+      read: async () => ({ keys: ['custody-key'], rootToken: null }),
+      write: async () => {},
+    };
+    const gitea: GiteaApi = {
+      ensureAdminSecret: async () => {
+        events.push('secret');
+        return { username: 'admin', password: 'pw' };
+      },
+      waitReady: async () => { events.push('gitea-down'); throw new Error('Gitea unavailable'); },
+      verifyAdmin: async () => {},
+      ensureRepository: async () => {},
+      seedBundle: async () => {},
+      ensureDeployBranch: async () => {},
+      protectBranch: async () => {},
+      ensureReadOnlySource: async () => {},
+      ensureApplicationObjects: async () => {},
+    };
+    const lines: RecordedLine[] = [];
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      openBao: { api: bao, custody },
+      platformPhaseStore: {
+        read: async () => phase,
+        write: async (next) => { phase = next; },
+      },
+      platformGiteaApi: gitea,
+      platformLoaderJwt: async () => 'loader-jwt',
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(
+      () => lines.some((line) => line.level === 'error'),
+      'Gitea phase failure logged'
+    );
+
+    expect(events.indexOf('unseal')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('unseal')).toBeLessThan(events.indexOf('gitea-down'));
+    expect(phase).toEqual({ phase: 'gitea-repository-seed', status: 'failed' });
+    expect(lines.find((line) => line.level === 'error')?.message).toContain('gitea-repository-seed');
+    expect(sealed).toBe(false);
+    await app.shutdown('test');
+  });
+
+  it('starts OpenBao phases only after its HTTP interface is listening', async () => {
+    const world = createLoaderWorld();
+    const observed: string[] = [];
+    const { app } = platformApp(world, {
+      runInitial: async () => {
+        observed.push(`initial:${app.host() ?? 'down'}`);
+      },
+      unsealIfSealed: async () => {
+        observed.push(`unseal:${app.host() ?? 'down'}`);
+      },
+    });
+    await app.start();
+    await waitUntil(() => observed.length === 2, 'platform bootstrap ran');
+    expect(observed).toEqual(['initial:0.0.0.0', 'unseal:0.0.0.0']);
+    expect(await app.shutdown('test')).toBe(0);
   });
 
   it('refuses browser and CLI resume in platform mode', async () => {
@@ -319,4 +481,38 @@ describe('the loader in instance mode (unchanged)', () => {
     const outcome = await shutdownLoader(world, app);
     expect(outcome).toBe(0);
   });
+  it('names the failed platform phase in the retry log', async () => {
+    const world = createLoaderWorld();
+    const lines: RecordedLine[] = [];
+    let phase: PlatformPhaseRecord | null = null;
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      platformPhaseStore: {
+        read: async () => phase,
+        write: async (record) => { phase = record; },
+      },
+      platformBootstrap: {
+        runInitial: async () => {
+          phase = { phase: 'gitea-repository-seed', status: 'failed' };
+          throw new Error('git is missing');
+        },
+        unsealIfSealed: async () => {},
+      },
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(() => lines.some((line) => line.level === 'error'), 'phase failure logged');
+    const failure = lines.find((line) => line.level === 'error');
+    expect(failure?.message).toContain('platform bootstrap failed');
+    expect(failure?.message).toContain('gitea-repository-seed');
+    expect(failure?.message).not.toContain('OpenBao');
+    await app.shutdown('test');
+  });
+
 });

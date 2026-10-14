@@ -1,0 +1,77 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-app-bootstrap
+  namespace: lifemodel
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["deploy-source-credential"]
+    verbs: ["get", "update"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    resourceNames: ["lifemodel"]
+    verbs: ["get"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    resourceNames: ["lifemodel"]
+    verbs: ["get", "update"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-app-bootstrap
+  namespace: lifemodel
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-app-bootstrap
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-app-bootstrap
+  namespace: lifemodel-motor
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["deploy-source-credential"]
+    verbs: ["get", "update"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    resourceNames: ["lifemodel-motor"]
+    verbs: ["get"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    resourceNames: ["lifemodel-motor"]
+    verbs: ["get", "update"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-app-bootstrap
+  namespace: lifemodel-motor
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-app-bootstrap

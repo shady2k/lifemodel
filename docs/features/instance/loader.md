@@ -476,6 +476,44 @@ Everything else the loader logs is one line per event, JSON with
 `component=loader`, so a person reading `docker logs` can tell its lines from
 lifemodel's. No secret - a password, a token - ever appears in one.
 
+## Platform mode: step A0 and first start
+
+The same loader image also runs as the platform bootstrap in Kubernetes. Platform
+mode serves the authenticated loader interface but does not start the instance
+front door, Agent Vault, egress rules or lifemodel. The platform deployment
+runs it as a non-root pod in `lifemodel-system`; A0 supplies its persistent
+state, Service, `boot.localhost` Ingress, default-deny NetworkPolicy and
+restricted ServiceAccount. The loader records each completed first-start
+phase in the platform-created `loader-bootstrap-state` Secret and verifies
+each write. A restart resumes at the recorded phase; a failure is recorded and
+retried with backoff while the interface remains available.
+
+The platform applies A0 before step A. A0 creates `lifemodel-system` and
+`lifemodel-git`; it creates none of the application namespaces step A creates.
+Step A depends on A0, so the loader starts before OpenBao exists. It then
+initializes OpenBao with a 1-of-1 Shamir key, writes and reads back the key and
+root token in the platform-created `openbao-unseal-custody` Secret, unseals
+Bao, configures the loader Kubernetes-auth policy and logs in as the loader
+ServiceAccount. Once that hand-off is verified, the loader revokes the root
+token and removes it from custody; the unseal key remains in custody. Each
+later start validates custody, unseals Bao if needed and restores the loader's
+Kubernetes-auth session. See [ADR-010](../../adr/010-container-generations.md)
+for the platform decision.
+
+The loader then runs durable Gitea phases: it creates or reuses the
+`gitea-admin` Secret and waits for Gitea; verifies the admin login; seeds
+protected `main` from the release git bundle in the loader image; creates
+`deploy` from `main`; protects `main` and `deploy`; and creates a read-only
+`lifemodel-source` account. It creates matching `deploy-source-credential`
+Secrets in `lifemodel` and `lifemodel-motor`, then creates the two application
+Kustomizations, each using its namespace-local GitRepository and applier.
+The Gitea admin Secret is retained while the chart references it; its Bao-held
+retirement is tracked separately by lifemodel-2t5.2. Secret admission allows
+the loader to create or update only these named Secrets and denies their
+delete. The application-Kustomization admission policy requires the local
+source and applier, forbids kubeconfig, and confines target namespace and
+dependencies to the requesting namespace. Both policies fail closed.
+
 ## Tests
 
 `tests/unit/loader-*.test.ts` drive the loader through its own interfaces with

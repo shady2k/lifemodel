@@ -24,7 +24,7 @@ function runKubectl(args, input) {
   try { return execFileSync(kubectl[0], [...kubectl.slice(1), ...args], { encoding: 'utf8', input }); }
   catch (error) { throw new Error(`kubectl ${args.join(' ')} failed: ${error?.stderr?.toString().trim() || error?.message || String(error)}`); }
 }
-function get(resource, namespace) { return JSON.parse(runKubectl(['get', resource, '-n', namespace, '-o', 'json'])); }
+function get(resource, namespace, name) { return JSON.parse(runKubectl(['get', resource, ...(name ? [name] : []), '-n', namespace, '-o', 'json'])); }
 function condition(item) { return (item.status?.conditions || []).find((entry) => entry.type === 'Ready') || {}; }
 function clean(value) { return String(value ?? 'unknown').replace(/[\r\n\t]+/g, ' ').trim() || 'unknown'; }
 function current(item) { return item.metadata?.generation != null && item.status?.observedGeneration === item.metadata.generation; }
@@ -52,16 +52,93 @@ function assertRootOwnership() {
   const owned = (root.metadata?.managedFields || []).filter(entry => entry.manager !== 'lifemodel-bootstrap' && entry.fieldsV1?.['f:spec']?.['f:ref']).map(entry => clean(entry.manager));
   if(owned.length) throw new Error(`Root OCIRepository spec.ref is owned by ${[...new Set(owned)].join(', ')}. To reset ownership, delete the root object and let the writer recreate it: sudo kubectl --kubeconfig ${kubeconfig} delete ocirepository platform -n flux-system (Flux keeps its applied state).`);
 }
+function reportOpenBao(failures) {
+  let status;
+  try { status = JSON.parse(execFileSync(kubectl[0], [...kubectl.slice(1), 'exec', '-n', 'openbao', 'openbao-0', '--', 'bao', 'status', '-format=json'], { encoding: 'utf8' })); }
+  catch (error) {
+    if (error?.status === 2 && error.stdout) {
+      try { status = JSON.parse(error.stdout.toString()); }
+      catch { failures.push('OpenBao status (invalid JSON)'); }
+    } else failures.push('OpenBao status (unavailable)');
+  }
+  if (!status) return;
+  if (typeof status.initialized !== 'boolean' || typeof status.sealed !== 'boolean') {
+    failures.push('OpenBao status (missing initialized/sealed fields)');
+    return;
+  }
+  if (!status.initialized) {
+    console.log('OpenBao: uninitialised sealed=unknown');
+    failures.push('OpenBao (uninitialised)');
+  } else {
+    const sealed = status.sealed === true;
+    console.log(`OpenBao: initialized=yes sealed=${sealed ? 'yes' : 'no'}`);
+    if (sealed) failures.push('OpenBao (sealed)');
+  }
+}
 function report() {
   const override = readOverride();
   if (override) console.log(`ACTIVE PLATFORM OVERRIDE: ${override.ref} (recorded against ${override.configuredRef})`);
   const failures = [];
+  reportOpenBao(failures);
   for (const [resource, kind, revision] of [['ocirepositories','OCIRepository',i=>i.status?.artifact?.revision],['gitrepositories','GitRepository',i=>i.status?.artifact?.revision]]) {
     const items = get(resource, 'flux-system').items || [];
     if (kind === 'GitRepository' && !items.length) console.log('GitRepository: none (expected before the first loader start)');
     else failures.push(...checkResources(kind, items, revision));
   }
   failures.push(...checkResources('Kustomization', get('kustomizations','flux-system').items || [], i=>i.status?.lastAppliedRevision));
+  const bootstrap = get('secrets', 'lifemodel-system', 'loader-bootstrap-state');
+  let phaseRecord;
+  let applicationResourcesRequired = false;
+  let phaseLabel = 'not started';
+  if (bootstrap.data?.phase === undefined) {
+    console.log('Loader first start not started');
+  } else {
+    try { phaseRecord = JSON.parse(Buffer.from(bootstrap.data.phase, 'base64').toString('utf8')); }
+    catch { phaseRecord = null; }
+    const validPhase = phaseRecord && typeof phaseRecord.phase === 'string' && phaseRecord.phase.trim() && ['running', 'complete', 'failed'].includes(phaseRecord.status);
+    if (!validPhase) {
+      console.log('Loader first start phase record invalid');
+      failures.push('Secret loader-bootstrap-state (invalid phase record)');
+      applicationResourcesRequired = true;
+      phaseLabel = 'phase record invalid';
+    } else {
+      phaseLabel = clean(phaseRecord.phase);
+      console.log(`Loader first start phase=${phaseLabel} status=${clean(phaseRecord.status)}`);
+      const finalPhaseComplete = phaseRecord.phase === 'gitea-application-kustomizations' && phaseRecord.status === 'complete';
+      if (phaseRecord.status === 'failed') {
+        failures.push(`Loader bootstrap phase ${phaseLabel} (failed)`);
+        applicationResourcesRequired = true;
+      } else if (finalPhaseComplete) {
+        applicationResourcesRequired = true;
+      } else {
+        console.log(`Loader first start in progress at ${phaseLabel} (status=${clean(phaseRecord.status)})`);
+      }
+    }
+  }
+  const appChecks = [
+    ['GitRepository', 'lifemodel', 'lifemodel'],
+    ['GitRepository', 'lifemodel-motor', 'lifemodel-motor'],
+    ['Kustomization', 'lifemodel', 'lifemodel'],
+    ['Kustomization', 'lifemodel-motor', 'lifemodel-motor'],
+  ];
+  for (const [kind, namespace, name] of appChecks) {
+    const resource = kind === 'GitRepository' ? 'gitrepositories' : 'kustomizations';
+    const item = (get(resource, namespace).items || []).find(i => i.metadata?.name === name);
+    if (!item) {
+      if (applicationResourcesRequired) failures.push(`${kind}/${namespace}/${name} (missing)`);
+      else console.log(`${kind}/${namespace}/${name}: missing (expected; first start ${phaseLabel === 'not started' ? 'not started' : `in progress at ${phaseLabel}`})`);
+      continue;
+    }
+    const ready = condition(item), generation = current(item);
+    console.log(`${kind}/${namespace}/${name} Ready=${clean(ready.status)} generationCurrent=${generation ? 'yes' : 'no'} reason=${clean(ready.reason)} message=${clean(ready.message)}`);
+    if (ready.status !== 'True' || !generation) failures.push(`${kind}/${namespace}/${name}`);
+  }
+  const giteaDeployments = get('deployments', 'lifemodel-git').items || [];
+  const gitea = giteaDeployments.find(i => i.metadata?.name === 'gitea');
+  const giteaDesired = gitea?.spec?.replicas ?? 1;
+  const giteaReady = Boolean(gitea && current(gitea) && giteaDesired > 0 && (gitea.status?.readyReplicas || 0) >= giteaDesired);
+  console.log(`Deployment/gitea ready=${giteaReady ? 'yes' : 'no'} generationCurrent=${gitea && current(gitea) ? 'yes' : 'no'} desiredReplicas=${giteaDesired}`);
+  if (!giteaReady) failures.push('Deployment/gitea');
   const deployments = get('deployments','lifemodel-system').items || [], loader = deployments.find(i=>i.metadata?.name==='loader');
   const pods = (get('pods','lifemodel-system').items || []).filter(p=>p.metadata?.labels?.['app.kubernetes.io/name']==='loader'||p.metadata?.labels?.app==='loader'||p.metadata?.name?.startsWith('loader-'));
   const statuses = pods.flatMap(p=>p.status?.containerStatuses||[]), desired = loader?.spec?.replicas ?? 1;

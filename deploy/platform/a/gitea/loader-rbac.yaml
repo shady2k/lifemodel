@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loader-gitea-admin-secret
+  namespace: lifemodel-git
+rules:
+  # Kubernetes RBAC cannot restrict create by resourceNames. The loader's API
+  # client posts only the fixed gitea-admin path and has no list/delete method.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["gitea-admin"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loader-gitea-admin-secret
+  namespace: lifemodel-git
+subjects:
+  - kind: ServiceAccount
+    name: loader
+    namespace: lifemodel-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loader-gitea-admin-secret

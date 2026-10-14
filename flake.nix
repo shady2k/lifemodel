@@ -127,6 +127,90 @@
         fi
         touch $out
       '';
+      renderedOpenBao = pkgs.runCommand "lifemodel-openbao-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
+      } ''
+        set -eux
+        helm template openbao ${./deploy/platform/charts/openbao} --namespace openbao \
+          --skip-tests -f ${./deploy/platform/a/openbao-values.yaml} > openbao-generated.yaml
+        cmp openbao-generated.yaml ${./deploy/platform/a/openbao/rendered.yaml}
+        grep -F 'kind: StatefulSet' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'volumeClaimTemplates:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'storage "raft"' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'serviceAccountName: openbao' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'persistentVolumeClaimRetentionPolicy:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'whenDeleted: Retain' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'whenScaled: Retain' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -A2 -F 'capabilities:' ${./deploy/platform/a/openbao/rendered.yaml} | grep -F -- '- ALL' >/dev/null
+        if grep -F 'automountServiceAccountToken: false' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null; then
+          echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
+        fi
+        grep -F 'pod-security.kubernetes.io/enforce: restricted' ${./deploy/platform/a/namespace.yaml} >/dev/null
+        if grep -E 'kind: (Deployment|MutatingWebhookConfiguration)|seal "' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null; then
+          echo 'OpenBao injector or auto-unseal rendered unexpectedly' >&2; exit 1
+        fi
+        kustomize build ${./deploy/platform} > platform.yaml
+        grep -F 'name: platform-a' platform.yaml >/dev/null
+        grep -F 'name: platform-a0' platform.yaml >/dev/null
+        kustomize build ${./deploy/platform/a} > step-a.yaml
+        if grep -F 'kind: HelmRelease' step-a.yaml >/dev/null; then
+          echo 'step A must not contain HelmRelease objects' >&2
+          exit 1
+        fi
+        grep -F 'name: openbao-default-deny' step-a.yaml >/dev/null
+        grep -F 'name: openbao-server-access' step-a.yaml >/dev/null
+        grep -F 'kind: NetworkPolicy' step-a.yaml >/dev/null
+        grep -F 'kind: Namespace' step-a.yaml >/dev/null
+        grep -F 'kustomize.toolkit.fluxcd.io/prune: disabled' step-a.yaml >/dev/null
+        grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
+        grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
+        grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'wait: true' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        grep -F 'timeout: 10m0s' ${./deploy/platform/a-reconciler.yaml} >/dev/null
+        touch $out
+      '';
+      renderedGitea = pkgs.runCommand "lifemodel-gitea-platform-render" {
+        nativeBuildInputs = [ pkgs.kubernetes-helm pkgs.kustomize pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
+      } ''
+        set -eux
+        helm template gitea ${./deploy/platform/charts/gitea} --namespace lifemodel-git \
+          --skip-tests -f ${./deploy/platform/a/gitea/values.yaml} > gitea-generated.yaml
+        cmp gitea-generated.yaml ${./deploy/platform/a/gitea/rendered.yaml}
+        grep -F 'DB_TYPE=sqlite3' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'PATH=/data/gitea/gitea.db' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'ROOT=/data/git/repositories' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'mountPath: /data' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'runAsNonRoot: true' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'allowPrivilegeEscalation: false' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'seccompProfile:' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F -- '- ALL' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'name: gitea-admin' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -E 'key:[[:space:]]+username' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -E 'key:[[:space:]]+password' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        grep -F 'claimName: gitea-shared-storage' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        test "$(grep -F -c 'kind: PersistentVolumeClaim' ${./deploy/platform/a/gitea/rendered.yaml})" -eq 1
+        if grep -F 'kind: Ingress' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null; then
+          echo 'Gitea Ingress must not be rendered in step A' >&2; exit 1
+        fi
+        grep -F 'kustomize.toolkit.fluxcd.io/prune: disabled' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        if grep -Ei '^  name: [^ ]*(postgresql|valkey)|^kind: StatefulSet$' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null; then
+          echo 'Gitea rendered a bundled PostgreSQL or Valkey workload' >&2
+          exit 1
+        fi
+        kustomize build ${./deploy/platform/a/gitea} > gitea-platform.yaml
+        grep -F 'name: gitea-default-deny' gitea-platform.yaml >/dev/null
+        if grep -F 'kind: HelmRelease' gitea-platform.yaml >/dev/null; then
+          echo 'Gitea component must not contain HelmRelease objects' >&2
+          exit 1
+        fi
+        grep -F 'kubernetes.io/metadata.name: lifemodel-system' gitea-platform.yaml >/dev/null
+        grep -F 'kubernetes.io/metadata.name: flux-system' gitea-platform.yaml >/dev/null
+        if grep -F 'kubernetes.io/metadata.name: kube-system' gitea-platform.yaml >/dev/null; then
+          echo 'Gitea policy must not allow Traefik ingress' >&2; exit 1
+        fi
+        grep -F 'egress: []' gitea-platform.yaml >/dev/null
+        touch $out
+      '';
       cliHelp = pkgs.runCommand "lifemodel-cli-help" { nativeBuildInputs = [ pkgs.nodejs pkgs.gnugrep ]; } ''
         node ${./deploy/cli/lifemodel.mjs} --help > help.txt
         grep -F 'Usage: lifemodel doctor' help.txt > /dev/null
@@ -179,6 +263,8 @@
           ./tests/fixtures/nixos/kustomization.yaml;
         module-evaluation = moduleEvaluation;
         platform-kustomize-wiring = renderedPlatform;
+        openbao-platform-render = renderedOpenBao;
+        gitea-platform-render = renderedGitea;
         keyless-identity-agreement = keylessIdentityAgreement;
         install-sh-keyless-ocirepository = compare "lifemodel-install-sh-keyless-root" scriptKeylessOCI ./tests/fixtures/nixos/keyless-ocirepository.yaml;
         install-sh-key-ocirepository = compare "lifemodel-install-sh-key-root" scriptKeyOCI ./tests/fixtures/nixos/key-ocirepository.yaml;
