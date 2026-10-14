@@ -29,6 +29,8 @@ fi
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# Keep the instance builder's own clear input diagnostics; the shared helper
+# repeats these guards for the standalone loader-image release path.
 if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
     printf '%s\n' \
         "build-image: $root is a shallow checkout, so the seed bundle would carry no history and the instance's repository could never be merged with upstream; fetch the full history first (git fetch --unshallow, or actions/checkout with fetch-depth: 0)" >&2
@@ -40,26 +42,18 @@ if [ ! -d loader ]; then
     exit 2
 fi
 
-# The bundle is written into the build context because a docker build can read
-# nothing else; .dockerignore keeps the rest of the repository out of it, and it
-# is removed on the way out whatever happens.
-#
-# The context directory is THIS RUN's own: a directory that is already there was
-# not made by this script, so it is refused by name rather than deleted. Before
-# that rule, `mkdir -p` plus an unconditional `rm -rf` meant a stale - or a
-# person's own - .docker-context was removed by a build (rework 2, finding 8).
+# The shared preparer creates the full-history bundle; this builder owns and
+# removes the context around its Docker build.
 context=.docker-context
 if [ -e "$context" ]; then
     printf '%s\n' \
-        "build-image: $root/$context already exists, and this script only removes a build context it made itself; it is not this run's, so nothing was deleted - remove it yourself if it is a stale one" >&2
+        "build-image: $root/$context already exists, and this script only removes a build context it made itself; it is not this run's, so nothing was deleted - remove it yourself if it is stale" >&2
     exit 2
 fi
-mkdir "$context"
 trap 'rm -rf "$context"' EXIT INT TERM
+scripts/release/prepare-loader-context.sh
 
 commit=$(git rev-parse HEAD)
-git bundle create "$context/seed.bundle" HEAD >/dev/null
-git bundle verify "$context/seed.bundle" >/dev/null
 
 printf 'build-image: building %s at %s, tags %s\n' "$image" "$commit" "$tags"
 
