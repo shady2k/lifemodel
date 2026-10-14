@@ -53,7 +53,7 @@ spec:
         resources: [kustomizations]
   validations:
     - expression: >-
-        object.spec.serviceAccountName == request.namespace + '-applier' &&
+        has(object.spec.serviceAccountName) && object.spec.serviceAccountName == request.namespace + '-applier' &&
         has(object.spec.sourceRef) && object.spec.sourceRef.kind == 'GitRepository' &&
         object.spec.sourceRef.name == request.namespace &&
         (!has(object.spec.sourceRef.namespace) || object.spec.sourceRef.namespace == request.namespace) &&

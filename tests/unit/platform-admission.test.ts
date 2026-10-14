@@ -56,6 +56,23 @@ describe('platform admission policies', () => {
     for (const fragment of ['serviceAccountName', 'applier', 'sourceRef', 'GitRepository', 'kubeConfig', 'targetNamespace', 'dependsOn', 'request.namespace']) {
       expect(expression).toContain(fragment);
     }
+    for (const objectName of ['loader-secret-admission', 'application-kustomization-admission']) {
+      expect(policy(objectName).spec.failurePolicy).toBe('Fail');
+    }
+    const guardedAccesses = [
+      ['has(object.spec.serviceAccountName)', 'object.spec.serviceAccountName =='],
+      ['has(object.spec.sourceRef)', 'object.spec.sourceRef.kind'],
+      ['has(object.spec.sourceRef)', 'object.spec.sourceRef.name'],
+      ['!has(object.spec.sourceRef.namespace)', 'object.spec.sourceRef.namespace =='],
+      ['!has(object.spec.kubeConfig)', '!has(object.spec.kubeConfig)'],
+      ['!has(object.spec.targetNamespace)', 'object.spec.targetNamespace =='],
+      ['!has(object.spec.dependsOn)', 'object.spec.dependsOn.all'],
+      ['!has(dependency.namespace)', 'dependency.namespace =='],
+    ];
+    for (const [guard, access] of guardedAccesses) {
+      expect(expression.indexOf(guard), `missing guard: ${guard}`).toBeGreaterThanOrEqual(0);
+      expect(expression.indexOf(access), `missing field access: ${access}`).toBeGreaterThanOrEqual(expression.indexOf(guard));
+    }
     expect(policyObject.spec.matchConstraints.namespaceSelector.matchExpressions[0].values).toEqual(['lifemodel', 'lifemodel-motor']);
     // No CEL evaluator is shipped in the test dependencies. These assertions pin the CEL contract structurally;
     // the coordinator's Kubernetes 1.35 VM acceptance evaluates admission against a live API server.
