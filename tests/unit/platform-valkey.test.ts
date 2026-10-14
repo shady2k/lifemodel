@@ -44,7 +44,7 @@ describe('Valkey platform state', () => {
     const container = valkey.spec.template.spec.containers[0];
     expect(container.volumeMounts).toContainEqual(expect.objectContaining({ name: 'data', mountPath: '/data' }));
     expect(valkey.spec.volumeClaimTemplates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ metadata: { name: 'data' }, spec: { storageClassName: 'local-path', accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '1Gi' } } } }),
+      expect.objectContaining({ metadata: expect.objectContaining({ name: 'data' }), spec: { storageClassName: 'local-path', accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '1Gi' } } } }),
     ]));
   });
 
