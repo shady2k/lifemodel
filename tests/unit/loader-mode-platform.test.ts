@@ -411,4 +411,38 @@ describe('the loader in instance mode (unchanged)', () => {
     const outcome = await shutdownLoader(world, app);
     expect(outcome).toBe(0);
   });
+  it('names the failed platform phase in the retry log', async () => {
+    const world = createLoaderWorld();
+    const lines: RecordedLine[] = [];
+    let phase: PlatformPhaseRecord | null = null;
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      platformPhaseStore: {
+        read: async () => phase,
+        write: async (record) => { phase = record; },
+      },
+      platformBootstrap: {
+        runInitial: async () => {
+          phase = { phase: 'gitea-repository-seed', status: 'failed' };
+          throw new Error('git is missing');
+        },
+        unsealIfSealed: async () => {},
+      },
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(() => lines.some((line) => line.level === 'error'), 'phase failure logged');
+    const failure = lines.find((line) => line.level === 'error');
+    expect(failure?.message).toContain('platform bootstrap failed');
+    expect(failure?.message).toContain('gitea-repository-seed');
+    expect(failure?.message).not.toContain('OpenBao');
+    await app.shutdown('test');
+  });
+
 });
