@@ -134,7 +134,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         bao: baoParts.api,
         custody: baoParts.custody,
         runPhases: createPlatformPhaseRunner(platformPhaseStore),
-        extraPhases: [...(deps.platformGiteaPhases ?? giteaBootstrap.phases()), createKubernetesPostgresSecretPhase()],
+        extraPhases: [
+          ...(deps.platformGiteaPhases ?? giteaBootstrap.phases()),
+          createKubernetesPostgresSecretPhase(),
+        ],
         ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
       });
       return {
