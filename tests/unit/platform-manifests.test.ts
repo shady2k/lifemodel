@@ -54,13 +54,30 @@ function assertAllowedPolicyPorts(policy: Record<string, any>, allowed: number[]
 
 function assertRestrictedContainers(podSpec: Record<string, any>): void {
   const pod = podSpec.securityContext ?? {};
-  if (pod.runAsNonRoot !== true || pod.seccompProfile?.type !== 'RuntimeDefault') throw new Error('pod security context is not restricted-compatible');
+  if (pod.runAsNonRoot !== true) throw new Error('pod security context is not restricted-compatible');
   for (const container of [...(podSpec.initContainers ?? []), ...(podSpec.containers ?? [])]) {
     const context = container.securityContext ?? {};
-    if ((context.runAsNonRoot ?? pod.runAsNonRoot) !== true || context.allowPrivilegeEscalation !== false ||
-        context.capabilities?.drop?.includes('ALL') !== true ||
-        (context.seccompProfile ?? pod.seccompProfile)?.type !== 'RuntimeDefault') {
+    const seccompType = (context.seccompProfile ?? pod.seccompProfile)?.type;
+    const runAsUser = context.runAsUser ?? pod.runAsUser;
+    if ((context.runAsNonRoot ?? pod.runAsNonRoot) !== true || runAsUser === 0 ||
+        context.privileged === true || context.allowPrivilegeEscalation !== false ||
+        (context.capabilities?.add?.length ?? 0) > 0 || context.capabilities?.drop?.includes('ALL') !== true ||
+        !['RuntimeDefault', 'Localhost'].includes(seccompType)) {
       throw new Error(`container ${container.name} is not restricted-compatible`);
+    }
+  }
+}
+
+function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
+  const expected = {
+    openbao: ['openbao-default-deny', 'openbao-server-access'],
+    'lifemodel-git': ['gitea-default-deny'],
+  };
+  for (const [namespace, names] of Object.entries(expected)) {
+    const actual = objects.filter((item) => item.kind === 'NetworkPolicy' && item.metadata?.namespace === namespace)
+      .map((item) => item.metadata.name).sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...names].sort())) {
+      throw new Error(`NetworkPolicy inventory differs in ${namespace}`);
     }
   }
 }
@@ -133,6 +150,36 @@ describe('platform manifests', () => {
     ]);
     expect(rendered.filter((item) => item.metadata?.annotations?.['helm.sh/hook'] !== undefined)).toEqual([]);
   });
+  it('rejects privileged, added-capability, and root-user containers', () => {
+    const rendered = parseYamlFiles([join(platformRoot, 'a/gitea/rendered.yaml')]);
+    const pod = rendered.find((item) => item.kind === 'Deployment' && item.metadata?.name === 'gitea')!.spec.template.spec;
+    const cases = [
+      (copy: any) => { copy.containers[0].securityContext.privileged = true; },
+      (copy: any) => { copy.containers[0].securityContext.capabilities.add = ['SYS_ADMIN']; },
+      (copy: any) => { copy.containers[0].securityContext.runAsUser = 0; },
+      (copy: any) => { delete copy.containers[0].securityContext.runAsUser; copy.securityContext.runAsUser = 0; },
+    ];
+    for (const mutate of cases) {
+      const copy = structuredClone(pod);
+      mutate(copy);
+      expect(() => assertRestrictedContainers(copy)).toThrow();
+    }
+  });
+
+  it('rejects extra step-A NetworkPolicies in either protected namespace', () => {
+    const objects = sourceObjects();
+    expect(() => assertStepANetworkPolicies(objects)).not.toThrow();
+    for (const namespace of ['openbao', 'lifemodel-git']) {
+      const mutated = structuredClone(objects);
+      mutated.push({
+        apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
+        metadata: { name: 'unexpected-allow', namespace },
+        spec: { podSelector: {}, policyTypes: ['Ingress'], ingress: [{ from: [{}] }] },
+      });
+      expect(() => assertStepANetworkPolicies(mutated)).toThrow(/inventory/);
+    }
+  });
+
   it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
     const giteaRoot = join(platformRoot, 'a/gitea');
     const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
@@ -293,6 +340,7 @@ describe('platform manifests', () => {
     const openbaoNamespace = objects.find((item) => item.kind === 'Namespace' && item.metadata?.name === 'openbao')!;
     assertRestrictedNamespace(openbaoNamespace);
     expect(openbaoNamespace.metadata.annotations['kustomize.toolkit.fluxcd.io/prune']).toBe('disabled');
+    assertStepANetworkPolicies(objects);
     const stepANetworkPolicies = objects.filter((item) => item.kind === 'NetworkPolicy' && ['openbao', 'lifemodel-git'].includes(item.metadata?.namespace));
     expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-default-deny')?.spec).toEqual({ podSelector: {}, policyTypes: ['Ingress', 'Egress'], ingress: [], egress: [] });
     expect(stepANetworkPolicies.find((item) => item.metadata.name === 'openbao-server-access')?.spec).toEqual({
