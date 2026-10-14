@@ -45,6 +45,7 @@ describe('fenced core Postgres writes', () => {
         (await stores.postgres.query("SELECT value FROM core.kv WHERE key='overlap'")).rowCount
       ).toBe(1);
       console.info(`fenced transaction lock-through-commit: ${Date.now() - started}ms`);
+      await stores.postgres.query('UPDATE core.active_holder SET epoch = 1 WHERE id = true');
       const operations = 10;
       const beforeStart = Date.now();
       for (let i = 0; i < operations; i++) {
@@ -63,7 +64,9 @@ describe('fenced core Postgres writes', () => {
       const afterStart = Date.now();
       for (let i = 0; i < operations; i++) await fenced.query('SELECT 1');
       const afterMs = Date.now() - afterStart;
-      console.info(`fence read benchmark (${operations} ops): before=${beforeMs}ms after=${afterMs}ms`);
+      console.info(
+        `fence read benchmark (${operations} ops): before=${beforeMs}ms after=${afterMs}ms`
+      );
     } finally {
       writer.release();
       await stores.postgres.query('UPDATE core.active_holder SET epoch = 1 WHERE id = true');
