@@ -7,7 +7,7 @@ import { join } from 'node:path';
 
 export interface ConfigStore {
   read(): Promise<AgentConfigFile | null>;
-  write(document: AgentConfigFile): Promise<void>;
+  write(document: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void>;
 }
 
 /** Reads and writes the one configuration document in Postgres. */
@@ -37,7 +37,7 @@ export class ConfigLoader {
 
   async writeConfig(file: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void> {
     options?.signal?.throwIfAborted();
-    await this.store.write(file);
+    await this.store.write(file, options);
   }
 
   /**

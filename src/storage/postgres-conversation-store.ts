@@ -6,17 +6,20 @@ interface ConversationMessageRow {
   role: string;
   content: string | null;
   timestamp: string;
-  tool_calls?: unknown;
+  tool_calls?: { id: string }[];
   tool_call_id?: string;
   channelMessageId?: string;
   channel?: string;
   messageId?: string;
+  sequence?: string;
 }
 interface CompactionMarker {
   id?: string;
   summary: string;
   retainedMessageIds: string[];
   timestamp: string;
+  coveredThroughSequence?: string;
+  expectedMessageCount?: number;
 }
 interface ConversationSnapshot {
   messages: ConversationMessageRow[];
@@ -30,6 +33,12 @@ interface EventRow {
   sequence: string;
   kind: string;
   payload: ConversationSnapshot | ConversationMessageRow;
+}
+
+export class ConversationCompactionConflictError extends Error {
+  constructor() {
+    super('Conversation changed while compaction was being prepared');
+  }
 }
 
 /** Storage adapter for conversations. Each save inserts keyed events; it never rewrites or deletes rows. */
@@ -47,7 +56,9 @@ export class PostgresConversationStore implements Storage {
     const markerRow = active.filter((row) => row.kind === 'compaction').at(-1);
     const marker = markerRow?.payload as CompactionMarker | undefined;
     const retainedIds = new Set(marker?.retainedMessageIds ?? []);
-    const markerSequence = markerRow ? BigInt(markerRow.sequence) : 0n;
+    const markerSequence = markerRow
+      ? BigInt(marker?.coveredThroughSequence ?? markerRow.sequence)
+      : 0n;
     const result: ConversationSnapshot = { messages: [] };
     if (marker) result.compactionMarker = { ...marker };
     for (const row of active) {
@@ -58,6 +69,7 @@ export class PostgresConversationStore implements Storage {
         result.messages.push({
           ...(row.payload as ConversationMessageRow),
           messageId: row.message_id,
+          sequence: row.sequence,
         });
       }
       if (row.kind === 'status') {
@@ -73,6 +85,13 @@ export class PostgresConversationStore implements Storage {
         );
       }
     }
+    if (result.completedActions) {
+      const cutoff = Date.now() - 4 * 60 * 60 * 1000;
+      result.completedActions = result.completedActions
+        .filter((action) => new Date(action.timestamp).getTime() > cutoff)
+        .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+        .slice(0, 20);
+    }
     return active.length ? result : null;
   }
 
@@ -82,6 +101,35 @@ export class PostgresConversationStore implements Storage {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [recipientId]);
+      if (
+        snapshot.compactionMarker &&
+        snapshot.compactionMarker.id === undefined &&
+        snapshot.compactionMarker.expectedMessageCount !== undefined
+      ) {
+        const { rows } = await client.query<EventRow>(
+          'SELECT message_id, sequence, kind, payload FROM core.conversation_messages WHERE recipient_id = $1 ORDER BY sequence',
+          [recipientId]
+        );
+        const clearIndex = rows.reduce(
+          (last, row, index) => (row.kind === 'clear' ? index : last),
+          -1
+        );
+        const activeRows = rows.slice(clearIndex + 1);
+        const existingMarkerRow = activeRows.filter((row) => row.kind === 'compaction').at(-1);
+        const existingMarker = existingMarkerRow?.payload as CompactionMarker | undefined;
+        const cutoff = existingMarkerRow
+          ? BigInt(existingMarker?.coveredThroughSequence ?? existingMarkerRow.sequence)
+          : 0n;
+        const retained = new Set(existingMarker?.retainedMessageIds ?? []);
+        const count = activeRows.filter(
+          (row) =>
+            row.kind === 'message' &&
+            (BigInt(row.sequence) > cutoff || retained.has(row.message_id))
+        ).length;
+        if (count !== snapshot.compactionMarker.expectedMessageCount)
+          throw new ConversationCompactionConflictError();
+      }
       for (const message of snapshot.messages ?? []) {
         const messageId = message.messageId ?? this.messageId(message);
         message.messageId = messageId;
@@ -116,8 +164,13 @@ export class PostgresConversationStore implements Storage {
         );
       }
       for (const action of snapshot.completedActions ?? []) {
-        const id = `action:${this.digest(action)}`;
-        await this.insertEvent(client, recipientId, id, 'action', action);
+        const id = `action:${this.digest({ tool: action.tool, summary: action.summary })}`;
+        await client.query(
+          `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
+           VALUES ($1, $2, 'action', $3::jsonb)
+           ON CONFLICT (recipient_id, message_id) DO UPDATE SET payload = EXCLUDED.payload`,
+          [recipientId, id, JSON.stringify(action)]
+        );
       }
       await client.query('COMMIT');
     } catch (error) {
@@ -150,6 +203,9 @@ export class PostgresConversationStore implements Storage {
     if (message.channelMessageId && message.channel)
       return `channel:${message.channel}:${message.channelMessageId}`;
     if (message.role === 'tool' && message.tool_call_id) return `tool:${message.tool_call_id}`;
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      return `turn:${this.digest(message.tool_calls.map((call) => call.id).sort())}`;
+    }
     return randomUUID();
   }
 

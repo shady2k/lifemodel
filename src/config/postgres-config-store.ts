@@ -12,11 +12,33 @@ export class PostgresConfigStore {
     return result.rows[0]?.document ?? null;
   }
 
-  async write(document: AgentConfigFile): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO core.settings (id, document) VALUES ('agent-config', $1::jsonb)
-       ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = now()`,
-      [JSON.stringify(document)]
-    );
+  async write(document: AgentConfigFile, options?: { signal?: AbortSignal }): Promise<void> {
+    options?.signal?.throwIfAborted();
+    const client = await this.pool.connect();
+    let began = false;
+    try {
+      await client.query('BEGIN');
+      began = true;
+      await client.query("SET LOCAL statement_timeout = '5s'");
+      options?.signal?.throwIfAborted();
+      await client.query(
+        `INSERT INTO core.settings (id, document) VALUES ('agent-config', $1::jsonb)
+         ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = now()`,
+        [JSON.stringify(document)]
+      );
+      options?.signal?.throwIfAborted();
+      await client.query('COMMIT');
+    } catch (error) {
+      if (began) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          /* Keep the original cancellation or query error. */
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

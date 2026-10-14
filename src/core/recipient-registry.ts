@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Logger } from '../types/logger.js';
 
 /**
@@ -328,6 +328,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
   private dirty = false;
   private readonly deletedRecipientIds = new Set<string>();
   private clearAllPending = false;
+  private clearGeneration = 0;
   private saving: Promise<void> | null = null;
 
   constructor(
@@ -382,12 +383,16 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
         this.dirty = false;
         const records = this.registry.export();
         const deletedIds = [...this.deletedRecipientIds];
-        this.deletedRecipientIds.clear();
+        const clearGeneration = this.clearGeneration;
         const clearAll = this.clearAllPending;
-        this.clearAllPending = false;
-        const client = await this.pool.connect();
+        let client: PoolClient | null = null;
+        let transactionStarted = false;
+        let committed = false;
+        let failure: unknown;
         try {
+          client = await this.pool.connect();
           await client.query('BEGIN');
+          transactionStarted = true;
           if (clearAll) await client.query('DELETE FROM core.recipient_registry');
           for (const recipientId of deletedIds) {
             await client.query('DELETE FROM core.recipient_registry WHERE recipient_id = $1', [
@@ -411,12 +416,35 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
             );
           }
           await client.query('COMMIT');
+          committed = true;
+          for (const recipientId of deletedIds) this.deletedRecipientIds.delete(recipientId);
+          if (clearAll && this.clearGeneration === clearGeneration) this.clearAllPending = false;
         } catch (error) {
-          await client.query('ROLLBACK');
+          failure = error;
+          if (transactionStarted && client) {
+            try {
+              await client.query('ROLLBACK');
+            } catch {
+              /* Preserve the original failure and retry the batch. */
+            }
+          }
           this.dirty = true;
-          throw error;
-        } finally {
-          client.release();
+        }
+        if (client) {
+          try {
+            client.release();
+          } catch (error) {
+            if (committed) {
+              this.dirty = true;
+              for (const recipientId of deletedIds) this.deletedRecipientIds.add(recipientId);
+              if (clearAll) this.clearAllPending = true;
+            }
+            failure ??= error;
+          }
+        }
+        if (failure !== undefined) {
+          if (failure instanceof Error) throw failure;
+          throw new Error('Recipient registry save failed', { cause: failure });
         }
       }
     })();
@@ -477,6 +505,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
     this.registry.clear();
     this.deletedRecipientIds.clear();
     this.clearAllPending = true;
+    this.clearGeneration++;
     this.dirty = true;
     await this.save();
   }

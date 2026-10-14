@@ -117,6 +117,8 @@ export class SoulProvider {
    * NOT persisted - only prevents concurrent in-process mutations.
    */
   private stateMutex: Promise<void> = Promise.resolve();
+  private loadPromise: Promise<void> | null = null;
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor(logger: Logger, config: SoulProviderConfig) {
     this.logger = logger.child({ component: 'soul-provider' });
@@ -970,15 +972,18 @@ export class SoulProvider {
    * Persist soul state to storage.
    */
   async persist(): Promise<void> {
-    if (!this.state) return;
-
-    this.state.lastSavedAt = new Date();
-
-    // Serialize with Date handling using shared utility
-    const serialized = JSON.stringify(this.state, dateReplacer);
-    this.storageVersion = await this.config.store.save(this.storageVersion, JSON.parse(serialized));
-
-    this.logger.debug('Soul state persisted');
+    const save = this.persistQueue.then(async () => {
+      if (!this.state) return;
+      this.state.lastSavedAt = new Date();
+      const serialized = JSON.stringify(this.state, dateReplacer);
+      this.storageVersion = await this.config.store.save(
+        this.storageVersion,
+        JSON.parse(serialized)
+      );
+      this.logger.debug('Soul state persisted');
+    });
+    this.persistQueue = save.catch(() => undefined);
+    await save;
   }
 
   /**
@@ -986,25 +991,30 @@ export class SoulProvider {
    */
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-
-    try {
-      const stored = await this.config.store.load();
-
-      if (stored) {
-        this.storageVersion = stored.version;
-        this.state = this.deserializeState(stored.document);
-        this.logger.info('Soul state loaded from storage');
-      } else {
-        this.state = this.createDefaultFullState();
-        this.loaded = true; // Set before persist to avoid recursion
-        await this.persist();
-        this.logger.info('No existing soul state, created and persisted defaults');
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = (async () => {
+      try {
+        const stored = await this.config.store.load();
+        if (stored) {
+          this.storageVersion = stored.version;
+          this.state = this.deserializeState(stored.document);
+          this.logger.info('Soul state loaded from storage');
+        } else {
+          this.state = this.createDefaultFullState();
+          this.loaded = true;
+          await this.persist();
+          this.logger.info('No existing soul state, created and persisted defaults');
+        }
+        this.loaded = true;
+      } catch (error) {
+        this.loaded = false;
+        throw error;
       }
-
-      this.loaded = true;
-    } catch (error) {
-      this.loaded = false;
-      throw error;
+    })();
+    try {
+      await this.loadPromise;
+    } finally {
+      this.loadPromise = null;
     }
   }
 

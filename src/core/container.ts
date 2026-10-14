@@ -477,6 +477,21 @@ export function createLLMProvider(
  * - Restores state from disk if available
  * - Sets up auto-save and shutdown hooks
  */
+export function createSettingsReloadHandler(
+  active: Pick<Container, 'logger' | 'reloadConfig'>
+): () => Promise<void> {
+  return async () => {
+    try {
+      await active.reloadConfig();
+    } catch (error) {
+      active.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Saved settings could not be applied to the running core'
+      );
+    }
+  };
+}
+
 export async function createContainerAsync(configOverrides: AppConfig = {}): Promise<Container> {
   // Load configuration from file and environment. The config file's directory
   // is resolved HERE, before anything else applies: a path is an input, not a

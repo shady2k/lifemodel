@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createConfigLoader } from '../../src/config/config-loader.js';
 import type { AgentConfigFile } from '../../src/config/config-schema.js';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
@@ -66,6 +66,71 @@ describe('Postgres configuration persistence', () => {
         motorModel: 'motor-next',
       });
     } finally {
+      await server.close();
+    }
+  });
+
+  it('does not publish a settings write cancelled while blocked on the row lock', async () => {
+    const loader = createConfigLoader(stores.postgres);
+    await loader.writeConfig(config('http://before/v1'));
+    const holder = await stores.postgres.connect();
+    await holder.query('BEGIN');
+    await holder.query("SELECT * FROM core.settings WHERE id = 'agent-config' FOR UPDATE");
+    const controller = new AbortController();
+    const saving = loader.writeConfig(config('http://after/v1'), { signal: controller.signal });
+    controller.abort();
+    await holder.query('COMMIT');
+    holder.release();
+    await expect(saving).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await loader.readConfig())?.llm?.endpoint?.baseUrl).toBe('http://before/v1');
+  });
+
+  it('aborts a DB-blocked settings save when the settings server closes', async () => {
+    const loader = createConfigLoader(stores.postgres);
+    await loader.writeConfig(config('http://before-close/v1'));
+    const holder = await stores.postgres.connect();
+    await holder.query('BEGIN');
+    await holder.query("SELECT * FROM core.settings WHERE id = 'agent-config' FOR UPDATE");
+    const server = createSettingsServer({
+      config: loader,
+      logger: createTestLogger('silent'),
+      port: 0,
+      closeGraceMs: 20,
+      onSaved: () => undefined,
+    });
+    await server.listen();
+    try {
+      const address = server.address();
+      const form = new URLSearchParams({
+        endpointBaseUrl: 'http://after-close/v1',
+        fastModel: 'fast',
+        smartModel: 'smart',
+        motorModel: 'motor',
+        telegramChatId: '',
+        telegramBotToken: '__telegram_bot_token__',
+      });
+      const request = fetch(`${address}/settings`, {
+        method: 'POST',
+        headers: { Origin: address, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form,
+      }).catch(() => undefined);
+      await vi.waitFor(async () => {
+        const waiting = await stores.postgres.query(
+          "SELECT 1 FROM pg_stat_activity WHERE query LIKE 'INSERT INTO core.settings%' AND wait_event_type = 'Lock'"
+        );
+        expect(waiting.rowCount).toBe(1);
+      });
+      await server.close();
+      await holder.query('COMMIT');
+      await request;
+      expect((await loader.readConfig())?.llm?.endpoint?.baseUrl).toBe('http://before-close/v1');
+    } finally {
+      try {
+        await holder.query('ROLLBACK');
+      } catch {
+        /* The lock was already released. */
+      }
+      holder.release();
       await server.close();
     }
   });

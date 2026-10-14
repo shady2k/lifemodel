@@ -1,4 +1,5 @@
 import type { Storage } from './storage.js';
+import { ConversationCompactionConflictError } from './postgres-conversation-store.js';
 import type { Logger } from '../types/index.js';
 
 /**
@@ -88,6 +89,7 @@ interface StoredMessage {
   channel?: string;
   /** Stable Postgres natural key, not exposed to the model. */
   messageId?: string;
+  sequence?: string;
 }
 
 interface ConversationCompactionMarker {
@@ -95,6 +97,8 @@ interface ConversationCompactionMarker {
   summary: string;
   retainedMessageIds: string[];
   timestamp: string;
+  coveredThroughSequence?: string;
+  expectedMessageCount?: number;
 }
 
 /**
@@ -325,6 +329,10 @@ export class ConversationManager {
     };
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
       assistantMsg.tool_calls = assistantMessage.tool_calls;
+      assistantMsg.messageId = `turn:${assistantMessage.tool_calls
+        .map((call) => call.id)
+        .sort()
+        .join(':')}`;
     }
     // Add channel metadata for reaction lookup
     if (channelMeta?.channelMessageId) {
@@ -542,18 +550,33 @@ export class ConversationManager {
       return true;
     }
 
-    // Persist a logical marker. Postgres keeps prior rows, but reads project the
-    // summary plus these retained messages and rows written after this marker.
+    // Record exactly the newest durable message visible to the summary snapshot.
+    const coveredThroughSequence = stored.messages
+      .reduce(
+        (max, message) =>
+          message.sequence && BigInt(message.sequence) > max ? BigInt(message.sequence) : max,
+        0n
+      )
+      .toString();
+
+    // Persist a logical marker. Rows appended after the summarized snapshot remain visible.
     stored.messages = recentMessages;
     stored.compactionMarker = {
       summary: summary.trim(),
       retainedMessageIds: recentMessages.flatMap((message) =>
         message.messageId ? [message.messageId] : []
       ),
+      coveredThroughSequence,
+      expectedMessageCount,
       timestamp: new Date().toISOString(),
     };
 
-    await this.storage.save(key, stored);
+    try {
+      await this.storage.save(key, stored);
+    } catch (error) {
+      if (error instanceof ConversationCompactionConflictError) return false;
+      throw error;
+    }
 
     this.logger.info(
       {
