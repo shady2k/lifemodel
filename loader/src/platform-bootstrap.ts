@@ -12,6 +12,8 @@ export interface PlatformPhaseStore {
 }
 export interface PlatformPhase {
   name: string;
+  /** Runs inside the durable phase boundary, after running is recorded. */
+  beforeRun?(): Promise<void>;
   run(): Promise<void>;
 }
 
@@ -43,6 +45,7 @@ export function createPlatformPhaseRunner(
       if (before?.phase !== phase.name || before.status !== 'running')
         throw new Error(`platform phase ${phase.name} was not durably recorded before its action`);
       try {
+        await phase.beforeRun?.();
         await phase.run();
       } catch (error) {
         await store.write({ phase: phase.name, status: 'failed' });

@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createLoaderApp, type LoaderApp } from '../../loader/src/app.js';
 import type { BaoApi, BaoKeys } from '../../loader/src/openbao.js';
+import type { GiteaApi } from '../../loader/src/gitea.js';
 import type {
   PlatformPhaseRecord,
   PlatformPhaseStore,
@@ -177,6 +178,75 @@ describe('the loader in platform mode', () => {
     );
     expect(events).toContain('init');
     expect(phase?.phase).toBe('openbao-policy');
+    await app.shutdown('test');
+  });
+
+  it('unseals OpenBao before a resumed Gitea phase can fail', async () => {
+    const world = createLoaderWorld();
+    const events: string[] = [];
+    let sealed = true;
+    let phase: PlatformPhaseRecord = { phase: 'gitea-admin-login', status: 'complete' };
+    const bao: BaoApi = {
+      status: async () => ({ initialized: true, sealed }),
+      init: async () => {
+        throw new Error('already initialized');
+      },
+      unseal: async () => {
+        events.push('unseal');
+        sealed = false;
+      },
+      rootTokenActive: async () => false,
+      ensureLoaderPolicy: async () => {},
+      loginLoader: async () => {},
+      revokeRootToken: async () => {},
+    };
+    const custody = {
+      read: async () => ({ keys: ['custody-key'], rootToken: null }),
+      write: async () => {},
+    };
+    const gitea: GiteaApi = {
+      ensureAdminSecret: async () => {
+        events.push('secret');
+        return { username: 'admin', password: 'pw' };
+      },
+      waitReady: async () => { events.push('gitea-down'); throw new Error('Gitea unavailable'); },
+      verifyAdmin: async () => {},
+      ensureRepository: async () => {},
+      seedBundle: async () => {},
+      ensureDeployBranch: async () => {},
+      protectBranch: async () => {},
+      ensureReadOnlySource: async () => {},
+      ensureApplicationObjects: async () => {},
+    };
+    const lines: RecordedLine[] = [];
+    const app = createLoaderApp({
+      config: { ...world.config, mode: 'platform' },
+      fs: world.fs,
+      runner: world.runner,
+      launcher: world.launcher,
+      logger: createRecordingLogger(lines),
+      clock: world.clock,
+      exit: () => {},
+      openBao: { api: bao, custody },
+      platformPhaseStore: {
+        read: async () => phase,
+        write: async (next) => { phase = next; },
+      },
+      platformGiteaApi: gitea,
+      platformLoaderJwt: async () => 'loader-jwt',
+    });
+    ownLoaderApp(world, app);
+    await app.start();
+    await waitUntil(
+      () => lines.some((line) => line.level === 'error'),
+      'Gitea phase failure logged'
+    );
+
+    expect(events.indexOf('unseal')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('unseal')).toBeLessThan(events.indexOf('gitea-down'));
+    expect(phase).toEqual({ phase: 'gitea-repository-seed', status: 'failed' });
+    expect(lines.find((line) => line.level === 'error')?.message).toContain('gitea-repository-seed');
+    expect(sealed).toBe(false);
     await app.shutdown('test');
   });
 

@@ -67,13 +67,24 @@ export function createGiteaBootstrap(deps: GiteaBootstrapDeps): {
     await deps.api.waitReady();
     await deps.api.verifyAdmin(credentials);
   };
+  const phasesWithResumeBoundary = (): PlatformPhase[] => {
+    let resumePrepared = false;
+    return phases.map((phase) => {
+      if (phase.name === 'gitea-admin-secret' || phase.name === 'gitea-ready') return phase;
+      return {
+        ...phase,
+        beforeRun: async () => {
+          if (resumePrepared) return;
+          await prepareResume();
+          resumePrepared = true;
+        },
+      };
+    });
+  };
   return {
-    phases: () => phases,
+    phases: phasesWithResumeBoundary,
     prepareResume,
-    runInitial: async () => {
-      await prepareResume();
-      await deps.runPhases(phases);
-    },
+    runInitial: () => deps.runPhases(phasesWithResumeBoundary()),
   };
 }
 

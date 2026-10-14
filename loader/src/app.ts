@@ -45,6 +45,7 @@ import {
   createGiteaBootstrap,
   createGiteaHttpApi,
   createKubernetesGiteaAdminSecret,
+  type GiteaApi,
 } from './gitea.js';
 
 export interface LoaderAppDeps {
@@ -66,6 +67,8 @@ export interface LoaderAppDeps {
   platformPhaseStore?: PlatformPhaseStore;
   /** Test seam for later first-start phases; production uses the Gitea plan. */
   platformGiteaPhases?: PlatformPhase[];
+  /** Test boundary for the Gitea HTTP and Kubernetes credential APIs. */
+  platformGiteaApi?: GiteaApi;
   platformLoaderJwt?: () => Promise<string>;
   platformBootstrap?: { runInitial(): Promise<void>; unsealIfSealed(): Promise<void> };
 }
@@ -109,15 +112,18 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
       api: createOpenBaoApi({ address: config.openBaoAddress }),
       custody: createKubernetesBaoCustody(),
     } satisfies { api: BaoApi; custody: BaoCustody });
-  const giteaBootstrap = createGiteaBootstrap({
-    api: {
+  const giteaApi =
+    deps.platformGiteaApi ??
+    ({
       ...createGiteaHttpApi({
         address: 'http://gitea-http.lifemodel-git.svc:3000',
         seedBundle: '/opt/lifemodel/seed.bundle',
         runner,
       }),
       ensureAdminSecret: createKubernetesGiteaAdminSecret(),
-    },
+    } satisfies GiteaApi);
+  const giteaBootstrap = createGiteaBootstrap({
+    api: giteaApi,
     runPhases: createPlatformPhaseRunner(platformPhaseStore),
   });
   const platformBootstrap =
@@ -131,13 +137,7 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
       });
       return {
-        runInitial: async () => {
-          // The durable phase runner may skip the historical login phase on a
-          // fresh process. Rehydrate and prove the Secret-backed admin login
-          // before it resumes any unfinished Gitea phase.
-          if (deps.platformGiteaPhases === undefined) await giteaBootstrap.prepareResume();
-          await bootstrap.runInitial();
-        },
+        runInitial: () => bootstrap.runInitial(),
         unsealIfSealed: () => bootstrap.unsealIfSealed(),
       };
     })();

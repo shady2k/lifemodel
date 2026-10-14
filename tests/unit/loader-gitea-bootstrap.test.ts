@@ -4,7 +4,11 @@ import {
   type GiteaApi,
   type GiteaCredentials,
 } from '../../loader/src/gitea.js';
-import type { PlatformPhase } from '../../loader/src/platform-bootstrap.js';
+import {
+  createPlatformPhaseRunner,
+  type PlatformPhase,
+  type PlatformPhaseStore,
+} from '../../loader/src/platform-bootstrap.js';
 import { createNodeRunner } from '../../loader/src/exec.js';
 import {
   createGiteaHttpApi,
@@ -50,16 +54,19 @@ describe('Gitea first-start bootstrap', () => {
       api,
       runPhases: async (work) => {
         phases.push(...work);
-        for (const phase of work) await phase.run();
+        for (const phase of work) {
+          await phase.beforeRun?.();
+          await phase.run();
+        }
       },
     });
     await bootstrap.runInitial();
     expect(events).toEqual([
       'secret',
       'ready',
-      'login:admin',
       'secret',
       'ready',
+      'login:admin',
       'secret',
       'login:admin',
       'repository',
@@ -81,6 +88,41 @@ describe('Gitea first-start bootstrap', () => {
     ]);
   });
 
+  it('does not rehydrate credentials when every durable Gitea phase is complete', async () => {
+    const calls: string[] = [];
+    const phases: PlatformPhaseStore = {
+      read: async () => ({ phase: 'gitea-application-kustomizations', status: 'complete' }),
+      write: async () => {
+        throw new Error('completed Gitea work must be skipped');
+      },
+    };
+    const api: GiteaApi = {
+      ensureAdminSecret: async () => {
+        calls.push('secret');
+        return { username: 'admin', password: 'pw' };
+      },
+      waitReady: async () => {
+        calls.push('ready');
+      },
+      verifyAdmin: async () => {
+        calls.push('login');
+      },
+      ensureRepository: async () => {
+        calls.push('repository');
+      },
+      seedBundle: async () => {},
+      ensureDeployBranch: async () => {},
+      protectBranch: async () => {},
+      ensureReadOnlySource: async () => {},
+      ensureApplicationObjects: async () => {},
+    };
+    const bootstrap = createGiteaBootstrap({ api, runPhases: createPlatformPhaseRunner(phases) });
+
+    await bootstrap.runInitial();
+
+    expect(calls).toEqual([]);
+  });
+
   it('requires a real seed bundle and leaves the admin Secret in place for the chart reference', async () => {
     const events: string[] = [];
     const api: GiteaApi = {
@@ -99,7 +141,10 @@ describe('Gitea first-start bootstrap', () => {
     const bootstrap = createGiteaBootstrap({
       api,
       runPhases: async (phases) => {
-        for (const phase of phases) await phase.run();
+        for (const phase of phases) {
+          await phase.beforeRun?.();
+          await phase.run();
+        }
       },
     });
     await bootstrap.runInitial();
@@ -514,8 +559,9 @@ describe('Gitea first-start bootstrap', () => {
         api.ensureAdminSecret = async () => secret;
         const bootstrap = createGiteaBootstrap({
           api,
-          runPhases: async () => {
+          runPhases: async (work) => {
             expect(durableRecord.status).toBe('running');
+            await work.find(({ name }) => name === 'gitea-repository-seed')?.beforeRun?.();
             await api.ensureRepository();
           },
         });
