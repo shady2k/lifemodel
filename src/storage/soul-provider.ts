@@ -48,32 +48,39 @@ export interface SoulStateStore {
 export class PostgresSoulStore implements SoulStateStore {
   constructor(private readonly pool: Pool) {}
 
+  private version(value: number | string): number {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1)
+      throw new Error('Invalid Postgres soul version');
+    return parsed;
+  }
+
   async load(): Promise<StoredSoulState | null> {
-    const { rows } = await this.pool.query<{ version: number; document: unknown }>(
+    const { rows } = await this.pool.query<{ version: number | string; document: unknown }>(
       'SELECT version, document FROM core.soul WHERE id = $1',
       ['soul']
     );
     const row = rows[0];
-    return row ? { version: row.version, document: row.document } : null;
+    return row ? { version: this.version(row.version), document: row.document } : null;
   }
 
   async save(expectedVersion: number | null, document: unknown): Promise<number> {
     if (expectedVersion === null) {
-      const result = await this.pool.query<{ version: number }>(
+      const result = await this.pool.query<{ version: number | string }>(
         `INSERT INTO core.soul (id, version, document) VALUES ('soul', 1, $1::jsonb)
          ON CONFLICT (id) DO NOTHING RETURNING version`,
         [JSON.stringify(document)]
       );
       if (!result.rows[0]) throw new Error('Soul write refused: a newer version already exists');
-      return result.rows[0].version;
+      return this.version(result.rows[0].version);
     }
-    const result = await this.pool.query<{ version: number }>(
+    const result = await this.pool.query<{ version: number | string }>(
       `UPDATE core.soul SET version = version + 1, document = $1::jsonb
        WHERE id = 'soul' AND version = $2 RETURNING version`,
       [JSON.stringify(document), expectedVersion]
     );
     if (!result.rows[0]) throw new Error('Soul write refused: stale version');
-    return result.rows[0].version;
+    return this.version(result.rows[0].version);
   }
 }
 

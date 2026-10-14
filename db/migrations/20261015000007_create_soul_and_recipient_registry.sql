@@ -1,11 +1,13 @@
 -- migrate:up
-CREATE TABLE core.soul (
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
+CREATE TABLE IF NOT EXISTS core.soul (
   id text PRIMARY KEY CHECK (id = 'soul'),
-  version integer NOT NULL CHECK (version > 0),
+  version bigint NOT NULL CHECK (version > 0),
   document jsonb NOT NULL
 );
 
-CREATE TABLE core.recipient_registry (
+CREATE TABLE IF NOT EXISTS core.recipient_registry (
   recipient_id text PRIMARY KEY CHECK (left(recipient_id, 5) = 'rcpt_'),
   channel text NOT NULL,
   destination text NOT NULL,

@@ -1,7 +1,6 @@
 -- migrate:up
-ALTER TABLE core.conversation_messages
-  DROP CONSTRAINT conversation_messages_kind_check;
-ALTER TABLE core.conversation_messages
-  ADD CONSTRAINT conversation_messages_kind_check
-  CHECK (kind IN ('message', 'status', 'action', 'actions_clear', 'clear', 'compaction'));
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
+-- Kept as a stable migration version; the fresh schema includes compaction.
+SELECT 1;
 -- migrate:down
