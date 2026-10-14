@@ -3,7 +3,6 @@ import type { Signal } from '../types/signal.js';
 import type { SnapshotOutboxEvent, SnapshotSectionOwner } from '../storage/snapshot-store.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { Channel, Logger } from '../types/index.js';
-import { markdownToTelegramHtml } from '../utils/telegram-html.js';
 
 export const INBOUND_STREAM = 'inbound';
 export const OUTBOUND_STREAM = 'outbound';
@@ -284,22 +283,20 @@ export function startOutboundDelivery(
         const payload = event.payload as OutboundMessagePayload;
         const channel = channels.get(payload.channel);
         if (!channel) {
-          logger.warn(
+          logger.info(
             { eventId: event.eventId, channel: payload.channel },
-            'Outbound event has no registered channel; retrying'
+            'Outbound event committed for the future gateway; no channel is registered'
           );
-          await new Promise((resolve) => setTimeout(resolve, 250));
-          break;
+          // Advance only this process's scan position. Persisting the channel
+          // delivery cursor here would let trimming discard events before the
+          // future gateway has delivered them.
+          offset = streamId;
+          continue;
         }
         try {
-          const result = await channel.sendMessage(
-            payload.destination,
-            markdownToTelegramHtml(payload.text),
-            {
-              parseMode: 'HTML',
-              ...(typeof payload.replyTo === 'string' ? { replyTo: payload.replyTo } : {}),
-            }
-          );
+          const result = await channel.sendMessage(payload.destination, payload.text, {
+            ...(typeof payload.replyTo === 'string' ? { replyTo: payload.replyTo } : {}),
+          });
           if (!result.success) throw new Error('channel returned unsuccessful send');
           await redis.set(offsetKey, streamId);
           offset = streamId;

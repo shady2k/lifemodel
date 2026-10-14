@@ -11,17 +11,12 @@
 import { CONFIG_FILE_VERSION, type AgentConfigFile } from '../config/config-schema.js';
 import { endpointGaps, isEndpointFieldSet, type ModelEndpoint } from '../config/model-endpoint.js';
 
-/** The default Agent Vault placeholder of a Telegram bot token. */
-export const TELEGRAM_BOT_TOKEN_PLACEHOLDER = '__telegram_bot_token__';
-
 /** What the form holds, as it arrives (every field a string, possibly empty). */
 export interface SettingsInput {
   endpointBaseUrl: string;
   fastModel: string;
   smartModel: string;
   motorModel: string;
-  telegramChatId: string;
-  telegramBotToken: string;
 }
 
 /** A field of the form. */
@@ -36,12 +31,7 @@ export const SETTINGS_FIELDS: readonly { field: SettingsField; label: string }[]
   { field: 'fastModel', label: 'the fast model' },
   { field: 'smartModel', label: 'the smart model' },
   { field: 'motorModel', label: 'the motor role model' },
-  { field: 'telegramChatId', label: 'the Telegram chat id' },
-  { field: 'telegramBotToken', label: 'the Telegram bot token' },
 ];
-
-/** The Agent Vault placeholder shape: `__something__`, never a token. */
-const PLACEHOLDER = /^__[A-Za-z0-9_]+__$/;
 
 /** An http(s) URL, the only thing lifemodel can send a request to. */
 function isHttpUrl(value: string): boolean {
@@ -144,17 +134,6 @@ export function validateSettings(input: SettingsInput): SettingsErrors {
     }
   }
 
-  const chatId = input.telegramChatId.trim();
-  if (chatId !== '' && !/^-?\d+$/.test(chatId)) {
-    errors.telegramChatId = 'the Telegram chat id must be a number (get it from @userinfobot)';
-  }
-
-  const token = input.telegramBotToken.trim();
-  if (token !== '' && !PLACEHOLDER.test(token)) {
-    errors.telegramBotToken =
-      'the Telegram bot token must be an Agent Vault placeholder like __telegram_bot_token__; the token itself belongs in Agent Vault, not here';
-  }
-
   return errors;
 }
 
@@ -169,8 +148,6 @@ export function settingsInputFromBody(body: Record<string, unknown>): SettingsIn
     fastModel: read('fastModel'),
     smartModel: read('smartModel'),
     motorModel: read('motorModel'),
-    telegramChatId: read('telegramChatId'),
-    telegramBotToken: read('telegramBotToken'),
   };
 }
 
@@ -182,8 +159,6 @@ export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInp
     fastModel: endpoint?.fastModel ?? '',
     smartModel: endpoint?.smartModel ?? '',
     motorModel: endpoint?.motorModel ?? '',
-    telegramChatId: file?.primaryUser?.telegramChatId ?? '',
-    telegramBotToken: file?.telegram?.botToken ?? TELEGRAM_BOT_TOKEN_PLACEHOLDER,
   };
 }
 
@@ -195,11 +170,6 @@ export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInp
 export function applySettings(file: AgentConfigFile | null, input: SettingsInput): AgentConfigFile {
   const endpoint = settingsEndpoint(input);
   const primaryUser = { ...(file?.primaryUser ?? {}) };
-  if (input.telegramChatId.trim() === '') {
-    delete primaryUser.telegramChatId;
-  } else {
-    primaryUser.telegramChatId = input.telegramChatId.trim();
-  }
   return {
     ...(file ?? {}),
     version: file?.version ?? CONFIG_FILE_VERSION,
@@ -217,6 +187,5 @@ export function applySettings(file: AgentConfigFile | null, input: SettingsInput
       },
     },
     primaryUser,
-    telegram: { ...(file?.telegram ?? {}), botToken: input.telegramBotToken.trim() },
   };
 }

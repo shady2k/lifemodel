@@ -61,8 +61,6 @@ export interface AgentConfigFile {
     name?: string;
     /** Timezone offset from UTC in hours */
     timezoneOffset?: number;
-    /** Telegram chat ID (can also be set via env var) */
-    telegramChatId?: string;
   };
 
   /** LLM configuration */
@@ -82,16 +80,6 @@ export interface AgentConfigFile {
       /** The motor role's model */
       motorModel?: string | null;
     };
-  };
-
-  /** Telegram configuration */
-  telegram?: {
-    /**
-     * The bot token as an Agent Vault placeholder (e.g.
-     * `__telegram_bot_token__`), never the token itself: Agent Vault
-     * substitutes it in the request path (lifemodel-q4x.3.*).
-     */
-    botToken?: string;
   };
 
   /** Logging configuration */
@@ -151,7 +139,6 @@ export interface MergedConfig {
   primaryUser: {
     name: string | null;
     timezoneOffset: number | null;
-    telegramChatId: string | null;
   };
 
   /** LLM configuration */
@@ -175,9 +162,6 @@ export interface MergedConfig {
     logDir: string;
     maxFiles: number;
   };
-
-  /** Telegram bot token */
-  telegramBotToken: string | null;
 
   /** Storage paths */
   paths: {
@@ -245,7 +229,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
   primaryUser: {
     name: null,
     timezoneOffset: null,
-    telegramChatId: null,
   },
   llm: {
     endpoint: {
@@ -263,7 +246,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
     logDir: 'data/logs',
     maxFiles: 10,
   },
-  telegramBotToken: null,
   // Motor Cortex remains enabled unless explicitly disabled.
   motorCortex: { enabled: true },
   paths: {

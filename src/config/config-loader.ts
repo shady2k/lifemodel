@@ -95,9 +95,6 @@ export class ConfigLoader {
       if (file.primaryUser.timezoneOffset !== undefined) {
         config.primaryUser.timezoneOffset = file.primaryUser.timezoneOffset;
       }
-      if (file.primaryUser.telegramChatId) {
-        config.primaryUser.telegramChatId = file.primaryUser.telegramChatId;
-      }
     }
 
     // LLM
@@ -111,12 +108,6 @@ export class ConfigLoader {
         if (endpoint.smartModel !== undefined) config.llm.endpoint.smartModel = endpoint.smartModel;
         if (endpoint.motorModel !== undefined) config.llm.endpoint.motorModel = endpoint.motorModel;
       }
-    }
-
-    // Telegram bot token: the configuration document carries the Agent Vault PLACEHOLDER
-    // (`__telegram_bot_token__`), never the token (lifemodel-q4x.3.*).
-    if (file.telegram?.botToken) {
-      config.telegramBotToken = file.telegram.botToken;
     }
 
     // Logging
@@ -155,18 +146,6 @@ export class ConfigLoader {
    * Override config with environment variables.
    */
   private mergeEnvironment(config: MergedConfig): void {
-    // Secrets (always from env)
-    const telegramToken = process.env['TELEGRAM_BOT_TOKEN'];
-    if (telegramToken) {
-      config.telegramBotToken = telegramToken;
-    }
-
-    // Primary user chat ID (can be in env or config)
-    const chatId = process.env['PRIMARY_USER_CHAT_ID'];
-    if (chatId) {
-      config.primaryUser.telegramChatId = chatId;
-    }
-
     // The endpoint (each field on its own: an environment variable names one
     // field, and a half-written endpoint stays visible as one)
     const endpointBaseUrl = process.env['LLM_ENDPOINT_BASE_URL'];
