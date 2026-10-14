@@ -30,7 +30,11 @@ function queryParts(input: unknown, values: unknown): { sql: string; values?: un
 }
 
 async function assertActiveHolder(client: SqlExecutor, epoch: number): Promise<void> {
-  const result = await client.query('SELECT epoch FROM core.active_holder WHERE id = true');
+  // Keep the row lock until COMMIT. Takeover updates the same row, so it must
+  // wait for this transaction rather than making a checked write stale.
+  const result = await client.query(
+    'SELECT epoch FROM core.active_holder WHERE id = true FOR SHARE'
+  );
   const rawStored = result.rows[0]?.['epoch'];
   const stored =
     typeof rawStored === 'number'
@@ -57,7 +61,7 @@ export function createFencedPostgres(pool: Pool, epoch: number): Pool {
         }
       }
       if (command === 'BEGIN' || command.startsWith('BEGIN ')) {
-        const result = await executor.query(sql, values);
+        const result = await executor.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         transactionOpen = true;
         try {
           await assertActiveHolder(executor, epoch);
@@ -70,7 +74,6 @@ export function createFencedPostgres(pool: Pool, epoch: number): Pool {
       }
       if (command === 'COMMIT' || command.startsWith('COMMIT ')) {
         try {
-          await assertActiveHolder(executor, epoch);
           return await executor.query(sql, values);
         } catch (error) {
           if (transactionOpen) await executor.query('ROLLBACK');
@@ -80,15 +83,15 @@ export function createFencedPostgres(pool: Pool, epoch: number): Pool {
         }
       }
       if (transactionOpen) {
-        await assertActiveHolder(executor, epoch);
+        // The holder row remains locked from BEGIN through COMMIT; checking
+        // every statement would add round trips without strengthening the fence.
         return executor.query(sql, values);
       }
-      await executor.query('BEGIN');
+      await executor.query('BEGIN ISOLATION LEVEL READ COMMITTED');
       transactionOpen = true;
       try {
         await assertActiveHolder(executor, epoch);
         const result = await executor.query(sql, values);
-        await assertActiveHolder(executor, epoch);
         await executor.query('COMMIT');
         transactionOpen = false;
         return result;
