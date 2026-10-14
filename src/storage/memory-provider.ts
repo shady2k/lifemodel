@@ -10,7 +10,6 @@
  * (Step 4) and association retrieval.
  */
 
-import type { Storage } from './storage.js';
 import type { Logger } from '../types/logger.js';
 import type {
   MemoryProvider,
@@ -23,23 +22,9 @@ import type {
   BehaviorRule,
 } from '../layers/cognition/tools/registry.js';
 import type { VectorStore } from './vector-store.js';
-import { JsonVectorStore } from './vector-store.js';
 import type { GraphStore } from './graph-store.js';
-import { JsonGraphStore } from './graph-store.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
-
-/**
- * Configuration for JSON memory provider (legacy factory signature).
- */
-export interface JsonMemoryProviderConfig {
-  /** Storage interface for persistence (DeferredStorage recommended) */
-  storage: Storage;
-  /** Storage key for memory data */
-  storageKey: string;
-  /** Maximum entries to keep (older entries pruned) */
-  maxEntries: number;
-}
 
 /**
  * Dependencies for the new dual-store constructor.
@@ -52,13 +37,13 @@ export interface MemoryProviderDeps {
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 /**
- * JSON-based Memory Provider.
+ * Memory provider.
  *
  * Delegates storage CRUD and search to VectorStore.
  * Domain methods (getRecentByType, findByKind, getBehaviorRules) use
  * vectorStore.getAll() + in-memory filtering — these remain orchestration above the Postgres VectorStore.
  */
-export class JsonMemoryProvider implements MemoryProvider {
+export class MemoryProviderImpl implements MemoryProvider {
   private readonly logger: Logger;
   readonly vectorStore: VectorStore;
   readonly graphStore: GraphStore | undefined;
@@ -438,28 +423,4 @@ export class JsonMemoryProvider implements MemoryProvider {
 
     return { totalEntries: entries.length, byType, oldestEntry: oldest, newestEntry: newest };
   }
-}
-
-// ─── Factory (backward-compatible) ──────────────────────────────────────────
-
-/**
- * Create a JSON memory provider.
- *
- * Transitional factory that creates VectorStore + GraphStore internally.
- * Existing callers pass the old { storage, storageKey, maxEntries } config.
- */
-export function createJsonMemoryProvider(
-  logger: Logger,
-  config: JsonMemoryProviderConfig
-): JsonMemoryProvider {
-  const vectorStore = new JsonVectorStore(logger, {
-    storage: config.storage,
-    storageKey: config.storageKey,
-    maxEntries: config.maxEntries,
-  });
-  const graphStore = new JsonGraphStore(logger, {
-    storage: config.storage,
-    storageKey: 'graph',
-  });
-  return new JsonMemoryProvider(logger, { vectorStore, graphStore });
 }

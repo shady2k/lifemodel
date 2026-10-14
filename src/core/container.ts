@@ -54,7 +54,7 @@ import {
   type ModelEndpoint,
 } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
-import { JsonMemoryProvider } from '../storage/memory-provider.js';
+import { MemoryProviderImpl } from '../storage/memory-provider.js';
 import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
@@ -184,7 +184,7 @@ export interface Container {
   /** COGNITION LLM adapter (optional, for agentic loop) */
   cognitionLLM: CognitionLLM | null;
   /** Memory provider (optional, for agentic loop) */
-  memoryProvider: JsonMemoryProvider | null;
+  memoryProvider: MemoryProviderImpl | null;
   /** Memory consolidator (for sleep-cycle consolidation) */
   memoryConsolidator: MemoryConsolidator | null;
   /** Soul provider (for identity awareness) */
@@ -677,7 +677,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const embedder = createEmbedder();
   const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
   const graphStore = new PostgresGraphStore(postgres, logger);
-  const memoryProvider = new JsonMemoryProvider(logger, { vectorStore, graphStore });
+  const memoryProvider = new MemoryProviderImpl(logger, { vectorStore, graphStore });
   logger.info('MemoryProvider configured (Postgres pgvector + graph)');
 
   // Create entity extractor (LLM-based, for consolidation)

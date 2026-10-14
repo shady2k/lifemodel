@@ -23,13 +23,7 @@ export { StateManager, createStateManager } from './state-manager.js';
 export type { ConversationMessage, GetHistoryOptions } from './conversation-manager.js';
 export { ConversationManager, createConversationManager } from './conversation-manager.js';
 export { PostgresConversationStore } from './postgres-conversation-store.js';
-export type {
-  VectorStore,
-  VectorSearchOptions,
-  VectorSearchResult,
-  JsonVectorStoreConfig,
-} from './vector-store.js';
-export { JsonVectorStore } from './vector-store.js';
+export type { VectorStore, VectorSearchOptions, VectorSearchResult } from './vector-store.js';
 export type { Embedder, EmbedderConfig } from './embedder.js';
 export { createEmbedder } from './embedder.js';
 export type {
@@ -42,9 +36,7 @@ export type {
   TraversalResult,
   SpreadingActivationOptions,
   ActivationResult,
-  JsonGraphStoreConfig,
 } from './graph-store.js';
-export { JsonGraphStore } from './graph-store.js';
 
 export {
   SnapshotStore,

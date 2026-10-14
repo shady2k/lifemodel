@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Logger } from '../types/logger.js';
 import type { MemoryEntry } from '../layers/cognition/tools/registry.js';
 import type { Embedder } from './embedder.js';
@@ -51,7 +51,9 @@ function fromMemoryRow(r: MemoryRow): MemoryEntry {
 }
 function vectorLiteral(v: Float32Array): string {
   if (v.length !== DIMENSIONS)
-    throw new Error(`Embedding dimension mismatch: expected ${DIMENSIONS}, got ${v.length}`);
+    throw new Error(
+      `Embedding dimension mismatch: expected ${String(DIMENSIONS)}, got ${String(v.length)}`
+    );
   return `[${Array.from(v).join(',')}]`;
 }
 const memoryColumns =
@@ -65,7 +67,7 @@ export class PostgresVectorStore implements VectorStore {
   ) {
     if (embedder.dimensions() !== DIMENSIONS)
       throw new Error(
-        `Embedder dimension mismatch: database requires ${DIMENSIONS}, got ${embedder.dimensions()}`
+        `Embedder dimension mismatch: database requires ${String(DIMENSIONS)}, got ${String(embedder.dimensions())}`
       );
     this.logger = logger.child({ component: 'vector-store' });
   }
@@ -86,7 +88,7 @@ export class PostgresVectorStore implements VectorStore {
     const where: string[] = [];
     const add = (sql: string, v: unknown) => {
       values.push(v);
-      where.push(sql.replace('?', `$${values.length}`));
+      where.push(sql.replace('?', `$${String(values.length)}`));
     };
     if (o.types) add('type = ANY(?::text[])', o.types);
     if (o.recipientId) add('(recipient_id IS NULL OR recipient_id = ?)', o.recipientId);
@@ -95,21 +97,23 @@ export class PostgresVectorStore implements VectorStore {
     if (o.metadata)
       for (const [k, v] of Object.entries(o.metadata)) {
         values.push(JSON.stringify({ [k]: v }));
-        where.push(`metadata @> $${values.length}::jsonb`);
+        where.push(`metadata @> $${String(values.length)}::jsonb`);
       }
     let queryVector: Float32Array | undefined;
     if (query.length >= 2) {
       queryVector = await this.embedder.embed(query);
       if (queryVector.length !== DIMENSIONS)
         throw new Error(
-          `Embedding dimension mismatch: expected ${DIMENSIONS}, got ${queryVector.length}`
+          `Embedding dimension mismatch: expected ${String(DIMENSIONS)}, got ${String(queryVector.length)}`
         );
     }
     const vectorSql = queryVector
-      ? 'embedding <=> $' + (values.push(vectorLiteral(queryVector)), values.length) + '::vector'
+      ? `embedding <=> $${String((values.push(vectorLiteral(queryVector)), values.length))}::vector`
       : '';
-    const sql = `SELECT ${memoryColumns}, ${queryVector ? `(${vectorSql}) AS distance` : '0::float AS distance'} FROM core.memories ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ${queryVector ? `ORDER BY ${vectorSql}` : 'ORDER BY timestamp DESC'} LIMIT $${(values.push(Math.max(0, limit + offset) * 3), values.length)} OFFSET 0`;
-    const { rows } = await this.pool.query(sql, values);
+    values.push(Math.max(0, limit + offset) * 3);
+    const limitParameter = String(values.length);
+    const sql = `SELECT ${memoryColumns}, ${queryVector ? `(${vectorSql}) AS distance` : '0::float AS distance'} FROM core.memories ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ${queryVector ? `ORDER BY ${vectorSql}` : 'ORDER BY timestamp DESC'} LIMIT $${limitParameter} OFFSET 0`;
+    const { rows } = await this.pool.query<MemoryRow & { distance: number | string }>(sql, values);
     const results = rows
       .filter(
         (r) =>
@@ -135,25 +139,33 @@ export class PostgresVectorStore implements VectorStore {
   }
   async count(o?: { types?: MemoryEntry['type'][] }): Promise<number> {
     const r = o?.types
-      ? await this.pool.query(
+      ? await this.pool.query<{ count: number }>(
           'SELECT count(*)::int AS count FROM core.memories WHERE type=ANY($1::text[])',
           [o.types]
         )
-      : await this.pool.query('SELECT count(*)::int AS count FROM core.memories');
-    return Number(r.rows[0]?.count ?? 0);
+      : await this.pool.query<{ count: number }>(
+          'SELECT count(*)::int AS count FROM core.memories'
+        );
+    return r.rows[0]?.count ?? 0;
   }
   async save(e: MemoryEntry): Promise<void> {
     const v = await this.embedder.embed(e.content);
     if (v.length !== DIMENSIONS)
-      throw new Error(`Embedding dimension mismatch: expected ${DIMENSIONS}, got ${v.length}`);
+      throw new Error(
+        `Embedding dimension mismatch: expected ${String(DIMENSIONS)}, got ${String(v.length)}`
+      );
     const x = e as MemoryEntry & { salience?: number };
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      if (e.type === 'fact' && e.metadata?.['subject'] && e.metadata['attribute']) {
-        const old = await client.query(
+      if (
+        e.type === 'fact' &&
+        typeof e.metadata?.['subject'] === 'string' &&
+        typeof e.metadata['attribute'] === 'string'
+      ) {
+        const old = await client.query<{ id: string }>(
           "SELECT id FROM core.memories WHERE type=$1 AND metadata->>'subject'=$2 AND metadata->>'attribute'=$3 LIMIT 1 FOR UPDATE",
-          ['fact', String(e.metadata['subject']), String(e.metadata['attribute'])]
+          ['fact', e.metadata['subject'], e.metadata['attribute']]
         );
         if (old.rows[0]) e.id = old.rows[0].id;
       }
@@ -185,6 +197,7 @@ export class PostgresVectorStore implements VectorStore {
       client.release();
     }
     await this.prune();
+    this.logger.debug({ memoryId: e.id }, 'Memory saved to Postgres');
   }
   private async prune() {
     const n = await this.count();
@@ -214,7 +227,9 @@ export class PostgresVectorStore implements VectorStore {
   async clear(): Promise<void> {
     await this.pool.query('DELETE FROM core.memories');
   }
-  async persist(): Promise<void> {}
+  persist(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 interface EntityRow {
@@ -255,20 +270,37 @@ const relation = (r: RelationRow): GraphRelation => ({
   type: r.type,
   strength: r.strength,
   confidence: r.confidence,
-  sourceTraceId: r.source_trace_id ?? undefined,
+  ...(r.source_trace_id ? { sourceTraceId: r.source_trace_id } : {}),
   lastActivated: new Date(r.last_activated).toISOString(),
   sourceMemoryIds: r.source_memory_ids,
 });
 export class PostgresGraphStore implements GraphStore {
   constructor(
     private readonly pool: Pool,
-    logger: Logger
+    logger: Logger,
+    private readonly executor: Pick<Pool | PoolClient, 'query'> = pool
   ) {
     this.logger = logger.child({ component: 'graph-store' });
   }
   private readonly logger: Logger;
+
+  async transaction<T>(operation: (store: GraphStore) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const store = new PostgresGraphStore(this.pool, this.logger, client);
+      const result = await operation(store);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async upsertEntity(e: GraphEntity): Promise<void> {
-    await this.pool.query(
+    await this.executor.query(
       `INSERT INTO core.memory_entities(id,name,aliases,type,description,metadata,last_activated,source_memory_ids) VALUES($1,$2,$3::jsonb,$4,$5,$6::jsonb,$7,$8::jsonb) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,aliases=EXCLUDED.aliases,type=EXCLUDED.type,description=EXCLUDED.description,metadata=EXCLUDED.metadata,last_activated=EXCLUDED.last_activated,source_memory_ids=EXCLUDED.source_memory_ids`,
       [
         e.id,
@@ -283,7 +315,7 @@ export class PostgresGraphStore implements GraphStore {
     );
   }
   async upsertRelation(e: GraphRelation): Promise<void> {
-    await this.pool.query(
+    await this.executor.query(
       `INSERT INTO core.memory_relations(id,from_id,to_id,type,strength,confidence,source_trace_id,last_activated,source_memory_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT(id) DO UPDATE SET from_id=EXCLUDED.from_id,to_id=EXCLUDED.to_id,type=EXCLUDED.type,strength=EXCLUDED.strength,confidence=EXCLUDED.confidence,source_trace_id=EXCLUDED.source_trace_id,last_activated=EXCLUDED.last_activated,source_memory_ids=EXCLUDED.source_memory_ids`,
       [
         e.id,
@@ -299,13 +331,14 @@ export class PostgresGraphStore implements GraphStore {
     );
   }
   async getEntity(id: string) {
-    const r = await this.pool.query<EntityRow>('SELECT * FROM core.memory_entities WHERE id=$1', [
-      id,
-    ]);
+    const r = await this.executor.query<EntityRow>(
+      'SELECT * FROM core.memory_entities WHERE id=$1',
+      [id]
+    );
     return r.rows[0] ? entity(r.rows[0]) : undefined;
   }
   async findEntity(name: string) {
-    const r = await this.pool.query<EntityRow>(
+    const r = await this.executor.query<EntityRow>(
       `SELECT * FROM core.memory_entities WHERE lower(name)=lower($1) OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(aliases) a WHERE lower(a)=lower($1)) LIMIT 1`,
       [name]
     );
@@ -318,18 +351,18 @@ export class PostgresGraphStore implements GraphStore {
         : direction === 'to'
           ? 'to_id=$1'
           : '(from_id=$1 OR to_id=$1)';
-    const r = await this.pool.query<RelationRow>(
+    const r = await this.executor.query<RelationRow>(
       `SELECT * FROM core.memory_relations WHERE ${op}`,
       [id]
     );
     return r.rows.map(relation);
   }
   async getAllEntities() {
-    const r = await this.pool.query<EntityRow>('SELECT * FROM core.memory_entities');
+    const r = await this.executor.query<EntityRow>('SELECT * FROM core.memory_entities');
     return r.rows.map(entity);
   }
   async getAllRelations() {
-    const r = await this.pool.query<RelationRow>('SELECT * FROM core.memory_relations');
+    const r = await this.executor.query<RelationRow>('SELECT * FROM core.memory_relations');
     return r.rows.map(relation);
   }
   async traverse(o: TraversalOptions): Promise<TraversalResult[]> {
@@ -339,11 +372,14 @@ export class PostgresGraphStore implements GraphStore {
     if (!start) return [];
     const results: TraversalResult[] = [];
     const seen = new Set([start.id]);
-    let q: [string, GraphRelation[], number, number][] = [[start.id, [], 0, 1]];
+    const q: [string, GraphRelation[], number, number][] = [[start.id, [], 0, 1]];
     while (q.length) {
-      const [id, path, hops, strength] = q.shift()!;
-      if (hops && entities.get(id))
-        results.push({ entity: entities.get(id)!, path, hops, pathStrength: strength });
+      const item = q.shift();
+      if (!item) break;
+      const [id, path, hops, strength] = item;
+      const currentEntity = entities.get(id);
+      if (hops && currentEntity)
+        results.push({ entity: currentEntity, path, hops, pathStrength: strength });
       if (hops >= o.maxHops || results.length >= (o.limit ?? 50)) continue;
       for (const edge of edges) {
         if (
@@ -383,7 +419,7 @@ export class PostgresGraphStore implements GraphStore {
               acts.set(next, n);
               via.set(
                 next,
-                `${entities.get(id)?.name} → ${edge.type} → ${entities.get(next)?.name}`
+                `${entities.get(id)?.name ?? id} → ${edge.type} → ${entities.get(next)?.name ?? next}`
               );
               changed = true;
             }
@@ -393,21 +429,19 @@ export class PostgresGraphStore implements GraphStore {
     const seeds = new Set(o.seeds.map((s) => s.entityId));
     return [...acts]
       .filter(([id, a]) => !seeds.has(id) && a >= threshold && entities.has(id))
-      .map(([id, activation]) => ({
-        entity: entities.get(id)!,
-        activation,
-        via: via.get(id) ?? '',
-      }))
+      .flatMap(([id, activation]) => {
+        const found = entities.get(id);
+        return found ? [{ entity: found, activation, via: via.get(id) ?? '' }] : [];
+      })
       .sort((a, b) => b.activation - a.activation)
       .slice(0, o.limit ?? 10);
   }
   async deleteEntity(id: string) {
-    await this.pool.query('DELETE FROM core.memory_entities WHERE id=$1', [id]);
+    await this.executor.query('DELETE FROM core.memory_entities WHERE id=$1', [id]);
   }
   async deleteRelation(id: string) {
-    await this.pool.query('DELETE FROM core.memory_relations WHERE id=$1', [id]);
+    await this.executor.query('DELETE FROM core.memory_relations WHERE id=$1', [id]);
   }
-  async persist(): Promise<void> {}
   async clear(): Promise<void> {
     const c = await this.pool.connect();
     try {
