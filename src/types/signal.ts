@@ -682,9 +682,9 @@ export function decodeSignal(value: unknown): Signal {
   }
   const raw = value as Record<string, unknown>;
   if (
-    typeof raw.id !== 'string' ||
-    typeof raw.type !== 'string' ||
-    typeof raw.source !== 'string'
+    typeof raw['id'] !== 'string' ||
+    typeof raw['type'] !== 'string' ||
+    typeof raw['source'] !== 'string'
   ) {
     throw new Error('Invalid serialized signal fields');
   }
@@ -696,7 +696,7 @@ export function decodeSignal(value: unknown): Signal {
   return {
     ...raw,
     timestamp: date('timestamp'),
-    ...(raw.expiresAt === undefined ? {} : { expiresAt: date('expiresAt') }),
+    ...(raw['expiresAt'] === undefined ? {} : { expiresAt: date('expiresAt') }),
   } as Signal;
 }
 

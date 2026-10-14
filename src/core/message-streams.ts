@@ -323,7 +323,11 @@ export async function applyCommittedOutboundEvents(
   for (;;) {
     const entries = await redis.xrange(streamKey, `(${offset}`, '+', 'COUNT', 100);
     if (entries.length === 0) {
-      await trimOutboundEvents(redis, { streamKey, postgresOffsetKey: offsetKey, logger });
+      await trimOutboundEvents(redis, {
+        streamKey,
+        postgresOffsetKey: offsetKey,
+        ...(logger ? { logger } : {}),
+      });
       return applied;
     }
     for (const [streamId, fields] of entries) {
@@ -367,10 +371,10 @@ export function startOutboundDelivery(
   const trimOptions = {
     streamKey,
     deliveryOffsetKey: offsetKey,
-    postgresOffsetKey: options.postgresOffsetKey,
-    eventKeysKey: options.eventKeysKey,
-    maxLength: options.maxLength,
-    maxAgeMs: options.maxAgeMs,
+    ...(options.postgresOffsetKey ? { postgresOffsetKey: options.postgresOffsetKey } : {}),
+    ...(options.eventKeysKey ? { eventKeysKey: options.eventKeysKey } : {}),
+    ...(options.maxLength !== undefined ? { maxLength: options.maxLength } : {}),
+    ...(options.maxAgeMs !== undefined ? { maxAgeMs: options.maxAgeMs } : {}),
     logger,
   };
   const done = (async () => {
