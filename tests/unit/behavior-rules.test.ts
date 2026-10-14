@@ -12,32 +12,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createMockLogger } from '../helpers/factories.js';
 import type { MemoryEntry, MemoryProvider } from '../../src/layers/cognition/tools/registry.js';
 import type { BehaviorRule } from '../../src/layers/cognition/tools/core/memory.js';
-import { createJsonMemoryProvider, type JsonMemoryProvider } from '../../src/storage/memory-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import { createTestMemoryProvider } from '../helpers/memory-provider-fixture.js';
+import type { MemoryProviderImpl } from '../../src/storage/memory-provider.js';
 import { buildBehaviorRulesSection } from '../../src/layers/cognition/prompts/context-sections.js';
 import type { LoopContext } from '../../src/layers/cognition/agentic-loop-types.js';
-import { saveBehaviorRule, pruneExcessBehaviorRules } from '../../src/layers/cognition/soul/reflection.js';
+import {
+  saveBehaviorRule,
+  pruneExcessBehaviorRules,
+} from '../../src/layers/cognition/soul/reflection.js';
 import type { ExtractedBehaviorRule } from '../../src/layers/cognition/soul/reflection.js';
 
 // In-memory storage for testing
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => {
-      store.set(key, data);
-    },
-    delete: async (key: string) => {
-      const existed = store.has(key);
-      store.delete(key);
-      return existed;
-    },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
 
-function createBehaviorRuleEntry(overrides: Partial<MemoryEntry> & { weight?: number; source?: string; lastReinforcedAt?: string } = {}): MemoryEntry {
+function createBehaviorRuleEntry(
+  overrides: Partial<MemoryEntry> & {
+    weight?: number;
+    source?: string;
+    lastReinforcedAt?: string;
+  } = {}
+): MemoryEntry {
   const { weight = 1.0, source = 'user_feedback', lastReinforcedAt, ...rest } = overrides;
   const ruleId = `rule_${String(Date.now())}_${Math.random().toString(36).slice(2, 8)}`;
   return {
@@ -91,16 +84,12 @@ function createMinimalLoopContext(overrides: Partial<LoopContext> = {}): LoopCon
 }
 
 describe('getBehaviorRules', () => {
-  let provider: JsonMemoryProvider;
+  let provider: MemoryProviderImpl;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    provider = createTestMemoryProvider(logger, 1000);
   });
 
   it('returns empty array when no rules exist', async () => {
@@ -275,16 +264,12 @@ describe('buildBehaviorRulesSection', () => {
 });
 
 describe('saveBehaviorRule', () => {
-  let provider: JsonMemoryProvider;
+  let provider: MemoryProviderImpl;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    provider = createTestMemoryProvider(logger, 1000);
   });
 
   it('creates a new behavioral rule', async () => {
@@ -364,16 +349,12 @@ describe('saveBehaviorRule', () => {
 });
 
 describe('pruneExcessBehaviorRules', () => {
-  let provider: JsonMemoryProvider;
+  let provider: MemoryProviderImpl;
   let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
     logger = createMockLogger();
-    provider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    provider = createTestMemoryProvider(logger, 1000);
   });
 
   it('does nothing when under limit', async () => {
@@ -389,10 +370,12 @@ describe('pruneExcessBehaviorRules', () => {
   it('deletes lowest-weight rules when over limit', async () => {
     // Create 4 rules with different weights
     for (let i = 0; i < 4; i++) {
-      await provider.save(createBehaviorRuleEntry({
-        content: `Rule ${String(i)}`,
-        weight: i + 1, // weights: 1, 2, 3, 4
-      }));
+      await provider.save(
+        createBehaviorRuleEntry({
+          content: `Rule ${String(i)}`,
+          weight: i + 1, // weights: 1, 2, 3, 4
+        })
+      );
     }
 
     await pruneExcessBehaviorRules(provider, logger, 2);

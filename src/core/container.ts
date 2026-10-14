@@ -54,7 +54,7 @@ import {
   type ModelEndpoint,
 } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
-import { JsonMemoryProvider } from '../storage/memory-provider.js';
+import { MemoryProviderImpl } from '../storage/memory-provider.js';
 import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
@@ -64,8 +64,7 @@ import {
 } from '../storage/memory-consolidator.js';
 import { LLMEntityExtractor } from '../storage/entity-extractor.js';
 import { createEmbedder } from '../storage/embedder.js';
-import { LanceVectorStore } from '../storage/lance-vector-store.js';
-import { JsonGraphStore } from '../storage/graph-store.js';
+import { PostgresVectorStore, PostgresGraphStore } from '../storage/postgres-memory-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
@@ -74,6 +73,7 @@ import {
   applyCommittedOutboundEvents,
   startOutboundDelivery,
 } from './message-streams.js';
+import { createBusSignalStream } from './bus-stream.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -87,7 +87,6 @@ import { createLockService } from '../runtime/lock/lock-service.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
@@ -189,7 +188,7 @@ export interface Container {
   /** COGNITION LLM adapter (optional, for agentic loop) */
   cognitionLLM: CognitionLLM | null;
   /** Memory provider (optional, for agentic loop) */
-  memoryProvider: JsonMemoryProvider | null;
+  memoryProvider: MemoryProviderImpl | null;
   /** Memory consolidator (for sleep-cycle consolidation) */
   memoryConsolidator: MemoryConsolidator | null;
   /** Soul provider (for identity awareness) */
@@ -512,8 +511,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   const snapshotRedis = new Redis(valkeyUrl);
   const snapshotStore = createSnapshotStore(snapshotRedis);
+  const busSignalStream = createBusSignalStream(snapshotRedis);
+  snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
   const initialSnapshot = await snapshotStore.read();
+  busSignalStream.hydrateSnapshot(initialSnapshot?.sections['busOffset'] as string | undefined);
 
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
@@ -677,30 +679,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
-  // Guard: fail fast if memory.json exists but hasn't been migrated to LanceDB
-  const legacyMemoryPath = resolve(storagePath, 'memory.json');
-  if (existsSync(legacyMemoryPath)) {
-    throw new Error(
-      `Unmigrated memory.json found at ${legacyMemoryPath}. ` +
-        'Run "npx tsx src/scripts/migrate-memory-to-lance.ts" before starting the agent.'
-    );
-  }
-
-  // Create dual-layer memory stores
-  const embedder = createEmbedder({
-    cacheDir: resolve(mergedConfig.paths.data, 'models'),
-  });
-  const vectorStore = new LanceVectorStore(logger, {
-    dbPath: resolve(storagePath, 'memory', 'vector'),
-    embedder,
-    maxEntries: 10000,
-  });
-  const graphStore = new JsonGraphStore(logger, {
-    storage,
-    storageKey: 'graph',
-  });
-  const memoryProvider = new JsonMemoryProvider(logger, { vectorStore, graphStore });
-  logger.info('MemoryProvider configured (dual-layer: VectorStore + GraphStore)');
+  // Long-lived memory and its graph live only in the core Postgres schema.
+  const embedder = createEmbedder();
+  const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
+  const graphStore = new PostgresGraphStore(postgres, logger);
+  const memoryProvider = new MemoryProviderImpl(logger, { vectorStore, graphStore });
+  logger.info('MemoryProvider configured (Postgres pgvector + graph)');
 
   // Create entity extractor (LLM-based, for consolidation)
   const entityExtractor = cognitionLLM ? new LLMEntityExtractor(logger, cognitionLLM) : undefined;
@@ -1081,11 +1065,14 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     storage,
     pluginLoader,
     inboundStream,
+    busSignalStream,
     initialTickCount: Number(
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
     commitSnapshot: async (tick, outbox) => {
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
+    },
+    afterSnapshotCommit: async () => {
       await applyCommittedOutboundEvents(snapshotRedis, conversationManager);
     },
     onStaleSnapshot: () => {

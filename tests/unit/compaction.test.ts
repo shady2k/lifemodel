@@ -13,9 +13,10 @@ import {
   ConversationManager,
   createConversationManager,
 } from '../../src/storage/conversation-manager.js';
-import { JsonMemoryProvider, createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import { createTestMemoryProvider } from '../helpers/memory-provider-fixture.js';
+import type { MemoryProviderImpl } from '../../src/storage/memory-provider.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/core/memory.js';
+import type { Storage } from '../../src/storage/storage.js';
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -32,20 +33,6 @@ function createTestLogger() {
   return mockLogger as any;
 }
 
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: vi.fn(async (key: string) => store.get(key)),
-    save: vi.fn(async (key: string, data: unknown) => {
-      store.set(key, data);
-    }),
-    delete: vi.fn(async (key: string) => {
-      store.delete(key);
-    }),
-    exists: vi.fn(async (key: string) => store.has(key)),
-  } as unknown as Storage;
-}
-
 interface StoredMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
@@ -56,6 +43,18 @@ interface StoredMessage {
     function: { name: string; arguments: string };
   }[];
   tool_call_id?: string;
+}
+
+function createMockStorage(): Storage {
+  const data = new Map<string, unknown>();
+  return {
+    load: async (key: string) => data.get(key) ?? null,
+    save: async (key: string, value: unknown) => {
+      data.set(key, value);
+    },
+    delete: async (key: string) => data.delete(key),
+    exists: async (key: string) => data.has(key),
+  };
 }
 
 async function setConversationData(
@@ -81,16 +80,12 @@ function makeMemoryEntry(overrides: Partial<MemoryEntry> & { id: string }): Memo
 
 // ─── getLatestByKind ─────────────────────────────────────────────────────────
 
-describe('JsonMemoryProvider.getLatestByKind', () => {
-  let memoryProvider: JsonMemoryProvider;
+describe('MemoryProviderImpl.getLatestByKind', () => {
+  let memoryProvider: MemoryProviderImpl;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    memoryProvider = createJsonMemoryProvider(createTestLogger(), {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    memoryProvider = createTestMemoryProvider(createTestLogger(), 1000);
   });
 
   it('returns the most recent entry by timestamp', async () => {
@@ -170,8 +165,8 @@ describe('JsonMemoryProvider.getLatestByKind', () => {
 // ─── compactMessages CAS guard ──────────────────────────────────────────────
 
 describe('ConversationManager.compactMessages', () => {
-  let storage: Storage;
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -250,8 +245,8 @@ describe('ConversationManager.compactMessages', () => {
 // ─── getHistory no longer injects compactedSummary ──────────────────────────
 
 describe('ConversationManager.getHistory with legacy summary field', () => {
-  let storage: Storage;
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -281,8 +276,8 @@ describe('ConversationManager.getHistory with legacy summary field', () => {
 // ─── getMessageCount ─────────────────────────────────────────────────────────
 
 describe('ConversationManager.getMessageCount', () => {
-  let storage: Storage;
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();

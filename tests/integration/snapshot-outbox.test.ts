@@ -5,6 +5,7 @@ import {
   InboundMessageStream,
   applyCommittedOutboundEvents,
   startOutboundDelivery,
+  trimOutboundEvents,
 } from '../../src/core/message-streams.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
@@ -107,6 +108,29 @@ describe('snapshot outbox commit', () => {
       store.commitOwners(epoch, 5, [{ ...event, eventId: 'answer:message-2' }])
     ).rejects.toThrow(/epoch mismatch/i);
     expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(1);
+  });
+  it('trims only events below the slower Postgres and delivery cursors', async () => {
+    const prefix = `outbound-trim:${stores.workerId}:`;
+    const streamKey = `${prefix}events`;
+    const postgresOffsetKey = `${prefix}pg-applied`;
+    const deliveryOffsetKey = `${prefix}delivered`;
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const id = await stores.redis.xadd(streamKey, '*', 'eventId', `trim-${i}`);
+      if (!id) throw new Error('Valkey returned no outbound stream id');
+      ids.push(id);
+    }
+    await stores.redis.set(postgresOffsetKey, ids[2]!);
+    await stores.redis.set(deliveryOffsetKey, ids[1]!);
+    await trimOutboundEvents(stores.redis, {
+      streamKey,
+      postgresOffsetKey,
+      deliveryOffsetKey,
+    });
+    expect((await stores.redis.xrange(streamKey, '-', '+')).map(([id]) => id)).toEqual([
+      ids[1],
+      ids[2],
+    ]);
   });
 });
 

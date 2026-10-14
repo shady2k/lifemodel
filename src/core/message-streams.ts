@@ -189,6 +189,35 @@ export interface OutboundMessagePayload extends Record<string, unknown> {
   replyTo?: string;
 }
 
+/** Trim only the prefix both outbound consumers have durably passed.
+ * MINID is inclusive, so the event at the slower cursor stays available. */
+export async function trimOutboundEvents(
+  redis: Redis,
+  options: { streamKey?: string; postgresOffsetKey?: string; deliveryOffsetKey?: string } = {}
+): Promise<void> {
+  const streamKey = options.streamKey ?? OUTBOUND_STREAM;
+  const postgresOffsetKey = options.postgresOffsetKey ?? 'outbound:pg-applied';
+  const deliveryOffsetKey = options.deliveryOffsetKey ?? 'outbound:delivery-offset';
+  const [postgresOffset, deliveryOffset] = await Promise.all([
+    redis.get(postgresOffsetKey),
+    redis.get(deliveryOffsetKey),
+  ]);
+  const minimum = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
+  if (minimum !== '0-0') await redis.xtrim(streamKey, 'MINID', minimum);
+}
+
+function minStreamId(left: string, right: string): string {
+  const [leftMillisText, leftSequenceText] = left.split('-');
+  const [rightMillisText, rightSequenceText] = right.split('-');
+  if (!leftMillisText || !leftSequenceText || !rightMillisText || !rightSequenceText) {
+    throw new Error('Invalid outbound stream cursor');
+  }
+  const leftMillis = BigInt(leftMillisText);
+  const rightMillis = BigInt(rightMillisText);
+  if (leftMillis !== rightMillis) return leftMillis < rightMillis ? left : right;
+  return BigInt(leftSequenceText) <= BigInt(rightSequenceText) ? left : right;
+}
+
 /** Apply committed outbound message rows in stream order. Replaying a row is safe
  * because eventId is its Postgres natural key. The offset advances only after
  * the row write succeeds. */
@@ -202,7 +231,10 @@ export async function applyCommittedOutboundEvents(
   let applied = 0;
   for (;;) {
     const entries = await redis.xrange(streamKey, `(${offset}`, '+', 'COUNT', 100);
-    if (entries.length === 0) return applied;
+    if (entries.length === 0) {
+      await trimOutboundEvents(redis, { streamKey, postgresOffsetKey: offsetKey });
+      return applied;
+    }
     for (const [streamId, fields] of entries) {
       const values = fieldsToRecord(fields);
       const event = JSON.parse(values['event'] ?? 'null') as SnapshotOutboxEvent | null;
@@ -236,6 +268,7 @@ export function startOutboundDelivery(
   let active = true;
   const done = (async () => {
     let offset = (await redis.get(offsetKey)) ?? '0-0';
+    await trimOutboundEvents(redis, { streamKey, deliveryOffsetKey: offsetKey });
     while (active) {
       const entries = await redis.xrange(streamKey, `(${offset}`, '+', 'COUNT', 20);
       if (entries.length === 0) {
@@ -270,6 +303,11 @@ export function startOutboundDelivery(
           if (!result.success) throw new Error('channel returned unsuccessful send');
           await redis.set(offsetKey, streamId);
           offset = streamId;
+          try {
+            await trimOutboundEvents(redis, { streamKey, deliveryOffsetKey: offsetKey });
+          } catch (trimError) {
+            logger.warn({ err: trimError }, 'Could not trim completed outbound events');
+          }
         } catch (error) {
           logger.warn(
             { err: error, eventId: event.eventId },
