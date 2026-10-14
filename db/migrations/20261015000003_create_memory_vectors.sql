@@ -1,7 +1,7 @@
 -- migrate:up
 SET lock_timeout = '1s';
 SET statement_timeout = '5s';
-CREATE TABLE core.memories (
+CREATE TABLE IF NOT EXISTS core.memories (
   id text PRIMARY KEY,
   type text NOT NULL CHECK (type IN ('message', 'thought', 'fact', 'intention')),
   content text NOT NULL,
@@ -18,6 +18,10 @@ CREATE TABLE core.memories (
   expires_at timestamptz,
   embedding vector(384) NOT NULL
 );
-CREATE INDEX memories_embedding_hnsw_idx ON core.memories USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX memories_timestamp_idx ON core.memories (timestamp DESC);
+-- Justification: this index is built on a new empty table, and the migration runner uses a transaction.
+-- squawk-ignore require-concurrent-index-creation
+CREATE INDEX IF NOT EXISTS memories_embedding_hnsw_idx ON core.memories USING hnsw (embedding vector_cosine_ops);
+-- Justification: this index is built on a new empty table, and the migration runner uses a transaction.
+-- squawk-ignore require-concurrent-index-creation
+CREATE INDEX IF NOT EXISTS memories_timestamp_idx ON core.memories (timestamp DESC);
 -- migrate:down

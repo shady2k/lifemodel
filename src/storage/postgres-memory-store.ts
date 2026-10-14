@@ -158,19 +158,18 @@ export class PostgresVectorStore implements VectorStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      if (
+      const naturalFact =
         e.type === 'fact' &&
         typeof e.metadata?.['subject'] === 'string' &&
-        typeof e.metadata['attribute'] === 'string'
-      ) {
-        const old = await client.query<{ id: string }>(
-          "SELECT id FROM core.memories WHERE type=$1 AND metadata->>'subject'=$2 AND metadata->>'attribute'=$3 LIMIT 1 FOR UPDATE",
-          ['fact', e.metadata['subject'], e.metadata['attribute']]
-        );
-        if (old.rows[0]) e.id = old.rows[0].id;
-      }
-      await client.query(
-        `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector) ON CONFLICT(id) DO UPDATE SET type=EXCLUDED.type,content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding`,
+        typeof e.metadata['attribute'] === 'string';
+      const saved = await client.query<{ id: string }>(
+        naturalFact
+          ? `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector)
+             ON CONFLICT ((metadata->>'subject'), (metadata->>'attribute'))
+             WHERE type = 'fact' AND metadata ? 'subject' AND metadata ? 'attribute'
+             DO UPDATE SET content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding
+             RETURNING id`
+          : `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector) ON CONFLICT(id) DO UPDATE SET type=EXCLUDED.type,content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding RETURNING id`,
         [
           e.id,
           e.type,
@@ -189,6 +188,7 @@ export class PostgresVectorStore implements VectorStore {
           vectorLiteral(v),
         ]
       );
+      if (naturalFact && saved.rows[0]) e.id = saved.rows[0].id;
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -200,12 +200,43 @@ export class PostgresVectorStore implements VectorStore {
     this.logger.debug({ memoryId: e.id }, 'Memory saved to Postgres');
   }
   private async prune() {
-    const n = await this.count();
-    if (n <= this.maxEntries) return;
-    await this.pool.query(
-      `DELETE FROM core.memories WHERE id IN (SELECT id FROM core.memories WHERE NOT (type='thought' AND tags @> '["state:unresolved","soul:reflection"]'::jsonb) ORDER BY timestamp ASC LIMIT $1)`,
-      [n - this.maxEntries]
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Serialize quota and total-count decisions across concurrent saves.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('core.memories.retention'))");
+      const protectedLimit = Math.max(1, Math.min(10, Math.floor(this.maxEntries / 2)));
+      await client.query(
+        `WITH excess AS (
+           SELECT id FROM core.memories
+           WHERE type = 'thought' AND tags @> '["state:unresolved","soul:reflection"]'::jsonb
+           ORDER BY timestamp DESC, id DESC OFFSET $1
+         )
+         UPDATE core.memories AS memory
+         SET tags = (COALESCE(memory.tags, '[]'::jsonb) - 'state:unresolved') || '["state:expired"]'::jsonb
+         FROM excess WHERE memory.id = excess.id`,
+        [protectedLimit]
+      );
+      const { rows } = await client.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM core.memories'
+      );
+      const excess = (rows[0]?.count ?? 0) - this.maxEntries;
+      if (excess > 0)
+        await client.query(
+          `DELETE FROM core.memories WHERE id IN (
+             SELECT id FROM core.memories
+             WHERE NOT (type='thought' AND tags @> '["state:unresolved","soul:reflection"]'::jsonb)
+             ORDER BY timestamp ASC, id ASC LIMIT $1
+           )`,
+          [excess]
+        );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async delete(id: string): Promise<boolean> {
     const r = await this.pool.query('DELETE FROM core.memories WHERE id=$1', [id]);

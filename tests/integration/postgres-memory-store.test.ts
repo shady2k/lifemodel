@@ -39,6 +39,190 @@ describe('Postgres memory stores', () => {
     }
   });
 
+  it('selects the nearest vector from beyond the SQL candidate window with pagination', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const vectorStore = new PostgresVectorStore(logger(), stores.postgres, createTestEmbedder());
+      await vectorStore.clear();
+      const query = 'quasar nebula distinctive';
+      for (let i = 0; i < 15; i++)
+        await vectorStore.save({
+          ...entry(`candidate-far-${i}`, `unrelated token${i}`),
+          timestamp: new Date(0),
+        });
+      await vectorStore.save({ ...entry('candidate-nearest', query), timestamp: new Date(0) });
+      await vectorStore.save({
+        ...entry('candidate-second', 'quasar nebula'),
+        timestamp: new Date(0),
+      });
+      const results = await vectorStore.search({ query, limit: 1, offset: 1 });
+      expect(results[0]?.entry.id).toBe('candidate-second');
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('atomically upserts concurrent facts with one natural key', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const vectorStore = new PostgresVectorStore(logger(), stores.postgres, createTestEmbedder());
+      await vectorStore.clear();
+      const fact = (id: string, content: string): MemoryEntry => ({
+        ...entry(id, content),
+        type: 'fact',
+        metadata: { subject: 'Ada', attribute: 'occupation' },
+      });
+      await Promise.all([
+        vectorStore.save(fact('natural-a', 'mathematician')),
+        vectorStore.save(fact('natural-b', 'writer')),
+      ]);
+      const result = await stores.postgres.query(
+        `SELECT id, content FROM core.memories WHERE type='fact' AND metadata->>'subject'='Ada' AND metadata->>'attribute'='occupation'`
+      );
+      expect(result.rowCount).toBe(1);
+      expect(['mathematician', 'writer']).toContain(result.rows[0]?.['content']);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('enforces protected-reflection expiry and total retention in Postgres', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const vectorStore = new PostgresVectorStore(
+        logger(),
+        stores.postgres,
+        createTestEmbedder(),
+        20
+      );
+      await vectorStore.clear();
+      for (let i = 0; i < 12; i++)
+        await vectorStore.save({
+          ...entry(`retained-protected-${i}`, `protected ${i}`),
+          type: 'thought',
+          tags: ['soul:reflection', 'state:unresolved'],
+          timestamp: new Date(i * 1000),
+        });
+      for (let i = 0; i < 10; i++)
+        await vectorStore.save({
+          ...entry(`retained-filler-${i}`, `filler ${i}`),
+          timestamp: new Date(20000 + i),
+        });
+      const rows = await stores.postgres.query(
+        `SELECT tags FROM core.memories WHERE id LIKE 'retained-%'`
+      );
+      expect(rows.rowCount).toBeLessThanOrEqual(20);
+      const unresolved = rows.rows.filter((row) =>
+        (row['tags'] as string[] | null)?.includes('state:unresolved')
+      );
+      const expired = rows.rows.filter((row) =>
+        (row['tags'] as string[] | null)?.includes('state:expired')
+      );
+      expect(unresolved.length).toBeLessThanOrEqual(10);
+      expect(unresolved.length + expired.length).toBeGreaterThanOrEqual(10);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('runs the existing soul retention scenarios against Postgres', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const save = async (
+        vectorStore: PostgresVectorStore,
+        id: string,
+        timestamp: number,
+        overrides: Partial<MemoryEntry> = {}
+      ) => vectorStore.save({ ...entry(id, id), timestamp: new Date(timestamp), ...overrides });
+
+      const protectedStore = new PostgresVectorStore(
+        logger(),
+        stores.postgres,
+        createTestEmbedder(),
+        5
+      );
+      await protectedStore.clear();
+      await save(protectedStore, 'scenario-protected', 1, {
+        type: 'thought',
+        tags: ['soul:reflection', 'state:unresolved'],
+      });
+      for (let i = 0; i < 6; i++) await save(protectedStore, `scenario-regular-${i}`, i + 10);
+      expect(
+        (await protectedStore.getAll()).some((memory) => memory.id === 'scenario-protected')
+      ).toBe(true);
+
+      await protectedStore.clear();
+      await save(protectedStore, 'scenario-resolved', 1, {
+        type: 'thought',
+        tags: ['soul:reflection', 'state:resolved'],
+      });
+      for (let i = 0; i < 6; i++) await save(protectedStore, `scenario-resolved-fill-${i}`, i + 10);
+      expect(
+        (await protectedStore.getAll()).some((memory) => memory.id === 'scenario-resolved')
+      ).toBe(false);
+
+      const typeStore = new PostgresVectorStore(
+        logger(),
+        stores.postgres,
+        createTestEmbedder(),
+        10
+      );
+      await typeStore.clear();
+      await save(typeStore, 'scenario-reflection', 1, {
+        type: 'thought',
+        tags: ['soul:reflection', 'state:unresolved'],
+      });
+      await save(typeStore, 'scenario-question', 2, {
+        type: 'thought',
+        tags: ['soul:question', 'state:unresolved'],
+      });
+      for (let i = 0; i < 10; i++) await save(typeStore, `scenario-type-fill-${i}`, i + 10);
+      expect((await typeStore.getAll()).some((memory) => memory.id === 'scenario-reflection')).toBe(
+        true
+      );
+
+      const oldestStore = new PostgresVectorStore(
+        logger(),
+        stores.postgres,
+        createTestEmbedder(),
+        3
+      );
+      await oldestStore.clear();
+      for (const [id, time] of [
+        ['scenario-oldest', 1],
+        ['scenario-middle', 2],
+        ['scenario-newest', 3],
+        ['scenario-trigger', 4],
+      ] as const)
+        await save(oldestStore, id, time);
+      const oldestEntries = await oldestStore.getAll();
+      expect(oldestEntries.some((memory) => memory.id === 'scenario-oldest')).toBe(false);
+      expect(oldestEntries.some((memory) => memory.id === 'scenario-newest')).toBe(true);
+      expect(oldestEntries.some((memory) => memory.id === 'scenario-trigger')).toBe(true);
+
+      const boundedStore = new PostgresVectorStore(
+        logger(),
+        stores.postgres,
+        createTestEmbedder(),
+        20
+      );
+      await boundedStore.clear();
+      for (let i = 0; i < 3; i++)
+        await save(boundedStore, `scenario-bound-protected-${i}`, i, {
+          type: 'thought',
+          tags: ['soul:reflection', 'state:unresolved'],
+        });
+      for (let i = 0; i < 20; i++) await save(boundedStore, `scenario-bound-regular-${i}`, i + 10);
+      expect(await boundedStore.count()).toBeLessThanOrEqual(20);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('persists entities and relations written by the consolidator across a store restart', async () => {
     const stores = await createTestStores();
     try {
