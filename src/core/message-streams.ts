@@ -254,7 +254,7 @@ export async function trimOutboundEvents(
   ]);
   const passed = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
   let boundary = passed;
-  const ageBoundary = `${Math.max(0, Date.now() - maxAgeMs)}-0`;
+  const ageBoundary = `${String(Math.max(0, Date.now() - maxAgeMs))}-0`;
   if (compareStreamIds(ageBoundary, boundary) > 0) boundary = ageBoundary;
   const newest = await redis.xrevrange(streamKey, '+', '-', 'COUNT', maxLength);
   if (newest.length === maxLength) {
