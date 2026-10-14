@@ -16,38 +16,6 @@ on:
 permissions:
   contents: read`;
 
-// Pin the entire exception, not just its test filename. This also rejects
-// extra steps, env, secrets, login, permissions and credential overrides.
-const image = `    needs: changes
-    if: \${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: npm
-      - name: Install what the first-start walk runs on
-        run: npm ci
-      - name: Build the image
-        env:
-          SHA: \${{ github.sha }}
-        run: |
-          set -eu
-          scripts/build-image.sh "ci-$SHA"
-          scripts/build-core-image.sh "ci-core-$SHA"
-      - name: A real first start inside the image
-        env:
-          SHA: \${{ github.sha }}
-        run: |
-          set -eu
-          LIFEMODEL_DOCKER_TESTS=1 LIFEMODEL_TEST_IMAGE="ghcr.io/shady2k/lifemodel:ci-$SHA" \\
-            npx vitest run --maxWorkers=2 tests/integration/instance-first-start.test.ts`;
-
 export function ciEntrypointPolicy(source: string): void {
   const fail = (reason: string): never => {
     throw new Error(`CI entrypoint policy: ${reason}`);
@@ -70,12 +38,10 @@ export function ciEntrypointPolicy(source: string): void {
       current.push(line);
     }
   }
-  for (const required of ['ci-product', 'ci-backlog', 'ci-image']) {
+  for (const required of ['ci-product', 'ci-backlog', 'ci-core-image', 'ci-core-image-publish']) {
     if (!jobs.has(required)) fail(`missing ${required}`);
   }
-  if (jobs.get('ci-image')?.join('\n') !== image) fail('image exception changed');
   for (const [name, body] of jobs) {
-    if (name === 'ci-image') continue;
     const commands: string[] = [];
     for (let i = 0; i < body.length; i++) {
       const line = body[i];
@@ -102,7 +68,7 @@ export function ciEntrypointPolicy(source: string): void {
       }
     }
     for (const command of commands) {
-      // Strict by design: no npm tokens outside the pinned image exception,
+      // Strict by design: no npm tokens or ordinary suites outside the isolated boundary,
       // including flagged commands and literal quoted executables.
       if (/\b(?:vitest|npm)\b/.test(command)) {
         fail(`${name}: host install or ordinary suite`);

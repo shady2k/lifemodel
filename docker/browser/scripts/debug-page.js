@@ -9,19 +9,8 @@
  *
  * Use this to debug any browser-based script, not just Telegram.
  *
- * Usage (from project root):
- *   docker run -d --name browser-debug \
- *     -v lifemodel-browser-profile-<PROFILE>:/profile \
- *     --network bridge \
- *     --entrypoint sleep lifemodel-browser:latest 3600
- *
- *   docker cp docker/browser/scripts/debug-page.js browser-debug:/tmp/debug-page.js
- *   docker exec -e NODE_PATH=/scripts/node_modules \
- *     -e TARGET_URL='https://example.com' \
- *     -e SELECTORS='.main,.sidebar,[data-id]' \
- *     browser-debug node /tmp/debug-page.js
- *
- *   docker stop browser-debug && docker rm browser-debug
+ * Usage: start the disposable browser debug container with the project's Docker tooling,
+ * copy this script into it, then run the documented Node command below.
  *
  * Environment:
  *   TARGET_URL  — URL to navigate to (required)

@@ -122,7 +122,7 @@ describe('the disposable launch boundary', () => {
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
-  it('copies the root .dockerignore the build-image tests read, while forbidden entries stay absent', () => {
+  it('copies the root .dockerignore used by the loader image build, while forbidden entries stay absent', () => {
     const root = mkdtempSync(join(tmpdir(), 'snapshot-dockerignore-'));
     const snapshot = join(root, 'snapshot');
     const source = join(root, 'source');

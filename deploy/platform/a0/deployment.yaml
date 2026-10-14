@@ -24,9 +24,6 @@ spec:
         - name: loader
           image: ghcr.io/shady2k/lifemodel-loader:release-placeholder
           imagePullPolicy: IfNotPresent
-          env:
-            - name: LIFEMODEL_LOADER_MODE
-              value: platform
           ports:
             - name: http
               containerPort: 7000

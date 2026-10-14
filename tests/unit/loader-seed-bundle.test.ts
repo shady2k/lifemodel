@@ -61,17 +61,14 @@ describe('loader image release seed bundle', () => {
     );
   });
 
-  it('lets the prepared bundle into the loader image and shares bundle creation with the instance builder', async () => {
+  it('includes the prepared history bundle in the platform loader image only', async () => {
     const dockerfile = await readFile('docker/loader/Dockerfile', 'utf8');
     const ignore = await readFile('.dockerignore', 'utf8');
-    const instanceBuilder = await readFile('scripts/build-image.sh', 'utf8');
     const prepareScript = await readFile('scripts/release/prepare-loader-context.sh', 'utf8');
-    expect(dockerfile).toContain(
-      'COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle'
-    );
+    expect(dockerfile).toContain('COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle');
     expect(ignore).toContain('!.docker-context');
     expect(ignore).toContain('!.docker-context/**');
-    expect(instanceBuilder).toContain('scripts/release/prepare-loader-context.sh');
+    expect(ignore).not.toContain('docker/instance');
     expect(prepareScript).toContain('git bundle create "$context/seed.bundle" HEAD');
     expect(prepareScript).toContain('git bundle verify "$context/seed.bundle"');
   });

@@ -203,14 +203,6 @@ export function loginLocation(forwardedHost: string, forwardedUri: string): stri
  * Null for a host no browser uses (the loopback literal the command line
  * talks to), where there is no such page to point at.
  */
-export function vaultLocation(requestHost: string): string | null {
-  const name = hostName(requestHost);
-  if (!isBrowserHost(name)) return null;
-  const domain = parentDomain(requestHost);
-  if (domain === null) return null;
-  const port = hostPort(requestHost);
-  return `http://vault.${domain}${port === '' ? '' : `:${port}`}`;
-}
 
 /**
  * The `next` of a login, or null when it is not an address of this instance.

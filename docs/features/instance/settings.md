@@ -1,39 +1,34 @@
 # lifemodel's own settings
 
-lifemodel serves a small web interface on `127.0.0.1:7100`, which Caddy reaches
-as the ROOT host (`localhost`) after the loader's login has checked the request.
-It is lifemodel's own code (`src/settings/`), not the loader's: the model
-endpoint, the models, the Telegram fields and everything lifemodel adds later
-are its settings. The loader keeps only its own parts today: the login, the
-panic switch and the first start. Generation selection and task ceilings are
-NOT the loader's to set yet - they belong to later outcomes, and nothing on its
-dashboard or in its config sets them now.
+lifemodel's settings interface is part of its own code (`src/settings/`), not
+the platform loader. On the k3s shape, the ingress gateway serves the web
+surface through the application Service. The model endpoint, models, Telegram
+fields and later product settings belong to lifemodel. The platform loader
+provides authentication and resumable platform bootstrap; it does not proxy to
+or supervise a local lifemodel process.
 
-It has **no auth of its own by design**: every request is checked by the loader
-before it is proxied here (`forward_auth` on the root host,
-docs/features/instance/loader.md), the session cookie is the loader's, and a
-request without one never arrives. The page holds no secret: the Telegram bot
-token field carries an Agent Vault placeholder, and lifemodel never holds a
-model key (Agent Vault injects it on the way out, lifemodel-q4x.3.*).
+It has **no auth of its own by design**: the platform ingress and
+ForwardAuth protect the application web surface. The page holds no secret: the
+Telegram bot token field carries a placeholder, and model credentials stay in
+the platform credential path (ADR-010).
 
 ## What it serves
 
 | Route | What it does |
 | --- | --- |
-| `GET /` | the form, with the values in lifemodel's config file, what is missing, and a link to the loader (the boot host, same port) for keys and panic |
+| `GET /` | the form, with the values in lifemodel's config file, what is missing, and a link to the platform loader for authentication |
 | `POST /settings` | validate, write the config file, answer, and then ask for the restart |
 
 `GET /` on a first start (no config file at all) is a normal page that says no
 model endpoint is configured yet and names the endpoint fields that are missing
 (the four endpoint fields; the Telegram chat id is blank, and the bot token
 field starts as the placeholder `__telegram_bot_token__`).
-lifemodel starts in that state, serves the page, and does NOT crash-loop: that
-is the first start of every instance. A GET whose config file holds an endpoint
+lifemodel starts in that state and serves the page without requiring instance-image bootstrap. A GET whose config file holds an endpoint
 value the rules refuse (below) shows that field's error too, with the safe
 representation of the value — never its secret part.
 
 The port is `SETTINGS_PORT` (7100). It is not a setting of the interface: the
-front door's own configuration names it (docker/instance/Caddyfile).
+application Service and ingress configuration name it for the platform shape.
 
 ## The fields and their rules
 
@@ -114,7 +109,7 @@ flight is drained, state and storage are flushed, the channels are released
 
 lifemodel asks the loader for nothing: it has no interface to it. The loader
 supervises its child and reads that code as the request
-(`loader/src/supervisor.ts`, `LIFEMODEL_RESTART_EXIT_CODE`; the same number in
+(`the former instance supervisor`, `LIFEMODEL_RESTART_EXIT_CODE`; the same number in
 `src/settings/restart.ts`):
 
 - the start is made **at once** — no backoff, and the request is not counted as
@@ -149,8 +144,4 @@ contract between the two programs, so a change to it changes both.
   real file in a temporary directory; the restart is the one double.
 - `tests/unit/llm/model-endpoint.test.ts` covers what lifemodel builds from
   that config, through `createLLMProvider`.
-- `tests/integration/instance-first-start.test.ts` (gated,
-  `LIFEMODEL_DOCKER_TESTS=1`) walks the real thing: login, the root host shows
-  the form, a save writes `/var/lib/lifemodel/data/config/agent.json`, the
-  loader logs the requested restart (and no backoff), and the running lifemodel
-  serves the new values.
+- Outcome 4's first-start acceptance is the manual clean-VM check on the k3s shape; the removed Docker instance fixture is not used.

@@ -4,8 +4,7 @@ node_modules/
 # Build output
 dist/
 
-# The seed bundle scripts/build-image.sh writes into the build context for the
-# length of a docker build; it removes it again.
+# The release seed bundle is temporary build context and is removed after use.
 .docker-context/
 
 # Data (mounted volume in production)
