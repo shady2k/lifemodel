@@ -124,6 +124,72 @@ describe('core Postgres migrations', () => {
     }
   });
 
+  it('resolves invalid concurrent indexes in the target table schema', async () => {
+    const stores = await createTestStores();
+    const directory = await mkdtemp(join(tmpdir(), 'migration-schema-retry-'));
+    const version = '20990301000002';
+    try {
+      await stores.postgres.query('CREATE SCHEMA IF NOT EXISTS core');
+      await stores.postgres.query(
+        'CREATE TABLE core.migration_schema_fixture (value integer NOT NULL)'
+      );
+      await stores.postgres.query(
+        'CREATE TABLE public.migration_schema_fixture (value integer NOT NULL)'
+      );
+      await stores.postgres.query('INSERT INTO core.migration_schema_fixture VALUES (1), (1)');
+      await stores.postgres.query('INSERT INTO public.migration_schema_fixture VALUES (1)');
+      await stores.postgres.query(
+        'CREATE UNIQUE INDEX migration_schema_fixture_idx ON public.migration_schema_fixture (value)'
+      );
+      await writeFile(
+        join(directory, `${version}_unique_retry_index.sql`),
+        `-- migrate:no-transaction\n-- migrate:up\nCREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS migration_schema_fixture_idx ON core.migration_schema_fixture (value);\n-- migrate:down\n`
+      );
+
+      await expect(applyMigrations(stores.postgres, directory)).rejects.toThrow();
+      await stores.postgres.query('DELETE FROM core.migration_schema_fixture WHERE value = 1');
+      await applyMigrations(stores.postgres, directory);
+
+      const indexes = await stores.postgres.query(`
+        SELECT n.nspname AS schema, i.indisvalid
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'migration_schema_fixture_idx'
+        ORDER BY n.nspname
+      `);
+      expect(indexes.rows).toEqual([
+        { schema: 'core', indisvalid: true },
+        { schema: 'public', indisvalid: true },
+      ]);
+      const appliedVersion = await stores.postgres.query(
+        'SELECT 1 FROM public.schema_migrations WHERE version = $1',
+        [version]
+      );
+      expect(appliedVersion.rowCount).toBe(1);
+    } finally {
+      await stores.postgres.query(
+        'DROP INDEX CONCURRENTLY IF EXISTS core.migration_schema_fixture_idx'
+      );
+      await stores.postgres.query(
+        'DROP INDEX CONCURRENTLY IF EXISTS public.migration_schema_fixture_idx'
+      );
+      await stores.postgres.query('DROP TABLE IF EXISTS core.migration_schema_fixture');
+      await stores.postgres.query('DROP TABLE IF EXISTS public.migration_schema_fixture');
+      await stores.postgres.query(`
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
+          version varchar(255) NOT NULL PRIMARY KEY,
+          applied_at timestamp without time zone NOT NULL DEFAULT current_timestamp
+        )
+      `);
+      await stores.postgres.query('DELETE FROM public.schema_migrations WHERE version = $1', [
+        version,
+      ]);
+      await rm(directory, { recursive: true, force: true });
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('rolls back a failing migration and its version while keeping earlier files applied', async () => {
     const stores = await createTestStores();
     const directory = await mkdtemp(join(tmpdir(), 'migration-rollback-'));
