@@ -23,6 +23,9 @@ if [ -e "$context" ]; then
     exit 2
 fi
 mkdir "$context"
+trap 'rm -rf "$context"' 0
+trap 'exit 1' HUP INT TERM
 git bundle create "$context/seed.bundle" HEAD >/dev/null
 git bundle verify "$context/seed.bundle" >/dev/null
+trap - 0 HUP INT TERM
 printf 'prepare-loader-context: prepared full-history seed bundle at %s/%s/seed.bundle\n' "$root" "$context"
