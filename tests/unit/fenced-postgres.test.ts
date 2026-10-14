@@ -29,6 +29,9 @@ describe('fenced core Postgres writes', () => {
     ).rejects.toBeInstanceOf(StalePostgresEpochError);
     await expect(
       stale.query('SELECT value FROM core.kv WHERE key = $1', ['stale'])
+    ).rejects.toBeInstanceOf(StalePostgresEpochError);
+    await expect(
+      stores.postgres.query('SELECT value FROM core.kv WHERE key = $1', ['stale'])
     ).resolves.toMatchObject({ rowCount: 0 });
     const newer = createFencedPostgres(stores.postgres, 2);
     await newer.query("INSERT INTO core.kv(key, value) VALUES ('newer', '1'::jsonb)");

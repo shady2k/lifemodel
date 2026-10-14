@@ -12,10 +12,21 @@ export class StalePostgresEpochError extends Error {
   }
 }
 
-const WRITE = /^\s*(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY)\b/i;
 type Result = QueryResult<Record<string, unknown>>;
 interface SqlExecutor {
   query: (sql: string, values?: unknown[]) => Promise<Result>;
+}
+
+function queryParts(input: unknown, values: unknown): { sql: string; values?: unknown[] } {
+  if (typeof input === 'string')
+    return { sql: input, ...(Array.isArray(values) ? { values } : {}) };
+  if (input && typeof input === 'object' && 'text' in input && typeof input.text === 'string') {
+    const configValues = 'values' in input ? input.values : values;
+    if (configValues !== undefined && !Array.isArray(configValues))
+      throw new Error('Fenced Postgres refused a query with invalid values');
+    return { sql: input.text, ...(Array.isArray(configValues) ? { values: configValues } : {}) };
+  }
+  throw new Error('Fenced Postgres refused a query without inspectable SQL');
 }
 
 async function assertActiveHolder(client: SqlExecutor, epoch: number): Promise<void> {
@@ -30,43 +41,90 @@ async function assertActiveHolder(client: SqlExecutor, epoch: number): Promise<v
   if (stored === null || stored > epoch) throw new StalePostgresEpochError(epoch, stored);
 }
 
-/** One shared fencing boundary for every core Postgres write. */
+/** Every statement through this pool is holder-checked; unknown query forms fail closed. */
 export function createFencedPostgres(pool: Pool, epoch: number): Pool {
-  const wrapClient = (client: PoolClient): PoolClient =>
-    new Proxy(client, {
+  const wrapClient = (client: PoolClient): PoolClient => {
+    const executor = client as unknown as SqlExecutor;
+    let transactionOpen = false;
+    const runQuery = async (input: unknown, inputValues: unknown): Promise<Result> => {
+      const { sql, values } = queryParts(input, inputValues);
+      const command = sql.trim().toUpperCase();
+      if (command === 'ROLLBACK' || command.startsWith('ROLLBACK ')) {
+        try {
+          return await executor.query(sql, values);
+        } finally {
+          transactionOpen = false;
+        }
+      }
+      if (command === 'BEGIN' || command.startsWith('BEGIN ')) {
+        const result = await executor.query(sql, values);
+        transactionOpen = true;
+        try {
+          await assertActiveHolder(executor, epoch);
+          return result;
+        } catch (error) {
+          await executor.query('ROLLBACK');
+          transactionOpen = false;
+          throw error;
+        }
+      }
+      if (command === 'COMMIT' || command.startsWith('COMMIT ')) {
+        try {
+          await assertActiveHolder(executor, epoch);
+          return await executor.query(sql, values);
+        } catch (error) {
+          if (transactionOpen) await executor.query('ROLLBACK');
+          throw error;
+        } finally {
+          transactionOpen = false;
+        }
+      }
+      if (transactionOpen) {
+        await assertActiveHolder(executor, epoch);
+        return executor.query(sql, values);
+      }
+      await executor.query('BEGIN');
+      transactionOpen = true;
+      try {
+        await assertActiveHolder(executor, epoch);
+        const result = await executor.query(sql, values);
+        await assertActiveHolder(executor, epoch);
+        await executor.query('COMMIT');
+        transactionOpen = false;
+        return result;
+      } catch (error) {
+        await executor.query('ROLLBACK');
+        transactionOpen = false;
+        throw error;
+      }
+    };
+    return new Proxy(client, {
       get(target, property) {
-        if (property === 'query')
-          return async (sql: string, values?: unknown[]) => {
-            const executor = target as unknown as SqlExecutor;
-            if (WRITE.test(sql)) await assertActiveHolder(executor, epoch);
-            return executor.query(sql, values);
-          };
+        if (property === 'query') return runQuery;
         const value = Reflect.get(target, property, target) as unknown;
         return typeof value === 'function'
           ? (value as (...args: unknown[]) => unknown).bind(target)
           : value;
       },
     });
+  };
+
   return new Proxy(pool, {
     get(target, property) {
-      if (property === 'connect') return async () => wrapClient(await target.connect());
+      if (property === 'connect')
+        return async (callback?: unknown) => {
+          if (callback !== undefined)
+            throw new Error('Fenced Postgres does not allow callback-style connect');
+          return wrapClient(await target.connect());
+        };
       if (property === 'query')
-        return async (sql: string, values?: unknown[]) => {
-          if (!WRITE.test(sql)) {
-            const execute = target.query.bind(target) as unknown as SqlExecutor['query'];
-            return execute(sql, values);
-          }
+        return async (input: unknown, values?: unknown[]) => {
           const client = await target.connect();
-          const executor = client as unknown as SqlExecutor;
           try {
-            await client.query('BEGIN');
-            await assertActiveHolder(executor, epoch);
-            const result = await executor.query(sql, values);
-            await client.query('COMMIT');
-            return result;
-          } catch (error) {
-            await client.query('ROLLBACK');
-            throw error;
+            return await (wrapClient(client) as unknown as SqlExecutor).query(
+              typeof input === 'string' ? input : queryParts(input, values).sql,
+              typeof input === 'string' ? values : queryParts(input, values).values
+            );
           } finally {
             client.release();
           }
