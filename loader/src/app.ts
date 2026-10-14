@@ -127,7 +127,10 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         http = createLoaderHttp({ state, logger, clock });
         await new Promise<void>((resolve, reject) => {
           const server = http?.server;
-          if (server === undefined) return reject(new Error('loader HTTP server is unavailable'));
+          if (server === undefined) {
+            reject(new Error('loader HTTP server is unavailable'));
+            return;
+          }
           server.once('error', reject);
           server.listen(config.httpPort, '0.0.0.0', () => {
             server.removeListener('error', reject);

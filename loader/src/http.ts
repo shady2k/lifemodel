@@ -122,5 +122,5 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
     logger.error({path:req.url ?? '',method:req.method ?? '',error:describe(error)},'the loader could not answer a request');
     if (!res.headersSent) sendText(res,500,'the loader could not answer this request'); else res.end();
   }); });
-  return { server, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  return { server, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => { resolve(); }); }) };
 }
