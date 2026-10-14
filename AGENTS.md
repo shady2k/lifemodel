@@ -298,7 +298,9 @@ Gateways append messages to `inbound`; the core reads them as signals. Inbound
 messages remain owned by that stream and are never copied into the internal bus.
 The bus snapshot stores a contiguous watermark and a per-entry ledger for
 entries beyond it. Each ledger entry is owned by a persisted turn id, completed,
-or failed with a retry count. A turn id is fixed when the turn starts, saved in
+or failed with a retry count. A failed internal turn retries once in the same
+running core; after its second failure its entries are completed with the
+recorded failure and a warning. A turn id is fixed when the turn starts, saved in
 the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
 commit atomically stores this ledger with the inbound read and per-recipient

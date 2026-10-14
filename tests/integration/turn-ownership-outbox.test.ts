@@ -415,70 +415,42 @@ describe('turn ownership and outbox durability', () => {
     }
   });
 
-  it('replays a rejected internal trigger with its persisted turn identity', async () => {
+  it('retries a rejected internal trigger on the same core with its persisted turn identity', async () => {
     const prefix = `turn-rejected:${stores.workerId}:${Date.now()}:`;
-    const firstStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
-    const firstBus = createBusSignalStream(stores.redis, prefix);
-    firstStore.register(firstBus);
-    const firstEpoch = await firstStore.takeEpoch();
-    const firstPath = await makeScratchDir('turn-rejected-first-');
-    const first = await startInstance(firstPath, {
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const bus = createBusSignalStream(stores.redis, prefix);
+    store.register(bus);
+    const epoch = await store.takeEpoch();
+    const path = await makeScratchDir('turn-rejected-');
+    const instance = await startInstance(path, {
       cognitionMode: 'hang',
       tickIntervalMs: 10,
-      busSignalStream: firstBus,
+      busSignalStream: bus,
       commitSnapshot: async (tick, outbox) => {
-        await firstStore.commitOwners(firstEpoch, tick, outbox);
+        await store.commitOwners(epoch, tick, outbox);
       },
     });
     try {
-      const signal = thoughtSignal('rejected internal', first.recipientId);
-      first.coreLoop.pushSignal(signal);
-      await waitFor(() => first.cognition.calls.length === 1, 'rejected trigger cognition started');
-      const firstTurnId = (first.cognition.calls[0] as { context: { tickId: string } }).context
-        .tickId;
-      (first.cognition as { rejectAll(): void }).rejectAll();
-      const entry = (await waitForEntries(firstBus, 1))[0]!;
-      await waitForAsync(async () => {
-        const state = firstBus.stateFor(entry.id);
-        return state?.status === 'failed' && state.retries === 1;
-      }, 'rejection stored as failed bus entry');
-      await waitForAsync(async () => {
-        const snapshot = await firstStore.read();
-        const section = snapshot?.sections['busOffset'] as BusSnapshot | undefined;
-        return section?.entries[entry.id]?.status === 'failed';
-      }, 'failed state snapshotted');
-      const committed = await firstStore.read();
-      first.coreLoop.haltForTest();
-
-      const restartedStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
-      const restartedBus = createBusSignalStream(stores.redis, prefix);
-      restartedStore.register(restartedBus);
-      await restartedStore.hydrate(committed);
-      const restartedEpoch = await restartedStore.takeEpoch();
-      const restartedPath = await makeScratchDir('turn-rejected-second-');
-      const restarted = await startInstance(restartedPath, {
-        cognitionMode: 'hang',
-        tickIntervalMs: 10,
-        busSignalStream: restartedBus,
-        commitSnapshot: async (tick, outbox) => {
-          await restartedStore.commitOwners(restartedEpoch, tick, outbox);
-        },
+      const signal = thoughtSignal('rejected internal', instance.recipientId);
+      instance.coreLoop.pushSignal(signal);
+      await waitFor(() => instance.cognition.calls.length === 1, 'first cognition attempt');
+      const firstTurnId = instance.cognition.calls[0]!.context.tickId;
+      instance.cognition.rejectAll();
+      await waitFor(() => instance.cognition.calls.length === 2, 'same-core retry');
+      const retry = instance.cognition.calls[1]!;
+      expect(retry.context.tickId).toBe(firstTurnId);
+      expect(retry.context.triggerSignals.map((item) => item.id)).toContain(signal.id);
+      instance.cognition.settleAll({
+        confidence: 1,
+        intents: [],
+        disposition: 'no_reply',
+        response: undefined,
       });
-      try {
-        await waitFor(() => restarted.cognition.calls.length === 1, 'failed trigger replayed');
-        const replayed = restarted.cognition.calls[0] as {
-          context: { tickId: string; triggerSignals: { id: string }[] };
-        };
-        expect(replayed.context.tickId).toBe(firstTurnId);
-        expect(replayed.context.triggerSignals.map((item) => item.id)).toContain(signal.id);
-        expect(restartedBus.committedOffset()).toBe('0-0');
-      } finally {
-        restarted.coreLoop.haltForTest();
-        await rmDir(restartedPath);
-      }
+      await waitFor(() => bus.committedOffset() !== '0-0', 'retried turn committed');
+      expect(instance.coreLoop.isRunning()).toBe(true);
     } finally {
-      first.coreLoop.haltForTest();
-      await rmDir(firstPath);
+      await instance.coreLoop.stop();
+      await rmDir(path);
     }
   });
 
