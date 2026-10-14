@@ -187,6 +187,19 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Lint expanding-only Postgres migrations with squawk
+        run: |
+          set -eu
+          squawk="$RUNNER_TEMP/squawk"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://github.com/sbdchd/squawk/releases/download/v2.69.0/squawk-linux-x64 \
+            -o "$squawk"
+          printf '%s  %s\n' \
+            9af8b2b54135ab236389122bce6c9edc40a8db4347e77d19079f19dcceddc737 \
+            "$squawk" | sha256sum --check
+          chmod +x "$squawk"
+          "$squawk" db/migrations/*.sql
+
       # The launcher, not the host: no `npm ci` here, no `node_modules` in this
       # checkout, and the checks and the suite never start in it. The daemon
       # behind the launcher is the disposable Docker daemon of this runner.
