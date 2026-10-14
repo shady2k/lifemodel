@@ -38,9 +38,15 @@ for _, row in ipairs(rows) do
   end
   if greater(id, passed) then dropped = dropped + 1 end
 end
+-- HDEL has a bounded argument arity. Delete keys first: if any batch fails,
+-- all stream rows remain available so a retry can find every key again.
+local batch_size = 500
+for first = 1, #event_ids, batch_size do
+  local last = math.min(first + batch_size - 1, #event_ids)
+  redis.call('HDEL', KEYS[2], unpack(event_ids, first, last))
+end
 redis.call('XTRIM', KEYS[1], 'MINID', boundary)
 if boundary == passed then redis.call('XDEL', KEYS[1], boundary) end
-if #event_ids > 0 then redis.call('HDEL', KEYS[2], unpack(event_ids)) end
 return dropped
 `;
 

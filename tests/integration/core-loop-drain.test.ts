@@ -242,6 +242,32 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     expect(h1.coreLoop.getOutboxForTest()).toHaveLength(1);
   });
 
+  it('withdraws an earlier acknowledgement and every result send for an error during drain', async () => {
+    const storagePath = await freshScratch('ctc-drain-error-batch-');
+    const h1 = await startInstance(storagePath, {
+      cognitionMode: 'hang',
+      drainTimeoutMs: 5_000,
+    });
+    h1.coreLoop.pushSignal(thoughtSignal('turn trigger', h1.recipientId));
+    await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
+    h1.coreLoop.applyImmediateIntent({
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: h1.recipientId, text: 'early acknowledgement' },
+    });
+    h1.cognition.settleAll({
+      confidence: 0,
+      disposition: 'error',
+      intents: [
+        { type: 'SEND_MESSAGE', payload: { recipientId: h1.recipientId, text: 'partial 1' } },
+        { type: 'SEND_MESSAGE', payload: { recipientId: h1.recipientId, text: 'partial 2' } },
+      ],
+      response: undefined,
+    });
+    await stopInstance(h1, await openStorage(storagePath));
+    expect(h1.coreLoop.getOutboxForTest()).toEqual([]);
+    expect(h1.channel.sent).toEqual([]);
+  });
+
   it('a pending outbound event does not hold core shutdown', async () => {
     const storagePath = await freshScratch('ctc-drain-hungsend-');
     const h1 = await startInstance(storagePath, {

@@ -230,11 +230,9 @@ interface PendingTurnCommits {
    * come.
    */
   sendsOutstanding: number;
-  /**
-   * SEND_MESSAGE intents the turn's own result will apply to the recipient it
-   * answers (counted at resolution) and the ones that really started; the
-   * outcome waits for the second to reach the first.
-   */
+  /** The whole result is being applied; keep ownership until that batch ends. */
+  applyingResult: boolean;
+  /** SEND_MESSAGE intents in the normalized result batch still to start. */
   finalSendsExpected: number;
   finalSendsStarted: number;
   /**
@@ -768,7 +766,7 @@ export class CoreLoop {
     // resolved, EVERY send of it (acknowledgements included) has settled, and
     // the sends its own result produces have really started (review round 4:
     // the window between the resolution and the application of its intents).
-    if (!state.resolved || state.sendsOutstanding > 0) return;
+    if (!state.resolved || state.applyingResult || state.sendsOutstanding > 0) return;
     if (state.finalSendsStarted < state.finalSendsExpected) return;
     state.settled = true;
     const recipientId = this.answeredRecipientOf(state);
@@ -823,6 +821,7 @@ export class CoreLoop {
       tickId,
       turn,
       resolved: false,
+      applyingResult: false,
       sendsOutstanding: 0,
       finalSendsExpected: 0,
       finalSendsStarted: 0,
@@ -888,28 +887,42 @@ export class CoreLoop {
     tickId: string,
     disposition: TurnDisposition | undefined,
     intents: Intent[]
-  ): void {
+  ): Intent[] {
     const state = this.turnCommits.get(tickId);
-    if (!state) return;
+    if (!state) return intents;
     state.resolved = true;
+    state.applyingResult = true;
     state.disposition = disposition;
     const answered = this.answeredRecipientOf(state);
     const inboundIds = answered === undefined ? [] : this.ownedInboundIds(state.turn, answered);
     state.finalErrorAttempt =
       disposition === 'error' && (this.inboundStream?.willExhaustRetries(inboundIds) ?? false);
+    let appliedIntents = intents;
     if (disposition === 'error') {
       state.tentativeEvents = [];
+      // Result sends are tentative as a batch: none may escape through the
+      // unowned outbox path after an earlier suppressed send settles.
+      appliedIntents = intents.filter((intent) => intent.type !== 'SEND_MESSAGE');
+      if (state.finalErrorAttempt) appliedIntents.push(...this.finalErrorNotice(state));
     } else {
       this.tickOutbox.push(...state.tentativeEvents.splice(0));
     }
-    if (answered !== undefined && (disposition !== 'error' || state.finalErrorAttempt)) {
-      state.finalSendsExpected = intents.filter(
-        (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
-      ).length;
-    }
+    state.finalSendsExpected =
+      answered === undefined
+        ? 0
+        : appliedIntents.filter(
+            (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
+          ).length;
     // The turn's loop is finished: no more mid-loop absorption can land.
     if (this.activeTurnCommits?.tickId === tickId) {
       this.activeTurnCommits = null;
+    }
+    return appliedIntents;
+  }
+
+  private markResultApplicationsComplete(): void {
+    for (const state of this.turnCommits.values()) {
+      if (state.resolved) state.applyingResult = false;
     }
   }
 
@@ -1232,11 +1245,13 @@ export class CoreLoop {
           'COGNITION turn in flight completed during the stop drain'
         );
       });
-      this.resolveTurnCommit(pending.tickId, outcome.result.disposition, outcome.result.intents);
-      this.applyIntents(
-        this.attributedToTurn(outcome.result.intents, pending),
-        pending.traceContext
+      const resultIntents = this.resolveTurnCommit(
+        pending.tickId,
+        outcome.result.disposition,
+        outcome.result.intents
       );
+      this.applyIntents(this.attributedToTurn(resultIntents, pending), pending.traceContext);
+      this.markResultApplicationsComplete();
       // Commit what is decidable now; sends still in flight turn the rest
       // through their outcome callbacks (each flush is chained onto its
       // send chain, so stop()'s awaitPendingSends waits for it too).
@@ -1249,10 +1264,9 @@ export class CoreLoop {
           'COGNITION rejected unexpectedly during the stop drain'
         );
       });
-      this.resolveTurnCommit(pending.tickId, 'error', []);
-      const state = this.turnCommits.get(pending.tickId);
-      const notice = state ? this.finalErrorNotice(state) : [];
-      if (notice.length > 0) this.applyIntents(notice, pending.traceContext);
+      const errorIntents = this.resolveTurnCommit(pending.tickId, 'error', []);
+      if (errorIntents.length > 0) this.applyIntents(errorIntents, pending.traceContext);
+      this.markResultApplicationsComplete();
       this.evaluateTurnCommits();
       this.finalDrainNeedsCommit = true;
     } finally {
@@ -1329,14 +1343,12 @@ export class CoreLoop {
    * Called by channels when they receive data.
    */
   pushSignal(signal: Signal): void {
-    const entry: PendingSignal = { signal, timestamp: new Date() };
-    this.pendingSignals.push(entry);
-    if (this.busSignalStream && !(signal.type === 'user_message' && this.inboundStream)) {
+    const durableBusSignal =
+      this.busSignalStream && !(signal.type === 'user_message' && this.inboundStream);
+    if (!durableBusSignal) this.pendingSignals.push({ signal, timestamp: new Date() });
+    if (durableBusSignal) {
       const write = this.busSignalStream.append(signal).then((id) => {
-        entry.streamId = id;
-        this.busSignalStream?.ensureOwned(id, `pending:${id}`);
         this.signalStreamIds.set(signal.id, id);
-        this.knownBusEntries.add(id);
       });
       this.pendingBusWrites.push(write);
     }
@@ -1724,6 +1736,7 @@ export class CoreLoop {
 
         // Apply all intents (per-intent context handled inside)
         this.applyIntents(allIntents, tickCtx);
+        this.markResultApplicationsComplete();
         // Settle the durable inbound log entries of a turn that reached its
         // outcome in this tick (its sends settle after, through the applicator).
         this.evaluateTurnCommits();
@@ -1861,18 +1874,34 @@ export class CoreLoop {
     this.pendingBusWrites.length = 0;
     const offset = this.busSignalStream.committedOffset();
     await this.busSignalStream.trimBefore(offset);
-    const entries = await this.busSignalStream.readAfter(offset, this.config.maxSignalsPerTick);
-    for (const entry of entries) {
-      if (this.busSignalStream.stateFor(entry.id)?.status === 'completed') continue;
-      this.busSignalStream.ensureOwned(entry.id, `pending:${entry.id}`);
-      this.signalStreamIds.set(entry.signal.id, entry.id);
-      if (this.knownBusEntries.has(entry.id)) continue;
-      this.knownBusEntries.add(entry.id);
-      this.pendingSignals.push({
-        signal: entry.signal,
-        timestamp: entry.signal.timestamp,
-        streamId: entry.id,
-      });
+    let cursor = offset;
+    let admitted = 0;
+    while (admitted < this.config.maxSignalsPerTick) {
+      const entries = await this.busSignalStream.readAfter(cursor, this.config.maxSignalsPerTick);
+      if (entries.length === 0) break;
+      let stoppedForCapacity = false;
+      for (const entry of entries) {
+        cursor = entry.id;
+        const state = this.busSignalStream.stateFor(entry.id);
+        if (state?.status === 'completed') continue;
+        if (!state) {
+          if (this.busSignalStream.admissionCapacity() === 0) {
+            stoppedForCapacity = true;
+            break;
+          }
+          this.busSignalStream.ensureOwned(entry.id, `pending:${entry.id}`);
+          admitted += 1;
+        }
+        this.signalStreamIds.set(entry.signal.id, entry.id);
+        if (this.knownBusEntries.has(entry.id)) continue;
+        this.knownBusEntries.add(entry.id);
+        this.pendingSignals.push({
+          signal: entry.signal,
+          timestamp: entry.signal.timestamp,
+          streamId: entry.id,
+        });
+      }
+      if (stoppedForCapacity || entries.length < this.config.maxSignalsPerTick) break;
     }
     this.pendingSignals.sort((a, b) => {
       if (!a.streamId) return b.streamId ? 1 : 0;
@@ -2331,17 +2360,20 @@ export class CoreLoop {
         return null;
       }
 
-      this.resolveTurnCommit(pending.tickId, result.disposition, result.intents);
+      const resultIntents = this.resolveTurnCommit(
+        pending.tickId,
+        result.disposition,
+        result.intents
+      );
       this.pendingCognition = null;
       // The turn is known here and nowhere later (see attributedToTurn): its
       // own result intents leave with their turn's trace.
-      return { ...result, intents: this.attributedToTurn(result.intents, pending) };
+      return { ...result, intents: this.attributedToTurn(resultIntents, pending) };
     } catch (error) {
-      this.resolveTurnCommit(pending.tickId, 'error', []);
+      const errorIntents = this.resolveTurnCommit(pending.tickId, 'error', []);
       this.pendingCognition = null;
-      const state = this.turnCommits.get(pending.tickId);
-      const notice = state ? this.finalErrorNotice(state) : [];
-      if (notice.length > 0) this.applyIntents(notice, pending.traceContext);
+      if (errorIntents.length > 0) this.applyIntents(errorIntents, pending.traceContext);
+      this.markResultApplicationsComplete();
       this.evaluateTurnCommits();
       withTraceContext(pending.traceContext, () => {
         this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');

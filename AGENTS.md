@@ -304,15 +304,17 @@ replay; absorbing more triggers later does not change its effect keys. A tick
 commit atomically stores this ledger with the inbound read and per-recipient
 offsets, bounded recent-message-id dedup ring, pending inbound messages, and
 outbox events. An entry is completed only in the CAS that commits its outcome.
-The watermark advances only over the contiguous completed prefix. Completed
-entries beyond a gap stay in the ledger and are skipped on restart; owned and
-failed entries replay under their recorded turn id. Entries leave the bounded
-ledger only when the watermark passes them, and the stream is trimmed only
-through that watermark after the snapshot CAS succeeds. The Valkey commit
+The watermark advances only over the contiguous completed prefix. The ledger
+admits at most 100 entries beyond the watermark. When full, later signals wait
+in the Valkey stream and are not admitted into the snapshot ledger until capacity
+opens. Completed entries beyond a gap stay in the ledger and are skipped on
+restart; owned and failed entries replay under their recorded turn id. Entries
+leave the ledger only when the watermark passes them, and the stream is trimmed
+only through that watermark after the snapshot CAS succeeds. The Valkey commit
 rejects a stale generation by epoch. Postgres writes are fenced by the active
 holder.
 
-The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. One Valkey Lua script trims rows and removes their event-key deduplication entries atomically, so an interrupted cleanup cannot orphan keys. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
+The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. One Valkey Lua script deletes event-key deduplication entries in bounded batches before trimming rows, so a key-deletion failure leaves rows available for retry and cannot orphan keys. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
 
 The outbox persists across tick boundaries. A CAS retires only the exact batch
 it accepted; sends arriving while the CAS is in flight remain queued for a

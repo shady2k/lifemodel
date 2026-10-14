@@ -80,9 +80,10 @@ reused on replay even if replay groups in more triggers. Entries complete only
 in the CAS that commits their outcome. The watermark advances only across a
 contiguous completed prefix; completed entries beyond a gap are skipped on
 restart, while owned and failed entries replay under their saved turn id. The
-ledger is bounded by the watermark: entries are removed as the watermark passes
-them, and stream trimming occurs only through that watermark after a successful
-CAS. The Valkey epoch check rejects commits from a stale core. Postgres writes
+ledger admits at most 100 entries beyond the watermark. Later signals remain in
+the Valkey stream until capacity opens; they do not enter the snapshot ledger.
+Entries are removed as the watermark passes them, and stream trimming occurs
+only through that watermark after a successful CAS. The Valkey epoch check rejects commits from a stale core. Postgres writes
 use the active-holder fence.
 
 A tick killed before commit leaves the previous snapshot and offsets
@@ -110,9 +111,10 @@ there is no channel registered, this core reports the event once at info and
 advances its own delivery cursor; the outbound event remains available to the
 gateway's separate cursor.
 
-Outbound retention trims stream rows and removes their event-key deduplication
-entries in one Valkey Lua script. The warning count reflects actual dropped
-rows; an interrupted cleanup cannot orphan keys.
+Outbound retention deletes event-key deduplication entries in bounded batches
+before trimming stream rows in one Valkey Lua script. The warning count reflects
+actual dropped rows; if key deletion fails, the rows remain available for retry
+so the cleanup cannot orphan keys.
 
 Delivery is at-least-once: a gateway can deliver an answer and crash before
 advancing its cursor, causing a repeat. An append that never reaches Valkey is

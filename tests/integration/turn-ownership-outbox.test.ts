@@ -274,9 +274,22 @@ describe('turn ownership and outbox durability', () => {
       });
       await inbound.append(signal);
       await waitFor(() => instance.cognition.calls.length === 1, 'input reaches cognition');
+      instance.coreLoop.applyImmediateIntent({
+        type: 'SEND_MESSAGE',
+        payload: { recipientId: instance.recipientId, text: 'acknowledged before failure' },
+      });
       (instance.cognition as { settleAll(result: unknown): void }).settleAll({
         confidence: 0,
-        intents: [],
+        intents: [
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId: instance.recipientId, text: 'partial 1' },
+          },
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId: instance.recipientId, text: 'partial 2' },
+          },
+        ],
         response: undefined,
         disposition: 'error',
       });
@@ -297,6 +310,7 @@ describe('turn ownership and outbox durability', () => {
         expect.objectContaining({ messageId: 'error-input' })
       );
       expect(section?.errorRetries['error-input']).toBe(1);
+      expect(await stores.redis.xlen(`${prefix}outbound`)).toBe(0);
 
       const retry = new InboundMessageStream(stores.redis, `${prefix}inbound`);
       retry.hydrateSnapshot(section);
@@ -502,7 +516,18 @@ describe('turn ownership and outbox durability', () => {
           await inbound.append(signal);
         }
         (instance.cognition as { result: unknown }).result = {
-          ...answer(instance.recipientId, 'failure notice'),
+          confidence: 0,
+          intents: [
+            {
+              type: 'SEND_MESSAGE',
+              payload: { recipientId: instance.recipientId, text: 'partial 1' },
+            },
+            {
+              type: 'SEND_MESSAGE',
+              payload: { recipientId: instance.recipientId, text: 'partial 2' },
+            },
+          ],
+          response: undefined,
           disposition: 'error',
         };
         if (attempt === 1) {
@@ -545,7 +570,99 @@ describe('turn ownership and outbox durability', () => {
             payload: { text: string };
           };
           expect(event.eventId).toMatch(/^error-notice:/);
-          expect(event.payload.text).toBe('failure notice');
+          expect(event.payload.text).toBe('I could not complete that request after two attempts.');
+          expect(event.payload.text).not.toMatch(/partial [12]/);
+          expect(rows).toHaveLength(1);
+        }
+      } finally {
+        if (attempt === 1) instance.coreLoop.haltForTest();
+        else await instance.coreLoop.stop();
+        await rmDir(path);
+      }
+    }
+  });
+
+  it('commits one core-owned notice for an exhausted error with no producer intents', async () => {
+    const prefix = `turn-exhausted-empty:${stores.workerId}:${Date.now()}:`;
+    let signal: ReturnType<typeof createUserMessageSignal> | undefined;
+    let saved: Awaited<ReturnType<ReturnType<typeof createSnapshotStore>['read']>> = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+      const bus = createBusSignalStream(stores.redis, prefix);
+      const inbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+      store.register(bus);
+      store.register(inbound);
+      if (saved) await store.hydrate(saved);
+      const epoch = await store.takeEpoch();
+      const path = await makeScratchDir(`turn-exhausted-${String(attempt)}-`);
+      const instance = await startInstance(path, {
+        cognitionMode: attempt === 1 ? 'hang' : 'immediate',
+        tickIntervalMs: 10,
+        busSignalStream: bus,
+        commitSnapshot: async (tick, outbox) => {
+          await store.commitOwners(epoch, tick, outbox);
+        },
+      });
+      (instance.coreLoop as unknown as { inboundStream: InboundMessageStream }).inboundStream =
+        inbound;
+      try {
+        if (attempt === 1) {
+          signal = createUserMessageSignal({
+            text: 'persistent failure',
+            recipientId: instance.recipientId,
+            channel: 'test',
+            updateId: 'empty-exhausted-message',
+          });
+          await inbound.append(signal);
+        }
+        (instance.cognition as { result: unknown }).result = {
+          confidence: 0,
+          intents: [],
+          response: undefined,
+          disposition: 'error',
+        };
+        if (attempt === 1) {
+          await waitFor(
+            () => instance.cognition.calls.length === 1,
+            'first failed attempt started'
+          );
+          (instance.cognition as { settleAll(result: unknown): void }).settleAll({
+            ...answer(instance.recipientId, 'failure notice'),
+            disposition: 'error',
+          });
+        }
+        const expectedEvents = attempt === 1 ? 0 : 1;
+        await waitForAsync(
+          async () => {
+            const snapshot = await store.read();
+            saved = snapshot;
+            const section = snapshot?.sections['inbound'] as
+              | { pending: unknown[]; recentMessageIds: string[] }
+              | undefined;
+            const eventCount = await stores.redis.xlen(`${prefix}outbound`);
+            return attempt === 1
+              ? eventCount === 0 && section?.errorRetries?.['empty-exhausted-message'] === 1
+              : eventCount === expectedEvents &&
+                  section?.pending.length === 0 &&
+                  section.recentMessageIds.includes('empty-exhausted-message');
+          },
+          attempt === 1
+            ? 'first error remains retryable'
+            : 'final notice and input outcome committed'
+        );
+        if (attempt === 1) {
+          const section = saved?.sections['inbound'] as { errorRetries: Record<string, number> };
+          expect(section.errorRetries['empty-exhausted-message']).toBe(1);
+          instance.coreLoop.haltForTest();
+        } else {
+          const rows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
+          const event = JSON.parse(rows[0]![1][rows[0]![1].indexOf('event') + 1] ?? 'null') as {
+            eventId: string;
+            payload: { text: string };
+          };
+          expect(event.eventId).toMatch(/^error-notice:/);
+          expect(event.payload.text).toBe('I could not complete that request after two attempts.');
+          expect(event.payload.text).not.toMatch(/partial [12]/);
           expect(rows).toHaveLength(1);
         }
       } finally {

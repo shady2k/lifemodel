@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
-import { createBusSignalStream, type BusSnapshot } from '../../src/core/bus-stream.js';
+import {
+  createBusSignalStream,
+  MAX_BUS_LEDGER_ENTRIES,
+  type BusSnapshot,
+} from '../../src/core/bus-stream.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { SendMessageIntent } from '../../src/types/intent.js';
 import {
@@ -105,7 +109,6 @@ describe('Valkey bus signal stream', () => {
     });
     const signal = createSignal('thought', 'memory.thought', { value: 1 });
     first.coreLoop.pushSignal(signal);
-    await waitFor(() => first.coreLoop.pendingSignalCount() === 1, 'signal accepted');
     const appendDeadline = Date.now() + 2_000;
     while ((await firstStream.readAfter('0-0', 10)).length === 0 && Date.now() < appendDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 2));
@@ -201,5 +204,32 @@ describe('Valkey bus signal stream', () => {
     restarted.markCompleted([firstId]);
     expect(restarted.committedOffset()).toBe(secondId);
     expect(restarted.exportSnapshot().entries).toEqual({});
+  });
+
+  it('bounds ledger admission behind a failed gap and keeps completed entries non-replayable', async () => {
+    const prefix = `bus-ledger-bound:${stores.workerId}:${Date.now()}:`;
+    const stream = createBusSignalStream(stores.redis, prefix);
+    const signals = Array.from({ length: MAX_BUS_LEDGER_ENTRIES + 5 }, (_, index) =>
+      thoughtSignal(`bounded-${index}`)
+    );
+    const ids: string[] = [];
+    for (const signal of signals) ids.push(await stream.append(signal));
+    stream.ensureOwned(ids[0]!, 'failed-head');
+    stream.markFailed([ids[0]!]);
+    for (const id of ids.slice(1)) stream.ensureOwned(id, `pending:${id}`);
+    stream.markCompleted(ids.slice(1, MAX_BUS_LEDGER_ENTRIES));
+
+    const saved = stream.exportSnapshot();
+    expect(Object.keys(saved.entries)).toHaveLength(MAX_BUS_LEDGER_ENTRIES);
+    expect(saved.entries[ids[1]!]).toEqual({ status: 'completed' });
+    expect(stream.admissionCapacity()).toBe(0);
+
+    const restarted = createBusSignalStream(stores.redis, prefix);
+    restarted.hydrateSnapshot(saved);
+    expect(restarted.stateFor(ids[1]!)).toEqual({ status: 'completed' });
+    expect(restarted.admissionCapacity()).toBe(0);
+    expect((await restarted.readAfter('0-0', 200)).map(({ id }) => id)).toHaveLength(
+      MAX_BUS_LEDGER_ENTRIES + 5
+    );
   });
 });
