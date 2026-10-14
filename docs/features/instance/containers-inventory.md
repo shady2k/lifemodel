@@ -43,7 +43,7 @@ reports (generations-lifecycle-source.md, generations-containment-source.md,
 base `30b9627`, 22 commits behind) were used as reading guides only — every
 line number below was re-read at this HEAD (several had moved; e.g.
 `recoverOnRestart` was container.ts:1113-1117 then, is container.ts:1114-1117
-now; `RESTART_EXIT_CODE` is src/settings/restart.ts:16).
+now; settings saves now reload the endpoint in place through `reloadConfig`; there is no settings restart exit code.
 
 ---
 
@@ -63,34 +63,24 @@ remain. Docker is a build/test tool, not a target environment for lifemodel.
 | Standalone core image (`docker/core/`, `scripts/build-core-image.sh`) | Builds the core runtime image; it has no instance loader, front door, or personal state volume. | Remains the core artifact used by the k3s platform. |
 | Instance image and supervisor | Removed: there is no all-in-one image, instance repository seeding/build loop, child-process supervisor, Docker-run CLI, Agent Vault wiring, Caddy front door, or iptables egress mode in the loader. | No compatibility layer is retained. Outcome 4 is accepted on the k3s shape by the manual clean-VM check. |
 
-### 1.2 lifemodel's construction and stop (src/core/container.ts, src/index.ts)
+### 1.2 Current core construction and stop
 
-Construction (`createContainerAsync`, container.ts:477-1257) writes and arms
-BEFORE any activity authority exists (FACT; the numbered order with writers is
-in the core findings): config load; logger creation WITH log retention deletes
-(container.ts:495-505, logger.ts:49-91); `storage.startAutoFlush()` 30 s timer
-(container.ts:517); inbound log load (loud refusal on wrong version,
-inbound-log.ts:261-267); state/conversation managers load; LanceDB created
-lazily; agent + bus; embedder/model cache dir; Motor Cortex wiring;
-recipient/ack registries; scheduler service; plugin loading and activation
-(writes manifest schedules); core loop created NOT started; motor tools
-registered; `motorCortex.recoverOnRestart()` — prunes daemon-wide by age and
-resumes persisted runs (container.ts:1114-1117; motor-cortex.ts:1545-1737);
-Telegram channel created; inbound replay (network photo re-fetch possible,
-container.ts:1153-1186); `storage.flush()`; `stateManager.startAutoSave()`
-2-min timer (container.ts:1205). Then src/index.ts starts the settings server
-(127.0.0.1:7100, before the loop, src/settings/server.ts:42), the channel
-(un-awaited), and `coreLoop.start()` (src/index.ts:45, :79, :83).
+The container requires `LIFEMODEL_VALKEY_URL` and
+`LIFEMODEL_DATABASE_URL`. It takes a Valkey snapshot epoch and updates the
+Postgres active-holder fence before it restores the committed snapshot. The
+snapshot owns the tick state, bus offset, inbound offsets, dedup ring and
+outbox. The container reads pending inbound stream messages into the signal
+queue before `CoreLoop.start()`; no channel is registered in this stage.
 
-Stop: ONE bounded best-effort sequence, `shutdownSequence`
-(container.ts:301-353) under `coreLoop.getStopDrainTimeoutMs()` — default
-90 s (core-loop.ts:109): intake_stop -> loop_drain (tick, scheduler, the
-cognition turn, awaited sends; late intents fenced, core-loop.ts:1073-1131)
--> state_flush (stateManager.shutdown, recipient+ack flush)
--> channel_stop -> storage_flush (`closeDurableWrites()` FIRST then
-`storage.shutdown()`, container.ts:347-349). The hard-exit timer armed in
-src/index.ts:197-227 enforces the deadline (exit 1, hard-exit.ts); exit 0
-graceful, 75 = settings-save restart (src/settings/restart.ts:16).
+Configuration, conversations, memory vectors, graph data and soul data use
+Postgres. Configuration is in `core.settings`; saving through the settings
+server reloads the endpoint in place. Local state and logs remain under
+`DATA_PATH`, but they are not the inbound-message durability boundary.
+
+The bounded shutdown sequence stops intake, drains the loop within its single
+deadline, persists state/registries and flushes storage. A hard kill does not
+run that sequence. Restart behavior and remaining crash windows are documented
+in AGENTS.md "Restart guarantees" and docs/architecture.md.
 
 ### 1.3 Mutable state: where it lives today -> where the decision puts it
 
@@ -105,17 +95,17 @@ the design, not decided here.
 | 3 | The event queue class | `InMemoryEventQueue` exists but is DEAD CODE — never wired (event-queue.ts:12-187; grep: no production caller; its comment names "Valkey, Kafka" as the future, event-queue.ts:10; interface comment src/types/event.ts:61-63) | Valkey bus (the seam already anticipated in code) |
 | 4 | Tick snapshot (agent state, sleepState, energy mirror) | `state.json` via StateManager, 2-min auto-save + shutdown save (state-manager.ts:23-26, :238-247; envelope persistable-state.ts:35-62) | Valkey snapshot (ONE current tick snapshot, atomic epoch-checked commit) |
 | 5 | UserModel (beliefs, `user` in the envelope) | rides inside state.json (state-manager.ts:61-67, :120) | unclear (neither bus nor plainly memory/config) |
-| 6 | Conversation history + statuses + completed actions | one JSON per user, whole-file rewrite, deferred (conversation-manager.ts:77-102, :163-165) | Postgres (memory) — but it is conversational state, not vectors; unclear at the margin |
-| 7 | Vector memory (LanceDB) | `data/state/memory/vector`, OWN persistence path bypassing DeferredStorage, lazy open, NO close method (lance-vector-store.ts:8-9, :128-169; absence verified at HEAD) | Postgres with pgvector |
-| 8 | Memory graph | `graph.json`, one storage key, written only by the consolidator (graph-store.ts:463-474) | Postgres (memory) |
-| 9 | Soul (inner life incl. pendingReflections) | `soul.json`, one envelope, write-heavy, deferred (soul-provider.ts:54-59, :927-937) | Postgres (memory); unclear (charter does not name it) |
-| 10 | Durable inbound log | `data/state/core/inbound_log.json` — the ONLY awaited-flush-per-write path; envelope v2 with dedup ring (1000) + per-recipient offsets (inbound-log.ts:64-65, :109-124, :612-618) | unclear (a durability/replay log; Valkey stream + offsets or Postgres could both express it; the no-loss/no-double-answer guarantee lives entirely inside this file today) |
-| 11 | Recipient registry | `recipient-registry.json`, debounced 1 s (recipient-registry.ts:317, :343-352) | unclear (Telegram out this milestone) |
-| 12 | Ack registry | `ack-registry.json`, debounced 500 ms (persistent-ack-registry.ts:21, :37) | unclear (layer state; see section 2) |
+| 6 | Conversation history + statuses + completed actions | Postgres `core.conversation_messages` and related tables | Postgres (conversational state) |
+| 7 | Vector memory | Postgres `core.memory_vectors` with pgvector; local embedding generation | Postgres with pgvector (current implementation) |
+| 8 | Memory graph | Postgres `core.memory_entities` and `core.memory_relations` | Postgres (memory) |
+| 9 | Soul (inner life incl. pendingReflections) | Postgres core schema via `PostgresSoulStore` | Postgres |
+| 10 | Inbound messages | Valkey `inbound` stream; committed offsets and bounded dedup ring live in the atomic tick snapshot | Valkey stream + snapshot |
+| 11 | Recipient registry | Postgres recipient table | Postgres |
+| 12 | Ack registry | Committed tick snapshot section | Valkey snapshot |
 | 13 | Plugin enable/disable | `core/disabled_plugins.json` (intent-applicator.ts:1179-1199) | Postgres (configuration) |
 | 14 | Plugin keys + schedules | `plugin/<id>/<key>.json`, incl. `schedules` and `fired:<id>` (storage-primitive.ts:50; scheduler-primitive.ts:42-45, :665-694) | Postgres (configuration); schedules are durable state the next generation must reload |
-| 15 | Config file (endpoint, models, telegram fields) | `data/config/agent.json`, its OWN DeferredStorage/JSONStorage pipeline, fsync+rename, awaited flush = durability point (config-loader.ts:26, :60-67, :135-141) | Postgres (configuration) explicitly ("no shared folder: the configuration lives in the store") |
-| 16 | LLM keys / Telegram token | placeholders or null in config; real credentials only in Agent Vault, injected at egress (config-schema.ts:87-95; settings.md:15-17) | OpenBao issues them; Agent Vault proxy stays |
+| 15 | Configuration | Postgres `core.settings`; `PostgresConfigStore` reads and writes configuration | Postgres (configuration); endpoint changes reload in place |
+| 16 | LLM keys | Secret values are not stored in configuration; platform credentials are injected at the egress boundary | OpenBao / Agent Vault |
 | 17 | Motor run registry | `motor-runs.json` (ONE DeferredStorage key), save+flush per transition (motor-state.ts:14-15, :65-88) | unclear (results arrive on the bus per charter; the registry itself is not named) |
 | 18 | Motor artifacts/workspaces, skills, plugins dirs, ONNX model cache, logs | host/volume filesystem: `data/motor-runs/`, `data/motor-workspaces/`, `data/skills/`, `data/plugins/`, `data/models/`, `data/logs/` (container.ts:694-696, :1092; embedder.ts:35-48; logger.ts:49-91) | image candidate for ONNX weights (same-for-everyone image, charter :15-16) vs first-use download today: unclear; skills/plugins dirs unclear (code-like artifacts vs the git repository); logs unclear |
 | 19 | Loader four files + vault store | `<volume>/loader/*` root-only, `<volume>/vault` | loader-owned |
@@ -125,7 +115,7 @@ Concurrency fact that constrains all of the above (FACT): there is NO
 inter-process safety in the storage stack — no flock/lock files, no leases, no
 writer identity in any file; the only LockService is in-memory for motor
 scripts (lock-service.ts:1-13). Two writers on one root = silent
-last-rename-wins whole-document clobbering, inbound-log replay corruption
+last-rename-wins whole-document clobbering and legacy storage corruption
 included. The one-process assumption is what the Valkey/Postgres move replaces.
 
 ### 1.4 Runtime surfaces the change touches (Motor Cortex, skills, channel)
@@ -154,70 +144,44 @@ included. The one-process assumption is what the Valkey/Postgres move replaces.
 - Skills are host-FS trees with policy.json sidecars (skill-loader.ts:415-424;
   skill-extraction.ts:186-228); dependencies become derived Docker images
   (dependency-manager.ts). Nothing skill-related lives in an external store.
-- Telegram (out this milestone, inventoried as-is): polling starts un-awaited
-  (src/index.ts:79); stopIntake vs stop are distinct (channel.ts:84-100);
-  photo downloads can run during construction via the replay path
-  (container.ts:1170-1178); grammY 409 two-consumer behavior is unverified
-  from source.
+- The core registers no channel adapter in this stage. Gateways append to `inbound`; answers are committed to `outbound` for a gateway to deliver.
 
 ---
 
-## 2. What the tick holds today
+## 2. The committed tick boundary
 
-### 2.1 Cross-tick in-memory state (must become snapshot or bus state)
+A Valkey tick snapshot is committed atomically under the active epoch. It
+contains the core state sections, internal bus offset, inbound stream read
+offset, per-recipient offsets, bounded recent-message-id ring, pending inbound
+messages and outbound outbox events. An uncommitted tick does not advance any
+of these durable positions. The Valkey epoch check rejects a stale core; the
+Postgres active-holder fence protects Postgres writes.
 
-CoreLoop fields that live across ticks (core-loop.ts:273-382): `tickCount`
-(:281) and the 1 s setTimeout chain (:1239-1247, tickInterval default
-core-loop.ts:106); `pendingSignals` FIFO (:315; deferrable signal types
-re-queued while COGNITION is busy, :1391); ONE `pendingCognition` (:333) with
-`turnCommits` map (:339) + `activeTurnCommits` (:347) deciding the durable
-inbound-log outcome; `drainingTurnTickId` (:297), `lateEffectsFenced` (:302),
-`durableWritesClosed` (:310) stop-state flags; `inFlightSends` tracked in the
-intent applicator (intent-applicator.ts:441-452); `schedulerTickInFlight`
-(:364); typing subscription id (:330); previous alertness mode (:327);
-`thoughtsThisTick` (:370). Layers: aggregation buckets, pattern history,
-thought-dedup cache, threshold-engine wake state, neuron
-previousValue/lastEmittedAt, filter/neuron registries — ALL in-memory except
-the ack registry (persisted, debounced 500 ms; persistent-ack-registry.ts:21).
-Energy is an in-memory EnergyModel mirrored into AgentState and persisted only
-by the 2-min auto-save (agent.ts:64, :188; state-manager.ts:25).
+The inbound stream is the gateway-to-core boundary. A gateway appends a
+`user_message` event to `inbound`; the core queues pending messages from the
+committed snapshot on startup. The bounded ring deduplicates recent external
+message ids. It does not promise unbounded deduplication.
 
-### 2.2 What spans ticks today (the set that must become bus events)
+A committed outbound event is the answer boundary. Postgres applies it with
+the event id as an idempotency key and advances its cursor after the row write.
+A deliberate silent turn commits without an outbound event. A failed or
+interrupted turn does not commit its partial answer, leaving its inbound
+messages eligible for the next core. The future gateway owns delivery and
+retry. With no channel registered, the core logs each event once per process
+and advances only its in-process scan position; the persisted gateway cursor
+and the event itself remain untouched.
 
-| Work | Re-entry today | Survives a stop? |
-|---|---|---|
-| COGNITION turn (agentic LLM loop, tool rounds) | a LATER tick's checkPendingCognition applies result intents (core-loop.ts:1416-1424, :2025-2068); stop drain applies inline (core-loop.ts:1073-1131); mid-loop immediate intents call the applicator DIRECTLY (core-loop.ts:423-425, :2084-2130) | No: overrun abandons the turn, its inbound entries replay once (core-loop.ts:1078-1081) |
-| SEND_MESSAGE chains | promise chains in `inFlightSends`; settlement chains settleTurn -> inboundLog.commit onto the send (core-loop.ts:661-688, :698-759) | the send result decides answered/failed_send only if settled; otherwise replay |
-| Scheduler fires | kicked per tick (core-loop.ts:1585-1599); results re-enter ONLY as pushed signals (container.ts:1059-1061); `nextFireAt <= now`, markFired BEFORE emit = at-most-once (scheduler-primitive.ts:330-378) | schedules persist; a fire whose signal was still in memory is lost as a signal but not re-fired |
-| Motor runs | `motor_result` signals pushed via callback into the queue (container.ts:1065-1069); runs persist per transition; recoverOnRestart resumes/fails/re-emits (motor-cortex.ts:1545-1737) | run state yes; in-flight progress re-derived from stepCursor; persisted containerId never reattached — fresh container on resume |
-| core.schedule SCHEDULE_EVENT timers | plain setTimeout in the intent applicator (intent-applicator.ts:513-521) | No — lost at restart |
-| Queued internal signals / reactions | pendingSignals | No — "a schedule firing, a Motor Cortex result or a reaction that was only queued is lost" (container.ts:1188-1190) |
-| Inbound user messages | durable inbound log, awaited flush at EMIT time, replay once at start (inbound-log.ts:612-618; container.ts:1153-1186) | Yes — the only durable async path |
+Remaining crash windows are described in AGENTS.md "Restart guarantees": a
+Postgres row can be applied before its cursor advances (safe idempotent
+reapply); a gateway can deliver before its cursor advances (at-least-once
+delivery); and Valkey and Postgres are separate fenced stores, not one
+cross-store transaction. Queued work outside the committed snapshot or its own
+durable store can still be lost.
 
-INFERENCE (labeled): the bus-event conversion set is exactly the re-entry rows
-above — cognition results, send settlements, scheduler/motor signal pushes,
-schedule timers — plus the queued-signal backlog; the snapshot must carry the
-cross-tick fields of 2.1 whose loss would change behavior (buckets, wake
-state, neuron transitions, turn bookkeeping), and the code's own comments name
-what is deliberately recomputable today (container.ts:1188-1192).
-
-### 2.3 What writes to disk during a tick today
-
-Every writer below runs while the loop ticks (trigger -> path): DeferredStorage
-30 s auto-flush -> every dirty key under data/state (deferred-storage.ts;
-container.ts:517); StateManager 2-min auto-save -> state.json
-(state-manager.ts:75-88); inbound log record/commit -> awaited
-save+flush per message/outcome (inbound-log.ts:612-618); conversation saves ->
-deferred per mutation (conversation-manager.ts:261, :339, :516, :657, :828);
-soul persist -> deferred per mutation (soul-provider.ts:927-937); schedule
-mutations -> deferred immediately (scheduler-primitive.ts:691-694); pino
-logger -> data/logs per line from a worker thread that cannot be fenced
-(logger.ts:18-25, :164-180); conversation logger -> per LLM block
-(logger.ts:227-258); LanceDB memory writes -> own path, immediate
-(lance-vector-store.ts:8-9); skill policy writes -> atomic per skill dir
-(skill-loader.ts:415-424). The snapshot design inherits exactly this write set.
-
----
+Configuration is stored in Postgres `core.settings`; the settings server
+reloads model endpoints in place. Memory vectors and graph data use Postgres
+with pgvector. The working directory and `DATA_PATH` hold files such as logs
+and Motor artifacts, but not the core's inbound/outbound durability boundary.
 
 ---
 
@@ -248,7 +212,7 @@ or instance-image CI walk remains.
 
 ### 3.3 The restart contract that outcome 2 already fixed and outcome 5 inherits (docs/charters/instance-1.md:62-65)
 
-A restart in the middle of a cognition turn ends with that turn completed or redone exactly once; no message around it is lost or answered twice. The durable inbound log is today's mechanism (src/core/inbound-log.ts; AGENTS.md "Restart guarantees"). Under generations, the planned switch extends the same promise to an epoch switch (charter :41-44).
+The current restart boundary is the Valkey stream and the atomic tick snapshot. A crash before commit leaves offsets unchanged; a committed outbound event and its inbound offsets move together. See AGENTS.md "Restart guarantees" and docs/architecture.md.
 
 ## 4. Quality attribute scenarios
 
@@ -258,10 +222,10 @@ Note on today's baseline (FACT, measured at HEAD): no Valkey, Postgres, pgvector
 
 | # | Category | Scenario | Measure |
 |---|---|---|---|
-| Q1 | Availability | Planned switch. Stimulus: the owner (or a successful self-change gate) requests generation N+1 while generation N serves a conversation. Condition: normal operation, a turn may be in flight. Response: N finishes its tick and leaves; N+1 continues from the current snapshot; the loader holds or queues owner input for the pause.  AMENDED (2026-10-12, simplification point 1 + the values): the serving gap is the core's stop deadline (5 s, DECIDED) plus the new core's start-to-first-commit (≤ readinessWindowMs 60 s); no 90 s drain and no overall switch deadline exist; owner input is NEVER dropped — the ingress gateway keeps accepting and XADDing to `inbound` through the gap; a switch moves who READS `inbound`, never who accepts it  AMENDED (2026-10-12, platform decision): the strategies are Kubernetes fields (the keyed writers RollingUpdate maxSurge 1/maxUnavailable 0; the core a ONE-REPLICA STATEFULSET under the operator's suspend/resume gate — Recreate rejected, R5-03); the web surface is Traefik's Service whose Endpoints follow readiness, so a core replacement moves no Service at all. | The switch ends within a bounded pause (today's comparable bounds: lifemodel drain 90 s, core-loop.ts:109; loader stop budget 110 s, loader/src/config.ts:173); every owner message received around the switch is answered exactly once (inbound-log once-only contract survives the switch, src/core/inbound-log.ts); the conversation continues from the snapshot (charter :83-84). |
+| Q1 | Availability | Planned switch. Stimulus: the owner (or a successful self-change gate) requests generation N+1 while generation N serves a conversation. Condition: normal operation, a turn may be in flight. Response: N finishes its tick and leaves; N+1 continues from the current snapshot; the loader holds or queues owner input for the pause.  AMENDED (2026-10-12, simplification point 1 + the values): the serving gap is the core's stop deadline (5 s, DECIDED) plus the new core's start-to-first-commit (≤ readinessWindowMs 60 s); no 90 s drain and no overall switch deadline exist; owner input is NEVER dropped — the ingress gateway keeps accepting and XADDing to `inbound` through the gap; a switch moves who READS `inbound`, never who accepts it  AMENDED (2026-10-12, platform decision): the strategies are Kubernetes fields (the keyed writers RollingUpdate maxSurge 1/maxUnavailable 0; the core a ONE-REPLICA STATEFULSET under the operator's suspend/resume gate — Recreate rejected, R5-03); the web surface is Traefik's Service whose Endpoints follow readiness, so a core replacement moves no Service at all. | The switch ends within a bounded pause (today's comparable bounds: lifemodel drain 90 s, core-loop.ts:109; loader stop budget 110 s, loader/src/config.ts:173); every owner message received around the switch is answered exactly once (the committed stream offsets survive the switch, the former file-based inbound implementation); the conversation continues from the snapshot (charter :83-84). |
 | Q2 | Reliability / fault tolerance | A generation fails its readiness probe. Stimulus: N+1 starts but never reports ready within its probe window (crash on boot, missing config). Response: the loader never switches the epoch; N keeps serving; the failed generation is discarded and reported.  AMENDED (2026-10-12, simplification point 1): readiness is per module; the epoch is touched only by the core's stop-first replacement.  AMENDED (2026-10-12, round 4 R4-11) — TWO cases: (a) a KEYED module (start-first) fails readiness — the epoch is untouched, the previous instance keeps serving, the discard is reported; (b) the CORE (stop-first) fails readiness — the old core has already exited and the epoch already taken (by the failed core's own CAS, if it got that far) before the failure is declared, so the measure is the epoch moved exactly once (never reused), durable intake throughout, and the bounded fallback on current data  AMENDED (2026-10-12, platform decision): the new core TAKES the epoch itself (the Lua CAS); the operator gates the core's replacement through its HelmRelease suspend/resume and verifies the post-conditions; the probe is the Kubernetes readiness probe. | Case (a): time to declared-failed is a fixed multiple of the probe interval (a named number, readinessWindowMs 60 s); zero epoch changes (operator records); generation N answers throughout. Case (b): the epoch value moved exactly once; no dropped owner message (the ingress gateway kept accepting and XADDing to `inbound`); the previous commit's core restores under the stop-first rules on current data within the fallback deadline. |
 | Q3 | Reliability / recoverability | A generation is ready but unhealthy. Stimulus: N+1 passed readiness but its health window shows no completed work (the charter defines health as completed work, not a live process - charter :35-36). Response: the loader rolls back to the previous healthy generation and produces a report.  AMENDED (2026-10-12, simplification points 1 and 6): rollback restores the previous commit's desired state, only the changed modules, on CURRENT data (Postgres is never rolled back); snapshot copies exist ONLY at core replacements and are restored manually in maintenance only; the rollback deadline stays 300 s  AMENDED (2026-10-12, platform decision): the restore is a GIT REVERT of the changed tags in the deploy branch, applied by Flux module by module; the operator is the controller that observes, gates and rolls back. | Rollback's two outcomes are DISTINCT measures (R4-13): restored within the named window (`rollbackDeadlineMs` 300 s), or maintenance-on-expiry with the ran-over step named — never conflated with restored service; the maximum-duration call during a multi-module rollback is MEASURED, not assumed; exactly one report exists naming what was rolled back and why (a durable record, observable in the loader UI/`lifemodel status`); rollback itself follows Q1's once-only message contract. |
-| Q4 | Reliability / recoverability | Crash of the running generation mid-tick. Stimulus: generation N's process dies between two tick commits (OOM, kill -9, broken generation). Response: the loader starts the previous/same generation again; it continues from the last committed snapshot; the durable inbound log replays messages whose turns recorded no outcome  AMENDED (2026-10-12, platform decision): on k3s an in-place pod restart IS this path (restartPolicy — a fresh bootstrap re-authenticating through its service account); new CODE arrives only by an operator rollout.  AMENDED (2026-10-12, simplification points 2 and 4): the abandoned tick's pending effects replay with their PERSISTED effect ids; in-flight command events are taken over by the owning module's consumer group via XAUTOCLAIM — no executor and no heartbeats exist. | At most one replay per message (the inbound log's contract, src/core/inbound-log.ts); work committed to the snapshot is not redone (observable: a turn answered before the crash is not answered again); today's known loss window - queued-but-unprocessed in-memory signals (AGENTS.md "Restart guarantees") - is either closed by the bus or explicitly carried as the same documented window. |
+| Q4 | Reliability / recoverability | Crash of the running generation mid-tick. Stimulus: generation N's process dies between two tick commits (OOM, kill -9, broken generation). Response: the loader starts the previous/same generation again; it continues from the last committed snapshot; the durable inbound log replays messages whose turns recorded no outcome  AMENDED (2026-10-12, platform decision): on k3s an in-place pod restart IS this path (restartPolicy — a fresh bootstrap re-authenticating through its service account); new CODE arrives only by an operator rollout.  AMENDED (2026-10-12, simplification points 2 and 4): the abandoned tick's pending effects replay with their PERSISTED effect ids; in-flight command events are taken over by the owning module's consumer group via XAUTOCLAIM — no executor and no heartbeats exist. | At most one replay per message (the committed stream-and-snapshot contract); work committed to the snapshot is not redone (observable: a turn answered before the crash is not answered again); today's known loss window - queued-but-unprocessed in-memory signals (AGENTS.md "Restart guarantees") - is either closed by the bus or explicitly carried as the same documented window. |
 | Q5 | Reliability / fault tolerance | Crash of the controller. Stimulus: the loader process (the only Docker-authorized component) dies. Response: the container's restart policy brings the loader back; it recovers its generation records and the running generation (or restarts it); panic still holds.  AMENDED (2026-10-12, simplification point 1): reconciliation is epoch-vs-record over the rollout record — simplified, no closed-apply barrier and no handoff key; the bump pair (epoch Lua CAS + the `active_holder` UPDATE) is re-run idempotently; a candidate container with no record is stopped and discarded.  AMENDED (2026-10-12, platform decision): the controller is the GENERATION OPERATOR — a single replica behind a leader-election Lease; a crash reconciles from CLUSTER-RESOURCE records (written and read back complete — etcd quorum commit) plus the branch's desired state; the epoch bump pair is re-run by the new core's idempotent CAS and the operator's verification; a candidate POD with no record is discarded; panic/maintenance are cluster state (suspend + scale 0) a node restart revives nothing of. | The operator is back within its Deployment restart delay (observable via `kubectl get pods` restart count); no generation is left orphaned (observable: one running generation beside a fresh operator); bootstrap phases are re-attempted after a loader restart; panic and maintenance are platform cluster state. |
 | Q6 | Reliability / data durability | Valkey restart. Stimulus: the Valkey process restarts (crash or operator action) while a generation runs. Response: the bus streams and the one committed tick snapshot survive via fsync-on-every-write; events after the last fsync never existed by contract.  AMENDED (2026-10-12, simplification point 3): the epoch record is writable ONLY by the loader role; the trim-floor and consumer-group-durability rules carry (R3-21)  AMENDED (2026-10-12, platform decision): the epoch record is writable by the OPERATOR role (panic bump) and the CORE role (the takeover/commit CAS) — no other role; Valkey runs on a PVC. | No committed event and no committed snapshot is lost across the restart (observable: replay from disk yields identical bus position and snapshot); a generation's writes during Valkey downtime fail visibly rather than silently proceeding (observable: the generation reports unavailability or pauses its ticks). |
 | Q7 | Security / integrity | A stale generation writes after the switch. Stimulus: generation N, partitioned or slow to stop, attempts a bus write or snapshot commit after N+1 took the epoch. Response: the epoch check refuses the write atomically with the commit (charter :38).  AMENDED (2026-10-12, simplification points 0 and 1): one host — the stop-first CONFIRMED EXIT gives one writer; the fence is the epoch CAS (Valkey) plus the `active_holder` guard (Postgres); no two-store barrier, no Valkey commit module, no mTLS; the cheap guards defend against LOADER bugs, not hostile modules (point 0)  AMENDED (2026-10-12, platform decision): the confirmed exit is a CONFIRMED POD TERMINATION (observed, never assumed) plus the bounded lease-revocation/backend drain (R4-14); the new core takes the epoch and sets `active_holder` at takeover; the guards defend against OPERATOR bugs (A2). | Zero accepted stale writes (observable: every refused attempt is counted and reported); the current snapshot and bus position are byte-identical before and after the refused write. Today: no epoch concept exists in lifemodel's process (the loader's in-memory `epoch` covers only its own restart scheduling - loader-reader's inventory, the removed instance supervisor); this is new machinery. |
@@ -293,8 +257,8 @@ Note on today's baseline (FACT, measured at HEAD): no Valkey, Postgres, pgvector
 ## 6. Explicitly unverified / unknown (not resolvable by source reading)
 
 1. grammY's exact behavior with two pollers on one token (no probe allowed;
-   telegram.ts facts are code-level only).
-2. Whether concurrent multi-process access to one LanceDB directory is safe
+   the former bot-channel source facts are code-level only).
+2. Whether concurrent multi-process access to a legacy local vector directory was safe
    (no probe; the wrapper has no close/dispose at HEAD — absence verified).
 3. Memory/CPU numbers for two generations + Valkey + Postgres on an 11 GB
    machine (no source carries any; Q11 is a to-measure driver).
@@ -318,11 +282,11 @@ Every FACT above carries a `path:line` citation read at HEAD `8864655` of
 branch design/b0r-containers-inventory. All citations were machine-checked for
 file existence and line range (~500 citations across five reader passes plus
 the coordinator's own reads); one stale line number from the superseded
-reports' style was corrected (src/settings/restart.ts:16, not :18). Spot
+reports' style was corrected (the former settings restart helper:16, not :18). Spot
 content checks confirmed the cited line holds the claimed constant, field or
 comment for: the supervisor spawn/uid/backoff/stop numbers, egress install,
-the three epoch counters, state auto-save default, LanceDB bypass header,
-inbound-log durability point, motor Docker refusal, labels/images, the
+the three epoch counters, state auto-save default, legacy vector-store bypass header,
+inbound stream/snapshot commit point, motor Docker refusal, labels/images, the
 lock-service in-memory header, the "lost at stop" comments, the event-queue
 Valkey comment, and the config path defaults. The worktree was not modified
 except by creating and committing this document.

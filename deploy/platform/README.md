@@ -110,9 +110,9 @@ store ports, plus the CNPG operator ports. The bootstrap creates database
 The post-init SQL enables pgvector in the application database.
 
 The loader copies only the generated username and password to a fixed Secret
-`lifemodel/lifemodel-db-credentials`, in a resumable first-start phase. It also
+the `lifemodel-db-credentials` Secret in the `lifemodel` namespace, in a resumable first-start phase. It also
 generates a random Valkey password only if the retained source Secret is
-absent, then copies it to `lifemodel/lifemodel-valkey-credentials`. This uses
+absent, then copies it to the `lifemodel-valkey-credentials` Secret in the `lifemodel` namespace. This uses
 the existing loader ServiceAccount; it adds no controller. The credentials are
 static until lifemodel-2t5 moves them to OpenBao. The platform admission policy
 allows only these named loader Secrets while application Kustomizations remain

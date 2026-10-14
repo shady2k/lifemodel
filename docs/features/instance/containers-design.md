@@ -821,7 +821,7 @@ the core module's schema.
 | 7 | Vector memory | Postgres pgvector | charter; supersedes ADR-005's storage leg; LanceDB path deleted |
 | 8 | Memory graph | Postgres (core schema) | consolidator writes transactionally |
 | 9 | Soul | Postgres (core schema) | one JSONB document + version (shape of soul-provider.ts:48 kept) |
-| 10 | Durable inbound log | Valkey stream `inbound` + snapshot | entries XADD'd by the ingress gateway (AOF fsync = today's awaited flush, inbound-log.ts:609-617); per-recipient offsets + dedup ring INSIDE the snapshot commit; replay = post-offset minus dedup |
+| 10 | Durable inbound log | Valkey stream `inbound` + snapshot | entries XADD'd by the ingress gateway (AOF fsync = today's awaited flush, the former file-based inbound implementation:609-617); per-recipient offsets + dedup ring INSIDE the snapshot commit; replay = post-offset minus dedup |
 | 11 | Recipient registry | Postgres (core schema) | small routing table; survives switches |
 | 12 | Ack registry | snapshot | aggregation-layer cross-tick state (inventory 2.1's persisted exception); snapshot-per-tick ≥ today's 500 ms debounce |
 | 13 | Plugin enable/disable | Postgres configuration (core schema) | (intent-applicator.ts:1179-1199 moves to a store row) |

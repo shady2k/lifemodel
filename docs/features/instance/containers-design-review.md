@@ -119,7 +119,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
 - **Scenarios:** F3, Q1/Q3/Q4 (drain overrun, crash and replay); Q13 settlement.
 - **Evidence:** ADR-010 O4-A (`docs/adr/010-container-generations.md:174,233-235,
   255-257`); `docs/features/instance/containers-design.md:221-225,232-233,253-255`;
-  `src/core/inbound-log.ts:7-15,28-41`; `src/core/core-loop.ts:661-687,720-757`;
+  `the former file-based inbound implementation:7-15,28-41`; `src/core/core-loop.ts:661-687,720-757`;
   `src/core/container.ts:341-349`.
 - **What fails:** atomically publishing a send command with a snapshot does not
   atomically deliver the answer and record its outcome. Trace: the command commits;
