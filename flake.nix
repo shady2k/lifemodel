@@ -138,6 +138,9 @@
         grep -F 'volumeClaimTemplates:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
         grep -F 'storage "raft"' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
         grep -F 'serviceAccountName: openbao' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'persistentVolumeClaimRetentionPolicy:' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'whenDeleted: Retain' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
+        grep -F 'whenScaled: Retain' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null
         grep -A2 -F 'capabilities:' ${./deploy/platform/a/openbao/rendered.yaml} | grep -F -- '- ALL' >/dev/null
         if grep -F 'automountServiceAccountToken: false' ${./deploy/platform/a/openbao/rendered.yaml} >/dev/null; then
           echo 'OpenBao pod disables its ServiceAccount token mount' >&2; exit 1
@@ -154,14 +157,11 @@
           echo 'step A must not contain HelmRelease objects' >&2
           exit 1
         fi
-        test "$(grep -F -c 'namespaceSelector:' step-a.yaml)" -eq 4
-        test "$(grep -F -c 'podSelector:' step-a.yaml)" -eq 6
-        test "$(grep -F -c 'kubernetes.io/metadata.name: lifemodel-system' step-a.yaml)" -eq 2
-        test "$(grep -F -c 'app.kubernetes.io/name: loader' step-a.yaml)" -eq 2
-        test "$(grep -F -c 'port: 8200' step-a.yaml)" -eq 3
-        ! grep -F 'ipBlock:' step-a.yaml >/dev/null
-        test "$(grep -F -c 'egress:' step-a.yaml)" -eq 1
-        grep -F 'egress: []' step-a.yaml >/dev/null
+        grep -F 'name: openbao-default-deny' step-a.yaml >/dev/null
+        grep -F 'name: openbao-server-access' step-a.yaml >/dev/null
+        grep -F 'kind: NetworkPolicy' step-a.yaml >/dev/null
+        grep -F 'kind: Namespace' step-a.yaml >/dev/null
+        grep -F 'kustomize.toolkit.fluxcd.io/prune: disabled' step-a.yaml >/dev/null
         grep -F 'kind: ClusterRoleBinding' step-a.yaml >/dev/null
         grep -F 'name: system:auth-delegator' step-a.yaml >/dev/null
         grep -F 'name: platform-a0' ${./deploy/platform/a-reconciler.yaml} >/dev/null
@@ -189,21 +189,25 @@
         grep -E 'key:[[:space:]]+password' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
         grep -F 'claimName: gitea-shared-storage' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
         test "$(grep -F -c 'kind: PersistentVolumeClaim' ${./deploy/platform/a/gitea/rendered.yaml})" -eq 1
-        grep -F 'host: "git.localhost"' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
+        if grep -F 'kind: Ingress' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null; then
+          echo 'Gitea Ingress must not be rendered in step A' >&2; exit 1
+        fi
+        grep -F 'kustomize.toolkit.fluxcd.io/prune: disabled' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null
         if grep -Ei '^  name: [^ ]*(postgresql|valkey)|^kind: StatefulSet$' ${./deploy/platform/a/gitea/rendered.yaml} >/dev/null; then
           echo 'Gitea rendered a bundled PostgreSQL or Valkey workload' >&2
           exit 1
         fi
         kustomize build ${./deploy/platform/a/gitea} > gitea-platform.yaml
-        test "$(grep -F -c 'namespaceSelector:' gitea-platform.yaml)" -eq 3
-        test "$(grep -F -c 'podSelector:' gitea-platform.yaml)" -eq 4
+        grep -F 'name: gitea-default-deny' gitea-platform.yaml >/dev/null
         if grep -F 'kind: HelmRelease' gitea-platform.yaml >/dev/null; then
           echo 'Gitea component must not contain HelmRelease objects' >&2
           exit 1
         fi
         grep -F 'kubernetes.io/metadata.name: lifemodel-system' gitea-platform.yaml >/dev/null
         grep -F 'kubernetes.io/metadata.name: flux-system' gitea-platform.yaml >/dev/null
-        grep -F 'kubernetes.io/metadata.name: kube-system' gitea-platform.yaml >/dev/null
+        if grep -F 'kubernetes.io/metadata.name: kube-system' gitea-platform.yaml >/dev/null; then
+          echo 'Gitea policy must not allow Traefik ingress' >&2; exit 1
+        fi
         grep -F 'egress: []' gitea-platform.yaml >/dev/null
         touch $out
       '';

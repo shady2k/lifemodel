@@ -15,8 +15,8 @@ not be present.
 Render both committed files with:
 
 ```sh
-nix shell nixpkgs#kubernetes-helm -c helm template openbao deploy/platform/charts/openbao --namespace openbao --skip-tests -f deploy/platform/a/openbao-values.yaml > deploy/platform/a/openbao/rendered.yaml
-nix shell nixpkgs#kubernetes-helm -c helm template gitea deploy/platform/charts/gitea --namespace lifemodel-git --skip-tests -f deploy/platform/a/gitea/values.yaml > deploy/platform/a/gitea/rendered.yaml
+tmp=$(mktemp deploy/platform/a/openbao/rendered.yaml.XXXXXX) && nix shell --inputs-from . nixpkgs#kubernetes-helm -c helm template openbao deploy/platform/charts/openbao --namespace openbao --skip-tests -f deploy/platform/a/openbao-values.yaml > "$tmp" && test -s "$tmp" && mv "$tmp" deploy/platform/a/openbao/rendered.yaml || { status=$?; rm -f "$tmp"; exit "$status"; }
+tmp=$(mktemp deploy/platform/a/gitea/rendered.yaml.XXXXXX) && nix shell --inputs-from . nixpkgs#kubernetes-helm -c helm template gitea deploy/platform/charts/gitea --namespace lifemodel-git --skip-tests -f deploy/platform/a/gitea/values.yaml > "$tmp" && test -s "$tmp" && mv "$tmp" deploy/platform/a/gitea/rendered.yaml || { status=$?; rm -f "$tmp"; exit "$status"; }
 ```
 
 OpenBao runs one standalone server using integrated Raft storage on a retained
@@ -25,10 +25,11 @@ projected Kubernetes token, and a ClusterRoleBinding grants only the built-in
 `system:auth-delegator` role for TokenReview. The chart does not create or label the
 namespace; `a/namespace.yaml` applies the PSA `restricted` labels. The chart's
 server pod security context renders to restricted-compatible settings.
-`a/network-policy.yaml` defaults OpenBao ingress to deny and allows TCP 8200
-only from the loader pod in `lifemodel-system` (other ingress, including Raft
-cluster port 8201, is denied). Egress is not constrained by this ingress-only
-policy, so later Kubernetes-auth TokenReview and DNS can work.
+`a/network-policy.yaml` denies all OpenBao namespace ingress and egress by
+default. It allows only loader-to-server TCP 8200, CoreDNS UDP/TCP 53, and
+Kubernetes API TCP 6443 egress for TokenReview. Gitea has no Ingress in this
+stage. Flux pruning is disabled for both stateful namespaces and the Gitea
+PVC; removing those retained resources is an explicit owner action.
 
 ## Loader image release pin
 
