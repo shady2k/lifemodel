@@ -10,7 +10,7 @@ Input: fresh `shady2k-gateway/glm-5.3-flash` report; coordinator rejected its wa
 
 The initialized candidate must remain the same process at promotion. During rehearsal, primary service must continue; candidate must not write live data, signal primary, use external credentials/network, or exhaust primary resources. Dynamic import/activation is denied/deferred unless separately verified restricted. Grants follow exclusive verified release, not cooperative mute flags.
 
-Current loader spawns one uid/gid child with allowlisted environment (`loader/src/supervisor.ts`); uid-scoped egress accepts named loopback services before external REJECT (`loader/src/egress.ts`). `DATA_PATH` chooses a destination, not authority. The root loader owns its record directory. Build tree ownership is granted to the child by `chownFreshTree`, not sealed (`loader/src/fs.ts`). Neither aggregate candidate cgroup control nor second slot exists. Historical executor observations in `lifemodel-653` are not current environment proof.
+Current loader spawns one uid/gid child with allowlisted environment (`the former instance supervisor`); uid-scoped egress accepts named loopback services before external REJECT (`the former instance egress integration`). `DATA_PATH` chooses a destination, not authority. The root loader owns its record directory. Build tree ownership is granted to the child by `chownFreshTree`, not sealed (`loader/src/fs.ts`). Neither aggregate candidate cgroup control nor second slot exists. Historical executor observations in `lifemodel-653` are not current environment proof.
 
 ## Options and consequences
 

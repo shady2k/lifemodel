@@ -1,289 +1,32 @@
-/**
- * Where the loader is and what it drives (lifemodel-q4x.2.1).
- *
- * The defaults are the contract with the image: one volume at
- * /var/lib/lifemodel, the seed bundle the image carries at
- * /opt/lifemodel/seed.bundle, the loader's own port 7000 on loopback. Every
- * one of them is overridable through the environment so a test (or a person)
- * can place the same program elsewhere.
- */
+/** Configuration for the platform loader (ADR-010, platform step A0). */
 import { join } from 'node:path';
-
 import { LoaderFatalError } from './errors.js';
 
-/** The unprivileged identity lifemodel runs as in the image. */
-export interface LifemodelIdentity {
-  uid: number;
-  gid: number;
-}
-
-/** How long the loader waits between two starts of a lifemodel that keeps dying. */
-export interface RestartPolicy {
-  initialDelayMs: number;
-  maxDelayMs: number;
-  /** A run at least this long counts as healthy: the delay goes back to the start. */
-  healthyRunMs: number;
-}
-
-export interface CaddyConfig {
-  /** The Caddy binary the image carries. */
-  binary: string;
-  /** Its configuration: host routing and the forward_auth to the loader. */
-  config: string;
-  /** How long Caddy may take to leave before it is killed. */
-  stopWaitMs: number;
-}
-
-/**
- * Agent Vault (lifemodel-q4x.3.1, decisions 4 and 12): the trusted layer that
- * holds the keys, started by the loader beside Caddy and stopped after
- * lifemodel.
- */
-export interface AgentVaultConfig {
-  /** The Agent Vault binary the image carries, pinned by version at build time. */
-  binary: string;
-  /**
-   * The store: Agent Vault's `HOME`, so its database, its CA and the CLI's own
-   * session land in `<storeDir>/.agent-vault/`. Root-only (0700): decision 4
-   * protects a passwordless store by the directory's permissions.
-   */
-  storeDir: string;
-  /** The transparent proxy's root CA, written where lifemodel can READ it. */
-  caPath: string;
-  /** Its management interface and API, behind `vault.<host>`. */
-  apiPort: number;
-  /** The transparent proxy lifemodel's traffic leaves through. */
-  proxyPort: number;
-  /** The vault the loader creates for lifemodel. */
-  vaultName: string;
-  /** The agent the loader creates in it; its token is lifemodel's proxy credential. */
-  agentName: string;
-  /** The instance owner account the loader registers; its password stays root-only. */
-  ownerEmail: string;
-  /** How long Agent Vault may take to answer `/health` before the loader gives up. */
-  startWaitMs: number;
-  /**
-   * How long ONE CLI command of Agent Vault may take (the loader's login and
-   * provisioning run them as root): each is bounded and the stop, arriving
-   * while one is stuck, kills it. Without the bound a stuck command would
-   * leave the bring-up waiting forever before the loader's interface opens.
-   */
-  commandWaitMs: number;
-  /** How long Agent Vault may take to leave before it is killed. */
-  stopWaitMs: number;
-}
-
-/**
- * The two shapes the loader runs in (ADR-010, platform step A0).
- *
- * "instance" is the shape this repo ships today: the loader is the container's
- * main process, it starts the front door, Agent Vault and the egress rule, and
- * it seeds, builds and supervises lifemodel on the volume. "platform" is the
- * shape ADR-010 deploys on k3s (task lut.2.1): Flux brings the loader into
- * `lifemodel-system` with NO Docker socket and nothing to supervise - no
- * lifemodel, no Agent Vault - so the loader starts only its own web interface
- * and login. The mode is read once, at start: a shape the deployment chose is
- * not a runtime toggle.
- */
-export const LOADER_MODES = ['instance', 'platform'] as const;
-
-export type LoaderMode = (typeof LOADER_MODES)[number];
-
-/**
- * The kernel rule that confines lifemodel's egress (lifemodel-q4x.3.2, story
- * S5): uid 1000 reaches loopback and nothing else, installed by the loader
- * before lifemodel starts. The chain is the loader's own, so a start replaces
- * what an earlier one left instead of stacking on it.
- */
-export interface EgressConfig {
-  /** The iptables the image carries; a container without it is a missing input. */
-  binary: string;
-  /**
-   * The ip6tables the image carries, for the IPv6 half of the rule; installed
-   * whenever the container has an IPv6 address or route (`egress.procPath`),
-   * and a container where it cannot be installed does not start lifemodel -
-   * the one line names the unconfined IPv6 path.
-   */
-  ipv6Binary: string;
-  /** Where the kernel reports the container's IPv6 addresses (/proc/net/if_inet6). */
-  procPath: string;
-  /** The chain the loader owns and fills with the one rule. */
-  chain: string;
-  /**
-   * The container's embedded resolver (Docker answers names at 127.0.0.11):
-   * the DNS port of it is one of the loopback services uid 1000 may still
-   * reach. Empty switches the resolver's two rules off - a container without
-   * its own resolver resolves nothing locally at all.
-   */
-  resolver: string;
-}
-
 export interface LoaderConfig {
-  /** The volume: everything the instance owns. */
+  /** Writable persistent state owned by the platform loader. */
   volumeRoot: string;
-  /** The instance's git repository (owner lifemodel). */
-  repoDir: string;
-  /** lifemodel's DATA_PATH (owner lifemodel). */
-  dataDir: string;
-  /** The loader's own root-only directory (0700). */
   loaderDir: string;
-  /** The `git bundle` of the code the image carries. */
-  seedBundle: string;
-  /** The upstream the instance merges from later. */
-  upstreamUrl: string;
-  /** The loader's own HTTP port, on loopback. */
   httpPort: number;
-  /** The identity lifemodel (and its build) runs as. */
-  lifemodel: LifemodelIdentity;
-  /** The built entry point inside the instance's repository. */
-  lifemodelEntry: string;
-  /** The front door the loader owns: Caddy, the only web entrance. */
-  caddy: CaddyConfig;
-  /** Agent Vault: the keys, the proxy and the vault lifemodel uses. */
-  agentVault: AgentVaultConfig;
-  /** The rule that confines lifemodel's egress to the proxy. */
-  egress: EgressConfig;
-  /**
-   * The shape this loader runs in (LOADER_MODES): the whole supervisor half of
-   * the loader - the front door, Agent Vault, the egress rule, seeding,
-   * building, lifemodel itself - belongs to "instance" only.
-   */
-  mode: LoaderMode;
-  /** OpenBao HTTP API endpoint used by the platform loader. */
+  /** OpenBao HTTP API endpoint used during platform bootstrap. */
   openBaoAddress: string;
-  /** How long lifemodel's drain may take before the loader gives up on it. */
-  drainWaitMs: number;
-  /**
-   * The room a stop keeps after SIGKILL for the kernel to reap a child (lifemodel
-   * or Caddy); the drain gets what is left of the budget less this.
-   */
-  killWaitMs: number;
-  /**
-   * The whole stop, from the first SIGTERM to the last child gone: lifemodel's
-   * drain and Caddy's exit share this one deadline, and the documented
-   * `--stop-timeout 120` leaves room for it (rework 2, finding 10).
-   */
-  stopBudgetMs: number;
-  /** A build (npm ci && npm run build) may take minutes; this is its ceiling. */
-  buildTimeoutMs: number;
-  restart: RestartPolicy;
-  /** True when the loader runs as root and can therefore chown and setuid. */
-  privileged: boolean;
 }
 
-const DEFAULTS = {
-  volumeRoot: '/var/lib/lifemodel',
-  seedBundle: '/opt/lifemodel/seed.bundle',
-  upstreamUrl: 'https://github.com/shady2k/lifemodel.git',
-  httpPort: 7000,
-  mode: 'instance' as const,
-  openBaoAddress: 'http://openbao.openbao.svc:8200',
-  uid: 1000,
-  gid: 1000,
-  caddyBinary: '/usr/bin/caddy',
-  caddyConfig: '/etc/lifemodel/Caddyfile',
-  caddyStopWaitMs: 10_000,
-  agentVaultBinary: '/usr/local/bin/agent-vault',
-  agentVaultStartWaitMs: 15_000,
-  agentVaultCommandWaitMs: 30_000,
-  agentVaultStopWaitMs: 10_000,
-  egressBinary: 'iptables',
-  egressIpv6Binary: 'ip6tables',
-  egressIpv6ProcPath: '/proc/net/if_inet6',
-  egressChain: 'LIFEMODEL_EGRESS',
-  egressResolver: '127.0.0.11',
-  agentVaultApiPort: 14_321,
-  agentVaultProxyPort: 14_322,
-  drainWaitMs: 95_000,
-  killWaitMs: 5_000,
-  stopBudgetMs: 110_000,
-  buildTimeoutMs: 20 * 60_000,
-  restart: { initialDelayMs: 1_000, maxDelayMs: 30_000, healthyRunMs: 60_000 },
-} as const;
-
-function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
-  const raw = env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0) {
-    throw new LoaderFatalError(`${name} must be a whole number, got "${raw}"`);
+function readPort(env: NodeJS.ProcessEnv): number {
+  const raw = env['LIFEMODEL_HTTP_PORT'];
+  if (raw === undefined || raw === '') return 7000;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new LoaderFatalError(`LIFEMODEL_HTTP_PORT must be a valid port, got "${raw}"`);
   }
-  return value;
+  return port;
 }
 
-/**
- * The mode out of the environment, one name at a time: anything else than the
- * two named shapes is a deployment the loader cannot be, and is said so - it
- * is never read as today's shape.
- */
-function readLoaderMode(env: NodeJS.ProcessEnv): LoaderMode {
-  const raw = env['LIFEMODEL_LOADER_MODE'];
-  if (raw === undefined) return DEFAULTS.mode;
-  const mode = LOADER_MODES.find((named) => named === raw);
-  if (mode === undefined) {
-    throw new LoaderFatalError(
-      `LIFEMODEL_LOADER_MODE must be one of ${LOADER_MODES.map((m) => `"${m}"`).join(', ')}, got "${raw}"`
-    );
-  }
-  return mode;
-}
-
-/** The loader's configuration, from the environment and the contract's defaults. */
 export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
-  const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? DEFAULTS.volumeRoot;
+  const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? '/var/lib/loader';
   return {
-    mode: readLoaderMode(env),
-    openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? DEFAULTS.openBaoAddress,
     volumeRoot,
-    repoDir: join(volumeRoot, 'repo'),
-    dataDir: join(volumeRoot, 'data'),
     loaderDir: join(volumeRoot, 'loader'),
-    seedBundle: env['LIFEMODEL_SEED_BUNDLE'] ?? DEFAULTS.seedBundle,
-    upstreamUrl: env['LIFEMODEL_UPSTREAM'] ?? DEFAULTS.upstreamUrl,
-    httpPort: readInt(env, 'LIFEMODEL_HTTP_PORT', DEFAULTS.httpPort),
-    lifemodel: {
-      uid: readInt(env, 'LIFEMODEL_UID', DEFAULTS.uid),
-      gid: readInt(env, 'LIFEMODEL_GID', DEFAULTS.gid),
-    },
-    lifemodelEntry: join(volumeRoot, 'repo', 'dist', 'index.js'),
-    caddy: {
-      binary: env['LIFEMODEL_CADDY_BINARY'] ?? DEFAULTS.caddyBinary,
-      config: env['LIFEMODEL_CADDY_CONFIG'] ?? DEFAULTS.caddyConfig,
-      stopWaitMs: readInt(env, 'LIFEMODEL_CADDY_STOP_WAIT_MS', DEFAULTS.caddyStopWaitMs),
-    },
-    agentVault: {
-      binary: env['LIFEMODEL_AGENT_VAULT_BINARY'] ?? DEFAULTS.agentVaultBinary,
-      storeDir: env['LIFEMODEL_AGENT_VAULT_STORE'] ?? join(volumeRoot, 'vault'),
-      caPath: env['LIFEMODEL_AGENT_VAULT_CA'] ?? join(volumeRoot, 'vault-ca.pem'),
-      apiPort: readInt(env, 'LIFEMODEL_AGENT_VAULT_API_PORT', DEFAULTS.agentVaultApiPort),
-      proxyPort: readInt(env, 'LIFEMODEL_AGENT_VAULT_PROXY_PORT', DEFAULTS.agentVaultProxyPort),
-      vaultName: env['LIFEMODEL_AGENT_VAULT_NAME'] ?? 'lifemodel',
-      agentName: env['LIFEMODEL_AGENT_AGENT_NAME'] ?? 'lifemodel',
-      ownerEmail: env['LIFEMODEL_AGENT_VAULT_OWNER_EMAIL'] ?? 'owner@lifemodel.local',
-      startWaitMs: readInt(
-        env,
-        'LIFEMODEL_AGENT_VAULT_START_WAIT_MS',
-        DEFAULTS.agentVaultStartWaitMs
-      ),
-      commandWaitMs: readInt(
-        env,
-        'LIFEMODEL_AGENT_VAULT_COMMAND_WAIT_MS',
-        DEFAULTS.agentVaultCommandWaitMs
-      ),
-      stopWaitMs: readInt(env, 'LIFEMODEL_AGENT_VAULT_STOP_WAIT_MS', DEFAULTS.agentVaultStopWaitMs),
-    },
-    egress: {
-      binary: env['LIFEMODEL_EGRESS_IPTABLES'] ?? DEFAULTS.egressBinary,
-      ipv6Binary: env['LIFEMODEL_EGRESS_IP6TABLES'] ?? DEFAULTS.egressIpv6Binary,
-      procPath: env['LIFEMODEL_EGRESS_IF_INET6'] ?? DEFAULTS.egressIpv6ProcPath,
-      chain: env['LIFEMODEL_EGRESS_CHAIN'] ?? DEFAULTS.egressChain,
-      resolver: env['LIFEMODEL_EGRESS_RESOLVER'] ?? DEFAULTS.egressResolver,
-    },
-    drainWaitMs: readInt(env, 'LIFEMODEL_DRAIN_WAIT_MS', DEFAULTS.drainWaitMs),
-    killWaitMs: readInt(env, 'LIFEMODEL_KILL_WAIT_MS', DEFAULTS.killWaitMs),
-    stopBudgetMs: readInt(env, 'LIFEMODEL_STOP_BUDGET_MS', DEFAULTS.stopBudgetMs),
-    buildTimeoutMs: readInt(env, 'LIFEMODEL_BUILD_TIMEOUT_MS', DEFAULTS.buildTimeoutMs),
-    restart: DEFAULTS.restart,
-    privileged: typeof process.getuid === 'function' && process.getuid() === 0,
+    httpPort: readPort(env),
+    openBaoAddress: env['LIFEMODEL_OPENBAO_ADDRESS'] ?? 'http://openbao.openbao.svc:8200',
   };
 }

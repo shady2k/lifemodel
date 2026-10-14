@@ -1,5 +1,5 @@
 #!/bin/sh
-# Prepare the full-history bundle consumed by both the instance and loader images.
+# Prepare the full-history bundle consumed by the platform loader image.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)

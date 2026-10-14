@@ -1,14 +1,7 @@
-/**
- * The container's main process (lifemodel-q4x.2.1).
- *
- * It runs as root under tini, brings up the loader's own port, and starts
- * lifemodel as the unprivileged user. SIGTERM (what `docker stop` sends) is
- * FORWARDED to lifemodel and its exit is awaited for the length of its drain,
- * so the stop gives the instance the restart guarantee it was built for.
- */
+/** Process entry point for the platform bootstrap loader. */
 import { systemClock } from './clock.js';
 import { loadConfig, type LoaderConfig } from './config.js';
-import { createNodeLauncher, createNodeRunner } from './exec.js';
+import { createNodeRunner } from './exec.js';
 import { createNodeFileSystem } from './fs.js';
 import { createStdoutLogger } from './logger.js';
 import { createLoaderApp } from './app.js';
@@ -34,7 +27,6 @@ const app = createLoaderApp({
   config,
   fs: createNodeFileSystem(),
   runner: createNodeRunner(),
-  launcher: createNodeLauncher(),
   logger,
   clock: systemClock,
   exit: (code) => process.exit(code),

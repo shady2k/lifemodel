@@ -12,8 +12,7 @@
 #
 # The runtime runs as a non-root user, holds a read-only root filesystem, and
 # writes only to /var/lib/loader (a volume: the password and session secret
-# survive a restart) and to /tmp. LIFEMODEL_LOADER_MODE=platform starts it in
-# platform mode; the port is the loader's own 7000 on every interface.
+# survive a restart) and to /tmp. the loader always runs in its platform role; the port is the loader's own 7000 on every interface.
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
@@ -59,14 +58,11 @@ COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle
 USER loader
 WORKDIR /var/lib/loader
 
-# The mode is the deployment's decision, named here because this image exists
-# for it; the volume root is the one writable path (a volume: the password
-# and session secret survive a restart), and /tmp is the process's own.
+# The volume root is the writable platform state path, and /tmp belongs to the process.
 # The port is the loader's own, on every interface so a Service can reach it
-# (the instance image binds the loopback inside its container).
+# the Kubernetes Service reaches the pod through its IP.
 VOLUME ["/var/lib/loader"]
-ENV LIFEMODEL_LOADER_MODE=platform \
-    LIFEMODEL_VOLUME_ROOT=/var/lib/loader \
+ENV LIFEMODEL_VOLUME_ROOT=/var/lib/loader \
     NODE_ENV=production
 
 EXPOSE 7000

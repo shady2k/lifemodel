@@ -4,18 +4,8 @@
  * Navigates to a group URL, reports the initial message state, then
  * tests the "scroll up → click FAB → check for new messages" strategy.
  *
- * Usage (from project root):
- *   docker run -d --name tg-debug \
- *     -v lifemodel-browser-profile-<PROFILE>:/profile \
- *     --network bridge \
- *     --entrypoint sleep lifemodel-browser:latest 3600
- *
- *   docker cp docker/browser/scripts/debug-scroll.js tg-debug:/tmp/debug-scroll.js
- *   docker exec -e NODE_PATH=/scripts/node_modules \
- *     -e GROUP_URL='https://web.telegram.org/a/#-100XXXXXXXXXX' \
- *     tg-debug node /tmp/debug-scroll.js
- *
- *   docker stop tg-debug && docker rm tg-debug
+ * Usage: start the disposable browser debug container with the project's Docker tooling,
+ * copy this script into it, then run the documented Node command below.
  *
  * Environment:
  *   GROUP_URL — full Telegram Web A URL with fragment (required)

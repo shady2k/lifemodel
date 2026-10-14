@@ -166,22 +166,9 @@ disposable test boundary, `scripts/test-isolated.mjs
   reads committed config surfaces (package.json scripts, vitest config, the
   pre-commit hook, CI, lockfile agreement and store-image/network policy) and
   refuses a
-  raw vitest start on the host outside the named `ci-image` exception.
+  raw vitest start on the host in every CI job.
 
-The owner-approved exception is the PR-only `ci-image` job on a fresh
-GitHub-hosted Ubuntu runner. It may install test dependencies with host `npm ci`
-and run only `tests/integration/instance-first-start.test.ts` directly, with
-at most 2 workers, against its actual built
-`ghcr.io/shady2k/lifemodel:ci-$SHA` image and the runner's Docker daemon.
-The job has a 45-minute limit, read-only permissions, full credential-less
-checkout, no user secrets and no login or publishing step. Publishing stays
-in the separate main-push `ci-image-publish` job. No other job inherits this
-exception; `ci-product` remains on the isolated Node 24 launcher.
-
-Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
-locally, including through `test:docker`. The NixOS test VM walk is manual.
-The completed isolated Docker backend is retained; this exception requires no
-new VM, DinD or controller.
+CI builds and publishes only the standalone core image; all tests run through the isolated launcher.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
@@ -218,9 +205,7 @@ config file is `<DATA_PATH>/config/agent.json` when `DATA_PATH` is set, and
 `data/config/agent.json` (the working directory's) when it is not — one
 function, `resolveConfigDir` (`src/config/config-loader.ts`), is what the
 startup read and lifemodel's settings interface both resolve, so they can
-never disagree about the file. The loader gives an instance
-`DATA_PATH=<volume>/data`, so its config is `<volume>/data/config/agent.json`
-(`src/core/container.ts`, `src/settings/`).
+never disagree about the file. The platform loader does not assign lifemodel data paths; the platform configuration and core runtime own their settings and state paths.
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request

@@ -5,18 +5,8 @@
  * sample message HTML structure, and extracted content using both
  * the production extraction logic and raw DOM inspection.
  *
- * Usage (from project root):
- *   docker run -d --name tg-debug \
- *     -v lifemodel-browser-profile-<PROFILE>:/profile \
- *     --network bridge \
- *     --entrypoint sleep lifemodel-browser:latest 3600
- *
- *   docker cp docker/browser/scripts/debug-messages.js tg-debug:/tmp/debug-messages.js
- *   docker exec -e NODE_PATH=/scripts/node_modules \
- *     -e GROUP_URL='https://web.telegram.org/a/#-100XXXXXXXXXX' \
- *     tg-debug node /tmp/debug-messages.js
- *
- *   docker stop tg-debug && docker rm tg-debug
+ * Usage: start the disposable browser debug container with the project's Docker tooling,
+ * copy this script into it, then run the documented Node command below.
  *
  * Environment:
  *   GROUP_URL — full Telegram Web A URL with fragment (required)
