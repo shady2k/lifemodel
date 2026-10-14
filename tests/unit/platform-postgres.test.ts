@@ -73,6 +73,16 @@ describe('CloudNativePG platform state', () => {
     expect(database?.spec.egress).toEqual([]);
   });
 
+  it('allows core egress to the state Postgres Service through its namespace default deny', () => {
+    const objects = YAML.parseAllDocuments(readFileSync(join(root, 'a/applications.yaml'), 'utf8')).map((doc) => doc.toJSON());
+    const policy = objects.find((item) => item.kind === 'NetworkPolicy' && item.metadata.name === 'lifemodel-postgres-egress');
+    expect(policy?.metadata.namespace).toBe('lifemodel');
+    expect(policy?.spec).toEqual({
+      podSelector: {}, policyTypes: ['Egress'], ingress: [],
+      egress: [{ to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'lifemodel-state' } } }], ports: [{ protocol: 'TCP', port: 5432 }] }],
+    });
+  });
+
   it('refuses application Kustomizations that target platform-owned state', () => {
     const policies = YAML.parseAllDocuments(readFileSync(join(root, 'a0/admission-policies.yaml'), 'utf8')).map((doc) => doc.toJSON());
     const policy = policies.find((item) => item.kind === 'ValidatingAdmissionPolicy' && item.metadata.name === 'application-kustomization-admission');

@@ -181,7 +181,9 @@
         grep -F 'image: "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"' ${./deploy/platform/b/operator/rendered.yaml} >/dev/null
         kustomize build ${./deploy/platform/b} > cnpg-operator.yaml
         kustomize build ${./deploy/platform/state} > state.yaml
+        kustomize build ${./deploy/platform/a} > step-a.yaml
         grep -F 'name: lifemodel-state' state.yaml >/dev/null
+        grep -F 'name: lifemodel-postgres-egress' step-a.yaml >/dev/null
         grep -F 'imageName: ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b' ${./deploy/platform/state/cluster/cluster.yaml} >/dev/null
         grep -F 'name: platform-b' ${./deploy/platform/b-reconciler.yaml} >/dev/null
         grep -F 'name: platform-c' ${./deploy/platform/c-reconciler.yaml} >/dev/null

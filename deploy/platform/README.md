@@ -100,7 +100,9 @@ value; the operator image is pinned to
 `ghcr.io/cloudnative-pg/cloudnative-pg@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07`.
 Step B applies the CRDs and waits for the operator. Step C owns
 `lifemodel-state`, its default-deny policies and the one-instance `lifemodel`
-Cluster. The bootstrap creates database `lifemodel` and owner role `lifemodel`
+Cluster. Step A also allows the core namespace to egress to the state Postgres
+Service on TCP 5432; the state policy allows only that source namespace and
+the CNPG operator ports. The bootstrap creates database `lifemodel` and owner role `lifemodel`
 with CNPG's generated `lifemodel-app` Secret. The post-init SQL enables
 pgvector in the application database.
 
