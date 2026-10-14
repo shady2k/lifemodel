@@ -10,6 +10,15 @@ The vendored chart and values stay in the repository; the pinned Helm version
 renders `a/openbao/rendered.yaml` before release. Step A applies this committed
 manifest directly, avoiding a HelmRelease source reference that Flux v2.9.6's
 CRD does not accept. `nix flake check` re-renders the chart and rejects drift.
+Flux applies these plain manifests, not Helm releases, so Helm test hooks must
+not be present.
+Render both committed files with:
+
+```sh
+nix shell nixpkgs#kubernetes-helm -c helm template openbao deploy/platform/charts/openbao --namespace openbao --skip-tests -f deploy/platform/a/openbao-values.yaml > deploy/platform/a/openbao/rendered.yaml
+nix shell nixpkgs#kubernetes-helm -c helm template gitea deploy/platform/charts/gitea --namespace lifemodel-git --skip-tests -f deploy/platform/a/gitea/values.yaml > deploy/platform/a/gitea/rendered.yaml
+```
+
 OpenBao runs one standalone server using integrated Raft storage on a retained
 PVC, with no injector or auto-unseal. Its explicit ServiceAccount enables the
 projected Kubernetes token, and a ClusterRoleBinding grants only the built-in

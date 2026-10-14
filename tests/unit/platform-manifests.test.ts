@@ -99,6 +99,13 @@ esac`);
 }
 
 describe('platform manifests', () => {
+  it('does not render Helm hook resources in step A', () => {
+    const rendered = parseYamlFiles([
+      join(platformRoot, 'a/openbao/rendered.yaml'),
+      join(platformRoot, 'a/gitea/rendered.yaml'),
+    ]);
+    expect(rendered.filter((item) => item.metadata?.annotations?.['helm.sh/hook'] !== undefined)).toEqual([]);
+  });
   it('deploys Gitea with explicit SQLite, admin Secret, persistence, and restricted access', () => {
     const giteaRoot = join(platformRoot, 'a/gitea');
     const kustomization = YAML.parse(readFileSync(join(platformRoot, 'a/kustomization.yaml'), 'utf8')) as { resources: string[] };
