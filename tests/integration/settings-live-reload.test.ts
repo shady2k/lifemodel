@@ -26,6 +26,10 @@ afterEach(async () => {
 describe('settings reload in a running core', () => {
   it('routes a settings save into the existing provider holder and uses the new model next', async () => {
     const stores = await createTestStores();
+    const previous = {
+      db: process.env.LIFEMODEL_DATABASE_URL,
+      valkey: process.env.LIFEMODEL_VALKEY_URL,
+    };
     try {
       await applyTestMigrations(stores.postgres);
       const url = new URL(process.env.LIFEMODEL_TEST_DATABASE_URL!);
@@ -114,9 +118,11 @@ describe('settings reload in a running core', () => {
         messages: [{ role: 'user', content: 'next' }],
       });
       expect(requestedModels).toEqual(['fast-old', 'fast-new']);
-      process.env.LIFEMODEL_DATABASE_URL = previous.db;
-      process.env.LIFEMODEL_VALKEY_URL = previous.valkey;
     } finally {
+      if (previous.db === undefined) delete process.env.LIFEMODEL_DATABASE_URL;
+      else process.env.LIFEMODEL_DATABASE_URL = previous.db;
+      if (previous.valkey === undefined) delete process.env.LIFEMODEL_VALKEY_URL;
+      else process.env.LIFEMODEL_VALKEY_URL = previous.valkey;
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
