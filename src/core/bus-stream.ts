@@ -2,6 +2,8 @@ import type { Redis } from 'iovalkey';
 import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotSectionOwner } from '../storage/snapshot-store.js';
 
+export const MAX_BUS_LEDGER_ENTRIES = 100;
+
 export interface BusSignalEntry {
   id: string;
   signal: Signal;
@@ -28,6 +30,7 @@ export interface BusSignalStream extends SnapshotSectionOwner<BusSnapshot> {
   markOwned(ids: string[], turnId: string): void;
   markCompleted(ids: string[]): void;
   markFailed(ids: string[]): void;
+  admissionCapacity(): number;
 }
 
 /** Durable FIFO for internal signals, sharing the snapshot store's key prefix. */
@@ -74,8 +77,14 @@ export class ValkeyBusSignalStream implements BusSignalStream {
     return state ? structuredClone(state) : undefined;
   }
 
+  admissionCapacity(): number {
+    return Math.max(0, MAX_BUS_LEDGER_ENTRIES - Object.keys(this.snapshot.entries).length);
+  }
+
   ensureOwned(id: string, turnId: string): void {
-    this.snapshot.entries[id] ??= { status: 'owned', turnId, retries: 0 };
+    if (this.snapshot.entries[id]) return;
+    if (this.admissionCapacity() === 0) return;
+    this.snapshot.entries[id] = { status: 'owned', turnId, retries: 0 };
   }
 
   markOwned(ids: string[], turnId: string): void {

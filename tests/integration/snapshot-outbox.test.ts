@@ -171,6 +171,35 @@ describe('snapshot outbox commit', () => {
     expect(await stores.redis.hlen(eventKeysKey)).toBe(2);
   });
 
+  it('trims the full default horizon with bounded key-delete batches and the exact drop count', async () => {
+    const prefix = `outbound-default-horizon:${stores.workerId}:${Date.now()}:`;
+    const streamKey = `${prefix}events`;
+    const eventKeysKey = `${streamKey}:event-keys`;
+    const pipeline = stores.redis.pipeline();
+    const count = 10_001;
+    for (let index = 1; index <= count; index += 1) {
+      const id = `${index}-0`;
+      const eventId = `horizon-${index}`;
+      pipeline.xadd(streamKey, id, 'eventId', eventId, 'event', '{}');
+      pipeline.hset(eventKeysKey, eventId, id);
+    }
+    const inserted = await pipeline.exec();
+    if (!inserted) throw new Error('Valkey did not execute the retention fixture pipeline');
+    const calls: RecordedLog[] = [];
+    await trimOutboundEvents(stores.redis, {
+      streamKey,
+      eventKeysKey,
+      postgresOffsetKey: `${prefix}pg`,
+      deliveryOffsetKey: `${prefix}delivery`,
+      logger: recordingLogger(createTestLogger(), calls),
+    });
+    expect(await stores.redis.xlen(streamKey)).toBe(0);
+    expect(await stores.redis.hlen(eventKeysKey)).toBe(0);
+    expect(calls.filter((call) => call.level === 'warn')).toEqual([
+      expect.objectContaining({ obj: expect.objectContaining({ count }) }),
+    ]);
+  });
+
   it('bounds no-channel backlog and event-key growth with one warning per trim', async () => {
     const prefix = `outbound-retention:${stores.workerId}:`;
     const streamKey = `${prefix}events`;
