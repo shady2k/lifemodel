@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   boundStopContainer(active);
   container = active;
 
-  const { logger, agent, coreLoop, messageComposer, stateManager } = container;
+  const { logger, agent, coreLoop, stateManager } = container;
 
   // lifemodel's own settings interface, on the port Caddy's root host reaches
   // (127.0.0.1:7100). It is started BEFORE the loop, so the instance is
