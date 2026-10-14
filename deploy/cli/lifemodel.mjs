@@ -24,7 +24,7 @@ function runKubectl(args, input) {
   try { return execFileSync(kubectl[0], [...kubectl.slice(1), ...args], { encoding: 'utf8', input }); }
   catch (error) { throw new Error(`kubectl ${args.join(' ')} failed: ${error?.stderr?.toString().trim() || error?.message || String(error)}`); }
 }
-function get(resource, namespace) { return JSON.parse(runKubectl(['get', resource, '-n', namespace, '-o', 'json'])); }
+function get(resource, namespace, name) { return JSON.parse(runKubectl(['get', resource, ...(name ? [name] : []), '-n', namespace, '-o', 'json'])); }
 function condition(item) { return (item.status?.conditions || []).find((entry) => entry.type === 'Ready') || {}; }
 function clean(value) { return String(value ?? 'unknown').replace(/[\r\n\t]+/g, ' ').trim() || 'unknown'; }
 function current(item) { return item.metadata?.generation != null && item.status?.observedGeneration === item.metadata.generation; }
@@ -86,13 +86,35 @@ function report() {
     else failures.push(...checkResources(kind, items, revision));
   }
   failures.push(...checkResources('Kustomization', get('kustomizations','flux-system').items || [], i=>i.status?.lastAppliedRevision));
-  const bootstrap = get('secrets loader-bootstrap-state', 'lifemodel-system');
+  const bootstrap = get('secrets', 'lifemodel-system', 'loader-bootstrap-state');
   let phaseRecord;
-  try { phaseRecord = JSON.parse(Buffer.from(bootstrap.data?.phase || '', 'base64').toString('utf8')); }
-  catch { throw new Error('Secret loader-bootstrap-state has an invalid phase record.'); }
-  if (!phaseRecord || typeof phaseRecord.phase !== 'string' || typeof phaseRecord.status !== 'string') throw new Error('Secret loader-bootstrap-state has an invalid phase record.');
-  const firstStartComplete = phaseRecord.phase === 'gitea-application-kustomizations' && phaseRecord.status === 'complete';
-  if (!firstStartComplete) console.log(`Loader first start in progress at ${clean(phaseRecord.phase)} (status=${clean(phaseRecord.status)})`);
+  let applicationResourcesRequired = false;
+  let phaseLabel = 'not started';
+  if (bootstrap.data?.phase === undefined) {
+    console.log('Loader first start not started');
+  } else {
+    try { phaseRecord = JSON.parse(Buffer.from(bootstrap.data.phase, 'base64').toString('utf8')); }
+    catch { phaseRecord = null; }
+    const validPhase = phaseRecord && typeof phaseRecord.phase === 'string' && phaseRecord.phase.trim() && ['running', 'complete', 'failed'].includes(phaseRecord.status);
+    if (!validPhase) {
+      console.log('Loader first start phase record invalid');
+      failures.push('Secret loader-bootstrap-state (invalid phase record)');
+      applicationResourcesRequired = true;
+      phaseLabel = 'phase record invalid';
+    } else {
+      phaseLabel = clean(phaseRecord.phase);
+      console.log(`Loader first start phase=${phaseLabel} status=${clean(phaseRecord.status)}`);
+      const finalPhaseComplete = phaseRecord.phase === 'gitea-application-kustomizations' && phaseRecord.status === 'complete';
+      if (phaseRecord.status === 'failed') {
+        failures.push(`Loader bootstrap phase ${phaseLabel} (failed)`);
+        applicationResourcesRequired = true;
+      } else if (finalPhaseComplete) {
+        applicationResourcesRequired = true;
+      } else {
+        console.log(`Loader first start in progress at ${phaseLabel} (status=${clean(phaseRecord.status)})`);
+      }
+    }
+  }
   const appChecks = [
     ['GitRepository', 'lifemodel', 'lifemodel'],
     ['GitRepository', 'lifemodel-motor', 'lifemodel-motor'],
@@ -103,8 +125,8 @@ function report() {
     const resource = kind === 'GitRepository' ? 'gitrepositories' : 'kustomizations';
     const item = (get(resource, namespace).items || []).find(i => i.metadata?.name === name);
     if (!item) {
-      if (firstStartComplete) failures.push(`${kind}/${namespace}/${name} (missing)`);
-      else console.log(`${kind}/${namespace}/${name}: missing (expected; first start in progress at ${clean(phaseRecord.phase)})`);
+      if (applicationResourcesRequired) failures.push(`${kind}/${namespace}/${name} (missing)`);
+      else console.log(`${kind}/${namespace}/${name}: missing (expected; first start ${phaseLabel === 'not started' ? 'not started' : `in progress at ${phaseLabel}`})`);
       continue;
     }
     const ready = condition(item), generation = current(item);

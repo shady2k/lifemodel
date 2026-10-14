@@ -20,15 +20,17 @@ function setup(responses: Record<string, unknown>, history?: string) {
   const fake = join(dir, 'kubectl');
   writeFileSync(fake, `#!/bin/sh
 if [ "$1" = --kubeconfig ]; then shift 2; fi
-printf '%s\n' "$*" >> "$FAKE_KUBECTL_CALLS"
+printf '<%s>' "$@" >> "$FAKE_KUBECTL_CALLS"
+printf '\n' >> "$FAKE_KUBECTL_CALLS"
 if [ "$1" = apply ]; then cat > "$FAKE_KUBECTL_INPUT"; exit 0; fi
 if [ "$1" = exec ]; then
   cat "$FAKE_KUBECTL_RESPONSES/bao-status.json"
   exit "\${FAKE_BAO_EXIT:-0}"
 fi
 if [ "$1" = get ]; then
-  case "$2" in
-    ocirepositories) file=ocirepositories;; ocirepository) file=ocirepository;; gitrepositories) file=gitrepositories;; kustomizations) file=kustomizations;; deployments) file=deployments;; pods) file=pods;; events) file=events;; secrets*) file=secret;; secret) file=secret;; *) exit 9;;
+  case "$2" in *' '*) echo 'malformed resource token' >&2; exit 8;; esac
+  case "$2:$3" in
+    ocirepositories:*) file=ocirepositories;; ocirepository:*) file=ocirepository;; gitrepositories:*) file=gitrepositories;; kustomizations:*) file=kustomizations;; deployments:*) file=deployments;; pods:*) file=pods;; events:*) file=events;; secrets:loader-bootstrap-state) file=secret;; secret:*) file=secret;; *) exit 9;;
   esac
   case "$*" in *"-n lifemodel-system "*) :;; *"-n lifemodel-motor "*) file=$file-lifemodel-motor;; *"-n lifemodel-git "*) file=$file-lifemodel-git;; *"-n lifemodel "*) file=$file-lifemodel;; esac
   cat "$FAKE_KUBECTL_RESPONSES/$file.json"
@@ -54,7 +56,7 @@ const healthy = {
   'kustomizations-lifemodel': { items: [{ metadata: { name: 'lifemodel', namespace: 'lifemodel', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
   'kustomizations-lifemodel-motor': { items: [{ metadata: { name: 'lifemodel-motor', namespace: 'lifemodel-motor', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
   'deployments-lifemodel-git': { items: [{ metadata: { name: 'gitea', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1 } }] },
-  secret: { data: { phase: Buffer.from(JSON.stringify({ phase: 'gitea-application-kustomizations', status: 'complete' })).toString('base64') } },
+  secret: { data: { phase: Buffer.from(JSON.stringify({ phase: 'gitea-application-kustomizations', status: 'complete' })).toString('base64'), custody: Buffer.from('DOCTOR_SECRET_CANARY_CUSTODY').toString('base64'), 'gitea-admin': Buffer.from('DOCTOR_SECRET_CANARY_GITEA_ADMIN').toString('base64'), credentials: Buffer.from('DOCTOR_SECRET_CANARY_CREDENTIALS').toString('base64') } },
   'bao-status': { initialized: true, sealed: false },
 };
 
@@ -78,6 +80,28 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('Kustomization/lifemodel-motor/lifemodel-motor Ready=True generationCurrent=yes');
     expect(run.stdout).toContain('Pod/loader-abc phase=Running ready=yes restarts=0');
     expect(run.stdout).toContain('Deployment/loader ready=yes generationCurrent=yes desiredReplicas=1 restarts=0 lastEventReason=none');
+    expect(readFileSync(env.calls, 'utf8').trim().split('\n')).toEqual([
+      '<exec><-n><openbao><openbao-0><--><bao><status><-format=json>',
+      '<get><ocirepositories><-n><flux-system><-o><json>',
+      '<get><gitrepositories><-n><flux-system><-o><json>',
+      '<get><kustomizations><-n><flux-system><-o><json>',
+      '<get><secrets><loader-bootstrap-state><-n><lifemodel-system><-o><json>',
+      '<get><gitrepositories><-n><lifemodel><-o><json>',
+      '<get><gitrepositories><-n><lifemodel-motor><-o><json>',
+      '<get><kustomizations><-n><lifemodel><-o><json>',
+      '<get><kustomizations><-n><lifemodel-motor><-o><json>',
+      '<get><deployments><-n><lifemodel-git><-o><json>',
+      '<get><deployments><-n><lifemodel-system><-o><json>',
+      '<get><pods><-n><lifemodel-system><-o><json>',
+      '<get><events><-n><lifemodel-system><-o><json>',
+    ]);
+  });
+
+  it('never prints values from custody, gitea-admin, or credentials Secrets', () => {
+    const env = setup(healthy);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(`${run.stdout}${run.stderr}`).not.toContain('DOCTOR_SECRET_CANARY');
   });
 
   it.each([
@@ -104,6 +128,64 @@ describe('lifemodel doctor', () => {
     const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(0);
     expect(run.stdout).toContain('first start in progress at gitea-ready');
+  });
+
+  it('treats the platform-created empty phase Secret as not started and continues checks', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret = { data: { custody: Buffer.from('DOCTOR_SECRET_CANARY_CUSTODY').toString('base64'), 'gitea-admin': Buffer.from('DOCTOR_SECRET_CANARY_GITEA_ADMIN').toString('base64'), credentials: Buffer.from('DOCTOR_SECRET_CANARY_CREDENTIALS').toString('base64') } };
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('Loader first start not started');
+    expect(run.stdout).toContain('GitRepository/lifemodel/lifemodel: missing (expected; first start not started)');
+    expect(run.stdout).toContain('Deployment/loader ready=yes');
+    expect(`${run.stdout}${run.stderr}`).not.toContain('DOCTOR_SECRET_CANARY');
+  });
+
+  it('reports a malformed phase record and continues reporting independent failures', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from('{bad json').toString('base64');
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('Secret loader-bootstrap-state (invalid phase record)');
+    expect(run.stderr).toContain('GitRepository/lifemodel/lifemodel (missing)');
+    expect(run.stdout).toContain('Deployment/loader ready=yes');
+  });
+
+  it('fails a persisted failed phase and does not waive missing application resources', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase: 'source-credentials', status: 'failed' })).toString('base64');
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('Loader first start phase=source-credentials status=failed');
+    expect(run.stderr).toContain('Loader bootstrap phase source-credentials (failed)');
+    expect(run.stderr).toContain('GitRepository/lifemodel/lifemodel (missing)');
+  });
+
+  it('prints a completed phase and status without exposing secret data', () => {
+    const env = setup(healthy);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.stdout).toContain('Loader first start phase=gitea-application-kustomizations status=complete');
+    expect(`${run.stdout}${run.stderr}`).not.toContain('DOCTOR_SECRET_CANARY');
+  });
+
+  it.each([
+    ['running', 'gitea-ready'],
+    ['complete', 'gitea-ready'],
+  ])('keeps %s at non-final phase non-fatal for missing application objects', (status, phase) => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase, status })).toString('base64');
+    data['gitrepositories-lifemodel'].items = [];
+    const env = setup(data);
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`Loader first start phase=${phase} status=${status}`);
+    expect(run.stdout).toContain('missing (expected; first start');
   });
 
   it('reports missing application resources as failures after first start completes', () => {
@@ -156,7 +238,7 @@ describe('lifemodel doctor', () => {
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain('owned by kubectl-patch');
     expect(run.stderr).toContain('delete ocirepository platform');
-    expect(readFileSync(env.calls, 'utf8')).toContain('get ocirepository platform -n flux-system -o json --show-managed-fields');
+    expect(readFileSync(env.calls, 'utf8')).toContain('<get><ocirepository><platform><-n><flux-system><-o><json><--show-managed-fields>');
   });
 
   it('persists the previous ref as an override and reruns bootstrap without writing the cluster', () => {
