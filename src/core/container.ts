@@ -70,6 +70,8 @@ import {
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import {
+  INBOUND_STREAM,
+  OUTBOUND_STREAM,
   InboundMessageStream,
   applyCommittedOutboundEvents,
   startOutboundDelivery,
@@ -487,7 +489,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const rawPostgres = new Pool({ connectionString: databaseUrl });
 
   const snapshotRedis = new Redis(valkeyUrl);
-  const snapshotStore = createSnapshotStore(snapshotRedis);
+  const snapshotStore = createSnapshotStore(snapshotRedis, { outboundKey: OUTBOUND_STREAM });
   const busSignalStream = createBusSignalStream(snapshotRedis);
   snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
@@ -545,7 +547,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Inbound offsets, pending entries and the bounded dedup ring are owned by
   // the Valkey snapshot. Existing stream entries replay from that snapshot.
-  const inboundStream = new InboundMessageStream(snapshotRedis);
+  const inboundStream = new InboundMessageStream(snapshotRedis, INBOUND_STREAM);
   inboundStream.hydrateSnapshot(
     initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]
   );

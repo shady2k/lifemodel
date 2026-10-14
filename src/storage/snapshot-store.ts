@@ -52,6 +52,8 @@ export class StaleSnapshotEpochError extends Error {
 
 export interface SnapshotStoreConfig {
   keyPrefix?: string;
+  /** Outbound stream shared with the message consumers. */
+  outboundKey?: string;
 }
 
 /** Atomic Valkey snapshot and epoch fencing for the core tick writer. */
@@ -70,7 +72,7 @@ export class SnapshotStore {
     const prefix = config.keyPrefix ?? 'lifemodel:core:snapshot:';
     this.epochKey = `${prefix}${SNAPSHOT_EPOCH_KEY}`;
     this.snapshotKey = `${prefix}${SNAPSHOT_KEY}`;
-    this.outboundKey = `${prefix}outbound`;
+    this.outboundKey = config.outboundKey ?? `${prefix}outbound`;
     this.outboundKeysKey = `${prefix}outbound:event-keys`;
     this.scriptSha = createHash('sha1').update(COMMIT_SCRIPT).digest('hex');
   }
