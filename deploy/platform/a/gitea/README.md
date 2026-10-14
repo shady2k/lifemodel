@@ -17,7 +17,7 @@ Helm rendering error. A0 starts the loader independently, and it creates the
 Secret during first-start bootstrap. Step A waits for all its resources,
 so it becomes ready after the Secret is created and Gitea becomes healthy.
 
-The owner UI Ingress is `git.localhost` through Traefik. ForwardAuth is not
-installed yet; the UI is not protected by it until the loader UI work adds
-that integration. The NetworkPolicy admits only the loader, Flux
-source-controller and Traefik to Gitea HTTP on TCP 3000, and denies all egress.
+Gitea has no Ingress in this stage. Its NetworkPolicy allows only the loader
+and Flux source-controller to reach HTTP on TCP 3000, and denies all egress.
+The Gitea PVC and namespace are protected from Flux pruning; removal is an
+explicit owner action.

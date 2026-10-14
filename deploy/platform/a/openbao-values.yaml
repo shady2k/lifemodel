@@ -26,9 +26,9 @@ server:
     enabled: true
     size: 10Gi
     accessMode: ReadWriteOnce
-    persistentVolumeClaimRetentionPolicy:
-      whenDeleted: Retain
-      whenScaled: Retain
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   authDelegator:
     enabled: false
   serviceAccount:

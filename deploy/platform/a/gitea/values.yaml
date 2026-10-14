@@ -38,16 +38,10 @@ persistence:
   storageClass: local-path
   annotations:
     helm.sh/resource-policy: keep
+    kustomize.toolkit.fluxcd.io/prune: disabled
 
 ingress:
-  enabled: true
-  className: traefik
-  hosts:
-    - host: git.localhost
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  enabled: false
 
 gitea:
   admin:
