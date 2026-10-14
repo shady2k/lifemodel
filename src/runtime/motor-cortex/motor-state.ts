@@ -1,7 +1,7 @@
 /**
  * Motor Cortex State Manager
  *
- * Manages persistence of Motor Cortex runs using DeferredStorage.
+ * Manages persistence of Motor Cortex runs using the configured durable storage.
  * All runs are stored in a single object under the 'motor-runs' key.
  */
 
@@ -48,7 +48,7 @@ function migrateTools(tools: string[]): MotorTool[] {
  * Motor Cortex State Manager.
  *
  * CRUD operations for MotorRun persistence.
- * Uses DeferredStorage with explicit flush after critical transitions.
+ * Writes each critical transition directly to durable storage.
  */
 export class MotorStateManager {
   private readonly storage: Storage;
@@ -66,7 +66,6 @@ export class MotorStateManager {
     const stored = await this.loadStored();
     stored.runs.push(run);
     await this.storage.save(MOTOR_RUNS_KEY, stored);
-    await this.flush();
     this.logger.debug({ runId: run.id, task: run.task }, 'Motor run created');
   }
 
@@ -83,7 +82,6 @@ export class MotorStateManager {
 
     stored.runs[index] = run;
     await this.storage.save(MOTOR_RUNS_KEY, stored);
-    await this.flush();
     this.logger.trace({ runId: run.id, status: run.status }, 'Motor run updated');
   }
 
@@ -121,16 +119,6 @@ export class MotorStateManager {
         (r) => r.status === 'running' || r.status === 'created' || r.status === 'awaiting_input'
       ) ?? null
     );
-  }
-
-  /**
-   * Explicit flush for critical state transitions.
-   */
-  private async flush(): Promise<void> {
-    // Check if storage has flush method (DeferredStorage)
-    if ('flush' in this.storage && typeof this.storage.flush === 'function') {
-      await (this.storage.flush as () => Promise<void>)();
-    }
   }
 
   /**

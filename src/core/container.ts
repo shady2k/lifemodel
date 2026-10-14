@@ -34,12 +34,9 @@ import {
   type Storage,
   type StateManager,
   type ConversationManager,
-  createJSONStorage,
-  createDeferredStorage,
   PostgresStorage,
   createStateManager,
   createConversationManager,
-  migrateToHierarchical,
   createSnapshotStore,
 } from '../storage/index.js';
 import {
@@ -243,8 +240,8 @@ export interface ShutdownSequenceDeps {
   channels: Iterable<Channel>;
   /** The core loop: stop() drains the turn in flight */
   coreLoop: Pick<CoreLoop, 'stop' | 'stopReport' | 'closeDurableWrites'>;
-  /** Storage (DeferredStorage): the final flush */
-  storage: Storage & { shutdown: () => Promise<void> };
+  /** Storage lifecycle hook; durable writes are synchronous at their store. */
+
   /** State manager (auto-save stop + final state save) */
   stateManager: { shutdown: () => Promise<void> };
   /** Recipient registry (flushes its pending writes) */
@@ -341,15 +338,10 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
     }
   }
 
-  // 5. Storage last: the deferred writes of steps 3-4 reach disk here, and no
-  //    component writes after this flush. The loop is closed for durable
-  //    writes FIRST: a send that settles behind this flush would commit into a
-  //    storage that already shut down (the write would be lost), so it keeps
-  //    its message in the log instead - the entry is on disk and replays once
-  //    at the next start.
+  // 5. Fence durable writes before releasing the store connections. Store writes
+  //    are awaited at their call sites; there is no buffered filesystem flush.
   if (progress) progress.step = 'storage_flush';
   deps.coreLoop.closeDurableWrites();
-  await deps.storage.shutdown();
 
   if (progress) progress.step = 'done';
   logger.info('Shutdown complete');
@@ -519,7 +511,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const mergedConfig = await configLoader.load();
 
   // Build logger config from merged config
-  const logToFile = configOverrides.logToFile ?? true;
+  const logToFile = configOverrides.logToFile ?? process.env['NODE_ENV'] !== 'production';
   const loggerConfig: Partial<LoggerConfig> = {
     logDir: configOverrides.logDir ?? mergedConfig.logging.logDir,
     maxFiles: configOverrides.maxLogFiles ?? mergedConfig.logging.maxFiles,
@@ -549,18 +541,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   setConversationLogger(conversationLogger);
   logger.info('Conversation logger initialized');
 
-  // Create storage with deferred writes (batches disk I/O, prevents race conditions)
+  // All mutable core state is held by Postgres or the Valkey snapshot.
   const storagePath = mergedConfig.paths.state;
-
-  // Migrate flat colon-delimited files to hierarchical directory structure
-  await migrateToHierarchical(storagePath, '.json', logger);
-
-  const jsonStorage = createJSONStorage(storagePath, { logger });
-  const storage = createDeferredStorage(jsonStorage, logger, {
-    flushIntervalMs: 30_000, // Flush every 30 seconds
-  });
-  storage.startAutoFlush();
-  logger.info({ storagePath }, 'Storage initialized');
+  const storage = new PostgresStorage(postgres);
+  logger.info('Postgres storage initialized');
 
   // Inbound offsets, pending entries and the bounded dedup ring are owned by
   // the Valkey snapshot. Existing stream entries replay from that snapshot.
@@ -575,7 +559,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   stateManager.setSnapshotState(snapshotState ?? null);
 
   // Conversation history lives in the core Postgres schema, not DATA_PATH.
-  const coreStorage = new PostgresStorage(postgres);
+  const coreStorage = storage;
   const conversationManager = createConversationManager(
     new PostgresConversationStore(postgres),
     logger
@@ -716,7 +700,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Long-lived memory and its graph live only in the core Postgres schema.
-  const embedder = createEmbedder();
+  const embedder = createEmbedder({ cacheDir: '/tmp/lifemodel-models' });
   const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
   const graphStore = new PostgresGraphStore(postgres, logger);
   const memoryProvider = new MemoryProviderImpl(logger, { vectorStore, graphStore });
@@ -1205,7 +1189,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   if (replayedInbound.length > 0) {
     logger.info({ count: replayedInbound.length }, 'Replayed pending inbound stream messages');
   }
-  await storage.flush();
 
   // Register components with state manager
   const stateManagerComponents: Parameters<typeof stateManager.registerComponents>[0] = {
@@ -1251,7 +1234,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       deadline: Date.now() + budget,
       channels: channels.values(),
       coreLoop,
-      storage,
       stateManager,
       recipientRegistry,
       progress: stopProgress,

@@ -8,7 +8,7 @@
  *      sends it scheduled
  *   3. state and registries persist
  *   4. the channels stop fully (sending released)
- *   5. storage flushes LAST
+ *   5. durable write intake is fenced after all awaited writes
  *
  * Nothing is persisted for the next run: internal signals are not durable and
  * inbound messages are carried by the durable inbound log. Whatever still
@@ -62,8 +62,7 @@ function makeDoubles() {
   const stateManager = { shutdown: async () => steps.push('stateManager.shutdown') };
   const recipientRegistry = { flush: async () => steps.push('recipientRegistry.flush') };
   const ackRegistry = { flush: async () => steps.push('ackRegistry.flush') };
-  const storage = { shutdown: async () => steps.push('storage.shutdown') };
-  return { steps, channel, coreLoop, stateManager, recipientRegistry, ackRegistry, storage };
+  return { steps, channel, coreLoop, stateManager, recipientRegistry, ackRegistry };
 }
 
 describe('container shutdown sequence', () => {
@@ -76,7 +75,6 @@ describe('container shutdown sequence', () => {
       deadline: Date.now() + 5_000,
       channels: [d.channel] as never,
       coreLoop: d.coreLoop as never,
-      storage: d.storage as never,
       progress,
       stateManager: d.stateManager as never,
       recipientRegistry: d.recipientRegistry as never,
@@ -91,7 +89,6 @@ describe('container shutdown sequence', () => {
       'channel.stop',
       // the fence is closed just before the LAST step: nothing writes after it
       'coreLoop.closeDurableWrites',
-      'storage.shutdown',
     ]);
     // the stop finished: the hard exit is disarmed on 'done'
     expect(progress.step).toBe('done');
@@ -119,11 +116,6 @@ describe('container shutdown sequence', () => {
         stopReport: () => idleReport,
         closeDurableWrites: () => undefined,
       },
-      storage: {
-        shutdown: async () => {
-          seen.push(progress.step);
-        },
-      },
     };
 
     await shutdownSequence({
@@ -131,14 +123,13 @@ describe('container shutdown sequence', () => {
       deadline: Date.now() + 5_000,
       channels: [watched.channel] as never,
       coreLoop: watched.coreLoop as never,
-      storage: watched.storage as never,
       progress,
       stateManager: d.stateManager as never,
       recipientRegistry: d.recipientRegistry as never,
       ackRegistry: d.ackRegistry as never,
     });
 
-    expect(seen).toEqual(['intake_stop', 'loop_drain', 'channel_stop', 'storage_flush']);
+    expect(seen).toEqual(['intake_stop', 'loop_drain', 'channel_stop']);
   });
 
   it('a caller without a progress recorder still stops in order', async () => {
@@ -148,11 +139,10 @@ describe('container shutdown sequence', () => {
       deadline: Date.now() + 5_000,
       channels: [d.channel] as never,
       coreLoop: d.coreLoop as never,
-      storage: d.storage as never,
       stateManager: d.stateManager as never,
       recipientRegistry: d.recipientRegistry as never,
       ackRegistry: d.ackRegistry as never,
     });
-    expect(d.steps.at(-1)).toBe('storage.shutdown');
+    expect(d.steps.at(-1)).toBe('coreLoop.closeDurableWrites');
   });
 });

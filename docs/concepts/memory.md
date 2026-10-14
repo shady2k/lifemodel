@@ -30,7 +30,7 @@ Responsible for:
 - **Semantic vector search**: queries and entries are embedded locally and searched with pgvector cosine distance
 - Two-phase search: vector retrieval from Postgres/pgvector → re-ranking in JS with recency/confidence/salience boosts
 
-**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). Model cached at `data/models/` (~50MB).
+**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). Model cache lives under `/tmp` in the cluster image (~50MB).
 
 **Storage:** vectors and their metadata are persisted in the core Postgres schema (`core.memory_vectors`, migration `20261015000003_create_memory_vectors.sql`). Configuration also lives in Postgres (`core.settings`); neither store depends on a local file directory.
 
@@ -56,7 +56,7 @@ Responsible for:
 - Primary: `Map<id, GraphEntity>`, `Map<id, GraphRelation>`
 - Adjacency: `outEdges: Map<entityId, Set<relationId>>`, `inEdges` same
 - Name index: `Map<lowercase name/alias, entityId>` for O(1) lookup
-- Persisted via DeferredStorage, key: `graph`, format: `{ version: 1, entities[], relations[] }`
+- Persisted in Postgres (`core.memory_entities` and `core.memory_relations`)
 
 **Graph algorithms:**
 - `traverse()` — BFS with visited set, filter by minStrength/minConfidence/relationTypes

@@ -213,13 +213,7 @@ Created at runtime relative to the working directory; the root is `data/`
   and results pretty-printed, responses unwrapped from their JSON envelope;
   the file comes from `src/core/logger.ts`, the entries from
   `src/llm/provider.ts`
-- `data/state/` — persisted state: JSON state files (written through
-  DeferredStorage), conversations, `data/state/memory/` (vector store),
-  soul, graph, the tick snapshot and message streams; next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
-  `data/plugins/`. These logs and `data/state/` hold personal messages and
-  tool content: do not paste them outside this machine, and back up
-  `data/state/` before cleaning conversation history
-- Configuration lives in the core Postgres schema (`core.settings`), read by `src/config/config-loader.ts`; no config file is read or written.
+- Persistent state lives in its declared store: the tick snapshot, bus offsets and inbound/outbound streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a persistent-state store and the core must start when it is read-only. In the cluster, logs go to stdout (`kubectl logs`), and the ONNX cache is under `/tmp`. Motor Cortex and its skill/workspace/run directories are disabled in the cluster (`MOTOR_CORTEX_ENABLED=false`) and move with lifemodel-653; when disabled, they must not create `data/skills`, `data/motor-runs` or `data/models`. Back up the stores before destructive recovery; logs and stores hold personal messages and tool content.
 
 ## Debugging unexpected agent output
 
@@ -393,9 +387,7 @@ These are requirements, not suggestions.
    preceding `tool_calls[].id`.
 3. **Deterministic Errors Need Prevention, Not Recovery** — Same input → same
    error means fix the root cause. Don't retry what will always fail.
-4. **Unified Storage Path** — All data through DeferredStorage → JSONStorage
-   (atomic writes). Direct file I/O causes race conditions.
-   Known exception, being decided: `lifemodel-ww8`.
+4. **State has an explicit durable home** — Tick snapshots and bus streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a state store. Do not add a file-backed state path or compatibility shim.
 5. **Timestamp Filtering Uses Content Timestamps** —
    `lastFetchedAt = max(item.publishedAt)`, NOT `new Date()`. Using fetch time
    skips items published between content time and fetch time.
