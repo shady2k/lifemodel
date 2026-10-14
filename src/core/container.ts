@@ -44,8 +44,6 @@ import {
   createConversationManager,
   migrateToHierarchical,
   createSnapshotStore,
-  type SnapshotEnvelope,
-  StaleSnapshotEpochError,
 } from '../storage/index.js';
 import {
   type MergedConfig,
@@ -1068,15 +1066,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
     commitSnapshot: async (tick) => {
-      const sections = {
-        agentState: stateManager.exportSnapshot(),
-        ackRegistry: ackRegistry.exportSnapshot(),
-        tickCounter: tick,
-      };
-      const envelope: SnapshotEnvelope = { version: 1, epoch: snapshotEpoch, tick, sections };
-      if (!(await snapshotStore.commit(snapshotEpoch, envelope))) {
-        throw new StaleSnapshotEpochError(snapshotEpoch, await snapshotStore.currentEpoch());
-      }
+      await snapshotStore.commitOwners(snapshotEpoch, tick);
     },
     onStaleSnapshot: () => {
       process.exitCode = 1;
