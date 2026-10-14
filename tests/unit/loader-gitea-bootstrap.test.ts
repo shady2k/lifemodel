@@ -38,6 +38,8 @@ describe('Gitea first-start bootstrap', () => {
       protectBranch: async (branch) => {
         events.push(`protect:${branch}`);
       },
+      ensureReadOnlySource: async () => {},
+      ensureApplicationObjects: async () => {},
     };
     const phases: PlatformPhase[] = [];
     const bootstrap = createGiteaBootstrap({
@@ -67,6 +69,8 @@ describe('Gitea first-start bootstrap', () => {
       'gitea-deploy-branch',
       'gitea-main-protection',
       'gitea-deploy-protection',
+      'gitea-source-credentials',
+      'gitea-application-kustomizations',
     ]);
   });
 
@@ -82,6 +86,8 @@ describe('Gitea first-start bootstrap', () => {
       },
       ensureDeployBranch: async () => {},
       protectBranch: async () => {},
+      ensureReadOnlySource: async () => {},
+      ensureApplicationObjects: async () => {},
     };
     const bootstrap = createGiteaBootstrap({
       api,
