@@ -2036,21 +2036,35 @@ export class CoreLoop {
     return () => {
       const drained: Signal[] = [];
 
-      // Iterate backwards to safely splice while iterating
-      for (let i = this.pendingSignals.length - 1; i >= 0; i--) {
-        const entry = this.pendingSignals[i];
-        if (!entry) continue; // Guard against undefined entries
+      if (this.busSignalStream) {
+        // A single snapshot offset can cover only a consumed FIFO prefix.
+        // Do not absorb a later user message past an unconsumed bus entry.
+        while (this.pendingSignals.length > 0) {
+          const entry = this.pendingSignals[0];
+          if (!entry || entry.signal.type !== 'user_message') break;
+          const signalData = entry.signal.data as { recipientId?: string } | undefined;
+          if (signalData?.recipientId !== recipientId) break;
+          this.pendingSignals.shift();
+          drained.push(entry.signal);
+          if (entry.streamId) this.tickConsumedBusOffset = entry.streamId;
+        }
+      } else {
+        // Iterate backwards to safely splice while iterating
+        for (let i = this.pendingSignals.length - 1; i >= 0; i--) {
+          const entry = this.pendingSignals[i];
+          if (!entry) continue; // Guard against undefined entries
 
-        const signal = entry.signal;
-        if (signal.type !== 'user_message') continue;
+          const signal = entry.signal;
+          if (signal.type !== 'user_message') continue;
 
-        // Filter by recipient (same conversation only)
-        const signalData = signal.data as { recipientId?: string } | undefined;
-        const signalRecipient = signalData?.recipientId;
-        if (signalRecipient !== recipientId) continue;
+          // Filter by recipient (same conversation only)
+          const signalData = signal.data as { recipientId?: string } | undefined;
+          const signalRecipient = signalData?.recipientId;
+          if (signalRecipient !== recipientId) continue;
 
-        this.pendingSignals.splice(i, 1);
-        drained.unshift(signal); // Preserve FIFO order
+          this.pendingSignals.splice(i, 1);
+          drained.unshift(signal); // Preserve FIFO order
+        }
       }
 
       // The turn absorbed these from the queue: they are part of its set of
