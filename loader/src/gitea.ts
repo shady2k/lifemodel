@@ -30,6 +30,7 @@ export interface GiteaBootstrapDeps {
 }
 export function createGiteaBootstrap(deps: GiteaBootstrapDeps): {
   runInitial(): Promise<void>;
+  prepareResume(): Promise<void>;
   phases(): PlatformPhase[];
 } {
   const phases: PlatformPhase[] = [
@@ -59,7 +60,21 @@ export function createGiteaBootstrap(deps: GiteaBootstrapDeps): {
     { name: 'gitea-source-credentials', run: () => deps.api.ensureReadOnlySource() },
     { name: 'gitea-application-kustomizations', run: () => deps.api.ensureApplicationObjects() },
   ];
-  return { phases: () => phases, runInitial: () => deps.runPhases(phases) };
+  const prepareResume = async (): Promise<void> => {
+    // A fresh loader process has no HTTP-client credentials, even when the
+    // durable phase record says gitea-admin-login is complete.
+    const credentials = await deps.api.ensureAdminSecret();
+    await deps.api.waitReady();
+    await deps.api.verifyAdmin(credentials);
+  };
+  return {
+    phases: () => phases,
+    prepareResume,
+    runInitial: async () => {
+      await prepareResume();
+      await deps.runPhases(phases);
+    },
+  };
 }
 
 interface KubernetesOptions {
@@ -347,6 +362,7 @@ export function createKubernetesApplicationBootstrap(options: KubernetesOptions 
           interval: '1m',
           path: app.path,
           prune: true,
+          force: false,
           serviceAccountName: `${app.namespace}-applier`,
           sourceRef: { kind: 'GitRepository', name: app.source },
           targetNamespace: app.namespace,
@@ -370,7 +386,7 @@ export function createKubernetesApplicationBootstrap(options: KubernetesOptions 
         );
       else {
         const object = JSON.parse(current.body) as { spec?: unknown };
-        if (JSON.stringify(object.spec) !== JSON.stringify(desired.spec))
+        if (!matchesOwnedKustomizationSpec(object.spec, desired.spec))
           throw new Error(
             `application Kustomization ${app.namespace}/${app.namespace} differs from the pinned platform bootstrap spec`
           );
@@ -382,11 +398,25 @@ export function createKubernetesApplicationBootstrap(options: KubernetesOptions 
           `application Kustomization ${app.namespace} read-back failed (${String(verified.status)})`
         );
       const object = JSON.parse(verified.body) as { spec?: unknown };
-      if (JSON.stringify(object.spec) !== JSON.stringify(desired.spec))
+      if (!matchesOwnedKustomizationSpec(object.spec, desired.spec))
         throw new Error(`application Kustomization ${app.namespace} read-back mismatch`);
     }
   }
   return { ensureCredentials, ensureApplicationObjects };
+}
+
+function matchesOwnedKustomizationSpec(actual: unknown, desired: Record<string, unknown>): boolean {
+  if (typeof actual !== 'object' || actual === null || Array.isArray(actual)) return false;
+  const observed = actual as Record<string, unknown>;
+  return Object.entries(desired).every(([key, value]) => {
+    // Flux kustomize-controller v1.9.6 CRD
+    // config/crd/bases/kustomize.toolkit.fluxcd.io_kustomizations.yaml defaults
+    // force to false. Missing and explicit false are the same intent; other
+    // owned fields must match exactly.
+    if (key === 'force' && value === false)
+      return observed[key] === undefined || observed[key] === false;
+    return JSON.stringify(observed[key]) === JSON.stringify(value);
+  });
 }
 
 /** Gitea's scoped bootstrap API; credentials never enter logs or chart values. */
@@ -498,7 +528,7 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
             `git clone of release seed bundle failed: ${clone.stderr.trim().split('\n')[0] ?? 'no output'}`
           );
         const header = `Authorization: Basic ${Buffer.from(`${credentialsNow.username}:${credentialsNow.password}`).toString('base64')}`;
-        const push = await options.runner.run(git, ['push', '--mirror', remote], {
+        const push = await options.runner.run(git, ['push', remote, 'HEAD:refs/heads/main'], {
           cwd: directory,
           env: {
             ...process.env,
@@ -533,8 +563,11 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
     },
     ensureReadOnlySource: async () => {
       const source = await kubernetes.ensureCredentials();
+      // Gitea 1.27 OpenAPI/router expose GET /users/{username}; admin-users
+      // has no GET operation (templates/swagger/v1_json.tmpl and
+      // routers/api/v1/api.go).
       const found = await request(
-        `/api/v1/admin/users/${sourceAccount}`,
+        `/api/v1/users/${encodeURIComponent(sourceAccount)}`,
         'GET',
         credentials,
         undefined,
@@ -547,31 +580,58 @@ export function createGiteaHttpApi(options: GiteaHttpOptions): GiteaApi {
           email: `${sourceAccount}@lifemodel.invalid`,
           must_change_password: false,
         });
+      } else {
+        const user = JSON.parse(found.body) as {
+          login?: string;
+          username?: string;
+          is_admin?: boolean;
+        };
+        if ((user.login ?? user.username) !== sourceAccount || user.is_admin !== false)
+          throw new Error('existing Gitea source user has unexpected identity or privileges');
       }
       await request(`${repo}/collaborators/${sourceAccount}`, 'PUT', credentials, {
         permission: 'read',
       });
       await request('/api/v1/user', 'GET', source);
-      await request(repo, 'GET', source);
+      const access = await request(repo, 'GET', source);
+      const permissions = (
+        JSON.parse(access.body) as { permissions?: { pull?: boolean; push?: boolean } }
+      ).permissions;
+      if (permissions?.pull !== true || permissions.push !== false)
+        throw new Error('Gitea source user does not have read-only repository access');
     },
     ensureApplicationObjects: () => kubernetes.ensureApplicationObjects(),
     protectBranch: async (branch) => {
-      await request(
-        `/api/v1/repos/admin/lifemodel/branch_protections/${encodeURIComponent(branch)}`,
-        'PUT',
-        credentials,
-        {
-          rule_name: branch,
-          enable_push: true,
-          enable_push_whitelist: true,
-          push_whitelist_usernames: ['admin'],
-          enable_merge_whitelist: true,
-          merge_whitelist_usernames: ['admin'],
-          block_on_official_review_requests: false,
-          block_on_outdated_branch: false,
-        },
-        true
-      );
+      const path = `/api/v1/repos/admin/lifemodel/branch_protections/${encodeURIComponent(branch)}`;
+      const expected = {
+        rule_name: branch,
+        enable_push: true,
+        enable_push_whitelist: true,
+        push_whitelist_usernames: ['admin'],
+        enable_merge_whitelist: true,
+        merge_whitelist_usernames: ['admin'],
+        block_on_official_review_requests: false,
+        block_on_outdated_branch: false,
+      };
+      // Gitea 1.27 OpenAPI/router define collection POST, named GET/PATCH
+      // (templates/swagger/v1_json.tmpl and routers/api/v1/api.go).
+      const existing = await request(path, 'GET', credentials, undefined, true);
+      if (existing.status === 404) {
+        await request(
+          '/api/v1/repos/admin/lifemodel/branch_protections',
+          'POST',
+          credentials,
+          expected
+        );
+      } else {
+        await request(path, 'PATCH', credentials, expected);
+      }
+      const verified = await request(path, 'GET', credentials);
+      const rule = JSON.parse(verified.body) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(expected)) {
+        if (JSON.stringify(rule[key]) !== JSON.stringify(value))
+          throw new Error(`Gitea branch protection ${branch} read-back mismatch at ${key}`);
+      }
     },
   };
 }
