@@ -13,6 +13,8 @@ def documents(paths):
 
 
 def check(value, schema, path, root):
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path}: value {value!r} is not one of {schema['enum']!r}")
     schema_type = schema.get("type")
     if schema_type is not None and not (value is None and schema.get("nullable") is True):
         types = schema_type if isinstance(schema_type, list) else [schema_type]
@@ -51,15 +53,16 @@ def check(value, schema, path, root):
     for key in ("anyOf", "oneOf"):
         branches = schema.get(key, [])
         if branches:
+            matches = 0
             errors = []
             for branch in branches:
                 try:
                     check(value, branch, path, root)
-                    break
+                    matches += 1
                 except ValueError as error:
                     errors.append(str(error))
-            else:
-                raise ValueError(f"{path} matches no {key} schema: {'; '.join(errors)}")
+            if matches == 0 or (key == "oneOf" and matches != 1):
+                raise ValueError(f"{path} matches {matches} {key} schemas: {'; '.join(errors)}")
     if isinstance(value, dict):
         properties = schema.get("properties", {})
         preserve = schema.get("x-kubernetes-preserve-unknown-fields") is True

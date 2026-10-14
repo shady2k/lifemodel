@@ -5,9 +5,10 @@ This directory is the root of the signed platform OCI artifact. The root
 `flux-system`. The artifact declares four ordered steps: A0, A, B and C. A0 has no
 `dependsOn`; it deploys the loader and the Gitea namespace first. Step A
 `dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
-can start. Step B installs CloudNativePG with its CRDs; step C depends on B
-and applies shared state resources, including the Postgres Cluster and Valkey
-StatefulSet. A0 creates no namespace that step A creates. This order
+can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
+its only opened routes are DNS, the documented Kubernetes API port, Postgres
+instance ports and API-server webhook ingress. Step C depends on B and applies
+shared state resources, including the Postgres Cluster and Valkey StatefulSet. A0 creates no namespace that step A creates. This order
 lets the loader initialize OpenBao rather than requiring an already running
 Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
@@ -116,3 +117,13 @@ the existing loader ServiceAccount; it adds no controller. The credentials are
 static until lifemodel-2t5 moves them to OpenBao. The platform admission policy
 allows only these named loader Secrets while application Kustomizations remain
 confined to their own namespaces.
+
+## Vendored CRD schema check
+
+`nix flake check` runs `scripts/check-platform-crd-schemas.py` against the rendered
+CloudNativePG resources and vendored CRDs. The checker validates schema-declared
+primitive types, enum values, required fields, object field placement, and nested
+array/object schemas (including local `$ref` and composition branches). It is a
+focused CRD resource checker, not a general Kubernetes or full OpenAPI validator;
+it does not validate formats or every Kubernetes extension. Nix fixtures prove it
+rejects both an unknown field and `instances: not-an-integer`.
