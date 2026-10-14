@@ -38,6 +38,7 @@ import type { CognitionContext, CognitionResult } from '../../src/types/layers.j
 import type { Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { Channel } from '../../src/types/index.js';
+import type { AgentState, SleepState } from '../../src/types/agent/state.js';
 
 export function makeDeferred<T>(): {
   promise: Promise<T>;
@@ -329,6 +330,7 @@ const noopLogger = {
 } as unknown as Logger;
 
 export interface CoreLoopInstance {
+  agent: ReturnType<typeof createAgent>;
   coreLoop: ReturnType<typeof createCoreLoop>;
   recordedLogs: RecordedLog[];
   cognition: FakeCognitionLayer;
@@ -359,6 +361,11 @@ export interface HarnessOptions {
     finishReason?: 'stop' | 'tool_calls' | 'length' | 'error';
   }[];
   tickIntervalMs?: number;
+  initialTickCount?: number;
+  initialState?: Partial<AgentState>;
+  initialSleepState?: Partial<SleepState>;
+  commitSnapshot?: (tick: number) => Promise<void>;
+  onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -381,7 +388,10 @@ export async function startInstance(
 
   // ── the three layers (cognition: fake processor boundary, or REAL
   // cognition with a scripted fake LLM provider - no network) ──
-  const agent = createAgent({ logger, metrics: createMetrics() });
+  const agent = createAgent(
+    { logger, metrics: createMetrics() },
+    { initialState: opts.initialState, initialSleepState: opts.initialSleepState }
+  );
   const eventBus = createEventBus(logger);
   const autonomic = new FakeAutonomicLayer();
   const aggregation = new FakeAggregationLayer();
@@ -415,6 +425,9 @@ export async function startInstance(
     {
       recipientRegistry: registry as never,
       ...cognitionDeps,
+      initialTickCount: opts.initialTickCount,
+      commitSnapshot: opts.commitSnapshot,
+      onStaleSnapshot: opts.onStaleSnapshot,
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);
@@ -422,6 +435,7 @@ export async function startInstance(
 
   coreLoop.start();
   return {
+    agent,
     coreLoop,
     cognition,
     autonomic,
@@ -452,7 +466,6 @@ export function makeContainerShutdown(
       storage: storage as never,
       stateManager: { shutdown: async () => undefined } as never,
       recipientRegistry: { flush: async () => undefined } as never,
-      ackRegistry: { flush: async () => undefined } as never,
     })
   );
 }
