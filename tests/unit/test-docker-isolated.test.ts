@@ -55,7 +55,10 @@ import {
   validateSnapshot,
   vitestEnv,
   vitestSteps,
+  storeProvisionSteps,
+  storeCleanupStep,
 } from '../../scripts/test-docker-isolated.mjs';
+import { STORE_IMAGES } from '../../scripts/test-isolated.mjs';
 
 afterAll(() => {
   for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
@@ -443,6 +446,19 @@ describe('test environment inside the machine', () => {
       expect(Object.keys(env).some((k) => k.startsWith('GIT_'))).toBe(false);
       expect(Object.keys(env).some((k) => k.startsWith('NPM_'))).toBe(false);
     }
+  });
+
+  it('provisions both pinned stores on an internal network and waits for readiness', () => {
+    const machine = makeMachineName('0123456789abcdef');
+    const steps = storeProvisionSteps(machine, 1000);
+    expect(steps.some((step) => step.id === 'stores-network' && step.argv.includes('--internal'))).toBe(true);
+    expect(steps.some((step) => step.id === 'stores-valkey-ready' && step.poll)).toBe(true);
+    expect(steps.some((step) => step.id === 'stores-postgres-ready' && step.poll)).toBe(true);
+    expect(steps.some((step) => step.argv.includes(STORE_IMAGES.valkey))).toBe(true);
+    expect(steps.some((step) => step.argv.includes(STORE_IMAGES.postgres))).toBe(true);
+    expect(vitestEnv(1000, machine).LIFEMODEL_TEST_VALKEY_URL).toBe('redis://127.0.0.1:16379');
+    expect(vitestEnv(1000, machine).LIFEMODEL_TEST_DATABASE_URL).toContain(`:${machine}@127.0.0.1:15432/`);
+    expect(storeCleanupStep(machine, 1000).argv.join(' ')).toContain('docker network rm');
   });
 
   it('rejects a bogus machine uid', () => {

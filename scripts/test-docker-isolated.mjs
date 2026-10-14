@@ -38,7 +38,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs as parseLaunchArgs } from './test-isolated.mjs';
+import { parseArgs as parseLaunchArgs, STORE_IMAGES, networkCreateArgs, storeContainerArgs } from './test-isolated.mjs';
 
 // ---------------------------------------------------------------------------
 // Machine identity and filesystem layout inside the disposable machine
@@ -422,7 +422,7 @@ export function rootlessSocketPath(uid) {
 }
 
 /** Fresh, credential-free environment for npm ci / vitest inside the machine. */
-export function vitestEnv(uid) {
+export function vitestEnv(uid, machineName = 'lifemodel-test-0000000000000000') {
   return {
     HOME: MACHINE_HOME,
     USER: MACHINE_USER,
@@ -433,6 +433,8 @@ export function vitestEnv(uid) {
     XDG_RUNTIME_DIR: `/run/user/${uid}`,
     DOCKER_HOST: rootlessSocketPath(uid),
     LIFEMODEL_DOCKER_TESTS: '1',
+    LIFEMODEL_TEST_VALKEY_URL: 'redis://127.0.0.1:16379',
+    LIFEMODEL_TEST_DATABASE_URL: `postgres://postgres:${machineName}@127.0.0.1:15432/postgres`,
   };
 }
 
@@ -564,11 +566,47 @@ export function buildPlan(input) {
  * lockfile (HUSKY=0) and vitest with a fresh credential-free environment whose
  * DOCKER_HOST points at the machine's private rootless socket.
  */
+export function storeProvisionSteps(machineName, uid) {
+  if (!Number.isInteger(uid) || uid <= 0) throw new IsolationError(`machine user id must be a positive integer, got: ${uid}`);
+  const network = `lifemodel-test-stores-${machineName.slice(-16)}`;
+  const valkey = `${network}-valkey`;
+  const postgres = `${network}-postgres`;
+  const envKvs = Object.entries(vitestEnv(uid, machineName)).map(([k, v]) => `${k}=${v}`);
+  const valkeyArgs = storeContainerArgs(valkey, STORE_IMAGES.valkey, network, 'valkey');
+  valkeyArgs.splice(valkeyArgs.indexOf(STORE_IMAGES.valkey), 0, '-p', '127.0.0.1:16379:6379');
+  const postgresArgs = storeContainerArgs(postgres, STORE_IMAGES.postgres, network, 'postgres', machineName);
+  postgresArgs.splice(postgresArgs.indexOf(STORE_IMAGES.postgres), 0, '-p', '127.0.0.1:15432:5432');
+  const run = (args) => runArgv(machineName, MACHINE_USER, SRC_DIR, ['env', '-i', ...envKvs, ...args]);
+  return [
+    ...Object.values(STORE_IMAGES).map((image, index) => ({
+      id: `pull-store-${index}`, kind: 'orb', argv: run(['docker', 'pull', image]), timeoutMs: 600_000,
+    })),
+    { id: 'stores-network', kind: 'orb', argv: run(['docker', ...networkCreateArgs(network).slice(1)]), timeoutMs: 60_000 },
+    { id: 'stores-valkey-create', kind: 'orb', argv: run(['docker', ...valkeyArgs.slice(1)]), timeoutMs: 60_000 },
+    { id: 'stores-postgres-create', kind: 'orb', argv: run(['docker', ...postgresArgs.slice(1)]), timeoutMs: 60_000 },
+    { id: 'stores-valkey-start', kind: 'orb', argv: run(['docker', 'start', valkey]), timeoutMs: 60_000 },
+    { id: 'stores-postgres-start', kind: 'orb', argv: run(['docker', 'start', postgres]), timeoutMs: 60_000 },
+    { id: 'stores-valkey-ready', kind: 'orb', argv: run(['docker', 'exec', valkey, 'valkey-cli', 'ping']), poll: { intervalMs: 1_000 }, timeoutMs: 120_000 },
+    { id: 'stores-postgres-ready', kind: 'orb', argv: run(['docker', 'exec', postgres, 'pg_isready', '-U', 'postgres']), poll: { intervalMs: 1_000 }, timeoutMs: 120_000 },
+  ];
+}
+
+export function storeCleanupStep(machineName, uid) {
+  const network = `lifemodel-test-stores-${machineName.slice(-16)}`;
+  const envKvs = Object.entries(vitestEnv(uid, machineName)).map(([k, v]) => `${k}=${v}`);
+  const script = `docker rm -f ${network}-valkey ${network}-postgres >/dev/null 2>&1 || true; docker network rm ${network} >/dev/null 2>&1 || true`;
+  return {
+    id: 'stores-cleanup', kind: 'orb',
+    argv: runArgv(machineName, MACHINE_USER, SRC_DIR, ['env', '-i', ...envKvs, 'sh', '-ec', script]),
+    timeoutMs: PHASE_TIMEOUTS_MS.teardown,
+  };
+}
+
 export function vitestSteps({ machineName, uid, vitestArgs }) {
   if (!Number.isInteger(uid) || uid <= 0) {
     throw new IsolationError(`machine user id must be a positive integer, got: ${uid}`);
   }
-  const env = vitestEnv(uid);
+  const env = vitestEnv(uid, machineName);
   const envKvs = Object.entries(env).map(([k, v]) => `${k}=${v}`);
   return [
     {
@@ -826,6 +864,7 @@ export function createRunner({
   let cleaned = false;
   let claimWritten = false;
   let lockHandle = null;
+  let machineUid = null;
 
   function fireAbort(kind, signalName) {
     if (abort) return;
@@ -880,6 +919,18 @@ export function createRunner({
     await invoker.killActive();
     let deletionConfirmed = false;
     try {
+      if (claimWritten && machineUid !== null) {
+        let timer;
+        const bound = new Promise((resolve) => { timer = timers.setTimeout(resolve, PHASE_TIMEOUTS_MS.teardown); });
+        try {
+          await Promise.race([invoker.runStep(storeCleanupStep(machineName, machineUid)), bound]);
+        } catch (e) {
+          log(`store cleanup failed: ${e.message}`);
+        } finally {
+          timers.clearTimeout(timer);
+          await invoker.killActive();
+        }
+      }
       // Teardown always gets its own bound: even a run that just hit the
       // hard deadline still deletes its machine from outside.
       const step = teardownStep(machineName);
@@ -960,6 +1011,11 @@ export function createRunner({
         }
       }
 
+      machineUid = uid;
+      for (const step of storeProvisionSteps(machineName, uid)) {
+        const r = await runStepOnce(step, step.timeoutMs);
+        if (r.code !== 0) throw new IsolationError(`step ${step.id} failed with exit code ${r.code}`);
+      }
       const tail = vitestSteps({ machineName, uid, vitestArgs });
       for (const step of tail) {
         const r = await runStepOnce(step, step.id === 'vitest' ? remainingMs() : step.timeoutMs);
