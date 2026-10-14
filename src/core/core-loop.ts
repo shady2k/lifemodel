@@ -257,6 +257,9 @@ interface PendingTurnCommits {
   /** Its entries were settled (guards a second commit from a later send). */
   settled: boolean;
   outboundCount: number;
+  /** Sends emitted while cognition runs stay tentative until its outcome succeeds. */
+  tentativeEvents: SnapshotOutboxEvent[];
+  finalErrorAttempt: boolean;
 }
 
 /**
@@ -385,6 +388,7 @@ export class CoreLoop {
   /** Snapshot-owned inbound stream offsets and pending entries. */
   private readonly inboundStream: InboundMessageStream | undefined;
   private tickOutbox: SnapshotOutboxEvent[] = [];
+  private readonly sendTurnByEvent = new Map<string, string>();
   private readonly commitSnapshot:
     | ((tick: number, outbox: SnapshotOutboxEvent[]) => Promise<void>)
     | undefined;
@@ -551,7 +555,18 @@ export class CoreLoop {
         this.enqueueThoughtSignal(data, source);
       },
       running: () => this.running,
-      enqueueOutbound: (event) => this.tickOutbox.push(event),
+      enqueueOutbound: (event) => {
+        const turnKey = this.sendTurnByEvent.get(event.eventId);
+        this.sendTurnByEvent.delete(event.eventId);
+        const turn = turnKey ? this.turnCommits.get(turnKey) : undefined;
+        if (turn) {
+          if (turn.disposition === 'error' && !turn.finalErrorAttempt) return;
+          turn.tentativeEvents.push(event);
+          if (turn.resolved) this.tickOutbox.push(...turn.tentativeEvents.splice(0));
+          return;
+        }
+        this.tickOutbox.push(event);
+      },
       storage: deps.storage,
       pluginLoader: deps.pluginLoader,
       resolveSendTurn: (intent) => {
@@ -585,17 +600,26 @@ export class CoreLoop {
               )
               .sort()
           : [];
-        const turnIdentity =
-          triggerIds.length > 0 ? triggerIds.join(',') : (turnKey ?? randomUUID());
+        // The first owned trigger is the immutable identity. Absorbing later
+        // triggers on replay must not alter effect keys for the same turn.
+        const turnIdentity = triggerIds[0] ?? turnKey ?? randomUUID();
         const ordinal = state ? state.outboundCount++ : 0;
-        const eventId = createHash('sha256')
-          .update(`${intent.payload.recipientId}|${turnIdentity}|${String(ordinal)}`)
+        const effectKind = state?.disposition === 'error' ? 'error-notice' : 'answer';
+        const eventHash = createHash('sha256')
+          .update(
+            effectKind === 'error-notice'
+              ? `error-notice|${intent.payload.recipientId}|${turnIdentity}|${String(ordinal)}`
+              : `${intent.payload.recipientId}|${turnIdentity}|${String(ordinal)}`
+          )
           .digest('hex');
+        const eventId = `${effectKind === 'error-notice' ? 'error-notice' : 'send'}:${eventHash}`;
+        const stableTurnKey = turnKey;
+        if (stableTurnKey !== undefined) this.sendTurnByEvent.set(eventId, stableTurnKey);
         return {
           turnKey,
           final: state?.resolved ?? false,
           answersInbound: inboundIds.length > 0,
-          eventId: `send:${eventId}`,
+          eventId,
         };
       },
       onSendStarted: (turnKey, recipientId, final) => {
@@ -756,6 +780,8 @@ export class CoreLoop {
       this.busOffsetBlockedByFailedTurn = true;
       const exhaustedIds =
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
+      if (state.finalErrorAttempt && exhaustedIds.length > 0)
+        this.inboundStream?.settle(exhaustedIds);
       if (inboundIds.length > 0 && (outcome === undefined || exhaustedIds.length > 0)) {
         this.logger.warn(
           {
@@ -800,6 +826,8 @@ export class CoreLoop {
       anyDelivered: false,
       settled: false,
       outboundCount: 0,
+      tentativeEvents: [],
+      finalErrorAttempt: false,
     };
     this.turnCommits.set(tickId, state);
     this.activeTurnCommits = state;
@@ -846,7 +874,15 @@ export class CoreLoop {
     state.resolved = true;
     state.disposition = disposition;
     const answered = this.answeredRecipientOf(state);
-    if (answered !== undefined) {
+    const inboundIds = answered === undefined ? [] : this.ownedInboundIds(state.turn, answered);
+    state.finalErrorAttempt =
+      disposition === 'error' && (this.inboundStream?.willExhaustRetries(inboundIds) ?? false);
+    if (disposition === 'error') {
+      state.tentativeEvents = [];
+    } else {
+      this.tickOutbox.push(...state.tentativeEvents.splice(0));
+    }
+    if (answered !== undefined && (disposition !== 'error' || state.finalErrorAttempt)) {
       state.finalSendsExpected = intents.filter(
         (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
       ).length;
@@ -2154,12 +2190,13 @@ export class CoreLoop {
             'COGNITION failed (async)'
           );
         });
-        if (this.pendingCognition?.tickId === context.tickId) {
+        const rejected =
+          this.pendingCognition?.tickId === context.tickId ? this.pendingCognition : undefined;
+        if (rejected) {
+          this.resolveTurnCommit(context.tickId, 'error', []);
           this.pendingCognition = null;
+          this.evaluateTurnCommits();
         }
-        // A rejected turn recorded no outcome: its entries stay in the log
-        // and replay once at the next start (review finding G).
-        this.evictTurnCommit(context.tickId);
       });
   }
 
@@ -2233,7 +2270,7 @@ export class CoreLoop {
       // own result intents leave with their turn's trace.
       return { ...result, intents: this.attributedToTurn(result.intents, pending) };
     } catch (error) {
-      this.evictTurnCommit(pending.tickId);
+      this.resolveTurnCommit(pending.tickId, 'error', []);
       this.pendingCognition = null;
       withTraceContext(pending.traceContext, () => {
         this.logger.error({ error, tickId: pending.tickId }, 'COGNITION rejected unexpectedly');
