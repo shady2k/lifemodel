@@ -135,6 +135,42 @@ describe('snapshot outbox commit', () => {
     expect((await stores.redis.xrange(streamKey, '-', '+')).map(([id]) => id)).toEqual([ids[2]]);
   });
 
+  it('keeps event keys aligned with rows when the HDEL cleanup path is configured to fail', async () => {
+    const prefix = `outbound-atomic-trim:${stores.workerId}:`;
+    const streamKey = `${prefix}events`;
+    const eventKeysKey = `${streamKey}:event-keys`;
+    for (let i = 0; i < 6; i += 1) {
+      const eventId = `atomic-${i}`;
+      const id = await stores.redis.xadd(streamKey, '*', 'eventId', eventId, 'event', '{}');
+      if (!id) throw new Error('Valkey returned no stream id');
+      await stores.redis.hset(eventKeysKey, eventId, id);
+    }
+    let hdelCalls = 0;
+    const failHdel = new Proxy(stores.redis, {
+      get(target, property) {
+        if (property === 'hdel') {
+          return async () => {
+            hdelCalls += 1;
+            throw new Error('injected HDEL failure');
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    await trimOutboundEvents(failHdel as never, {
+      streamKey,
+      postgresOffsetKey: `${prefix}pg`,
+      deliveryOffsetKey: `${prefix}delivery`,
+      eventKeysKey,
+      maxLength: 2,
+      maxAgeMs: 60_000,
+    });
+    expect(hdelCalls).toBe(0);
+    expect(await stores.redis.xlen(streamKey)).toBe(2);
+    expect(await stores.redis.hlen(eventKeysKey)).toBe(2);
+  });
+
   it('bounds no-channel backlog and event-key growth with one warning per trim', async () => {
     const prefix = `outbound-retention:${stores.workerId}:`;
     const streamKey = `${prefix}events`;

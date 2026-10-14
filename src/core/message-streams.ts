@@ -10,6 +10,40 @@ export const OUTBOUND_RETENTION_MAX_LENGTH = 10_000;
 export const OUTBOUND_RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_DEDUP_LIMIT = 1_000;
 
+// The stream rows are the only source for event-key cleanup. Delete the rows
+// and their keys in one Valkey operation so a crash cannot orphan keys.
+const TRIM_OUTBOUND_SCRIPT = `
+local boundary = ARGV[1]
+local passed = ARGV[2]
+local rows = redis.call('XRANGE', KEYS[1], '-', '(' .. boundary)
+if boundary == passed then
+  local exact = redis.call('XRANGE', KEYS[1], boundary, boundary)
+  for _, row in ipairs(exact) do table.insert(rows, row) end
+end
+local event_ids = {}
+local dropped = 0
+local function greater(left, right)
+  local lm, ls = string.match(left, '^(%d+)%-(%d+)$')
+  local rm, rs = string.match(right, '^(%d+)%-(%d+)$')
+  return tonumber(lm) > tonumber(rm) or (tonumber(lm) == tonumber(rm) and tonumber(ls) > tonumber(rs))
+end
+for _, row in ipairs(rows) do
+  local id = row[1]
+  local fields = row[2]
+  for index = 1, #fields, 2 do
+    if fields[index] == 'eventId' then
+      table.insert(event_ids, fields[index + 1])
+      break
+    end
+  end
+  if greater(id, passed) then dropped = dropped + 1 end
+end
+redis.call('XTRIM', KEYS[1], 'MINID', boundary)
+if boundary == passed then redis.call('XDEL', KEYS[1], boundary) end
+if #event_ids > 0 then redis.call('HDEL', KEYS[2], unpack(event_ids)) end
+return dropped
+`;
+
 export interface InboundMessage {
   streamId: string;
   messageId: string;
@@ -156,6 +190,13 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
   }
 
+  /** Whether this failed turn is the bounded final attempt for its entries. */
+  willExhaustRetries(signalIds: string[]): boolean {
+    const ids = new Set(signalIds);
+    const owned = this.snapshot.pending.filter((message) => ids.has(message.signal.id));
+    return owned.some((message) => (this.snapshot.errorRetries[message.messageId] ?? 0) + 1 >= 2);
+  }
+
   /** Record an error-disposition attempt without settling the input. */
   markFailedTurn(signalIds: string[]): string[] {
     const failed = new Set(signalIds);
@@ -262,20 +303,9 @@ export async function trimOutboundEvents(
     if (lengthBoundary && compareStreamIds(lengthBoundary, boundary) > 0) boundary = lengthBoundary;
   }
   if (boundary === '0-0') return;
-  const removable = await redis.xrange(streamKey, '-', `(${boundary}`);
-  if (boundary === passed) {
-    removable.push(...(await redis.xrange(streamKey, boundary, boundary)));
-  }
-  if (removable.length === 0) return;
-  const dropped = removable.filter(([id]) => compareStreamIds(id, passed) > 0).length;
-  const eventIds = removable.flatMap(([, fields]) => {
-    const values = fieldsToRecord(fields);
-    const eventId = values['eventId'];
-    return eventId ? [eventId] : [];
-  });
-  await redis.xtrim(streamKey, 'MINID', boundary);
-  if (boundary === passed) await redis.xdel(streamKey, boundary);
-  if (eventIds.length > 0) await redis.hdel(eventKeysKey, ...eventIds);
+  const dropped = Number(
+    await redis.eval(TRIM_OUTBOUND_SCRIPT, 2, streamKey, eventKeysKey, boundary, passed)
+  );
   if (dropped > 0) {
     options.logger?.warn(
       { count: dropped, streamKey, maxLength, maxAgeMs },

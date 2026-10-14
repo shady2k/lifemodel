@@ -39,7 +39,7 @@ import type { Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { Channel } from '../../src/types/index.js';
 import type { AgentState, SleepState } from '../../src/types/agent/state.js';
-import type { BusSignalStream } from '../../src/core/bus-stream.js';
+import type { BusSignalStream, BusSnapshot } from '../../src/core/bus-stream.js';
 
 export function makeDeferred<T>(): {
   promise: Promise<T>;
@@ -368,7 +368,7 @@ export interface HarnessOptions {
   commitSnapshot?: CoreLoopDeps['commitSnapshot'];
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
   busSignalStream?: BusSignalStream;
-  initialBusOffset?: string;
+  initialBusOffset?: BusSnapshot;
 }
 
 const TEST_TICK_INTERVAL = 5;
