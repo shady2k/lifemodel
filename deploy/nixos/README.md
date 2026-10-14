@@ -69,7 +69,7 @@ manager. Delete that object to reset ownership; Flux keeps its applied state:
 sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml delete ocirepository platform -n flux-system
 ```
 
-See [ADR-010](../adr/010-container-generations.md) for the platform decision.
+See [ADR-010](../../docs/adr/010-container-generations.md) for the platform decision.
 
 On the test VM, recovery was measured at 82 seconds. The A0 Kustomization's
 two-minute timeout covers its reconciliation and health check; it does not

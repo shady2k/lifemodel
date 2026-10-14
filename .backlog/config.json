@@ -44,7 +44,12 @@
     "docs/architecture.md",
     "docs/concepts/*.md",
     "docs/features/**/*.md",
-    "docs/plugins/*.md"
+    "docs/plugins/*.md",
+    "deploy/nixos/README.md",
+    "deploy/platform/README.md",
+    "deploy/platform/a/gitea/README.md",
+    "deploy/root/README.md",
+    "tests/fixtures/stub-loader/README.md"
   ],
   "presentAreas": [
     ""

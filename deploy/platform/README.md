@@ -7,7 +7,7 @@ This directory is the root of the signed platform OCI artifact. The root
 `dependsOn: platform-a0`, so OpenBao and the rest of step A arrive only after
 the loader can start. A0 creates no namespace that step A creates. This order
 lets the loader initialize OpenBao rather than requiring an already running
-Bao. See [ADR-010](../adr/010-container-generations.md) for the decision.
+Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
 ## A0: loader and admission
 
