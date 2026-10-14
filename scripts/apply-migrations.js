@@ -6,16 +6,19 @@ import { Pool } from 'pg';
 
 const DEFAULT_MIGRATIONS_DIR = fileURLToPath(new URL('../db/migrations/', import.meta.url));
 
-function migrationUpSql(source, filename) {
+export function migrationUpSql(source, filename) {
   const lines = source.split(/\r?\n/);
   const upMarkers = lines.flatMap((line, index) => line.trim() === '-- migrate:up' ? [index] : []);
   const downMarkers = lines.flatMap((line, index) => line.trim() === '-- migrate:down' ? [index] : []);
-  if (upMarkers.length !== 1 || downMarkers.length > 1 || (downMarkers.length && downMarkers[0] < upMarkers[0])) {
-    throw new Error(`Migration ${filename} must have one -- migrate:up section and at most one later -- migrate:down section`);
+  if (upMarkers.length !== 1 || downMarkers.length !== 1 || downMarkers[0] < upMarkers[0]) {
+    throw new Error(`Migration ${filename} must have one -- migrate:up section and one later -- migrate:down section`);
   }
   const end = downMarkers[0] ?? lines.length;
   const sql = lines.slice(upMarkers[0] + 1, end).join('\n').trim();
   if (!sql) throw new Error(`Migration ${filename} has an empty -- migrate:up section`);
+  if (lines.slice(downMarkers[0] + 1).join('\n').trim()) {
+    throw new Error(`Migration ${filename} must have an empty -- migrate:down section; rollback SQL is not allowed`);
+  }
   return sql;
 }
 

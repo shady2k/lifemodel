@@ -21,6 +21,23 @@ describe('isolated Valkey and pgvector stores', () => {
     await expect(fetch('http://1.1.1.1/', { signal: AbortSignal.timeout(2_000) })).rejects.toThrow();
   });
 
+  it('isolates Valkey namespaces for distinct and reused worker ids', async () => {
+    const first = await createTestStores('1');
+    const distant = await createTestStores('17');
+    try {
+      await first.redis.set('collision-check', 'worker-1');
+      expect(await distant.redis.get('collision-check')).toBeNull();
+      const reused = await createTestStores('1');
+      try {
+        expect(await reused.redis.get('collision-check')).toBeNull();
+      } finally {
+        await Promise.all([reused.redis.quit(), reused.postgres.end()]);
+      }
+    } finally {
+      await Promise.all([first.redis.quit(), first.postgres.end(), distant.redis.quit(), distant.postgres.end()]);
+    }
+  });
+
   it('evaluates Lua on Valkey', async () => {
     const result = await redis.eval('return tonumber(ARGV[1]) * 7', 0, '6');
     expect(result).toBe(42);

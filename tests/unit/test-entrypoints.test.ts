@@ -94,6 +94,18 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(() => ciEntrypointPolicy(ci)).not.toThrow();
   });
 
+  it('puts pinned migration lint inside the required backlog job', () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const backlogStart = ci.indexOf('  ci-backlog:');
+    const imageStart = ci.indexOf('  ci-image:', backlogStart);
+    const backlog = ci.slice(backlogStart, imageStart);
+    expect(backlogStart).toBeGreaterThan(0);
+    expect(backlog).toContain('Lint expanding-only Postgres migrations with squawk');
+    expect(backlog).toContain('9af8b2b54135ab236389122bce6c9edc40a8db4347e77d19079f19dcceddc737');
+    expect(backlog).toContain('"$squawk" db/migrations/*.sql');
+    expect(ci).not.toContain('  ci-migrations:');
+  });
+
   it('rejects synthetic policy regressions, including multiline and new-job commands', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     const imageStart = ci.indexOf('\n  ci-image:\n');
