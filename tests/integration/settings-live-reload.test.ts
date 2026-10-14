@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,8 +33,16 @@ describe('settings reload in a running core', () => {
     const previous = {
       db: process.env.LIFEMODEL_DATABASE_URL,
       valkey: process.env.LIFEMODEL_VALKEY_URL,
+      dataPath: process.env.DATA_PATH,
+      nodeEnv: process.env.NODE_ENV,
+      motor: process.env.MOTOR_CORTEX_ENABLED,
     };
+    const readOnlyDataPath = join(tmpdir(), `lifemodel-readonly-${randomUUID()}`);
+    await writeFile(readOnlyDataPath, 'not a directory');
     try {
+      process.env.DATA_PATH = readOnlyDataPath;
+      process.env.NODE_ENV = 'production';
+      process.env.MOTOR_CORTEX_ENABLED = 'false';
       await applyTestMigrations(stores.postgres);
       const url = new URL(process.env.LIFEMODEL_TEST_DATABASE_URL!);
       url.pathname = `/lifemodel_test_worker_${stores.workerId}`;
@@ -79,7 +91,7 @@ describe('settings reload in a running core', () => {
           },
         },
       });
-      core = await createContainerAsync({ logToFile: false, logLevel: 'error' });
+      core = await createContainerAsync({ logLevel: 'error' });
       await core.llmProvider.complete({
         role: 'fast',
         messages: [{ role: 'user', content: 'first' }],
@@ -124,7 +136,13 @@ describe('settings reload in a running core', () => {
       else process.env.LIFEMODEL_DATABASE_URL = previous.db;
       if (previous.valkey === undefined) delete process.env.LIFEMODEL_VALKEY_URL;
       else process.env.LIFEMODEL_VALKEY_URL = previous.valkey;
-      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+      if (previous.dataPath === undefined) delete process.env.DATA_PATH;
+      else process.env.DATA_PATH = previous.dataPath;
+      if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previous.nodeEnv;
+      if (previous.motor === undefined) delete process.env.MOTOR_CORTEX_ENABLED;
+      else process.env.MOTOR_CORTEX_ENABLED = previous.motor;
+      await Promise.all([stores.postgres.end(), stores.redis.quit(), unlink(readOnlyDataPath)]);
     }
   });
 });
