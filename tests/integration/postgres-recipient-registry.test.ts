@@ -66,7 +66,10 @@ describe('Postgres recipient registry retries', () => {
 
       const cleared = registry.getOrCreate('web', 'clear-target');
       await registry.flush();
-      await registry.clear();
+      failDelete = true;
+      await expect(registry.clear()).rejects.toThrow('injected statement failure');
+      failDelete = false;
+      await registry.flush();
       expect(
         (
           await stores.postgres.query(
