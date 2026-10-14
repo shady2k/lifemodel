@@ -54,9 +54,9 @@ describe('Valkey bus signal stream', () => {
     const firstSignal = thoughtSignal('start cognition', instance.recipientId);
     instance.coreLoop.pushSignal(firstSignal);
     await waitFor(() => instance.cognition.calls.length === 1, 'cognition started');
-    await waitFor(() => stream.committedOffset() !== '0-0', 'first bus offset committed');
+    await waitFor(() => commitAttempts >= 1, 'initial snapshot committed');
     const committedOffset = stream.committedOffset();
-    instance.coreLoop.pushSignal(thoughtSignal('consume with answer', instance.recipientId));
+    expect(committedOffset).toBe('0-0');
     const send: SendMessageIntent = {
       type: 'SEND_MESSAGE',
       payload: { recipientId: instance.recipientId, text: 'must not commit' },

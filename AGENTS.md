@@ -294,30 +294,40 @@ Common issues:
 
 The Valkey streams and the committed tick snapshot are the core's durable
 boundary. Local files do not define inbound replay.
-Gateways append messages to `inbound`; the core reads them as signals. A tick
-commit atomically stores the epoch-checked snapshot (including the internal
-bus offset, inbound read and per-recipient offsets, bounded recent-message-id
-dedup ring, pending messages, and outbound snapshot outbox). Only a committed
-tick advances these offsets. The Valkey commit rejects a stale generation by
-epoch. Postgres writes are fenced by the active holder.
+Gateways append messages to `inbound`; the core reads them as signals. Inbound
+messages remain owned by that stream and are never copied into the internal bus.
+Internal bus entries stay before the committed offset while a turn owns them.
+A tick commit atomically stores the epoch-checked snapshot (including the
+internal bus offset, inbound read and per-recipient offsets, bounded
+recent-message-id dedup ring, pending inbound messages, and outbox events). A
+turn's owned inputs advance only in the CAS that commits its answer or
+intentional silence. The Valkey commit rejects a stale generation by epoch.
+Postgres writes are fenced by the active holder.
 
-A committed outbound event is the answer boundary. The Postgres message-row
-consumer applies outbound events idempotently by event id; its cursor advances
-after the row write. Deliberate silence is recorded by the committed tick with
-no outbound event. A failed turn does not commit its partial result, so its
-inbound messages remain available to a fresh core. Failed sends are not a core
-outcome: the gateway owns delivery and retry. With no channel registered, the
-core logs the committed event once at info and advances its in-process delivery
-cursor; the event remains in Valkey for the gateway's independent cursor.
+The outbox persists across tick boundaries. A CAS retires only the exact batch
+it accepted; sends arriving while the CAS is in flight remain queued for a
+later commit. A committed outbound event is the answer boundary. The Postgres
+message-row consumer applies outbound events idempotently by event id; its
+cursor advances after the row write. Deliberate silence is recorded by the
+committed tick with no outbound event. An error-disposition turn commits no
+partial result and leaves its inputs unsettled for one retry by a fresh core.
+The inbound snapshot records that retry; a second error leaves the input pending
+but does not automatically restart it again.
+Failed sends are not a core outcome: the gateway owns delivery and retry. With
+no channel registered, the core logs the committed event once at info and
+advances its in-process delivery cursor; the event remains in Valkey for the
+gateway's independent cursor.
 
 A hard stop or crash during a tick leaves the previous snapshot authoritative.
 The fresh core reads from its committed offsets and processes uncommitted
 messages again. After a commit, those messages are past the committed offsets
 and do not replay. The dedup ring is bounded; it is not an unbounded history.
-A stop that completes a tick commits by the same rule; a stop that kills the
-process does not drain or commit the in-flight tick. Queued non-inbound work
-that was not included in a committed snapshot can be lost and is regenerated
-or recovered according to its own durable store.
+A graceful stop commits a drained turn through a bounded final epoch-checked
+snapshot before durable writes close. If it cannot commit by the stop deadline,
+its inputs remain uncommitted and replay. The same applies to an in-flight turn
+killed by a hard stop. Queued non-inbound work not represented by a durable
+stream or the committed snapshot can be regenerated or recovered according to
+its own durable store.
 
 Remaining windows are explicit: a Postgres message row may be applied before
 its cursor advances, so restart can reapply it (the event-id key makes that

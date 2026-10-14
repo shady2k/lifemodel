@@ -72,8 +72,11 @@ these messages through the ordinary signal pipeline.
 Each tick commits one Valkey snapshot atomically under the current epoch. It
 contains the agent/core state, internal bus offset, inbound stream read offset,
 per-recipient offsets, bounded recent-message-id dedup ring, pending inbound
-messages and outbound snapshot outbox. The Valkey epoch check rejects commits
-from a stale core. Postgres writes use the active-holder fence.
+messages and outbound snapshot outbox. Inbound entries have one queue owner:
+they are not copied to the internal bus. An internal bus offset remains before
+triggers owned by unresolved cognition; turn outcome and owned offsets are
+committed together. The Valkey epoch check rejects commits from a stale core.
+Postgres writes use the active-holder fence.
 
 A tick killed before commit leaves the previous snapshot and offsets
 unchanged. On restart, inbound messages not covered by that snapshot are
@@ -81,12 +84,20 @@ processed again. A successful commit advances the offsets together with the
 state and outbox, so a committed answer does not replay. The dedup ring is
 bounded; no unbounded deduplication promise is made.
 
-A committed outbound event is an answer. The Postgres consumer writes its
-message row with the event id as an idempotency key, then advances its cursor.
+A committed outbound event is an answer. Pending outbox events survive tick
+boundaries, and each CAS retires only the exact batch it accepted. A graceful
+stop commits a drained answer through a bounded final CAS before writes close;
+if that CAS misses the stop deadline, its triggers remain eligible for replay.
+The Postgres consumer writes its message row with the event id as an idempotency
+key, then advances its cursor.
 If a crash happens between those operations, the row is applied again safely.
 Deliberate silence is represented by a committed tick with no outbound event.
-A failed turn has no committed result, so its inbound messages remain eligible
-for processing by the next core. Delivery belongs to the future gateway. If
+An error-disposition turn has no committed result, so its inbound messages
+remain unsettled for one retry by the next core. The inbound snapshot tracks
+that retry; a second error leaves the input pending without automatically
+restarting it again. Distinct turns derive outbound
+idempotency keys from their persisted trigger identities and effect ordinal.
+Delivery belongs to the future gateway. If
 there is no channel registered, this core reports the event once at info and
 advances its own delivery cursor; the outbound event remains available to the
 gateway's separate cursor.
