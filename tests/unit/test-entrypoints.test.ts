@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 import { ciEntrypointPolicy } from '../helpers/ci-entrypoint-policy.js';
+import { networkCreateArgs, STORE_IMAGES, storeContainerArgs, validateStoreImages } from '../../scripts/test-isolated.mjs';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -190,6 +191,25 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
           `${name}@${entry?.version} does not satisfy ${spec}`,
         ).toBe(true);
       }
+    }
+  });
+
+  it('store images are digest pinned and refuses tag-only images', () => {
+    expect(Object.values(STORE_IMAGES).every((image) => /@sha256:[a-f0-9]{64}$/.test(image))).toBe(true);
+    expect(() => validateStoreImages({ valkey: 'valkey/valkey:8.1' })).toThrow(/sha256 digest/);
+  });
+
+  it('store containers join a network and the network itself is internal', () => {
+    const network = networkCreateArgs('run-network');
+    expect(network).toContain('--internal');
+    expect(network).toContain('--label');
+    const valkey = storeContainerArgs('valkey', STORE_IMAGES.valkey, 'run-network', 'valkey');
+    const postgres = storeContainerArgs('postgres', STORE_IMAGES.postgres, 'run-network', 'postgres');
+    for (const args of [valkey, postgres]) {
+      expect(args).toContain('--network');
+      expect(args).toContain('run-network');
+      expect(args).toContain('--label');
+      expect(args.join(' ')).not.toMatch(/--network (?:host|bridge|none)/);
     }
   });
 

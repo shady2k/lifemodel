@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, symlinkSync, rmSync, truncateSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs, stageSnapshot, acquireLock, innerSteps, containerArgs, command } from '../../scripts/test-isolated.mjs';
+import { parseArgs, stageSnapshot, acquireLock, innerSteps, containerArgs, command, STORE_IMAGES, networkCreateArgs, storeContainerArgs, testStoreEnv } from '../../scripts/test-isolated.mjs';
 
 describe('the disposable launch boundary', () => {
   it('refuses interactive and resource-policy overrides', () => {
@@ -131,6 +131,25 @@ describe('the disposable launch boundary', () => {
     expect(args).not.toMatch(/--privileged|--mount|--volume/);
     expect(args).toContain('--read-only'); expect(args).toContain('/tmp:rw,exec,nosuid,nodev,size=768m');
     expect(args).toContain('--memory-swap 3g');
+  });
+  it('pins store images and creates bounded service containers on the internal test network', () => {
+    expect(STORE_IMAGES.valkey).toBe('valkey/valkey:8.1-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571');
+    expect(STORE_IMAGES.postgres).toBe('ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b');
+    expect(networkCreateArgs('owned-net')).toEqual(['network', 'create', '--internal', '--label', expect.stringMatching(/^com\.lifemodel\.test-boundary=/), 'owned-net']);
+    const args = storeContainerArgs('owned-pg', STORE_IMAGES.postgres, 'owned-net', 'postgres');
+    expect(args.join(' ')).toContain('--network owned-net');
+    expect(args.join(' ')).toContain('--network-alias postgres');
+    expect(args.join(' ')).toContain('--tmpfs');
+    expect(args.join(' ')).toContain('--cpus 1');
+    expect(args.join(' ')).not.toMatch(/--network-alias (?:localhost|host)(?:\s|$)/);
+  });
+  it('passes explicit store URLs only to the test container on its isolated network', () => {
+    const args = testStoreEnv('run-net', 'postgres-secret');
+    expect(args).toEqual(['-e', 'LIFEMODEL_TEST_VALKEY_URL=redis://valkey:6379', '-e', 'LIFEMODEL_TEST_DATABASE_URL=postgres://postgres:postgres-secret@postgres:5432/postgres']);
+    const testArgs = containerArgs('run', 'image', true, { network: 'run-net', storeEnv: args });
+    expect(testArgs.join(' ')).toContain('--network run-net');
+    expect(testArgs.join(' ')).toContain('LIFEMODEL_TEST_DATABASE_URL=');
+    expect(testArgs.join(' ')).not.toContain('--network none');
   });
   it('executes static checks before the suite without recursive npm scripts', () => {
     expect(innerSteps('check', []).map(([name]) => name)).toEqual(['tsc', 'tsc', 'eslint', 'prettier', 'vitest']);

@@ -122,21 +122,30 @@ disposable test boundary, `scripts/test-isolated.mjs
   never reach it; the launcher fails closed when it cannot hold that;
 - the launcher installs SIGINT/SIGTERM handlers and a hard deadline: on exit —
   success, inner failure, timeout or interruption — it stops and removes the
-  containers and temporary source images it started, then returns the exit
-  code (124 for timeout,
-  130/143 for interruption); a hard kill
-  can leave a container behind, and the launcher prunes leftovers matching its
-  label at the next run start and reports what it pruned;
+  test/store containers, the per-run internal store network and temporary
+  source images it started, then returns the exit code (124 for timeout,
+  130/143 for interruption); a hard kill can leave labeled resources behind,
+  and it prunes matching containers, networks and snapshot images at the next
+  run start and reports what it pruned;
+- each run pulls digest-pinned Valkey 8.1 and Postgres 17.11/pgvector images
+  during provisioning, starts them with memory-backed data and resource caps,
+  and waits for both readiness checks before Vitest. The test container joins
+  only their dedicated `--internal` Docker network and receives
+  `LIFEMODEL_TEST_VALKEY_URL` and `LIFEMODEL_TEST_DATABASE_URL`; that network
+  has no outside route. The test container receives no Docker socket or host
+  mounts. Tests use `tests/helpers/test-stores.ts` for a Postgres database and
+  Valkey logical database per Vitest worker. Missing store URLs fail tests;
+  there is no skip or substitute store;
 - the boundary runs Node.js 24.21.0 (`node:24.21.0-bookworm-slim`) with
   dependencies provisioned by native `npm ci` inside a container. Only the
   allowlisted `legacy-peer-deps` install policy is copied from `.npmrc`;
   credentials and registry overrides are rejected. The dependency cache key
   includes the manifests, policy and resolved base image/platform. Provisioning
-  can use the network; the test container is offline, non-root, capped at 2 CPUs,
-  3 GiB of memory (no additional swap) and 256 processes. Its root filesystem
-  is read-only; writes use memory-backed `/tmp` (768 MiB) and `/home/node`
-  (64 MiB). The per-run source image is removed after the container. The
-  dependency cache is intentionally retained;
+  can use the network; the test container is isolated to its internal store
+  network, non-root, capped at 2 CPUs, 3 GiB of memory (no additional swap) and
+  256 processes. Its root filesystem is read-only; writes use memory-backed
+  `/tmp` (768 MiB) and `/home/node` (64 MiB). The per-run source image is
+  removed after the container. The dependency cache is intentionally retained;
 - the overall run deadline is 25 minutes (`--timeout-ms` can lower it). Cleanup
   is awaited afterwards; the Docker-machine helper has up to 75 seconds to stop
   control processes and delete its machine after interruption;
@@ -144,15 +153,19 @@ disposable test boundary, `scripts/test-isolated.mjs
   machine with `--isolated --isolate-network`, 2 CPUs, 4 GiB memory and a
   32 GiB disk limit. No Mac mounts or SSH forwarding are enabled. The source
   and SHA-verified Node/Docker artifacts arrive over stdin; native `npm ci`
-  and a private rootless Docker daemon run inside the machine. OrbStack
-  machines share a Linux kernel: this is not a hardware-VM security boundary.
+  and a private rootless Docker daemon run inside the machine. Docker mode
+  pulls and starts the same digest-pinned Valkey and Postgres services on an
+  internal network, publishes them only to machine loopback for Vitest, waits
+  for readiness, then removes the services/network before deleting the
+  machine. OrbStack machines share a Linux kernel: this is not a hardware-VM security boundary.
   Unsupported hosts, missing OrbStack and failed rootless setup fail closed;
   there is no owner-socket, privileged or host-suite fallback. Deletion is
   awaited from outside the machine; an unconfirmed deletion keeps its claim
   for next-run recovery and cannot turn a successful suite into a green run;
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
-  reads the committed config surfaces (package.json scripts, vitest config,
-  the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a
+  reads committed config surfaces (package.json scripts, vitest config, the
+  pre-commit hook, CI, lockfile agreement and store-image/network policy) and
+  refuses a
   raw vitest start on the host outside the named `ci-image` exception.
 
 The owner-approved exception is the PR-only `ci-image` job on a fresh
