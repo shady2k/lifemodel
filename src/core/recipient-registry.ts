@@ -442,7 +442,10 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
             failure ??= error;
           }
         }
-        if (failure !== undefined) throw failure;
+        if (failure !== undefined) {
+          if (failure instanceof Error) throw failure;
+          throw new Error(String(failure));
+        }
       }
     })();
     try {
