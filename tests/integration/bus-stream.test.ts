@@ -52,9 +52,14 @@ describe('Valkey bus signal stream', () => {
       },
     });
     const firstSignal = thoughtSignal('start cognition', instance.recipientId);
+    const secondSignal = thoughtSignal('second consumed trigger', instance.recipientId);
     instance.coreLoop.pushSignal(firstSignal);
+    instance.coreLoop.pushSignal(secondSignal);
     await waitFor(() => instance.cognition.calls.length === 1, 'cognition started');
     await waitFor(() => commitAttempts >= 1, 'initial snapshot committed');
+    const bothBusEntries = await stream.readAfter('0-0', 10);
+    expect(bothBusEntries).toHaveLength(2);
+    const secondStreamId = bothBusEntries[1]!.id;
     const committedOffset = stream.committedOffset();
     expect(committedOffset).toBe('0-0');
     const send: SendMessageIntent = {
@@ -65,8 +70,14 @@ describe('Valkey bus signal stream', () => {
     instance.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
     await waitFor(() => attemptedOffset !== undefined, 'second snapshot commit attempted');
     await waitFor(() => instance.coreLoop.stopReport().loopStopped, 'core stopped after failure');
-    expect(attemptedOffset).not.toBe(committedOffset);
+    expect(attemptedOffset).toBe(secondStreamId);
     expect(attemptedOutbox).toHaveLength(1);
+    expect((await stores.redis.xrange(`${prefix}bus`, '-', '+')).map(([id]) => id)).toHaveLength(2);
+    const restartBus = createBusSignalStream(stores.redis, prefix);
+    restartBus.hydrateSnapshot((await store.read())?.sections['busOffset'] as string | undefined);
+    expect(
+      (await restartBus.readAfter(restartBus.committedOffset(), 10)).map((entry) => entry.signal.id)
+    ).toEqual([firstSignal.id, secondSignal.id]);
     expect(stream.committedOffset()).toBe(committedOffset);
     expect(await store.read()).toMatchObject({ sections: { busOffset: committedOffset } });
     expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toEqual([]);
@@ -121,5 +132,37 @@ describe('Valkey bus signal stream', () => {
     const snapshot = await secondStore.read();
     expect(snapshot?.sections['busOffset']).toMatch(/^\d+-\d+$/);
     await second.coreLoop.stop();
+  });
+
+  it('replays both consumed bus entries in order after a failed snapshot CAS', async () => {
+    const prefix = `bus-multi-replay:${stores.workerId}:${Date.now()}:`;
+    const originalStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const originalBus = createBusSignalStream(stores.redis, prefix);
+    originalStore.register(originalBus);
+    const epoch = await originalStore.takeEpoch();
+    await originalStore.commitOwners(epoch, 1);
+    const signals = [
+      thoughtSignal('first replay', 'recipient'),
+      thoughtSignal('second replay', 'recipient'),
+    ];
+    const ids: string[] = [];
+    for (const signal of signals) ids.push(await originalBus.append(signal));
+    const consumed = await originalBus.readAfter('0-0', 10);
+    expect(consumed.map((entry) => entry.signal.id)).toEqual(signals.map((signal) => signal.id));
+    originalBus.setCommittedOffset(consumed[1]!.id);
+    await originalStore.takeEpoch();
+    await expect(originalStore.commitOwners(epoch, 2)).rejects.toThrow(/epoch mismatch/i);
+    expect(await stores.redis.xrange(`${prefix}bus`, '-', '+')).toHaveLength(2);
+    const restartedStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const restartedBus = createBusSignalStream(stores.redis, prefix);
+    restartedStore.register(restartedBus);
+    await restartedStore.hydrate(await restartedStore.read());
+    expect(restartedBus.committedOffset()).toBe('0-0');
+    expect(
+      (await restartedBus.readAfter(restartedBus.committedOffset(), 10)).map((entry) => entry.id)
+    ).toEqual(ids);
+    expect((await restartedBus.readAfter('0-0', 10)).map((entry) => entry.signal.id)).toEqual(
+      signals.map((signal) => signal.id)
+    );
   });
 });

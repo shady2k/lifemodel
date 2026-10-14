@@ -754,16 +754,19 @@ export class CoreLoop {
     this.dropTurnCommit(state);
     if (outcome === undefined || outcome === 'failed_turn') {
       this.busOffsetBlockedByFailedTurn = true;
-      if (outcome === 'failed_turn') this.inboundStream?.markFailedTurn(inboundIds);
-      if (inboundIds.length > 0) {
+      const exhaustedIds =
+        outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
+      if (inboundIds.length > 0 && (outcome === undefined || exhaustedIds.length > 0)) {
         this.logger.warn(
           {
             recipientId,
-            entries: inboundIds.length,
+            entries: outcome === 'failed_turn' ? exhaustedIds.length : inboundIds.length,
             outcome: outcome ?? 'none',
             disposition: state.disposition ?? null,
           },
-          'Turn committed no outcome; its inputs remain available for retry'
+          outcome === 'failed_turn'
+            ? 'Inbound messages remain pending but will not be retried after repeated errors'
+            : 'Turn committed no outcome; its inputs remain available for retry'
         );
       }
       return;

@@ -581,7 +581,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   logger.info('ConversationManager configured');
   // Re-apply all committed outbound message rows after restart. The independent
   // cursor advances only after Postgres accepts the natural-keyed row.
-  await applyCommittedOutboundEvents(snapshotRedis, conversationManager);
+  await applyCommittedOutboundEvents(
+    snapshotRedis,
+    conversationManager,
+    undefined,
+    undefined,
+    logger
+  );
 
   // Load persisted state
   const persistedState = await stateManager.load();
@@ -1100,7 +1106,13 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
     },
     afterSnapshotCommit: async () => {
-      await applyCommittedOutboundEvents(snapshotRedis, conversationManager);
+      await applyCommittedOutboundEvents(
+        snapshotRedis,
+        conversationManager,
+        undefined,
+        undefined,
+        logger
+      );
     },
     onStaleSnapshot: () => {
       process.exitCode = 1;
