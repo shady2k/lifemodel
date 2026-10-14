@@ -12,21 +12,26 @@ export interface FileSystem {
 }
 
 async function exists(path: string): Promise<boolean> {
-  try { await access(path, constants.F_OK); return true; } catch { return false; }
+  try {
+    await access(path, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createNodeFileSystem(): FileSystem {
   return {
     exists,
-    ensureDir: async (path, mode) => mkdir(path,{recursive:true,mode}).then(()=>undefined),
-    readFile: (path) => readFile(path,'utf8'),
-    writeFileAtomic: async (path,contents,mode) => {
-      await mkdir(dirname(path),{recursive:true,mode:0o700});
-      const temporary=join(dirname(path),`.${String(process.pid)}.${String(Date.now())}.tmp`);
-      await writeFile(temporary,contents,{mode});
-      await rename(temporary,path);
-      await chmod(path,mode);
+    ensureDir: async (path, mode) => mkdir(path, { recursive: true, mode }).then(() => undefined),
+    readFile: (path) => readFile(path, 'utf8'),
+    writeFileAtomic: async (path, contents, mode) => {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      const temporary = join(dirname(path), `.${String(process.pid)}.${String(Date.now())}.tmp`);
+      await writeFile(temporary, contents, { mode });
+      await rename(temporary, path);
+      await chmod(path, mode);
     },
-    chmod: (path,mode) => chmod(path,mode),
+    chmod: (path, mode) => chmod(path, mode),
   };
 }

@@ -26,11 +26,19 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
   async function readAuth(): Promise<PasswordRecord | null> {
     if (!(await fs.exists(authPath))) return null;
     let text: string;
-    try { text = await fs.readFile(authPath); }
-    catch (error) { throw new LoaderFatalError(`cannot read ${authPath}: ${describe(error)}`, { cause: error }); }
+    try {
+      text = await fs.readFile(authPath);
+    } catch (error) {
+      throw new LoaderFatalError(`cannot read ${authPath}: ${describe(error)}`, { cause: error });
+    }
     let record: unknown;
-    try { record = JSON.parse(text) as unknown; }
-    catch (error) { throw new LoaderFatalError(`${authPath} is not valid JSON: ${describe(error)}`, { cause: error }); }
+    try {
+      record = JSON.parse(text) as unknown;
+    } catch (error) {
+      throw new LoaderFatalError(`${authPath} is not valid JSON: ${describe(error)}`, {
+        cause: error,
+      });
+    }
     const value = record as Partial<PasswordRecord>;
     if (value.version !== 1 || typeof value.hash !== 'string' || typeof value.salt !== 'string') {
       throw new LoaderFatalError(`${authPath} does not hold a password this loader wrote`);
@@ -44,12 +52,19 @@ export function createLoaderState({ fs, config, logger }: LoaderStateDeps): Load
         await fs.ensureDir(config.loaderDir, LOADER_DIR_MODE);
         await fs.chmod(config.loaderDir, LOADER_DIR_MODE);
       } catch (error) {
-        throw new LoaderFatalError(`cannot prepare the loader volume at ${config.volumeRoot}: ${describe(error)}`, { cause: error });
+        throw new LoaderFatalError(
+          `cannot prepare the loader volume at ${config.volumeRoot}: ${describe(error)}`,
+          { cause: error }
+        );
       }
-      logger.info({ volume: config.volumeRoot, loaderDir: config.loaderDir }, 'platform loader volume ready');
+      logger.info(
+        { volume: config.volumeRoot, loaderDir: config.loaderDir },
+        'platform loader volume ready'
+      );
     },
     readAuth,
-    writeAuth: async (record) => fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
+    writeAuth: async (record) =>
+      fs.writeFileAtomic(authPath, `${JSON.stringify(record, null, 2)}\n`, AUTH_MODE),
   };
 }
 

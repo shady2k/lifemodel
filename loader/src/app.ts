@@ -7,17 +7,24 @@ import { createLoaderHttp, type LoaderHttp } from './http.js';
 import type { LoaderLogger } from './logger.js';
 import { createLoaderState, describe, type LoaderState } from './state.js';
 import {
-  createKubernetesBaoCustody, createOpenBaoApi, createOpenBaoBootstrap,
-  type BaoApi, type BaoCustody,
+  createKubernetesBaoCustody,
+  createOpenBaoApi,
+  createOpenBaoBootstrap,
+  type BaoApi,
+  type BaoCustody,
 } from './openbao.js';
 import {
-  createKubernetesPhaseStore, createPlatformPhaseRunner,
-  type PlatformPhaseStore, type PlatformPhase,
+  createKubernetesPhaseStore,
+  createPlatformPhaseRunner,
+  type PlatformPhaseStore,
+  type PlatformPhase,
 } from './platform-bootstrap.js';
 import { createKubernetesPostgresSecretPhase } from './postgres.js';
 import { createKubernetesValkeySecretPhase } from './valkey.js';
 import {
-  createGiteaBootstrap, createGiteaHttpApi, createKubernetesGiteaAdminSecret,
+  createGiteaBootstrap,
+  createGiteaHttpApi,
+  createKubernetesGiteaAdminSecret,
   type GiteaApi,
 } from './gitea.js';
 
@@ -64,28 +71,32 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     api: giteaApi,
     runPhases: createPlatformPhaseRunner(phaseStore),
   });
-  const platformBootstrap = deps.platformBootstrap ?? (() => {
-    const bootstrap = createOpenBaoBootstrap({
-      bao: bao.api,
-      custody: bao.custody,
-      runPhases: createPlatformPhaseRunner(phaseStore),
-      extraPhases: deps.platformGiteaPhases ?? [
-        ...giteaBootstrap.phases(),
-        createKubernetesPostgresSecretPhase(),
-        createKubernetesValkeySecretPhase(),
-      ],
-      ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
-    });
-    return {
-      runInitial: () => bootstrap.runInitial(),
-      unsealIfSealed: () => bootstrap.unsealIfSealed(),
-    };
-  })();
+  const platformBootstrap =
+    deps.platformBootstrap ??
+    (() => {
+      const bootstrap = createOpenBaoBootstrap({
+        bao: bao.api,
+        custody: bao.custody,
+        runPhases: createPlatformPhaseRunner(phaseStore),
+        extraPhases: deps.platformGiteaPhases ?? [
+          ...giteaBootstrap.phases(),
+          createKubernetesPostgresSecretPhase(),
+          createKubernetesValkeySecretPhase(),
+        ],
+        ...(deps.platformLoaderJwt === undefined ? {} : { loaderJwt: deps.platformLoaderJwt }),
+      });
+      return {
+        runInitial: () => bootstrap.runInitial(),
+        unsealIfSealed: () => bootstrap.unsealIfSealed(),
+      };
+    })();
 
   let http: LoaderHttp | null = null;
   let stopping = false;
   let resolveStop!: () => void;
-  const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
+  const stopped = new Promise<void>((resolve) => {
+    resolveStop = resolve;
+  });
 
   async function bootstrapUntilStopped(): Promise<void> {
     let delayMs = 1_000;
@@ -100,8 +111,13 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
         try {
           const record = await phaseStore.read();
           if (record?.status === 'failed') phase = record.phase;
-        } catch { /* Keep the original bootstrap failure visible. */ }
-        logger.error({ error: describe(error), phase }, `platform bootstrap failed during ${phase}; retrying in ${String(delayMs)} ms`);
+        } catch {
+          /* Keep the original bootstrap failure visible. */
+        }
+        logger.error(
+          { error: describe(error), phase },
+          `platform bootstrap failed during ${phase}; retrying in ${String(delayMs)} ms`
+        );
         await Promise.race([clock.sleep(delayMs), stopped]);
         delayMs = Math.min(delayMs * 2, 30_000);
         continue;
@@ -114,11 +130,15 @@ export function createLoaderApp(deps: LoaderAppDeps): LoaderApp {
     state,
     port: () => {
       const address = http?.server.address();
-      return address === null || address === undefined || typeof address === 'string' ? config.httpPort : address.port;
+      return address === null || address === undefined || typeof address === 'string'
+        ? config.httpPort
+        : address.port;
     },
     host: () => {
       const address = http?.server.address();
-      return address === null || address === undefined || typeof address === 'string' ? null : address.address;
+      return address === null || address === undefined || typeof address === 'string'
+        ? null
+        : address.address;
     },
     start: async () => {
       if (http !== null) return;
