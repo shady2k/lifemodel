@@ -1,11 +1,13 @@
 import type { Redis } from 'iovalkey';
-import type { Signal } from '../types/signal.js';
+import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotOutboxEvent, SnapshotSectionOwner } from '../storage/snapshot-store.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { Channel, Logger } from '../types/index.js';
 
 export const INBOUND_STREAM = 'inbound';
 export const OUTBOUND_STREAM = 'outbound';
+export const OUTBOUND_RETENTION_MAX_LENGTH = 10_000;
+export const OUTBOUND_RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_DEDUP_LIMIT = 1_000;
 
 export interface InboundMessage {
@@ -103,7 +105,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       const recipientId = values['recipientId'];
       if (!messageId || !recipientId || !values['signal'])
         throw new Error(`Malformed inbound message at ${streamId}`);
-      const signal = JSON.parse(values['signal']) as Signal;
+      const signal = decodeSignal(JSON.parse(values['signal']));
       if (signal.type !== 'user_message')
         throw new Error(`Inbound stream payload at ${streamId} is not a user_message`);
       if (known.has(messageId)) {
@@ -155,14 +157,17 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   }
 
   /** Record an error-disposition attempt without settling the input. */
-  markFailedTurn(signalIds: string[]): void {
+  markFailedTurn(signalIds: string[]): string[] {
     const failed = new Set(signalIds);
+    const exhausted: string[] = [];
     for (const message of this.snapshot.pending) {
       if (failed.has(message.signal.id)) {
-        this.snapshot.errorRetries[message.messageId] =
-          (this.snapshot.errorRetries[message.messageId] ?? 0) + 1;
+        const attempts = (this.snapshot.errorRetries[message.messageId] ?? 0) + 1;
+        this.snapshot.errorRetries[message.messageId] = attempts;
+        if (attempts === 2) exhausted.push(message.signal.id);
       }
     }
+    return exhausted;
   }
 
   exportSnapshot(): InboundSnapshot {
@@ -184,7 +189,13 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     ) {
       throw new Error('Invalid inbound snapshot section');
     }
-    this.snapshot = structuredClone({ ...value, errorRetries: value.errorRetries ?? {} });
+    this.snapshot = {
+      ...structuredClone({ ...value, errorRetries: value.errorRetries ?? {} }),
+      pending: value.pending.map((message) => ({
+        ...message,
+        signal: decodeSignal(message.signal),
+      })),
+    };
     this.queuedIds.clear();
   }
 
@@ -207,21 +218,82 @@ export interface OutboundMessagePayload extends Record<string, unknown> {
   replyTo?: string;
 }
 
-/** Trim only the prefix both outbound consumers have durably passed.
- * MINID is inclusive, so the event at the slower cursor stays available. */
+/**
+ * Retain events until both consumers pass them, except that the oldest events
+ * are forcibly discarded after the configured age/length horizon. Events and
+ * their idempotency keys share that horizon.
+ */
 export async function trimOutboundEvents(
   redis: Redis,
-  options: { streamKey?: string; postgresOffsetKey?: string; deliveryOffsetKey?: string } = {}
+  options: {
+    streamKey?: string;
+    postgresOffsetKey?: string;
+    deliveryOffsetKey?: string;
+    eventKeysKey?: string;
+    maxLength?: number;
+    maxAgeMs?: number;
+    logger?: Logger;
+  } = {}
 ): Promise<void> {
   const streamKey = options.streamKey ?? OUTBOUND_STREAM;
   const postgresOffsetKey = options.postgresOffsetKey ?? 'outbound:pg-applied';
   const deliveryOffsetKey = options.deliveryOffsetKey ?? 'outbound:delivery-offset';
+  const eventKeysKey =
+    options.eventKeysKey ??
+    (streamKey === OUTBOUND_STREAM
+      ? 'lifemodel:core:snapshot:outbound:event-keys'
+      : `${streamKey}:event-keys`);
+  const maxLength = options.maxLength ?? OUTBOUND_RETENTION_MAX_LENGTH;
+  const maxAgeMs = options.maxAgeMs ?? OUTBOUND_RETENTION_MAX_AGE_MS;
+  if (!Number.isInteger(maxLength) || maxLength < 1 || !Number.isFinite(maxAgeMs) || maxAgeMs < 1) {
+    throw new Error('Outbound retention maxLength and maxAgeMs must be positive');
+  }
   const [postgresOffset, deliveryOffset] = await Promise.all([
     redis.get(postgresOffsetKey),
     redis.get(deliveryOffsetKey),
   ]);
-  const minimum = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
-  if (minimum !== '0-0') await redis.xtrim(streamKey, 'MINID', minimum);
+  const passed = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
+  let boundary = passed;
+  const ageBoundary = `${String(Math.max(0, Date.now() - maxAgeMs))}-0`;
+  if (compareStreamIds(ageBoundary, boundary) > 0) boundary = ageBoundary;
+  const newest = await redis.xrevrange(streamKey, '+', '-', 'COUNT', maxLength);
+  if (newest.length === maxLength) {
+    const lengthBoundary = newest[newest.length - 1]?.[0];
+    if (lengthBoundary && compareStreamIds(lengthBoundary, boundary) > 0) boundary = lengthBoundary;
+  }
+  if (boundary === '0-0') return;
+  const removable = await redis.xrange(streamKey, '-', `(${boundary}`);
+  if (boundary === passed) {
+    removable.push(...(await redis.xrange(streamKey, boundary, boundary)));
+  }
+  if (removable.length === 0) return;
+  const dropped = removable.filter(([id]) => compareStreamIds(id, passed) > 0).length;
+  const eventIds = removable.flatMap(([, fields]) => {
+    const values = fieldsToRecord(fields);
+    const eventId = values['eventId'];
+    return eventId ? [eventId] : [];
+  });
+  await redis.xtrim(streamKey, 'MINID', boundary);
+  if (boundary === passed) await redis.xdel(streamKey, boundary);
+  if (eventIds.length > 0) await redis.hdel(eventKeysKey, ...eventIds);
+  if (dropped > 0) {
+    options.logger?.warn(
+      { count: dropped, streamKey, maxLength, maxAgeMs },
+      'Outbound retention bound dropped undelivered events'
+    );
+  }
+}
+
+function compareStreamIds(left: string, right: string): number {
+  const [leftMs, leftSeq] = left.split('-');
+  const [rightMs, rightSeq] = right.split('-');
+  if (!leftMs || !leftSeq || !rightMs || !rightSeq) throw new Error('Invalid Valkey stream ID');
+  const a = BigInt(leftMs),
+    b = BigInt(rightMs);
+  if (a !== b) return a < b ? -1 : 1;
+  const x = BigInt(leftSeq),
+    y = BigInt(rightSeq);
+  return x < y ? -1 : x > y ? 1 : 0;
 }
 
 function minStreamId(left: string, right: string): string {
@@ -243,14 +315,19 @@ export async function applyCommittedOutboundEvents(
   redis: Redis,
   conversations: ConversationManager,
   offsetKey = 'outbound:pg-applied',
-  streamKey = OUTBOUND_STREAM
+  streamKey = OUTBOUND_STREAM,
+  logger?: Logger
 ): Promise<number> {
   let offset = (await redis.get(offsetKey)) ?? '0-0';
   let applied = 0;
   for (;;) {
     const entries = await redis.xrange(streamKey, `(${offset}`, '+', 'COUNT', 100);
     if (entries.length === 0) {
-      await trimOutboundEvents(redis, { streamKey, postgresOffsetKey: offsetKey });
+      await trimOutboundEvents(redis, {
+        streamKey,
+        postgresOffsetKey: offsetKey,
+        ...(logger ? { logger } : {}),
+      });
       return applied;
     }
     for (const [streamId, fields] of entries) {
@@ -279,14 +356,30 @@ export function startOutboundDelivery(
   redis: Redis,
   channels: Map<string, Channel>,
   logger: Logger,
-  options: { streamKey?: string; offsetKey?: string } = {}
+  options: {
+    streamKey?: string;
+    offsetKey?: string;
+    postgresOffsetKey?: string;
+    eventKeysKey?: string;
+    maxLength?: number;
+    maxAgeMs?: number;
+  } = {}
 ): { stop(): void; done: Promise<void> } {
   const streamKey = options.streamKey ?? OUTBOUND_STREAM;
   const offsetKey = options.offsetKey ?? 'outbound:delivery-offset';
   let active = true;
+  const trimOptions = {
+    streamKey,
+    deliveryOffsetKey: offsetKey,
+    ...(options.postgresOffsetKey ? { postgresOffsetKey: options.postgresOffsetKey } : {}),
+    ...(options.eventKeysKey ? { eventKeysKey: options.eventKeysKey } : {}),
+    ...(options.maxLength !== undefined ? { maxLength: options.maxLength } : {}),
+    ...(options.maxAgeMs !== undefined ? { maxAgeMs: options.maxAgeMs } : {}),
+    logger,
+  };
   const done = (async () => {
     let offset = (await redis.get(offsetKey)) ?? '0-0';
-    await trimOutboundEvents(redis, { streamKey, deliveryOffsetKey: offsetKey });
+    await trimOutboundEvents(redis, trimOptions);
     while (active) {
       const entries = await redis.xrange(streamKey, `(${offset}`, '+', 'COUNT', 20);
       if (entries.length === 0) {
@@ -310,6 +403,11 @@ export function startOutboundDelivery(
           // delivery cursor here would let trimming discard events before the
           // future gateway has delivered them.
           offset = streamId;
+          try {
+            await trimOutboundEvents(redis, trimOptions);
+          } catch (trimError) {
+            logger.warn({ err: trimError }, 'Could not enforce outbound retention bound');
+          }
           continue;
         }
         try {
@@ -320,7 +418,7 @@ export function startOutboundDelivery(
           await redis.set(offsetKey, streamId);
           offset = streamId;
           try {
-            await trimOutboundEvents(redis, { streamKey, deliveryOffsetKey: offsetKey });
+            await trimOutboundEvents(redis, trimOptions);
           } catch (trimError) {
             logger.warn({ err: trimError }, 'Could not trim completed outbound events');
           }

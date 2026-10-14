@@ -1,5 +1,5 @@
 import type { Redis } from 'iovalkey';
-import type { Signal } from '../types/signal.js';
+import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotSectionOwner } from '../storage/snapshot-store.js';
 
 export interface BusSignalEntry {
@@ -38,14 +38,11 @@ export class ValkeyBusSignalStream implements BusSignalStream {
     return records.map(([id, fields]) => {
       const payload = fields[fields.indexOf('signal') + 1];
       if (!payload) throw new Error(`Bus entry ${id} has no signal payload`);
-      const parsed: unknown = JSON.parse(payload);
-      if (!parsed || typeof parsed !== 'object' || typeof (parsed as Signal).id !== 'string') {
-        throw new Error(`Bus entry ${id} has an invalid signal payload`);
+      try {
+        return { id, signal: decodeSignal(JSON.parse(payload)) };
+      } catch (error) {
+        throw new Error(`Bus entry ${id} has an invalid signal payload`, { cause: error });
       }
-      const signal = parsed as Signal;
-      signal.timestamp = new Date(signal.timestamp);
-      if (signal.expiresAt) signal.expiresAt = new Date(signal.expiresAt);
-      return { id, signal };
     });
   }
 

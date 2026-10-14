@@ -304,6 +304,8 @@ turn's owned inputs advance only in the CAS that commits its answer or
 intentional silence. The Valkey commit rejects a stale generation by epoch.
 Postgres writes are fenced by the active holder.
 
+The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the drop count. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
+
 The outbox persists across tick boundaries. A CAS retires only the exact batch
 it accepted; sends arriving while the CAS is in flight remain queued for a
 later commit. A committed outbound event is the answer boundary. The Postgres
