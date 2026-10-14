@@ -29,7 +29,7 @@ function parseYamlFiles(files: string[]): Record<string, any>[] {
 function sourceObjects(): Record<string, any>[] {
   // Helm chart templates are Go templates, not standalone Kubernetes YAML.
   // Render the vendored chart in the Nix platform check instead.
-  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml')));
+  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml') && !file.endsWith('/b/operator/rendered.yaml')));
 }
 
 function object(objects: Record<string, any>[], kind: string): Record<string, any> {
