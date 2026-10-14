@@ -7,7 +7,7 @@
  *
  * JsonVectorStore: JSON-backed implementation with TF-IDF-like scoring
  * and an ephemeral inverted index for IDF weighting.
- * Swappable to LanceDB later — only search/save/delete/getById matter.
+ * The Postgres pgvector implementation provides durable vector search.
  */
 
 import type { Storage } from './storage.js';
@@ -42,7 +42,7 @@ export interface VectorSearchResult {
  * VectorStore interface — retrieval/index CRUD.
  *
  * Domain-specific operations (getRecentByType, findByKind, getBehaviorRules)
- * stay on MemoryProvider. A LanceDB impl only needs these methods.
+ * stay on MemoryProvider. The Postgres implementation owns vector persistence and search.
  */
 export interface VectorStore {
   search(options: VectorSearchOptions): Promise<VectorSearchResult[]>;

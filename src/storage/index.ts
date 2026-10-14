@@ -32,8 +32,6 @@ export type {
 export { JsonVectorStore } from './vector-store.js';
 export type { Embedder, EmbedderConfig } from './embedder.js';
 export { createEmbedder } from './embedder.js';
-export type { LanceVectorStoreConfig } from './lance-vector-store.js';
-export { LanceVectorStore } from './lance-vector-store.js';
 export type {
   GraphStore,
   GraphEntity,

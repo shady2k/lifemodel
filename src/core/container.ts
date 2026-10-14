@@ -64,8 +64,7 @@ import {
 } from '../storage/memory-consolidator.js';
 import { LLMEntityExtractor } from '../storage/entity-extractor.js';
 import { createEmbedder } from '../storage/embedder.js';
-import { LanceVectorStore } from '../storage/lance-vector-store.js';
-import { JsonGraphStore } from '../storage/graph-store.js';
+import { PostgresVectorStore, PostgresGraphStore } from '../storage/postgres-memory-store.js';
 import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
@@ -84,7 +83,6 @@ import { createLockService } from '../runtime/lock/lock-service.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
@@ -675,30 +673,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
-  // Guard: fail fast if memory.json exists but hasn't been migrated to LanceDB
-  const legacyMemoryPath = resolve(storagePath, 'memory.json');
-  if (existsSync(legacyMemoryPath)) {
-    throw new Error(
-      `Unmigrated memory.json found at ${legacyMemoryPath}. ` +
-        'Run "npx tsx src/scripts/migrate-memory-to-lance.ts" before starting the agent.'
-    );
-  }
-
-  // Create dual-layer memory stores
-  const embedder = createEmbedder({
-    cacheDir: resolve(mergedConfig.paths.data, 'models'),
-  });
-  const vectorStore = new LanceVectorStore(logger, {
-    dbPath: resolve(storagePath, 'memory', 'vector'),
-    embedder,
-    maxEntries: 10000,
-  });
-  const graphStore = new JsonGraphStore(logger, {
-    storage,
-    storageKey: 'graph',
-  });
+  // Long-lived memory and its graph live only in the core Postgres schema.
+  const embedder = createEmbedder();
+  const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
+  const graphStore = new PostgresGraphStore(postgres, logger);
   const memoryProvider = new JsonMemoryProvider(logger, { vectorStore, graphStore });
-  logger.info('MemoryProvider configured (dual-layer: VectorStore + GraphStore)');
+  logger.info('MemoryProvider configured (Postgres pgvector + graph)');
 
   // Create entity extractor (LLM-based, for consolidation)
   const entityExtractor = cognitionLLM ? new LLMEntityExtractor(logger, cognitionLLM) : undefined;

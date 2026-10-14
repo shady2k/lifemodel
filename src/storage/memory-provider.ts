@@ -56,8 +56,7 @@ export interface MemoryProviderDeps {
  *
  * Delegates storage CRUD and search to VectorStore.
  * Domain methods (getRecentByType, findByKind, getBehaviorRules) use
- * vectorStore.getAll() + in-memory filtering — these are orchestration
- * that a LanceDB VectorStore wouldn't need to implement.
+ * vectorStore.getAll() + in-memory filtering — these remain orchestration above the Postgres VectorStore.
  */
 export class JsonMemoryProvider implements MemoryProvider {
   private readonly logger: Logger;
