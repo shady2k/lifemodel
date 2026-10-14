@@ -1,5 +1,5 @@
 /**
- * JSON-safe encoding for Date values in payloads stored through JSONStorage.
+ * JSON-safe encoding for Date values in payloads stored as JSON.
  *
  * JSON.stringify turns Date objects into plain ISO strings; a value restored
  * from such a file is a string, not a Date, and code holding an object shape

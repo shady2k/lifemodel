@@ -94,7 +94,7 @@ the design, not decided here.
 | 2 | Queued internal signals | CoreLoop `pendingSignals` FIFO array, in-memory (core-loop.ts:315, :1230, :1666-1667) | Valkey bus |
 | 3 | The event queue class | `InMemoryEventQueue` exists but is DEAD CODE — never wired (event-queue.ts:12-187; grep: no production caller; its comment names "Valkey, Kafka" as the future, event-queue.ts:10; interface comment src/types/event.ts:61-63) | Valkey bus (the seam already anticipated in code) |
 | 4 | Tick snapshot (agent state, sleepState, energy mirror) | `state.json` via StateManager, 2-min auto-save + shutdown save (state-manager.ts:23-26, :238-247; envelope persistable-state.ts:35-62) | Valkey snapshot (ONE current tick snapshot, atomic epoch-checked commit) |
-| 5 | UserModel (beliefs, `user` in the envelope) | rides inside state.json (state-manager.ts:61-67, :120) | unclear (neither bus nor plainly memory/config) |
+| 5 | UserModel (beliefs, `user` in the envelope) | travels in the tick snapshot | Valkey snapshot |
 | 6 | Conversation history + statuses + completed actions | Postgres `core.conversation_messages` and related tables | Postgres (conversational state) |
 | 7 | Vector memory | Postgres `core.memory_vectors` with pgvector; local embedding generation | Postgres with pgvector (current implementation) |
 | 8 | Memory graph | Postgres `core.memory_entities` and `core.memory_relations` | Postgres (memory) |
@@ -106,17 +106,12 @@ the design, not decided here.
 | 14 | Plugin keys + schedules | `plugin/<id>/<key>.json`, incl. `schedules` and `fired:<id>` (storage-primitive.ts:50; scheduler-primitive.ts:42-45, :665-694) | Postgres (configuration); schedules are durable state the next generation must reload |
 | 15 | Configuration | Postgres `core.settings`; `PostgresConfigStore` reads and writes configuration | Postgres (configuration); endpoint changes reload in place |
 | 16 | LLM keys | Secret values are not stored in configuration; platform credentials are injected at the egress boundary | OpenBao / Agent Vault |
-| 17 | Motor run registry | `motor-runs.json` (ONE DeferredStorage key), save+flush per transition (motor-state.ts:14-15, :65-88) | unclear (results arrive on the bus per charter; the registry itself is not named) |
-| 18 | Motor artifacts/workspaces, skills, plugins dirs, ONNX model cache, logs | host/volume filesystem: `data/motor-runs/`, `data/motor-workspaces/`, `data/skills/`, `data/plugins/`, `data/models/`, `data/logs/` (container.ts:694-696, :1092; embedder.ts:35-48; logger.ts:49-91) | image candidate for ONNX weights (same-for-everyone image, charter :15-16) vs first-use download today: unclear; skills/plugins dirs unclear (code-like artifacts vs the git repository); logs unclear |
+| 17 | Motor run registry | Motor Cortex is disabled in the cluster; the registry is owned by lifemodel-653 | no cluster state home in this stage |
+| 18 | Motor run/workspace artifacts, skills, ONNX model, logs | Motor directories are disabled in the cluster; skill definitions are Postgres rows; ONNX model is read-only at `/opt/model-cache`; logs are stdout | Postgres; image; stdout |
 | 19 | Loader four files + vault store | `<volume>/loader/*` root-only, `<volume>/vault` | loader-owned |
 | 20 | Repository (the instance's code) | `<volume>/repo` git clone, dist/ overwritten by build | git repository on the volume (unchanged); generations select commits — no version store exists today (state.json holds ONE builtCommit, state.ts:28-32) |
 
-Concurrency fact that constrains all of the above (FACT): there is NO
-inter-process safety in the storage stack — no flock/lock files, no leases, no
-writer identity in any file; the only LockService is in-memory for motor
-scripts (lock-service.ts:1-13). Two writers on one root = silent
-last-rename-wins whole-document clobbering and legacy storage corruption
-included. The one-process assumption is what the Valkey/Postgres move replaces.
+Concurrency is enforced by the Valkey epoch snapshot and fenced Postgres pool. Mutable core state is no longer shared through a filesystem tree.
 
 ### 1.4 Runtime surfaces the change touches (Motor Cortex, skills, channel)
 

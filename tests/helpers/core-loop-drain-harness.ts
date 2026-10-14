@@ -1,7 +1,6 @@
 /**
  * Harness for shutdown-drain tests: a real CoreLoop wired the way the
- * container wires it (real Agent, EventBus, Metrics, DeferredStorage over
- * JSONStorage and the production shutdown sequence), with doubles only at
+ * container wires it (real Agent, EventBus, Metrics and the production shutdown sequence), with doubles only at
  * the boundaries:
  * - the three layer processors are the processing boundary (no LLM, no network)
  * - the persistence services (state manager, registries) are step recorders
@@ -26,11 +25,6 @@ import { RecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
 import type { Logger } from '../../src/types/logger.js';
-import {
-  createJSONStorage,
-  createDeferredStorage,
-  type DeferredStorage,
-} from '../../src/storage/index.js';
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
 import { makeIdempotentShutdown, shutdownSequence } from '../../src/core/container.js';
@@ -387,7 +381,7 @@ export async function startInstance(
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
-  const storage = await openStorage(storagePath, logger);
+  void storagePath; // state durability is exercised by the store-backed integration tests.
 
   // ── the three layers (cognition: fake processor boundary, or REAL
   // cognition with a scripted fake LLM provider - no network) ──
@@ -458,10 +452,7 @@ export async function startInstance(
  * the production shutdownSequence, later calls (sequential or concurrent)
  * return the SAME promise - what src/core/container.ts builds internally.
  */
-export function makeContainerShutdown(
-  instance: CoreLoopInstance,
-  storage: DeferredStorage
-): () => Promise<void> {
+export function makeContainerShutdown(instance: CoreLoopInstance): () => Promise<void> {
   // the SAME memoization the real container wraps its sequence in
   return makeIdempotentShutdown(() =>
     shutdownSequence({
@@ -469,7 +460,6 @@ export function makeContainerShutdown(
       deadline: Date.now() + instance.coreLoop.getStopDrainTimeoutMs(),
       channels: [instance.channel] as never,
       coreLoop: instance.coreLoop as never,
-      storage: storage as never,
       stateManager: { shutdown: async () => undefined } as never,
       recipientRegistry: { flush: async () => undefined } as never,
     })
@@ -477,25 +467,16 @@ export function makeContainerShutdown(
 }
 
 /** Stop an instance the way container.ts shuts down: the production sequence. */
-export async function stopInstance(
-  instance: CoreLoopInstance,
-  storage: DeferredStorage
-): Promise<void> {
+export async function stopInstance(instance: CoreLoopInstance): Promise<void> {
   await shutdownSequence({
     logger: instance.logger,
     deadline: Date.now() + instance.coreLoop.getStopDrainTimeoutMs(),
     channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
-    storage: storage as never,
     stateManager: { shutdown: async () => undefined } as never,
     recipientRegistry: { flush: async () => undefined } as never,
     ackRegistry: { flush: async () => undefined } as never,
   });
-}
-
-export async function openStorage(storagePath: string, logger?: Logger): Promise<DeferredStorage> {
-  const json = createJSONStorage(storagePath, { logger });
-  return createDeferredStorage(json, logger ?? noopLogger, { flushIntervalMs: 60_000 });
 }
 
 export async function makeScratchDir(prefix: string): Promise<string> {

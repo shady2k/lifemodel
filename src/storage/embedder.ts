@@ -28,7 +28,7 @@ type PipelineLike = (
 ) => Promise<{ data: ArrayLike<number> }>;
 
 export function createEmbedder(config?: EmbedderConfig): Embedder {
-  const cacheDir = config?.cacheDir;
+  const cacheDir = config?.cacheDir ?? process.env['LIFEMODEL_MODEL_DIR'];
 
   let pipelinePromise: Promise<PipelineLike> | null = null;
 
@@ -39,6 +39,9 @@ export function createEmbedder(config?: EmbedderConfig): Embedder {
         env.cacheDir = cacheDir;
       }
       env.allowLocalModels = true;
+      if (cacheDir) {
+        env.allowRemoteModels = false;
+      }
       const pipe = await pipeline('feature-extraction', MODEL_ID, {
         dtype: 'fp32',
       });

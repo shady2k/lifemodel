@@ -29,9 +29,8 @@
 
 import matter from 'gray-matter';
 import { createHash } from 'node:crypto';
-import { readFile, readdir, mkdir, stat, lstat } from 'node:fs/promises';
+import { readFile, readdir, mkdir, stat, lstat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { JSONStorage } from '../../storage/json-storage.js';
 import type {
   SkillFrontmatter,
   SkillPolicy,
@@ -407,7 +406,7 @@ export async function loadPolicy(skillDir: string): Promise<SkillPolicy | null> 
 }
 
 /**
- * Save policy.json to a skill directory (atomic write via JSONStorage).
+ * Save the policy sidecar for a locally installed skill.
  *
  * @param skillDir - Absolute path to skill directory
  * @param policy - Policy to save
@@ -416,8 +415,7 @@ export async function savePolicy(skillDir: string, policy: SkillPolicy): Promise
   // Ensure directory exists
   await mkdir(skillDir, { recursive: true });
 
-  const storage = new JSONStorage({ basePath: skillDir, createBackup: false });
-  await storage.save('policy', policy);
+  await writeFile(join(skillDir, 'policy.json'), JSON.stringify(policy, null, 2), 'utf-8');
 
   // Invalidate discovery cache — policy changes affect skill status/metadata
   invalidateSkillsCache();

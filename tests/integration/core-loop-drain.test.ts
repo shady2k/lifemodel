@@ -2,7 +2,7 @@
  * Integration tests for the bounded, best-effort stop (lifemodel-ctc.1.1,
  * lifemodel-ctc.1.2).
  *
- * Real CoreLoop + real storage chain (JSONStorage behind DeferredStorage),
+ * Real CoreLoop and the production shutdown sequence,
  * doubles only at the layer boundary (no LLM, no network). Required
  * scenarios:
  * 1. Stop while a cognition turn is in flight and the turn finishes within
@@ -29,7 +29,6 @@ import {
   makeContainerShutdown,
   makeDeferred,
   makeScratchDir,
-  openStorage,
   rmDir,
   startInstance,
   stopInstance,
@@ -82,7 +81,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     // ...and stays completed (its result is not re-run)
     const callsBeforeStop = h1.cognition.calls.length;
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(h1.cognition.calls.length).toBe(callsBeforeStop);
 
@@ -105,7 +104,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.coreLoop.pushSignal(trigger);
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     h1.cognition.settleAll();
 
     // nothing is written for the next run to redo
@@ -143,7 +142,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     expect(h1.cognition.calls.length).toBe(1); // consumed nothing
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(existsSync(journalPath(storagePath))).toBe(false);
     const h2 = await startInstance(storagePath, {
@@ -176,7 +175,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     h1.cognition.settleAll();
 
     expect(existsSync(journalPath(storagePath))).toBe(false);
@@ -213,7 +212,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     };
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(h1.channel.events).toEqual(['stopIntake', 'stop']);
     expect(h1.channel.sent).toEqual([]);
     expect(h1.channel.failed).toEqual([]);
@@ -235,7 +234,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
     h1.channel.failNextSend = 'transport-error';
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(h1.channel.sent).toEqual([]);
     expect(h1.channel.failed).toEqual([]);
@@ -263,7 +262,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
       ],
       response: undefined,
     });
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(h1.coreLoop.getOutboxForTest()).toEqual([]);
     expect(h1.channel.sent).toEqual([]);
   });
@@ -285,7 +284,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
 
     const started = Date.now();
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(Date.now() - started).toBeLessThan(5_000); // the deadline, not the hang
     // The channel is not called from intent application or held open by the core.
     expect(h1.channel.fullyStopped).toBe(true);
@@ -304,7 +303,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.coreLoop.setStallForTest({ tickGate: release.promise, schedulerGate: release.promise });
 
     const started = Date.now();
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     const elapsed = Date.now() - started;
     expect(elapsed).toBeLessThan(5_000); // the deadline (150 ms), not the stall
     release.resolve(); // the stalled waits still settle for test cleanup
@@ -316,8 +315,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
       cognitionMode: 'immediate',
       drainTimeoutMs: 500,
     });
-    const storage = await openStorage(storagePath);
-    const containerShutdown = makeContainerShutdown(h1, storage);
+    const containerShutdown = makeContainerShutdown(h1);
     const p1 = containerShutdown();
     const p2 = containerShutdown();
     expect(p2).toBe(p1); // concurrent callers share the first call's promise
@@ -353,7 +351,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     await waitFor(() => h1.coreLoop.getOutboxForTest().length === 1, 'outbound event committed');
     expect(h1.coreLoop.getOutboxForTest()[0]?.payload['text']).toBe('The real loop reply');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(h1.channel.events).not.toContain('send');
     expect(existsSync(journalPath(storagePath))).toBe(false);
   });
@@ -375,7 +373,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     await waitFor(() => h1.cognition.provider.requests.length === 1, 'LLM held (turn in flight)');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(existsSync(journalPath(storagePath))).toBe(false);
     h1.cognition.settleHangingTurn();
 
@@ -404,7 +402,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
     // reject WHILE the drain is in flight (before stop, the tick path already
     // logs 'COGNITION failed (async)' - that is not the drain's log)
-    const stopping = stopInstance(h1, await openStorage(storagePath));
+    const stopping = stopInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     // reject while the DRAIN's race is running (20 ms past intake stop is
     // well inside it: the drain starts within a tick of the intake stop)
