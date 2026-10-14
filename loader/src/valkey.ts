@@ -27,39 +27,63 @@ const SERVICE_ACCOUNT = '/var/run/secrets/kubernetes.io/serviceaccount';
 export function createKubernetesValkeySecretPhase(
   options: KubernetesValkeySecretOptions = {}
 ): PlatformPhase {
-  const host = options.apiServer ??
+  const host =
+    options.apiServer ??
     `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`;
   const tokenFile = options.tokenFile ?? `${SERVICE_ACCOUNT}/token`;
   const caFile = options.caFile ?? `${SERVICE_ACCOUNT}/ca.crt`;
-  const call = options.request ?? ((url, method, token, body, ca) =>
-    new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = httpsRequest(url, {
-        method, ca,
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...(body === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }),
-        },
-      }, (res) => {
-        let response = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk: string) => { response += chunk; });
-        res.on('end', () => { resolve({ status: res.statusCode ?? 0, body: response }); });
-        res.on('aborted', () => { reject(new Error('Kubernetes API response was truncated')); });
-      });
-      req.on('error', reject);
-      if (body !== undefined) req.write(body);
-      req.end();
-    }));
+  const call =
+    options.request ??
+    ((url, method, token, body, ca) =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = httpsRequest(
+          url,
+          {
+            method,
+            ca,
+            headers: {
+              authorization: `Bearer ${token}`,
+              ...(body === undefined
+                ? {}
+                : {
+                    'content-type': 'application/json',
+                    'content-length': Buffer.byteLength(body),
+                  }),
+            },
+          },
+          (res) => {
+            let response = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              response += chunk;
+            });
+            res.on('end', () => {
+              resolve({ status: res.statusCode ?? 0, body: response });
+            });
+            res.on('aborted', () => {
+              reject(new Error('Kubernetes API response was truncated'));
+            });
+          }
+        );
+        req.on('error', reject);
+        if (body !== undefined) req.write(body);
+        req.end();
+      }));
   async function send(url: URL, method: string, body?: unknown) {
     const token = (await readFile(tokenFile, 'utf8')).trim();
     if (!token) throw new Error('Kubernetes ServiceAccount token is empty');
     let ca: Buffer | undefined;
-    try { ca = await readFile(caFile); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try {
+      ca = await readFile(caFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     return call(url, method, token, body === undefined ? undefined : JSON.stringify(body), ca);
   }
-  const secretUrl = (namespace: string) => new URL(`/api/v1/namespaces/${namespace}/secrets/${SECRET_NAME}`, host);
-  const collectionUrl = (namespace: string) => new URL(`/api/v1/namespaces/${namespace}/secrets`, host);
+  const secretUrl = (namespace: string) =>
+    new URL(`/api/v1/namespaces/${namespace}/secrets/${SECRET_NAME}`, host);
+  const collectionUrl = (namespace: string) =>
+    new URL(`/api/v1/namespaces/${namespace}/secrets`, host);
   const sourceUrl = secretUrl(SOURCE_NAMESPACE);
   const targetUrl = secretUrl(TARGET_NAMESPACE);
   const password = options.randomPassword ?? (() => randomBytes(32).toString('base64url'));
@@ -71,41 +95,78 @@ export function createKubernetesValkeySecretPhase(
         const generated = password();
         if (!generated) throw new Error('generated Valkey password is empty');
         const body = {
-          apiVersion: 'v1', kind: 'Secret',
-          metadata: { name: SECRET_NAME, namespace: SOURCE_NAMESPACE, annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } },
-          type: 'Opaque', data: { password: Buffer.from(generated).toString('base64') },
+          apiVersion: 'v1',
+          kind: 'Secret',
+          metadata: {
+            name: SECRET_NAME,
+            namespace: SOURCE_NAMESPACE,
+            annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+          },
+          type: 'Opaque',
+          data: { password: Buffer.from(generated).toString('base64') },
         };
         source = await send(collectionUrl(SOURCE_NAMESPACE), 'POST', body);
         if (source.status === 409) source = await send(sourceUrl, 'GET');
-        else if (source.status !== 201) throw new Error(`Valkey password Secret create failed (${String(source.status)}): ${source.body}`);
+        else if (source.status !== 201)
+          throw new Error(
+            `Valkey password Secret create failed (${String(source.status)}): ${source.body}`
+          );
       }
       if (source.status !== 200 && source.status !== 201)
-        throw new Error(`Valkey password Secret read failed (${String(source.status)}): ${source.body}`);
-      const encodedPassword = (JSON.parse(source.body) as { data?: Record<string, string> }).data?.['password'];
+        throw new Error(
+          `Valkey password Secret read failed (${String(source.status)}): ${source.body}`
+        );
+      const encodedPassword = (JSON.parse(source.body) as { data?: Record<string, string> }).data?.[
+        'password'
+      ];
       if (!encodedPassword || !Buffer.from(encodedPassword, 'base64').toString())
         throw new Error('Valkey password Secret has no password');
       const targetBody = {
-        apiVersion: 'v1', kind: 'Secret',
-        metadata: { name: SECRET_NAME, namespace: TARGET_NAMESPACE, annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' } },
-        type: 'Opaque', data: { password: encodedPassword },
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: SECRET_NAME,
+          namespace: TARGET_NAMESPACE,
+          annotations: { 'kustomize.toolkit.fluxcd.io/prune': 'disabled' },
+        },
+        type: 'Opaque',
+        data: { password: encodedPassword },
       };
       let target = await send(targetUrl, 'GET');
       if (target.status === 404) {
         target = await send(collectionUrl(TARGET_NAMESPACE), 'POST', targetBody);
         if (target.status === 201) return verify();
-        if (target.status !== 409) throw new Error(`core Valkey Secret create failed (${String(target.status)}): ${target.body}`);
+        if (target.status !== 409)
+          throw new Error(
+            `core Valkey Secret create failed (${String(target.status)}): ${target.body}`
+          );
         target = await send(targetUrl, 'GET');
       }
-      if (target.status !== 200) throw new Error(`core Valkey Secret read failed (${String(target.status)}): ${target.body}`);
-      const resourceVersion = (JSON.parse(target.body) as { metadata?: { resourceVersion?: string } }).metadata?.resourceVersion;
+      if (target.status !== 200)
+        throw new Error(
+          `core Valkey Secret read failed (${String(target.status)}): ${target.body}`
+        );
+      const resourceVersion = (
+        JSON.parse(target.body) as { metadata?: { resourceVersion?: string } }
+      ).metadata?.resourceVersion;
       if (!resourceVersion) throw new Error('core Valkey Secret has no resourceVersion');
-      const result = await send(targetUrl, 'PUT', { ...targetBody, metadata: { ...targetBody.metadata, resourceVersion } });
-      if (result.status !== 200) throw new Error(`core Valkey Secret update failed (${String(result.status)}): ${result.body}`);
+      const result = await send(targetUrl, 'PUT', {
+        ...targetBody,
+        metadata: { ...targetBody.metadata, resourceVersion },
+      });
+      if (result.status !== 200)
+        throw new Error(
+          `core Valkey Secret update failed (${String(result.status)}): ${result.body}`
+        );
       await verify();
       async function verify() {
         const response = await send(targetUrl, 'GET');
-        const actual = response.status === 200 ? (JSON.parse(response.body) as { data?: Record<string, string> }).data?.['password'] : undefined;
-        if (actual !== encodedPassword) throw new Error('core Valkey Secret read-back did not match platform password');
+        const actual =
+          response.status === 200
+            ? (JSON.parse(response.body) as { data?: Record<string, string> }).data?.['password']
+            : undefined;
+        if (actual !== encodedPassword)
+          throw new Error('core Valkey Secret read-back did not match platform password');
       }
     },
   };
