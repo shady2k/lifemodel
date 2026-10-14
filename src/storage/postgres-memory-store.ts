@@ -162,33 +162,48 @@ export class PostgresVectorStore implements VectorStore {
         e.type === 'fact' &&
         typeof e.metadata?.['subject'] === 'string' &&
         typeof e.metadata['attribute'] === 'string';
-      const saved = await client.query<{ id: string }>(
-        naturalFact
-          ? `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector)
-             ON CONFLICT ((metadata->>'subject'), (metadata->>'attribute'))
-             WHERE type = 'fact' AND metadata ? 'subject' AND metadata ? 'attribute'
-             DO UPDATE SET content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding
-             RETURNING id`
-          : `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector) ON CONFLICT(id) DO UPDATE SET type=EXCLUDED.type,content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding RETURNING id`,
-        [
-          e.id,
-          e.type,
-          e.content,
-          e.timestamp,
-          e.recipientId ?? null,
-          JSON.stringify(e.tags ?? null),
-          e.confidence ?? 0.5,
-          x.salience ?? null,
-          JSON.stringify(e.metadata ?? null),
-          e.tickId ?? null,
-          e.parentSignalId ?? null,
-          JSON.stringify(e.trigger ?? null),
-          e.status ?? null,
-          e.expiresAt ?? null,
-          vectorLiteral(v),
-        ]
-      );
-      if (naturalFact && saved.rows[0]) e.id = saved.rows[0].id;
+      const values = [
+        e.id,
+        e.type,
+        e.content,
+        e.timestamp,
+        e.recipientId ?? null,
+        JSON.stringify(e.tags ?? null),
+        e.confidence ?? 0.5,
+        x.salience ?? null,
+        JSON.stringify(e.metadata ?? null),
+        e.tickId ?? null,
+        e.parentSignalId ?? null,
+        JSON.stringify(e.trigger ?? null),
+        e.status ?? null,
+        e.expiresAt ?? null,
+        vectorLiteral(v),
+      ];
+      let savedId: string | undefined;
+      if (naturalFact) {
+        const updated = await client.query<{ id: string }>(
+          `UPDATE core.memories SET type=$2,content=$3,timestamp=$4,recipient_id=$5,tags=$6::jsonb,
+             confidence=$7,salience=$8,metadata=$9::jsonb,tick_id=$10,parent_signal_id=$11,
+             trigger=$12::jsonb,status=$13,expires_at=$14,embedding=$15::vector
+           WHERE id=$1 AND type='fact' RETURNING id`,
+          values
+        );
+        savedId = updated.rows[0]?.id;
+      }
+      if (!savedId) {
+        const saved = await client.query<{ id: string }>(
+          naturalFact
+            ? `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector)
+               ON CONFLICT ((metadata->>'subject'), (metadata->>'attribute'))
+               WHERE type = 'fact' AND metadata ? 'subject' AND metadata ? 'attribute'
+               DO UPDATE SET content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding
+               RETURNING id`
+            : `INSERT INTO core.memories (${memoryColumns},embedding) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15::vector) ON CONFLICT(id) DO UPDATE SET type=EXCLUDED.type,content=EXCLUDED.content,timestamp=EXCLUDED.timestamp,recipient_id=EXCLUDED.recipient_id,tags=EXCLUDED.tags,confidence=EXCLUDED.confidence,salience=EXCLUDED.salience,metadata=EXCLUDED.metadata,tick_id=EXCLUDED.tick_id,parent_signal_id=EXCLUDED.parent_signal_id,trigger=EXCLUDED.trigger,status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,embedding=EXCLUDED.embedding RETURNING id`,
+          values
+        );
+        savedId = saved.rows[0]?.id;
+      }
+      if (naturalFact && savedId) e.id = savedId;
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');

@@ -88,6 +88,33 @@ describe('Postgres memory stores', () => {
     }
   });
 
+  it('updates an existing natural-key fact by id when its subject or attribute is renamed', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const vectorStore = new PostgresVectorStore(logger(), stores.postgres, createTestEmbedder());
+      await vectorStore.clear();
+      const fact = (content: string, subject: string, attribute: string): MemoryEntry => ({
+        ...entry('renamed-natural-fact', content),
+        type: 'fact',
+        metadata: { subject, attribute },
+      });
+      await vectorStore.save(fact('Ada is a mathematician', 'Ada', 'occupation'));
+      await vectorStore.save(fact('Ada is an engineer', 'Ada', 'profession'));
+      await vectorStore.save(fact('Augusta is an engineer', 'Augusta', 'profession'));
+
+      const saved = await vectorStore.getById('renamed-natural-fact');
+      expect(saved).toMatchObject({
+        id: 'renamed-natural-fact',
+        content: 'Augusta is an engineer',
+        metadata: { subject: 'Augusta', attribute: 'profession' },
+      });
+      expect(await vectorStore.count({ types: ['fact'] })).toBe(1);
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
   it('enforces protected-reflection expiry and total retention in Postgres', async () => {
     const stores = await createTestStores();
     try {
