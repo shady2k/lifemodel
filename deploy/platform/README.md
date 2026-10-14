@@ -105,8 +105,8 @@ manifest rather than a chart: its small, fixed resource set stays explicit and
 adds no chart packaging. Step A permits core egress to Postgres on TCP 5432 and
 Valkey on TCP 6379; the state policies admit only the core namespace on those
 store ports, plus the CNPG operator ports. The bootstrap creates database
-`lifemodel` and owner role `lifemodel` with CNPG's generated `lifemodel-app`
-Secret. The post-init SQL enables pgvector in the application database.
+`lifemodel` and owner role `lifemodel` with CNPG's generated `lifemodel-app` Secret.
+The post-init SQL enables pgvector in the application database.
 
 The loader copies only the generated username and password to a fixed Secret
 `lifemodel/lifemodel-db-credentials`, in a resumable first-start phase. It also
