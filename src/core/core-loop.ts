@@ -2041,7 +2041,7 @@ export class CoreLoop {
         // Do not absorb a later user message past an unconsumed bus entry.
         while (this.pendingSignals.length > 0) {
           const entry = this.pendingSignals[0];
-          if (!entry || entry.signal.type !== 'user_message') break;
+          if (entry?.signal.type !== 'user_message') break;
           const signalData = entry.signal.data as { recipientId?: string } | undefined;
           if (signalData?.recipientId !== recipientId) break;
           this.pendingSignals.shift();
