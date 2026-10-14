@@ -9,13 +9,11 @@ import 'dotenv/config';
 import { createContainerAsync, type Container, type StopStep } from './core/container.js';
 import type { StopReport } from './core/core-loop.js';
 import { armStopDeadlineExit, type ArmedStopDeadlineExit } from './core/hard-exit.js';
-import { createConfigLoader, resolveConfigDir } from './config/index.js';
 import {
   createSettingsServer,
   type SettingsServer,
   type SettingsServerOptions,
 } from './settings/server.js';
-import { RESTART_EXIT_CODE } from './settings/restart.js';
 
 let container: Container | undefined;
 let settingsServer: SettingsServer | undefined;
@@ -41,8 +39,18 @@ async function main(): Promise<void> {
   // lifemodel's own settings interface, on the port Caddy's root host reaches
   // (127.0.0.1:7100). It is started BEFORE the loop, so the instance is
   // configurable even when nothing else works yet - on the first start of an
-  // instance the config file is empty, and this page is how it gets filled.
-  await startSettingsInterface(logger);
+  // instance the configuration document is empty, and this page is how it gets filled.
+  await startSettingsInterface(logger, {
+    config: container.configLoader,
+    onSaved: () => {
+      void container?.reloadConfig().catch((error: unknown) => {
+        container?.logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Saved settings could not be applied to the running core'
+        );
+      });
+    },
+  });
 
   logger.info('Lifemodel starting...');
   logger.info(
@@ -102,6 +110,8 @@ export interface StopTargets {
  * carries its port.
  */
 export interface SettingsStartOptions {
+  config: SettingsServerOptions['config'];
+  onSaved: () => void;
   onConnection?: SettingsServerOptions['onConnection'];
   closeGraceMs?: number;
   port?: number;
@@ -117,17 +127,12 @@ export interface SettingsStartOptions {
  */
 export async function startSettingsInterface(
   logger: Container['logger'],
-  options: SettingsStartOptions = {}
+  options: SettingsStartOptions
 ): Promise<SettingsServer> {
   const server = createSettingsServer({
-    // The same config file the container loaded its configuration from: one
-    // resolution (resolveConfigDir), so the interface writes where the next
-    // start reads.
-    config: createConfigLoader(resolveConfigDir()),
+    config: options.config,
     logger,
-    onSaved: () => {
-      void restartAfterSettingsSaved();
-    },
+    onSaved: options.onSaved,
     ...(options.port !== undefined && { port: options.port }),
     ...(options.closeGraceMs !== undefined && { closeGraceMs: options.closeGraceMs }),
     ...(options.onConnection !== undefined && { onConnection: options.onConnection }),
@@ -151,17 +156,6 @@ export async function startSettingsInterface(
  */
 export function boundStopContainer(active: Container): void {
   container = active;
-}
-
-/**
- * lifemodel's settings were saved: stop as on any other stop (the turn in
- * flight is drained, state and storage are flushed, the channels are released),
- * then leave with the code the loader restarts on - see src/settings/restart.ts
- * and loader/src/supervisor.ts. Nothing is reconfigured underneath a running
- * turn: the next start reads the new config.
- */
-async function restartAfterSettingsSaved(): Promise<void> {
-  await stopAndLeave('settings saved: restarting lifemodel', RESTART_EXIT_CODE);
 }
 
 /**
@@ -210,7 +204,7 @@ export async function runStopSequence(options: {
 
   // Intake stops FIRST, as in the loader's own stop: no new settings save is
   // accepted while lifemodel is draining (a save that arrived now would write
-  // a config the exiting process would never apply, and the restart it asks
+  // a config the running core would never apply, and the reload it asks
   // for would be swallowed by the stop already running). The answer to the
   // save that started THIS stop has already gone out. The close is BOUNDED
   // (src/settings/server.ts): an outstanding request that does not end within

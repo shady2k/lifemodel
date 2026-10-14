@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createLLMProvider } from '../../../src/core/container.js';
+import { createReloadableLLMProvider } from '../../../src/core/reloadable-llm-provider.js';
 import { LLMError, type LLMProvider, type ModelRole } from '../../../src/llm/provider.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from '../../helpers/test-logger.js';
 
@@ -134,5 +135,18 @@ describe('createLLMProvider: the endpoint and the roles', () => {
     );
     expect(provider?.name).toBe('endpoint');
     expect(await modelFor(provider as LLMProvider, 'smart')).toBe('smart-big');
+  });
+
+  it('routes the next request through a provider rebuilt from changed configuration', async () => {
+    const initial = createLLMProvider({ endpoint: COMPLETE }, logger());
+    const dynamic = createReloadableLLMProvider(initial);
+    await modelFor(dynamic.provider, 'smart');
+    const updated = createLLMProvider(
+      { endpoint: { ...COMPLETE, baseUrl: 'http://127.0.0.1:5678/v1', smartModel: 'smart-next' } },
+      logger()
+    );
+    dynamic.replace(updated);
+    expect(await modelFor(dynamic.provider, 'smart')).toBe('smart-next');
+    expect(mocks.createOpenAI.mock.calls.at(-1)?.[0]?.baseURL).toBe('http://127.0.0.1:5678/v1');
   });
 });

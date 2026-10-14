@@ -49,8 +49,7 @@ import {
 } from '../storage/index.js';
 import {
   type MergedConfig,
-  loadConfig,
-  resolveConfigDir,
+  createConfigLoader,
   endpointGaps,
   type ModelEndpoint,
 } from '../config/index.js';
@@ -59,6 +58,7 @@ import { MemoryProviderImpl } from '../storage/memory-provider.js';
 import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
+import { createReloadableLLMProvider } from './reloadable-llm-provider.js';
 import {
   type MemoryConsolidator,
   createMemoryConsolidator,
@@ -110,8 +110,6 @@ import {
 export interface AppConfig {
   /** Log directory */
   logDir?: string;
-  /** The config file's directory (default: DATA_PATH/config, else data/config) */
-  configDir?: string;
   /** Maximum log files to keep */
   maxLogFiles?: number;
   /** Log level */
@@ -208,6 +206,10 @@ export interface Container {
   conversationManager: ConversationManager | null;
   /** Loaded configuration */
   config: MergedConfig | null;
+  /** Postgres-backed config shared with the settings server. */
+  configLoader: ReturnType<typeof createConfigLoader>;
+  /** Reload configuration from Postgres and apply endpoint/model changes. */
+  reloadConfig: () => Promise<void>;
   /** Scheduler service for plugin timers */
   schedulerService: SchedulerService | null;
   /** Plugin loader */
@@ -494,8 +496,9 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const databaseUrl = process.env['LIFEMODEL_DATABASE_URL'];
   if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
 
-  const configDir = configOverrides.configDir ?? resolveConfigDir();
-  const mergedConfig = await loadConfig(configDir);
+  const postgres = new Pool({ connectionString: databaseUrl });
+  const configLoader = createConfigLoader(postgres);
+  const mergedConfig = await configLoader.load();
 
   // Build logger config from merged config
   const logToFile = configOverrides.logToFile ?? true;
@@ -557,7 +560,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   stateManager.setSnapshotState(snapshotState ?? null);
 
   // Conversation history lives in the core Postgres schema, not DATA_PATH.
-  const postgres = new Pool({ connectionString: databaseUrl });
   const coreStorage = new PostgresStorage(postgres);
   const conversationManager = createConversationManager(
     new PostgresConversationStore(postgres),
@@ -668,7 +670,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const llmConfig = {
     endpoint: configOverrides.llm?.endpoint ?? mergedConfig.llm.endpoint,
   };
-  const llmProvider = createLLMProvider(llmConfig, logger);
+  const reloadableProvider = createReloadableLLMProvider(createLLMProvider(llmConfig, logger));
+  const llmProvider = reloadableProvider.provider;
+  const reloadConfig = async (): Promise<void> => {
+    const refreshed = await configLoader.load();
+    reloadableProvider.replace(createLLMProvider({ endpoint: refreshed.llm.endpoint }, logger));
+    logger.info(
+      { baseUrl: refreshed.llm.endpoint.baseUrl },
+      'Model endpoint configuration reloaded'
+    );
+  };
 
   // Create MessageComposer if LLM available
   let messageComposer: MessageComposer | null = null;
@@ -711,7 +722,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
   const credentialStore = createEnvCredentialStore();
   const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
-  if (llmProvider && mergedConfig.motorCortex.enabled) {
+  if (mergedConfig.motorCortex.enabled) {
     containerMgr = createContainerManager(logger);
 
     // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape
@@ -1280,6 +1291,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     stateManager,
     conversationManager,
     config: mergedConfig,
+    configLoader,
+    reloadConfig,
     schedulerService,
     pluginLoader,
     recipientRegistry,

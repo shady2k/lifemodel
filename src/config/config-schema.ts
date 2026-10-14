@@ -2,9 +2,9 @@ import type { AgentIdentity } from '../types/agent/identity.js';
 import type { AgentState } from '../types/agent/state.js';
 
 /**
- * Agent configuration file schema.
+ * Agent configuration document schema.
  *
- * This is what gets loaded from data/config/agent.json.
+ * This is the JSON document stored in the core Postgres schema.
  * All fields are optional - defaults are used for missing values.
  */
 export interface AgentConfigFile {
@@ -182,7 +182,6 @@ export interface MergedConfig {
   /** Storage paths */
   paths: {
     data: string;
-    config: string;
     state: string;
     logs: string;
   };
@@ -269,7 +268,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
   motorCortex: { enabled: true },
   paths: {
     data: 'data',
-    config: 'data/config',
     state: 'data/state',
     logs: 'data/logs',
   },
