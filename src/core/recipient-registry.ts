@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Logger } from '../types/logger.js';
 
 /**
@@ -385,7 +385,7 @@ export class PersistentRecipientRegistry implements IRecipientRegistry {
         const deletedIds = [...this.deletedRecipientIds];
         const clearGeneration = this.clearGeneration;
         const clearAll = this.clearAllPending;
-        let client: Awaited<ReturnType<Pool['connect']>> | null = null;
+        let client: PoolClient | null = null;
         let transactionStarted = false;
         let committed = false;
         try {
