@@ -72,6 +72,7 @@ import type { PluginLoader } from './plugin-loader.js';
 import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 import type { InboundLog } from './inbound-log.js';
 import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
+import type { BusSignalStream } from './bus-stream.js';
 
 /**
  * Core loop configuration.
@@ -153,6 +154,8 @@ export interface CoreLoopDeps {
    * durability).
    */
   inboundLog?: InboundLog | undefined;
+  /** Durable internal signal stream; omitted only by isolated logic tests. */
+  busSignalStream?: BusSignalStream | undefined;
   /** Commit the complete state envelope after every completed tick. */
   commitSnapshot?: ((tick: number) => Promise<void>) | undefined;
   initialTickCount?: number | undefined;
@@ -165,6 +168,7 @@ export interface CoreLoopDeps {
 interface PendingSignal {
   signal: Signal;
   timestamp: Date;
+  streamId?: string;
 }
 
 /**
@@ -274,6 +278,27 @@ export interface StopReport {
 /**
  * CoreLoop - orchestrates the 4-layer pipeline.
  */
+function compareStreamIds(left: string, right: string): number {
+  const leftParts = left.split('-');
+  const rightParts = right.split('-');
+  if (leftParts.length !== 2 || rightParts.length !== 2) {
+    throw new Error('Invalid Valkey stream ID');
+  }
+  const leftMillis = BigInt(leftParts[0] ?? '');
+  const leftSequence = BigInt(leftParts[1] ?? '');
+  const rightMillis = BigInt(rightParts[0] ?? '');
+  const rightSequence = BigInt(rightParts[1] ?? '');
+  return leftMillis < rightMillis
+    ? -1
+    : leftMillis > rightMillis
+      ? 1
+      : leftSequence < rightSequence
+        ? -1
+        : leftSequence > rightSequence
+          ? 1
+          : 0;
+}
+
 export class CoreLoop {
   private readonly agent: Agent;
   private readonly eventBus: EventBus;
@@ -354,6 +379,10 @@ export class CoreLoop {
   /** Durable inbound log (see CoreLoopDeps.inboundLog). */
   private readonly inboundLog: InboundLog | undefined;
   private readonly commitSnapshot: ((tick: number) => Promise<void>) | undefined;
+  private readonly busSignalStream: BusSignalStream | undefined;
+  private readonly pendingBusWrites: Promise<void>[] = [];
+  private readonly knownBusEntries = new Set<string>();
+  private tickConsumedBusOffset: string | undefined;
   private readonly onStaleSnapshot: ((error: StaleSnapshotEpochError) => void) | undefined;
 
   /**
@@ -403,6 +432,10 @@ export class CoreLoop {
     this.logger = logger.child({ component: 'core-loop' });
     this.inboundLog = deps.inboundLog;
     this.commitSnapshot = deps.commitSnapshot;
+    this.busSignalStream = deps.busSignalStream;
+    if (this.busSignalStream && !deps.commitSnapshot) {
+      throw new Error('A bus signal stream requires a snapshot commit callback');
+    }
     this.onStaleSnapshot = deps.onStaleSnapshot;
     this.tickCount = deps.initialTickCount ?? 0;
     this.metrics = metrics;
@@ -1237,10 +1270,15 @@ export class CoreLoop {
    * Called by channels when they receive data.
    */
   pushSignal(signal: Signal): void {
-    this.pendingSignals.push({
-      signal,
-      timestamp: new Date(),
-    });
+    const entry: PendingSignal = { signal, timestamp: new Date() };
+    this.pendingSignals.push(entry);
+    if (this.busSignalStream) {
+      const write = this.busSignalStream.append(signal).then((id) => {
+        entry.streamId = id;
+        this.knownBusEntries.add(id);
+      });
+      this.pendingBusWrites.push(write);
+    }
   }
 
   /**
@@ -1271,6 +1309,7 @@ export class CoreLoop {
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
 
+    this.tickConsumedBusOffset = undefined;
     try {
       // ============================================================================
       // TICK-INITIATED OPERATIONS (run every tick regardless of signals)
@@ -1338,6 +1377,8 @@ export class CoreLoop {
       const allIntents: Intent[] = [];
       let allSignals: Signal[] = [];
 
+      // Reload every uncommitted bus entry after a process restart.
+      await this.loadBusSignals();
       // Drain signals (no side effects, no logs)
       const pendingSignals = this.drainPendingSignals();
 
@@ -1398,7 +1439,11 @@ export class CoreLoop {
         for (let i = toDefer.length - 1; i >= 0; i--) {
           const signal = toDefer[i];
           if (signal) {
-            this.pendingSignals.unshift({ signal, timestamp: new Date() });
+            if (this.busSignalStream) {
+              this.pushSignal(signal);
+            } else {
+              this.pendingSignals.unshift({ signal, timestamp: new Date() });
+            }
           }
         }
         allSignals = otherSignals;
@@ -1649,7 +1694,33 @@ export class CoreLoop {
 
         // This awaited CAS is the tick's durability boundary. The next tick
         // cannot start until the complete snapshot is committed.
-        await this.commitSnapshot?.(this.tickCount);
+        const previousOffset = this.busSignalStream?.committedOffset();
+        if (this.busSignalStream && this.tickConsumedBusOffset) {
+          this.busSignalStream.setCommittedOffset(this.tickConsumedBusOffset);
+        }
+        try {
+          await this.commitSnapshot?.(this.tickCount);
+        } catch (error) {
+          if (this.busSignalStream && previousOffset !== undefined) {
+            this.busSignalStream.setCommittedOffset(previousOffset);
+            if (this.tickConsumedBusOffset) {
+              for (const id of this.knownBusEntries) {
+                if (compareStreamIds(id, this.tickConsumedBusOffset) <= 0) {
+                  this.knownBusEntries.delete(id);
+                }
+              }
+            }
+          }
+          throw error;
+        }
+        if (this.busSignalStream && this.tickConsumedBusOffset) {
+          await this.busSignalStream.trimBefore(this.tickConsumedBusOffset);
+          for (const id of this.knownBusEntries) {
+            if (compareStreamIds(id, this.tickConsumedBusOffset) <= 0)
+              this.knownBusEntries.delete(id);
+          }
+        }
+        this.tickConsumedBusOffset = undefined;
         this.scheduleTick();
       });
     } catch (error) {
@@ -1684,6 +1755,29 @@ export class CoreLoop {
     }
   }
 
+  private async loadBusSignals(): Promise<void> {
+    if (!this.busSignalStream) return;
+    await Promise.all(this.pendingBusWrites);
+    this.pendingBusWrites.length = 0;
+    const offset = this.busSignalStream.committedOffset();
+    await this.busSignalStream.trimBefore(offset);
+    const entries = await this.busSignalStream.readAfter(offset, this.config.maxSignalsPerTick);
+    for (const entry of entries) {
+      if (this.knownBusEntries.has(entry.id)) continue;
+      this.knownBusEntries.add(entry.id);
+      this.pendingSignals.push({
+        signal: entry.signal,
+        timestamp: entry.signal.timestamp,
+        streamId: entry.id,
+      });
+    }
+    this.pendingSignals.sort((a, b) => {
+      if (!a.streamId) return b.streamId ? 1 : 0;
+      if (!b.streamId) return -1;
+      return compareStreamIds(a.streamId, b.streamId);
+    });
+  }
+
   /**
    * Drain pending signals without side effects or logging.
    * Separated from normalization to enable per-signal trace context.
@@ -1696,6 +1790,7 @@ export class CoreLoop {
       const pending = this.pendingSignals.shift();
       if (pending) {
         signals.push(pending.signal);
+        if (pending.streamId) this.tickConsumedBusOffset = pending.streamId;
       }
     }
 
@@ -1941,21 +2036,35 @@ export class CoreLoop {
     return () => {
       const drained: Signal[] = [];
 
-      // Iterate backwards to safely splice while iterating
-      for (let i = this.pendingSignals.length - 1; i >= 0; i--) {
-        const entry = this.pendingSignals[i];
-        if (!entry) continue; // Guard against undefined entries
+      if (this.busSignalStream) {
+        // A single snapshot offset can cover only a consumed FIFO prefix.
+        // Do not absorb a later user message past an unconsumed bus entry.
+        while (this.pendingSignals.length > 0) {
+          const entry = this.pendingSignals[0];
+          if (entry?.signal.type !== 'user_message') break;
+          const signalData = entry.signal.data as { recipientId?: string } | undefined;
+          if (signalData?.recipientId !== recipientId) break;
+          this.pendingSignals.shift();
+          drained.push(entry.signal);
+          if (entry.streamId) this.tickConsumedBusOffset = entry.streamId;
+        }
+      } else {
+        // Iterate backwards to safely splice while iterating
+        for (let i = this.pendingSignals.length - 1; i >= 0; i--) {
+          const entry = this.pendingSignals[i];
+          if (!entry) continue; // Guard against undefined entries
 
-        const signal = entry.signal;
-        if (signal.type !== 'user_message') continue;
+          const signal = entry.signal;
+          if (signal.type !== 'user_message') continue;
 
-        // Filter by recipient (same conversation only)
-        const signalData = signal.data as { recipientId?: string } | undefined;
-        const signalRecipient = signalData?.recipientId;
-        if (signalRecipient !== recipientId) continue;
+          // Filter by recipient (same conversation only)
+          const signalData = signal.data as { recipientId?: string } | undefined;
+          const signalRecipient = signalData?.recipientId;
+          if (signalRecipient !== recipientId) continue;
 
-        this.pendingSignals.splice(i, 1);
-        drained.unshift(signal); // Preserve FIFO order
+          this.pendingSignals.splice(i, 1);
+          drained.unshift(signal); // Preserve FIFO order
+        }
       }
 
       // The turn absorbed these from the queue: they are part of its set of

@@ -70,6 +70,7 @@ import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
 import { createInboundLog, type InboundLog } from './inbound-log.js';
+import { createBusSignalStream } from './bus-stream.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -508,8 +509,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   const snapshotRedis = new Redis(valkeyUrl);
   const snapshotStore = createSnapshotStore(snapshotRedis);
+  const busSignalStream = createBusSignalStream(snapshotRedis);
+  snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
   const initialSnapshot = await snapshotStore.read();
+  busSignalStream.hydrateSnapshot(initialSnapshot?.sections['busOffset'] as string | undefined);
 
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
@@ -1075,6 +1079,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     storage,
     pluginLoader,
     inboundLog,
+    busSignalStream,
     initialTickCount: Number(
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
