@@ -8,6 +8,7 @@ export interface KubernetesValkeySecretOptions {
   apiServer?: string;
   tokenFile?: string;
   caFile?: string;
+  timeoutMs?: number;
   randomPassword?: () => string;
   request?: (
     url: URL,
@@ -32,6 +33,8 @@ export function createKubernetesValkeySecretPhase(
     `https://${process.env['KUBERNETES_SERVICE_HOST'] ?? 'kubernetes.default.svc'}:${process.env['KUBERNETES_SERVICE_PORT_HTTPS'] ?? '443'}`;
   const tokenFile = options.tokenFile ?? `${SERVICE_ACCOUNT}/token`;
   const caFile = options.caFile ?? `${SERVICE_ACCOUNT}/ca.crt`;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const customRequest = options.request;
   const call =
     options.request ??
     ((url, method, token, body, ca) =>
@@ -58,14 +61,26 @@ export function createKubernetesValkeySecretPhase(
               response += chunk;
             });
             res.on('end', () => {
+              clearTimeout(timer);
               resolve({ status: res.statusCode ?? 0, body: response });
             });
             res.on('aborted', () => {
+              clearTimeout(timer);
               reject(new Error('Kubernetes API response was truncated'));
             });
           }
         );
-        req.on('error', reject);
+        const timer = setTimeout(
+          () =>
+            req.destroy(
+              new Error(`Kubernetes API request timed out after ${String(timeoutMs)} ms`)
+            ),
+          timeoutMs
+        );
+        req.on('error', (error) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        });
         if (body !== undefined) req.write(body);
         req.end();
       }));
@@ -78,7 +93,31 @@ export function createKubernetesValkeySecretPhase(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    return call(url, method, token, body === undefined ? undefined : JSON.stringify(body), ca);
+    const requestBody = body === undefined ? undefined : JSON.stringify(body);
+    if (!customRequest) return call(url, method, token, requestBody, ca);
+    return new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Kubernetes API request timed out after ${String(timeoutMs)} ms`));
+      }, timeoutMs);
+      let result: Promise<{ status: number; body: string }>;
+      try {
+        result = customRequest(url, method, token, requestBody, ca);
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      result.then(
+        (response) => {
+          clearTimeout(timer);
+          resolve(response);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      );
+    });
   }
   const secretUrl = (namespace: string) =>
     new URL(`/api/v1/namespaces/${namespace}/secrets/${SECRET_NAME}`, host);
@@ -87,12 +126,14 @@ export function createKubernetesValkeySecretPhase(
   const sourceUrl = secretUrl(SOURCE_NAMESPACE);
   const targetUrl = secretUrl(TARGET_NAMESPACE);
   const password = options.randomPassword ?? (() => randomBytes(32).toString('base64url'));
+  let pendingSourcePassword: string | undefined;
   return {
     name: 'valkey-password',
     run: async () => {
       let source = await send(sourceUrl, 'GET');
       if (source.status === 404) {
-        const generated = password();
+        pendingSourcePassword ??= password();
+        const generated = pendingSourcePassword;
         if (!generated) throw new Error('generated Valkey password is empty');
         const body = {
           apiVersion: 'v1',
