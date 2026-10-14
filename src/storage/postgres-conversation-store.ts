@@ -6,7 +6,7 @@ interface ConversationMessageRow {
   role: string;
   content: string | null;
   timestamp: string;
-  tool_calls?: unknown;
+  tool_calls?: { id: string }[];
   tool_call_id?: string;
   channelMessageId?: string;
   channel?: string;
