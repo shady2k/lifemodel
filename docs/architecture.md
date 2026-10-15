@@ -106,10 +106,12 @@ immediate acknowledgements. Inbound failures are retried once by the next core
 notice as the input outcome; its effect key is distinct from a successful
 answer, and the input then completes. Distinct turns derive outbound
 idempotency keys from their persisted turn identity and effect ordinal.
-Delivery belongs to the future gateway. If
-there is no channel registered, this core reports the event once at info and
-advances its own delivery cursor; the outbound event remains available to the
-gateway's separate cursor.
+The web channel is a pull channel with no delivery cursor. Outbound events are
+retained until the Postgres apply offset passes them, subject to the 10,000-event
+and 30-day retention bounds. Delivery belongs to a future channel whose delivery
+can fail. If there is no channel registered, this core reports the event once at
+info and advances its own delivery cursor; the outbound event remains available
+to the gateway's separate cursor.
 
 Outbound retention deletes event-key deduplication entries in bounded batches
 before trimming stream rows in one Valkey Lua script. The warning count reflects

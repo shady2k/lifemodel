@@ -97,9 +97,6 @@ export interface CoreLoopConfig {
   /** Prune signals every N ticks (default: 10) */
   pruneInterval: number;
 
-  /** Primary user's Telegram chat ID for proactive messages */
-  primaryUserChatId?: string | undefined;
-
   /** System health monitor configuration */
   health?: Partial<SystemHealthConfig>;
 }
@@ -508,13 +505,10 @@ export class CoreLoop {
 
     // Set dependencies on AGGREGATION for conversation-aware proactive contact
     if ('updateDeps' in this.layers.aggregation) {
-      // Convert primaryUserChatId to recipientId if both registry and chatId are available
-      if (this.recipientRegistry && config.primaryUserChatId) {
-        this.primaryRecipientId = this.recipientRegistry.getOrCreate(
-          'telegram',
-          config.primaryUserChatId
-        );
-        // Set global accessor so any part of the system can access it
+      if (this.recipientRegistry) {
+        this.primaryRecipientId =
+          this.recipientRegistry.lookup('web', 'owner') ??
+          this.recipientRegistry.getOrCreate('web', 'owner');
         setPrimaryRecipientId(this.primaryRecipientId);
       }
 

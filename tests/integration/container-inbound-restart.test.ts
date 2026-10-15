@@ -198,19 +198,6 @@ describe('real container inbound crash/restart boundary', { timeout: 120_000 }, 
       return `send:${digest}`;
     });
     const expectedRecipientIds = recipients;
-    const eventsForExpectedIds = async () => {
-      const rows = await redis.xrange('outbound', '-', '+');
-      return rows
-        .map(
-          ([, fields]) =>
-            JSON.parse(fieldsToRecord(fields)['event'] ?? 'null') as { eventId?: string } | null
-        )
-        .filter((event) => event && expectedEventIds.includes(event.eventId ?? ''));
-    };
-    await waitFor(
-      async () => (await eventsForExpectedIds()).length === 3,
-      'three committed outbound events'
-    );
     await waitFor(async () => {
       const rows = await stores.postgres.query(
         "SELECT payload->>'channelMessageId' AS event_id FROM core.conversation_messages WHERE kind = $1 AND payload->>'role' = 'assistant' AND recipient_id = ANY($2::text[])",
@@ -218,10 +205,6 @@ describe('real container inbound crash/restart boundary', { timeout: 120_000 }, 
       );
       return rows.rowCount === 3;
     }, 'three Postgres assistant rows');
-    const recoveredEvents = await eventsForExpectedIds();
-    expect(recoveredEvents.map((event) => event?.eventId).sort()).toEqual(
-      [...expectedEventIds].sort()
-    );
     const recoveredRows = await stores.postgres.query(
       "SELECT payload->>'channelMessageId' AS event_id, recipient_id FROM core.conversation_messages WHERE kind = $1 AND payload->>'role' = 'assistant' AND recipient_id = ANY($2::text[])",
       ['message', expectedRecipientIds]
@@ -246,29 +229,19 @@ describe('real container inbound crash/restart boundary', { timeout: 120_000 }, 
     const third = startCore({ ...env, DATA_PATH: join(dataRoot, 'after-commit') });
     child = third.child;
     await third.ready;
-    const outboundForCommittedRecipient = async () =>
-      (await redis.xrange('outbound', '-', '+'))
-        .map(
-          ([, fields]) =>
-            JSON.parse(fieldsToRecord(fields)['event'] ?? 'null') as {
-              eventId?: string;
-              payload?: { recipientId?: string };
-            } | null
-        )
-        .filter((event) => event?.payload?.recipientId === committedRecipient);
-    await waitFor(
-      async () => (await outboundForCommittedRecipient()).length === 1,
-      'second scenario commit'
-    );
-    const committedEventId = (await outboundForCommittedRecipient())[0]?.eventId;
-    if (!committedEventId) throw new Error('Committed outbound event has no event id');
     await waitFor(async () => {
-      const result = await stores.postgres.query(
-        "SELECT message_id FROM core.conversation_messages WHERE payload->>'channelMessageId' = $1 AND payload->>'role' = 'assistant'",
-        [committedEventId]
+      const result = await stores.postgres.query<{ event_id: string }>(
+        "SELECT payload->>'channelMessageId' AS event_id FROM core.conversation_messages WHERE recipient_id = $1 AND payload->>'role' = 'assistant'",
+        [committedRecipient]
       );
       return result.rowCount === 1;
-    }, 'committed Postgres row');
+    }, 'second scenario assistant row');
+    const committedRows = await stores.postgres.query<{ event_id: string }>(
+      "SELECT payload->>'channelMessageId' AS event_id FROM core.conversation_messages WHERE recipient_id = $1 AND payload->>'role' = 'assistant'",
+      [committedRecipient]
+    );
+    const committedEventId = committedRows.rows[0]?.event_id;
+    if (!committedEventId) throw new Error('Committed assistant row has no event id');
     await hardStop(third.child);
     child = undefined;
     blockRequests = false;
@@ -285,7 +258,7 @@ describe('real container inbound crash/restart boundary', { timeout: 120_000 }, 
       } | null;
       return event?.eventId === committedEventId;
     });
-    expect(committedMatches).toHaveLength(1);
+    expect(committedMatches).toHaveLength(0);
     const row = await stores.postgres.query(
       "SELECT message_id FROM core.conversation_messages WHERE payload->>'channelMessageId' = $1 AND payload->>'role' = 'assistant'",
       [committedEventId]

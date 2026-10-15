@@ -21,7 +21,7 @@ import {
   type CoreLoopDeps,
 } from '../../src/core/core-loop.js';
 import { createAgent } from '../../src/core/agent.js';
-import { RecipientRegistry } from '../../src/core/recipient-registry.js';
+import { RecipientRegistry, type IRecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
 import type { Logger } from '../../src/types/logger.js';
@@ -188,6 +188,11 @@ export class FakeAggregationLayer {
   readonly batches: Signal[][] = [];
   /** When set, process() parks here (the tick has taken the batch already) */
   processGate: Promise<void> | null = null;
+  primaryRecipientId: string | undefined;
+
+  updateDeps(deps: { primaryRecipientId?: string }) {
+    this.primaryRecipientId = deps.primaryRecipientId;
+  }
 
   process(signals: Signal[], _state: unknown) {
     this.batches.push([...signals]);
@@ -334,7 +339,7 @@ export interface CoreLoopInstance {
   aggregation: FakeAggregationLayer;
   channel: FakeTestChannel;
   recipientId: string;
-  registry: RecipientRegistry;
+  registry: IRecipientRegistry;
   logger: Logger;
 }
 
@@ -369,6 +374,7 @@ export interface HarnessOptions {
   inboundStream?: CoreLoopDeps['inboundStream'];
   initialBusOffset?: BusSnapshot;
   conversationManager?: ConversationManager;
+  recipientRegistry?: IRecipientRegistry;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -417,7 +423,7 @@ export async function startInstance(
     tickInterval: opts.tickIntervalMs ?? TEST_TICK_INTERVAL,
     ...(opts.drainTimeoutMs !== undefined && { shutdownDrainTimeoutMs: opts.drainTimeoutMs }),
   };
-  const registry = new RecipientRegistry();
+  const registry = opts.recipientRegistry ?? new RecipientRegistry();
   const channel = new FakeTestChannel();
   const coreLoop = createCoreLoop(
     agent as never,

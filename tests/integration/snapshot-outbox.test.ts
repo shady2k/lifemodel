@@ -78,59 +78,27 @@ describe('snapshot outbox commit', () => {
     );
     expect(historyRows.rows).toHaveLength(1);
     expect(historyRows.rows[0]?.payload.content).toBe('answer');
-    let resolveDelivered: (() => void) | undefined;
-    const delivered = new Promise<void>((resolve) => {
-      resolveDelivered = resolve;
-    });
-    let deliveryCount = 0;
-    const sendMessage = async () => {
-      deliveryCount += 1;
-      resolveDelivered?.();
-      return { success: true, messageId: 'external-1' };
-    };
-    const worker = startOutboundDelivery(
-      stores.redis,
-      new Map([['test', { sendMessage } as never]]),
-      createTestLogger(),
-      { streamKey: `${prefix}outbound`, offsetKey: `${prefix}delivery-offset` }
-    );
-    await delivered;
-    worker.stop();
-    await worker.done;
-    expect(deliveryCount).toBe(1);
-    const restartedWorker = startOutboundDelivery(
-      stores.redis,
-      new Map([['test', { sendMessage } as never]]),
-      createTestLogger(),
-      { streamKey: `${prefix}outbound`, offsetKey: `${prefix}delivery-offset` }
-    );
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    restartedWorker.stop();
-    await restartedWorker.done;
-    expect(deliveryCount).toBe(1);
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(0);
     await store.takeEpoch();
     await expect(
       store.commitOwners(epoch, 5, [{ ...event, eventId: 'answer:message-2' }])
     ).rejects.toThrow(/epoch mismatch/i);
-    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(1);
+    expect(await stores.redis.xrange(`${prefix}outbound`, '-', '+')).toHaveLength(0);
   });
-  it('trims only events below the slower Postgres and delivery cursors', async () => {
+  it('trims through the Postgres apply offset even when no delivery cursor advances', async () => {
     const prefix = `outbound-trim:${stores.workerId}:`;
     const streamKey = `${prefix}events`;
     const postgresOffsetKey = `${prefix}pg-applied`;
-    const deliveryOffsetKey = `${prefix}delivered`;
     const ids: string[] = [];
     for (let i = 0; i < 3; i += 1) {
       const id = await stores.redis.xadd(streamKey, '*', 'eventId', `trim-${i}`);
       if (!id) throw new Error('Valkey returned no outbound stream id');
       ids.push(id);
     }
-    await stores.redis.set(postgresOffsetKey, ids[2]!);
-    await stores.redis.set(deliveryOffsetKey, ids[1]!);
+    await stores.redis.set(postgresOffsetKey, ids[1]!);
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey,
-      deliveryOffsetKey,
     });
     expect((await stores.redis.xrange(streamKey, '-', '+')).map(([id]) => id)).toEqual([ids[2]]);
   });
@@ -161,7 +129,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(failHdel as never, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 2,
       maxAgeMs: 60_000,
@@ -190,7 +157,6 @@ describe('snapshot outbox commit', () => {
       streamKey,
       eventKeysKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       logger: recordingLogger(createTestLogger(), calls),
     });
     expect(await stores.redis.xlen(streamKey)).toBe(0);
@@ -222,7 +188,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 5,
       maxAgeMs: 60_000,
@@ -239,7 +204,6 @@ describe('snapshot outbox commit', () => {
     await trimOutboundEvents(stores.redis, {
       streamKey,
       postgresOffsetKey: `${prefix}pg`,
-      deliveryOffsetKey: `${prefix}delivery`,
       eventKeysKey,
       maxLength: 5,
       maxAgeMs: 60_000,
@@ -429,7 +393,7 @@ describe('outbound retention with delivery consumers', () => {
     await stores.postgres.end();
   });
 
-  it('keeps long-run stream and event-key growth bounded with a registered delivery channel', async () => {
+  it('trims outbound rows and event keys once Postgres applies them', async () => {
     const prefix = `outbound-consumer-retention:${stores.workerId}:`;
     const streamKey = `${prefix}outbound`;
     const eventKeysKey = `${streamKey}:event-keys`;
@@ -451,39 +415,9 @@ describe('outbound retention with delivery consumers', () => {
       createTestLogger()
     );
     await applyCommittedOutboundEvents(stores.redis, manager, `${prefix}pg`, streamKey);
-    let sends = 0;
-    const worker = startOutboundDelivery(
-      stores.redis,
-      new Map([
-        [
-          'test',
-          {
-            sendMessage: async () => {
-              sends += 1;
-              return { success: true, messageId: `sent-${sends}` };
-            },
-          } as never,
-        ],
-      ]),
-      createTestLogger(),
-      {
-        streamKey,
-        offsetKey: `${prefix}delivery`,
-        postgresOffsetKey: `${prefix}pg`,
-        eventKeysKey,
-        maxLength: 100,
-        maxAgeMs: 60_000,
-      }
-    );
-    const deadline = Date.now() + 5_000;
-    while (sends < events.length && Date.now() < deadline)
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    worker.stop();
-    await worker.done;
-    expect(sends).toBe(events.length);
     expect(await stores.redis.xlen(streamKey)).toBe(0);
     expect(await stores.redis.hlen(eventKeysKey)).toBe(0);
-  }, 15_000);
+  });
 });
 
 describe('inbound message stream', () => {

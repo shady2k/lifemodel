@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import Redis from 'iovalkey';
 import { chmod, mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import { createContainerAsync, type Container } from '../../src/core/container.j
 import { createStoragePrimitive } from '../../src/core/storage-primitive.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 
 vi.mock('@huggingface/transformers', () => ({
   env: { cacheDir: '', allowLocalModels: true, allowRemoteModels: true },
@@ -49,6 +51,24 @@ describe('core state homes across restart', () => {
 
       active = await createContainerAsync({ logLevel: 'error' });
       const first = active;
+      const primaryRecipientId = first.recipientRegistry!.lookup('web', 'owner');
+      expect(primaryRecipientId).not.toBeNull();
+      expect(first.userModel?.getUser().id).toBe(primaryRecipientId);
+      first.userModel!.setProperty('restartMarker', 'restored', 0.95, 'user_explicit');
+      const snapshotRedis = new Redis(process.env['LIFEMODEL_VALKEY_URL']!);
+      try {
+        const snapshotStore = createSnapshotStore(snapshotRedis);
+        const epoch = await snapshotStore.currentEpoch();
+        const committed = await snapshotStore.commit(epoch, {
+          version: 1,
+          epoch,
+          tick: 1,
+          sections: { agentState: first.stateManager!.exportSnapshot() },
+        });
+        expect(committed).toBe(true);
+      } finally {
+        await snapshotRedis.quit();
+      }
       const conversationId = 'restart-check';
       await first.conversationManager!.addMessage(conversationId, {
         role: 'user',
@@ -88,6 +108,8 @@ describe('core state homes across restart', () => {
       active = await createContainerAsync({ logLevel: 'error' });
       const restarted = active;
 
+      expect(restarted.userModel?.getUser().id).toBe(primaryRecipientId);
+      expect(restarted.userModel?.getProperty('restartMarker')?.value).toBe('restored');
       expect(
         (await restarted.conversationManager!.getHistory(conversationId)).map((m) => m.content)
       ).toEqual(['remember this conversation across restart', 'I will remember it']);

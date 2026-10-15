@@ -161,7 +161,6 @@ describe('new ledger and exhaustion boundaries', () => {
         await trimOutboundEvents(stores.redis, {
           streamKey: `${prefix}outbound`,
           postgresOffsetKey: `${prefix}pg`,
-          deliveryOffsetKey: `${prefix}delivery`,
           maxLength: 1,
           maxAgeMs: 60000,
         });
