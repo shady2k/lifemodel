@@ -4,9 +4,17 @@ Date: 2026-10-15.
 
 ## Status
 
-Proposed (lifemodel-vhd design, 2026-10-15). The first review round
-(gpt-6.1-sol, ATAM manner) is answered in this revision: VHD-01 to VHD-05
-were blocking and are fixed; VHD-06 to VHD-12 are taken in.
+Proposed (lifemodel-vhd design, 2026-10-15). Reviewed by gpt-6.1-sol in
+ATAM manner, two rounds:
+
+- the first round's VHD-01 to VHD-05 were blocking, and VHD-06 to VHD-12
+  are taken in;
+- the confirmation round closed VHD-01, VHD-03 and VHD-04 and the freshness
+  part of VHD-05;
+- it left VHD-02 (an expired receipt) and the read semantics of VHD-05 open.
+  Both are fixed in this revision on their own diff: the server-side id age
+  check (Decision 2) and the owner's meaning of "Прочитано" (D3). By the
+  review's convergence rule there is no third round.
 
 It amends ADR-010 in the places named under "Amendments to ADR-010" and
 leaves the rest of ADR-010 unchanged. The target view it serves is
@@ -73,6 +81,7 @@ Quality attribute scenarios (each becomes a check, see "Checks"):
 | S10 | The owner uses the keyboard or a screen reader, or a narrow screen | Every control is reachable and named; live updates do not steal focus or scroll | axe-core passes; the keyboard and screen-reader checklist passes; WCAG 2.2 AA contrast |
 | S11 | The core crashes while "thinking", or stops publishing | The tab never shows a stale state as current | the state shown is at most 15 s old, or the tab shows "нет связи" |
 | S12 | lifemodel decides to write first, with no owner message before | The message reaches the owner's conversation | the proactive path writes a row for the web recipient; the same recipient after a restart |
+| S13 | The owner answers a specific earlier message ("↩ Ответить") | lifemodel's turn sees which message is answered; the history shows the quote | the turn's context carries the quoted message; the row and the DTO carry `replyTo` |
 
 Constraints, with their sources:
 
@@ -93,7 +102,12 @@ Constraints, with their sources:
   - the web module's own role and credentials come in lifemodel-2t5, in their
     target form;
   - the chat is walked against an in-cluster stub model, and real model
-    access arrives with lifemodel-2t5.
+    access arrives with lifemodel-2t5;
+  - the owner never writes to a task; a message is bound to a matter by
+    inference, by "↩ Ответить" or by "@". This feature builds "↩ Ответить"
+    on messages;
+  - "Прочитано" means lifemodel has received the message and written it into
+    its history.
 - No generation operator yet (lifemodel-pwe): "a switch of generations" in
   this feature is a core image change rolled through the deploy branch.
 
@@ -153,10 +167,12 @@ Constraints, with their sources:
     the key is absent or older than 15 s, it shows "нет связи", never
     "asleep" (S11).
   - **"Прочитано"** sits under the owner's last message once its own row is
-    in the history. The core writes that row when it takes the message into
-    a turn. A crash before the commit replays the input under the same key,
-    so a message shown as read is always processed. No separate
-    read-through signal exists.
+    in the history. By the owner's decision of 2026-10-15 it means "received
+    and written into the history; it answers when it gets to it". It does
+    not mean "taken into a turn": the core writes the row while normalizing
+    the input, and a busy cognition can still requeue it. A crash before the
+    commit replays the input under the same key, so a message shown as read
+    is always processed. No separate read-through signal exists.
 - **O3-B: per-message statuses (accepted, thinking, answered).** Rejected by
   the owner: the creature thinks as one, not per message.
 - **O3-C: state inside the snapshot commit.** Exact, but it writes the state
@@ -210,7 +226,8 @@ Constraints, with their sources:
 
 ### 1. One identity for an owner message (VHD-01)
 
-- The tab mints a UUID `id` per message.
+- The tab mints a UUIDv7 `id` per message. Its embedded time is the
+  minting time, which Decision 2 checks.
 - The web module builds a full `user_message` signal with `signal.id = id`,
   `data.updateId = id`, `data.text`, `data.channel = 'web'` and
   `data.recipientId` = the owner's web recipient (Decision 4).
@@ -220,6 +237,14 @@ Constraints, with their sources:
 - The transcript projection returns `clientId = id` for owner rows, so the
   tab matches its optimistic bubble by `clientId`. Two tabs see the same row
   once.
+- **A reply** ("↩ Ответить") sends `replyTo` = the `sequence` of a visible
+  message. The module checks that the row exists and is visible, and puts
+  `data.replyTo = { sequence, role, excerpt }` (the excerpt at most 280
+  characters) into the signal.
+  - The core adds the quoted message to the turn's context.
+  - It stores `replyTo` in the owner row's payload, and the DTO returns it,
+    so the tab shows the quote.
+  - Binding to tasks and "@" come with tasks.
 
 ### 2. Durable intake receipts (VHD-02)
 
@@ -237,9 +262,29 @@ atomic across replicas and restarts:
 The module answers 202 only after Valkey acknowledges the script (AOF
 `appendfsync always`). The core's dedup ring stays as a second line.
 
-A retry later than 7 days becomes a new message. The tab drops an unsent
-message after 24 hours and shows it as not sent, so it never retries that
-late.
+**Age, checked on the server.** Before the script runs, the module reads
+the time inside the UUIDv7 `id`:
+
+- an id older than 24 hours, or more than 5 minutes in the future, gets 409
+  `stale` and nothing is appended;
+- the receipt lives 7 days, longer than any id the server still accepts, so
+  every accepted retry meets its own receipt;
+- an id can never come back as a new message after its receipt expired,
+  because by then the id itself is refused;
+- an intentionally new message gets a new id.
+
+The tab marks a message it could not send within 24 hours as not sent; a
+"повторить" then mints a new id.
+
+**Inside the script**, Valkey does not roll back a runtime error, so:
+
+- inputs are validated before the call;
+- the script appends first and writes the receipt second.
+
+If the receipt write fails after the append, the script returns an error
+and the module answers 503. The retry appends a second entry with the same
+`messageId`, which the core's dedup absorbs: the entry is fresh, so it is
+inside the ring. A receipt never exists without its entry.
 
 ### 3. The web module and its routes (VHD-03, VHD-10, VHD-11)
 
@@ -274,7 +319,7 @@ deploy branch):
 | Route | Purpose |
 |---|---|
 | `GET /` and the app's assets | serves the built React app |
-| `POST /api/messages` | body `{ id, text }`: Decisions 1 and 2 |
+| `POST /api/messages` | body `{ id, text, replyTo? }`: Decisions 1 and 2 |
 | `GET /api/transcript?before=<seq>&limit=50` | the projection (Decision 5), newest first, with `cursor` = the newest `sequence` in the response or, for the latest page, the recipient's newest visible `sequence` read in the same query |
 | `GET /api/events?after=<cursor>` | SSE (Decision 6) |
 
@@ -283,7 +328,8 @@ deploy branch):
 - Every state-changing request needs an Origin header that parses to exactly
   the scheme, host and port `http://localhost`. A missing, `null`,
   malformed or sibling-host Origin is refused with 403. No CORS.
-- The JSON body must have a UUID `id` and non-empty text up to 16 KiB. The
+- The JSON body must have a UUIDv7 `id`, non-empty text up to 16 KiB, and
+  optionally `replyTo` as a decimal `sequence` string. The
   server derives the recipient and channel; the client never sends them.
 - The CSP is `default-src 'self'; script-src 'self'; object-src 'none';
   base-uri 'none'; frame-ancestors 'none'; img-src 'self';
@@ -325,7 +371,7 @@ deploy branch):
 - Clear markers and compaction change the model's context, not the owner's
   view: the owner sees the whole conversation.
 - The DTO is `{ sequence (decimal string), clientId?, role, text,
-  createdAt }`.
+  createdAt, replyTo? }`.
 - Limit and cursors are validated server-side: an invalid cursor gets 400,
   and a cursor ahead of the newest row gets an empty result.
 
@@ -435,7 +481,12 @@ VM.
   - the same id with different text.
 
   It asserts one logical input, the original `streamId` returned, and 409 on
-  a conflict.
+  a conflict. Two more cases:
+
+  - an id older than 24 hours, and one more than 5 minutes ahead, both get
+    409 `stale`;
+  - a receipt-write failure after the append gets 503, and its retry is
+    absorbed as one input.
 - **S2:** a VM walk with a deterministic stub model that sends one answer
   per turn:
   - roll the core's image through the deploy branch while a script sends a
@@ -483,6 +534,10 @@ VM.
 - **S12:** an integration test: trigger proactive contact with no owner
   message before; a row appears for the web recipient; after a restart the
   same recipient and transcript are used.
+
+- **S13:** an integration test: a reply to an earlier visible row puts the
+  quoted message into the turn's context and `replyTo` into the row and the
+  DTO; a reply to an invisible or unknown row gets 400.
 
 Operations: the module exports the oldest unapplied `outbound` age, the
 oldest pending inbound age, intake failures, SSE lag, reconnects and state

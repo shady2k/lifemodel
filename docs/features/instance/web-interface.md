@@ -25,9 +25,21 @@ messages, because the assistant has nowhere else to put progress.
 - **The creature has one state.** It thinks as one, not per message. There
   are no per-message statuses, except a message that failed to send
   ("не отправлено — повторить").
-- **Progress lives in the panel, not in the conversation.** The conversation
-  gets short system lines only for events that matter: a task started, a
-  task needs an answer (asked by lifemodel), a task finished or failed.
+- **Progress lives with the task, not in the conversation.** A task appears
+  in the conversation once, as a clickable chip under the message that
+  started it ("◌ Собрать скиллы из шаблонов"), showing its state. The
+  chip opens the task's drawer; the conversation itself gets no "still
+  running" messages.
+- **Several matters at once, without talking to tasks.** The owner never
+  writes to a task. A message is bound to a matter in three layers:
+  1. lifemodel infers it from context, and asks when unsure ("про
+     синхронизацию MailFlow или про дашборд?");
+  2. "↩ Ответить" on any message or task chip binds the reply to it; the
+     message shows a small quote, so the history stays readable;
+  3. "@" in the composer picks a task or a project.
+
+  lifemodel's own messages about a task carry the same binding. Separate
+  threads are not used: they would split the one conversation.
 - **Its own first messages look like any other.** Messages lifemodel writes
   on its own are not marked.
 
@@ -38,8 +50,8 @@ messages, because the assistant has nowhere else to put progress.
 │ lifemodel    │  ты: возьми апстрим, синхронизируй…  │ (аватар) lifemodel   │
 │ ▸ Разговор   │  lifemodel: Сделаю: возьму upstream, │ думает               │
 │              │  уберу ненужные патчи, заведу issue. │                      │
-│ ПРОЕКТЫ      │  ── ▶ «Синхр. с upstream» · MailFlow │ ИДЁТ                 │
-│  MailFlow  1 │  ── ✓ «Синхр. с upstream» готово ──  │ ▶ Синхр. с upstream  │
+│ ПРОЕКТЫ      │  [◌ Синхр. с upstream · MailFlow]    │ ИДЁТ                 │
+│  MailFlow  1 │  ты ↩ «Синхр…»: issue не дублируй    │ ▶ Синхр. с upstream  │
 │  Bifrost     │  lifemodel: CI зелёный, issue #611…  │   MailFlow · 12 мин  │
 │  Hindsight   │  Собрать и развернуть в кластере?    │   frontend-тесты     │
 │  + проект    │  [Да] [Нет] [Ответить…]              │   «проверяю дубли»   │
@@ -54,11 +66,22 @@ messages, because the assistant has nowhere else to put progress.
   - Messages with date and time separators. Links, lists and code are
     rendered.
   - The owner can write at any time, without waiting for an answer.
-  - "Прочитано" means lifemodel has taken the message into a turn.
+  - "Прочитано" means lifemodel has received the message and written it into
+    its history; it answers when it gets to it.
   - A "•••" bubble shows while lifemodel thinks. "Прочитано" sits under the
     owner's last message once lifemodel has taken it.
   - A question that asks for permission carries buttons: Да / Нет /
     Ответить.
+  - Each message has "↩ Ответить" and reactions. lifemodel reads reactions
+    as feedback.
+- **The task drawer** opens from a chip or the panel:
+  - the task's own feed: its steps, collapsed ("Ran commands", "Review
+    finished"), its reports and a live "thinking";
+  - the conversation messages bound to the task;
+  - **Stop**, and "Написать про задачу", which closes the drawer and puts a
+    binding to the task into the conversation's composer. The drawer has no
+    composer of its own.
+  - It can open full width, as a tab of its own.
 - **Right: "Сейчас".**
   - lifemodel's avatar and presence: thinking, awake, asleep, or "нет связи"
     when its state is stale.
@@ -109,11 +132,13 @@ messages, because the assistant has nowhere else to put progress.
 
 Nothing yet. The first module (lifemodel-vhd, ADR-011) builds:
 
-- the conversation;
+- the conversation, with "↩ Ответить" on a message (binding layer 2 for
+  messages; binding to tasks and "@" come with tasks);
 - the creature's state ("•••", presence, "Прочитано");
 - the layout with Разговор and Система on the left and the "Сейчас" panel
   with the state only;
 - login through the loader's password.
 
-Tasks, Stop, projects, memory and settings come with the features that
-create tasks and projects (lifemodel-653, lifemodel-n6r).
+Task chips and the drawer, Stop, "@", reactions, projects, memory and
+settings come with the features that create tasks and projects
+(lifemodel-653, lifemodel-n6r).
