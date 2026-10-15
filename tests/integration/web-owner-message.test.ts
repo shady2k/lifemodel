@@ -132,6 +132,9 @@ describe('owner message HTTP route with real Valkey', () => {
       signal: firstAbort.signal,
     });
     expect(firstResponse.headers.get('cache-control')).toBe('no-store');
+    expect(firstResponse.headers.get('content-security-policy')).toBe(
+      "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self'; connect-src 'self'"
+    );
     const firstReader = firstResponse.body!.getReader();
     const firstBuffer = { value: '' };
     const initialState = await nextSseEvent(firstReader, firstBuffer);

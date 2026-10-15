@@ -99,7 +99,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
 
   const server = Fastify({
     bodyLimit: options.bodyLimit ?? 100 * 1024,
-    ajv: { customOptions: { removeAdditional: false } },
+    ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   const appDirectory = path.resolve(options.appDirectory);
   const rates = new Map<string, { start: number; count: number }>();
@@ -119,8 +119,19 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
 
   const csp =
     "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self'; connect-src 'self'";
+  server.addHook('onRequest', async (request, reply) => {
+    if (request.method === 'POST' && request.url.split('?')[0] === '/api/messages') {
+      const origin = request.headers.origin;
+      if (!origin || origin === 'null' || !isAllowedOrigin(origin, options.allowedOrigin))
+        return reply
+          .code(403)
+          .header('Cache-Control', 'no-store')
+          .send({ error: 'forbidden_origin' });
+    }
+  });
   server.addHook('onSend', async (_request, reply) => {
     reply.header('Content-Security-Policy', csp);
+    if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
   });
   server.get('/*', async (request, reply) => {
     const requested = request.url.split('?')[0] ?? '/';
@@ -163,8 +174,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       '.woff2': 'font/woff2',
     };
     reply.header('Content-Type', contentTypes[ext] ?? 'application/octet-stream');
-    if (path.basename(servedPath) === 'index.html') reply.header('Cache-Control', 'no-store');
-    else if (/-[A-Za-z0-9_-]{8,}\./.test(path.basename(servedPath)))
+    const assetPath = path.relative(appDirectory, servedPath).split(path.sep).join('/');
+    if (assetPath.startsWith('assets/') && /-[A-Za-z0-9_-]{8,}\./.test(path.basename(servedPath)))
       reply.header('Cache-Control', 'public, max-age=31536000, immutable');
     return reply.send(body);
   });
@@ -205,21 +216,49 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       return reply.code(400).send({ error: 'invalid_cursor' });
 
     const session = getSessionKey(request.headers.cookie, request.ip);
+    let leased = false;
     const streamCount = activeStreams.get(session) ?? 0;
     if (streamCount >= MAX_STREAMS_PER_SESSION)
       return reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
+    const admissionAbort = new AbortController();
+    const admissionTimer = setTimeout(() => {
+      admissionAbort.abort();
+    }, STREAM_MAX_AGE_MS);
     try {
-      const latest = await options.transcript.readTranscript({ after, limit: 1 });
+      const lease = await withTimeout(
+        options.transcript.acquireStreamLease(session),
+        admissionAbort.signal
+      );
+      if (!lease) {
+        activeStreams.set(session, (activeStreams.get(session) ?? 1) - 1);
+        clearTimeout(admissionTimer);
+        return await reply.code(429).send({ error: 'too_many_streams' });
+      }
+      leased = true;
+      const latest = await withTimeout(
+        options.transcript.readTranscript({ after, limit: 1 }),
+        admissionAbort.signal
+      );
       options.runtimeMetrics.sseLag =
         latest.cursor === null ? 0 : Math.max(0, Number(BigInt(latest.cursor) - BigInt(after)));
     } catch {
       options.runtimeMetrics.sseLag = 0;
+      if (admissionAbort.signal.aborted) {
+        if (leased) await options.transcript.releaseStreamLease(session).catch(() => undefined);
+        const remaining = (activeStreams.get(session) ?? 1) - 1;
+        if (remaining <= 0) activeStreams.delete(session);
+        else activeStreams.set(session, remaining);
+        clearTimeout(admissionTimer);
+        return reply.code(503).send({ error: 'stream_unavailable' });
+      }
     }
+    clearTimeout(admissionTimer);
     reply.hijack();
     const response = reply.raw;
     response.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
+      'Content-Security-Policy': csp,
       'Cache-Control': 'no-store',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
@@ -229,6 +268,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     const abort = new AbortController();
     const queue = new BoundedQueue<StreamEvent>();
     let previousState: string | null = null;
+    let stateReadInFlight = false;
+    let stateFreshnessTimer: ReturnType<typeof setTimeout> | undefined;
     let ended = false;
     const cleanup = () => {
       if (ended) return;
@@ -237,35 +278,65 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       queue.close();
       clearInterval(stateTimer);
       clearInterval(heartbeatTimer);
+      if (stateFreshnessTimer) clearTimeout(stateFreshnessTimer);
       clearTimeout(maxAgeTimer);
       const remaining = (activeStreams.get(session) ?? 1) - 1;
       if (remaining <= 0) activeStreams.delete(session);
       else activeStreams.set(session, remaining);
+      if (leased) void options.transcript.releaseStreamLease(session).catch(() => undefined);
       if (!response.writableEnded) response.end();
     };
     response.on('close', cleanup);
 
-    const publishState = async () => {
-      try {
-        const state = await options.creatureState.readCreatureState();
-        const key =
-          state === null
-            ? 'null'
-            : JSON.stringify({
-                state: state.state,
-                epoch: state.epoch,
-                publishedAt: state.publishedAt,
-              });
-        if (key !== previousState) {
-          previousState = key;
-          if (!queue.push({ event: 'state', data: state })) cleanup();
-        }
-      } catch {
-        previousState = 'unavailable';
-        if (!queue.push({ event: 'state', data: null })) cleanup();
-      }
+    const publishUnavailable = () => {
+      previousState = 'unavailable';
+      if (!queue.push({ event: 'state', data: null })) cleanup();
     };
-    const stateTimer = setInterval(() => void publishState(), STATE_POLL_MS);
+    const publishState = (): Promise<void> => {
+      if (ended || stateReadInFlight) return Promise.resolve();
+      stateReadInFlight = true;
+      let settled = false;
+      let resolveFreshness!: () => void;
+      const freshness = new Promise<void>((resolve) => {
+        resolveFreshness = resolve;
+      });
+      stateFreshnessTimer = setTimeout(() => {
+        if (!settled && !ended) publishUnavailable();
+        resolveFreshness();
+      }, STATE_POLL_MS);
+      const read = options.creatureState
+        .readCreatureState()
+        .then((state) => {
+          if (ended || settled) return;
+          if (state === null) {
+            publishUnavailable();
+            return;
+          }
+          const key = JSON.stringify({
+            state: state.state,
+            epoch: state.epoch,
+            publishedAt: state.publishedAt,
+          });
+          if (key !== previousState) {
+            previousState = key;
+            if (!queue.push({ event: 'state', data: state })) cleanup();
+          }
+        })
+        .catch(() => {
+          if (!ended && !settled) publishUnavailable();
+        })
+        .finally(() => {
+          settled = true;
+          if (stateFreshnessTimer) clearTimeout(stateFreshnessTimer);
+          stateFreshnessTimer = undefined;
+          stateReadInFlight = false;
+          resolveFreshness();
+        });
+      return Promise.race([read, freshness]);
+    };
+    const stateTimer = setInterval(() => {
+      void publishState();
+    }, STATE_POLL_MS);
     const heartbeatTimer = setInterval(() => {
       if (!ended && !response.write(': heartbeat\n\n')) response.once('drain', () => undefined);
     }, HEARTBEAT_MS);
@@ -363,7 +434,10 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
 
   server.setErrorHandler((error: unknown, request, reply) => {
     const details = error as { validation?: unknown; statusCode?: number };
-    if (details.validation || details.statusCode === 413) {
+    if (
+      details.validation ||
+      (details.statusCode !== undefined && details.statusCode >= 400 && details.statusCode < 500)
+    ) {
       options.logger.info(
         { requestId: request.id, result: 'invalid_body' },
         'Owner message intake'
@@ -384,6 +458,19 @@ function getSessionKey(cookie: string | undefined, ip: string): string {
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${SESSION_COOKIE_NAME}=`));
   return sessionCookie ?? `client:${ip}`;
+}
+
+function withTimeout<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error('operation timed out'));
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      reject(new Error('operation timed out'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', abort);
+    });
+  });
 }
 
 function isAllowedOrigin(origin: string, allowedOrigin: string): boolean {

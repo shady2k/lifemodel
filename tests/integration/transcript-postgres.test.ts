@@ -233,6 +233,49 @@ describe('Postgres owner transcript', () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('wakes the transcript watcher locally when the shared hint read never settles', async () => {
+    const disconnect = vi.fn();
+    const xread = vi.fn(() => new Promise<never>(() => {}));
+    const fakeRedis = {
+      duplicate: () => ({ xread, disconnect }),
+    } as unknown as import('iovalkey').Redis;
+    let reads = 0;
+    const fakePool = {
+      query: vi.fn(async () => {
+        reads += 1;
+        return {
+          rows:
+            reads === 2
+              ? [
+                  {
+                    sequence: '1',
+                    message_id: 'channel:web:row',
+                    role: 'assistant',
+                    text: 'fallback',
+                    created_at: new Date(),
+                    reply_to: null,
+                    has_reply_to: false,
+                    newest_sequence: '1',
+                  },
+                ]
+              : [],
+        };
+      }),
+    } as unknown as import('pg').Pool;
+    const transcript = new PostgresTranscriptStore(fakePool, fakeRedis, 'hint-never-settles');
+    const abort = new AbortController();
+    try {
+      const iterator = transcript.watchTranscript('0', abort.signal)[Symbol.asyncIterator]();
+      const delivered = await iterator.next();
+      expect(delivered.value?.text).toBe('fallback');
+      expect(reads).toBe(2);
+      abort.abort();
+      await iterator.return?.();
+    } finally {
+      abort.abort();
+    }
+  });
+
   it('delivers a newly saved assistant row promptly when outbound wakes the watcher', async () => {
     const promptRecipientId = 'transcript-owner-prompt';
     const stores = await createTestStores();
@@ -259,6 +302,40 @@ describe('Postgres owner transcript', () => {
       await iterator.return?.();
     } finally {
       abort.abort();
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('enforces four session stream leases across transcript-store replicas and expires crashed leases', async () => {
+    const stores = await createTestStores();
+    try {
+      const firstReplica = new PostgresTranscriptStore(
+        stores.postgres,
+        stores.redis,
+        'lease-owner'
+      );
+      const secondReplica = new PostgresTranscriptStore(
+        stores.postgres,
+        stores.redis,
+        'lease-owner'
+      );
+      const sessions = 'signed-session-cookie';
+      expect(
+        await Promise.all([
+          firstReplica.acquireStreamLease(sessions),
+          secondReplica.acquireStreamLease(sessions),
+          firstReplica.acquireStreamLease(sessions),
+          secondReplica.acquireStreamLease(sessions),
+          firstReplica.acquireStreamLease(sessions),
+        ])
+      ).toEqual([true, true, true, true, false]);
+      await firstReplica.releaseStreamLease(sessions);
+      expect(await secondReplica.acquireStreamLease(sessions)).toBe(true);
+      await stores.redis.del(
+        `web:stream-leases:${(await import('node:crypto')).createHash('sha256').update(sessions).digest('hex')}`
+      );
+      expect(await firstReplica.acquireStreamLease(sessions)).toBe(true);
+    } finally {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
   });
