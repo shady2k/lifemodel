@@ -10,6 +10,8 @@ function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(acce
   const info = vi.fn();
   const server = createWebServer({
     allowedOrigin: 'http://localhost',
+    appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+    runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
     intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
     transcript: {
       readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
@@ -99,6 +101,8 @@ describe('POST /api/messages', () => {
     const acceptOwnerMessage = vi.fn().mockResolvedValue({ status: 'reply_not_found' });
     const server = createWebServer({
       allowedOrigin: 'http://localhost',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
       transcript: {
         readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
@@ -146,6 +150,22 @@ describe('POST /api/messages', () => {
       'Owner message intake'
     );
     expect(JSON.stringify(info.mock.calls)).not.toContain(secret);
+    await server.close();
+  });
+});
+
+describe('static application', () => {
+  it('serves the built app and its assets with the exact CSP', async () => {
+    const { server } = setup();
+    const home = await server.inject({ method: 'GET', url: '/' });
+    const asset = await server.inject({ method: 'GET', url: '/assets/app.js' });
+    expect(home.statusCode).toBe(200);
+    expect(home.body).toContain('<div id="app">fixture app</div>');
+    expect(asset.statusCode).toBe(200);
+    expect(asset.body.trim()).toBe('window.fixture = true;');
+    expect(home.headers['content-security-policy']).toBe(
+      "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self'; connect-src 'self'"
+    );
     await server.close();
   });
 });

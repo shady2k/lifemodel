@@ -6,6 +6,8 @@ import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader } from '../ports/transcript.js';
+import type { WebOperationalMetrics } from '../web/operations.js';
+import type { WebRuntimeMetrics } from '../web/server.js';
 import { createUserMessageSignal } from '../types/signal.js';
 
 const RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -165,6 +167,8 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
   transcript: TranscriptReader;
   creatureState: CreatureStateReader;
   close(): Promise<void>;
+  checkStores(): Promise<void>;
+  readMetrics(runtime: WebRuntimeMetrics): Promise<WebOperationalMetrics>;
 } {
   const valkeyUrl = env['LIFEMODEL_VALKEY_URL'];
   const databaseUrl = env['LIFEMODEL_DATABASE_URL'];
@@ -180,6 +184,64 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
     intake: new OwnerMessageIntake(redis, recipientId, { transcript }),
     transcript,
     creatureState,
+    async checkStores() {
+      await Promise.all([redis.ping(), pool.query('SELECT 1')]);
+    },
+    async readMetrics(runtime) {
+      const [snapshotRaw, outboundOffset, state] = await Promise.all([
+        redis.get('lifemodel:core:snapshot:current'),
+        redis.get('outbound:pg-applied'),
+        creatureState.readCreatureState(),
+      ]);
+      const outboundRows = await redis.xrange(
+        'outbound',
+        `(${outboundOffset ?? '0-0'}`,
+        '+',
+        'COUNT',
+        1
+      );
+      let pendingTimestamps: number[] = [];
+      let inboundReadOffset = '0-0';
+      if (snapshotRaw) {
+        const snapshot = JSON.parse(snapshotRaw) as {
+          sections?: {
+            inbound?: {
+              readOffset?: string;
+              pending?: { signal?: { timestamp?: string } }[];
+            };
+          };
+        };
+        const inbound = snapshot.sections?.inbound;
+        inboundReadOffset = inbound?.readOffset ?? '0-0';
+        pendingTimestamps = (inbound?.pending ?? [])
+          .map((entry) => Date.parse(entry.signal?.timestamp ?? ''))
+          .filter(Number.isFinite);
+      }
+      const unreadInbound = await redis.xrange('inbound', `(${inboundReadOffset}`, '+', 'COUNT', 1);
+      const unreadFields = unreadInbound[0]?.[1] ?? [];
+      for (let index = 0; index < unreadFields.length; index += 2) {
+        const fieldValue = unreadFields[index + 1];
+        if (unreadFields[index] === 'timestamp' && fieldValue) {
+          const timestamp = Date.parse(fieldValue);
+          if (Number.isFinite(timestamp)) pendingTimestamps.push(timestamp);
+          break;
+        }
+      }
+      const pendingAge = pendingTimestamps.length
+        ? Math.max(0, (Date.now() - Math.min(...pendingTimestamps)) / 1000)
+        : 0;
+      const outboundAge = outboundRows.length
+        ? Math.max(0, (Date.now() - Number(outboundRows[0]?.[0].split('-')[0])) / 1000)
+        : 0;
+      return {
+        oldestUnappliedOutboundAgeSeconds: outboundAge,
+        oldestPendingInboundAgeSeconds: pendingAge,
+        intakeFailures: runtime.intakeFailures,
+        sseLag: runtime.sseLag,
+        reconnects: runtime.reconnects,
+        stateFreshnessSeconds: state ? Math.max(0, state.ageMs / 1000) : 15,
+      };
+    },
     async close() {
       await closeTranscriptWakeBroker(redis);
       await Promise.all([redis.quit(), pool.end()]);
