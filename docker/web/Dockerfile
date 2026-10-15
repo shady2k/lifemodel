@@ -6,15 +6,15 @@ COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 COPY src ./src
 COPY web/app ./web/app
-RUN npm run build:web-server && npm run build:app
+RUN npm run build:web
 
 FROM ${NODE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="lifemodel-web" \
       org.opencontainers.image.description="The lifemodel web interface"
 ENV NODE_ENV=production HOME=/tmp LIFEMODEL_WEB_APP_DIRECTORY=/opt/lifemodel/web/app
 WORKDIR /opt/lifemodel
-COPY --from=build --chown=node:node /opt/lifemodel/dist/web/server.mjs ./dist/web/server.mjs
+COPY --from=build --chown=node:node /opt/lifemodel/dist/web/server.cjs ./dist/web/server.cjs
 COPY --from=build --chown=node:node /opt/lifemodel/web/app/dist ./web/app
 USER node
 EXPOSE 8080 8081
-CMD ["node", "dist/web/server.mjs"]
+CMD ["node", "dist/web/server.cjs"]
