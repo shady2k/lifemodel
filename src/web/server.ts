@@ -1,4 +1,6 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { IOwnerMessageIntake } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader, TranscriptRow } from '../ports/transcript.js';
@@ -16,8 +18,16 @@ const STATE_POLL_MS = 250;
 const HEARTBEAT_MS = 15_000;
 const SESSION_COOKIE_NAME = 'lm_session';
 
+export interface WebRuntimeMetrics {
+  intakeFailures: number;
+  sseLag: number;
+  reconnects: number;
+}
+
 export interface WebServerOptions {
   allowedOrigin: string;
+  appDirectory: string;
+  runtimeMetrics: WebRuntimeMetrics;
   intake: IOwnerMessageIntake;
   transcript: TranscriptReader;
   creatureState: CreatureStateReader;
@@ -76,6 +86,8 @@ class BoundedQueue<T> {
 
 export function createWebServer(options: WebServerOptions): FastifyInstance {
   if (!options.allowedOrigin) throw new Error('allowedOrigin is required');
+  if (!options.appDirectory) throw new Error('appDirectory is required');
+  if (!options.runtimeMetrics) throw new Error('runtimeMetrics is required');
   let allowed: URL;
   try {
     allowed = new URL(options.allowedOrigin);
@@ -89,6 +101,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     bodyLimit: options.bodyLimit ?? 100 * 1024,
     ajv: { customOptions: { removeAdditional: false } },
   });
+  const appDirectory = path.resolve(options.appDirectory);
   const rates = new Map<string, { start: number; count: number }>();
   const activeStreams = new Map<string, number>();
   const schema = {
@@ -103,6 +116,58 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
       },
     },
   } as const;
+
+  const csp =
+    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self'; connect-src 'self'";
+  server.addHook('onSend', async (_request, reply) => {
+    reply.header('Content-Security-Policy', csp);
+  });
+  server.get('/*', async (request, reply) => {
+    const requested = request.url.split('?')[0] ?? '/';
+    let relative: string;
+    try {
+      relative = requested === '/' ? 'index.html' : decodeURIComponent(requested.slice(1));
+    } catch {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    const filename = path.resolve(appDirectory, relative);
+    if (filename !== appDirectory && !filename.startsWith(`${appDirectory}${path.sep}`))
+      return reply.code(404).send({ error: 'not_found' });
+    let body: Buffer;
+    let servedPath = filename;
+    try {
+      body = await readFile(filename);
+    } catch {
+      if (requested.startsWith('/api/') || path.extname(requested))
+        return reply.code(404).send({ error: 'not_found' });
+      servedPath = path.join(appDirectory, 'index.html');
+      try {
+        body = await readFile(servedPath);
+      } catch {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+    }
+    const ext = path.extname(servedPath);
+    const contentTypes: Record<string, string> = {
+      '.css': 'text/css; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.ico': 'image/x-icon',
+      '.jpeg': 'image/jpeg',
+      '.jpg': 'image/jpeg',
+      '.js': 'text/javascript; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.png': 'image/png',
+      '.svg': 'image/svg+xml',
+      '.webp': 'image/webp',
+      '.woff': 'font/woff',
+      '.woff2': 'font/woff2',
+    };
+    reply.header('Content-Type', contentTypes[ext] ?? 'application/octet-stream');
+    if (path.basename(servedPath) === 'index.html') reply.header('Cache-Control', 'no-store');
+    else if (/-[A-Za-z0-9_-]{8,}\./.test(path.basename(servedPath)))
+      reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    return reply.send(body);
+  });
 
   server.get<{ Querystring: { before?: string; limit?: string } }>(
     '/api/transcript',
@@ -132,6 +197,8 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
   server.get<{ Querystring: { after?: string } }>('/api/events', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     const lastEventId = request.headers['last-event-id'];
+    if (typeof lastEventId === 'string' && lastEventId.length > 0)
+      options.runtimeMetrics.reconnects += 1;
     const after =
       typeof lastEventId === 'string' && lastEventId.length > 0 ? lastEventId : request.query.after;
     if (after === undefined || !/^(0|[1-9][0-9]*)$/.test(after))
@@ -142,6 +209,13 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
     if (streamCount >= MAX_STREAMS_PER_SESSION)
       return reply.code(429).send({ error: 'too_many_streams' });
     activeStreams.set(session, streamCount + 1);
+    try {
+      const latest = await options.transcript.readTranscript({ after, limit: 1 });
+      options.runtimeMetrics.sseLag =
+        latest.cursor === null ? 0 : Math.max(0, Number(BigInt(latest.cursor) - BigInt(after)));
+    } catch {
+      options.runtimeMetrics.sseLag = 0;
+    }
     reply.hijack();
     const response = reply.raw;
     response.writeHead(200, {
@@ -275,6 +349,7 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
         return await reply.code(400).send({ reason: result.status });
       return await reply.code(409).send({ reason: result.status });
     } catch {
+      options.runtimeMetrics.intakeFailures += 1;
       options.logger.info(
         { requestId: request.id, clientId: body.id, result: 'receipt_failure' },
         'Owner message intake'

@@ -145,13 +145,9 @@ messages, because the assistant has nowhere else to put progress.
 
 ## Built so far
 
-The first module (lifemodel-vhd, ADR-011) is in progress. Its frontend now has:
+The first module (lifemodel-vhd, ADR-011) is in progress. The built React app is served by the web module at `/` with same-origin hashed assets and a restrictive Content-Security-Policy. The module provides owner-message intake, transcript and SSE routes, plus an internal-only operations listener for store-based readiness and Prometheus metrics. The English/Russian shell, virtualized transcript, owner and lifemodel bubbles, safe Markdown rendering and history-based "Прочитано" receipt are in place. The storage-failure, loader-outage and stuck-stream runbook is in [web-module.md](web-module.md).
 
-- the English/Russian app shell, with a conversation header and fresh creature presence;
-- a virtualized transcript view that reads one latest page, loads earlier pages by cursor, and merges live message/state events through a transport seam;
-- owner and lifemodel bubbles, date/time labels, safe Markdown rendering and the history-based "Прочитано" receipt.
-
-The module's transcript and event HTTP routes are not implemented yet. The frontend transport targets the ADR-011 DTO and SSE event contract; this does not make the end-to-end module available. The composer and "↩ Ответить" (binding layer 2 for messages), and login through the loader's password, remain to be built. Binding to tasks and "@" come with tasks.
+The composer and "↩ Ответить" (binding layer 2 for messages), and login through the loader's password, remain to be built. Binding to tasks and "@" come with tasks.
 
 Task chips and the drawer, Stop, "@", reactions, projects, memory and
 settings come with the features that create tasks and projects
