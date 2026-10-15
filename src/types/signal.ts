@@ -80,6 +80,7 @@ export type SignalSource =
   | 'sense.telegram'
   | 'sense.telegram.reaction'
   | 'sense.discord'
+  | 'sense.web'
   | 'sense.system' // System-level events (startup, shutdown)
 
   // === INTERNAL NEURONS ===
