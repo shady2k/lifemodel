@@ -58,7 +58,7 @@ export default tseslint.config(
   },
   {
     // `**/dist/` also covers the loader's own build output (loader/dist).
-    ignores: ['**/dist/', 'node_modules/', 'data/'],
+    ignores: ['**/dist/', 'node_modules/', 'data/', 'web/app/src/components/ui/**'],
   },
   eslintConfigPrettier
 );
