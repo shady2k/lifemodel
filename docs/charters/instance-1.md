@@ -94,9 +94,11 @@ development test environment, never on somebody's real instance.
    main, and one local command runs the same checks with the same verdict.
 4. **A person starts their own instance with one command.** *Check:* on a
    clean test machine with Docker, one command starts the image from CI; the
-   owner sets the loader's password, puts the model key into Agent Vault
-   through the loader, sets the endpoint and models in lifemodel's own web
-   interface; lifemodel's model request reaches the endpoint with the key
+   owner sets the loader's password and, in the loader's first-start wizard,
+   the model access: a primary endpoint with its key and a reserve endpoint,
+   each checked, the keys kept in Agent Vault (owner, 2026-10-16; was "the
+   endpoint and models in lifemodel's own web interface" — lifemodel's
+   interface keeps only the choice of model per role); lifemodel's model request reaches the endpoint with the key
    injected by Agent Vault while no key is in lifemodel's process (the test
    environment uses a stub endpoint and a made-up key; owner, 2026-10-08);
    recreating the container keeps the code and the data; panic keeps it down
