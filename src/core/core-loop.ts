@@ -1457,6 +1457,14 @@ export class CoreLoop {
       const exhaustedInbound = this.inboundStream?.exhaustedEntries() ?? [];
       for (const entry of exhaustedInbound) {
         const data = entry.signal.data as { channel?: unknown };
+        const route = this.recipientRegistry?.resolve(entry.recipientId);
+        const channel =
+          route?.channel ?? (typeof data.channel === 'string' ? data.channel : undefined);
+        if (!channel) {
+          throw new Error(
+            `Could not determine outbound channel for recipient ${entry.recipientId}`
+          );
+        }
         const eventHash = createHash('sha256')
           .update(`error-notice|${entry.recipientId}|${entry.messageId}|0`)
           .digest('hex');
@@ -1465,7 +1473,8 @@ export class CoreLoop {
           type: 'send.command',
           payload: {
             recipientId: entry.recipientId,
-            channel: typeof data.channel === 'string' ? data.channel : 'unknown',
+            channel,
+            ...(route ? { destination: route.destination } : {}),
             text: 'I could not complete that request after two attempts.',
           },
         });
