@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto';
 import Redis from 'iovalkey';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, testStoreUrls, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
 import { InboundMessageStream } from '../../src/core/message-streams.js';
+import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
+import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 
 function uuidV7(at: number): string {
   const bytes = new Uint8Array(16);
@@ -25,6 +28,7 @@ describe('durable owner-message intake on real Valkey', () => {
   let intake: OwnerMessageIntake;
   beforeAll(async () => {
     stores = await createTestStores();
+    await applyTestMigrations(stores.postgres);
     const url = new URL(testStoreUrls().valkeyUrl);
     url.pathname = '/7';
     redis = new Redis(url.toString());
@@ -73,15 +77,63 @@ describe('durable owner-message intake on real Valkey', () => {
     });
   });
 
-  it('carries a validated reply sequence on the web signal', async () => {
+  it('quotes only a visible transcript row and refuses unknown or invisible replies before append', async () => {
+    const recipientId = 'web-owner-recipient';
+    const conversations = new PostgresConversationStore(stores.postgres);
+    const transcript = new PostgresTranscriptStore(stores.postgres, stores.redis, recipientId);
+    const visibleRowId = `reply-target-${Date.now()}`;
+    await conversations.save(`conversation:${recipientId}`, {
+      messages: [
+        {
+          role: 'user',
+          content: 'A visible earlier message',
+          timestamp: new Date().toISOString(),
+          messageId: visibleRowId,
+        },
+      ],
+    });
+    const visible = await transcript.readTranscript({ limit: 50 });
+    const target = visible.rows.find((row) => row.text === 'A visible earlier message')!;
+    const replyIntake = new OwnerMessageIntake(redis, recipientId, { transcript });
     const id = uuidV7(Date.now());
-    const accepted = await intake.acceptOwnerMessage(id, 'reply', '42');
+    const before = await redis.xlen('inbound');
+    const accepted = await replyIntake.acceptOwnerMessage(id, 'reply', target.sequence);
+    expect(accepted.status).toBe('accepted');
     const [[, fields]] = await redis.xrange('inbound', accepted.streamId, accepted.streamId);
     const signalText = fields[fields.indexOf('signal') + 1];
     expect(JSON.parse(signalText!)).toMatchObject({
       id,
-      data: { replyTo: { sequence: '42' } },
+      data: {
+        replyTo: { sequence: target.sequence, role: 'user', excerpt: 'A visible earlier message' },
+      },
     });
+    expect(
+      await replyIntake.acceptOwnerMessage(uuidV7(Date.now()), 'unknown', '999999999')
+    ).toEqual({ status: 'reply_not_found' });
+    const invisible = await conversations.save(`conversation:${recipientId}`, {
+      messages: [
+        {
+          role: 'system',
+          content: 'private',
+          timestamp: new Date().toISOString(),
+          messageId: 'invisible-reply-target',
+        },
+      ],
+    });
+    expect(invisible).toBeUndefined();
+    const beforeInvisible = await stores.postgres.query(
+      "SELECT sequence::text FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = 'invisible-reply-target'",
+      [recipientId]
+    );
+    expect(beforeInvisible.rowCount).toBe(1);
+    expect(
+      await replyIntake.acceptOwnerMessage(
+        uuidV7(Date.now()),
+        'invisible',
+        beforeInvisible.rows[0]!.sequence
+      )
+    ).toEqual({ status: 'reply_not_found' });
+    expect(await redis.xlen('inbound')).toBe(before + 1);
   });
 
   it('validates IDs, text, and reply sequence before any append', async () => {

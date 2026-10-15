@@ -134,7 +134,17 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
 
   if (signal.type === 'user_message' && data) {
     const text = (data['text'] as string | undefined) ?? '';
-    return `<user_input>${text}</user_input>`;
+    const replyTo = data['replyTo'] as
+      | { sequence?: unknown; role?: unknown; excerpt?: unknown }
+      | undefined;
+    const quote =
+      replyTo &&
+      typeof replyTo.sequence === 'string' &&
+      (replyTo.role === 'user' || replyTo.role === 'assistant') &&
+      typeof replyTo.excerpt === 'string'
+        ? `\n<quoted_message role="${replyTo.role}" sequence="${replyTo.sequence}">${replyTo.excerpt.slice(0, 280)}</quoted_message>`
+        : '';
+    return `${quote ? `${quote}\n` : ''}<user_input>${text}</user_input>`;
   }
 
   // Handle contact_urge triggers (proactive contact from ThresholdEngine)

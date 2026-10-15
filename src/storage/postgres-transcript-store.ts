@@ -17,7 +17,8 @@ interface TranscriptDbRow {
   role: 'user' | 'assistant';
   text: string;
   created_at: Date | string;
-  reply_to: string | null;
+  reply_to: unknown;
+  has_reply_to: boolean;
   newest_sequence: string | null;
 }
 
@@ -52,7 +53,8 @@ export class PostgresTranscriptStore implements TranscriptReader {
     const { rows } = await this.pool.query<TranscriptDbRow>(
       `WITH visible AS (
          SELECT sequence::text, message_id, payload->>'role' AS role,
-                payload->>'content' AS text, created_at, payload->>'replyTo' AS reply_to
+                payload->>'content' AS text, created_at, payload->'replyTo' AS reply_to,
+                payload ? 'replyTo' AS has_reply_to
          FROM core.conversation_messages
          WHERE recipient_id = $1 AND kind = 'message'
            AND (payload->>'role' = 'user' OR
@@ -66,7 +68,7 @@ export class PostgresTranscriptStore implements TranscriptReader {
          ORDER BY sequence::bigint ${direction} LIMIT ${limitParam}
        )
        SELECT page.sequence, page.message_id, page.role, page.text, page.created_at,
-              page.reply_to, newest.newest_sequence
+              page.reply_to, page.has_reply_to, newest.newest_sequence
        FROM newest LEFT JOIN page ON true
        ORDER BY page.sequence::bigint ${direction}`,
       values
@@ -103,6 +105,34 @@ export class PostgresTranscriptStore implements TranscriptReader {
     }
   }
 
+  private parseReplyTo(value: unknown): NonNullable<TranscriptRow['replyTo']> {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      !('sequence' in value) ||
+      !('role' in value) ||
+      !('excerpt' in value)
+    ) {
+      throw new Error('Stored transcript replyTo is missing required fields');
+    }
+    const replyTo = value as Record<string, unknown>;
+    if (
+      typeof replyTo['sequence'] !== 'string' ||
+      !/^[1-9][0-9]*$/.test(replyTo['sequence']) ||
+      (replyTo['role'] !== 'user' && replyTo['role'] !== 'assistant') ||
+      typeof replyTo['excerpt'] !== 'string' ||
+      replyTo['excerpt'].length > 280
+    ) {
+      throw new Error('Stored transcript replyTo is malformed');
+    }
+    return {
+      sequence: replyTo['sequence'],
+      role: replyTo['role'],
+      excerpt: replyTo['excerpt'],
+    };
+  }
+
   private toDto(row: TranscriptDbRow): TranscriptRow {
     const clientId = row.message_id.startsWith('inbound:')
       ? row.message_id.slice('inbound:'.length)
@@ -113,7 +143,7 @@ export class PostgresTranscriptStore implements TranscriptReader {
       role: row.role,
       text: row.text,
       createdAt: new Date(row.created_at).toISOString(),
-      ...(row.reply_to ? { replyTo: row.reply_to } : {}),
+      ...(row.has_reply_to ? { replyTo: this.parseReplyTo(row.reply_to) } : {}),
     };
   }
 }
