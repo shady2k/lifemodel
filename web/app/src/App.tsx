@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Orbit } from 'lucide-react';
+import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import {
@@ -26,15 +27,17 @@ import {
 import { useIsMobile } from '@/hooks/use-mobile';
 import i18n from './i18n';
 
-type CreatureState = 'awake';
+const initialCreatureState: CreaturePresenceValue = {
+  state: 'awake',
+  publishedAt: new Date().toISOString(),
+};
 
-function Creature({ state }: { state: CreatureState }) {
+function Creature() {
   return (
     <Avatar className="bg-primary text-primary-foreground">
       <AvatarFallback className="bg-primary text-primary-foreground">
         <Orbit aria-hidden="true" className="size-4" />
       </AvatarFallback>
-      <span className="sr-only">{state}</span>
     </Avatar>
   );
 }
@@ -83,12 +86,10 @@ function NowPanel() {
         </h2>
       </header>
       <div className="flex items-center gap-3 p-4">
-        <Creature state="awake" />
+        <Creature />
         <div className="flex min-w-0 flex-col gap-1">
           <span className="font-medium">lifemodel</span>
-          <span role="status" aria-live="polite" className="text-sm text-muted-foreground">
-            {t('awake')}
-          </span>
+          <CreaturePresence value={initialCreatureState} />
         </div>
       </div>
     </section>
@@ -122,12 +123,10 @@ export default function App() {
       <div className="flex h-svh min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
           {isMobile && <SidebarTrigger aria-label={t('openNavigation')} />}
-          <Creature state="awake" />
+          <Creature />
           <div className="flex min-w-0 flex-col">
             <span className="text-sm font-medium leading-tight">lifemodel</span>
-            <span role="status" className="text-xs text-muted-foreground">
-              {t('awake')}
-            </span>
+            <CreaturePresence value={initialCreatureState} />
           </div>
           {isMobile && (
             <Button
