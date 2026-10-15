@@ -25,6 +25,8 @@ describe('creature presence', () => {
     );
     expect(screen.getByText('на связи')).toBeTruthy();
     expect(document.querySelector('svg.lucide-check')).toBeTruthy();
+    rerender(<CreaturePresence value={{ state: 'asleep', publishedAt: fresh }} />);
+    expect(screen.getByRole('status').textContent).toBe('спит');
     rerender(
       <CreaturePresence
         value={{ state: 'asleep', publishedAt: fresh, asleepUntil: '2026-10-15T20:30:00Z' }}

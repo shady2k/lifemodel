@@ -9,6 +9,9 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
+import { Send, CornerUpLeft } from 'lucide-react';
+import { InputGroup, InputGroupButton, InputGroupTextarea } from '@/components/ui/input-group';
+import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Bubble, Marker, Message, MessageScroller } from '@/components/ui/message';
 import { CodeBlock } from '@/components/ui/code-block';
@@ -19,6 +22,19 @@ import {
   type TranscriptMessage,
   type WebTransport,
 } from './transport';
+
+function uuidV7(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let timestamp = Date.now();
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = timestamp & 0xff;
+    timestamp = Math.floor(timestamp / 256);
+  }
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x70;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 function safeHttpUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -100,6 +116,11 @@ function ConversationContent({
   const didInitialPosition = useRef(false);
   const [creature, setCreature] = useState<CreaturePresenceValue>();
   const [announcement, setAnnouncement] = useState('');
+  const [draft, setDraft] = useState('');
+  const [optimistic, setOptimistic] = useState<
+    (TranscriptMessage & { status?: 'sending' | 'failed' })[]
+  >([]);
+  const [reply, setReply] = useState<TranscriptMessage | undefined>();
   const transcript = useInfiniteQuery({
     queryKey: ['transcript'],
     initialPageParam: undefined as string | undefined,
@@ -111,8 +132,9 @@ function ConversationContent({
     getNextPageParam: () => undefined,
   });
   const messages = useMemo(
-    () => sortTranscript(transcript.data?.pages.map((page) => page.messages) ?? []),
-    [transcript.data]
+    () =>
+      sortTranscript([...(transcript.data?.pages.map((page) => page.messages) ?? []), optimistic]),
+    [transcript.data, optimistic]
   );
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -178,6 +200,72 @@ function ConversationContent({
   const virtualItems = scroller.current?.clientHeight
     ? virtualizer.getVirtualItems()
     : messages.map((_, index) => ({ index, start: index * 96 }));
+  const send = async (text: string, replyTo?: TranscriptMessage, retryId?: string) => {
+    const id = retryId ?? uuidV7();
+    const item: TranscriptMessage & { status?: 'sending' | 'failed' } = {
+      sequence: String(Date.now()),
+      clientId: id,
+      role: 'user',
+      text,
+      createdAt: new Date().toISOString(),
+      ...(replyTo
+        ? {
+            replyTo: {
+              sequence: replyTo.sequence,
+              role: replyTo.role,
+              excerpt: replyTo.text.slice(0, 280),
+            },
+          }
+        : {}),
+      status: 'sending',
+    };
+    setOptimistic((current) =>
+      current.some((row) => row.clientId === id) ? current : [...current, item]
+    );
+    const expiration = window.setTimeout(
+      () => {
+        setOptimistic((current) =>
+          current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+        );
+      },
+      24 * 60 * 60 * 1000
+    );
+    const submit = () =>
+      transport.sendMessage({ id, text, ...(replyTo ? { replyTo: replyTo.sequence } : {}) });
+    try {
+      let result;
+      try {
+        result = await submit();
+      } catch {
+        result = await submit();
+      }
+      if (result === 'accepted') {
+        window.clearTimeout(expiration);
+        setOptimistic((current) =>
+          current.map((row) => (row.clientId === id ? { ...row, status: undefined } : row))
+        );
+      } else {
+        window.clearTimeout(expiration);
+        setOptimistic((current) =>
+          current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+        );
+      }
+    } catch {
+      setOptimistic((current) =>
+        current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+      );
+    }
+  };
+
+  const submitDraft = () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft('');
+    const binding = reply;
+    setReply(undefined);
+    void send(text, binding);
+  };
+
   const dateLabel = (message: TranscriptMessage) =>
     new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium' }).format(
       new Date(message.createdAt)
@@ -236,13 +324,19 @@ function ConversationContent({
                 {!previous || dateLabel(previous) !== dateLabel(message) ? (
                   <Marker>{dateLabel(message)}</Marker>
                 ) : null}
-                <Message className={owner ? 'justify-end' : 'justify-start'}>
+                <Message className={`group ${owner ? 'justify-end' : 'justify-start'}`}>
                   {!owner ? (
                     <Avatar className="mt-1">
                       <AvatarFallback>l</AvatarFallback>
                     </Avatar>
                   ) : null}
                   <div className="flex min-w-0 flex-col">
+                    {message.replyTo ? (
+                      <Marker className="justify-start gap-1 border-l-2 pl-2 text-left">
+                        <CornerUpLeft aria-hidden="true" className="size-3" />
+                        {message.replyTo.excerpt}
+                      </Marker>
+                    ) : null}
                     <Bubble
                       className={
                         owner
@@ -274,6 +368,54 @@ function ConversationContent({
                         })}
                       </span>
                     ) : null}
+                    <div className="flex items-center gap-2 px-2 pt-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        aria-label={`${t('replyTo')} ${message.text.slice(0, 80)}`}
+                        onClick={() => {
+                          setReply(message);
+                        }}
+                      >
+                        {t('reply')}
+                      </Button>
+                      {message.clientId &&
+                      optimistic.find((row) => row.clientId === message.clientId)?.status ===
+                        'failed' ? (
+                        <>
+                          <span className="text-xs text-destructive">{t('notSentRetry')}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            aria-label={t('retrySending')}
+                            onClick={() => {
+                              const failed = optimistic.find(
+                                (row) => row.clientId === message.clientId
+                              );
+                              if (failed)
+                                void send(
+                                  failed.text,
+                                  failed.replyTo
+                                    ? {
+                                        sequence: failed.replyTo.sequence,
+                                        role: failed.replyTo.role,
+                                        text: failed.replyTo.excerpt,
+                                        createdAt: failed.createdAt,
+                                      }
+                                    : undefined
+                                );
+                              setOptimistic((rows) =>
+                                rows.filter((row) => row.clientId !== message.clientId)
+                              );
+                            }}
+                          >
+                            {t('retry')}
+                          </Button>
+                        </>
+                      ) : null}
+                    </div>
                   </div>
                 </Message>
               </div>
@@ -294,6 +436,52 @@ function ConversationContent({
           {announcement}
         </div>
       </MessageScroller>
+      <form
+        className="shrink-0 border-t p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitDraft();
+        }}
+      >
+        {reply ? (
+          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
+            <Marker className="justify-start gap-1 py-1">
+              <CornerUpLeft aria-hidden="true" className="size-3" />
+              {reply.text.slice(0, 280)}
+            </Marker>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              aria-label={t('cancelReply')}
+              onClick={() => {
+                setReply(undefined);
+              }}
+            >
+              ×
+            </Button>
+          </div>
+        ) : null}
+        <InputGroup>
+          <InputGroupTextarea
+            aria-label={t('message')}
+            placeholder={t('writeMessage')}
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.currentTarget.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                submitDraft();
+              }
+            }}
+          />
+          <InputGroupButton type="submit" aria-label={t('send')} disabled={!draft.trim()}>
+            <Send aria-hidden="true" className="size-4" />
+          </InputGroupButton>
+        </InputGroup>
+      </form>
     </div>
   );
 }

@@ -39,9 +39,9 @@ export function CreaturePresence({ value }: { value?: CreaturePresenceValue }) {
     : value.state === 'thinking'
       ? t('thinking')
       : value.state === 'asleep'
-        ? t('asleepUntil', {
-            time: value.asleepUntil ? formatTime(value.asleepUntil, i18n.language) : '--:--',
-          })
+        ? value.asleepUntil
+          ? t('asleepUntil', { time: formatTime(value.asleepUntil, i18n.language) })
+          : t('asleep')
         : t('awake');
   const Icon = disconnected
     ? WifiOff
