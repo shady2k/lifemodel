@@ -316,7 +316,7 @@ export class CoreLoop {
 
   private running = false;
   private tickCount = 0;
-  private lastTickAt = 0;
+  private lastCommitAt = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
   private tickPromise: Promise<void> | null = null;
@@ -947,7 +947,8 @@ export class CoreLoop {
       disposition !== 'no_reply' &&
       disposition !== 'defer' &&
       inboundIds.length > 0 &&
-      !hasAnswerIntent
+      !hasAnswerIntent &&
+      !state.anyDelivered
         ? 'error'
         : disposition;
     state.disposition = effectiveDisposition;
@@ -1383,8 +1384,8 @@ export class CoreLoop {
     return this.tickCount;
   }
 
-  getLastTickAt(): number {
-    return this.lastTickAt;
+  getLastCommitAt(): number {
+    return this.lastCommitAt;
   }
 
   /**
@@ -1441,7 +1442,6 @@ export class CoreLoop {
     this.tickInFlight++;
     const tickStart = Date.now();
     this.tickCount++;
-    this.lastTickAt = tickStart;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
@@ -1899,6 +1899,7 @@ export class CoreLoop {
         try {
           await this.commitSnapshot?.(this.tickCount, committingOutbox);
           if (this.commitSnapshot) {
+            this.lastCommitAt = Date.now();
             const committed = new Set(committingOutbox);
             for (let index = this.tickOutbox.length - 1; index >= 0; index--) {
               const event = this.tickOutbox[index];
@@ -2039,7 +2040,7 @@ export class CoreLoop {
 
     // Special handling for user messages
     if (normalized.type === 'user_message') {
-      this.processUserMessageSignal(normalized);
+      await this.processUserMessageSignal(normalized);
     }
 
     // Enrich reaction signals with message preview and add to history as metadata
@@ -2143,14 +2144,13 @@ export class CoreLoop {
   /**
    * Process user message signal for side effects.
    */
-  private processUserMessageSignal(signal: Signal): void {
+  private async processUserMessageSignal(signal: Signal): Promise<void> {
     const data = signal.data as
       | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
       | undefined;
 
     // Idempotency guard: skip if already applied (signal was re-queued after deferral)
     if (data?.sideEffectsApplied) return;
-    if (data) data.sideEffectsApplied = true;
 
     // Note: Ack clearing is now handled by ThresholdEngine when it sees user_message
 
@@ -2172,12 +2172,17 @@ export class CoreLoop {
         const photoPrefix = data.images?.length
           ? `[Photo${data.images.length > 1 ? ` x${String(data.images.length)}` : ''} attached] `
           : '';
-        void this.conversationManager.addMessage(data.recipientId, {
-          role: 'user',
-          content: photoPrefix + data.text,
-        });
+        await this.conversationManager.addMessage(
+          data.recipientId,
+          {
+            role: 'user',
+            content: photoPrefix + data.text,
+          },
+          { messageId: `inbound:${signal.id}` }
+        );
       }
     }
+    if (data) data.sideEffectsApplied = true;
   }
 
   /**

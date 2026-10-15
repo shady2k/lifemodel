@@ -115,6 +115,61 @@ describe('turn ownership and outbox durability', () => {
     }
   });
 
+  it('settles an inbound core.say-only answer with its queued immediate event', async () => {
+    const prefix = `turn-core-say:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const inbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+    store.register(inbound);
+    const epoch = await store.takeEpoch();
+    const path = await makeScratchDir('turn-core-say-');
+    const instance = await startInstance(path, {
+      cognitionMode: 'hang',
+      tickIntervalMs: 10,
+      commitSnapshot: async (tick, outbox) => {
+        await store.commitOwners(epoch, tick, outbox);
+      },
+    });
+    (instance.coreLoop as unknown as { inboundStream: InboundMessageStream }).inboundStream =
+      inbound;
+    const signal = createUserMessageSignal({
+      text: 'answer me',
+      recipientId: instance.recipientId,
+      channel: 'test',
+      updateId: 'core-say-answer',
+    });
+    try {
+      await inbound.append(signal);
+      await waitFor(() => instance.cognition.calls.length === 1, 'inbound cognition starts');
+      instance.coreLoop.applyImmediateIntent({
+        type: 'SEND_MESSAGE',
+        payload: { recipientId: instance.recipientId, text: 'immediate answer' },
+        trace: {
+          tickId: instance.cognition.calls[0]!.context.tickId,
+          parentSignalId: signal.id,
+        },
+      });
+      instance.cognition.settleAll({
+        confidence: 1,
+        intents: [],
+        response: undefined,
+        disposition: 'answer',
+      });
+      await waitForAsync(async () => {
+        const snapshot = await store.read();
+        const pending = (snapshot?.sections.inbound as { pending: unknown[] } | undefined)?.pending;
+        return pending?.length === 0 && (await stores.redis.xlen(`${prefix}outbound`)) === 1;
+      }, 'immediate answer and input outcome commit');
+      const row = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
+      const event = JSON.parse(row[0]![1][row[0]![1].indexOf('event') + 1] ?? 'null') as {
+        payload: { text: string };
+      };
+      expect(event.payload.text).toBe('immediate answer');
+    } finally {
+      await instance.coreLoop.stop();
+      await rmDir(path);
+    }
+  });
+
   it('commits an inbound answer without a registered recipient route', async () => {
     const prefix = `turn-no-route:${stores.workerId}:${Date.now()}:`;
     const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });

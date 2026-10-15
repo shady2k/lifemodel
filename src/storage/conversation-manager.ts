@@ -252,6 +252,7 @@ export class ConversationManager {
     channelMeta?: {
       channelMessageId?: string;
       channel?: string;
+      messageId?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);
@@ -262,6 +263,7 @@ export class ConversationManager {
       content: message.content,
       timestamp: new Date().toISOString(),
     };
+    if (channelMeta?.messageId) storedMsg.messageId = channelMeta.messageId;
     // Add channel metadata for reaction lookup (only for assistant messages)
     if (message.role === 'assistant') {
       if (channelMeta?.channelMessageId) {
@@ -315,6 +317,7 @@ export class ConversationManager {
     channelMeta?: {
       channelMessageId?: string;
       channel?: string;
+      messageId?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);

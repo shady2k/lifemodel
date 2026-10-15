@@ -9,12 +9,11 @@ afterEach(async () => {
 });
 
 describe('core tick health endpoint', () => {
-  it('reports healthy only while the loop is running and a tick recently started', async () => {
+  it('reports healthy only while the loop is running and a snapshot recently committed', async () => {
     let running = true;
-    let tickCount = 1;
-    let lastTickAt = Date.now();
+    let lastCommitAt = Date.now();
     server = await startCoreHealthServer(
-      { isRunning: () => running, getTickCount: () => tickCount, getLastTickAt: () => lastTickAt },
+      { isRunning: () => running, getLastCommitAt: () => lastCommitAt },
       0
     );
     const address = server.address();
@@ -22,12 +21,11 @@ describe('core tick health endpoint', () => {
       throw new Error('health server has no TCP address');
     const url = `http://127.0.0.1:${address.port}/healthz`;
     expect((await fetch(url)).status).toBe(200);
-    lastTickAt = Date.now() - 11_000;
+    lastCommitAt = Date.now() - 11_000;
     expect((await fetch(url)).status).toBe(503);
-    lastTickAt = Date.now();
-    tickCount = 0;
+    lastCommitAt = 0;
     expect((await fetch(url)).status).toBe(503);
-    tickCount = 1;
+    lastCommitAt = Date.now();
     running = false;
     expect((await fetch(url)).status).toBe(503);
   });
