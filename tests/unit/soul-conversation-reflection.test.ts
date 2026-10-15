@@ -17,8 +17,8 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { createMockLogger } from '../helpers/factories.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/registry.js';
-import { createJsonMemoryProvider } from '../../src/storage/memory-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import { createTestMemoryProvider } from '../helpers/memory-provider-fixture.js';
+import type { MemoryProviderImpl } from '../../src/storage/memory-provider.js';
 import {
   processBatchReflection,
   saveBehaviorRule,
@@ -31,17 +31,6 @@ import type { PendingReflection } from '../../src/types/agent/soul.js';
 import type { ConversationMessage } from '../../src/storage/conversation-manager.js';
 
 // ─── Helpers ───────────────────────────────────────────────
-
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => { store.set(key, data); },
-    delete: async (key: string) => { const existed = store.has(key); store.delete(key); return existed; },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
 
 function createPendingItem(overrides: Partial<PendingReflection> = {}): PendingReflection {
   return {
@@ -85,7 +74,9 @@ function createMockSoulProvider(items: PendingReflection[] = []) {
     getState: vi.fn().mockResolvedValue(createMockSoulState()),
     recordReflection: vi.fn().mockResolvedValue(undefined),
     deductTokens: vi.fn().mockResolvedValue(undefined),
-    commitPendingBatch: vi.fn().mockImplementation(async () => { committed = true; }),
+    commitPendingBatch: vi.fn().mockImplementation(async () => {
+      committed = true;
+    }),
     addSoftLearningItem: vi.fn().mockResolvedValue(undefined),
     enqueuePendingReflection: vi.fn().mockImplementation(async (item: PendingReflection) => {
       enqueuedItems.push(item);
@@ -134,17 +125,16 @@ function buildDeps(
   opts: {
     conversationManager?: ReturnType<typeof createMockConversationManager>;
     llm?: ReturnType<typeof createMockLLM>;
-    memoryProvider?: JsonMemoryProvider;
+    memoryProvider?: MemoryProviderImpl;
     soulProvider?: ReturnType<typeof createMockSoulProvider>;
   } = {}
-): ReflectionDeps & { _soulProvider: ReturnType<typeof createMockSoulProvider>; _llm: ReturnType<typeof createMockLLM> } {
+): ReflectionDeps & {
+  _soulProvider: ReturnType<typeof createMockSoulProvider>;
+  _llm: ReturnType<typeof createMockLLM>;
+} {
   const logger = createMockLogger();
   const soulProvider = opts.soulProvider ?? createMockSoulProvider(items);
-  const memoryProvider = opts.memoryProvider ?? createJsonMemoryProvider(logger, {
-    storage: createMockStorage(),
-    storageKey: 'memory',
-    maxEntries: 1000,
-  });
+  const memoryProvider = opts.memoryProvider ?? createTestMemoryProvider(logger, 1000);
   const llm = opts.llm ?? createMockLLM(items);
 
   return {
@@ -165,7 +155,11 @@ describe('conversation-aware batch reflection', () => {
     const items = [createPendingItem({ recipientId: 'user-42' })];
     const convManager = createMockConversationManager([
       { role: 'user', content: 'hi', timestamp: new Date('2026-02-18T14:58:00Z') },
-      { role: 'assistant', content: 'How was your day?', timestamp: new Date('2026-02-18T15:00:00Z') },
+      {
+        role: 'assistant',
+        content: 'How was your day?',
+        timestamp: new Date('2026-02-18T15:00:00Z'),
+      },
     ]);
     const deps = buildDeps(items, { conversationManager: convManager });
 
@@ -190,7 +184,11 @@ describe('conversation-aware batch reflection', () => {
     const items = [createPendingItem()];
     const convManager = createMockConversationManager([
       { role: 'user', content: 'hello there', timestamp: new Date('2026-02-18T14:58:00Z') },
-      { role: 'assistant', content: 'How was your day?', timestamp: new Date('2026-02-18T15:00:00Z') },
+      {
+        role: 'assistant',
+        content: 'How was your day?',
+        timestamp: new Date('2026-02-18T15:00:00Z'),
+      },
     ]);
     const deps = buildDeps(items, { conversationManager: convManager });
 
@@ -209,7 +207,14 @@ describe('conversation-aware batch reflection', () => {
     const items = [createPendingItem()];
     const convManager = createMockConversationManager([
       { role: 'user', content: 'hello', timestamp: new Date() },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'tc1', type: 'function' as const, function: { name: 'search', arguments: '{}' } }], timestamp: new Date() },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'tc1', type: 'function' as const, function: { name: 'search', arguments: '{}' } },
+        ],
+        timestamp: new Date(),
+      },
       { role: 'tool', content: 'result', tool_call_id: 'tc1', timestamp: new Date() },
       { role: 'assistant', content: 'Here is the result', timestamp: new Date() },
     ]);
@@ -274,21 +279,19 @@ describe('conversation-aware batch reflection', () => {
     const llmResponse = {
       results: [{ tickId: 'tick_abc', dissonance: 3, reasoning: 'Contextual mismatch' }],
       patterns: [],
-      behaviorRules: [{
-        action: 'create',
-        rule: 'Check time of day before asking about day completion',
-        evidence: 'User replied "it is not over yet"',
-        source: 'implicit_correction',
-      }],
+      behaviorRules: [
+        {
+          action: 'create',
+          rule: 'Check time of day before asking about day completion',
+          evidence: 'User replied "it is not over yet"',
+          source: 'implicit_correction',
+        },
+      ],
     };
     const llm = { complete: vi.fn().mockResolvedValue(JSON.stringify(llmResponse)) };
 
     const logger = createMockLogger();
-    const memoryProvider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    const memoryProvider = createTestMemoryProvider(logger, 1000);
 
     const deps = buildDeps(items, { llm: llm as any, memoryProvider });
 
@@ -303,11 +306,7 @@ describe('conversation-aware batch reflection', () => {
 
   it('saves implicit corrections with weight 0.7', async () => {
     const logger = createMockLogger();
-    const memoryProvider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    const memoryProvider = createTestMemoryProvider(logger, 1000);
 
     const rule: ExtractedBehaviorRule = {
       action: 'create',
@@ -326,11 +325,7 @@ describe('conversation-aware batch reflection', () => {
 
   it('implicit corrections get 21-day half-life in getBehaviorRules()', async () => {
     const logger = createMockLogger();
-    const memoryProvider = createJsonMemoryProvider(logger, {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    const memoryProvider = createTestMemoryProvider(logger, 1000);
 
     const twentyOneDaysAgo = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000);
     const ruleId = `rule_test_implicit`;

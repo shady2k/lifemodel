@@ -27,6 +27,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Prepare the core image context
+        run: scripts/prepare-core-image-context.sh .docker-core-context
+
+      - name: Build and push core image
+        id: core
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        with:
+          context: .docker-core-context
+          file: docker/core/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/lifemodel-core:${{ github.ref_name }}
+
+      - name: Remove the temporary core build context
+        if: always()
+        run: rm -rf .docker-core-context
+
+      - name: Pin the core image to its pushed digest in the seed source
+        env:
+          CORE_DIGEST: ${{ steps.core.outputs.digest }}
+        run: scripts/release/set-core-digest.sh "$CORE_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
+
       - name: Prepare the full-history loader seed bundle
         id: prepare-seed
         run: scripts/release/prepare-loader-context.sh

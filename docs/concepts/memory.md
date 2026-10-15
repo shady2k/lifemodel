@@ -23,16 +23,16 @@ Memory is split into two abstract stores:
 
 ### VectorStore (Retrieval/Index CRUD)
 
-`src/storage/lance-vector-store.ts` — LanceDB-backed store with local embeddings for semantic search.
+`src/storage/vector-store.ts` defines the retrieval API. The runtime implementation is `PostgresVectorStore` in `src/storage/postgres-memory-store.ts`, backed by Postgres with pgvector; entity relations are stored by `PostgresGraphStore` in the same module.
 
 Responsible for:
 - Save/delete/getById/getAll — standard CRUD
-- **Semantic vector search**: queries and entries embedded via `paraphrase-multilingual-MiniLM-L12-v2` (384-dim, multilingual ONNX model), cosine similarity via LanceDB
-- Two-phase search: vector retrieval from LanceDB → re-ranking in JS with recency/confidence/salience boosts
+- **Semantic vector search**: queries and entries are embedded locally and searched with pgvector cosine distance
+- Two-phase search: vector retrieval from Postgres/pgvector → re-ranking in JS with recency/confidence/salience boosts
 
-**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). Model cached at `data/models/` (~50MB).
+**Embedding model:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2` — 384 dimensions, supports 50+ languages (EN, RU, etc.). Runs locally via `@huggingface/transformers` (ONNX). The model is baked into the core image at `/opt/model-cache` and read in place in the cluster (~50MB).
 
-**Storage:** LanceDB manages its own files at `data/state/memory/vector/`. This is a second persistence path — NOT routed through DeferredStorage. LanceDB is immediately durable (no explicit persist needed).
+**Storage:** vectors and their metadata are persisted in the core Postgres schema (`core.memory_vectors`, migration `20261015000003_create_memory_vectors.sql`). Configuration also lives in Postgres (`core.settings`); neither store depends on a local file directory.
 
 **Scoring components (two-phase):**
 1. **Vector similarity**: cosine distance → similarity (`1 - distance/2`), scaled ×10
@@ -56,7 +56,7 @@ Responsible for:
 - Primary: `Map<id, GraphEntity>`, `Map<id, GraphRelation>`
 - Adjacency: `outEdges: Map<entityId, Set<relationId>>`, `inEdges` same
 - Name index: `Map<lowercase name/alias, entityId>` for O(1) lookup
-- Persisted via DeferredStorage, key: `graph`, format: `{ version: 1, entities[], relations[] }`
+- Persisted in Postgres (`core.memory_entities` and `core.memory_relations`)
 
 **Graph algorithms:**
 - `traverse()` — BFS with visited set, filter by minStrength/minConfidence/relationTypes
@@ -70,14 +70,14 @@ Memories have:
 - `salience` - Retrieval priority (0-1), decays over time
 - `tags` - For retrieval
 - `provenance` - Where it came from
-- `embedding` - 384-dim vector from `paraphrase-multilingual-MiniLM-L12-v2` (stored in LanceDB, not on the MemoryEntry object)
+- `embedding` - locally generated vector stored in `core.memory_vectors`, not on the MemoryEntry object
 
 ## Retrieval Pipeline
 
 ### 1. Vector Search (default)
 
 COGNITION searches memory via VectorStore:
-- **Semantic vector search** (query embedded → cosine similarity via LanceDB → overfetch candidates)
+- **Semantic vector search** (query embedded → cosine similarity via pgvector → overfetch candidates)
 - **Re-ranking** in JS: similarity ×10 + recency boost + confidence boost + salience boost
 - **Recency boost** (recent memories get a boost, decaying over 1 week)
 - **Confidence boost** (additive: `score += confidence * 3`)
@@ -178,18 +178,9 @@ After merge/decay/forget, the consolidator runs entity extraction on entries not
 
 **First consolidation = implicit migration.** Since no existing entries have `metadata.graphExtracted`, the first sleep-cycle run processes ALL existing memories through entity extraction, populating the graph from scratch.
 
-## Data Migration
+## Persistence
 
-### VectorStore: JSON → LanceDB migration
-
-Run the one-time migration script before first launch with LanceDB:
-```bash
-npx tsx src/scripts/migrate-memory-to-lance.ts
-```
-
-This embeds all entries from `memory.json` into LanceDB at `data/state/memory/vector/` and removes `memory.json`. See [ADR 005](../adr/005-lancedb-vector-store.md) for the decision record.
-
-### GraphStore
-
-- **`graph.json`** — Brand new file, starts empty. Created on first `graphStore.persist()`.
-- **Rollback:** Delete `graph.json` and revert code. Memory data is untouched.
+There is no LanceDB-to-Postgres migration path in the current architecture.
+Vector rows and graph data are owned by the core Postgres schema; settings are
+read and written through `src/config/config-loader.ts`. See
+`docs/architecture.md` and the current migrations under `db/migrations/`.

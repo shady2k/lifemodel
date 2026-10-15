@@ -1,4 +1,5 @@
 import type { Storage } from './storage.js';
+import { ConversationCompactionConflictError } from './postgres-conversation-store.js';
 import type { Logger } from '../types/index.js';
 
 /**
@@ -86,6 +87,18 @@ interface StoredMessage {
   channelMessageId?: string;
   /** Which channel sent this message */
   channel?: string;
+  /** Stable Postgres natural key, not exposed to the model. */
+  messageId?: string;
+  sequence?: string;
+}
+
+interface ConversationCompactionMarker {
+  id?: string;
+  summary: string;
+  retainedMessageIds: string[];
+  timestamp: string;
+  coveredThroughSequence?: string;
+  expectedMessageCount?: number;
 }
 
 /**
@@ -99,6 +112,8 @@ interface StoredConversation {
   statusUpdatedAt?: string;
   /** Recent completed actions for preventing re-execution */
   completedActions?: CompletedAction[];
+  /** Latest logical compaction marker; older rows remain append-only in storage. */
+  compactionMarker?: ConversationCompactionMarker;
 }
 
 /**
@@ -237,6 +252,7 @@ export class ConversationManager {
     channelMeta?: {
       channelMessageId?: string;
       channel?: string;
+      messageId?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);
@@ -247,6 +263,7 @@ export class ConversationManager {
       content: message.content,
       timestamp: new Date().toISOString(),
     };
+    if (channelMeta?.messageId) storedMsg.messageId = channelMeta.messageId;
     // Add channel metadata for reaction lookup (only for assistant messages)
     if (message.role === 'assistant') {
       if (channelMeta?.channelMessageId) {
@@ -300,6 +317,7 @@ export class ConversationManager {
     channelMeta?: {
       channelMessageId?: string;
       channel?: string;
+      messageId?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);
@@ -314,6 +332,10 @@ export class ConversationManager {
     };
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
       assistantMsg.tool_calls = assistantMessage.tool_calls;
+      assistantMsg.messageId = `turn:${assistantMessage.tool_calls
+        .map((call) => call.id)
+        .sort()
+        .join(':')}`;
     }
     // Add channel metadata for reaction lookup
     if (channelMeta?.channelMessageId) {
@@ -400,6 +422,14 @@ export class ConversationManager {
       result.push(convMsg);
     }
 
+    if (stored.compactionMarker) {
+      result.unshift({
+        role: 'system',
+        content: `Conversation summary:\n${stored.compactionMarker.summary}`,
+        timestamp: new Date(stored.compactionMarker.timestamp),
+      });
+    }
+
     this.logger.debug(
       {
         userId,
@@ -420,7 +450,7 @@ export class ConversationManager {
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
-    return stored.messages.map((msg) => {
+    const history = stored.messages.map((msg) => {
       const convMsg: ConversationMessage = {
         role: msg.role,
         content: msg.content,
@@ -440,6 +470,14 @@ export class ConversationManager {
       }
       return convMsg;
     });
+    if (stored.compactionMarker) {
+      history.unshift({
+        role: 'system',
+        content: `Conversation summary:\n${stored.compactionMarker.summary}`,
+        timestamp: new Date(stored.compactionMarker.timestamp),
+      });
+    }
+    return history;
   }
 
   /**
@@ -480,13 +518,18 @@ export class ConversationManager {
    * Uses a CAS guard: if the current message count doesn't match expectedMessageCount,
    * another compaction ran concurrently and this one is stale — returns false.
    *
-   * Summaries are stored externally in the memory system (not here).
+   * The summary is kept in an append-only logical marker; older message rows remain durable.
    *
    * @param userId User ID
    * @param expectedMessageCount Expected message count at time of compaction decision
    * @returns true if trimmed successfully, false if stale (concurrent compaction)
    */
-  async compactMessages(userId: string, expectedMessageCount: number): Promise<boolean> {
+  async compactMessages(
+    userId: string,
+    expectedMessageCount: number,
+    summary: string
+  ): Promise<boolean> {
+    if (!summary.trim()) throw new Error('Compaction summary is required');
     const key = this.getKey(userId);
     const stored = await this.loadConversation(key);
 
@@ -510,10 +553,33 @@ export class ConversationManager {
       return true;
     }
 
-    // Update stored data — only trim messages, no summary stored here
-    stored.messages = recentMessages;
+    // Record exactly the newest durable message visible to the summary snapshot.
+    const coveredThroughSequence = stored.messages
+      .reduce(
+        (max, message) =>
+          message.sequence && BigInt(message.sequence) > max ? BigInt(message.sequence) : max,
+        0n
+      )
+      .toString();
 
-    await this.storage.save(key, stored);
+    // Persist a logical marker. Rows appended after the summarized snapshot remain visible.
+    stored.messages = recentMessages;
+    stored.compactionMarker = {
+      summary: summary.trim(),
+      retainedMessageIds: recentMessages.flatMap((message) =>
+        message.messageId ? [message.messageId] : []
+      ),
+      coveredThroughSequence,
+      expectedMessageCount,
+      timestamp: new Date().toISOString(),
+    };
+
+    try {
+      await this.storage.save(key, stored);
+    } catch (error) {
+      if (error instanceof ConversationCompactionConflictError) return false;
+      throw error;
+    }
 
     this.logger.info(
       {
@@ -546,7 +612,8 @@ export class ConversationManager {
     }
 
     // Check total content size (new: handles bloated tool results)
-    const totalSize = this.calculateContentSize(stored.messages);
+    const totalSize =
+      this.calculateContentSize(stored.messages) + (stored.compactionMarker?.summary.length ?? 0);
     if (totalSize > this.maxContentSizeBeforeCompaction) {
       this.logger.debug(
         { userId, totalSize, threshold: this.maxContentSizeBeforeCompaction },

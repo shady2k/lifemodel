@@ -821,7 +821,7 @@ the core module's schema.
 | 7 | Vector memory | Postgres pgvector | charter; supersedes ADR-005's storage leg; LanceDB path deleted |
 | 8 | Memory graph | Postgres (core schema) | consolidator writes transactionally |
 | 9 | Soul | Postgres (core schema) | one JSONB document + version (shape of soul-provider.ts:48 kept) |
-| 10 | Durable inbound log | Valkey stream `inbound` + snapshot | entries XADD'd by the ingress gateway (AOF fsync = today's awaited flush, inbound-log.ts:609-617); per-recipient offsets + dedup ring INSIDE the snapshot commit; replay = post-offset minus dedup |
+| 10 | Durable inbound log | Valkey stream `inbound` + snapshot | entries XADD'd by the ingress gateway (AOF fsync = today's awaited flush, the former file-based inbound implementation:609-617); per-recipient offsets + dedup ring INSIDE the snapshot commit; replay = post-offset minus dedup |
 | 11 | Recipient registry | Postgres (core schema) | small routing table; survives switches |
 | 12 | Ack registry | snapshot | aggregation-layer cross-tick state (inventory 2.1's persisted exception); snapshot-per-tick ≥ today's 500 ms debounce |
 | 13 | Plugin enable/disable | Postgres configuration (core schema) | (intent-applicator.ts:1179-1199 moves to a store row) |
@@ -1798,38 +1798,20 @@ shape SURVIVES: its assertions are content-neutral, only the mechanism nouns
 changed — the noun map after the N-rows). Each row states the design rule or
 owner decision it proves.
 
-**Open question 7 is DECIDED here (the ADR's k3d-scope item).** Three
-where-forms, always stated in the row itself:
+**Delivery checks are decided here.** Isolated launcher tests cover unit and
+ordinary integration behavior; they do not start a cluster. The owner decision
+of 2026-10-14 removes the Docker-run instance image and its first-start fixture.
+There is no PR-only first-start or k3d delivery CI walk. Outcome 4 is accepted
+on the k3s shape by the manual clean-VM check on the owner's test VM, run by the
+coordinator over SSH using `generations/clean-vm-install`. The owner restores
+the clean hypervisor snapshot before the from-scratch check. It proves k3s,
+Flux, the pinned signature-verifying OCI source, platform-up, loader first
+start, second source and first generation, including a node reboot cut. The
+supported shapes are NixOS first (`services.lifemodel`, `nixos-rebuild switch`)
+and Ubuntu/Debian (`scripts/install.sh`); both use k3s with embedded etcd and
+the same rendered `deploy/root/` templates. Existing-cluster installation is
+deferred to lifemodel-xc9.
 
-1. **Isolated launcher unit/integration** — synthetic manifests, serialized
-   fixtures, fake clocks; no engines, no Docker, no cluster
-   (`node scripts/test-isolated.mjs`). The launcher's offline boundary is
-   unchanged (inventory constraint 2).
-2. **The k3d walk** — the heavy acceptance surface for CLUSTER MECHANICS.
-   A `generations/*` case
-   runs against a THROWAWAY k3d cluster with the real surfaces (Flux,
-   CloudNativePG, Traefik, OpenBao + the Bank-Vaults secrets webhook,
-   the local registry,
-   BuildKit) and the built module images. It runs in the PR-only `ci-image`
-   job — a k3d cluster created inside the job against the job's built
-   image, the 45-minute job bound as the walk-set budget — and is
-   LOCALLY REPRODUCIBLE by the developer with the same command (k3d is the
-   dev/CI test environment; the owner's platform decision). The 19-case
-   first-start fixture is the walk's base case, re-walked on the k3s shape
-   (the ADR's constraint: re-walkable, CI-only on k3d). NOTHING runs a
-   cluster on the host or inside the isolated launcher. What k3d CANNOT
-   prove is a clean VM's k3s installation, node trust setup, or reboot
-   behavior. The end-to-end clean-VM check is a manual acceptance check on
-   the owner's test VM, run by the coordinator over SSH using
-   `generations/clean-vm-install`. The owner restores the clean hypervisor
-   snapshot before the from-scratch check. It proves k3s, Flux, the pinned
-   signature-verifying OCI source, platform-up, loader first start, second
-   source and first generation, including a node reboot cut. The supported
-   shapes are NixOS first (`services.lifemodel`, `nixos-rebuild switch`) and
-   Ubuntu/Debian (`scripts/install.sh`); both use k3s with embedded etcd and
-   the same rendered `deploy/root/` templates. There is no CI walk and no
-   k3d delivery walk. There is no existing-cluster entrypoint or walk in
-   this milestone; that feature is deferred to lifemodel-xc9.
 3. **A named human judgement** — the table at the end.
 
 No surviving check depends on a removed mechanism (the socket proxies, the

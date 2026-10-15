@@ -119,7 +119,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
 - **Scenarios:** F3, Q1/Q3/Q4 (drain overrun, crash and replay); Q13 settlement.
 - **Evidence:** ADR-010 O4-A (`docs/adr/010-container-generations.md:174,233-235,
   255-257`); `docs/features/instance/containers-design.md:221-225,232-233,253-255`;
-  `src/core/inbound-log.ts:7-15,28-41`; `src/core/core-loop.ts:661-687,720-757`;
+  `the former file-based inbound implementation:7-15,28-41`; `src/core/core-loop.ts:661-687,720-757`;
   `src/core/container.ts:341-349`.
 - **What fails:** atomically publishing a send command with a snapshot does not
   atomically deliver the answer and record its outcome. Trace: the command commits;
@@ -227,7 +227,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
 - **Scenarios:** Q5; Q3/Q10 reports; F7 panic across restarts.
 - **Evidence:** `docs/adr/010-container-generations.md:166,195`;
   `docs/features/instance/containers-design.md:118,130-139,196,199-217`;
-  `loader/src/state.ts:28-32,176-188`; `loader/src/supervisor.ts:300-319`.
+  `loader/src/state.ts:28-32,176-188`; `the former instance supervisor:300-319`.
 - **Risk:** the written intention is idempotent adoption by labels and records,
   but the sequence records the completed switch only after activation/routing and
   the health window. Crash immediately after the durable epoch bump: N has exited,
@@ -248,7 +248,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
 
 - **Scenarios:** F3, Q1; Q3/Q4 recovery; outcome 4 front-door re-walk.
 - **Evidence:** `docs/features/instance/containers-design.md:25,41,71-74,124-134,
-  151-152,171-175,229`; `docker/instance/Caddyfile:101-105`.
+  151-152,171-175,229`; `the former Caddy configuration:101-105`.
 - **What fails:** the root-host upstream is the generation's web channel at
   `current`. N stops intake, exits, and only later is that alias moved after C
   activates. C explicitly does not serve during readiness. A POST in that interval
@@ -293,7 +293,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
   `src/layers/aggregation/persistent-ack-registry.ts:27-29,76-89`;
   `src/core/intent-applicator.ts:513-521`;
   `README.md:189-196`;
-  `tests/integration/instance-first-start.test.ts:1117-1139,1847-1864`.
+  `the removed Docker instance first-start fixture:1117-1139,1847-1864`.
 - **Risk and classification:**
   - Trade 1 (drain time versus redo) and trade 4 (health duration versus detection)
     are genuine open values within the charter. Neither alone provides B03's
@@ -322,7 +322,7 @@ written mechanism addresses the scenario; it is not a runtime PASS.
   - Alias movement needs acceptance for DNS caching, persistent Caddy upstream
     connections and retries, not just a new alias target. “Caddy unchanged” can
     mean unchanged authentication/pinned hosts; its root upstream must change
-    from `127.0.0.1:7100` (`docker/instance/Caddyfile:104`) to the new service.
+    from `127.0.0.1:7100` (`the former Caddy configuration:104`) to the new service.
   - The inventory's delayed `SCHEDULE_EVENT` timeout needs an explicit durable
     event/due-time mapping; the general events rule could cover it, but the table
     omits it. Check the entire span-tick inventory, including stop-time result
@@ -344,7 +344,7 @@ risks; it adds no separately counted findings.
 | Docker socket / broker | Elevation and tampering through allowed create/start bodies; denial of service by arbitrary resource requests; spoofed instance/run identity | B08 rejects the reduced-blast-radius claim. Prove the broker's allowed request shape, labels and limits; generations must still lack direct Docker paths (Q9). |
 | OpenBao | Spoofed issuance client, overbroad PG/Valkey role grants, lease renewal/revocation failure, unseal-key disclosure | Loader-only token is a useful boundary. Engine availability is A7, not evidence. Verify scopes, renewable lifetime, maximum effective access and termination of live sessions, including engine/loader restarts (Q8; C01/C02). TTL metadata alone does not prove database-side expiry. |
 | Valkey ACLs / epoch | Tampered bus/snapshot via raw mutations; forged command producers; replay after dedup eviction; denial of service via untrimmed streams | B01/B03 require enforceable authority and retention. One durable epoch prevents compliant stale CAS commits across a single-store restart, not malicious writes outside CAS. Keep refusal counts observable without mutating the protected snapshot/position. |
-| Agent Vault leaving loopback | Management/API bypass, proxy-token theft/reuse, model-key disclosure and unallowlisted relay | The source uses one server `--host 127.0.0.1` (`loader/src/agent-vault.ts:222-232`) and reuses one proxy agent/token (`:506-536`). Verify proxy-only exposure versus management binding, distinct generation tokens/revocation, mounted public CA and named direct private-store routes (`:766-797`). The accepted key-absence fixture does not prove these new boundaries. |
+| Agent Vault leaving loopback | Management/API bypass, proxy-token theft/reuse, model-key disclosure and unallowlisted relay | The source uses one server `--host 127.0.0.1` (`the former instance Agent Vault integration:222-232`) and reuses one proxy agent/token (`:506-536`). Verify proxy-only exposure versus management binding, distinct generation tokens/revocation, mounted public CA and named direct private-store routes (`:766-797`). The accepted key-absence fixture does not prove these new boundaries. |
 | Shared private network | Lateral access to Bao/admin/control listeners; spoofed `/activate` or `/drain`; network/resource denial of service | Do not rely on absent internet routing for internal authorization. Define allowed callers/authentication on generation control and trusted management listeners. Re-derive IPv4/IPv6 direct-egress and loader-login tests on the new network; never infer them from the old uid-only iptables rule. |
 
 ## Disposition
@@ -884,7 +884,7 @@ choices. The findings below specify the missing safety mechanisms or evidence.
 
 - **Severity:** BLOCKING.
 - **Scenario:** F7, Q7/Q8/Q9: compromised generation code reaches a peer’s :7400/activate or /drain, claims another module’s name at the door, or calls Agent Vault’s network-visible injection/management surface directly. All peers share one internal network; removing internet routes neither authenticates callers nor enforces “only the door reaches injection” or “no module reaches the proxy/admin surfaces.”
-- **Evidence:** docs/adr/010-container-generations.md:405-425,454-465; docs/features/instance/containers-design.md:31-41,53-66,92-105,678,693; loader/src/agent-vault.ts:201,222-232; docker/instance/Caddyfile:93-99.
+- **Evidence:** docs/adr/010-container-generations.md:405-425,454-465; docs/features/instance/containers-design.md:31-41,53-66,92-105,678,693; the former instance Agent Vault integration:201,222-232; the former Caddy configuration:93-99.
 - **Suggested fix:** Define authenticated workload identity bound to module/generation and loader-only control authorization, plus network/listener isolation for management, Docker proxy and vault injection. Derive door policy from that identity, not a caller-supplied name, and test a malicious peer bypassing Caddy and spoofing an allowed module.
 
 ### R3-12 — Core-only health can accept a generation that cannot do its work
@@ -912,7 +912,7 @@ choices. The findings below specify the missing safety mechanisms or evidence.
 
 - **Severity:** COMMENT.
 - **Scenario:** F3/F4, Q1/Q3/Q10: a candidate becomes intake-ready or the current alias moves while Caddy retains an old upstream connection/DNS result. Without a pool membership/discovery mechanism, submissions can still reach a revoked old intake and UI traffic a dead holder; alias movement alone does not update a list of every intake-ready generation.
-- **Evidence:** docs/features/instance/containers-design.md:54-55,118-125,241-253,295-302; docker/instance/Caddyfile:101-105; this review’s pending validation at :510-513,574-575.
+- **Evidence:** docs/features/instance/containers-design.md:54-55,118-125,241-253,295-302; the former Caddy configuration:101-105; this review’s pending validation at :510-513,574-575.
 - **Suggested fix:** Name dynamic upstream discovery, membership removal ordering and connection/DNS refresh semantics, keeping the accepted authentication surface. Extend switch/rollback checks with persistent connections and a POST whose fsync succeeds but HTTP response is lost; verify retry uses the same key.
 
 ### R3-16 — Single-use bootstrap and lease rotation need a restart lifecycle
@@ -974,7 +974,7 @@ choices. The findings below specify the missing safety mechanisms or evidence.
 ### R3-24 — The charter and inventory still prescribe superseded choices
 
 - **Severity:** COMMENT.
-- **Scenario:** F1/F5/F6/F7, Q11/Q13: a planner follows the charter or inventory constraints and produces sealed/no-rebuild delivery, down migrations, no functions, or no current module split. Those sources still state these requirements even though the fixed decisions and rewritten ADR prescribe per-module images, expand/contract and five function plugins; the inventory also still asks whether the old docker run must work.
+- **Scenario:** F1/F5/F6/F7, Q11/Q13: a planner follows the charter or inventory constraints and produces sealed/no-rebuild delivery, down migrations, no functions, or no current module split. Those sources still state these requirements even though the fixed decisions and rewritten ADR prescribe per-module images, expand/contract and five function plugins; the inventory also still asks whether the old legacy Docker instance command must work.
 - **Evidence:** OWNER-DECISIONS.md:3,5,10,13,19; docs/charters/instance-1.md:15-27,45-50,85-88,129-132; docs/features/instance/containers-inventory.md:21-23,230,263,278-279; docs/adr/010-container-generations.md:8-13,152-170.
 - **Suggested fix:** In the authorized amendment pass, sync the charter and inventory constraints with the fixed decisions and distinguish historical FACTs from target constraints. Explicitly state how the versioned static Compose file is shipped/updated without allowing a self-change to silently rewrite the trusted running infrastructure; this review changes neither input file.
 
@@ -1377,7 +1377,7 @@ R3-13) is first.
   quotes them. The four inventory lines that quote the superseded charter text
   — the status paragraph's "the core is not cut into modules"/"reversible
   format migrations" (inv :21-23), constraint 1's charter quotation (inv
-  5.1), the section-3.2 "must keep working `docker run`" question (inv :230)
+  5.1), the section-3.2 "must keep working legacy Docker instance command" question (inv :230)
   and the open-question "11 GB machine" item (inv :278-279) — are each marked
   **PENDING CHARTER AMENDMENT — R3-24** with the superseded facts named and a
   "plan from the decisions and the rewritten ADR" pointer; nothing else in
@@ -2766,7 +2766,7 @@ finding in this round.
 
 - **Severity:** BLOCKING.
 - **Scenario:** F7/Q10.
-- **Evidence:** Design:268-284, 140, 1369, 1400; inventory section 3.2 (outcome-4 key entry); docker/instance/Caddyfile:39-56, 81-104; loader/src/http.ts:604-634.
+- **Evidence:** Design:268-284, 140, 1369, 1400; inventory section 3.2 (outcome-4 key entry); the former Caddy configuration:39-56, 81-104; loader/src/http.ts:604-634.
 - **Risk / sensitivity:** The new design explicitly removes the Vault UI route but supplies no replacement key-provisioning route or operator→Vault access. The accepted first-start walk cannot put in its made-up model key. ForwardAuth is also unnamed on the root route and has no stated boot setup/login exception; applying it everywhere blocks first login, while applying it only to boot leaves chat/transcript unguarded.
 - **Fix:** Map the setup/login/assets exceptions and protect every other owner router with ForwardAuth. Preserve the existing narrowly authenticated Vault UI as the lighter option, or name a replacement operator key-entry path and its network grant; test first setup, key entry, anonymous route denial and the model call end to end.
 
@@ -3230,7 +3230,7 @@ UNPROVED-in-CI until first run) or to a named human judgement.
   `lifemodel` and `openbao` rows), P21, the RBAC table, the container
   view (secret delivery, lease lifecycle), the bootstrap DAG step 4, the
   operator-crash reconciliation step 3, the named-rows list, the values
-  row `leaseMaxTtl`, the ci-image surface list, the noun-map row; the
+  row `leaseMaxTtl`, the former instance-image CI job surface list, the noun-map row; the
   review document's noun-map and platform-shape rows and the inventory's
   F7/Q8/Q11 amendments note the same replacement in place.
   Checks: N-7 (pod spec AND Kubernetes Secrets/etcd carry no credential;

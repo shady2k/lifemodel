@@ -1,4 +1,8 @@
 import type { Logger } from 'pino';
+import type { PersistableState } from '../storage/persistable-state.js';
+import type { PersistedAckRegistryState } from '../layers/aggregation/ack-registry.js';
+import { Redis } from 'iovalkey';
+import { Pool } from 'pg';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
 import type { EvidenceSource } from '../types/cognition.js';
@@ -22,11 +26,6 @@ import {
   createAggregationProcessor,
   createCognitionProcessor,
 } from '../layers/index.js';
-import {
-  type TelegramChannel,
-  createTelegramChannel,
-  type TelegramConfig,
-} from '../channels/index.js';
 import { type UserModel, createUserModel, createNewUserWithModel } from '../models/user-model.js';
 import { type MessageComposer, createMessageComposer } from '../llm/composer.js';
 import type { LLMProvider } from '../llm/provider.js';
@@ -35,35 +34,46 @@ import {
   type Storage,
   type StateManager,
   type ConversationManager,
-  createJSONStorage,
-  createDeferredStorage,
+  PostgresStorage,
   createStateManager,
   createConversationManager,
-  migrateToHierarchical,
+  createSnapshotStore,
 } from '../storage/index.js';
 import {
   type MergedConfig,
-  loadConfig,
-  resolveConfigDir,
+  createConfigLoader,
   endpointGaps,
   type ModelEndpoint,
 } from '../config/index.js';
 import { getEffectiveTimezone } from '../utils/date.js';
-import { JsonMemoryProvider } from '../storage/memory-provider.js';
+import { MemoryProviderImpl } from '../storage/memory-provider.js';
+import { PostgresConversationStore } from '../storage/postgres-conversation-store.js';
+import { createFencedPostgres } from '../storage/fenced-postgres.js';
 import { type CognitionLLM } from '../layers/cognition/agentic-loop.js';
 import { createLLMAdapter } from '../layers/cognition/llm-adapter.js';
+import { createReloadableLLMProvider } from './reloadable-llm-provider.js';
 import {
   type MemoryConsolidator,
   createMemoryConsolidator,
 } from '../storage/memory-consolidator.js';
 import { LLMEntityExtractor } from '../storage/entity-extractor.js';
 import { createEmbedder } from '../storage/embedder.js';
-import { LanceVectorStore } from '../storage/lance-vector-store.js';
-import { JsonGraphStore } from '../storage/graph-store.js';
-import { type SoulProvider, createSoulProvider } from '../storage/soul-provider.js';
+import { PostgresVectorStore, PostgresGraphStore } from '../storage/postgres-memory-store.js';
+import {
+  type SoulProvider,
+  createSoulProvider,
+  PostgresSoulStore,
+} from '../storage/soul-provider.js';
 import { type SchedulerService, createSchedulerService } from './scheduler-service.js';
 import { type PluginLoader, createPluginLoader } from './plugin-loader.js';
-import { createInboundLog, type InboundLog } from './inbound-log.js';
+import {
+  INBOUND_STREAM,
+  OUTBOUND_STREAM,
+  InboundMessageStream,
+  applyCommittedOutboundEvents,
+  startOutboundDelivery,
+} from './message-streams.js';
+import { createBusSignalStream, type BusSnapshot } from './bus-stream.js';
 import { createScopedScriptRunner } from './scoped-script-runner.js';
 import { createBrowserAuthPrimitive } from './browser-auth-primitive.js';
 import { loadAllPlugins } from './plugin-discovery.js';
@@ -77,7 +87,6 @@ import { createLockService } from '../runtime/lock/lock-service.js';
 import { createEnvCredentialStore } from '../runtime/vault/credential-store.js';
 import { createContainerManager } from '../runtime/container/container-manager.js';
 import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createActTool } from '../layers/cognition/tools/core/act.js';
 import { createTaskTool } from '../layers/cognition/tools/core/task.js';
@@ -96,8 +105,6 @@ import {
 export interface AppConfig {
   /** Log directory */
   logDir?: string;
-  /** The config file's directory (default: DATA_PATH/config, else data/config) */
-  configDir?: string;
   /** Maximum log files to keep */
   maxLogFiles?: number;
   /** Log level */
@@ -123,14 +130,10 @@ export interface AppConfig {
   };
   /** Core loop configuration */
   coreLoop?: Partial<CoreLoopConfig>;
-  /** Telegram configuration */
-  telegram?: TelegramConfig;
   /** Primary user configuration (for proactive contact) */
   primaryUser?: {
     /** User's name */
     name?: string;
-    /** Telegram chat ID to send proactive messages to */
-    telegramChatId?: string;
     /** User's timezone offset from UTC in hours (e.g., -5 for EST), null = unknown */
     timezoneOffset?: number | null;
   };
@@ -166,8 +169,6 @@ export interface Container {
   layers: CoreLoopLayers;
   /** The core loop (heartbeat) */
   coreLoop: CoreLoop;
-  /** Telegram channel (optional, depends on config) */
-  telegramChannel: TelegramChannel | null;
   /** All registered channels */
   channels: Map<string, Channel>;
   /** User model for tracking user beliefs (optional) */
@@ -179,13 +180,11 @@ export interface Container {
   /** COGNITION LLM adapter (optional, for agentic loop) */
   cognitionLLM: CognitionLLM | null;
   /** Memory provider (optional, for agentic loop) */
-  memoryProvider: JsonMemoryProvider | null;
+  memoryProvider: MemoryProviderImpl | null;
   /** Memory consolidator (for sleep-cycle consolidation) */
   memoryConsolidator: MemoryConsolidator | null;
   /** Soul provider (for identity awareness) */
   soulProvider: SoulProvider | null;
-  /** Primary user's Telegram chat ID (for proactive messages) */
-  primaryUserChatId: string | null;
   /** Storage backend */
   storage: Storage | null;
   /** State manager for persistence */
@@ -194,6 +193,10 @@ export interface Container {
   conversationManager: ConversationManager | null;
   /** Loaded configuration */
   config: MergedConfig | null;
+  /** Postgres-backed config shared with the settings server. */
+  configLoader: ReturnType<typeof createConfigLoader>;
+  /** Reload configuration from Postgres and apply endpoint/model changes. */
+  reloadConfig: () => Promise<void>;
   /** Scheduler service for plugin timers */
   schedulerService: SchedulerService | null;
   /** Plugin loader */
@@ -203,7 +206,7 @@ export interface Container {
   /** Motor Cortex service for code execution */
   motorCortex: MotorCortex | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
-  inboundLog: InboundLog | null;
+  inboundStream: InboundMessageStream | null;
   /**
    * The step the stop reached ('done' while the agent runs). `src/index.ts`
    * reads it at the stop deadline for the hard exit's error line
@@ -237,14 +240,12 @@ export interface ShutdownSequenceDeps {
   channels: Iterable<Channel>;
   /** The core loop: stop() drains the turn in flight */
   coreLoop: Pick<CoreLoop, 'stop' | 'stopReport' | 'closeDurableWrites'>;
-  /** Storage (DeferredStorage): the final flush */
-  storage: Storage & { shutdown: () => Promise<void> };
+  /** Storage lifecycle hook; durable writes are synchronous at their store. */
+
   /** State manager (auto-save stop + final state save) */
   stateManager: { shutdown: () => Promise<void> };
   /** Recipient registry (flushes its pending writes) */
   recipientRegistry: { flush: () => Promise<void> };
-  /** Ack registry (flushes its pending writes) */
-  ackRegistry: { flush: () => Promise<void> };
   /**
    * The step the stop reached (mutated here, read by the hard exit).
    * Optional: a caller that does not arm a stop deadline does not need it.
@@ -328,7 +329,6 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
   if (progress) progress.step = 'state_flush';
   await deps.stateManager.shutdown();
   await deps.recipientRegistry.flush();
-  await deps.ackRegistry.flush();
 
   // 4. Channels stop fully (clients released; after this a send refuses).
   if (progress) progress.step = 'channel_stop';
@@ -338,15 +338,10 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
     }
   }
 
-  // 5. Storage last: the deferred writes of steps 3-4 reach disk here, and no
-  //    component writes after this flush. The loop is closed for durable
-  //    writes FIRST: a send that settles behind this flush would commit into a
-  //    storage that already shut down (the write would be lost), so it keeps
-  //    its message in the log instead - the entry is on disk and replays once
-  //    at the next start.
+  // 5. Fence durable writes before releasing the store connections. coreLoop.stop()
+  //    drains tracked store-writing effects within the shared stop deadline.
   if (progress) progress.step = 'storage_flush';
   deps.coreLoop.closeDurableWrites();
-  await deps.storage.shutdown();
 
   if (progress) progress.step = 'done';
   logger.info('Shutdown complete');
@@ -474,15 +469,52 @@ export function createLLMProvider(
  * - Restores state from disk if available
  * - Sets up auto-save and shutdown hooks
  */
-export async function createContainerAsync(configOverrides: AppConfig = {}): Promise<Container> {
+export function createSettingsReloadHandler(
+  active: Pick<Container, 'logger' | 'reloadConfig'>
+): () => Promise<void> {
+  return async () => {
+    try {
+      await active.reloadConfig();
+    } catch (error) {
+      active.logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Saved settings could not be applied to the running core'
+      );
+    }
+  };
+}
+
+export async function createContainerAsync(
+  configOverrides: AppConfig = {},
+  callbacks: { onFatalStop?: (error: Error) => void } = {}
+): Promise<Container> {
   // Load configuration from file and environment. The config file's directory
   // is resolved HERE, before anything else applies: a path is an input, not a
   // value the config itself decides (lifemodel-q4x.4.1).
-  const configDir = configOverrides.configDir ?? resolveConfigDir();
-  const mergedConfig = await loadConfig(configDir);
+  const valkeyUrl = process.env['LIFEMODEL_VALKEY_URL'];
+  if (!valkeyUrl) throw new Error('LIFEMODEL_VALKEY_URL is required');
+  const databaseUrl = process.env['LIFEMODEL_DATABASE_URL'];
+  if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
+
+  const rawPostgres = new Pool({ connectionString: databaseUrl });
+
+  const snapshotRedis = new Redis(valkeyUrl);
+  const snapshotStore = createSnapshotStore(snapshotRedis, { outboundKey: OUTBOUND_STREAM });
+  const busSignalStream = createBusSignalStream(snapshotRedis);
+  snapshotStore.register(busSignalStream);
+  const snapshotEpoch = await snapshotStore.takeEpoch();
+  await rawPostgres.query(
+    `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
+     ON CONFLICT (id) DO UPDATE SET epoch = EXCLUDED.epoch
+     WHERE core.active_holder.epoch < EXCLUDED.epoch`,
+    [snapshotEpoch]
+  );
+  const postgres = createFencedPostgres(rawPostgres, snapshotEpoch);
+  const configLoader = createConfigLoader(postgres);
+  const mergedConfig = await configLoader.load();
 
   // Build logger config from merged config
-  const logToFile = configOverrides.logToFile ?? true;
+  const logToFile = configOverrides.logToFile ?? process.env['NODE_ENV'] !== 'production';
   const loggerConfig: Partial<LoggerConfig> = {
     logDir: configOverrides.logDir ?? mergedConfig.logging.logDir,
     maxFiles: configOverrides.maxLogFiles ?? mergedConfig.logging.maxFiles,
@@ -493,7 +525,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create logger
   const logger = createLogger(loggerConfig);
+  logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
   logger.info('Loaded configuration');
+  if (!mergedConfig.motorCortex.enabled) {
+    logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
+  }
+
+  const initialSnapshot = await snapshotStore.read();
+  busSignalStream.hydrateSnapshot(
+    initialSnapshot?.sections['busOffset'] as BusSnapshot | undefined
+  );
 
   // Create conversation logger for LLM interactions (separate file)
   const conversationLogger = createConversationLogger(
@@ -504,33 +545,39 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   setConversationLogger(conversationLogger);
   logger.info('Conversation logger initialized');
 
-  // Create storage with deferred writes (batches disk I/O, prevents race conditions)
+  // All mutable core state is held by Postgres or the Valkey snapshot.
   const storagePath = mergedConfig.paths.state;
+  const storage = new PostgresStorage(postgres);
+  logger.info('Postgres storage initialized');
 
-  // Migrate flat colon-delimited files to hierarchical directory structure
-  await migrateToHierarchical(storagePath, '.json', logger);
-
-  const jsonStorage = createJSONStorage(storagePath, { logger });
-  const storage = createDeferredStorage(jsonStorage, logger, {
-    flushIntervalMs: 30_000, // Flush every 30 seconds
-  });
-  storage.startAutoFlush();
-  logger.info({ storagePath }, 'Storage initialized');
-
-  // Create the durable inbound log (lifemodel-ctc.2.1): inbound user
-  // messages are written and flushed HERE at emit time; an entry leaves the
-  // log when its turn reached a recorded outcome (owner decision, comment
-  // 54), and a start replays the entries whose turn recorded none (see the
-  // replay block below, after the core loop exists).
-  const inboundLog = createInboundLog({ storage, logger, storagePath });
-  await inboundLog.load();
+  // Inbound offsets, pending entries and the bounded dedup ring are owned by
+  // the Valkey snapshot. Existing stream entries replay from that snapshot.
+  const inboundStream = new InboundMessageStream(snapshotRedis, INBOUND_STREAM);
+  inboundStream.hydrateSnapshot(
+    initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]
+  );
 
   // Create state manager
   const stateManager = createStateManager(storage, logger);
+  const snapshotState = initialSnapshot?.sections['agentState'] as PersistableState | undefined;
+  stateManager.setSnapshotState(snapshotState ?? null);
 
-  // Create conversation manager for history
-  const conversationManager = createConversationManager(storage, logger);
+  // Conversation history lives in the core Postgres schema, not DATA_PATH.
+  const coreStorage = storage;
+  const conversationManager = createConversationManager(
+    new PostgresConversationStore(postgres),
+    logger
+  );
   logger.info('ConversationManager configured');
+  // Re-apply all committed outbound message rows after restart. The independent
+  // cursor advances only after Postgres accepts the natural-keyed row.
+  await applyCommittedOutboundEvents(
+    snapshotRedis,
+    conversationManager,
+    undefined,
+    undefined,
+    logger
+  );
 
   // Load persisted state
   const persistedState = await stateManager.load();
@@ -569,9 +616,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create event bus
   const eventBus = createEventBus(logger);
 
-  // Get primary user chat ID
-  const primaryUserChatId =
-    configOverrides.primaryUser?.telegramChatId ?? mergedConfig.primaryUser.telegramChatId ?? null;
+  const primaryUserChatId: string | null = null;
 
   // Create UserModel if primary user configured
   let userModel: UserModel | null = null;
@@ -632,7 +677,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const llmConfig = {
     endpoint: configOverrides.llm?.endpoint ?? mergedConfig.llm.endpoint,
   };
-  const llmProvider = createLLMProvider(llmConfig, logger);
+  const reloadableProvider = createReloadableLLMProvider(createLLMProvider(llmConfig, logger));
+  const llmProvider = reloadableProvider.provider;
+  const reloadConfig = async (): Promise<void> => {
+    const refreshed = await configLoader.load();
+    reloadableProvider.replace(createLLMProvider({ endpoint: refreshed.llm.endpoint }, logger));
+    logger.info(
+      { baseUrl: refreshed.llm.endpoint.baseUrl },
+      'Model endpoint configuration reloaded'
+    );
+  };
 
   // Create MessageComposer if LLM available
   let messageComposer: MessageComposer | null = null;
@@ -649,30 +703,12 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     logger.info('CognitionLLM adapter configured');
   }
 
-  // Guard: fail fast if memory.json exists but hasn't been migrated to LanceDB
-  const legacyMemoryPath = resolve(storagePath, 'memory.json');
-  if (existsSync(legacyMemoryPath)) {
-    throw new Error(
-      `Unmigrated memory.json found at ${legacyMemoryPath}. ` +
-        'Run "npx tsx src/scripts/migrate-memory-to-lance.ts" before starting the agent.'
-    );
-  }
-
-  // Create dual-layer memory stores
-  const embedder = createEmbedder({
-    cacheDir: resolve(mergedConfig.paths.data, 'models'),
-  });
-  const vectorStore = new LanceVectorStore(logger, {
-    dbPath: resolve(storagePath, 'memory', 'vector'),
-    embedder,
-    maxEntries: 10000,
-  });
-  const graphStore = new JsonGraphStore(logger, {
-    storage,
-    storageKey: 'graph',
-  });
-  const memoryProvider = new JsonMemoryProvider(logger, { vectorStore, graphStore });
-  logger.info('MemoryProvider configured (dual-layer: VectorStore + GraphStore)');
+  // Long-lived memory and its graph live only in the core Postgres schema.
+  const embedder = createEmbedder();
+  const vectorStore = new PostgresVectorStore(logger, postgres, embedder, 10000);
+  const graphStore = new PostgresGraphStore(postgres, logger);
+  const memoryProvider = new MemoryProviderImpl(logger, { vectorStore, graphStore });
+  logger.info('MemoryProvider configured (Postgres pgvector + graph)');
 
   // Create entity extractor (LLM-based, for consolidation)
   const entityExtractor = cognitionLLM ? new LLMEntityExtractor(logger, cognitionLLM) : undefined;
@@ -683,8 +719,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create soul provider (for identity awareness in system prompt)
   const soulProvider = createSoulProvider(logger, {
-    storage,
-    storageKey: 'soul',
+    store: new PostgresSoulStore(postgres),
   });
   logger.info('SoulProvider configured');
 
@@ -694,7 +729,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const artifactsBaseDir = resolve(storagePath, '..', 'motor-runs'); // data/motor-runs/
   const credentialStore = createEnvCredentialStore();
   const skillsDir = resolve(storagePath, '..', 'skills'); // data/skills/ relative to data/state/
-  if (llmProvider) {
+  if (mergedConfig.motorCortex.enabled) {
     containerMgr = createContainerManager(logger);
 
     // Wire fetch adapter: wraps fetchPage() → MotorFetchFn shape
@@ -792,7 +827,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
     motorCortex = createMotorCortex({
       llm: llmProvider,
-      storage,
+      storage: coreStorage,
       logger,
       energyModel: agent.getEnergyModel(),
       skillsDir,
@@ -807,13 +842,15 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   }
 
   // Create recipient registry for message routing (with persistence)
-  const recipientRegistry = createPersistentRecipientRegistry(storage, logger);
+  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
   await recipientRegistry.init();
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
   // Create persistent ack registry for deferrals (must be loaded before use)
-  const ackRegistry = new PersistentAckRegistry(logger, storage);
-  await ackRegistry.load();
+  const ackRegistry = new PersistentAckRegistry(logger);
+  await ackRegistry.load(
+    initialSnapshot?.sections['ackRegistry'] as PersistedAckRegistryState | undefined
+  );
   logger.info('AckRegistry configured with persistence');
 
   // === PLUGIN SYSTEM INITIALIZATION ===
@@ -823,7 +860,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const schedulerService = createSchedulerService(logger);
 
   // 2. Create plugin loader with per-plugin config support
-  const pluginLoader = createPluginLoader(logger, storage, schedulerService, {
+  const pluginLoader = createPluginLoader(logger, coreStorage, schedulerService, {
     pluginConfigs: mergedConfig.plugins.configs,
   });
 
@@ -977,7 +1014,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // 7. Discover and load plugins (triggers dynamic neuron registration via callbacks)
   // Load persisted disabled plugins list from storage
   const persistedDisabled =
-    ((await storage.load('core:disabled_plugins')) as string[] | null) ?? [];
+    ((await coreStorage.load('core:disabled_plugins')) as string[] | null) ?? [];
   const runtimeDisabledIds = new Set(persistedDisabled);
 
   const pluginConfig = mergedConfig.plugins;
@@ -1032,10 +1069,16 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...configOverrides.coreLoop,
   };
+  const stopDeadlineMs = Number(process.env['LIFEMODEL_CORE_STOP_DEADLINE_MS'] ?? 5_000);
+  if (!Number.isSafeInteger(stopDeadlineMs) || stopDeadlineMs < 1) {
+    throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
+  }
+  coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
   if (primaryUserChatId) {
     coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }
 
+  let shutdown: (() => Promise<void>) | null = null;
   // Create core loop
   const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {
     messageComposer: messageComposer ?? undefined,
@@ -1047,9 +1090,28 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryConsolidator,
     recipientRegistry,
     soulProvider,
-    storage,
+    storage: coreStorage,
     pluginLoader,
-    inboundLog,
+    inboundStream,
+    busSignalStream,
+    initialTickCount: Number(
+      initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
+    ),
+    commitSnapshot: async (tick, outbox) => {
+      await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
+      logger.debug({ epoch: snapshotEpoch, tick }, 'Core snapshot committed');
+    },
+    afterSnapshotCommit: async () => {
+      await applyCommittedOutboundEvents(
+        snapshotRedis,
+        conversationManager,
+        undefined,
+        undefined,
+        logger
+      );
+    },
+    onStaleSnapshot: callbacks.onFatalStop,
+    onFatalError: callbacks.onFatalStop,
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },
@@ -1122,75 +1184,19 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Create channels registry
   const channels = new Map<string, Channel>();
 
-  // Create Telegram channel if configured
-  let telegramChannel: TelegramChannel | null = null;
-  const telegramBotToken =
-    configOverrides.telegram?.botToken ?? mergedConfig.telegramBotToken ?? '';
+  // Outbound events are retained for the future gateway; no channel is registered in this core.
 
-  if (telegramBotToken) {
-    // Build base config with allowed chat IDs filter if primary user is configured
-    const telegramConfig: TelegramConfig = primaryUserChatId
-      ? {
-          botToken: telegramBotToken,
-          allowedChatIds: [primaryUserChatId],
-          ...configOverrides.telegram,
-        }
-      : { botToken: telegramBotToken, ...configOverrides.telegram };
-    telegramChannel = createTelegramChannel(telegramConfig, logger, recipientRegistry);
-    channels.set('telegram', telegramChannel);
-    coreLoop.registerChannel(telegramChannel);
+  const outboundDelivery = startOutboundDelivery(snapshotRedis, channels, logger);
+  void outboundDelivery.done.catch((error: unknown) => {
+    logger.error({ err: error }, 'Outbound delivery worker stopped unexpectedly');
+  });
 
-    // When telegram receives messages, write them to the durable inbound log
-    // FIRST (flushed at emit time through the awaited callback) and queue the
-    // accepted ones; duplicates by update_id are dropped.
-    telegramChannel.setSignalCallback((signal) => {
-      return coreLoop.pushInboundSignal(signal);
-    });
-
-    logger.info('Telegram channel configured');
+  // Prime the core queue with messages committed to the inbound stream.
+  const replayedInbound = await inboundStream.readNew();
+  for (const entry of replayedInbound) coreLoop.pushSignal(entry.signal);
+  if (replayedInbound.length > 0) {
+    logger.info({ count: replayedInbound.length }, 'Replayed pending inbound stream messages');
   }
-
-  // Replay every uncommitted inbound message (its answer was never
-  // DELIVERED, so the offset did not advance) as signals, in log order.
-  // The entries STAY in the log: a crash before they are processed cannot
-  // lose them - the next start replays them again (lifemodel-ctc.2.1).
-  const replayEntries = inboundLog.replayable();
-  for (const entry of replayEntries) {
-    // A first message of a new chat can outlive the registry's debounced
-    // save (review round 2, finding 1): replay re-registers the route the
-    // entry carries, deterministically, before anything is queued.
-    if (entry.routing && recipientRegistry.resolve(entry.recipientId) === null) {
-      recipientRegistry.getOrCreate(entry.routing.channel, entry.routing.destination);
-    }
-
-    // A durable photo receipt whose download never finished: the channel
-    // re-fetches it and emits the full signal (finding 7). Without a
-    // completing channel (or on re-fetch failure) the receipt itself is
-    // queued as its caption text.
-    const photoData = entry.signal.data as
-      | { pendingPhoto?: { fileId?: unknown } | undefined }
-      | undefined;
-    if (typeof photoData?.pendingPhoto?.fileId === 'string' && telegramChannel !== null) {
-      const completed = await telegramChannel.completePhotoReceipt(entry.signal);
-      if (completed) {
-        continue;
-      }
-    }
-    coreLoop.pushSignal(entry.signal);
-  }
-  if (replayEntries.length > 0) {
-    logger.info(
-      { count: replayEntries.length },
-      'Replayed uncommitted inbound messages from the durable log'
-    );
-  }
-
-  // Nothing else is restored: internal signals are NOT persisted across a stop
-  // (the ticks of this run regenerate the pressures and neurons; a schedule
-  // firing, a Motor Cortex result or a reaction that was only queued is lost)
-  // and every inbound user message is carried by the durable log replayed
-  // above (lifemodel-ctc.1.2).
-  await storage.flush();
 
   // Register components with state manager
   const stateManagerComponents: Parameters<typeof stateManager.registerComponents>[0] = {
@@ -1200,6 +1206,24 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     stateManagerComponents.userModel = userModel;
   }
   stateManager.registerComponents(stateManagerComponents);
+  snapshotStore.register({
+    section: 'agentState',
+    exportSnapshot: () => stateManager.exportSnapshot(),
+    hydrateSnapshot: () => undefined,
+  });
+  snapshotStore.register({
+    section: 'ackRegistry',
+    exportSnapshot: () => ackRegistry.exportSnapshot(),
+    hydrateSnapshot: async (value) => {
+      await ackRegistry.load(value as PersistedAckRegistryState | undefined);
+    },
+  });
+  snapshotStore.register(inboundStream);
+  snapshotStore.register({
+    section: 'tickCounter',
+    exportSnapshot: () => coreLoop.getTickCount(),
+    hydrateSnapshot: () => undefined,
+  });
 
   // Start auto-save
   stateManager.startAutoSave();
@@ -1210,18 +1234,20 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   // Idempotent (see makeIdempotentShutdown): the first call wins; a later
   // caller gets the same promise.
   const stopProgress: StopProgress = { step: 'done' };
-  const shutdown = makeIdempotentShutdown(() => {
+  shutdown = makeIdempotentShutdown(() => {
     const budget = coreLoop.getStopDrainTimeoutMs();
+    outboundDelivery.stop();
     return shutdownSequence({
       logger,
       deadline: Date.now() + budget,
       channels: channels.values(),
       coreLoop,
-      storage,
       stateManager,
       recipientRegistry,
-      ackRegistry,
       progress: stopProgress,
+    }).finally(async () => {
+      await snapshotRedis.quit();
+      await postgres.end();
     });
   });
 
@@ -1232,7 +1258,6 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     agent,
     layers,
     coreLoop,
-    telegramChannel,
     channels,
     userModel,
     llmProvider,
@@ -1241,16 +1266,17 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     memoryProvider,
     memoryConsolidator,
     soulProvider,
-    primaryUserChatId,
     storage,
     stateManager,
     conversationManager,
     config: mergedConfig,
+    configLoader,
+    reloadConfig,
     schedulerService,
     pluginLoader,
     recipientRegistry,
     motorCortex,
-    inboundLog,
+    inboundStream,
     stopProgress: () => stopProgress.step,
     shutdown,
   };

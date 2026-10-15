@@ -1,0 +1,5 @@
+processor : 0
+flags : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr
+
+processor : 1
+flags : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr

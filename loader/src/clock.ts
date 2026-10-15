@@ -2,7 +2,7 @@
  * Time, behind one interface (lifemodel-q4x.2.1).
  *
  * A test that has to wait for a backoff would be slow and flaky, so the loader
- * never calls setTimeout directly: the supervisor and the login take this.
+ * never calls setTimeout directly: the bootstrap retry loop and login take this.
  */
 export interface Clock {
   now(): number;

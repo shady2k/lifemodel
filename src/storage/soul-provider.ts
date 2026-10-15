@@ -2,16 +2,16 @@
  * Soul Provider
  *
  * Manages persistence and loading of soul state.
- * Uses DeferredStorage for safe, batched writes.
+ * Stores one versioned JSONB document with optimistic concurrency.
  *
  * Key design:
- * - Soul state is persisted as a single JSON file for atomic saves
+ * - Soul state is persisted as a single versioned JSONB document
  * - Budget resets are handled automatically
  * - Migrations supported via version field
  * - Uses JSON.stringify/parse with Date handling (same as persistable-state.ts)
  */
 
-import type { Storage } from './storage.js';
+import type { Pool } from 'pg';
 import type { Logger } from '../types/logger.js';
 import type {
   SoulState,
@@ -34,19 +34,63 @@ import {
 import { DEFAULT_SOFT_LEARNING_STORE } from '../types/agent/soul.js';
 import { dateReplacer, createDateReviver } from '../utils/date.js';
 
+export interface StoredSoulState {
+  version: number;
+  document: unknown;
+}
+
+export interface SoulStateStore {
+  load(): Promise<StoredSoulState | null>;
+  save(expectedVersion: number | null, document: unknown): Promise<number>;
+}
+
+/** Persists the single versioned soul document in the core schema. */
+export class PostgresSoulStore implements SoulStateStore {
+  constructor(private readonly pool: Pool) {}
+
+  private version(value: number | string): number {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1)
+      throw new Error('Invalid Postgres soul version');
+    return parsed;
+  }
+
+  async load(): Promise<StoredSoulState | null> {
+    const { rows } = await this.pool.query<{ version: number | string; document: unknown }>(
+      'SELECT version, document FROM core.soul WHERE id = $1',
+      ['soul']
+    );
+    const row = rows[0];
+    return row ? { version: this.version(row.version), document: row.document } : null;
+  }
+
+  async save(expectedVersion: number | null, document: unknown): Promise<number> {
+    if (expectedVersion === null) {
+      const result = await this.pool.query<{ version: number | string }>(
+        `INSERT INTO core.soul (id, version, document) VALUES ('soul', 1, $1::jsonb)
+         ON CONFLICT (id) DO NOTHING RETURNING version`,
+        [JSON.stringify(document)]
+      );
+      if (!result.rows[0]) throw new Error('Soul write refused: a newer version already exists');
+      return this.version(result.rows[0].version);
+    }
+    const result = await this.pool.query<{ version: number | string }>(
+      `UPDATE core.soul SET version = version + 1, document = $1::jsonb
+       WHERE id = 'soul' AND version = $2 RETURNING version`,
+      [JSON.stringify(document), expectedVersion]
+    );
+    if (!result.rows[0]) throw new Error('Soul write refused: stale version');
+    return this.version(result.rows[0].version);
+  }
+}
+
 /**
  * Configuration for Soul Provider.
  */
 export interface SoulProviderConfig {
-  /** Storage interface (DeferredStorage recommended) */
-  storage: Storage;
-  /** Storage key for soul data */
-  storageKey: string;
+  /** Versioned persistence for the single soul document. */
+  store: SoulStateStore;
 }
-
-const DEFAULT_CONFIG: Omit<SoulProviderConfig, 'storage'> = {
-  storageKey: 'soul',
-};
 
 /**
  * Extended soul state including Parliament and Socratic Engine.
@@ -66,16 +110,19 @@ export class SoulProvider {
   private readonly logger: Logger;
   private state: FullSoulState | null = null;
   private loaded = false;
+  private storageVersion: number | null = null;
 
   /**
    * Runtime-only mutex for serializing state mutations.
    * NOT persisted - only prevents concurrent in-process mutations.
    */
   private stateMutex: Promise<void> = Promise.resolve();
+  private loadPromise: Promise<void> | null = null;
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor(logger: Logger, config: SoulProviderConfig) {
     this.logger = logger.child({ component: 'soul-provider' });
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = config;
   }
 
   /**
@@ -925,15 +972,18 @@ export class SoulProvider {
    * Persist soul state to storage.
    */
   async persist(): Promise<void> {
-    if (!this.state) return;
-
-    this.state.lastSavedAt = new Date();
-
-    // Serialize with Date handling using shared utility
-    const serialized = JSON.stringify(this.state, dateReplacer);
-    await this.config.storage.save(this.config.storageKey, JSON.parse(serialized));
-
-    this.logger.debug('Soul state persisted');
+    const save = this.persistQueue.then(async () => {
+      if (!this.state) return;
+      this.state.lastSavedAt = new Date();
+      const serialized = JSON.stringify(this.state, dateReplacer);
+      this.storageVersion = await this.config.store.save(
+        this.storageVersion,
+        JSON.parse(serialized)
+      );
+      this.logger.debug('Soul state persisted');
+    });
+    this.persistQueue = save.catch(() => undefined);
+    await save;
   }
 
   /**
@@ -941,28 +991,30 @@ export class SoulProvider {
    */
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-
-    try {
-      const data = await this.config.storage.load(this.config.storageKey);
-
-      if (data) {
-        this.state = this.deserializeState(data);
-        this.logger.info('Soul state loaded from storage');
-      } else {
-        this.state = this.createDefaultFullState();
-        this.loaded = true; // Set before persist to avoid recursion
-        await this.persist();
-        this.logger.info('No existing soul state, created and persisted defaults');
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = (async () => {
+      try {
+        const stored = await this.config.store.load();
+        if (stored) {
+          this.storageVersion = stored.version;
+          this.state = this.deserializeState(stored.document);
+          this.logger.info('Soul state loaded from storage');
+        } else {
+          this.state = this.createDefaultFullState();
+          this.loaded = true;
+          await this.persist();
+          this.logger.info('No existing soul state, created and persisted defaults');
+        }
+        this.loaded = true;
+      } catch (error) {
+        this.loaded = false;
+        throw error;
       }
-
-      this.loaded = true;
-    } catch (error) {
-      this.logger.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to load soul state'
-      );
-      this.state = this.createDefaultFullState();
-      this.loaded = true;
+    })();
+    try {
+      await this.loadPromise;
+    } finally {
+      this.loadPromise = null;
     }
   }
 

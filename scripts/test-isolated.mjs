@@ -11,11 +11,15 @@ export const BASE_IMAGE = 'node:24.21.0-bookworm-slim';
 const LABEL = 'com.lifemodel.test-boundary';
 const LIMITS = ['--cpus', '2', '--memory', '3g', '--memory-swap', '3g', '--pids-limit', '256', '--init'];
 const SOURCE_LABEL = 'com.lifemodel.test-source';
+export const STORE_IMAGES = Object.freeze({
+  valkey: 'valkey/valkey:8.1-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571',
+  postgres: 'ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b',
+});
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
-const DIRS = ['src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
+const DIRS = ['db', 'src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
 const FORBIDDEN = new Set(['.git', 'node_modules', 'dist', 'data', 'coverage', '.DS_Store', '.npmrc']);
 const log = (text) => console.error(`[test-isolated] ${text}`);
 
@@ -152,11 +156,39 @@ export function innerSteps(mode, args) {
     : [suite];
 }
 
-export function containerArgs(name, image, offline) {
+export function validateStoreImages(images) {
+  for (const [name, image] of Object.entries(images)) {
+    if (typeof image !== 'string' || !/@sha256:[a-f0-9]{64}$/.test(image)) {
+      throw new Error(`Store image ${name} must be pinned by a sha256 digest`);
+    }
+  }
+  return true;
+}
+
+validateStoreImages(STORE_IMAGES);
+
+export function networkCreateArgs(name) {
+  return ['network', 'create', '--internal', '--label', `${LABEL}=${process.getuid?.() ?? 'user'}`, name];
+}
+
+export function storeContainerArgs(name, image, network, alias, password = 'postgres-secret') {
+  const args = ['create', '--name', name, '--label', `${LABEL}=${process.getuid?.() ?? 'user'}`,
+    '--network', network, '--network-alias', alias, '--cpus', '1', '--memory', '1g', '--memory-swap', '1g', '--pids-limit', '128', '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m'];
+  if (alias === 'valkey') return [...args, '--tmpfs', '/data:rw,nosuid,nodev,size=256m', image, 'valkey-server', '--save', '', '--appendonly', 'no'];
+  return [...args, '--tmpfs', '/var/lib/postgresql/data:rw,nosuid,nodev,size=512m,uid=26,gid=26', '-e', `POSTGRES_PASSWORD=${password}`, image, 'bash', '-ec', 'printf %s \"$POSTGRES_PASSWORD\" > /tmp/pg-password; initdb -D /var/lib/postgresql/data/pgdata --username=postgres --auth-local=trust --auth-host=trust --pwfile=/tmp/pg-password; printf \'host all all 0.0.0.0/0 trust\\nhost all all ::/0 trust\\n\' > /var/lib/postgresql/data/pgdata/pg_hba.conf; exec postgres -D /var/lib/postgresql/data/pgdata -c listen_addresses=\'*\''];
+}
+
+export function testStoreEnv(_network, password) {
+  if (!password) throw new Error('Postgres password is required');
+  return ['-e', 'LIFEMODEL_TEST_VALKEY_URL=redis://valkey:6379', '-e', `LIFEMODEL_TEST_DATABASE_URL=postgres://postgres:${password}@postgres:5432/postgres`];
+}
+
+export function containerArgs(name, image, offline, options = {}) {
   return ['create', '--name', name, '--label', `${LABEL}=${process.getuid?.() ?? 'user'}`,
     ...LIMITS, ...(offline ? ['--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,nodev,size=768m',
-      '--tmpfs', '/home/node:rw,nosuid,nodev,size=64m', '--user', 'node', '--network', 'none', '--cap-drop', 'ALL',
-      '--security-opt', 'no-new-privileges', '-e', 'HOME=/home/node', '-e', 'TMPDIR=/tmp', '-e', 'HUSKY=0', '-e', 'DATA_PATH=/tmp/test-state'] : []), image];
+      '--tmpfs', '/home/node:rw,nosuid,nodev,size=64m', '--user', 'node', '--network', options.network ?? 'none', '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges', '-e', 'HOME=/home/node', '-e', 'TMPDIR=/tmp', '-e', 'HUSKY=0', '-e', 'DATA_PATH=/tmp/test-state'] : []),
+    ...(options.storeEnv ?? []), image];
 }
 
 // The host environment is needed only by the CONTROL CLI. No variable is
@@ -195,30 +227,33 @@ export function command(program, args, { timeoutMs = 60_000, signal, live = fals
 
 function quote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
 
-export async function run(argv) {
+export async function run(argv, dependencies = {}) {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { log(error.message); return 2; }
   let release;
-  try { release = acquireLock(); } catch (error) { log(error.message); return 2; }
+  try { release = acquireLock(dependencies.lockDirectory); } catch (error) { log(error.message); return 2; }
   const controller = new AbortController();
   const owned = new Set();
   const ownedImages = new Set();
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lifemodel-test-'));
+  const ownedNetworks = new Set();
+  const temporary = fs.mkdtempSync(path.join(dependencies.tempRoot ?? os.tmpdir(), 'lifemodel-test-'));
+  const runCommand = dependencies.command ?? command;
+  const root = dependencies.root ?? ROOT;
   const stop = (exitCode, reason) => controller.abort(Object.assign(new Error(reason), { exitCode }));
   const onInt = () => stop(130, 'Interrupted (SIGINT)');
   const onTerm = () => stop(143, 'Interrupted (SIGTERM)');
   process.once('SIGINT', onInt); process.once('SIGTERM', onTerm);
   const deadline = setTimeout(() => stop(124, 'Overall isolation deadline exceeded'), parsed.timeoutMs);
   async function docker(args, { mustSucceed = true, ...options } = {}) {
-    const result = await command('docker', args, { timeoutMs: 10 * 60_000, signal: controller.signal, ...options });
+    const result = await runCommand('docker', args, { timeoutMs: 10 * 60_000, signal: controller.signal, ...options });
     if (mustSucceed && result.code) throw new Error(`docker ${args[0]} failed (${result.code}): ${result.stderr}`);
     return result;
   }
   let result = 1;
   try {
-    const snapshot = stageSnapshot(ROOT, path.join(temporary, 'source'));
+    const snapshot = stageSnapshot(root, path.join(temporary, 'source'));
     if (parsed.mode === 'docker') {
-      const backend = path.join(ROOT, 'scripts/test-docker-isolated.mjs');
+      const backend = path.join(root, 'scripts/test-docker-isolated.mjs');
       if (!fs.existsSync(backend)) throw new Error('Private Docker backend is unavailable; no owner-daemon fallback');
       const execution = await command(process.execPath, [backend, '--snapshot', snapshot, '--timeout', String(Math.max(1, parsed.timeoutMs - 60_000)), '--', ...parsed.vitestArgs],
         { timeoutMs: parsed.timeoutMs + 60_000, signal: controller.signal, live: true, killGraceMs: 75_000 });
@@ -230,6 +265,11 @@ export async function run(argv) {
       for (const id of stale.stdout.trim().split(/\s+/).filter(Boolean)) {
         log(`Removing leftover owned container ${id}`);
         await docker(['rm', '-f', id], { timeoutMs: 20_000 });
+      }
+      const staleNetworks = await docker(['network', 'ls', '-q', '--filter', `label=${LABEL}=${process.getuid?.() ?? 'user'}`], { timeoutMs: 20_000 });
+      for (const id of staleNetworks.stdout.trim().split(/\s+/).filter(Boolean)) {
+        log(`Removing leftover owned network ${id}`);
+        await docker(['network', 'rm', id], { timeoutMs: 20_000 });
       }
       const staleImages = await docker(['image', 'ls', '-q', '--filter', `label=${SOURCE_LABEL}=${process.getuid?.() ?? 'user'}`], { timeoutMs: 20_000 });
       for (const id of new Set(staleImages.stdout.trim().split(/\s+/).filter(Boolean))) {
@@ -269,6 +309,34 @@ export async function run(argv) {
       await docker(['commit', '--change', `LABEL ${SOURCE_LABEL}=${process.getuid?.() ?? 'user'}`, sourceContainer, sourceImage]);
       await docker(['rm', '-f', sourceContainer]);
       owned.delete(sourceContainer);
+      // Store images are always fetched during provisioning; the test network is
+      // internal and is the only network attached to the test process.
+      for (const storeImage of Object.values(STORE_IMAGES)) await docker(['pull', storeImage], { live: true });
+      const network = `lifemodel-test-net-${randomUUID()}`;
+      ownedNetworks.add(network);
+      await docker(networkCreateArgs(network));
+      const valkey = `lifemodel-test-valkey-${randomUUID()}`;
+      const postgres = `lifemodel-test-postgres-${randomUUID()}`;
+      const storePassword = randomUUID();
+      owned.add(valkey); owned.add(postgres);
+      await docker(storeContainerArgs(valkey, STORE_IMAGES.valkey, network, 'valkey'));
+      await docker(storeContainerArgs(postgres, STORE_IMAGES.postgres, network, 'postgres', storePassword));
+      await docker(['start', valkey]);
+      await docker(['start', postgres]);
+      const waitFor = async (container, commandArgs) => {
+        const end = Date.now() + 120_000;
+        while (Date.now() < end) {
+          const status = await docker(['exec', container, ...commandArgs], { mustSucceed: false, timeoutMs: 5_000 });
+          if (status.code === 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        const logs = await docker(['logs', container], { mustSucceed: false, timeoutMs: 10_000 });
+        const state = await docker(['inspect', '--format', '{{json .State}}', container], { mustSucceed: false, timeoutMs: 10_000 });
+        throw new Error(`Store did not become ready: ${container}: ${state.stdout} ${logs.stdout} ${logs.stderr}`);
+      };
+      await waitFor(valkey, ['valkey-cli', 'ping']);
+      await waitFor(postgres, ['pg_isready', '-U', 'postgres']);
+
       const name = `lifemodel-test-run-${randomUUID()}`;
       owned.add(name);
       const steps = innerSteps(parsed.mode, parsed.vitestArgs).map(([binary, ...args]) =>
@@ -277,7 +345,8 @@ export async function run(argv) {
       const script = 'cp -R /snapshot /tmp/work; mkdir /tmp/work/node_modules; node -e ' + quote(linkDependencies) + '; cd /tmp/work; '
         + 'git init -q -b main; git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null add -A; '
         + 'git -c user.name=lifemodel-test -c user.email=test@lifemodel.local -c core.hooksPath=/dev/null commit -qm snapshot; ' + steps;
-      await docker([...containerArgs(name, sourceImage, true), 'sh', '-ec', script]);
+      await docker([...containerArgs(name, sourceImage, true, { network, storeEnv: testStoreEnv(network, storePassword) }), 'sh', '-ec', script]);
+      await dependencies.beforeTestStart?.({ onInt, onTerm });
       log(`Running ${parsed.mode} in disposable offline Node 24 container`);
       const execution = await docker(['start', '-a', name], { mustSucceed: false, live: true, timeoutMs: TIMEOUT });
       // docker start -a normally propagates the container code; inspect it explicitly.
@@ -290,13 +359,19 @@ export async function run(argv) {
     process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm);
     for (const name of owned) {
       try {
-        const cleanup = await command('docker', ['rm', '-f', name], { timeoutMs: 15_000 });
+        const cleanup = await runCommand('docker', ['rm', '-f', name], { timeoutMs: 15_000 });
         if (cleanup.code && !/No such container/.test(cleanup.stderr)) { log(`Cleanup failed for ${name}: ${cleanup.stderr}`); if (!result) result = 1; }
       } catch (error) { log(`Cleanup failed for ${name}: ${error.message}`); if (!result) result = 1; }
     }
+    for (const network of ownedNetworks) {
+      try {
+        const cleanup = await runCommand('docker', ['network', 'rm', network], { timeoutMs: 15_000 });
+        if (cleanup.code && !/not found|does not exist/i.test(cleanup.stderr)) { log(`Network cleanup failed for ${network}: ${cleanup.stderr}`); if (!result) result = 1; }
+      } catch (error) { log(`Network cleanup failed for ${network}: ${error.message}`); if (!result) result = 1; }
+    }
     for (const image of ownedImages) {
       try {
-        const cleanup = await command('docker', ['image', 'rm', image], { timeoutMs: 15_000 });
+        const cleanup = await runCommand('docker', ['image', 'rm', image], { timeoutMs: 15_000 });
         if (cleanup.code && !/No such image/.test(cleanup.stderr)) { log(`Snapshot cleanup failed: ${cleanup.stderr}`); if (!result) result = 1; }
       } catch (error) { log(`Snapshot cleanup failed: ${error.message}`); if (!result) result = 1; }
     }

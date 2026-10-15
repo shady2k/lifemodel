@@ -1,7 +1,6 @@
 /**
  * Harness for shutdown-drain tests: a real CoreLoop wired the way the
- * container wires it (real Agent, EventBus, Metrics, DeferredStorage over
- * JSONStorage and the production shutdown sequence), with doubles only at
+ * container wires it (real Agent, EventBus, Metrics and the production shutdown sequence), with doubles only at
  * the boundaries:
  * - the three layer processors are the processing boundary (no LLM, no network)
  * - the persistence services (state manager, registries) are step recorders
@@ -26,11 +25,6 @@ import { RecipientRegistry } from '../../src/core/recipient-registry.js';
 import { createEventBus } from '../../src/core/event-bus.js';
 import { createMetrics } from '../../src/core/metrics.js';
 import type { Logger } from '../../src/types/logger.js';
-import {
-  createJSONStorage,
-  createDeferredStorage,
-  type DeferredStorage,
-} from '../../src/storage/index.js';
 import { RealCognitionFacade, createRealCognitionProcessor } from './core-loop-real-cognition.js';
 import { createTestLogger, recordingLogger, type RecordedLog } from './test-logger.js';
 import { makeIdempotentShutdown, shutdownSequence } from '../../src/core/container.js';
@@ -38,6 +32,9 @@ import type { CognitionContext, CognitionResult } from '../../src/types/layers.j
 import type { Signal } from '../../src/types/signal.js';
 import { createSignal } from '../../src/types/signal.js';
 import type { Channel } from '../../src/types/index.js';
+import type { AgentState, SleepState } from '../../src/types/agent/state.js';
+import type { BusSignalStream, BusSnapshot } from '../../src/core/bus-stream.js';
+import type { ConversationManager } from '../../src/storage/conversation-manager.js';
 
 export function makeDeferred<T>(): {
   promise: Promise<T>;
@@ -329,6 +326,7 @@ const noopLogger = {
 } as unknown as Logger;
 
 export interface CoreLoopInstance {
+  agent: ReturnType<typeof createAgent>;
   coreLoop: ReturnType<typeof createCoreLoop>;
   recordedLogs: RecordedLog[];
   cognition: FakeCognitionLayer;
@@ -336,6 +334,7 @@ export interface CoreLoopInstance {
   aggregation: FakeAggregationLayer;
   channel: FakeTestChannel;
   recipientId: string;
+  registry: RecipientRegistry;
   logger: Logger;
 }
 
@@ -359,6 +358,17 @@ export interface HarnessOptions {
     finishReason?: 'stop' | 'tool_calls' | 'length' | 'error';
   }[];
   tickIntervalMs?: number;
+  initialTickCount?: number;
+  initialState?: Partial<AgentState>;
+  initialSleepState?: Partial<SleepState>;
+  commitSnapshot?: CoreLoopDeps['commitSnapshot'];
+  onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
+  onFatalError?: CoreLoopDeps['onFatalError'];
+  initialCognitionResult?: CognitionResult;
+  busSignalStream?: BusSignalStream;
+  inboundStream?: CoreLoopDeps['inboundStream'];
+  initialBusOffset?: BusSnapshot;
+  conversationManager?: ConversationManager;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -377,11 +387,14 @@ export async function startInstance(
   const recordedLogs: RecordedLog[] = [];
   const logger = opts.recordLogs ? recordingLogger(base, recordedLogs) : base;
 
-  const storage = await openStorage(storagePath, logger);
+  void storagePath; // state durability is exercised by the store-backed integration tests.
 
   // ── the three layers (cognition: fake processor boundary, or REAL
   // cognition with a scripted fake LLM provider - no network) ──
-  const agent = createAgent({ logger, metrics: createMetrics() });
+  const agent = createAgent(
+    { logger, metrics: createMetrics() },
+    { initialState: opts.initialState, initialSleepState: opts.initialSleepState }
+  );
   const eventBus = createEventBus(logger);
   const autonomic = new FakeAutonomicLayer();
   const aggregation = new FakeAggregationLayer();
@@ -397,6 +410,7 @@ export async function startInstance(
     };
   } else {
     cognition = new FakeCognitionLayer(opts.cognitionMode ?? 'immediate');
+    if (opts.initialCognitionResult) cognition.result = opts.initialCognitionResult;
   }
   const layers = { autonomic, aggregation, cognition: cognition as never };
   const config: Partial<CoreLoopConfig> = {
@@ -415,19 +429,30 @@ export async function startInstance(
     {
       recipientRegistry: registry as never,
       ...cognitionDeps,
+      initialTickCount: opts.initialTickCount,
+      busSignalStream: opts.busSignalStream,
+      inboundStream: opts.inboundStream,
+      commitSnapshot: opts.commitSnapshot,
+      onStaleSnapshot: opts.onStaleSnapshot,
+      onFatalError: opts.onFatalError,
+      conversationManager: opts.conversationManager,
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);
   const recipientId = registry.getOrCreate('test', 'chat-42');
 
+  if (opts.initialBusOffset !== undefined)
+    opts.busSignalStream?.hydrateSnapshot(opts.initialBusOffset);
   coreLoop.start();
   return {
+    agent,
     coreLoop,
     cognition,
     autonomic,
     aggregation,
     channel,
     recipientId,
+    registry,
     recordedLogs,
     logger,
   };
@@ -438,10 +463,7 @@ export async function startInstance(
  * the production shutdownSequence, later calls (sequential or concurrent)
  * return the SAME promise - what src/core/container.ts builds internally.
  */
-export function makeContainerShutdown(
-  instance: CoreLoopInstance,
-  storage: DeferredStorage
-): () => Promise<void> {
+export function makeContainerShutdown(instance: CoreLoopInstance): () => Promise<void> {
   // the SAME memoization the real container wraps its sequence in
   return makeIdempotentShutdown(() =>
     shutdownSequence({
@@ -449,34 +471,23 @@ export function makeContainerShutdown(
       deadline: Date.now() + instance.coreLoop.getStopDrainTimeoutMs(),
       channels: [instance.channel] as never,
       coreLoop: instance.coreLoop as never,
-      storage: storage as never,
       stateManager: { shutdown: async () => undefined } as never,
       recipientRegistry: { flush: async () => undefined } as never,
-      ackRegistry: { flush: async () => undefined } as never,
     })
   );
 }
 
 /** Stop an instance the way container.ts shuts down: the production sequence. */
-export async function stopInstance(
-  instance: CoreLoopInstance,
-  storage: DeferredStorage
-): Promise<void> {
+export async function stopInstance(instance: CoreLoopInstance): Promise<void> {
   await shutdownSequence({
     logger: instance.logger,
     deadline: Date.now() + instance.coreLoop.getStopDrainTimeoutMs(),
     channels: [instance.channel] as never,
     coreLoop: instance.coreLoop as never,
-    storage: storage as never,
     stateManager: { shutdown: async () => undefined } as never,
     recipientRegistry: { flush: async () => undefined } as never,
     ackRegistry: { flush: async () => undefined } as never,
   });
-}
-
-export async function openStorage(storagePath: string, logger?: Logger): Promise<DeferredStorage> {
-  const json = createJSONStorage(storagePath, { logger });
-  return createDeferredStorage(json, logger ?? noopLogger, { flushIntervalMs: 60_000 });
 }
 
 export async function makeScratchDir(prefix: string): Promise<string> {

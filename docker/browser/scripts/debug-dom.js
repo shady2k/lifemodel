@@ -5,16 +5,8 @@
  * which selectors match, chat counts by type, and sample element HTML.
  * Use this to diagnose selector breakage when Telegram updates their SPA.
  *
- * Usage (from project root):
- *   docker run -d --name tg-debug \
- *     -v lifemodel-browser-profile-<PROFILE>:/profile \
- *     --network bridge \
- *     --entrypoint sleep lifemodel-browser:latest 3600
- *
- *   docker cp docker/browser/scripts/debug-dom.js tg-debug:/tmp/debug-dom.js
- *   docker exec -e NODE_PATH=/scripts/node_modules tg-debug node /tmp/debug-dom.js
- *
- *   docker stop tg-debug && docker rm tg-debug
+ * Usage: start the disposable browser debug container with the project's Docker tooling,
+ * copy this script into it, then run the documented Node command below.
  *
  * Environment:
  *   WAIT_MS — SPA sync wait in ms (default: 10000)

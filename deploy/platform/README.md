@@ -2,10 +2,13 @@
 
 This directory is the root of the signed platform OCI artifact. The root
 `OCIRepository` and `platform` Kustomization apply the artifact in
-`flux-system`. The artifact declares two ordered steps: A0 and A. A0 has no
+`flux-system`. The artifact declares four ordered steps: A0, A, B and C. A0 has no
 `dependsOn`; it deploys the loader and the Gitea namespace first. Step A
-`dependsOn: platform-a0`, so OpenBao and the rest of step A arrive only after
-the loader can start. A0 creates no namespace that step A creates. This order
+`dependsOn: platform-a0`, so OpenBao and Gitea arrive only after the loader
+can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
+its only opened routes are DNS, the documented Kubernetes API port, Postgres
+instance ports and API-server webhook ingress. Step C depends on B and applies
+shared state resources, including the Postgres Cluster and Valkey StatefulSet. A0 creates no namespace that step A creates. This order
 lets the loader initialize OpenBao rather than requiring an already running
 Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
@@ -88,3 +91,39 @@ The A0 reconciler uses the Flux v2.9.6 Kustomization API, which supports
 Step A uses `dependsOn` to enforce the A0-to-A order. See the [Flux v2.9.6
 API](https://github.com/fluxcd/kustomize-controller/blob/v1.9.6/docs/spec/v1/kustomizations.md)
 and [release notes](https://github.com/fluxcd/flux2/releases/tag/v2.9.6).
+
+## CloudNativePG state
+
+The CloudNativePG operator chart is vendored at `charts/cloudnative-pg`,
+version 0.29.1 (operator 1.30.1). Its release archive SHA-256 is recorded in
+`chart-source.sha256`. The chart supports a digest override added to its image
+value; the operator image is pinned to
+`ghcr.io/cloudnative-pg/cloudnative-pg@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07`.
+Step B applies the CRDs and waits for the operator. Step C owns
+`lifemodel-state`, its default-deny policies, the one-instance `lifemodel`
+Cluster and the one-replica Valkey StatefulSet. Valkey uses a plain Kubernetes
+manifest rather than a chart: its small, fixed resource set stays explicit and
+adds no chart packaging. Step A permits core egress to Postgres on TCP 5432 and
+Valkey on TCP 6379; the state policies admit only the core namespace on those
+store ports, plus the CNPG operator ports. The bootstrap creates database
+`lifemodel` and owner role `lifemodel` with CNPG's generated `lifemodel-app` Secret.
+The post-init SQL enables pgvector in the application database.
+
+The loader copies only the generated username and password to a fixed Secret
+the `lifemodel-db-credentials` Secret in the `lifemodel` namespace, in a resumable first-start phase. It also
+generates a random Valkey password only if the retained source Secret is
+absent, then copies it to the `lifemodel-valkey-credentials` Secret in the `lifemodel` namespace. This uses
+the existing loader ServiceAccount; it adds no controller. The credentials are
+static until lifemodel-2t5 moves them to OpenBao. The platform admission policy
+allows only these named loader Secrets while application Kustomizations remain
+confined to their own namespaces.
+
+## Vendored CRD schema check
+
+`nix flake check` runs `scripts/check-platform-crd-schemas.py` against the rendered
+CloudNativePG resources and vendored CRDs. The checker validates schema-declared
+primitive types, enum values, required fields, object field placement, and nested
+array/object schemas (including local `$ref` and composition branches). It is a
+focused CRD resource checker, not a general Kubernetes or full OpenAPI validator;
+it does not validate formats or every Kubernetes extension. Nix fixtures prove it
+rejects both an unknown field and `instances: not-an-integer`.

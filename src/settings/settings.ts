@@ -1,19 +1,15 @@
 /**
- * lifemodel's own settings: the values, their rules and the config file's shape
+ * lifemodel's own settings: the values, their rules and the configuration document's shape
  * they are written to (lifemodel-q4x.4.1).
  *
  * lifemodel serves this interface on the root host, behind Caddy and the
  * loader's login, and it has NO auth of its own: the loader checks every
  * request before it arrives (docs/features/instance/settings.md). Saving
- * writes lifemodel's config file and asks the loader to start lifemodel again,
- * so the new values are what the next start reads - the agent is not
- * reconfigured underneath a running turn.
+ * writes the configuration document to Postgres and reloads the model endpoint
+ * for future requests from the running core.
  */
 import { CONFIG_FILE_VERSION, type AgentConfigFile } from '../config/config-schema.js';
 import { endpointGaps, isEndpointFieldSet, type ModelEndpoint } from '../config/model-endpoint.js';
-
-/** The default Agent Vault placeholder of a Telegram bot token. */
-export const TELEGRAM_BOT_TOKEN_PLACEHOLDER = '__telegram_bot_token__';
 
 /** What the form holds, as it arrives (every field a string, possibly empty). */
 export interface SettingsInput {
@@ -21,8 +17,6 @@ export interface SettingsInput {
   fastModel: string;
   smartModel: string;
   motorModel: string;
-  telegramChatId: string;
-  telegramBotToken: string;
 }
 
 /** A field of the form. */
@@ -37,12 +31,7 @@ export const SETTINGS_FIELDS: readonly { field: SettingsField; label: string }[]
   { field: 'fastModel', label: 'the fast model' },
   { field: 'smartModel', label: 'the smart model' },
   { field: 'motorModel', label: 'the motor role model' },
-  { field: 'telegramChatId', label: 'the Telegram chat id' },
-  { field: 'telegramBotToken', label: 'the Telegram bot token' },
 ];
-
-/** The Agent Vault placeholder shape: `__something__`, never a token. */
-const PLACEHOLDER = /^__[A-Za-z0-9_]+__$/;
 
 /** An http(s) URL, the only thing lifemodel can send a request to. */
 function isHttpUrl(value: string): boolean {
@@ -56,7 +45,7 @@ function isHttpUrl(value: string): boolean {
 
 /**
  * Does the URL carry credentials (`user:password@` before the host)? Such a
- * URL would put a secret into the config file, the settings page and the log -
+ * URL would put a secret into the configuration document, the settings page and the log -
  * and the fetch-based provider refuses it anyway (the AI SDK rejects URL
  * userinfo). The key belongs in Agent Vault, never in this field.
  */
@@ -90,7 +79,7 @@ function hasUrlQueryOrFragment(value: string): boolean {
  * or a log gets: its origin and path. The credentials are gone whatever the
  * value is, and so are the parts a URL can hide a secret in (query, fragment) -
  * not only when validation already refused the value (review round 2,
- * finding F: a config file an older interface wrote still echoed `user:key@`
+ * finding F: a stored config document still echoed `user:key@`
  * on GET, and an accepted `?api_key=`/`#...` was echoed whole afterwards).
  */
 export function redactEndpointUrl(value: string): string {
@@ -145,17 +134,6 @@ export function validateSettings(input: SettingsInput): SettingsErrors {
     }
   }
 
-  const chatId = input.telegramChatId.trim();
-  if (chatId !== '' && !/^-?\d+$/.test(chatId)) {
-    errors.telegramChatId = 'the Telegram chat id must be a number (get it from @userinfobot)';
-  }
-
-  const token = input.telegramBotToken.trim();
-  if (token !== '' && !PLACEHOLDER.test(token)) {
-    errors.telegramBotToken =
-      'the Telegram bot token must be an Agent Vault placeholder like __telegram_bot_token__; the token itself belongs in Agent Vault, not here';
-  }
-
   return errors;
 }
 
@@ -170,12 +148,10 @@ export function settingsInputFromBody(body: Record<string, unknown>): SettingsIn
     fastModel: read('fastModel'),
     smartModel: read('smartModel'),
     motorModel: read('motorModel'),
-    telegramChatId: read('telegramChatId'),
-    telegramBotToken: read('telegramBotToken'),
   };
 }
 
-/** The form's values as the config file holds them (what the page renders). */
+/** The form's values as the configuration document holds them (what the page renders). */
 export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInput {
   const endpoint = file?.llm?.endpoint;
   return {
@@ -183,24 +159,17 @@ export function settingsInputFromFile(file: AgentConfigFile | null): SettingsInp
     fastModel: endpoint?.fastModel ?? '',
     smartModel: endpoint?.smartModel ?? '',
     motorModel: endpoint?.motorModel ?? '',
-    telegramChatId: file?.primaryUser?.telegramChatId ?? '',
-    telegramBotToken: file?.telegram?.botToken ?? TELEGRAM_BOT_TOKEN_PLACEHOLDER,
   };
 }
 
 /**
- * The config file with these settings applied, and every OTHER field of the
+ * The config document with these settings applied, and every OTHER field of the
  * file kept exactly as it was: the owner's identity, plugin configuration and
  * anything a later version adds are not this interface's to drop.
  */
 export function applySettings(file: AgentConfigFile | null, input: SettingsInput): AgentConfigFile {
   const endpoint = settingsEndpoint(input);
   const primaryUser = { ...(file?.primaryUser ?? {}) };
-  if (input.telegramChatId.trim() === '') {
-    delete primaryUser.telegramChatId;
-  } else {
-    primaryUser.telegramChatId = input.telegramChatId.trim();
-  }
   return {
     ...(file ?? {}),
     version: file?.version ?? CONFIG_FILE_VERSION,
@@ -218,6 +187,5 @@ export function applySettings(file: AgentConfigFile | null, input: SettingsInput
       },
     },
     primaryUser,
-    telegram: { ...(file?.telegram ?? {}), botToken: input.telegramBotToken.trim() },
   };
 }

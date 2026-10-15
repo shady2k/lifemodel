@@ -1,0 +1,17 @@
+# The operator's CRDs and controller are ready before the state step applies Cluster resources.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-b
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  timeout: 10m0s
+  dependsOn:
+    - name: platform-a
+  path: ./b
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: platform

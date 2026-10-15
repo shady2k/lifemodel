@@ -675,6 +675,31 @@ export interface SignalAggregate {
   trend: 'stable' | 'increasing' | 'decreasing' | 'volatile';
 }
 
+/** Decode persisted signal JSON, reviving every Date-valued field. */
+export function decodeSignal(value: unknown): Signal {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid serialized signal');
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw['id'] !== 'string' ||
+    typeof raw['type'] !== 'string' ||
+    typeof raw['source'] !== 'string'
+  ) {
+    throw new Error('Invalid serialized signal fields');
+  }
+  const date = (field: string): Date => {
+    const parsed = new Date(raw[field] as string | number | Date);
+    if (!Number.isFinite(parsed.getTime())) throw new Error(`Invalid signal ${field}`);
+    return parsed;
+  };
+  return {
+    ...raw,
+    timestamp: date('timestamp'),
+    ...(raw['expiresAt'] === undefined ? {} : { expiresAt: date('expiresAt') }),
+  } as Signal;
+}
+
 /**
  * Create a signal with defaults.
  */

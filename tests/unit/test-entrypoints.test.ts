@@ -1,7 +1,6 @@
 /**
  * Entrypoint policy tests: local and ordinary CI suite entrypoints start
- * inside the disposable test boundary. Only ci-image has the approved
- * CI-only, built-image first-start exception.
+ * inside the disposable test boundary. CI has no host test exception.
  *
  * Ordinary suites never start on the host. `npm test`, `npm run check`, the husky
  * pre-commit hook and CI's product job all go through the isolated launcher
@@ -18,6 +17,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 import { ciEntrypointPolicy } from '../helpers/ci-entrypoint-policy.js';
+import { networkCreateArgs, STORE_IMAGES, storeContainerArgs, validateStoreImages } from '../../scripts/test-isolated.mjs';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -88,82 +88,40 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
     expect(hook).toContain('# --- END LIFEMODEL BACKLOG GATE ---');
   });
 
-  it('CI allows only the named, bounded image exception; ordinary jobs remain isolated', () => {
+  it('CI builds only the standalone core image and keeps all suites isolated', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
     expect(() => ciEntrypointPolicy(ci)).not.toThrow();
+    expect(ci).not.toMatch(/^  ci-image:/m);
+    expect(ci).not.toContain('instance-first-start.test.ts');
+    expect(ci).toContain('scripts/build-core-image.sh');
+    expect(ci).not.toContain('scripts/build-image.sh');
   });
 
-  it('rejects synthetic policy regressions, including multiline and new-job commands', () => {
+  it('puts pinned migration lint inside the required backlog job', () => {
     const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
-    const imageStart = ci.indexOf('\n  ci-image:\n');
-    const publishStart = ci.indexOf('\n  ci-image-publish:\n');
-    expect(imageStart).toBeGreaterThan(0);
-    expect(publishStart).toBeGreaterThan(imageStart);
-    const mutateImage = (from: string, to: string): string => {
-      const block = ci.slice(imageStart, publishStart);
-      expect(block).toContain(from);
-      return ci.slice(0, imageStart) + block.replace(from, to) + ci.slice(publishStart);
-    };
-    const productExtra = (step: string): string => ci.replace(
-      'run: node scripts/test-isolated.mjs check',
-      `run: node scripts/test-isolated.mjs check\n${step}`,
-    );
-    const ordinaryExtra = (step: string): string =>
-      `${ci}\n  ordinary-new:\n    steps:\n${step}\n`;
-    const namedStep = (run: string): string =>
-      `      - name: Bad\n        ${run}`;
-    const cases: [string, string][] = [
-      ['product install', ci.replace('run: node scripts/test-isolated.mjs check', 'run: npm ci')],
-      ['product suite', ci.replace('run: node scripts/test-isolated.mjs check', 'run: npx vitest run')],
-      ['product Node', ci.replace("node-version: '24'", "node-version: '22'")],
-      ['multiline product install', ci.replace(
-        'run: node scripts/test-isolated.mjs check',
-        'run: |\n          node scripts/test-isolated.mjs check\n          npm ci',
-      )],
-      ['new job install', ci + '\n  ordinary-new:\n    steps:\n      - name: Bad\n        run: npm ci\n'],
-      ['new job suite', ci + '\n  ordinary-new:\n    steps:\n      - name: Bad\n        run: |\n          set -eu\n          npx vitest run\n'],
-      ['product quoted run extra', productExtra(namedStep('"run": npx vitest run'))],
-      ['new job quoted run', ordinaryExtra(namedStep('"run": npm ci'))],
-      ['new job single-quoted run', ordinaryExtra(namedStep("'run': npm ci"))],
-      ['new job escaped run key', ordinaryExtra(namedStep('"r\\u0075n": npm ci'))],
-      ['product inline-map run extra', productExtra(
-        '      - {name: Bad, run: npx vitest run}',
-      )],
-      ['new job inline-map run', ordinaryExtra('      - {name: Bad, run: npm ci}')],
-      ['new job flagged npm ci', ordinaryExtra(namedStep('run: npm --ignore-scripts ci'))],
-      ['product flagged npm ci extra', productExtra(namedStep('run: npm --ignore-scripts ci'))],
-      ['new job quoted npm executable', ordinaryExtra(namedStep('run: command "npm" ci'))],
-      ['new job single-quoted npm executable', ordinaryExtra(namedStep("run: command 'npm' ci"))],
-      ['product quoted npm executable extra', productExtra(namedStep('run: command "npm" ci'))],
-      ['new job other npm command', ordinaryExtra(namedStep('run: npm --version'))],
-      ['renamed exception', ci.replace('\n  ci-image:\n', '\n  image-copy:\n')],
-      ['wrong file', mutateImage('instance-first-start.test.ts', 'other.test.ts')],
-      ['extra file', mutateImage('instance-first-start.test.ts', 'instance-first-start.test.ts tests/unit/energy-management.test.ts')],
-      ['general suite', mutateImage(' tests/integration/instance-first-start.test.ts', '')],
-      ['workers', mutateImage('--maxWorkers=2', '--maxWorkers=3')],
-      ['wrong image', mutateImage('lifemodel:ci-$SHA', 'lifemodel:main')],
-      ['wrong build', mutateImage('scripts/build-image.sh "ci-$SHA"', 'scripts/build-image.sh main')],
-      ['self-hosted', mutateImage('runs-on: ubuntu-latest', 'runs-on: self-hosted')],
-      ['unbounded', mutateImage('    timeout-minutes: 45\n', '')],
-      ['longer deadline', mutateImage('timeout-minutes: 45', 'timeout-minutes: 90')],
-      ['push', mutateImage("github.event_name == 'pull_request'", "github.event_name == 'push'")],
-      ['credentials', mutateImage('persist-credentials: false', 'persist-credentials: true')],
-      ['shallow', mutateImage('fetch-depth: 0', 'fetch-depth: 1')],
-      ['secret', mutateImage('SHA: ${{ github.sha }}', 'SHA: ${{ secrets.IMAGE_TOKEN }}')],
-      ['extra env', mutateImage('    steps:', '    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps:')],
-      ['write', mutateImage('    steps:', '    permissions:\n      contents: write\n    steps:')],
-      ['login', mutateImage('run: npm ci', 'run: |\n          npm ci\n          docker login ghcr.io')],
-      ['extra install command', mutateImage('run: npm ci', 'run: npm ci && npm test')],
-      ['inherited secret', ci.replace('jobs:', 'env:\n  TOKEN: ${{ secrets.TOKEN }}\njobs:')],
-      ['inherited write', ci.replace('permissions:\n  contents: read', 'permissions:\n  contents: write')],
-      ['unsupported folded run', ci.replace(
-        'run: node scripts/test-isolated.mjs check',
-        'run: >\n          npm ci',
-      )],
+    const backlogStart = ci.indexOf('  ci-backlog:');
+    const coreImageStart = ci.indexOf('  ci-core-image:', backlogStart);
+    const backlog = ci.slice(backlogStart, coreImageStart);
+    expect(backlogStart).toBeGreaterThan(0);
+    expect(backlog).toContain('Lint expanding-only Postgres migrations with squawk');
+    expect(backlog).toContain('9af8b2b54135ab236389122bce6c9edc40a8db4347e77d19079f19dcceddc737');
+    expect(backlog).toContain('"$squawk" db/migrations/*.sql');
+    expect(ci).not.toContain('  ci-migrations:');
+  });
+
+  it('rejects raw host test or install commands in every CI job', () => {
+    const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+    const mutations = [
+      ci.replace('run: node scripts/test-isolated.mjs check', 'run: npm ci'),
+      ci.replace('run: node scripts/test-isolated.mjs check', 'run: npx vitest run'),
+      ci.replace('run: node scripts/test-isolated.mjs check', 'run: |\n          node scripts/test-isolated.mjs check\n          npm ci'),
+      ci + '\n  unexpected:\n    steps:\n      - name: Bad\n        run: npm ci\n',
+      ci + '\n  unexpected:\n    steps:\n      - name: Bad\n        run: |\n          npx vitest run\n',
+      ci.replace('\n  ci-core-image:\n', '\n  renamed-core-image:\n'),
     ];
-    for (const [name, changed] of cases) {
-      expect(changed, name).not.toBe(ci);
-      expect(() => ciEntrypointPolicy(changed), name).toThrow();
+    for (const changed of mutations) {
+      expect(changed).not.toBe(ci);
+      expect(() => ciEntrypointPolicy(changed)).toThrow();
     }
   });
 
@@ -190,6 +148,25 @@ describe('test entrypoint policy (lifemodel-q4x.5.2)', () => {
           `${name}@${entry?.version} does not satisfy ${spec}`,
         ).toBe(true);
       }
+    }
+  });
+
+  it('store images are digest pinned and refuses tag-only images', () => {
+    expect(Object.values(STORE_IMAGES).every((image) => /@sha256:[a-f0-9]{64}$/.test(image))).toBe(true);
+    expect(() => validateStoreImages({ valkey: 'valkey/valkey:8.1' })).toThrow(/sha256 digest/);
+  });
+
+  it('store containers join a network and the network itself is internal', () => {
+    const network = networkCreateArgs('run-network');
+    expect(network).toContain('--internal');
+    expect(network).toContain('--label');
+    const valkey = storeContainerArgs('valkey', STORE_IMAGES.valkey, 'run-network', 'valkey');
+    const postgres = storeContainerArgs('postgres', STORE_IMAGES.postgres, 'run-network', 'postgres');
+    for (const args of [valkey, postgres]) {
+      expect(args).toContain('--network');
+      expect(args).toContain('run-network');
+      expect(args).toContain('--label');
+      expect(args.join(' ')).not.toMatch(/--network (?:host|bridge|none)/);
     }
   });
 

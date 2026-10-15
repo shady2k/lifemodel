@@ -2,18 +2,17 @@
 #
 # A platform-mode loader: the program Flux deploys into `lifemodel-system`
 # while the cluster has NO Docker socket and nothing to supervise. It carries
-# the loader and nothing else - no Caddy, no Agent Vault, no seed bundle, no
-# lifemodel - because in platform mode the loader reads none of them. It comes
-# up, serves its interface and login on one port, and waits.
+# the loader and a prepared full-history seed bundle, but no Caddy, Agent Vault
+# or lifemodel core image. The bundle seeds this release into Gitea on first
+# start; the loader then serves its interface and login on one port and waits.
 #
-# Build it from the checkout root (the context is the whole repository):
-#
-#   docker build -f docker/loader/Dockerfile -t lifemodel-loader:local .
+# Release builds first run scripts/release/prepare-loader-context.sh after
+# pinning the pushed core digest. This Dockerfile requires the prepared
+# .docker-context/seed.bundle; a bare checkout-root build is not sufficient.
 #
 # The runtime runs as a non-root user, holds a read-only root filesystem, and
 # writes only to /var/lib/loader (a volume: the password and session secret
-# survive a restart) and to /tmp. LIFEMODEL_LOADER_MODE=platform starts it in
-# platform mode; the port is the loader's own 7000 on every interface.
+# survive a restart) and to /tmp. the loader always runs in its platform role; the port is the loader's own 7000 on every interface.
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
@@ -59,14 +58,11 @@ COPY --chown=root:root .docker-context/seed.bundle /opt/lifemodel/seed.bundle
 USER loader
 WORKDIR /var/lib/loader
 
-# The mode is the deployment's decision, named here because this image exists
-# for it; the volume root is the one writable path (a volume: the password
-# and session secret survive a restart), and /tmp is the process's own.
+# The volume root is the writable platform state path, and /tmp belongs to the process.
 # The port is the loader's own, on every interface so a Service can reach it
-# (the instance image binds the loopback inside its container).
+# the Kubernetes Service reaches the pod through its IP.
 VOLUME ["/var/lib/loader"]
-ENV LIFEMODEL_LOADER_MODE=platform \
-    LIFEMODEL_VOLUME_ROOT=/var/lib/loader \
+ENV LIFEMODEL_VOLUME_ROOT=/var/lib/loader \
     NODE_ENV=production
 
 EXPOSE 7000

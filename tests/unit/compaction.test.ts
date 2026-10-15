@@ -13,12 +13,10 @@ import {
   ConversationManager,
   createConversationManager,
 } from '../../src/storage/conversation-manager.js';
-import {
-  JsonMemoryProvider,
-  createJsonMemoryProvider,
-} from '../../src/storage/memory-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import { createTestMemoryProvider } from '../helpers/memory-provider-fixture.js';
+import type { MemoryProviderImpl } from '../../src/storage/memory-provider.js';
 import type { MemoryEntry } from '../../src/layers/cognition/tools/core/memory.js';
+import type { Storage } from '../../src/storage/storage.js';
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -35,20 +33,6 @@ function createTestLogger() {
   return mockLogger as any;
 }
 
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: vi.fn(async (key: string) => store.get(key)),
-    save: vi.fn(async (key: string, data: unknown) => {
-      store.set(key, data);
-    }),
-    delete: vi.fn(async (key: string) => {
-      store.delete(key);
-    }),
-    exists: vi.fn(async (key: string) => store.has(key)),
-  } as unknown as Storage;
-}
-
 interface StoredMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
@@ -59,6 +43,18 @@ interface StoredMessage {
     function: { name: string; arguments: string };
   }[];
   tool_call_id?: string;
+}
+
+function createMockStorage(): Storage {
+  const data = new Map<string, unknown>();
+  return {
+    load: async (key: string) => data.get(key) ?? null,
+    save: async (key: string, value: unknown) => {
+      data.set(key, value);
+    },
+    delete: async (key: string) => data.delete(key),
+    exists: async (key: string) => data.has(key),
+  };
 }
 
 async function setConversationData(
@@ -84,16 +80,12 @@ function makeMemoryEntry(overrides: Partial<MemoryEntry> & { id: string }): Memo
 
 // ─── getLatestByKind ─────────────────────────────────────────────────────────
 
-describe('JsonMemoryProvider.getLatestByKind', () => {
-  let memoryProvider: JsonMemoryProvider;
+describe('MemoryProviderImpl.getLatestByKind', () => {
+  let memoryProvider: MemoryProviderImpl;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    memoryProvider = createJsonMemoryProvider(createTestLogger(), {
-      storage: createMockStorage(),
-      storageKey: 'memory',
-      maxEntries: 1000,
-    });
+    memoryProvider = createTestMemoryProvider(createTestLogger(), 1000);
   });
 
   it('returns the most recent entry by timestamp', async () => {
@@ -173,8 +165,8 @@ describe('JsonMemoryProvider.getLatestByKind', () => {
 // ─── compactMessages CAS guard ──────────────────────────────────────────────
 
 describe('ConversationManager.compactMessages', () => {
-  let storage: Storage;
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,13 +192,14 @@ describe('ConversationManager.compactMessages', () => {
 
     await setConversationData(storage, 'user-1', messages);
 
-    const result = await manager.compactMessages('user-1', 12);
+    const result = await manager.compactMessages('user-1', 12, 'A rolling summary');
     expect(result).toBe(true);
 
     // Should keep last 3 turns = 6 messages
     const history = await manager.getHistory('user-1', { maxRecentTurns: 100 });
-    expect(history).toHaveLength(6);
-    expect(history[0]?.content).toBe('User 3');
+    expect(history).toHaveLength(7);
+    expect(history[0]?.content).toBe('Conversation summary:\nA rolling summary');
+    expect(history[1]?.content).toBe('User 3');
   });
 
   it('returns false when count is stale (concurrent compaction)', async () => {
@@ -227,7 +220,7 @@ describe('ConversationManager.compactMessages', () => {
     await setConversationData(storage, 'user-1', messages);
 
     // Pass wrong expected count
-    const result = await manager.compactMessages('user-1', 999);
+    const result = await manager.compactMessages('user-1', 999, 'A rolling summary');
     expect(result).toBe(false);
 
     // Messages should be unchanged
@@ -244,16 +237,16 @@ describe('ConversationManager.compactMessages', () => {
 
     await setConversationData(storage, 'user-1', messages);
 
-    const result = await manager.compactMessages('user-1', 2);
+    const result = await manager.compactMessages('user-1', 2, 'A rolling summary');
     expect(result).toBe(true);
   });
 });
 
 // ─── getHistory no longer injects compactedSummary ──────────────────────────
 
-describe('ConversationManager.getHistory (no compactedSummary)', () => {
-  let storage: Storage;
+describe('ConversationManager.getHistory with legacy summary field', () => {
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -261,13 +254,13 @@ describe('ConversationManager.getHistory (no compactedSummary)', () => {
     manager = createConversationManager(storage, createTestLogger());
   });
 
-  it('does not inject compactedSummary even when present in storage', async () => {
+  it('ignores the legacy compactedSummary storage field', async () => {
     const messages: StoredMessage[] = [
       { role: 'user', content: 'Hello', timestamp: new Date().toISOString() },
       { role: 'assistant', content: 'Hi!', timestamp: new Date().toISOString() },
     ];
 
-    // Simulate old data with compactedSummary still in storage
+    // Legacy compactedSummary data does not create a logical marker.
     await setConversationData(storage, 'user-1', messages, {
       compactedSummary: 'Old summary from before migration',
     });
@@ -283,8 +276,8 @@ describe('ConversationManager.getHistory (no compactedSummary)', () => {
 // ─── getMessageCount ─────────────────────────────────────────────────────────
 
 describe('ConversationManager.getMessageCount', () => {
-  let storage: Storage;
   let manager: ConversationManager;
+  let storage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();

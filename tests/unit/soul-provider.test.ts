@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createSoulProvider, type SoulProviderConfig } from '../../src/storage/soul-provider.js';
-import type { Storage } from '../../src/storage/storage.js';
+import type { SoulStateStore } from '../../src/storage/soul-provider.js';
+import { createInMemorySoulStore } from '../helpers/in-memory-soul-store.js';
 
 // Mock logger
 const mockLogger = {
@@ -12,31 +13,13 @@ const mockLogger = {
   child: () => mockLogger,
 };
 
-// In-memory storage for testing
-function createMockStorage(): Storage {
-  const store = new Map<string, unknown>();
-  return {
-    load: async (key: string) => store.get(key) ?? null,
-    save: async (key: string, data: unknown) => {
-      store.set(key, data);
-    },
-    delete: async (key: string) => {
-      const existed = store.has(key);
-      store.delete(key);
-      return existed;
-    },
-    exists: async (key: string) => store.has(key),
-    keys: async () => Array.from(store.keys()),
-  };
-}
-
 describe('SoulProvider', () => {
-  let storage: Storage;
+  let storage: SoulStateStore;
   let config: SoulProviderConfig;
 
   beforeEach(() => {
-    storage = createMockStorage();
-    config = { storage, storageKey: 'soul-test' };
+    storage = createInMemorySoulStore();
+    config = { store: storage };
     vi.clearAllMocks();
   });
 
@@ -53,6 +36,29 @@ describe('SoulProvider', () => {
       expect(state.parliament.voices.length).toBeGreaterThan(0);
       expect(state.socraticEngine).toBeDefined();
       expect(state.unanswerableCore).toBeDefined();
+    });
+
+    it('shares one initialization and serializes concurrent saves on the same provider', async () => {
+      let loads = 0;
+      const base = createInMemorySoulStore();
+      const store: SoulStateStore = {
+        load: async () => {
+          loads++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return base.load();
+        },
+        save: (version, document) => base.save(version, document),
+      };
+      const provider = createSoulProvider(mockLogger as any, { store });
+      const [a, b] = await Promise.all([provider.getState(), provider.getState()]);
+      expect(a).toBe(b);
+      expect(loads).toBe(1);
+      a.selfModel.narrative.currentStory = 'concurrent mutation';
+      await Promise.all([provider.persist(), provider.persist()]);
+      const restarted = createSoulProvider(mockLogger as any, { store });
+      expect((await restarted.getState()).selfModel.narrative.currentStory).toBe(
+        'concurrent mutation'
+      );
     });
 
     it('loads existing state from storage', async () => {
@@ -178,7 +184,9 @@ describe('SoulProvider', () => {
       const reloadedState = await provider2.getState();
 
       expect(reloadedState.constitution.lastModifiedAt).toBeInstanceOf(Date);
-      expect(reloadedState.constitution.lastModifiedAt.toISOString()).toBe('2024-01-15T10:30:00.000Z');
+      expect(reloadedState.constitution.lastModifiedAt.toISOString()).toBe(
+        '2024-01-15T10:30:00.000Z'
+      );
     });
   });
 

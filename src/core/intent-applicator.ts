@@ -7,13 +7,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import type {
   SignalType,
   SignalSource,
   Logger,
   Metrics,
   Channel,
-  SendOptions,
   Event,
   ThoughtData,
   InterestIntensity,
@@ -43,11 +43,11 @@ import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { UserModel } from '../models/user-model.js';
 import type { MemoryProvider, MemoryEntry } from '../layers/cognition/tools/registry.js';
 import type { IRecipientRegistry } from './recipient-registry.js';
-import { markdownToTelegramHtml } from '../utils/telegram-html.js';
 import type { StatusUpdateService } from './status-update-service.js';
 import type { DomainTrackerService } from './domain-trackers.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
+import type { DurableEffectRegistry } from './durable-effect-registry.js';
 
 /**
  * Dependencies injected into IntentApplicator.
@@ -70,6 +70,7 @@ export interface IntentApplicatorDeps {
   running: () => boolean;
   storage?: Storage | undefined;
   pluginLoader?: PluginLoader | undefined;
+  durableEffects: DurableEffectRegistry;
   /**
    * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1) and
    * what it does there (see SendTurnRef).
@@ -81,15 +82,9 @@ export interface IntentApplicatorDeps {
    * still to come.
    */
   onSendStarted?: (turnKey: string, recipientId: string, final: boolean) => void;
-  /**
-   * A send of that turn settled. The turn's durable-log entries leave the log
-   * when the turn records an outcome and a send's fate is part of it, so the
-   * outcome is reported here - once per SEND_MESSAGE intent, whether the send
-   * ran, was skipped or could not start. It carries NO per-entry identity and
-   * NO delivery evidence. The return value (the commit of the turn's entries,
-   * when any) is chained into the send chain, so the stop drain awaits its
-   * flush too.
-   */
+  /** Called when the turn's send event is added to its outbox. This is not
+   * delivery evidence; the gateway owns the later send.settled event. */
+  enqueueOutbound?: (event: SnapshotOutboxEvent) => void;
   onSendSettled?: (
     turnKey: string,
     recipientId: string,
@@ -117,20 +112,14 @@ export interface SendTurnRef {
    * two different inbound questions can legitimately need the same reply.
    */
   answersInbound: boolean;
+  /** Inbound channel metadata; delivery resolves the current destination. */
+  channel?: string;
+  eventId: string;
 }
 
-/**
- * How one send of a turn ended (lifemodel-ctc.2.1, owner decision comment 54:
- * the turn's OUTCOME settles its messages, a failed outcome is never retried).
- */
+/** Whether the event was admitted to this tick's transactional outbox. */
 export interface SendOutcome {
-  /**
-   * The text reached the chat (or was already there: a send skipped as a
-   * verbatim repeat of the last assistant message is not a failure).
-   */
   delivered: boolean;
-  /** When not delivered: why - reported at warn with the recipient. */
-  reason?: string;
 }
 
 /**
@@ -139,6 +128,10 @@ export interface SendOutcome {
  */
 export class IntentApplicator {
   private readonly deps: IntentApplicatorDeps;
+
+  private trackDurableEffect(name: string, effect: Promise<unknown>): void {
+    this.deps.durableEffects.track(name, effect);
+  }
 
   /** Timestamp of last message sent (for response timing) */
   private _lastMessageSentAt: number | null = null;
@@ -153,7 +146,6 @@ export class IntentApplicator {
    * is delivered before the channels are released; a failed send is logged in
    * its chain, never silently dropped.
    */
-  private readonly inFlightSends = new Set<Promise<void>>();
 
   /**
    * Intensity-to-delta mapping for SET_INTEREST intent.
@@ -285,6 +277,7 @@ export class IntentApplicator {
                   'PLUGIN_CONTROL failed'
                 );
               });
+            this.trackDurableEffect('plugin control persistence', this.pluginControlChain);
             break;
         }
       });
@@ -296,204 +289,42 @@ export class IntentApplicator {
   // ──────────────────────────────────────────────────────────────────────────
 
   private applySendMessage(intent: SendMessageIntent): void {
-    const { recipientId, text, replyTo, conversationStatus } = intent.payload;
-
-    // Which durable-log turn this send belongs to (lifemodel-ctc.2.1), and
-    // whether it is one of the turn's final answers or an acknowledgement.
-    // Its entries leave the log when the turn records an outcome, and this
-    // send's fate is part of that outcome.
+    const { recipientId, text, replyTo } = intent.payload;
     const send = this.deps.resolveSendTurn?.(intent);
     const turnKey = send?.turnKey;
     const finalSend = send?.final ?? false;
-    // Does this send answer a logged inbound message? Then it is no proactive
-    // repeat, whatever its text (lifemodel-q4f).
-    const answersInbound = send?.answersInbound ?? false;
-    let delivered = false;
-    let failureReason: string | undefined;
-    const reportSettled = (outcome: SendOutcome): void => {
-      if (!turnKey) return;
-      const settled = this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
-      if (settled && typeof settled.then === 'function') {
-        void settled;
-      }
-    };
-    // Registered before anything else can fail: the turn waits for this send.
+    if (turnKey) this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
+
+    const route = this.deps.recipientRegistry?.resolve(recipientId);
+    const channel = route?.channel ?? send?.channel;
+    if (!channel)
+      throw new Error(`Could not determine outbound channel for recipient ${recipientId}`);
+    if (!this.deps.enqueueOutbound) {
+      throw new Error('Outbound event queue is required for SEND_MESSAGE');
+    }
+    const eventId = send?.eventId ?? randomUUID();
+    this.deps.enqueueOutbound({
+      eventId,
+      type: 'send.command',
+      payload: {
+        recipientId,
+        channel,
+        ...(route ? { destination: route.destination } : {}),
+        text,
+        ...(replyTo ? { replyTo } : {}),
+      },
+    });
+    this.deps.metrics.counter('outbound_events_queued', { channel });
     if (turnKey) {
-      this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
+      // The core outcome is the committed outbound event, not delivery. The
+      // gateway owns send.settled and any later delivery failure.
+      void this.deps.onSendSettled?.(turnKey, recipientId, finalSend, { delivered: true });
     }
-    // A send that cannot start never reaches the chat: the turn's outcome is a
-    // FAILED send, which is reported and deliberately NOT retried (owner
-    // decision, comment 54).
-    const reportUndeliverable = (reason: string): void => {
-      this.deps.metrics.counter('messages_failed', { reason });
-      reportSettled({ delivered: false, reason });
-    };
-
-    if (!this.deps.recipientRegistry) {
-      this.deps.logger.error({ recipientId }, 'RecipientRegistry not configured');
-      reportUndeliverable('no_registry');
-      return;
-    }
-
-    const route = this.deps.recipientRegistry.resolve(recipientId);
-    if (!route) {
-      this.deps.logger.error({ recipientId }, 'Could not resolve recipientId');
-      reportUndeliverable('unresolved_recipient');
-      return;
-    }
-
-    const channelImpl = this.deps.channels.get(route.channel);
-    if (!channelImpl) {
-      this.deps.logger.error(
-        {
-          recipientId,
-          channel: route.channel,
-          registeredChannels: Array.from(this.deps.channels.keys()),
-        },
-        'Channel not found'
-      );
-      reportUndeliverable('channel_not_found');
-      return;
-    }
-
-    const htmlText = markdownToTelegramHtml(text);
-    const sendOptions: SendOptions = {
-      ...(replyTo && { replyTo }),
-      parseMode: 'HTML',
-    };
-
-    const sendChain = Promise.resolve()
-      .then(async () => {
-        // The pre-existing duplicate guard, PROACTIVE sends only
-        // (lifemodel-q4f): a message that repeats the last assistant message
-        // verbatim is not sent again - but never when this send answers a
-        // logged inbound message. Two ordinary questions can need the same
-        // reply; suppressing the second would leave that user with nothing
-        // while the turn reported the entry answered. A skipped send is not a
-        // failure - the text is already in the chat, so it counts as
-        // delivered for the turn's outcome (no endless replay).
-        if (this.deps.conversationManager && !answersInbound) {
-          const lastMessage =
-            await this.deps.conversationManager.getLastAssistantMessage(recipientId);
-          if (lastMessage && lastMessage === text) {
-            this.deps.logger.warn(
-              { recipientId, textLength: text.length },
-              'Skipping duplicate message - identical to last assistant message'
-            );
-            this.deps.metrics.counter('messages_skipped', { reason: 'duplicate' });
-            return { success: false, skipped: true, reason: 'identical_text' as const };
-          }
-        }
-        return channelImpl.sendMessage(route.destination, htmlText, sendOptions);
-      })
-      .then((result) => {
-        if (result.success) {
-          delivered = true;
-          this._lastMessageSentAt = Date.now();
-          this._lastMessageRecipientId = recipientId;
-          this.deps.metrics.counter('messages_sent', { channel: route.channel });
-          this.deps.agent.onMessageSent();
-
-          if (this.deps.conversationManager) {
-            // Type guard: messageId only exists on actual send results, not on skipped results
-            const messageId = 'messageId' in result ? result.messageId : undefined;
-            // Note: toolCalls and toolResults are NOT saved to history
-            // They're kept in agentic loop memory only to prevent pollution across triggers
-            void this.saveAgentMessage(
-              recipientId,
-              text,
-              conversationStatus,
-              messageId ? { channelMessageId: messageId, channel: route.channel } : undefined
-            );
-          }
-        } else if ('skipped' in result && result.skipped) {
-          // Skipped on purpose, never because a send failed: the identical
-          // text is already the last assistant message, so the user has it.
-          delivered = true;
-          this.deps.logger.debug(
-            { recipientId, textLength: text.length, reason: result.reason },
-            'Send skipped as a duplicate; counted as delivered for the turn outcome'
-          );
-        } else {
-          failureReason = 'returned_false';
-          this.deps.logger.warn(
-            { recipientId, channel: route.channel, textLength: text.length },
-            'Message send returned false'
-          );
-          this.deps.metrics.counter('messages_failed', {
-            channel: route.channel,
-            reason: 'returned_false',
-          });
-        }
-      })
-      .catch((error: unknown) => {
-        failureReason = 'exception';
-        this.deps.logger.error({ err: error, recipientId }, 'Message send threw an error');
-        this.deps.metrics.counter('messages_failed', {
-          channel: route.channel,
-          reason: 'exception',
-        });
-      });
-
-    // Track the whole chain so the stop drain can await its completion
-    // (bounded by the stop deadline) before the channels are released; the
-    // turn's settlement rides on the same chain, so its flush is awaited too.
-    const tracked = sendChain
-      .then(() => {
-        if (!turnKey) return undefined;
-        const outcome: SendOutcome = delivered
-          ? { delivered: true }
-          : { delivered: false, reason: failureReason ?? 'unknown' };
-        return this.deps.onSendSettled?.(turnKey, recipientId, finalSend, outcome);
-      })
-      .finally(() => {
-        this.inFlightSends.delete(tracked);
-      });
-    this.inFlightSends.add(tracked);
   }
 
-  /** Number of SEND_MESSAGE chains still running. */
+  /** The core has no network send in flight; messages are outbox events. */
   pendingSendCount(): number {
-    return this.inFlightSends.size;
-  }
-
-  /**
-   * Await every in-flight send (bounded when a deadline is given; the caller
-   * reports what outlives it). Each chain logs its own failure - 'Message
-   * send returned false' / 'Message send threw an error' - so a failed send
-   * is reported, never silently dropped.
-   */
-  async drainPendingSends(deadlineMs?: number): Promise<void> {
-    while (this.inFlightSends.size > 0) {
-      if (deadlineMs === undefined) {
-        await Promise.race([...this.inFlightSends]);
-        continue;
-      }
-      if (Date.now() >= deadlineMs) {
-        return;
-      }
-      // A never-settling send must not block the stop forever: race the
-      // current chains against the remaining budget (review finding A).
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const cap = new Promise<'deadline'>((resolve) => {
-          timer = setTimeout(
-            () => {
-              resolve('deadline');
-            },
-            Math.max(0, deadlineMs - Date.now())
-          );
-        });
-        const settled = Promise.allSettled([...this.inFlightSends]).then(() => 'settled' as const);
-        if ((await Promise.race([settled, cap])) === 'deadline') {
-          return;
-        }
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    }
+    return 0;
   }
 
   private applyScheduleEvent(intent: ScheduleEventIntent): void {
@@ -566,7 +397,9 @@ export class IntentApplicator {
           metadata: fact ? { subject, predicate, object } : undefined,
         };
 
-        this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+        const save = this.deps.memoryProvider.save(entry);
+        this.trackDurableEffect('memory save', save);
+        save.catch((err: unknown) => {
           this.deps.logger.error(
             { error: err instanceof Error ? err.message : String(err) },
             'Failed to save to memory'
@@ -735,7 +568,10 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(memoryEntry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(memoryEntry);
+      this.trackDurableEffect('remembered fact', save);
+
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { error: err instanceof Error ? err.message : String(err) },
           'Failed to save remembered fact to memory'
@@ -755,17 +591,17 @@ export class IntentApplicator {
 
     if (rememberRecipientId && this.deps.conversationManager) {
       const summary = `${subject}.${attribute}="${value}"`;
-      this.deps.conversationManager
-        .addCompletedAction(rememberRecipientId, {
-          tool: 'core.remember',
-          summary,
-        })
-        .catch((err: unknown) => {
-          this.deps.logger.warn(
-            { error: err instanceof Error ? err.message : String(err) },
-            'Failed to record completed action for remember'
-          );
-        });
+      const actionWrite = this.deps.conversationManager.addCompletedAction(rememberRecipientId, {
+        tool: 'core.remember',
+        summary,
+      });
+      this.trackDurableEffect('remember conversation record', actionWrite);
+      actionWrite.catch((err: unknown) => {
+        this.deps.logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to record completed action for remember'
+        );
+      });
     }
 
     this.deps.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
@@ -812,17 +648,17 @@ export class IntentApplicator {
 
     if (interestRecipientId && this.deps.conversationManager) {
       const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
-      this.deps.conversationManager
-        .addCompletedAction(interestRecipientId, {
-          tool: 'core.setInterest',
-          summary,
-        })
-        .catch((err: unknown) => {
-          this.deps.logger.warn(
-            { error: err instanceof Error ? err.message : String(err) },
-            'Failed to record completed action for setInterest'
-          );
-        });
+      const actionWrite = this.deps.conversationManager.addCompletedAction(interestRecipientId, {
+        tool: 'core.setInterest',
+        summary,
+      });
+      this.trackDurableEffect('interest conversation record', actionWrite);
+      actionWrite.catch((err: unknown) => {
+        this.deps.logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to record completed action for setInterest'
+        );
+      });
     }
 
     this.deps.logger.debug(
@@ -892,7 +728,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('commitment', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { commitmentId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save commitment'
@@ -903,7 +741,7 @@ export class IntentApplicator {
       if (commitmentRecipientId && this.deps.conversationManager) {
         const dueDate = new Date(dueAt);
         const summary = `promise: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" (due ${dueDate.toLocaleDateString()})`;
-        this.deps.conversationManager
+        const actionWrite = this.deps.conversationManager
           .addCompletedAction(commitmentRecipientId, {
             tool: 'core.commitment',
             summary,
@@ -914,6 +752,7 @@ export class IntentApplicator {
               'Failed to record completed action for commitment'
             );
           });
+        this.trackDurableEffect('commitment conversation record', actionWrite);
       }
 
       this.deps.logger.info(
@@ -924,12 +763,15 @@ export class IntentApplicator {
     } else if (action === 'mark_kept') {
       // Update commitment status to kept
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'kept',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'kept',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId
+          )
         );
         this.deps.logger.info({ commitmentId }, 'Commitment marked as kept');
         this.deps.metrics.counter('commitments_kept');
@@ -937,13 +779,16 @@ export class IntentApplicator {
     } else if (action === 'mark_repaired') {
       // Update commitment status to repaired with note
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'repaired',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId,
-          repairNote
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'repaired',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId,
+            repairNote
+          )
         );
         this.deps.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
         this.deps.metrics.counter('commitments_repaired');
@@ -951,12 +796,15 @@ export class IntentApplicator {
     } else if (action === 'cancel') {
       // Update commitment status to cancelled
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'cancelled',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'cancelled',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId
+          )
         );
         this.deps.logger.info({ commitmentId }, 'Commitment cancelled');
         this.deps.metrics.counter('commitments_cancelled');
@@ -1007,7 +855,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('desire', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { desireId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save desire'
@@ -1022,14 +872,20 @@ export class IntentApplicator {
     } else if (action === 'adjust') {
       // Update desire intensity
       if (desireId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateDesireStatus(desireId, 'active', intensity);
+        this.trackDurableEffect(
+          'desire status update',
+          this.deps.statusUpdates.updateDesireStatus(desireId, 'active', intensity)
+        );
         this.deps.logger.info({ desireId, intensity }, 'Desire intensity adjusted');
         this.deps.metrics.counter('desires_adjusted');
       }
     } else if (action === 'resolve') {
       // Mark desire as satisfied
       if (desireId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateDesireStatus(desireId, 'satisfied');
+        this.trackDurableEffect(
+          'desire status update',
+          this.deps.statusUpdates.updateDesireStatus(desireId, 'satisfied')
+        );
         this.deps.logger.info({ desireId }, 'Desire resolved');
         this.deps.metrics.counter('desires_resolved');
       }
@@ -1087,7 +943,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('opinion', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { opinionId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save opinion'
@@ -1129,7 +987,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('prediction', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { predictionId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save prediction'
@@ -1143,17 +1003,23 @@ export class IntentApplicator {
       this.deps.metrics.counter('predictions_created');
     } else if (action === 'resolve_prediction') {
       if (predictionId && outcome && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updatePredictionStatus(
-          predictionId,
-          outcome,
-          this.deps.domainTrackers.signaledDuePredictions
+        this.trackDurableEffect(
+          'prediction status update',
+          this.deps.statusUpdates.updatePredictionStatus(
+            predictionId,
+            outcome,
+            this.deps.domainTrackers.signaledDuePredictions
+          )
         );
         this.deps.logger.info({ predictionId, outcome }, 'Prediction resolved');
         this.deps.metrics.counter('predictions_resolved', { outcome });
       }
     } else if (action === 'revise_opinion') {
       if (opinionId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateOpinionStatus(opinionId, stance, confidence);
+        this.trackDurableEffect(
+          'opinion status update',
+          this.deps.statusUpdates.updateOpinionStatus(opinionId, stance, confidence)
+        );
         this.deps.logger.info({ opinionId }, 'Opinion revised');
         this.deps.metrics.counter('opinions_revised');
       }
@@ -1217,48 +1083,5 @@ export class IntentApplicator {
     if (Number.isNaN(num)) return null;
     // Clamp delta to reasonable range (-1 to +1)
     return Math.max(-1, Math.min(1, num));
-  }
-
-  /**
-   * Save agent message to conversation history.
-   * When tool call data is present, saves as a full turn (assistant + tool results).
-   */
-  private async saveAgentMessage(
-    chatId: string,
-    text: string,
-    conversationStatus?: 'active' | 'awaiting_answer' | 'closed' | 'idle',
-    channelMeta?: {
-      channelMessageId?: string;
-      channel?: string;
-    }
-  ): Promise<void> {
-    if (!this.deps.conversationManager) return;
-
-    try {
-      // Only save the final response text - tool calls are internal to the agentic loop
-      // This keeps conversation history clean: user messages, reactions, and assistant responses
-      await this.deps.conversationManager.addMessage(
-        chatId,
-        {
-          role: 'assistant',
-          content: text,
-        },
-        channelMeta
-      );
-
-      // Use inline status if provided, otherwise fall back to LLM classification
-      if (conversationStatus) {
-        await this.deps.conversationManager.setStatus(chatId, conversationStatus);
-      } else if (this.deps.messageComposer) {
-        // Fallback: classify via separate LLM call (legacy path)
-        const classification = await this.deps.messageComposer.classifyConversationStatus(text);
-        await this.deps.conversationManager.setStatus(chatId, classification.status);
-      }
-    } catch (error) {
-      this.deps.logger.warn(
-        { error: error instanceof Error ? error.message : String(error), chatId },
-        'Failed to save agent message'
-      );
-    }
   }
 }

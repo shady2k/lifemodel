@@ -2,9 +2,9 @@ import type { AgentIdentity } from '../types/agent/identity.js';
 import type { AgentState } from '../types/agent/state.js';
 
 /**
- * Agent configuration file schema.
+ * Agent configuration document schema.
  *
- * This is what gets loaded from data/config/agent.json.
+ * This is the JSON document stored in the core Postgres schema.
  * All fields are optional - defaults are used for missing values.
  */
 export interface AgentConfigFile {
@@ -61,8 +61,6 @@ export interface AgentConfigFile {
     name?: string;
     /** Timezone offset from UTC in hours */
     timezoneOffset?: number;
-    /** Telegram chat ID (can also be set via env var) */
-    telegramChatId?: string;
   };
 
   /** LLM configuration */
@@ -84,16 +82,6 @@ export interface AgentConfigFile {
     };
   };
 
-  /** Telegram configuration */
-  telegram?: {
-    /**
-     * The bot token as an Agent Vault placeholder (e.g.
-     * `__telegram_bot_token__`), never the token itself: Agent Vault
-     * substitutes it in the request path (lifemodel-q4x.3.*).
-     */
-    botToken?: string;
-  };
-
   /** Logging configuration */
   logging?: {
     /** Log level */
@@ -101,6 +89,9 @@ export interface AgentConfigFile {
     /** Enable pretty logging */
     pretty?: boolean;
   };
+
+  /** Motor Cortex execution setting */
+  motorCortex?: { enabled?: boolean };
 
   /** Plugin configuration */
   plugins?: {
@@ -148,7 +139,6 @@ export interface MergedConfig {
   primaryUser: {
     name: string | null;
     timezoneOffset: number | null;
-    telegramChatId: string | null;
   };
 
   /** LLM configuration */
@@ -173,16 +163,15 @@ export interface MergedConfig {
     maxFiles: number;
   };
 
-  /** Telegram bot token */
-  telegramBotToken: string | null;
-
   /** Storage paths */
   paths: {
     data: string;
-    config: string;
     state: string;
     logs: string;
   };
+
+  /** Motor Cortex execution setting */
+  motorCortex: { enabled: boolean };
 
   /** Plugin configuration */
   plugins: {
@@ -240,7 +229,6 @@ export const DEFAULT_CONFIG: MergedConfig = {
   primaryUser: {
     name: null,
     timezoneOffset: null,
-    telegramChatId: null,
   },
   llm: {
     endpoint: {
@@ -258,10 +246,10 @@ export const DEFAULT_CONFIG: MergedConfig = {
     logDir: 'data/logs',
     maxFiles: 10,
   },
-  telegramBotToken: null,
+  // Motor Cortex remains enabled unless explicitly disabled.
+  motorCortex: { enabled: true },
   paths: {
     data: 'data',
-    config: 'data/config',
     state: 'data/state',
     logs: 'data/logs',
   },

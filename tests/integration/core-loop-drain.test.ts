@@ -2,7 +2,7 @@
  * Integration tests for the bounded, best-effort stop (lifemodel-ctc.1.1,
  * lifemodel-ctc.1.2).
  *
- * Real CoreLoop + real storage chain (JSONStorage behind DeferredStorage),
+ * Real CoreLoop and the production shutdown sequence,
  * doubles only at the layer boundary (no LLM, no network). Required
  * scenarios:
  * 1. Stop while a cognition turn is in flight and the turn finishes within
@@ -10,7 +10,7 @@
  * 2. An internal signal is NOT persisted across a stop: a turn the deadline
  *    cut loose is abandoned and nothing replays (the ticks of the next run
  *    regenerate internal signals; inbound messages are carried by the durable
- *    inbound log - tests/integration/inbound-log-restart.test.ts).
+ *    inbound log - tests/integration/snapshot-outbox.test.ts).
  * 3. A hang the deadline cuts loose does not hang the stop, and neither a
  *    slow nor a hung send outlives the release by accident.
  * 4. The stop is idempotent.
@@ -29,7 +29,6 @@ import {
   makeContainerShutdown,
   makeDeferred,
   makeScratchDir,
-  openStorage,
   rmDir,
   startInstance,
   stopInstance,
@@ -82,7 +81,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     // ...and stays completed (its result is not re-run)
     const callsBeforeStop = h1.cognition.calls.length;
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(h1.cognition.calls.length).toBe(callsBeforeStop);
 
@@ -105,7 +104,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.coreLoop.pushSignal(trigger);
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     h1.cognition.settleAll();
 
     // nothing is written for the next run to redo
@@ -143,7 +142,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     expect(h1.cognition.calls.length).toBe(1); // consumed nothing
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(existsSync(journalPath(storagePath))).toBe(false);
     const h2 = await startInstance(storagePath, {
@@ -176,7 +175,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     h1.cognition.settleAll();
 
     expect(existsSync(journalPath(storagePath))).toBe(false);
@@ -186,13 +185,13 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
     await waitFor(() => h2.autonomic.ticks() >= SETTLE_TICKS, 'instance 2 ran ticks');
     // without the log (this harness has none) the message is not replayed -
-    // with the log it is, exactly once (inbound-log-restart.test.ts)
+    // with stream offsets, exactly once (snapshot-outbox.test.ts)
     expect(h2.cognition.triggerIds()).toEqual([]);
     await h2.coreLoop.stop();
     h2.cognition.settleAll();
   });
 
-  it('a turn that finishes during the drain delivers its answer through a channel that has stopped intake (sent once, success)', async () => {
+  it('a turn finishing during drain commits an outbound event; the core does not call the channel', async () => {
     const storagePath = await freshScratch('ctc-drain-deliver-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -213,20 +212,14 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     };
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
-    // a SLOW send: the stop must await the in-flight chain before releasing
-    h1.channel.sendDelayMs = 80;
-    await stopInstance(h1, await openStorage(storagePath));
-
-    // Intake stopped before the send; the slow send was awaited and delivered;
-    // the full stop came after it
-    expect(h1.channel.events).toEqual(['stopIntake', 'send', 'stop']);
-    expect(h1.channel.sent).toEqual([
-      { target: 'chat-42', text: expect.stringContaining(text), messageId: 'test-msg-1' },
-    ]);
+    await stopInstance(h1);
+    expect(h1.channel.events).toEqual(['stopIntake', 'stop']);
+    expect(h1.channel.sent).toEqual([]);
     expect(h1.channel.failed).toEqual([]);
+    expect(h1.coreLoop.getOutboxForTest().map((event) => event.payload['text'])).toContain(text);
   });
 
-  it('a FAILED send during the drain is reported, not silently dropped', async () => {
+  it('channel delivery failure is outside the core turn outcome', async () => {
     const storagePath = await freshScratch('ctc-drain-failsend-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -240,18 +233,41 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     };
     h1.cognition.settleAll({ confidence: 1, intents: [send], response: undefined });
 
-    // the send itself fails (like Telegram: transport error) - the drain must
-    // surface the failure, not swallow it
     h1.channel.failNextSend = 'transport-error';
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
 
     expect(h1.channel.sent).toEqual([]);
-    expect(h1.channel.failed).toEqual([
-      { target: 'chat-42', text: expect.any(String), reason: 'transport-error' },
-    ]);
+    expect(h1.channel.failed).toEqual([]);
+    expect(h1.coreLoop.getOutboxForTest()).toHaveLength(1);
   });
 
-  it('a HUNG send does not hang the stop: the deadline releases the channels', async () => {
+  it('withdraws an earlier acknowledgement and every result send for an error during drain', async () => {
+    const storagePath = await freshScratch('ctc-drain-error-batch-');
+    const h1 = await startInstance(storagePath, {
+      cognitionMode: 'hang',
+      drainTimeoutMs: 5_000,
+    });
+    h1.coreLoop.pushSignal(thoughtSignal('turn trigger', h1.recipientId));
+    await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
+    h1.coreLoop.applyImmediateIntent({
+      type: 'SEND_MESSAGE',
+      payload: { recipientId: h1.recipientId, text: 'early acknowledgement' },
+    });
+    h1.cognition.settleAll({
+      confidence: 0,
+      disposition: 'error',
+      intents: [
+        { type: 'SEND_MESSAGE', payload: { recipientId: h1.recipientId, text: 'partial 1' } },
+        { type: 'SEND_MESSAGE', payload: { recipientId: h1.recipientId, text: 'partial 2' } },
+      ],
+      response: undefined,
+    });
+    await stopInstance(h1);
+    expect(h1.coreLoop.getOutboxForTest()).toEqual([]);
+    expect(h1.channel.sent).toEqual([]);
+  });
+
+  it('a pending outbound event does not hold core shutdown', async () => {
     const storagePath = await freshScratch('ctc-drain-hungsend-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'hang',
@@ -259,8 +275,6 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
     h1.coreLoop.pushSignal(thoughtSignal('turn trigger', h1.recipientId));
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
-    // the send never returns
-    h1.channel.sendGate = new Promise<void>(() => undefined);
     h1.cognition.settleAll({
       confidence: 1,
       intents: [
@@ -270,12 +284,12 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     });
 
     const started = Date.now();
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(Date.now() - started).toBeLessThan(5_000); // the deadline, not the hang
-    // the stop finished its own steps: the channels were released and the
-    // sends were abandoned (the hard exit leaves the process at the deadline)
+    // The channel is not called from intent application or held open by the core.
     expect(h1.channel.fullyStopped).toBe(true);
-    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(1);
+    expect(h1.coreLoop.stopReport().sendsOutstanding).toBe(0);
+    expect(h1.coreLoop.getOutboxForTest()).toHaveLength(1);
   });
 
   it('stop past the overall deadline continues: a stalled tick and a stalled scheduler do not hang it', async () => {
@@ -289,7 +303,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     h1.coreLoop.setStallForTest({ tickGate: release.promise, schedulerGate: release.promise });
 
     const started = Date.now();
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     const elapsed = Date.now() - started;
     expect(elapsed).toBeLessThan(5_000); // the deadline (150 ms), not the stall
     release.resolve(); // the stalled waits still settle for test cleanup
@@ -301,8 +315,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
       cognitionMode: 'immediate',
       drainTimeoutMs: 500,
     });
-    const storage = await openStorage(storagePath);
-    const containerShutdown = makeContainerShutdown(h1, storage);
+    const containerShutdown = makeContainerShutdown(h1);
     const p1 = containerShutdown();
     const p2 = containerShutdown();
     expect(p2).toBe(p1); // concurrent callers share the first call's promise
@@ -316,7 +329,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
 
   // ── real cognition (agentic loop) with a scripted fake LLM provider ──
 
-  it('REAL cognition: a turn completing during the stop drain delivers its reply', async () => {
+  it('REAL cognition: a turn completing during the stop drain produces an outbound event', async () => {
     const storagePath = await freshScratch('ctc-real-finish-');
     const h1 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
@@ -334,14 +347,12 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     // the real agentic loop ran exactly once (one LLM completion) ...
     await waitFor(() => h1.cognition.provider.requests.length === 1, 'LLM called once');
-    // ... and its reply is delivered through the channel exactly once
-    await waitFor(() => h1.channel.sent.length === 1, 'reply delivered');
-    expect(h1.channel.sent[0]?.text).toBe('The real loop reply');
+    // ... its reply is placed in the tick's outbox, not sent by intent application
+    await waitFor(() => h1.coreLoop.getOutboxForTest().length === 1, 'outbound event committed');
+    expect(h1.coreLoop.getOutboxForTest()[0]?.payload['text']).toBe('The real loop reply');
 
-    await stopInstance(h1, await openStorage(storagePath));
-    // delivered (before the full release) and never refused
-    expect(h1.channel.events).not.toContain('send-refused');
-    expect(h1.channel.events.indexOf('send')).toBeLessThan(h1.channel.events.indexOf('stop'));
+    await stopInstance(h1);
+    expect(h1.channel.events).not.toContain('send');
     expect(existsSync(journalPath(storagePath))).toBe(false);
   });
 
@@ -362,12 +373,12 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     );
     await waitFor(() => h1.cognition.provider.requests.length === 1, 'LLM held (turn in flight)');
 
-    await stopInstance(h1, await openStorage(storagePath));
+    await stopInstance(h1);
     expect(existsSync(journalPath(storagePath))).toBe(false);
     h1.cognition.settleHangingTurn();
 
     // fresh start: nothing is redone (this harness has no inbound log; with
-    // one, the message replays exactly once - inbound-log-restart.test.ts)
+    // one, the message replays from the inbound stream)
     const h2 = await startInstance(storagePath, {
       cognitionMode: 'real-scripted',
       hang: false,
@@ -391,7 +402,7 @@ describe('bounded best-effort stop (lifemodel-ctc.1.2)', () => {
     await waitFor(() => h1.cognition.calls.length === 1, 'cognition started');
     // reject WHILE the drain is in flight (before stop, the tick path already
     // logs 'COGNITION failed (async)' - that is not the drain's log)
-    const stopping = stopInstance(h1, await openStorage(storagePath));
+    const stopping = stopInstance(h1);
     await waitFor(() => h1.channel.intakeStopped, 'intake stopped (drain running)');
     // reject while the DRAIN's race is running (20 ms past intake stop is
     // well inside it: the drain starts within a tick of the intake stop)

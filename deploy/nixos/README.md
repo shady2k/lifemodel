@@ -13,6 +13,8 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
 }
 ```
 
+The core image requires an x86-64-v2 CPU or newer for memory search. For a VM, configure the vCPU type as `host` or an x86-64-v2 model; a default `Common KVM processor` / `qemu64` may expose only x86-64-v1. `lifemodel doctor` warns if `/proc/cpuinfo` lacks `sse4_2` or `popcnt`.
+
 Then run `sudo nixos-rebuild switch --flake .#HOST`. The module starts k3s
 with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
 the verified platform source and root Kustomization. The bootstrap is a systemd

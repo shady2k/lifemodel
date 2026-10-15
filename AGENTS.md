@@ -27,7 +27,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 
 ## Repository layout
 
-- `src/index.ts` — entry point: builds the container, starts Telegram and CoreLoop
+- `src/index.ts` — entry point: builds the container and starts CoreLoop
 - `flake.nix`, `flake.lock` — Nix flake exporting the NixOS module and defining flake checks
 - `deploy/root/` — Flux root OCIRepository and Kustomization templates
 - `deploy/nixos/` — the `services.lifemodel` NixOS module and setup guide
@@ -43,11 +43,8 @@ tick), Energy & state are physiology. Start with `README.md` and
   sequence (one overall stop deadline; intake stop first, sends of the drained
   turn awaited, channels released after, storage flushed last) with its hard
   exit at the deadline (`hard-exit.ts`), and the durable
-  inbound log (`inbound-log.ts`), which persists inbound user messages on
-  receipt, removes an entry once its turn reached a recorded outcome
-  (answered, deliberately silent, failed send, failed turn - a failed outcome
-  is never retried), replays the entries whose turn recorded none at start
-  and dedups by Telegram update_id
+  stream-backed inbound messages, included in the tick snapshot and deduplicated
+  by external message id
 - `src/layers/` — the brain: `autonomic/` (neurons, filters, zero LLM cost),
   `aggregation/` (buckets, patterns, the wake threshold), `cognition/` (the
   agentic LLM loop with its prompts, message builders and core.* tools, plus
@@ -55,8 +52,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/runtime/` — Motor Cortex (the sandboxed agentic act loop), Docker
   container management, sandbox and shell runners, the Agent Skills loader
   (`skills/`), built-in skills (`builtin-skills/`), locks, credentials
-- `src/channels/` — sensory organs; the Telegram channel lives in
-  `src/plugins/channels/telegram.ts`
+- `src/channels/` — shared channel interfaces; gateways deliver through the inbound stream
 - `src/plugins/` — plugins proper (alertness, calories, contact-pressure,
   desire-pressure, energy, news, reminder, social-debt, thoughts, time-neuron,
   web-fetch, web-search) and shared helper libraries (`providers/`,
@@ -64,9 +60,8 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/llm/` — the provider interface, the single OpenAI-compatible endpoint
   provider (the endpoint names a model per role; no separate keyed provider
   and no fallback), tool-schema conversion, conversation-log writing
-- `src/storage/` — persistence: JSONStorage (atomic writes) behind
-  DeferredStorage (batched flush), conversations, the dual-layer memory
-  (LanceDB vector store + JSON graph store), the soul
+- `src/storage/` — persistence: Postgres storage, conversations, the dual-layer memory
+  (pgvector vector store + JSON graph store), the soul
 - `src/ports/` — the narrow interfaces plugins see (LLM, storage, scheduler, …)
 - `src/types/` — Signal, Intent, Plugin, Cognition and friends: the shared
   vocabulary
@@ -122,21 +117,30 @@ disposable test boundary, `scripts/test-isolated.mjs
   never reach it; the launcher fails closed when it cannot hold that;
 - the launcher installs SIGINT/SIGTERM handlers and a hard deadline: on exit —
   success, inner failure, timeout or interruption — it stops and removes the
-  containers and temporary source images it started, then returns the exit
-  code (124 for timeout,
-  130/143 for interruption); a hard kill
-  can leave a container behind, and the launcher prunes leftovers matching its
-  label at the next run start and reports what it pruned;
+  test/store containers, the per-run internal store network and temporary
+  source images it started, then returns the exit code (124 for timeout,
+  130/143 for interruption); a hard kill can leave labeled resources behind,
+  and it prunes matching containers, networks and snapshot images at the next
+  run start and reports what it pruned;
+- each run pulls digest-pinned Valkey 8.1 and Postgres 17.11/pgvector images
+  during provisioning, starts them with memory-backed data and resource caps,
+  and waits for both readiness checks before Vitest. The test container joins
+  only their dedicated `--internal` Docker network and receives
+  `LIFEMODEL_TEST_VALKEY_URL` and `LIFEMODEL_TEST_DATABASE_URL`; that network
+  has no outside route. The test container receives no Docker socket or host
+  mounts. Tests use `tests/helpers/test-stores.ts` for a Postgres database and
+  Valkey logical database per Vitest worker. Missing store URLs fail tests;
+  there is no skip or substitute store;
 - the boundary runs Node.js 24.21.0 (`node:24.21.0-bookworm-slim`) with
   dependencies provisioned by native `npm ci` inside a container. Only the
   allowlisted `legacy-peer-deps` install policy is copied from `.npmrc`;
   credentials and registry overrides are rejected. The dependency cache key
   includes the manifests, policy and resolved base image/platform. Provisioning
-  can use the network; the test container is offline, non-root, capped at 2 CPUs,
-  3 GiB of memory (no additional swap) and 256 processes. Its root filesystem
-  is read-only; writes use memory-backed `/tmp` (768 MiB) and `/home/node`
-  (64 MiB). The per-run source image is removed after the container. The
-  dependency cache is intentionally retained;
+  can use the network; the test container is isolated to its internal store
+  network, non-root, capped at 2 CPUs, 3 GiB of memory (no additional swap) and
+  256 processes. Its root filesystem is read-only; writes use memory-backed
+  `/tmp` (768 MiB) and `/home/node` (64 MiB). The per-run source image is
+  removed after the container. The dependency cache is intentionally retained;
 - the overall run deadline is 25 minutes (`--timeout-ms` can lower it). Cleanup
   is awaited afterwards; the Docker-machine helper has up to 75 seconds to stop
   control processes and delete its machine after interruption;
@@ -144,31 +148,22 @@ disposable test boundary, `scripts/test-isolated.mjs
   machine with `--isolated --isolate-network`, 2 CPUs, 4 GiB memory and a
   32 GiB disk limit. No Mac mounts or SSH forwarding are enabled. The source
   and SHA-verified Node/Docker artifacts arrive over stdin; native `npm ci`
-  and a private rootless Docker daemon run inside the machine. OrbStack
-  machines share a Linux kernel: this is not a hardware-VM security boundary.
+  and a private rootless Docker daemon run inside the machine. Docker mode
+  pulls and starts the same digest-pinned Valkey and Postgres services on an
+  internal network, publishes them only to machine loopback for Vitest, waits
+  for readiness, then removes the services/network before deleting the
+  machine. OrbStack machines share a Linux kernel: this is not a hardware-VM security boundary.
   Unsupported hosts, missing OrbStack and failed rootless setup fail closed;
   there is no owner-socket, privileged or host-suite fallback. Deletion is
   awaited from outside the machine; an unconfirmed deletion keeps its claim
   for next-run recovery and cannot turn a successful suite into a green run;
 - the entrypoint policy is itself tested: `tests/unit/test-entrypoints.test.ts`
-  reads the committed config surfaces (package.json scripts, vitest config,
-  the pre-commit hook, the CI workflow, the lockfile agreement) and refuses a
-  raw vitest start on the host outside the named `ci-image` exception.
+  reads committed config surfaces (package.json scripts, vitest config, the
+  pre-commit hook, CI, lockfile agreement and store-image/network policy) and
+  refuses a
+  raw vitest start on the host in every CI job.
 
-The owner-approved exception is the PR-only `ci-image` job on a fresh
-GitHub-hosted Ubuntu runner. It may install test dependencies with host `npm ci`
-and run only `tests/integration/instance-first-start.test.ts` directly, with
-at most 2 workers, against its actual built
-`ghcr.io/shady2k/lifemodel:ci-$SHA` image and the runner's Docker daemon.
-The job has a 45-minute limit, read-only permissions, full credential-less
-checkout, no user secrets and no login or publishing step. Publishing stays
-in the separate main-push `ci-image-publish` job. No other job inherits this
-exception; `ci-product` remains on the isolated Node 24 launcher.
-
-Heavy Docker image/first-start acceptance is CI-only. Do not run that walk
-locally, including through `test:docker`. The NixOS test VM walk is manual.
-The completed isolated Docker backend is retained; this exception requires no
-new VM, DinD or controller.
+CI builds and publishes only the standalone core image; all tests run through the isolated launcher.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
@@ -200,14 +195,7 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 
 Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
-`DATA_PATH` moves the state, logs, plugins, models AND config roots: the
-config file is `<DATA_PATH>/config/agent.json` when `DATA_PATH` is set, and
-`data/config/agent.json` (the working directory's) when it is not — one
-function, `resolveConfigDir` (`src/config/config-loader.ts`), is what the
-startup read and lifemodel's settings interface both resolve, so they can
-never disagree about the file. The loader gives an instance
-`DATA_PATH=<volume>/data`, so its config is `<volume>/data/config/agent.json`
-(`src/core/container.ts`, `src/settings/`).
+`DATA_PATH` moves logs and plugin/runtime files, not durable application state. Configuration is stored in the core Postgres schema `core.settings`; `src/config/config-loader.ts` does not read or write a config file. `resolveConfigDir` and `data/config/agent.json` are removed.
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
@@ -224,13 +212,7 @@ never disagree about the file. The loader gives an instance
   and results pretty-printed, responses unwrapped from their JSON envelope;
   the file comes from `src/core/logger.ts`, the entries from
   `src/llm/provider.ts`
-- `data/state/` — persisted state: JSON state files (written through
-  DeferredStorage), conversations, `data/state/memory/` (vector store),
-  soul, graph, the durable inbound log (`core/inbound_log.json`) and its backup/corrupted siblings (written through DeferredStorage); next to it `data/skills/`, `data/motor-runs/`, `data/models/`,
-  `data/plugins/`. These logs and `data/state/` hold personal messages and
-  tool content: do not paste them outside this machine, and back up
-  `data/state/` before cleaning conversation history
-- `data/config/` — the config file read by `src/config/config-loader.ts`
+- Persistent state lives in its declared store: the tick snapshot, bus offsets and inbound/outbound streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a persistent-state store and the core must start when it is read-only. In the cluster, logs go to stdout (`kubectl logs`), and the ONNX model is baked into the core image at `/opt/model-cache` and read in place. Motor Cortex and its skill/workspace/run directories are disabled in the cluster (`MOTOR_CORTEX_ENABLED=false`) and move with lifemodel-653; when disabled, they must not create `data/skills`, `data/motor-runs` or `data/models`. Back up the stores before destructive recovery; logs and stores hold personal messages and tool content.
 
 ## Debugging unexpected agent output
 
@@ -291,7 +273,11 @@ Common issues:
   the prompt is clear.
 - **Poisoned history:** a bad response saved into conversation history gets
   copied by later turns. Check prior ASSISTANT messages in the conversation
-  log; fix by cleaning the conversation files under `data/state/`.
+  log. Conversation history lives in Postgres; inspect and recover it through
+  the Postgres-backed conversation store, after backing up the database. Tick
+  snapshots, bus offsets and inbound/outbound streams live in Valkey; inspect
+  or recover those through their Valkey-backed stores, after backing up Valkey.
+  Do not delete files under `data/` to recover durable state.
 - **Truncated response:** `finishReason: "length"` — the model hit the token
   limit. The loop retries: a truncated user-message response with no tool
   calls forces a retry, and failures escalate to the smart model.
@@ -303,57 +289,69 @@ Common issues:
 
 ## Restart guarantees
 
-A restart is never allowed to lose a turn or to answer a message twice by
-accident. The durable inbound log (`src/core/inbound-log.ts`) is the boundary
-that makes the distinction, and it is deliberately simple: the entry is
-written and flushed on receipt, and it LEAVES the log when its turn recorded
-an OUTCOME - answered, deliberately silent (`core.defer` / explicit
-no-reply), failed send, failed turn (`error` disposition). The four are
-mutually exclusive: an `error` disposition wins, otherwise the turn's FINAL
-send decides answered against failed send (an acknowledgement through
-`core.say` counts only when the turn ends with no further message). A failed
-outcome is reported at warn with the recipient and the reason and is NEVER
-retried. Only a message whose turn recorded no outcome is replayed, once, at
-the next start.
+The Valkey streams and the committed tick snapshot are the core's durable
+boundary. Local files do not define inbound replay.
+Gateways append messages to `inbound`; the core reads them as signals. Inbound
+messages remain owned by that stream and are never copied into the internal bus.
+The bus snapshot stores a contiguous watermark and a per-entry ledger for
+entries beyond it. Each ledger entry is owned by a persisted turn id, completed,
+or failed with a retry count. A failed internal turn retries once in the same
+running core; after its second failure its entries are completed with the
+recorded failure and a warning. A turn id is fixed when the turn starts, saved in
+the epoch-checked snapshot before any effect, and reused when its owned entries
+replay; absorbing more triggers later does not change its effect keys. A tick
+commit atomically stores this ledger with the inbound read and per-recipient
+offsets, bounded recent-message-id dedup ring, pending inbound messages, and
+outbox events. An entry is completed only in the CAS that commits its outcome.
+The watermark advances only over the contiguous completed prefix. The ledger
+admits at most 100 entries beyond the watermark. When full, later signals wait
+in the Valkey stream and are not admitted into the snapshot ledger until capacity
+opens. Completed entries beyond a gap stay in the ledger and are skipped on
+restart; owned and failed entries replay under their recorded turn id. Entries
+leave the ledger only when the watermark passes them, and the stream is trimmed
+only through that watermark after the snapshot CAS succeeds. The Valkey commit
+rejects a stale generation by epoch. Postgres writes are fenced by the active
+holder.
 
-The stop (`shutdownSequence` in `src/core/container.ts`) is BOUNDED and BEST
-EFFORT, under ONE deadline (`CoreLoopConfig.shutdownDrainTimeoutMs`, default
-90 s): intake stops first, the turn in flight and the sends it scheduled are
-drained, state and registries persist, the channels are released, the loop is
-closed for durable writes and storage flushes last (so a send that settles
-behind the flush keeps its message in the log for a single replay instead of
-writing where nothing would flush it). The stop persists NOTHING for the next
-run: what is queued but unprocessed is dropped. The guarantee covers the TURN
-IN FLIGHT and INBOUND TELEGRAM MESSAGES (the log above); everything else that
-was only queued in memory is LOST on a restart, as before this feature - a
-schedule firing (one-shot or recurring), a Motor Cortex result, a Telegram
-reaction, an internal signal. Reminders and Motor Cortex results become tasks
-with their own durable record and outcome later (`lifemodel-ten`); the
-pressures and neurons the ticks produce are simply recomputed. `src/index.ts` arms a hard
-exit at the same deadline (`src/core/hard-exit.ts`, REFERENCED until it is
-disarmed - an unref'd timer lets a hung process leave with code 0 before the
-deadline): whatever still hangs there - a stalled intake stop, a stalled tick,
-a hung send, a stalled flush - is abandoned and the process leaves with a
-non-zero code and one error line naming the step and the loop's live work it
-never finished.
+The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. One Valkey Lua script deletes event-key deduplication entries in bounded batches before trimming rows, so a key-deletion failure leaves rows available for retry and cannot orphan keys. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
 
-- **Graceful restart (SIGINT/SIGTERM) - strict, while the stop fits its
-  deadline.** When the sequence completes: no message is lost and none is
-  answered twice - an entry removed by a recorded outcome cannot replay, an
-  entry without one replays exactly once at the next start. A stop that hits
-  the deadline is best effort like a crash: the steps after it did not run.
-- **Crash (kill -9, OOM, a broken generation) - best effort.** Messages whose
-  turn recorded no outcome replay once at start. Signals that were only queued
-  in memory are lost, as on main.
+The outbox persists across tick boundaries. A CAS retires only the exact batch
+it accepted; sends arriving while the CAS is in flight remain queued for a
+later commit. A committed outbound event is the answer boundary. The Postgres
+message-row consumer applies outbound events idempotently by event id; its
+cursor advances after the row write. Deliberate silence is recorded by the
+committed tick with no outbound event. Error-disposition and rejected turns
+commit no partial sends; acknowledgements emitted before the failure are
+withdrawn with the turn. Inbound failures are counted and retried once by a
+fresh core (two failed attempts total). On the exhausted attempt only, one error
+notice is committed as the input's outcome, with an effect key distinct from a
+successful answer, and the input completes. An internal bus failure remains
+failed with its retry count and recorded turn id until a later outcome commits.
+Failed sends are not a core outcome: the gateway owns delivery and retry. With
+no channel registered, the core logs the committed event once at info and
+advances its in-process delivery cursor; the event remains in Valkey for the
+gateway's independent cursor.
 
-Known crash windows (named, not fixed; one debt item): an update lost between
-receipt and the emit-time flush; an answer delivered while its removal is not
-yet on disk (or any outcome recorded only in memory at the crash) - the
-message may be answered twice; a send in flight at the crash - the message
-replays once and the user may get the late send and the replay; a failed send
-or failed turn removes the message for good by decision. The same windows
-cover the stop that hits its deadline. `docs/architecture.md`
-carries the same list in context.
+A rejected signal-normalization write fails the core closed without committing that tick; the bounded fatal stop exits non-zero, and restart replays every uncommitted durable input, including the rest of the drained batch. A persistent store failure remains unhealthy and requires store repair.
+
+A hard stop or crash during a tick leaves the previous snapshot authoritative.
+The fresh core reads from its committed offsets and processes uncommitted
+messages again. After a commit, those messages are past the committed offsets
+and do not replay. The dedup ring is bounded; it is not an unbounded history.
+A graceful stop commits a drained turn through a bounded final epoch-checked
+snapshot before durable writes close. If it cannot commit by the stop deadline,
+its inputs remain uncommitted and replay. The same applies to an in-flight turn
+killed by a hard stop. Queued non-inbound work not represented by a durable
+stream or the committed snapshot can be regenerated or recovered according to
+its own durable store.
+
+Remaining windows are explicit: a Postgres message row may be applied before
+its cursor advances, so restart can reapply it (the event-id key makes that
+idempotent). A gateway may deliver an answer before its delivery cursor
+advances, so restart can deliver it again (delivery is at-least-once). An
+inbound gateway append that never reaches Valkey is outside the core's durable
+boundary. The Valkey epoch fence protects snapshot commits; the Postgres active
+holder fence protects Postgres writes. Neither makes a cross-store transaction.
 
 ## Design Principles
 
@@ -396,13 +394,11 @@ These are requirements, not suggestions.
    preceding `tool_calls[].id`.
 3. **Deterministic Errors Need Prevention, Not Recovery** — Same input → same
    error means fix the root cause. Don't retry what will always fail.
-4. **Unified Storage Path** — All data through DeferredStorage → JSONStorage
-   (atomic writes). Direct file I/O causes race conditions.
-   Known exception, being decided: `lifemodel-ww8`.
+4. **State has an explicit durable home** — Tick snapshots and bus streams live in Valkey; conversations, memory, soul, registries, plugin settings, schedules and configuration live in Postgres. `DATA_PATH` is not a state store. Do not add a file-backed state path or compatibility shim.
 5. **Timestamp Filtering Uses Content Timestamps** —
    `lastFetchedAt = max(item.publishedAt)`, NOT `new Date()`. Using fetch time
    skips items published between content time and fetch time.
    (`getMaxPublishedAt` in `src/plugins/news/index.ts`)
 6. **Stop Conditions Handle Gaps** — Stop on exact match with the last seen
    id, never on `<=`. IDs may have gaps from deletions.
-   (`fetchTelegramChannelUntil` in `src/plugins/news/fetchers/telegram.ts`)
+   (`getMaxPublishedAt` in `src/plugins/news/index.ts`)

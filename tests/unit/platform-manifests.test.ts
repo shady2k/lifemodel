@@ -29,7 +29,7 @@ function parseYamlFiles(files: string[]): Record<string, any>[] {
 function sourceObjects(): Record<string, any>[] {
   // Helm chart templates are Go templates, not standalone Kubernetes YAML.
   // Render the vendored chart in the Nix platform check instead.
-  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml')));
+  return parseYamlFiles(yamlFiles(platformRoot).filter((file) => !file.includes('/charts/') && !file.endsWith('kustomization.yaml') && !file.endsWith('/b/operator/rendered.yaml')));
 }
 
 function object(objects: Record<string, any>[], kind: string): Record<string, any> {
@@ -258,8 +258,8 @@ describe('platform manifests', () => {
     const pod = deployment!.spec.template.spec;
     const container = pod.containers[0];
     expect(container.image).toBe('ghcr.io/shady2k/lifemodel-loader:release-placeholder');
-    expect(container.env).toContainEqual({ name: 'LIFEMODEL_LOADER_MODE', value: 'platform' });
     expect(container.ports).toContainEqual(expect.objectContaining({ containerPort: 7000 }));
+    expect(container.env ?? []).not.toContainEqual(expect.objectContaining({ name: 'LIFEMODEL_LOADER_MODE' }));
     expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: { type: 'RuntimeDefault' } });
     expect(container.securityContext).toMatchObject({
       runAsNonRoot: true,

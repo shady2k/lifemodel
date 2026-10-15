@@ -354,9 +354,10 @@ owner's 2026-10-12 amendments named inline:
   NOT design drivers; the two-generation (and two-pod) overlap is measured
   in the test environment.
 - Constraints (inventory section 5): the 19-case first-start fixture
-  (tests/integration/instance-first-start.test.ts) is the accepted
-  outcome-4 walk and must stay re-walkable (CI-only on k3d, per the
-  Checks); design principles carry (signals not events; restart-safe
+  (tests/integration/instance-first-start.test.ts) was the accepted outcome-4
+  walk. Amended 2026-10-14 (owner, lifemodel-avy): the docker-run instance
+  image and this fixture are removed; outcome 4 is re-walked on the k3s shape
+  by the manual clean-VM check. Design principles carry (signals not events; restart-safe
   scheduling; plugin isolation; no backward-compat shims; no
   attribute-prefix routing).
 

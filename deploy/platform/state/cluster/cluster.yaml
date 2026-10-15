@@ -1,0 +1,19 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: lifemodel
+  namespace: lifemodel-state
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm@sha256:fe22b9fcd038dcd08c2019b17d95f517f137801e5f39d857a895d65e8c63033b
+  bootstrap:
+    initdb:
+      database: lifemodel
+      owner: lifemodel
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector;
+  storage:
+    size: 4Gi
+    storageClass: local-path
