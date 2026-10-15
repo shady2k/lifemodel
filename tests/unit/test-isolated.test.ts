@@ -100,9 +100,10 @@ describe('the disposable launch boundary', () => {
     const root = mkdtempSync(join(tmpdir(), 'snapshot-loader-'));
     const snapshot = join(root, 'snapshot');
     const source = join(root, 'source');
-    for (const directory of ['loader/src', 'loader/dist', 'loader/data', 'loader/.git', 'loader/node_modules', 'tests']) mkdirSync(join(source, directory), { recursive: true });
+    for (const directory of ['web/app/src', 'loader/src', 'loader/dist', 'loader/data', 'loader/.git', 'loader/node_modules', 'tests']) mkdirSync(join(source, directory), { recursive: true });
     writeFileSync(join(source, 'package.json'), '{}');
     writeFileSync(join(source, 'package-lock.json'), '{}');
+    writeFileSync(join(source, 'web', 'app', 'src', 'main.tsx'), 'export {};');
     writeFileSync(join(source, 'loader', 'package.json'), '{}');
     writeFileSync(join(source, 'loader', 'package-lock.json'), '{}');
     writeFileSync(join(source, 'loader', 'tsconfig.json'), '{}');
@@ -114,7 +115,7 @@ describe('the disposable launch boundary', () => {
     for (const nested of ['.env', '.env.local']) writeFileSync(join(source, 'loader', nested), 'synthetic-only');
     try {
       stageSnapshot(source, snapshot);
-      for (const file of ['loader/tsconfig.json', 'loader/package.json', 'loader/package-lock.json', 'loader/src/main.ts']) {
+      for (const file of ['loader/tsconfig.json', 'loader/package.json', 'loader/package-lock.json', 'loader/src/main.ts', 'web/app/src/main.tsx']) {
         expect(existsSync(join(snapshot, file))).toBe(true);
       }
       for (const file of ['loader/.env', 'loader/.env.local', 'loader/dist', 'loader/data', 'loader/.git', 'loader/node_modules']) {
@@ -187,11 +188,12 @@ describe('the disposable launch boundary', () => {
     expect(testArgs.join(' ')).not.toContain('--network none');
   });
   it('executes static checks before the suite without recursive npm scripts', () => {
-    expect(innerSteps('check', []).map(([name]) => name)).toEqual(['tsc', 'tsc', 'eslint', 'prettier', 'vitest']);
+    expect(innerSteps('check', []).map(([name]) => name)).toEqual(['tsc', 'tsc', 'tsc', 'eslint', 'prettier', 'vitest']);
     expect(innerSteps('check', [])[0]).toEqual(['tsc', '--noEmit']);
     expect(innerSteps('check', [])[1]).toEqual(['tsc', '-p', 'loader/tsconfig.json', '--noEmit']);
-    expect(innerSteps('check', [])[2]).toEqual(['eslint', 'src/', 'loader/']);
-    expect(innerSteps('check', [])[3]).toEqual(['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts']);
+    expect(innerSteps('check', [])[2]).toEqual(['tsc', '-p', 'web/app/tsconfig.json', '--noEmit']);
+    expect(innerSteps('check', [])[3]).toEqual(['eslint', 'src/', 'loader/', 'web/app/']);
+    expect(innerSteps('check', [])[4]).toEqual(['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}']);
     expect(innerSteps('test', ['test-file.ts'])[0].at(-1)).toBe('--maxWorkers=2');
   });
   it('preserves a child failure and times out a child that never settles', async () => {

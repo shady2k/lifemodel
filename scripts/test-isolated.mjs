@@ -19,7 +19,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TIMEOUT = 25 * 60_000;
 const FILES = ['package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts',
   'eslint.config.js', '.prettierrc', '.prettierignore', '.gitignore', '.dockerignore', 'AGENTS.md', 'README.md', 'LICENSE'];
-const DIRS = ['db', 'src', 'loader', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
+const DIRS = ['db', 'src', 'loader', 'web', 'tests', 'scripts', 'cli', 'docker', 'deploy', 'docs', '.backlog', '.githooks', '.husky', '.github'];
 const FORBIDDEN = new Set(['.git', 'node_modules', 'dist', 'data', 'coverage', '.DS_Store', '.npmrc']);
 const log = (text) => console.error(`[test-isolated] ${text}`);
 
@@ -148,11 +148,11 @@ export function acquireLock(directory = path.join(os.tmpdir(), `lifemodel-test-$
 
 export function innerSteps(mode, args) {
   const suite = ['vitest', 'run', ...args, '--maxWorkers=2'];
-  // The loader is a separate TypeScript project: root and loader typechecks,
-  // then lint and format over both trees, then the suite last.
+  // The loader and web app are separate TypeScript projects: typecheck all three,
+  // then lint and format source, then the suite last.
   return mode === 'check'
-    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'],
-      ['eslint', 'src/', 'loader/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts'], suite]
+    ? [['tsc', '--noEmit'], ['tsc', '-p', 'loader/tsconfig.json', '--noEmit'], ['tsc', '-p', 'web/app/tsconfig.json', '--noEmit'],
+      ['eslint', 'src/', 'loader/', 'web/app/'], ['prettier', '--check', 'src/**/*.ts', 'loader/**/*.ts', 'web/app/**/*.{ts,tsx,css,json,html}'], suite]
     : [suite];
 }
 
