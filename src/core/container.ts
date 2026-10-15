@@ -522,6 +522,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create logger
   const logger = createLogger(loggerConfig);
+  logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
   logger.info('Loaded configuration');
   if (!mergedConfig.motorCortex.enabled) {
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
@@ -1095,6 +1096,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     ),
     commitSnapshot: async (tick, outbox) => {
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
+      logger.debug({ epoch: snapshotEpoch, tick }, 'Core snapshot committed');
     },
     afterSnapshotCommit: async () => {
       await applyCommittedOutboundEvents(
