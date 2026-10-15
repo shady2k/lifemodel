@@ -95,7 +95,7 @@ describe('per-namespace application topology', () => {
         `deploy/platform/applications/${ns}/kustomization.yaml`,
         'utf8'
       );
-      expect(YAML.parse(application).resources).toEqual([]);
+      expect(YAML.parse(application).resources).toEqual(ns === 'lifemodel' ? ['core.yaml'] : []);
     }
   });
 

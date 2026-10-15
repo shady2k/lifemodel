@@ -1065,6 +1065,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...configOverrides.coreLoop,
   };
+  const stopDeadlineMs = Number(process.env['LIFEMODEL_CORE_STOP_DEADLINE_MS'] ?? 5_000);
+  if (!Number.isSafeInteger(stopDeadlineMs) || stopDeadlineMs < 1) {
+    throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
+  }
+  coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
   if (primaryUserChatId) {
     coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }

@@ -30,7 +30,7 @@ fi
 if [ "$1" = get ]; then
   case "$2" in *' '*) echo 'malformed resource token' >&2; exit 8;; esac
   case "$2:$3" in
-    ocirepositories:*) file=ocirepositories;; ocirepository:*) file=ocirepository;; gitrepositories:*) file=gitrepositories;; kustomizations:*) file=kustomizations;; deployments:*) file=deployments;; pods:*) file=pods;; events:*) file=events;; secrets:loader-bootstrap-state) file=secret;; secret:*) file=secret;; *) exit 9;;
+    ocirepositories:*) file=ocirepositories;; ocirepository:*) file=ocirepository;; gitrepositories:*) file=gitrepositories;; kustomizations:*) file=kustomizations;; deployments:*) file=deployments;; statefulsets:*) file=statefulset;; pods:*) file=pods;; events:*) file=events;; secrets:loader-bootstrap-state) file=secret;; secret:*) file=secret;; *) exit 9;;
   esac
   case "$*" in *"-n lifemodel-system "*) :;; *"-n lifemodel-motor "*) file=$file-lifemodel-motor;; *"-n lifemodel-git "*) file=$file-lifemodel-git;; *"-n lifemodel "*) file=$file-lifemodel;; esac
   cat "$FAKE_KUBECTL_RESPONSES/$file.json"
@@ -50,6 +50,8 @@ const healthy = {
   kustomizations: { items: [{ metadata: { name: 'platform', namespace: 'flux-system', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'ReconciliationSucceeded', message: 'Applied revision' }], lastAppliedRevision: 'sha256:root' } }] },
   deployments: { items: [{ metadata: { name: 'loader', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1, replicas: 1 } }] },
   pods: { items: [{ metadata: { name: 'loader-abc', labels: { app: 'loader' } }, status: { phase: 'Running', containerStatuses: [{ restartCount: 0, ready: true }] } }] },
+  'pods-lifemodel': { items: [{ metadata: { name: 'core-0', labels: { 'app.kubernetes.io/name': 'core', 'controller-revision-hash': 'core-abc' } }, status: { phase: 'Running', containerStatuses: [{ restartCount: 2, ready: true }] } }] },
+  'statefulset-lifemodel': { metadata: { name: 'core', generation: 1 }, spec: { replicas: 1 }, status: { observedGeneration: 1, readyReplicas: 1, currentRevision: 'core-abc' } },
   events: { items: [] },
   'gitrepositories-lifemodel': { items: [{ metadata: { name: 'lifemodel', namespace: 'lifemodel', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
   'gitrepositories-lifemodel-motor': { items: [{ metadata: { name: 'lifemodel-motor', namespace: 'lifemodel-motor', generation: 1 }, status: { observedGeneration: 1, conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] } }] },
@@ -80,6 +82,8 @@ describe('lifemodel doctor', () => {
     expect(run.stdout).toContain('Kustomization/lifemodel-motor/lifemodel-motor Ready=True generationCurrent=yes');
     expect(run.stdout).toContain('Pod/loader-abc phase=Running ready=yes restarts=0');
     expect(run.stdout).toContain('Deployment/loader ready=yes generationCurrent=yes desiredReplicas=1 restarts=0 lastEventReason=none');
+    expect(run.stdout).toContain('StatefulSet/core ready=yes generationCurrent=yes desiredReplicas=1 restarts=2 revision=core-abc snapshotCommitAge=not-queried');
+    expect(run.stdout).toContain('Pod/core-0 phase=Running ready=yes restarts=2');
     expect(readFileSync(env.calls, 'utf8').trim().split('\n')).toEqual([
       '<exec><-n><openbao><openbao-0><--><bao><status><-format=json>',
       '<get><ocirepositories><-n><flux-system><-o><json>',
@@ -94,6 +98,8 @@ describe('lifemodel doctor', () => {
       '<get><deployments><-n><lifemodel-system><-o><json>',
       '<get><pods><-n><lifemodel-system><-o><json>',
       '<get><events><-n><lifemodel-system><-o><json>',
+      '<get><statefulsets><core><-n><lifemodel><-o><json>',
+      '<get><pods><-n><lifemodel><-o><json>',
     ]);
   });
 
@@ -110,6 +116,7 @@ describe('lifemodel doctor', () => {
     ['unready Gitea', (data: any) => { data['deployments-lifemodel-git'].items[0].status.readyReplicas = 0; }, 0, 'Deployment/gitea'],
     ['a failing application source', (data: any) => { data['gitrepositories-lifemodel'].items[0].status.conditions[0].status = 'False'; }, 0, 'GitRepository/lifemodel/lifemodel'],
     ['a stale application Kustomization', (data: any) => { data['kustomizations-lifemodel'].items[0].status.observedGeneration = 0; }, 0, 'Kustomization/lifemodel/lifemodel'],
+    ['an unready core pod', (data: any) => { data['pods-lifemodel'].items[0].status.containerStatuses[0].ready = false; }, 0, 'StatefulSet/core'],
   ])('names %s', (_name, alter, baoExit, expected) => {
     const data = structuredClone(healthy) as Record<string, any>;
     alter(data);
