@@ -115,3 +115,10 @@ export type {
   CreatureStateSnapshot,
   CreatureStateReader,
 } from './creature-state.js';
+
+export type {
+  TranscriptRow,
+  TranscriptPage,
+  ReadTranscriptOptions,
+  TranscriptReader,
+} from './transcript.js';
