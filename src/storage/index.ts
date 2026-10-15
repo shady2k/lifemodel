@@ -47,3 +47,11 @@ export type {
 } from './snapshot-store.js';
 
 export { PostgresStorage } from './postgres-storage.js';
+
+export {
+  CreatureStateStore,
+  createCreatureStateStore,
+  CREATURE_STATE_KEY,
+  CREATURE_STATE_TTL_SECONDS,
+  CREATURE_STATE_HEARTBEAT_MS,
+} from './creature-state-store.js';

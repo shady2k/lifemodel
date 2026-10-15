@@ -108,3 +108,10 @@ export type {
   EventSchema,
 } from './plugin.js';
 export { isValidPluginId } from './plugin.js';
+
+// Creature state port
+export type {
+  CreatureState,
+  CreatureStateSnapshot,
+  CreatureStateReader,
+} from './creature-state.js';

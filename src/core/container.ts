@@ -5,6 +5,7 @@ import { Redis } from 'iovalkey';
 import { Pool } from 'pg';
 import type { Metrics, AgentIdentity, AgentState, Channel } from '../types/index.js';
 import type { PluginEventData } from '../types/signal.js';
+import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { EvidenceSource } from '../types/cognition.js';
 import {
   createLogger,
@@ -38,6 +39,7 @@ import {
   createStateManager,
   createConversationManager,
   createSnapshotStore,
+  createCreatureStateStore,
 } from '../storage/index.js';
 import {
   type MergedConfig,
@@ -207,6 +209,8 @@ export interface Container {
   motorCortex: MotorCortex | null;
   /** Durable inbound log (entries leave it on the turn's recorded outcome; lifemodel-ctc.2.1) */
   inboundStream: InboundMessageStream | null;
+  /** Fresh creature state for the web module; no Valkey client crosses this seam. */
+  creatureState: CreatureStateReader;
   /**
    * The step the stop reached ('done' while the agent runs). `src/index.ts`
    * reads it at the stop deadline for the hard exit's error line
@@ -500,6 +504,7 @@ export async function createContainerAsync(
 
   const snapshotRedis = new Redis(valkeyUrl);
   const snapshotStore = createSnapshotStore(snapshotRedis, { outboundKey: OUTBOUND_STREAM });
+  const creatureStateStore = createCreatureStateStore(snapshotRedis);
   const busSignalStream = createBusSignalStream(snapshotRedis);
   snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
@@ -1091,6 +1096,8 @@ export async function createContainerAsync(
     initialTickCount: Number(
       initialSnapshot?.sections['tickCounter'] ?? initialSnapshot?.tick ?? 0
     ),
+    creatureStateEpoch: snapshotEpoch,
+    publishCreatureState: (state, epoch) => creatureStateStore.publishCreatureState(state, epoch),
     commitSnapshot: async (tick, outbox) => {
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
       logger.debug({ epoch: snapshotEpoch, tick }, 'Core snapshot committed');
@@ -1271,6 +1278,7 @@ export async function createContainerAsync(
     recipientRegistry,
     motorCortex,
     inboundStream,
+    creatureState: creatureStateStore,
     stopProgress: () => stopProgress.step,
     shutdown,
   };
