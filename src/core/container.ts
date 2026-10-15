@@ -569,7 +569,9 @@ export async function createContainerAsync(
       );
       return result.rowCount !== 0;
     },
-    (messageId) => logger.warn({ messageId }, 'Inbound retry already has an owner history row')
+    (messageId) => {
+      logger.warn({ messageId }, 'Inbound retry already has an owner history row');
+    }
   );
   inboundStream.hydrateSnapshot(
     initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]

@@ -28,7 +28,9 @@ class OutboundWakeBroker {
         resolve();
         if (this.waiters.size === 0) this.disconnect();
       };
-      const abort = () => wake();
+      const abort = () => {
+        wake();
+      };
       this.waiters.add(wake);
       signal?.addEventListener('abort', abort, { once: true });
       this.start();
