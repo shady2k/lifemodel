@@ -2223,7 +2223,12 @@ export class CoreLoop {
    */
   private async processUserMessageSignal(signal: Signal): Promise<void> {
     const data = signal.data as
-      | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
+      | {
+          text?: string;
+          recipientId?: string;
+          sideEffectsApplied?: boolean;
+          replyTo?: { sequence: string };
+        }
       | undefined;
 
     // Idempotency guard: skip if already applied (signal was re-queued after deferral)
@@ -2243,7 +2248,12 @@ export class CoreLoop {
     // Save to conversation history (text only — base64 images are NOT persisted)
     if (this.conversationManager) {
       const data = signal.data as
-        | { text?: string; recipientId?: string; images?: unknown[] }
+        | {
+            text?: string;
+            recipientId?: string;
+            images?: unknown[];
+            replyTo?: { sequence: string };
+          }
         | undefined;
       if (data?.text && data.recipientId) {
         const photoPrefix = data.images?.length
@@ -2255,7 +2265,10 @@ export class CoreLoop {
             role: 'user',
             content: photoPrefix + data.text,
           },
-          { messageId: `inbound:${signal.id}` }
+          {
+            messageId: `inbound:${signal.id}`,
+            ...(data.replyTo ? { replyTo: data.replyTo.sequence } : {}),
+          }
         );
       }
     }

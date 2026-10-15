@@ -57,6 +57,8 @@ export interface ConversationMessage {
   channelMessageId?: string;
   /** Which channel sent this message */
   channel?: string;
+  /** Visible transcript sequence replied to by an owner message. */
+  replyTo?: string;
 }
 
 /**
@@ -87,6 +89,7 @@ interface StoredMessage {
   channelMessageId?: string;
   /** Which channel sent this message */
   channel?: string;
+  replyTo?: string;
   /** Stable Postgres natural key, not exposed to the model. */
   messageId?: string;
   sequence?: string;
@@ -253,6 +256,7 @@ export class ConversationManager {
       channelMessageId?: string;
       channel?: string;
       messageId?: string;
+      replyTo?: string;
     }
   ): Promise<void> {
     const key = this.getKey(userId);
@@ -264,6 +268,7 @@ export class ConversationManager {
       timestamp: new Date().toISOString(),
     };
     if (channelMeta?.messageId) storedMsg.messageId = channelMeta.messageId;
+    if (channelMeta?.replyTo) storedMsg.replyTo = channelMeta.replyTo;
     // Add channel metadata for reaction lookup (only for assistant messages)
     if (message.role === 'assistant') {
       if (channelMeta?.channelMessageId) {

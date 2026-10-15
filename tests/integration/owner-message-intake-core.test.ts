@@ -10,10 +10,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, testStoreUrls, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
+import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 
 const TSX = join(process.cwd(), 'node_modules', '.bin', 'tsx');
 const CHILD = join(process.cwd(), 'tests', 'fixtures', 'stream-core-child.ts');
 let coreOutput = '';
+let llmRequests: string[] = [];
 
 function uuidV7(at: number): string {
   const bytes = randomBytes(16);
@@ -89,9 +91,9 @@ describe('owner intake is processed once by the real core', { timeout: 120_000 }
     await redis.flushdb();
     dataRoot = await mkdtemp(join(tmpdir(), 'lifemodel-owner-intake-core-'));
     server = createServer(async (request, response) => {
-      for await (const _chunk of request) {
-        /* consume request */
-      }
+      let body = '';
+      for await (const chunk of request) body += chunk.toString();
+      llmRequests.push(body);
       completions += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(
@@ -128,7 +130,8 @@ describe('owner intake is processed once by the real core', { timeout: 120_000 }
 
   it('absorbs a receipt-write retry and answers both accepted messages once', async () => {
     const recipientId = 'rcpt_5dca93478eabd318';
-    const intake = new OwnerMessageIntake(redis, recipientId);
+    const transcript = new PostgresTranscriptStore(stores.postgres, stores.redis, recipientId);
+    const intake = new OwnerMessageIntake(redis, recipientId, { transcript });
     const retriedId = uuidV7(Date.now());
     const failureConnection = redis.duplicate();
     const failing = new OwnerMessageIntake(failureConnection, recipientId, {
@@ -175,8 +178,15 @@ describe('owner intake is processed once by the real core', { timeout: 120_000 }
         })
     );
 
+    const ownerRow = await stores.postgres.query(
+      'SELECT sequence::text FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2',
+      [recipientId, `inbound:${retriedId}`]
+    );
+    const replySequence = ownerRow.rows[0]!.sequence as string;
     const freshId = uuidV7(Date.now());
-    expect((await intake.acceptOwnerMessage(freshId, 'fresh accepted')).status).toBe('accepted');
+    expect((await intake.acceptOwnerMessage(freshId, 'fresh accepted', replySequence)).status).toBe(
+      'accepted'
+    );
     await waitFor(
       async () => {
         const rows = await stores.postgres.query(
@@ -206,6 +216,20 @@ describe('owner intake is processed once by the real core', { timeout: 120_000 }
     expect(rows.rows.filter((row) => row.message_id === `inbound:${retriedId}`)).toHaveLength(1);
     expect(rows.rows.filter((row) => row.message_id === `inbound:${freshId}`)).toHaveLength(1);
     expect(rows.rows.filter((row) => row.role === 'assistant')).toHaveLength(2);
+    const replyRow = await stores.postgres.query(
+      "SELECT sequence::text, payload->>'replyTo' AS reply_to FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2",
+      [recipientId, `inbound:${freshId}`]
+    );
+    expect(replyRow.rows[0]).toMatchObject({ reply_to: replySequence });
+    const replyDto = (await transcript.readTranscript({ limit: 50 })).rows.find(
+      (row) => row.clientId === freshId
+    );
+    expect(replyDto).toMatchObject({ replyTo: replySequence, text: 'fresh accepted' });
+    expect(
+      llmRequests.some(
+        (request) => request.includes('quoted_message') && request.includes('retry accepted')
+      )
+    ).toBe(true);
     expect(completions).toBe(2);
   });
 });

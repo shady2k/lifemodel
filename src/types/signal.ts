@@ -213,7 +213,7 @@ export interface UserMessageData {
   messageId?: string;
 
   /** Reply binding for the owner's web conversation. */
-  replyTo?: { sequence: string };
+  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 
   /** Reply-to message ID (if this is a reply from an external channel) */
   replyToId?: string;

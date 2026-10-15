@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Redis } from 'iovalkey';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
+import type { TranscriptReader } from '../ports/transcript.js';
 import { createUserMessageSignal } from '../types/signal.js';
 
 const RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -53,7 +54,11 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
   constructor(
     private readonly redis: Redis,
     private readonly recipientId: string,
-    options: { streamKey?: string; scriptOverride?: string } = {}
+    private readonly options: {
+      streamKey?: string;
+      scriptOverride?: string;
+      transcript?: TranscriptReader;
+    } = {}
   ) {
     if (!recipientId) throw new Error('recipientId is required');
     this.streamKey = options.streamKey ?? 'inbound';
@@ -66,6 +71,17 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
     replyTo?: string
   ): Promise<OwnerMessageAcceptance> {
     const idTime = validate(id, text, replyTo);
+    let quotedMessage:
+      | { sequence: string; role: 'user' | 'assistant'; excerpt: string }
+      | undefined;
+    if (replyTo !== undefined) {
+      if (!this.options.transcript) return { status: 'reply_not_found' };
+      const previous = (BigInt(replyTo) - 1n).toString();
+      const page = await this.options.transcript.readTranscript({ after: previous, limit: 1 });
+      const row = page.rows.find((candidate) => candidate.sequence === replyTo);
+      if (!row) return { status: 'reply_not_found' };
+      quotedMessage = { sequence: row.sequence, role: row.role, excerpt: row.text.slice(0, 280) };
+    }
     const now = Date.now();
     if (idTime < now - 24 * 60 * 60 * 1_000 || idTime > now + 5 * 60 * 1_000)
       return { status: 'stale' };
@@ -75,7 +91,7 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
       updateId: id,
       recipientId: this.recipientId,
       channel: 'web',
-      ...(replyTo === undefined ? {} : { replyTo: { sequence: replyTo } }),
+      ...(quotedMessage === undefined ? {} : { replyTo: quotedMessage }),
     });
     signal.id = id;
     signal.source = 'sense.web';
