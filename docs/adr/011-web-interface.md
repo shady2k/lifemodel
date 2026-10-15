@@ -400,8 +400,24 @@ deploy branch):
 
 ### 8. The frontend
 
-- React, TypeScript and Vite; TanStack Query for reads; an EventSource for
-  live events.
+- The stack, agreed with the owner on 2026-10-15:
+  - React 19, TypeScript and Vite, in `web/app/`;
+  - TanStack Query for reads, with the EventSource feeding new rows into its
+    cache; TanStack Router for routes; TanStack Virtual for the long list;
+  - Radix UI primitives with shadcn/ui components kept in the repository,
+    Tailwind CSS v4, and lucide-react icons;
+  - code highlighting with Shiki;
+  - Node 24 everywhere. Bun was declined for this module; moving the whole
+    project to Bun is an idea (lifemodel-knak).
+- The server is Fastify on Node 24, with request schemas and hand-written
+  SSE, bundled by esbuild into one file.
+- **Language:** English and Russian, chosen by the browser's language;
+  English by default. i18next with react-i18next, with plural forms and
+  dates by locale. This is the interface's language; lifemodel picks the
+  language of its answers itself.
+- **Themes:** light and dark from the start, following the system setting
+  (`prefers-color-scheme`) and changing live with it. Both themes are sets
+  of the same design tokens, and both meet WCAG 2.2 AA contrast.
 - react-markdown without raw HTML. Links render only for `http` and `https`
   URLs and open in a new tab with `rel="noopener noreferrer"`; images are not
   fetched from model text.
@@ -525,7 +541,7 @@ VM.
   write rows, start it again, and assert the catch-up shows each row once.
 - **S9:** an integration and frontend test over 10,000 rows: one initial page
   including the stream, bounded earlier pages, and no internal rows.
-- **S10:** an axe-core run, plus the keyboard and screen-reader checklist of
+- **S10:** an axe-core run in both themes and both languages, plus the keyboard and screen-reader checklist of
   Decision 8 as a frontend test where it can be automated. The owner judges
   the layout on the VM walk.
 - **S11:** an integration test: kill the core after it published `thinking`;
