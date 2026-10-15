@@ -2227,7 +2227,7 @@ export class CoreLoop {
           text?: string;
           recipientId?: string;
           sideEffectsApplied?: boolean;
-          replyTo?: { sequence: string };
+          replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
         }
       | undefined;
 
@@ -2252,7 +2252,7 @@ export class CoreLoop {
             text?: string;
             recipientId?: string;
             images?: unknown[];
-            replyTo?: { sequence: string };
+            replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
           }
         | undefined;
       if (data?.text && data.recipientId) {
@@ -2267,7 +2267,7 @@ export class CoreLoop {
           },
           {
             messageId: `inbound:${signal.id}`,
-            ...(data.replyTo ? { replyTo: data.replyTo.sequence } : {}),
+            ...(data.replyTo ? { replyTo: data.replyTo } : {}),
           }
         );
       }

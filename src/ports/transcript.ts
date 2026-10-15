@@ -5,7 +5,7 @@ export interface TranscriptRow {
   role: 'user' | 'assistant';
   text: string;
   createdAt: string;
-  replyTo?: string;
+  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 }
 
 export interface TranscriptPage {

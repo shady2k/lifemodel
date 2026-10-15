@@ -58,7 +58,7 @@ export interface ConversationMessage {
   /** Which channel sent this message */
   channel?: string;
   /** Visible transcript sequence replied to by an owner message. */
-  replyTo?: string;
+  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 }
 
 /**
@@ -89,7 +89,7 @@ interface StoredMessage {
   channelMessageId?: string;
   /** Which channel sent this message */
   channel?: string;
-  replyTo?: string;
+  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
   /** Stable Postgres natural key, not exposed to the model. */
   messageId?: string;
   sequence?: string;
@@ -256,7 +256,7 @@ export class ConversationManager {
       channelMessageId?: string;
       channel?: string;
       messageId?: string;
-      replyTo?: string;
+      replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
     }
   ): Promise<void> {
     const key = this.getKey(userId);

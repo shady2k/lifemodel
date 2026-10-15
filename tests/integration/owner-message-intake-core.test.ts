@@ -217,14 +217,19 @@ describe('owner intake is processed once by the real core', { timeout: 120_000 }
     expect(rows.rows.filter((row) => row.message_id === `inbound:${freshId}`)).toHaveLength(1);
     expect(rows.rows.filter((row) => row.role === 'assistant')).toHaveLength(2);
     const replyRow = await stores.postgres.query(
-      "SELECT sequence::text, payload->>'replyTo' AS reply_to FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2",
+      "SELECT sequence::text, payload->'replyTo' AS reply_to FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2",
       [recipientId, `inbound:${freshId}`]
     );
-    expect(replyRow.rows[0]).toMatchObject({ reply_to: replySequence });
+    expect(replyRow.rows[0]).toMatchObject({
+      reply_to: { sequence: replySequence, role: 'user', excerpt: 'retry accepted' },
+    });
     const replyDto = (await transcript.readTranscript({ limit: 50 })).rows.find(
       (row) => row.clientId === freshId
     );
-    expect(replyDto).toMatchObject({ replyTo: replySequence, text: 'fresh accepted' });
+    expect(replyDto).toMatchObject({
+      replyTo: { sequence: replySequence, role: 'user', excerpt: 'retry accepted' },
+      text: 'fresh accepted',
+    });
     expect(
       llmRequests.some(
         (request) => request.includes('quoted_message') && request.includes('retry accepted')

@@ -38,7 +38,12 @@ describe('Postgres owner transcript', () => {
       });
       await conversations.save(`conversation:${recipientId}`, {
         messages: [
-          { ...row('user', 'new question', { replyTo: '123' }), messageId: 'inbound:client-new' },
+          {
+            ...row('user', 'new question', {
+              replyTo: { sequence: '123', role: 'assistant', excerpt: 'quoted answer' },
+            }),
+            messageId: 'inbound:client-new',
+          },
         ],
       });
       await conversations.delete(`conversation:${recipientId}`);
@@ -53,7 +58,7 @@ describe('Postgres owner transcript', () => {
       expect(latest.rows[1]).toMatchObject({
         clientId: 'client-new',
         role: 'user',
-        replyTo: '123',
+        replyTo: { sequence: '123', role: 'assistant', excerpt: 'quoted answer' },
       });
       expect(latest.cursor).toBe(latest.rows[0]?.sequence);
       const earlier = await transcript.readTranscript({
@@ -69,6 +74,22 @@ describe('Postgres owner transcript', () => {
       ).rejects.toThrow();
       expect((await transcript.readTranscript({ after: '999999999', limit: 50 })).rows).toEqual([]);
       await expect(transcript.readTranscript({ limit: 51 })).rejects.toThrow();
+    } finally {
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('rejects malformed stored reply quotes instead of silently omitting them', async () => {
+    const stores = await createTestStores();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const transcript = new PostgresTranscriptStore(stores.postgres, stores.redis, recipientId);
+      await stores.postgres.query(
+        `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
+         VALUES ($1, 'inbound:malformed-reply', 'message', $2::jsonb)`,
+        [recipientId, JSON.stringify(row('user', 'question', { replyTo: { sequence: '12' } }))]
+      );
+      await expect(transcript.readTranscript({ limit: 50 })).rejects.toThrow(/replyTo/i);
     } finally {
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
