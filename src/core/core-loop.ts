@@ -30,6 +30,7 @@ import type {
 } from '../types/index.js';
 import { createSignal, THOUGHT_LIMITS } from '../types/signal.js';
 import { awaitWithinDeadline } from './deadline.js';
+import { DurableEffectRegistry } from './durable-effect-registry.js';
 import { createTraceContext, withTraceContext, type TraceContext } from './trace-context.js';
 import type {
   AutonomicResult,
@@ -434,6 +435,7 @@ export class CoreLoop {
 
   /** Extracted intent applicator (handles the 15-case switch statement) */
   private readonly intentApplicator: IntentApplicator;
+  private readonly durableEffects = new DurableEffectRegistry();
 
   constructor(
     agent: Agent,
@@ -537,6 +539,7 @@ export class CoreLoop {
     // The channels Map is passed by reference, so new channels registered later are visible
     this.intentApplicator = new IntentApplicator({
       agent,
+      durableEffects: this.durableEffects,
       logger: this.logger,
       metrics,
       recipientRegistry: deps.recipientRegistry,
@@ -1004,7 +1007,9 @@ export class CoreLoop {
    * messages remain in the durable inbound log.
    */
   async stop(deadlineMs?: number): Promise<void> {
+    const deadline = deadlineMs ?? Date.now() + this.config.shutdownDrainTimeoutMs;
     if (!this.running) {
+      await this.durableEffects.drain(deadline, this.logger);
       return;
     }
 
@@ -1023,8 +1028,6 @@ export class CoreLoop {
       this.eventBus.unsubscribe(this.typingSubscriptionId);
       this.typingSubscriptionId = null;
     }
-
-    const deadline = deadlineMs ?? Date.now() + this.config.shutdownDrainTimeoutMs;
 
     // The in-flight tick and the scheduler callback are waited on here (so no
     // signal handling races the drain below); each wait is bounded by the ONE
@@ -1086,6 +1089,8 @@ export class CoreLoop {
         );
       }
     }
+
+    await this.durableEffects.drain(deadline, this.logger);
 
     // The stop is over: the turn in flight (if it overran) may not apply
     // further intents through its later immediate callbacks.
@@ -1697,14 +1702,16 @@ export class CoreLoop {
 
           // Prune dedup sets to prevent unbounded growth
           if (this.domainTrackers) {
-            void this.domainTrackers.pruneSignaledSets().catch((err: unknown) => {
+            const prune = this.domainTrackers.pruneSignaledSets();
+            this.durableEffects.track('sleep dedup-set pruning', prune);
+            void prune.catch((err: unknown) => {
               this.logger.warn({ error: err }, 'Failed to prune dedup sets during sleep');
             });
           }
 
           // Soul sleep maintenance
           if (this.soulProvider) {
-            void runSleepMaintenance({
+            const maintenance = runSleepMaintenance({
               logger: this.logger,
               soulProvider: this.soulProvider,
               memoryProvider: this.memoryProvider,
@@ -1728,6 +1735,7 @@ export class CoreLoop {
                 this.logger.warn({ error: result.error }, 'Soul sleep maintenance failed');
               }
             });
+            this.durableEffects.track('soul sleep maintenance', maintenance);
           }
         }
         this.previousAlertnessMode = currentMode;
