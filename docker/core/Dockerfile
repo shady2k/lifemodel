@@ -5,9 +5,7 @@ WORKDIR /opt/lifemodel
 COPY package.json package-lock.json tsconfig.json .npmrc ./
 RUN npm ci
 COPY src ./src
-RUN npm run build && npm prune --omit=dev \
-    && npm install --omit=dev --no-save --cpu=wasm32 sharp \
-    && rm -rf node_modules/@img/sharp-linux-x64 node_modules/@img/sharp-libvips-linux-x64
+RUN npm run build && npm prune --omit=dev
 
 # Resolve and cache the exact local embedder model at build time. The application
 # reads this cache in place from /opt/model-cache at startup.
