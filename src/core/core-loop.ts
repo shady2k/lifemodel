@@ -1046,7 +1046,7 @@ export class CoreLoop {
     this.scheduleTick();
     if (this.publishCreatureState && this.creatureStateEpoch !== undefined) {
       this.creatureStateHeartbeat = setInterval(() => {
-        void this.publishCurrentCreatureState(true);
+        if (this.running) void this.publishCurrentCreatureState(true);
       }, CREATURE_STATE_HEARTBEAT_MS);
       this.creatureStateHeartbeat.unref?.();
     }
@@ -1063,15 +1063,13 @@ export class CoreLoop {
   async stop(deadlineMs?: number): Promise<void> {
     const deadline = deadlineMs ?? Date.now() + this.config.shutdownDrainTimeoutMs;
     if (!this.running) {
+      this.clearCreatureStateHeartbeat();
       await this.durableEffects.drain(deadline, this.logger);
       return;
     }
 
     this.running = false;
-    if (this.creatureStateHeartbeat) {
-      clearInterval(this.creatureStateHeartbeat);
-      this.creatureStateHeartbeat = null;
-    }
+    this.clearCreatureStateHeartbeat();
 
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
@@ -1237,6 +1235,7 @@ export class CoreLoop {
    */
   haltForTest(): void {
     this.running = false;
+    this.clearCreatureStateHeartbeat();
     this.deadForTest = true;
     this.lateEffectsFenced = true;
     if (this.tickTimeout) {
@@ -1447,6 +1446,11 @@ export class CoreLoop {
       });
       this.pendingBusWrites.push(write);
     }
+  }
+
+  private clearCreatureStateHeartbeat(): void {
+    if (this.creatureStateHeartbeat) clearInterval(this.creatureStateHeartbeat);
+    this.creatureStateHeartbeat = null;
   }
 
   private async publishCurrentCreatureState(force = false): Promise<void> {
@@ -1995,6 +1999,7 @@ export class CoreLoop {
     } catch (error) {
       if (error instanceof SignalNormalizationError) {
         this.running = false;
+        this.clearCreatureStateHeartbeat();
         if (this.tickTimeout) clearTimeout(this.tickTimeout);
         this.tickTimeout = null;
         withTraceContext(tickCtx, () => {
@@ -2020,6 +2025,7 @@ export class CoreLoop {
 
       if (error instanceof StaleSnapshotEpochError || error instanceof StalePostgresEpochError) {
         this.running = false;
+        this.clearCreatureStateHeartbeat();
         if (this.tickTimeout) clearTimeout(this.tickTimeout);
         this.tickTimeout = null;
         withTraceContext(tickCtx, () => {
@@ -2037,6 +2043,7 @@ export class CoreLoop {
         // ahead of durable state. Stop and let restart hydrate the last commit.
         if (this.snapshotCommitStarted) {
           this.running = false;
+          this.clearCreatureStateHeartbeat();
           return;
         }
         this.scheduleTick();
