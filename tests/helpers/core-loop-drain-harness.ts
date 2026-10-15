@@ -363,6 +363,8 @@ export interface HarnessOptions {
   initialSleepState?: Partial<SleepState>;
   commitSnapshot?: CoreLoopDeps['commitSnapshot'];
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
+  onFatalError?: CoreLoopDeps['onFatalError'];
+  initialCognitionResult?: CognitionResult;
   busSignalStream?: BusSignalStream;
   inboundStream?: CoreLoopDeps['inboundStream'];
   initialBusOffset?: BusSnapshot;
@@ -408,6 +410,7 @@ export async function startInstance(
     };
   } else {
     cognition = new FakeCognitionLayer(opts.cognitionMode ?? 'immediate');
+    if (opts.initialCognitionResult) cognition.result = opts.initialCognitionResult;
   }
   const layers = { autonomic, aggregation, cognition: cognition as never };
   const config: Partial<CoreLoopConfig> = {
@@ -431,6 +434,7 @@ export async function startInstance(
       inboundStream: opts.inboundStream,
       commitSnapshot: opts.commitSnapshot,
       onStaleSnapshot: opts.onStaleSnapshot,
+      onFatalError: opts.onFatalError,
       conversationManager: opts.conversationManager,
     } as CoreLoopDeps
   );

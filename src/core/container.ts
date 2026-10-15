@@ -1111,6 +1111,10 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
       process.exitCode = 1;
       void shutdown?.();
     },
+    onFatalError: () => {
+      process.exitCode = 1;
+      void shutdown?.();
+    },
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },
