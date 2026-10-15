@@ -316,7 +316,7 @@ export class CoreLoop {
 
   private running = false;
   private tickCount = 0;
-  private lastTickAt = 0;
+  private lastCommitAt = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
   private tickPromise: Promise<void> | null = null;
@@ -1384,8 +1384,8 @@ export class CoreLoop {
     return this.tickCount;
   }
 
-  getLastTickAt(): number {
-    return this.lastTickAt;
+  getLastCommitAt(): number {
+    return this.lastCommitAt;
   }
 
   /**
@@ -1442,7 +1442,6 @@ export class CoreLoop {
     this.tickInFlight++;
     const tickStart = Date.now();
     this.tickCount++;
-    this.lastTickAt = tickStart;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });
@@ -1900,6 +1899,7 @@ export class CoreLoop {
         try {
           await this.commitSnapshot?.(this.tickCount, committingOutbox);
           if (this.commitSnapshot) {
+            this.lastCommitAt = Date.now();
             const committed = new Set(committingOutbox);
             for (let index = this.tickOutbox.length - 1; index >= 0; index--) {
               const event = this.tickOutbox[index];
