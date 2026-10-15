@@ -844,6 +844,8 @@ export async function createContainerAsync(
   // Create recipient registry for message routing (with persistence)
   const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
   await recipientRegistry.init();
+  recipientRegistry.getOrCreate('web', 'owner');
+  await recipientRegistry.flush();
   logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
   // Create persistent ack registry for deferrals (must be loaded before use)
@@ -1074,10 +1076,6 @@ export async function createContainerAsync(
     throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
   }
   coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
-  if (primaryUserChatId) {
-    coreLoopConfig.primaryUserChatId = primaryUserChatId;
-  }
-
   let shutdown: (() => Promise<void>) | null = null;
   // Create core loop
   const coreLoop = createCoreLoop(agent, eventBus, layers, logger, metrics, coreLoopConfig, {

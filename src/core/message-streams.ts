@@ -274,7 +274,7 @@ export interface OutboundMessagePayload extends Record<string, unknown> {
 }
 
 /**
- * Retain events until both consumers pass them, except that the oldest events
+ * Retain events until Postgres applies them, except that the oldest events
  * are forcibly discarded after the configured age/length horizon. Events and
  * their idempotency keys share that horizon.
  */
@@ -283,7 +283,6 @@ export async function trimOutboundEvents(
   options: {
     streamKey?: string;
     postgresOffsetKey?: string;
-    deliveryOffsetKey?: string;
     eventKeysKey?: string;
     maxLength?: number;
     maxAgeMs?: number;
@@ -292,7 +291,6 @@ export async function trimOutboundEvents(
 ): Promise<void> {
   const streamKey = options.streamKey ?? OUTBOUND_STREAM;
   const postgresOffsetKey = options.postgresOffsetKey ?? 'outbound:pg-applied';
-  const deliveryOffsetKey = options.deliveryOffsetKey ?? 'outbound:delivery-offset';
   const eventKeysKey =
     options.eventKeysKey ??
     (streamKey === OUTBOUND_STREAM
@@ -303,11 +301,7 @@ export async function trimOutboundEvents(
   if (!Number.isInteger(maxLength) || maxLength < 1 || !Number.isFinite(maxAgeMs) || maxAgeMs < 1) {
     throw new Error('Outbound retention maxLength and maxAgeMs must be positive');
   }
-  const [postgresOffset, deliveryOffset] = await Promise.all([
-    redis.get(postgresOffsetKey),
-    redis.get(deliveryOffsetKey),
-  ]);
-  const passed = minStreamId(postgresOffset ?? '0-0', deliveryOffset ?? '0-0');
+  const passed = (await redis.get(postgresOffsetKey)) ?? '0-0';
   let boundary = passed;
   const ageBoundary = `${String(Math.max(0, Date.now() - maxAgeMs))}-0`;
   if (compareStreamIds(ageBoundary, boundary) > 0) boundary = ageBoundary;
@@ -323,7 +317,7 @@ export async function trimOutboundEvents(
   if (dropped > 0) {
     options.logger?.warn(
       { count: dropped, streamKey, maxLength, maxAgeMs },
-      'Outbound retention bound dropped undelivered events'
+      'Outbound retention bound dropped unapplied events'
     );
   }
 }
@@ -338,18 +332,6 @@ function compareStreamIds(left: string, right: string): number {
   const x = BigInt(leftSeq),
     y = BigInt(rightSeq);
   return x < y ? -1 : x > y ? 1 : 0;
-}
-
-function minStreamId(left: string, right: string): string {
-  const [leftMillisText, leftSequenceText] = left.split('-');
-  const [rightMillisText, rightSequenceText] = right.split('-');
-  if (!leftMillisText || !leftSequenceText || !rightMillisText || !rightSequenceText) {
-    throw new Error('Invalid outbound stream cursor');
-  }
-  const leftMillis = BigInt(leftMillisText);
-  const rightMillis = BigInt(rightMillisText);
-  if (leftMillis !== rightMillis) return leftMillis < rightMillis ? left : right;
-  return BigInt(leftSequenceText) <= BigInt(rightSequenceText) ? left : right;
 }
 
 /** Apply committed outbound message rows in stream order. Replaying a row is safe
@@ -415,7 +397,6 @@ export function startOutboundDelivery(
   let active = true;
   const trimOptions = {
     streamKey,
-    deliveryOffsetKey: offsetKey,
     ...(options.postgresOffsetKey ? { postgresOffsetKey: options.postgresOffsetKey } : {}),
     ...(options.eventKeysKey ? { eventKeysKey: options.eventKeysKey } : {}),
     ...(options.maxLength !== undefined ? { maxLength: options.maxLength } : {}),

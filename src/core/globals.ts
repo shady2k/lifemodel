@@ -18,7 +18,7 @@
 
 /**
  * Primary recipient ID - the main user the system interacts with.
- * Set during CoreLoop initialization from config.primaryUserChatId.
+ * Set during CoreLoop initialization from the web owner recipient.
  */
 let primaryRecipientId: string | undefined;
 

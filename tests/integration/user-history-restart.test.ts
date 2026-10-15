@@ -7,6 +7,8 @@ import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { ConversationManager } from '../../src/storage/conversation-manager.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestLogger } from '../helpers/test-logger.js';
+import { PersistentRecipientRegistry } from '../../src/core/recipient-registry.js';
+import { getPrimaryRecipientId, setPrimaryRecipientId } from '../../src/core/globals.js';
 import { startCoreHealthServer } from '../../src/core/health-server.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import {
@@ -42,6 +44,43 @@ describe('inbound user history restart durability', () => {
   afterAll(async () => {
     await stores.redis.quit();
     await stores.postgres.end();
+  });
+
+  it('registers the durable web recipient as primary across restart', async () => {
+    const registry = new PersistentRecipientRegistry(stores.postgres, createTestLogger());
+    await registry.init();
+    const recipientId = registry.getOrCreate('web', 'owner');
+    await registry.flush();
+    const path = await makeScratchDir('web-recipient-');
+    const first = await startInstance(path, { tickIntervalMs: 10, recipientRegistry: registry });
+    try {
+      expect(getPrimaryRecipientId()).toBe(recipientId);
+      expect(first.registry.resolve(recipientId)).toEqual({
+        channel: 'web',
+        destination: 'owner',
+      });
+      const restartedRegistry = new PersistentRecipientRegistry(
+        stores.postgres,
+        createTestLogger()
+      );
+      await restartedRegistry.init();
+      expect(restartedRegistry.lookup('web', 'owner')).toBe(recipientId);
+      const secondPath = await makeScratchDir('web-recipient-restart-');
+      const second = await startInstance(secondPath, {
+        tickIntervalMs: 10,
+        recipientRegistry: restartedRegistry,
+      });
+      try {
+        expect(second.registry.lookup('web', 'owner')).toBe(recipientId);
+      } finally {
+        await second.coreLoop.stop();
+        await rmDir(secondPath);
+      }
+    } finally {
+      await first.coreLoop.stop();
+      setPrimaryRecipientId(undefined);
+      await rmDir(path);
+    }
   });
 
   it('stops unhealthy when normalization rejects and replays every drained input', async () => {
