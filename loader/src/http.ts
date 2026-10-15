@@ -6,6 +6,7 @@ import {
   createSession,
   csrfToken,
   hashPassword,
+  hostName,
   isAllowedHost,
   loginLocation,
   parseCookies,
@@ -126,7 +127,10 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     const method = req.method ?? 'GET';
-    if (!isAllowedHost(req.headers.host)) {
+    const serviceVerify =
+      path === '/_auth/verify' &&
+      hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
+    if (!serviceVerify && !isAllowedHost(req.headers.host)) {
       sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
       return;
     }
