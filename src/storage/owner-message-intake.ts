@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Redis } from 'iovalkey';
 import { Pool } from 'pg';
-import { PostgresTranscriptStore } from './postgres-transcript-store.js';
+import { closeTranscriptWakeBroker, PostgresTranscriptStore } from './postgres-transcript-store.js';
 import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
@@ -181,6 +181,7 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
     transcript,
     creatureState,
     async close() {
+      await closeTranscriptWakeBroker(redis);
       await Promise.all([redis.quit(), pool.end()]);
     },
   };

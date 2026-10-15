@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PostgresTranscriptStore } from '../../src/storage/postgres-transcript-store.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
+import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
 
 const recipientId = 'transcript-owner-pages';
+const uuidV7 = (): string => {
+  const timestamp = Date.now().toString(16).padStart(12, '0');
+  return `${timestamp.slice(0, 8)}-${timestamp.slice(8)}-7000-8000-000000000000`;
+};
 const row = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
   role,
   content,
@@ -24,6 +29,12 @@ describe('Postgres owner transcript', () => {
           { ...row('user', 'older question'), messageId: 'inbound:client-older' },
           { ...row('assistant', 'older answer'), messageId: 'channel:web:answer-older' },
           { ...row('assistant', null, { tool_calls: [{ id: 'call-1' }] }), messageId: 'tool-turn' },
+          {
+            ...row('assistant', 'tool reasoning that must stay hidden', {
+              tool_calls: [{ id: 'call-2' }],
+            }),
+            messageId: 'text-tool-turn',
+          },
           {
             ...row('tool', 'private tool result', { tool_call_id: 'call-1' }),
             messageId: 'tool-result',
@@ -53,6 +64,22 @@ describe('Postgres owner transcript', () => {
         ],
       });
 
+      const visibleRows = await transcript.readTranscript({ limit: 50 });
+      expect(visibleRows.rows.map(({ text }) => text)).not.toContain(
+        'tool reasoning that must stay hidden'
+      );
+      const hiddenTarget = await stores.postgres.query(
+        `SELECT sequence::text FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = 'text-tool-turn'`,
+        [recipientId]
+      );
+      const intake = new OwnerMessageIntake(stores.redis, recipientId, { transcript });
+      expect(
+        await intake.acceptOwnerMessage(
+          uuidV7(),
+          'must not quote hidden tool text',
+          hiddenTarget.rows[0]!.sequence
+        )
+      ).toEqual({ status: 'reply_not_found' });
       const latest = await transcript.readTranscript({ limit: 2 });
       expect(latest.rows.map(({ text }) => text)).toEqual(['answer after clear', 'new question']);
       expect(latest.rows[1]).toMatchObject({
@@ -119,7 +146,13 @@ describe('Postgres owner transcript', () => {
         [watchRecipientId, JSON.stringify(row('user', 'must not be visible'))]
       );
       const later = writer.save(`conversation:${watchRecipientId}`, {
-        messages: [{ ...row('assistant', 'later'), messageId: 'channel:web:later' }],
+        messages: [
+          {
+            ...row('assistant', 'hidden tool-call text', { tool_calls: [{ id: 'hidden-call' }] }),
+            messageId: 'text-tool-call',
+          },
+          { ...row('assistant', 'later'), messageId: 'channel:web:later' },
+        ],
       });
       const firstRow = iterator.next();
       await delayed.query('ROLLBACK');
@@ -148,6 +181,56 @@ describe('Postgres owner transcript', () => {
       abort.abort();
       await Promise.all([stores.postgres.end(), stores.redis.quit()]);
     }
+  });
+
+  it('removes an aborted watcher while its shared Valkey hint is pending', async () => {
+    const stores = await createTestStores();
+    const abort = new AbortController();
+    try {
+      await applyTestMigrations(stores.postgres);
+      const transcript = new PostgresTranscriptStore(stores.postgres, stores.redis, 'abort-watch');
+      const iterator = transcript.watchTranscript('0', abort.signal)[Symbol.asyncIterator]();
+      const pending = iterator.next();
+      abort.abort();
+      await expect(pending).resolves.toMatchObject({ done: true });
+      await iterator.return?.();
+    } finally {
+      abort.abort();
+      await Promise.all([stores.postgres.end(), stores.redis.quit()]);
+    }
+  });
+
+  it('shares one hint connection and disconnects it when outage watchers abort', async () => {
+    let signalXreadStarted!: () => void;
+    const xreadStarted = new Promise<void>((resolve) => {
+      signalXreadStarted = resolve;
+    });
+    const disconnect = vi.fn();
+    const xread = vi.fn(async () => {
+      signalXreadStarted();
+      throw new Error('Valkey unavailable');
+    });
+    const connection = { xread, disconnect };
+    const duplicate = vi.fn(() => connection);
+    const fakeRedis = { duplicate } as unknown as import('iovalkey').Redis;
+    const fakePool = {
+      query: vi.fn(async () => ({ rows: [] })),
+    } as unknown as import('pg').Pool;
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const firstStore = new PostgresTranscriptStore(fakePool, fakeRedis, 'outage-one');
+    const secondStore = new PostgresTranscriptStore(fakePool, fakeRedis, 'outage-two');
+    const first = firstStore.watchTranscript('0', firstAbort.signal)[Symbol.asyncIterator]();
+    const second = secondStore.watchTranscript('0', secondAbort.signal)[Symbol.asyncIterator]();
+    const firstPending = first.next();
+    const secondPending = second.next();
+    await xreadStarted;
+    firstAbort.abort();
+    await expect(firstPending).resolves.toMatchObject({ done: true });
+    expect(duplicate).toHaveBeenCalledTimes(1);
+    secondAbort.abort();
+    await expect(secondPending).resolves.toMatchObject({ done: true });
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('delivers a newly saved assistant row promptly when outbound wakes the watcher', async () => {
@@ -198,7 +281,20 @@ describe('Postgres owner transcript', () => {
         stores.redis,
         largeRecipientId
       );
+      await stores.postgres.query('ANALYZE core.conversation_messages');
+      const querySpy = vi.spyOn(stores.postgres, 'query');
       let page = await transcript.readTranscript({ limit: 50 });
+      const queryCall = querySpy.mock.calls.at(-1);
+      querySpy.mockRestore();
+      expect(queryCall?.[0]).toBeTypeOf('string');
+      const plan = await stores.postgres.query<{ 'QUERY PLAN': { Plan: unknown }[] }>(
+        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${String(queryCall?.[0])}`,
+        queryCall?.[1] as unknown[]
+      );
+      const planText = JSON.stringify(plan.rows[0]?.['QUERY PLAN'][0]?.Plan);
+      expect(planText).toContain('Limit');
+      expect(planText).toMatch(/Index (Only )?Scan/);
+      expect(planText).not.toMatch(/CTE Scan|Materialize/);
       expect(page.rows).toHaveLength(50);
       expect(page.rows.every(({ text }) => text.startsWith('text-'))).toBe(true);
       const all: string[] = [];
