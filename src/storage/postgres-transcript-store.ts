@@ -118,18 +118,18 @@ export class PostgresTranscriptStore implements TranscriptReader {
     }
     const replyTo = value as Record<string, unknown>;
     if (
-      typeof replyTo.sequence !== 'string' ||
-      !/^[1-9][0-9]*$/.test(replyTo.sequence) ||
-      (replyTo.role !== 'user' && replyTo.role !== 'assistant') ||
-      typeof replyTo.excerpt !== 'string' ||
-      replyTo.excerpt.length > 280
+      typeof replyTo['sequence'] !== 'string' ||
+      !/^[1-9][0-9]*$/.test(replyTo['sequence']) ||
+      (replyTo['role'] !== 'user' && replyTo['role'] !== 'assistant') ||
+      typeof replyTo['excerpt'] !== 'string' ||
+      replyTo['excerpt'].length > 280
     ) {
       throw new Error('Stored transcript replyTo is malformed');
     }
     return {
-      sequence: replyTo.sequence,
-      role: replyTo.role,
-      excerpt: replyTo.excerpt,
+      sequence: replyTo['sequence'],
+      role: replyTo['role'],
+      excerpt: replyTo['excerpt'],
     };
   }
 
