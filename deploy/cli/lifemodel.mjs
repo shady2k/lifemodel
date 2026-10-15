@@ -75,7 +75,15 @@ function reportOpenBao(failures) {
     if (sealed) failures.push('OpenBao (sealed)');
   }
 }
+function reportCpuRequirement() {
+  const cpuinfoPath = process.env.LIFEMODEL_CPUINFO || '/proc/cpuinfo';
+  const cpuinfo = readFileSync(cpuinfoPath, 'utf8');
+  const flagSets = [...cpuinfo.matchAll(/^flags\s*:\s*(.*)$/gm)].map(match => new Set(match[1].split(/\s+/)));
+  const supported = flagSets.length > 0 && flagSets.every(flags => flags.has('sse4_2') && flags.has('popcnt'));
+  if (!supported) console.warn('WARNING: CPU lacks x86-64-v2 flags (sse4_2, popcnt); the core image memory search may fail to load. Use x86-64-v2 or newer; for VMs set the vCPU type to host or an x86-64-v2 model.');
+}
 function report() {
+  reportCpuRequirement();
   const override = readOverride();
   if (override) console.log(`ACTIVE PLATFORM OVERRIDE: ${override.ref} (recorded against ${override.configuredRef})`);
   const failures = [];

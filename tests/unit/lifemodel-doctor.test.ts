@@ -71,6 +71,16 @@ function runAsync(args: string[], env: NodeJS.ProcessEnv): Promise<number | null
 }
 
 describe('lifemodel doctor', () => {
+  it('warns when cpuinfo lacks x86-64-v2 flags', () => {
+    const env = setup(healthy);
+    env.env.LIFEMODEL_CPUINFO = join(root, 'tests/fixtures/cpuinfo-x86-64-v1.txt');
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stderr).toContain('CPU lacks x86-64-v2 flags (sse4_2, popcnt)');
+    expect(run.stderr).toContain('core image memory search may fail to load');
+    expect(run.stderr).toContain('set the vCPU type to host or an x86-64-v2 model');
+  });
+
   it('reports ready Flux resources and loader state with exit zero', () => {
     const env = setup(healthy);
     const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });

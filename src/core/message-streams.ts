@@ -197,6 +197,13 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
   }
 
+  /** Pending entries whose retry budget was exhausted before this process read them. */
+  exhaustedEntries(): InboundMessage[] {
+    return this.snapshot.pending.filter(
+      (message) => (this.snapshot.errorRetries[message.messageId] ?? 0) >= 2
+    );
+  }
+
   /** Whether this failed turn is the bounded final attempt for its entries. */
   willExhaustRetries(signalIds: string[]): boolean {
     const ids = new Set(signalIds);

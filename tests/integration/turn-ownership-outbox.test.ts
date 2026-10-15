@@ -44,6 +44,77 @@ async function waitForEntries(bus: ReturnType<typeof createBusSignalStream>, cou
 }
 
 describe('turn ownership and outbox durability', () => {
+  it('settles a snapshot entry already at the retry limit with one notice and no cognition', async () => {
+    const prefix = `turn-pre-exhausted:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const bus = createBusSignalStream(stores.redis, prefix);
+    const inbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+    const signal = createUserMessageSignal({
+      text: 'already exhausted',
+      recipientId: 'exhausted-recipient',
+      channel: 'test',
+      updateId: 'already-exhausted',
+    });
+    inbound.hydrateSnapshot({
+      version: 1,
+      readOffset: '0-0',
+      recipientOffsets: {},
+      recentMessageIds: [],
+      pending: [
+        {
+          streamId: '1-0',
+          messageId: 'already-exhausted',
+          recipientId: 'exhausted-recipient',
+          signal,
+        },
+      ],
+      errorRetries: { 'already-exhausted': 2 },
+    });
+    store.register(bus);
+    store.register(inbound);
+    const epoch = await store.takeEpoch();
+    const path = await makeScratchDir('turn-pre-exhausted-');
+    const instance = await startInstance(path, {
+      tickIntervalMs: 10,
+      busSignalStream: bus,
+      inboundStream: inbound,
+      commitSnapshot: async (tick, outbox) => {
+        await store.commitOwners(epoch, tick, outbox);
+      },
+    });
+    try {
+      await waitForAsync(
+        async () => (await stores.redis.xlen(`${prefix}outbound`)) === 1,
+        'one exhausted-input notice'
+      );
+      const rows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
+      const event = JSON.parse(rows[0]![1][rows[0]![1].indexOf('event') + 1] ?? 'null') as {
+        eventId: string;
+        payload: { recipientId: string; channel: string; text: string };
+      };
+      expect(event).toMatchObject({
+        eventId: expect.stringMatching(/^error-notice:/),
+        payload: {
+          recipientId: 'exhausted-recipient',
+          channel: 'test',
+          text: 'I could not complete that request after two attempts.',
+        },
+      });
+      expect(rows).toHaveLength(1);
+      expect(instance.cognition.calls).toHaveLength(0);
+      const saved = await store.read();
+      const section = saved?.sections['inbound'] as {
+        pending: unknown[];
+        recentMessageIds: string[];
+      };
+      expect(section.pending).toHaveLength(0);
+      expect(section.recentMessageIds).toContain('already-exhausted');
+    } finally {
+      await instance.coreLoop.stop();
+      await rmDir(path);
+    }
+  });
+
   it('commits an inbound answer without a registered recipient route', async () => {
     const prefix = `turn-no-route:${stores.workerId}:${Date.now()}:`;
     const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
