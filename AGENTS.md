@@ -313,7 +313,7 @@ only through that watermark after the snapshot CAS succeeds. The Valkey commit
 rejects a stale generation by epoch. Postgres writes are fenced by the active
 holder.
 
-The outbound stream retains events until both Postgres and delivery cursors pass them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. One Valkey Lua script deletes event-key deduplication entries in bounded batches before trimming rows, so a key-deletion failure leaves rows available for retry and cannot orphan keys. Events at or below both cursors are removed, and event-key deduplication entries share the same retention horizon.
+The outbound stream retains events until the Postgres apply offset passes them, except for an explicit 10,000-event / 30-day retention bound; events beyond that bound may be dropped and are logged with the actual trim count. The web channel is a pull channel with no delivery cursor. One Valkey Lua script deletes event-key deduplication entries in bounded batches before trimming rows, so a key-deletion failure leaves rows available for retry and cannot orphan keys. Events at or below the Postgres apply offset are removed, and event-key deduplication entries share the same retention horizon.
 
 The outbox persists across tick boundaries. A CAS retires only the exact batch
 it accepted; sends arriving while the CAS is in flight remain queued for a
@@ -327,10 +327,11 @@ fresh core (two failed attempts total). On the exhausted attempt only, one error
 notice is committed as the input's outcome, with an effect key distinct from a
 successful answer, and the input completes. An internal bus failure remains
 failed with its retry count and recorded turn id until a later outcome commits.
-Failed sends are not a core outcome: the gateway owns delivery and retry. With
-no channel registered, the core logs the committed event once at info and
-advances its in-process delivery cursor; the event remains in Valkey for the
-gateway's independent cursor.
+Failed sends are not a core outcome: the gateway owns delivery and retry. The
+web channel is a pull channel with no delivery cursor; the browser's resume
+cursor is not a delivery record. With no channel registered, the core logs the
+committed event once at info and advances its in-process delivery cursor; the
+event remains in Valkey for the gateway's independent cursor.
 
 A rejected signal-normalization write fails the core closed without committing that tick; the bounded fatal stop exits non-zero, and restart replays every uncommitted durable input, including the rest of the drained batch. A persistent store failure remains unhealthy and requires store repair.
 

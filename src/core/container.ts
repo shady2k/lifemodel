@@ -616,61 +616,64 @@ export async function createContainerAsync(
   // Create event bus
   const eventBus = createEventBus(logger);
 
-  const primaryUserChatId: string | null = null;
+  // The web owner is the primary user for all primary-recipient consumers.
+  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
+  await recipientRegistry.init();
+  const primaryRecipientId = recipientRegistry.getOrCreate('web', 'owner');
+  await recipientRegistry.flush();
+  logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
-  // Create UserModel if primary user configured
+  // Restore or create the UserModel for the web owner.
   let userModel: UserModel | null = null;
-  if (primaryUserChatId) {
-    // Check if user has beliefs (may be missing from old persisted states)
-    const hasBeliefs = persistedState?.user && 'beliefs' in persistedState.user;
-    if (persistedState?.user?.id === primaryUserChatId && hasBeliefs) {
-      // Restore from persisted state - convert date strings
-      const restoredUser = {
-        ...persistedState.user,
-        lastMentioned:
-          typeof persistedState.user.lastMentioned === 'string'
-            ? new Date(persistedState.user.lastMentioned)
-            : persistedState.user.lastMentioned,
-        beliefs: {
-          energy: {
-            ...persistedState.user.beliefs.energy,
-            updatedAt:
-              typeof persistedState.user.beliefs.energy.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.energy.updatedAt)
-                : persistedState.user.beliefs.energy.updatedAt,
-          },
-          mood: {
-            ...persistedState.user.beliefs.mood,
-            updatedAt:
-              typeof persistedState.user.beliefs.mood.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.mood.updatedAt)
-                : persistedState.user.beliefs.mood.updatedAt,
-          },
-          availability: {
-            ...persistedState.user.beliefs.availability,
-            updatedAt:
-              typeof persistedState.user.beliefs.availability.updatedAt === 'string'
-                ? new Date(persistedState.user.beliefs.availability.updatedAt)
-                : persistedState.user.beliefs.availability.updatedAt,
-          },
+  // Check if user has beliefs (may be missing from old persisted states)
+  const hasBeliefs = persistedState?.user && 'beliefs' in persistedState.user;
+  if (persistedState?.user?.id === primaryRecipientId && hasBeliefs) {
+    // Restore from persisted state - convert date strings
+    const restoredUser = {
+      ...persistedState.user,
+      lastMentioned:
+        typeof persistedState.user.lastMentioned === 'string'
+          ? new Date(persistedState.user.lastMentioned)
+          : persistedState.user.lastMentioned,
+      beliefs: {
+        energy: {
+          ...persistedState.user.beliefs.energy,
+          updatedAt:
+            typeof persistedState.user.beliefs.energy.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.energy.updatedAt)
+              : persistedState.user.beliefs.energy.updatedAt,
         },
-      };
-      userModel = createUserModel(restoredUser, logger);
-      logger.info(
-        {
-          userId: primaryUserChatId,
-          userName: restoredUser.name,
-          language: restoredUser.preferences.language,
+        mood: {
+          ...persistedState.user.beliefs.mood,
+          updatedAt:
+            typeof persistedState.user.beliefs.mood.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.mood.updatedAt)
+              : persistedState.user.beliefs.mood.updatedAt,
         },
-        'UserModel restored from persisted state'
-      );
-    } else {
-      const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
-      const timezoneOffset =
-        configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
-      userModel = createNewUserWithModel(primaryUserChatId, userName, logger, timezoneOffset);
-      logger.info({ userId: primaryUserChatId, userName }, 'UserModel created for primary user');
-    }
+        availability: {
+          ...persistedState.user.beliefs.availability,
+          updatedAt:
+            typeof persistedState.user.beliefs.availability.updatedAt === 'string'
+              ? new Date(persistedState.user.beliefs.availability.updatedAt)
+              : persistedState.user.beliefs.availability.updatedAt,
+        },
+      },
+    };
+    userModel = createUserModel(restoredUser, logger);
+    logger.info(
+      {
+        userId: primaryRecipientId,
+        userName: restoredUser.name,
+        language: restoredUser.preferences.language,
+      },
+      'UserModel restored from persisted state'
+    );
+  } else {
+    const userName = configOverrides.primaryUser?.name ?? mergedConfig.primaryUser.name;
+    const timezoneOffset =
+      configOverrides.primaryUser?.timezoneOffset ?? mergedConfig.primaryUser.timezoneOffset;
+    userModel = createNewUserWithModel(primaryRecipientId, userName, logger, timezoneOffset);
+    logger.info({ userId: primaryRecipientId, userName }, 'UserModel created for primary user');
   }
 
   // Create LLM providers
@@ -840,13 +843,6 @@ export async function createContainerAsync(
 
     logger.info({ hasFetch: true, hasSearch: !!motorSearchFn }, 'Motor Cortex service initialized');
   }
-
-  // Create recipient registry for message routing (with persistence)
-  const recipientRegistry = createPersistentRecipientRegistry(postgres, logger);
-  await recipientRegistry.init();
-  recipientRegistry.getOrCreate('web', 'owner');
-  await recipientRegistry.flush();
-  logger.info({ count: recipientRegistry.size() }, 'RecipientRegistry configured');
 
   // Create persistent ack registry for deferrals (must be loaded before use)
   const ackRegistry = new PersistentAckRegistry(logger);
