@@ -112,6 +112,8 @@ export interface SendTurnRef {
    * two different inbound questions can legitimately need the same reply.
    */
   answersInbound: boolean;
+  /** Inbound channel metadata; delivery resolves the current destination. */
+  channel?: string;
   eventId: string;
 }
 
@@ -294,15 +296,9 @@ export class IntentApplicator {
     if (turnKey) this.deps.onSendStarted?.(turnKey, recipientId, finalSend);
 
     const route = this.deps.recipientRegistry?.resolve(recipientId);
-    if (!route) {
-      this.deps.logger.error({ recipientId }, 'Could not resolve outbound recipient');
-      if (turnKey) {
-        void this.deps.onSendSettled?.(turnKey, recipientId, finalSend, {
-          delivered: false,
-        });
-      }
-      return;
-    }
+    const channel = route?.channel ?? send?.channel;
+    if (!channel)
+      throw new Error(`Could not determine outbound channel for recipient ${recipientId}`);
     if (!this.deps.enqueueOutbound) {
       throw new Error('Outbound event queue is required for SEND_MESSAGE');
     }
@@ -312,13 +308,13 @@ export class IntentApplicator {
       type: 'send.command',
       payload: {
         recipientId,
-        channel: route.channel,
-        destination: route.destination,
+        channel,
+        ...(route ? { destination: route.destination } : {}),
         text,
         ...(replyTo ? { replyTo } : {}),
       },
     });
-    this.deps.metrics.counter('outbound_events_queued', { channel: route.channel });
+    this.deps.metrics.counter('outbound_events_queued', { channel });
     if (turnKey) {
       // The core outcome is the committed outbound event, not delivery. The
       // gateway owns send.settled and any later delivery failure.

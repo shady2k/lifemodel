@@ -3,6 +3,7 @@ import { decodeSignal, type Signal } from '../types/signal.js';
 import type { SnapshotOutboxEvent, SnapshotSectionOwner } from '../storage/snapshot-store.js';
 import type { ConversationManager } from '../storage/conversation-manager.js';
 import type { Channel, Logger } from '../types/index.js';
+import type { IRecipientRegistry } from './recipient-registry.js';
 
 export const INBOUND_STREAM = 'inbound';
 export const OUTBOUND_STREAM = 'outbound';
@@ -260,7 +261,7 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
 export interface OutboundMessagePayload extends Record<string, unknown> {
   recipientId: string;
   channel: string;
-  destination: string;
+  destination?: string;
   text: string;
   replyTo?: string;
 }
@@ -399,6 +400,7 @@ export function startOutboundDelivery(
     eventKeysKey?: string;
     maxLength?: number;
     maxAgeMs?: number;
+    recipientRegistry?: IRecipientRegistry;
   } = {}
 ): { stop(): void; done: Promise<void> } {
   const streamKey = options.streamKey ?? OUTBOUND_STREAM;
@@ -429,10 +431,12 @@ export function startOutboundDelivery(
         if (event?.type !== 'send.command')
           throw new Error(`Invalid outbound message event at ${streamId}`);
         const payload = event.payload as OutboundMessagePayload;
-        const channel = channels.get(payload.channel);
+        const route = options.recipientRegistry?.resolve(payload.recipientId);
+        const channelName = route?.channel ?? payload.channel;
+        const channel = channels.get(channelName);
         if (!channel) {
           logger.info(
-            { eventId: event.eventId, channel: payload.channel },
+            { eventId: event.eventId, channel: channelName },
             'Outbound event committed for the future gateway; no channel is registered'
           );
           // Advance only this process's scan position. Persisting the channel
@@ -447,7 +451,10 @@ export function startOutboundDelivery(
           continue;
         }
         try {
-          const result = await channel.sendMessage(payload.destination, payload.text, {
+          const destination = route?.destination ?? payload.destination;
+          if (!destination)
+            throw new Error(`Could not resolve delivery destination for ${payload.recipientId}`);
+          const result = await channel.sendMessage(destination, payload.text, {
             ...(typeof payload.replyTo === 'string' ? { replyTo: payload.replyTo } : {}),
           });
           if (!result.success) throw new Error('channel returned unsuccessful send');

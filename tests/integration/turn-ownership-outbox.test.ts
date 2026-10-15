@@ -1,8 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestStores, type TestStores } from '../helpers/test-stores.js';
+import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
 import { createBusSignalStream, type BusSnapshot } from '../../src/core/bus-stream.js';
-import { InboundMessageStream } from '../../src/core/message-streams.js';
+import {
+  applyCommittedOutboundEvents,
+  InboundMessageStream,
+} from '../../src/core/message-streams.js';
+import { ConversationManager } from '../../src/storage/conversation-manager.js';
+import { PostgresStorage } from '../../src/storage/postgres-storage.js';
+import { createTestLogger } from '../helpers/test-logger.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import {
   startInstance,
@@ -37,9 +44,72 @@ async function waitForEntries(bus: ReturnType<typeof createBusSignalStream>, cou
 }
 
 describe('turn ownership and outbox durability', () => {
+  it('commits an inbound answer without a registered recipient route', async () => {
+    const prefix = `turn-no-route:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const bus = createBusSignalStream(stores.redis, prefix);
+    const inbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+    store.register(bus);
+    store.register(inbound);
+    const epoch = await store.takeEpoch();
+    const path = await makeScratchDir('turn-no-route-');
+    const instance = await startInstance(path, {
+      tickIntervalMs: 10,
+      busSignalStream: bus,
+      commitSnapshot: async (tick, outbox) => {
+        await store.commitOwners(epoch, tick, outbox);
+      },
+    });
+    (instance.coreLoop as unknown as { inboundStream: InboundMessageStream }).inboundStream =
+      inbound;
+    instance.registry.remove(instance.recipientId);
+    const recipientId = `walk-${stores.workerId}-${Date.now()}`;
+    const conversation = new ConversationManager(
+      new PostgresStorage(stores.postgres),
+      createTestLogger()
+    );
+    try {
+      (instance.cognition as { result: unknown }).result = answer(recipientId, 'committed answer');
+      await inbound.append(
+        createUserMessageSignal({
+          text: 'please answer',
+          recipientId,
+          channel: 'walk',
+          updateId: `walk-${Date.now()}`,
+        })
+      );
+      await waitForAsync(
+        async () => (await stores.redis.xlen(`${prefix}outbound`)) === 1,
+        'outbound event committed'
+      );
+      await applyCommittedOutboundEvents(
+        stores.redis,
+        conversation,
+        `${prefix}pg-offset`,
+        `${prefix}outbound`
+      );
+      const rows = await conversation.getFullHistory(recipientId);
+      expect(rows.filter((row) => row.role === 'assistant').map((row) => row.content)).toEqual([
+        'committed answer',
+      ]);
+      const streamRows = await stores.redis.xrange(`${prefix}outbound`, '-', '+');
+      const event = JSON.parse(
+        streamRows[0]![1][streamRows[0]![1].indexOf('event') + 1] ?? 'null'
+      ) as {
+        payload: { recipientId: string; channel: string };
+      };
+      expect(event.payload).toMatchObject({ recipientId, channel: 'walk' });
+      expect(streamRows).toHaveLength(1);
+    } finally {
+      await instance.coreLoop.stop();
+      await rmDir(path);
+    }
+  });
+
   let stores: TestStores;
   beforeAll(async () => {
     stores = await createTestStores();
+    await applyTestMigrations(stores.postgres);
   });
   afterAll(async () => {
     await stores.redis.quit();
@@ -554,7 +624,7 @@ describe('turn ownership and outbox durability', () => {
     }
   });
 
-  it('commits one core-owned notice for an exhausted error with no producer intents', async () => {
+  it('bounds no-outcome turns and commits one core-owned notice on exhaustion', async () => {
     const prefix = `turn-exhausted-empty:${stores.workerId}:${Date.now()}:`;
     let signal: ReturnType<typeof createUserMessageSignal> | undefined;
     let saved: Awaited<ReturnType<ReturnType<typeof createSnapshotStore>['read']>> = null;
@@ -591,16 +661,16 @@ describe('turn ownership and outbox durability', () => {
           confidence: 0,
           intents: [],
           response: undefined,
-          disposition: 'error',
         };
         if (attempt === 1) {
           await waitFor(
             () => instance.cognition.calls.length === 1,
-            'first failed attempt started'
+            'first no-outcome attempt started'
           );
           (instance.cognition as { settleAll(result: unknown): void }).settleAll({
-            ...answer(instance.recipientId, 'failure notice'),
-            disposition: 'error',
+            confidence: 0,
+            intents: [],
+            response: undefined,
           });
         }
         const expectedEvents = attempt === 1 ? 0 : 1;

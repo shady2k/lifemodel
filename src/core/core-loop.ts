@@ -617,10 +617,21 @@ export class CoreLoop {
         const eventId = `${effectKind === 'error-notice' ? 'error-notice' : 'send'}:${eventHash}`;
         const stableTurnKey = turnKey;
         if (stableTurnKey !== undefined) this.sendTurnByEvent.set(eventId, stableTurnKey);
+        const inboundChannel = state?.turn.triggerSignals
+          .concat(state.turn.absorbedSignals)
+          .find((signal) => {
+            const data = signal.data as { recipientId?: unknown } | undefined;
+            return (
+              signal.type === 'user_message' && data?.recipientId === intent.payload.recipientId
+            );
+          })?.data as { channel?: unknown } | undefined;
         return {
           turnKey,
           final: state?.resolved ?? false,
           answersInbound: inboundIds.length > 0,
+          ...(typeof inboundChannel?.channel === 'string'
+            ? { channel: inboundChannel.channel }
+            : {}),
           eventId,
         };
       },
@@ -815,17 +826,17 @@ export class CoreLoop {
         outcome === 'failed_turn' ? (this.inboundStream?.markFailedTurn(inboundIds) ?? []) : [];
       if (state.finalErrorAttempt && exhaustedIds.length > 0)
         this.inboundStream?.settle(exhaustedIds);
-      if (inboundIds.length > 0 && (outcome === undefined || exhaustedIds.length > 0)) {
+      if (inboundIds.length > 0) {
         this.logger.warn(
           {
             recipientId,
-            entries: outcome === 'failed_turn' ? exhaustedIds.length : inboundIds.length,
+            entries: inboundIds.length,
             outcome: outcome ?? 'none',
             disposition: state.disposition ?? null,
           },
-          outcome === 'failed_turn'
+          exhaustedIds.length > 0
             ? 'Inbound messages remain pending but will not be retried after repeated errors'
-            : 'Turn committed no outcome; its inputs remain available for retry'
+            : 'Inbound turn failed; its messages remain pending for bounded retry'
         );
       }
       return;
@@ -924,13 +935,27 @@ export class CoreLoop {
     if (!state) return intents;
     state.resolved = true;
     state.applyingResult = true;
-    state.disposition = disposition;
     const answered = this.answeredRecipientOf(state);
     const inboundIds = answered === undefined ? [] : this.ownedInboundIds(state.turn, answered);
+    const hasAnswerIntent = intents.some(
+      (intent) => intent.type === 'SEND_MESSAGE' && intent.payload.recipientId === answered
+    );
+    // A resolved inbound turn with no answer and no explicit silence is a
+    // failed attempt, not durable progress that may replay forever.
+    const effectiveDisposition =
+      disposition !== 'error' &&
+      disposition !== 'no_reply' &&
+      disposition !== 'defer' &&
+      inboundIds.length > 0 &&
+      !hasAnswerIntent
+        ? 'error'
+        : disposition;
+    state.disposition = effectiveDisposition;
     state.finalErrorAttempt =
-      disposition === 'error' && (this.inboundStream?.willExhaustRetries(inboundIds) ?? false);
+      effectiveDisposition === 'error' &&
+      (this.inboundStream?.willExhaustRetries(inboundIds) ?? false);
     let appliedIntents = intents;
-    if (disposition === 'error') {
+    if (effectiveDisposition === 'error') {
       state.tentativeEvents = [];
       // Result sends are tentative as a batch: none may escape through the
       // unowned outbox path after an earlier suppressed send settles.
