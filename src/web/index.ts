@@ -48,6 +48,7 @@ async function main(): Promise<void> {
     server.listen({ host: '0.0.0.0', port }),
     operations.listen({ host: '0.0.0.0', port: internalPort }),
   ]);
+  process.stdout.write('Web server listening\n');
 }
 
 void main().catch((error: unknown) => {
