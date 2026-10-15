@@ -30,6 +30,18 @@ messages, because the assistant has nowhere else to put progress.
   started it ("◌ Собрать скиллы из шаблонов"), showing its state. The
   chip opens the task's drawer; the conversation itself gets no "still
   running" messages.
+- **The conversation is never busy.** The owner can change the subject at
+  any moment without fear that lifemodel drops what it was doing. (The
+  owner, 2026-10-15: dots does some work inside its conversation turn, and
+  asking about something else feels like it may abandon that work.)
+  - Long work is always a task. A conversation turn is short: understand,
+    answer, decide. Anything longer than one turn (running commands,
+    checks, builds) becomes a task with its chip, never work done inside
+    the turn.
+  - A new message cancels nothing. A started task runs until Stop or the
+    owner's explicit request.
+  - Every started piece of work is visible in "Сейчас" as running, so the
+    owner sees nothing was dropped without asking.
 - **Several matters at once, without talking to tasks.** The owner never
   writes to a task. A message is bound to a matter in three layers:
   1. lifemodel infers it from context, and asks when unsure ("про
