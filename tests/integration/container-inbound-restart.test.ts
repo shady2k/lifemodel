@@ -96,6 +96,7 @@ describe('real container inbound crash/restart boundary', { timeout: 120_000 }, 
     stores = await createTestStores();
     await applyTestMigrations(stores.postgres);
     const rawUrl = new URL(testStoreUrls().valkeyUrl);
+    // container-inbound-restart.test.ts owns logical database 5; fatal-stop-process.test.ts owns 6.
     rawUrl.pathname = '/5'; // private logical DB for the real container's unprefixed keys
     redis = new Redis(rawUrl.toString());
     await redis.flushdb();

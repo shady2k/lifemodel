@@ -70,7 +70,8 @@ describe('fatal stop through the real entrypoint and stores', { timeout: 120_000
     stores = await createTestStores();
     await applyTestMigrations(stores.postgres);
     const valkeyUrl = new URL(testStoreUrls().valkeyUrl);
-    valkeyUrl.pathname = '/5';
+    // fatal-stop-process.test.ts owns logical database 6; container-inbound-restart.test.ts owns 5.
+    valkeyUrl.pathname = '/6';
     redis = new Redis(valkeyUrl.toString());
     await redis.flushdb();
     dataRoot = await mkdtemp(join(tmpdir(), 'lifemodel-fatal-stop-'));
@@ -118,7 +119,7 @@ describe('fatal stop through the real entrypoint and stores', { timeout: 120_000
       const snapshotStore = createSnapshotStore(redis);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
-        LIFEMODEL_VALKEY_URL: new URL('/5', testStoreUrls().valkeyUrl).toString(),
+        LIFEMODEL_VALKEY_URL: new URL('/6', testStoreUrls().valkeyUrl).toString(),
         LIFEMODEL_DATABASE_URL: new URL(
           `/${`lifemodel_test_worker_${stores.workerId}`}`,
           testStoreUrls().databaseUrl
