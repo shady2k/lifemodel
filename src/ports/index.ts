@@ -118,3 +118,10 @@ export type {
 
 // Owner web-module operations
 export type { IOwnerMessageIntake, OwnerMessageAcceptance } from './owner-message-intake.js';
+
+export type {
+  TranscriptRow,
+  TranscriptPage,
+  ReadTranscriptOptions,
+  TranscriptReader,
+} from './transcript.js';

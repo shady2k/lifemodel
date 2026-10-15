@@ -55,3 +55,5 @@ export {
   CREATURE_STATE_TTL_SECONDS,
   CREATURE_STATE_HEARTBEAT_MS,
 } from './creature-state-store.js';
+
+export { PostgresTranscriptStore } from './postgres-transcript-store.js';
