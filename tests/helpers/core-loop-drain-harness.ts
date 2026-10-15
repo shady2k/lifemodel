@@ -34,6 +34,7 @@ import { createSignal } from '../../src/types/signal.js';
 import type { Channel } from '../../src/types/index.js';
 import type { AgentState, SleepState } from '../../src/types/agent/state.js';
 import type { BusSignalStream, BusSnapshot } from '../../src/core/bus-stream.js';
+import type { ConversationManager } from '../../src/storage/conversation-manager.js';
 
 export function makeDeferred<T>(): {
   promise: Promise<T>;
@@ -365,6 +366,7 @@ export interface HarnessOptions {
   busSignalStream?: BusSignalStream;
   inboundStream?: CoreLoopDeps['inboundStream'];
   initialBusOffset?: BusSnapshot;
+  conversationManager?: ConversationManager;
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -429,6 +431,7 @@ export async function startInstance(
       inboundStream: opts.inboundStream,
       commitSnapshot: opts.commitSnapshot,
       onStaleSnapshot: opts.onStaleSnapshot,
+      conversationManager: opts.conversationManager,
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);

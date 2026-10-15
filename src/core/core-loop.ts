@@ -2040,7 +2040,7 @@ export class CoreLoop {
 
     // Special handling for user messages
     if (normalized.type === 'user_message') {
-      this.processUserMessageSignal(normalized);
+      await this.processUserMessageSignal(normalized);
     }
 
     // Enrich reaction signals with message preview and add to history as metadata
@@ -2144,14 +2144,13 @@ export class CoreLoop {
   /**
    * Process user message signal for side effects.
    */
-  private processUserMessageSignal(signal: Signal): void {
+  private async processUserMessageSignal(signal: Signal): Promise<void> {
     const data = signal.data as
       | { text?: string; recipientId?: string; sideEffectsApplied?: boolean }
       | undefined;
 
     // Idempotency guard: skip if already applied (signal was re-queued after deferral)
     if (data?.sideEffectsApplied) return;
-    if (data) data.sideEffectsApplied = true;
 
     // Note: Ack clearing is now handled by ThresholdEngine when it sees user_message
 
@@ -2173,12 +2172,17 @@ export class CoreLoop {
         const photoPrefix = data.images?.length
           ? `[Photo${data.images.length > 1 ? ` x${String(data.images.length)}` : ''} attached] `
           : '';
-        void this.conversationManager.addMessage(data.recipientId, {
-          role: 'user',
-          content: photoPrefix + data.text,
-        });
+        await this.conversationManager.addMessage(
+          data.recipientId,
+          {
+            role: 'user',
+            content: photoPrefix + data.text,
+          },
+          { messageId: `inbound:${signal.id}` }
+        );
       }
     }
+    if (data) data.sideEffectsApplied = true;
   }
 
   /**
