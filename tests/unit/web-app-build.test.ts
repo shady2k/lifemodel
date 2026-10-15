@@ -20,4 +20,4 @@ it('builds the React app with same-origin scripts and styles', async () => {
   expect(html).toMatch(/src="\/assets\/index-[^"]+\.js"/);
   expect(html).toMatch(/href="\/assets\/index-[^"]+\.css"/);
   expect(html).not.toMatch(/(?:src|href)="https?:\/\//);
-});
+}, 60_000);

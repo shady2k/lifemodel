@@ -48,6 +48,27 @@ jobs:
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
         run: scripts/release/set-core-digest.sh "$CORE_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
 
+      - name: Prepare the web image context
+        run: scripts/prepare-web-image-context.sh .docker-web-context
+
+      - name: Build and push web image
+        id: web
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        with:
+          context: .docker-web-context
+          file: docker/web/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/lifemodel-web:${{ github.ref_name }}
+
+      - name: Remove the temporary web build context
+        if: always()
+        run: rm -rf .docker-web-context
+
+      - name: Pin the web image to its pushed digest in the seed source
+        env:
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        run: scripts/release/set-web-digest.sh "$WEB_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
+
       - name: Prepare the full-history loader seed bundle
         id: prepare-seed
         run: scripts/release/prepare-loader-context.sh
