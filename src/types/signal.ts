@@ -212,7 +212,10 @@ export interface UserMessageData {
   /** Original message ID (for replies) */
   messageId?: string;
 
-  /** Reply-to message ID (if this is a reply) */
+  /** Reply binding for the owner's web conversation. */
+  replyTo?: { sequence: string };
+
+  /** Reply-to message ID (if this is a reply from an external channel) */
   replyToId?: string;
 
   /** Detected language (if available) */

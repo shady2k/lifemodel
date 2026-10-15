@@ -73,6 +73,17 @@ describe('durable owner-message intake on real Valkey', () => {
     });
   });
 
+  it('carries a validated reply sequence on the web signal', async () => {
+    const id = uuidV7(Date.now());
+    const accepted = await intake.acceptOwnerMessage(id, 'reply', '42');
+    const [[, fields]] = await redis.xrange('inbound', accepted.streamId, accepted.streamId);
+    const signalText = fields[fields.indexOf('signal') + 1];
+    expect(JSON.parse(signalText!)).toMatchObject({
+      id,
+      data: { replyTo: { sequence: '42' } },
+    });
+  });
+
   it('validates IDs, text, and reply sequence before any append', async () => {
     const count = await redis.xlen('inbound');
     await expect(intake.acceptOwnerMessage('not-a-uuid', 'hello')).rejects.toThrow(/UUIDv7/);

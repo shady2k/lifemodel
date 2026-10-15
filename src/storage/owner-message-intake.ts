@@ -75,7 +75,7 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
       updateId: id,
       recipientId: this.recipientId,
       channel: 'web',
-      ...(replyTo === undefined ? {} : { replyToId: replyTo }),
+      ...(replyTo === undefined ? {} : { replyTo: { sequence: replyTo } }),
     });
     signal.id = id;
     signal.source = 'sense.web';
