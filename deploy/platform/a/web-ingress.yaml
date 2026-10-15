@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-private
+  namespace: lifemodel
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: lifemodel-system-loader-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 8080

@@ -9,3 +9,4 @@ resources:
   - openbao/rendered.yaml
   - gitea
   - network-policy.yaml
+  - web-ingress.yaml
