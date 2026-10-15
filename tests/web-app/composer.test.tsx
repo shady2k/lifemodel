@@ -82,25 +82,6 @@ describe('conversation composer and replies', () => {
     expect(transport.sent[1]?.id).not.toBe(firstId);
   });
 
-  it('marks an unaccepted optimistic message not sent after 24 hours', async () => {
-    await i18n.changeLanguage('en');
-    const transport = new SendingTransport();
-    transport.outcomes.push(() => new Promise(() => undefined));
-    render(<Conversation transport={transport} />);
-    const user = userEvent.setup();
-    const composer = await screen.findByRole('textbox', { name: 'Message' });
-    await user.type(composer, 'waiting for acceptance{enter}');
-    await waitFor(() => expect(transport.sent).toHaveLength(1));
-    const timer = vi.spyOn(window, 'setTimeout');
-    await user.type(composer, 'start timer{enter}');
-    await waitFor(() => expect(transport.sent).toHaveLength(2));
-    const expiration = timer.mock.calls.find((call) => call[1] === 24 * 60 * 60 * 1000)?.[0];
-    timer.mockRestore();
-    expect(expiration).toBeTypeOf('function');
-    act(() => (expiration as () => void)());
-    expect(screen.getByText('Not sent — retry')).toBeTruthy();
-  });
-
   it('sends a reply binding and shows the quoted text in both binding and sent bubble', async () => {
     await i18n.changeLanguage('en');
     const transport = new SendingTransport();

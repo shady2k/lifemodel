@@ -1,0 +1,17 @@
+{
+  "components": [
+    "avatar.tsx",
+    "badge.tsx",
+    "button.tsx",
+    "code-block.tsx",
+    "input-group.tsx",
+    "input.tsx",
+    "message.tsx",
+    "separator.tsx",
+    "sheet.tsx",
+    "sidebar.tsx",
+    "skeleton.tsx",
+    "textarea.tsx",
+    "tooltip.tsx"
+  ]
+}

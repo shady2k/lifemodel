@@ -10,8 +10,15 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { Send, CornerUpLeft } from 'lucide-react';
-import { InputGroup, InputGroupButton, InputGroupTextarea } from '@/components/ui/input-group';
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from '@/components/ui/input-group';
+import { scheduleNotSent } from './send-state';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Bubble, Marker, Message, MessageScroller } from '@/components/ui/message';
 import { CodeBlock } from '@/components/ui/code-block';
@@ -222,14 +229,11 @@ function ConversationContent({
     setOptimistic((current) =>
       current.some((row) => row.clientId === id) ? current : [...current, item]
     );
-    const expiration = window.setTimeout(
-      () => {
-        setOptimistic((current) =>
-          current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
-        );
-      },
-      24 * 60 * 60 * 1000
-    );
+    const expiration = scheduleNotSent(window.setTimeout.bind(window), () => {
+      setOptimistic((current) =>
+        current.map((row) => (row.clientId === id ? { ...row, status: 'failed' } : row))
+      );
+    });
     const submit = () =>
       transport.sendMessage({ id, text, ...(replyTo ? { replyTo: replyTo.sequence } : {}) });
     try {
@@ -443,26 +447,25 @@ function ConversationContent({
           submitDraft();
         }}
       >
-        {reply ? (
-          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-            <Marker className="justify-start gap-1 py-1">
-              <CornerUpLeft aria-hidden="true" className="size-3" />
-              {reply.text.slice(0, 280)}
-            </Marker>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              aria-label={t('cancelReply')}
-              onClick={() => {
-                setReply(undefined);
-              }}
-            >
-              ×
-            </Button>
-          </div>
-        ) : null}
         <InputGroup>
+          {reply ? (
+            <InputGroupAddon align="block-start">
+              <Badge variant="secondary" className="max-w-full gap-1">
+                <CornerUpLeft aria-hidden="true" className="size-3 shrink-0" />
+                <span className="truncate">{reply.text.slice(0, 280)}</span>
+              </Badge>
+              <InputGroupButton
+                type="button"
+                aria-label={t('cancelReply')}
+                className="ml-auto"
+                onClick={() => {
+                  setReply(undefined);
+                }}
+              >
+                ×
+              </InputGroupButton>
+            </InputGroupAddon>
+          ) : null}
           <InputGroupTextarea
             aria-label={t('message')}
             placeholder={t('writeMessage')}
@@ -477,9 +480,20 @@ function ConversationContent({
               }
             }}
           />
-          <InputGroupButton type="submit" aria-label={t('send')} disabled={!draft.trim()}>
-            <Send aria-hidden="true" className="size-4" />
-          </InputGroupButton>
+          <InputGroupAddon align="block-end">
+            <span className="ml-1 text-xs text-muted-foreground">
+              Enter {t('send')} · Shift+Enter
+            </span>
+            <InputGroupButton
+              type="submit"
+              aria-label={t('send')}
+              disabled={!draft.trim()}
+              variant="default"
+              className="ml-auto"
+            >
+              <Send aria-hidden="true" className="size-4" />
+            </InputGroupButton>
+          </InputGroupAddon>
         </InputGroup>
       </form>
     </div>
