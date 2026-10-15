@@ -10,7 +10,10 @@ import {
 import { ConversationManager } from '../../src/storage/conversation-manager.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestLogger } from '../helpers/test-logger.js';
-import { PersistentRecipientRegistry } from '../../src/core/recipient-registry.js';
+import {
+  PersistentRecipientRegistry,
+  RecipientRegistry,
+} from '../../src/core/recipient-registry.js';
 import { getPrimaryRecipientId, setPrimaryRecipientId } from '../../src/core/globals.js';
 import { startCoreHealthServer } from '../../src/core/health-server.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
@@ -48,6 +51,23 @@ describe('inbound user history restart durability', () => {
   afterAll(async () => {
     await stores.redis.quit();
     await stores.postgres.end();
+  });
+
+  it('creates the web owner when the core loop receives a cold registry', async () => {
+    const registry = new RecipientRegistry();
+    const path = await makeScratchDir('web-recipient-cold-');
+    const instance = await startInstance(path, { recipientRegistry: registry });
+    try {
+      const ownerId = registry.lookup('web', 'owner');
+      expect(ownerId).toBeDefined();
+      expect(getPrimaryRecipientId()).toBe(ownerId);
+      expect(instance.aggregation.primaryRecipientId).toBe(ownerId);
+      expect(registry.lookup('test', 'chat-42')).toBe(instance.recipientId);
+    } finally {
+      await instance.coreLoop.stop();
+      await rmDir(path);
+      setPrimaryRecipientId(undefined);
+    }
   });
 
   it('records proactive contact in the durable web transcript and reuses it after restart', async () => {

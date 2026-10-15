@@ -110,8 +110,10 @@ The web channel is a pull channel with no delivery cursor. Outbound events are
 retained until the Postgres apply offset passes them, subject to the 10,000-event
 and 30-day retention bounds. Delivery belongs to a future channel whose delivery
 can fail. If there is no channel registered, this core reports the event once at
-info and advances its own delivery cursor; the outbound event remains available
-to the gateway's separate cursor.
+info and advances its own delivery cursor. Web availability is its Postgres
+conversation row. An outbound event is not retained for future gateway delivery
+after the Postgres apply offset advances, except for the explicit 10,000-event /
+30-day retention bound.
 
 Outbound retention deletes event-key deduplication entries in bounded batches
 before trimming stream rows in one Valkey Lua script. The warning count reflects

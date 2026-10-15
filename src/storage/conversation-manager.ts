@@ -423,6 +423,7 @@ export class ConversationManager {
       if (msg.tool_call_id) {
         convMsg.tool_call_id = msg.tool_call_id;
       }
+      if (msg.replyTo) convMsg.replyTo = msg.replyTo;
 
       result.push(convMsg);
     }
@@ -467,6 +468,7 @@ export class ConversationManager {
       if (msg.tool_call_id) {
         convMsg.tool_call_id = msg.tool_call_id;
       }
+      if (msg.replyTo) convMsg.replyTo = msg.replyTo;
       if (msg.channelMessageId) {
         convMsg.channelMessageId = msg.channelMessageId;
       }

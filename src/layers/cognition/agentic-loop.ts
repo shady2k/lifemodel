@@ -13,6 +13,7 @@
  * 6. If low confidence and safe to retry → retry with smart model
  */
 
+import { renderReplyQuote } from './prompts/reply-quote.js';
 import type { Logger } from '../../types/logger.js';
 import type { LoopConfig, LoopState, Terminal } from '../../types/cognition.js';
 import { DEFAULT_LOOP_CONFIG, createLoopState } from '../../types/cognition.js';
@@ -481,8 +482,13 @@ export class AgenticLoop {
 
             // Inject pending user messages
             for (const signal of pendingMessages) {
-              const text = (signal.data as { text: string }).text;
-              messages.push({ role: 'user', content: text });
+              const data = signal.data as { text: string; replyTo?: unknown };
+              const text = data.text;
+              const quote = renderReplyQuote(data.replyTo);
+              messages.push({
+                role: 'user',
+                content: `${quote ? `${quote}\n` : ''}<user_input>${text}</user_input>`,
+              });
               this.logger.debug(
                 { text: text.slice(0, 50) },
                 'Absorbed pending user message at natural completion'
@@ -541,8 +547,13 @@ export class AgenticLoop {
       if (context.triggerSignal.type === 'user_message') {
         const pendingMessages = context.drainPendingUserMessages?.() ?? [];
         for (const signal of pendingMessages) {
-          const text = (signal.data as { text: string }).text;
-          messages.push({ role: 'user', content: text });
+          const data = signal.data as { text: string; replyTo?: unknown };
+          const text = data.text;
+          const quote = renderReplyQuote(data.replyTo);
+          messages.push({
+            role: 'user',
+            content: `${quote ? `${quote}\n` : ''}<user_input>${text}</user_input>`,
+          });
           this.logger.debug({ text: text.slice(0, 50) }, 'Injected mid-loop user message');
         }
       }

@@ -331,7 +331,7 @@ Failed sends are not a core outcome: the gateway owns delivery and retry. The
 web channel is a pull channel with no delivery cursor; the browser's resume
 cursor is not a delivery record. With no channel registered, the core logs the
 committed event once at info and advances its in-process delivery cursor; the
-event remains in Valkey for the gateway's independent cursor.
+web availability is its Postgres row; the outbound event is not retained for future gateway delivery after the Postgres apply offset advances, except for the explicit 10,000-event / 30-day retention bound.
 
 A rejected signal-normalization write fails the core closed without committing that tick; the bounded fatal stop exits non-zero, and restart replays every uncommitted durable input, including the rest of the drained batch. A persistent store failure remains unhealthy and requires store repair.
 

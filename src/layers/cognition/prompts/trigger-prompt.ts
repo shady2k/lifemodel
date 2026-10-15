@@ -6,6 +6,7 @@
  */
 
 import type { Signal } from '../../../types/signal.js';
+import { renderReplyQuote } from './reply-quote.js';
 import type { LoopContext } from '../agentic-loop-types.js';
 import { isProactiveTrigger } from './runtime-snapshot.js';
 import {
@@ -134,16 +135,7 @@ function buildTriggerSection(signal: Signal, context: LoopContext): string {
 
   if (signal.type === 'user_message' && data) {
     const text = (data['text'] as string | undefined) ?? '';
-    const replyTo = data['replyTo'] as
-      | { sequence?: unknown; role?: unknown; excerpt?: unknown }
-      | undefined;
-    const quote =
-      replyTo &&
-      typeof replyTo.sequence === 'string' &&
-      (replyTo.role === 'user' || replyTo.role === 'assistant') &&
-      typeof replyTo.excerpt === 'string'
-        ? `\n<quoted_message role="${replyTo.role}" sequence="${replyTo.sequence}">${replyTo.excerpt.slice(0, 280)}</quoted_message>`
-        : '';
+    const quote = renderReplyQuote(data['replyTo']);
     return `${quote ? `${quote}\n` : ''}<user_input>${text}</user_input>`;
   }
 

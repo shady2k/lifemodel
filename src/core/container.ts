@@ -508,6 +508,11 @@ export async function createContainerAsync(
   const busSignalStream = createBusSignalStream(snapshotRedis);
   snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
+  // Replace stale thinking state immediately after epoch takeover; this is
+  // best-effort and must not delay startup if the projection store is down.
+  void creatureStateStore.publishCreatureState('awake', snapshotEpoch).catch((error: unknown) => {
+    logger.warn({ err: error }, 'Failed to publish initial creature state');
+  });
   await rawPostgres.query(
     `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
      ON CONFLICT (id) DO UPDATE SET epoch = EXCLUDED.epoch

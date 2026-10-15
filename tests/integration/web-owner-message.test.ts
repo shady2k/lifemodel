@@ -332,6 +332,7 @@ describe('owner message HTTP route with real Valkey', () => {
     }
     const fifth = await fetch(url, { headers: { cookie: 'lm_session=opaque-token' } });
     expect(fifth.status).toBe(429);
+    await redis.set('lifemodel:core:snapshot:epoch', '1');
     await stateStore.publishCreatureState('thinking', 1);
     const change = await nextSseEvent(readers[0]!, buffers[0]!);
     expect(change.event).toBe('state');

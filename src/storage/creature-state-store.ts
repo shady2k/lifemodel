@@ -6,10 +6,13 @@ import type {
 } from '../ports/creature-state.js';
 
 export const CREATURE_STATE_KEY = 'lifemodel:creature:state';
+export const CORE_SNAPSHOT_EPOCH_KEY = 'lifemodel:core:snapshot:epoch';
 export const CREATURE_STATE_TTL_SECONDS = 15;
 export const CREATURE_STATE_HEARTBEAT_MS = 5_000;
 
 const PUBLISH_SCRIPT = `
+local current_epoch = redis.call('GET', KEYS[2])
+if not current_epoch or tonumber(current_epoch) ~= tonumber(ARGV[1]) then return 0 end
 local current = redis.call('GET', KEYS[1])
 if current then
   local decoded = cjson.decode(current)
@@ -41,8 +44,9 @@ export class CreatureStateStore implements CreatureStateReader {
     const published: PublishedCreatureState = { state, epoch, publishedAt: this.now() };
     await this.redis.eval(
       PUBLISH_SCRIPT,
-      1,
+      2,
       CREATURE_STATE_KEY,
+      CORE_SNAPSHOT_EPOCH_KEY,
       String(epoch),
       JSON.stringify(published),
       String(CREATURE_STATE_TTL_SECONDS)
