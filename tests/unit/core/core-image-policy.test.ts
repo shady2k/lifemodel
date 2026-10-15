@@ -56,6 +56,12 @@ describe('core image policy', () => {
     }
   });
 
+  it('installs only the WebAssembly sharp build for CPU-v1-compatible embedding', () => {
+    expect(dockerfile).toContain('npm install --omit=dev --no-save --cpu=wasm32 sharp');
+    expect(dockerfile).toMatch(/rm -rf[^\n]*@img\/sharp-linux-x64/);
+    expect(dockerfile).toMatch(/rm -rf[^\n]*@img\/sharp-libvips-linux-x64/);
+  });
+
   it('bakes the embedder model into the image at a stable path', () => {
     expect(dockerfile).toContain('Xenova/paraphrase-multilingual-MiniLM-L12-v2');
     expect(dockerfile).toContain('/opt/model-cache');
