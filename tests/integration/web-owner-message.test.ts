@@ -330,6 +330,63 @@ describe('owner message HTTP route with real Valkey', () => {
     await stateServer.close();
   });
 
+  it('closes the watcher Valkey connection when the HTTP client disconnects', async () => {
+    const recipient = 'web-owner-recipient';
+    const stateServer = createWebServer({
+      allowedOrigin: 'http://localhost',
+      intake,
+      transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
+      creatureState: new CreatureStateStore(redis),
+      logger: { info: vi.fn() },
+    });
+    await stateServer.listen({ host: '127.0.0.1', port: 0 });
+    const address = stateServer.server.address();
+    if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+    const page = await new PostgresTranscriptStore(
+      stores.postgres,
+      redis,
+      recipient
+    ).readTranscript({ limit: 1 });
+    const baseline = new Set(
+      ((await redis.client('LIST')) as string)
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.match(/\bid=(\d+)/)?.[1])
+        .filter((id): id is string => id !== undefined)
+    );
+    const abort = new AbortController();
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/events?after=${page.cursor ?? '0'}`,
+      { signal: abort.signal }
+    );
+    const reader = response.body!.getReader();
+    expect((await nextSseEvent(reader, { value: '' })).event).toBe('state');
+    let watcherIds: string[] = [];
+    await expect
+      .poll(async () => {
+        const current = ((await redis.client('LIST')) as string)
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.match(/\bid=(\d+)/)?.[1])
+          .filter((id): id is string => id !== undefined);
+        watcherIds = current.filter((id) => !baseline.has(id));
+        return watcherIds;
+      })
+      .toHaveLength(1);
+    abort.abort();
+    await reader.cancel().catch(() => undefined);
+    await expect
+      .poll(async () => {
+        const current = ((await redis.client('LIST')) as string)
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.match(/\bid=(\d+)/)?.[1]);
+        return watcherIds.every((id) => !current.includes(id));
+      })
+      .toBe(true);
+    await stateServer.close();
+  });
+
   it('publishes stale state on the open stream after the core stops refreshing it', async () => {
     const recipient = 'web-owner-recipient';
     const stateStore = new CreatureStateStore(redis);
