@@ -484,7 +484,10 @@ export function createSettingsReloadHandler(
   };
 }
 
-export async function createContainerAsync(configOverrides: AppConfig = {}): Promise<Container> {
+export async function createContainerAsync(
+  configOverrides: AppConfig = {},
+  callbacks: { onFatalStop?: (error: Error) => void } = {}
+): Promise<Container> {
   // Load configuration from file and environment. The config file's directory
   // is resolved HERE, before anything else applies: a path is an input, not a
   // value the config itself decides (lifemodel-q4x.4.1).
@@ -1107,14 +1110,8 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
         logger
       );
     },
-    onStaleSnapshot: () => {
-      process.exitCode = 1;
-      void shutdown?.();
-    },
-    onFatalError: () => {
-      process.exitCode = 1;
-      void shutdown?.();
-    },
+    onStaleSnapshot: callbacks.onFatalStop,
+    onFatalError: callbacks.onFatalStop,
     pluginManager: {
       listStatuses: () => pluginLoader.getPluginStatuses(),
     },

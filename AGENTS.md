@@ -332,6 +332,8 @@ no channel registered, the core logs the committed event once at info and
 advances its in-process delivery cursor; the event remains in Valkey for the
 gateway's independent cursor.
 
+A rejected signal-normalization write fails the core closed without committing that tick; the bounded fatal stop exits non-zero, and restart replays every uncommitted durable input, including the rest of the drained batch. A persistent store failure remains unhealthy and requires store repair.
+
 A hard stop or crash during a tick leaves the previous snapshot authoritative.
 The fresh core reads from its committed offsets and processes uncommitted
 messages again. After a commit, those messages are past the committed offsets
