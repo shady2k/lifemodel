@@ -11,6 +11,11 @@ function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(acce
   const server = createWebServer({
     allowedOrigin: 'http://localhost',
     intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
+    transcript: {
+      readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+      watchTranscript: vi.fn(),
+    },
+    creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
     logger: { info },
   });
   return { server, acceptOwnerMessage, info };
@@ -87,6 +92,30 @@ describe('POST /api/messages', () => {
     });
     expect(response.statusCode).toBe(status);
     expect(response.json()).toEqual(body);
+    await server.close();
+  });
+
+  it('maps an invisible reply target to 400 without appending', async () => {
+    const acceptOwnerMessage = vi.fn().mockResolvedValue({ status: 'reply_not_found' });
+    const server = createWebServer({
+      allowedOrigin: 'http://localhost',
+      intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(),
+      },
+      creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
+      logger: { info: vi.fn() },
+    });
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { origin: 'http://localhost' },
+      payload: { id, text: 'reply', replyTo: '999' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ reason: 'reply_not_found' });
+    expect(acceptOwnerMessage).toHaveBeenCalledWith(id, 'reply', '999');
     await server.close();
   });
 
