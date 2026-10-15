@@ -366,6 +366,7 @@ export interface HarnessOptions {
   initialTickCount?: number;
   initialState?: Partial<AgentState>;
   initialSleepState?: Partial<SleepState>;
+  sleepSchedule?: { sleepHour: number; wakeHour: number };
   commitSnapshot?: CoreLoopDeps['commitSnapshot'];
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
   onFatalError?: CoreLoopDeps['onFatalError'];
@@ -401,7 +402,11 @@ export async function startInstance(
   // cognition with a scripted fake LLM provider - no network) ──
   const agent = createAgent(
     { logger, metrics: createMetrics() },
-    { initialState: opts.initialState, initialSleepState: opts.initialSleepState }
+    {
+      initialState: opts.initialState,
+      initialSleepState: opts.initialSleepState,
+      sleepSchedule: opts.sleepSchedule,
+    }
   );
   const eventBus = createEventBus(logger);
   const autonomic = new FakeAutonomicLayer();
