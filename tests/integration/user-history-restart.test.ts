@@ -7,6 +7,7 @@ import { InboundMessageStream } from '../../src/core/message-streams.js';
 import { ConversationManager } from '../../src/storage/conversation-manager.js';
 import { PostgresConversationStore } from '../../src/storage/postgres-conversation-store.js';
 import { createTestLogger } from '../helpers/test-logger.js';
+import { startCoreHealthServer } from '../../src/core/health-server.js';
 import { createUserMessageSignal } from '../../src/types/signal.js';
 import {
   startInstance,
@@ -41,6 +42,140 @@ describe('inbound user history restart durability', () => {
   afterAll(async () => {
     await stores.redis.quit();
     await stores.postgres.end();
+  });
+
+  it('stops unhealthy when normalization rejects and replays every drained input', async () => {
+    const manager = new ConversationManager(
+      new PostgresConversationStore(stores.postgres),
+      createTestLogger()
+    );
+    let historyAttempts = 0;
+    const failOnceManager = {
+      addMessage: async (...args: Parameters<ConversationManagerType['addMessage']>) => {
+        historyAttempts++;
+        if (historyAttempts === 1) throw new Error('simulated transient Postgres failure');
+        return manager.addMessage(...args);
+      },
+    } as ConversationManagerType;
+    const prefix = `history-reject:${stores.workerId}:${Date.now()}:`;
+    const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const inbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+    const bus = createBusSignalStream(stores.redis, prefix);
+    store.register(inbound);
+    store.register(bus);
+    const epoch = await store.takeEpoch();
+    const first = createUserMessageSignal({
+      text: 'first rejected message',
+      recipientId: 'history-reject-recipient',
+      channel: 'test',
+      updateId: 'reject-1',
+    });
+    const second = createUserMessageSignal({
+      text: 'second drained message',
+      recipientId: 'history-reject-recipient',
+      channel: 'test',
+      updateId: 'reject-2',
+    });
+    let commits = 0;
+    const fatalErrors: Error[] = [];
+    const failedPath = await makeScratchDir('history-reject-');
+    const failed = await startInstance(failedPath, {
+      tickIntervalMs: 10,
+      busSignalStream: bus,
+      inboundStream: inbound,
+      conversationManager: failOnceManager,
+      onFatalError: (error) => fatalErrors.push(error),
+      commitSnapshot: async (tick, outbox) => {
+        commits++;
+        await store.commitOwners(epoch, tick, outbox);
+      },
+    });
+    const healthServer = await startCoreHealthServer(failed.coreLoop, 0);
+    const address = healthServer.address();
+    if (!address || typeof address === 'string')
+      throw new Error('health server has no TCP address');
+    let commitsAtFailure: number;
+    let savedSnapshot: Awaited<ReturnType<typeof store.read>>;
+    try {
+      await waitFor(() => failed.coreLoop.getLastCommitAt() > 0, 'initial snapshot commit');
+      expect((await fetch(`http://127.0.0.1:${address.port}/healthz`)).status).toBe(200);
+      await inbound.append(first);
+      await inbound.append(second);
+      await waitFor(() => !failed.coreLoop.isRunning(), 'normalization failure stops core');
+      await waitFor(() => fatalErrors.length === 1, 'fatal error invokes process failure callback');
+      commitsAtFailure = commits;
+      expect(fatalErrors[0]?.message).toContain('Signal normalization failed');
+      expect(commitsAtFailure).toBeGreaterThan(0);
+      expect((await fetch(`http://127.0.0.1:${address.port}/healthz`)).status).toBe(503);
+      expect(historyAttempts).toBe(1);
+      savedSnapshot = await store.read();
+      expect(savedSnapshot).not.toBeNull();
+      expect((savedSnapshot?.sections.inbound as { pending: unknown[] }).pending).toHaveLength(0);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        healthServer.close((error) => (error ? reject(error) : resolve()))
+      );
+      await failed.coreLoop.stop();
+      await rmDir(failedPath);
+    }
+
+    const replayStore = createSnapshotStore(stores.redis, { keyPrefix: prefix });
+    const replayInbound = new InboundMessageStream(stores.redis, `${prefix}inbound`);
+    const replayBus = createBusSignalStream(stores.redis, prefix);
+    replayStore.register(replayInbound);
+    replayStore.register(replayBus);
+    if (!savedSnapshot) throw new Error('initial snapshot was not saved');
+    await replayStore.hydrate(savedSnapshot);
+    const replayEpoch = await replayStore.takeEpoch();
+    const replayPath = await makeScratchDir('history-reject-replay-');
+    const committedOutbox: { payload: Record<string, unknown> }[] = [];
+    const replay = await startInstance(replayPath, {
+      tickIntervalMs: 10,
+      busSignalStream: replayBus,
+      inboundStream: replayInbound,
+      conversationManager: failOnceManager,
+      initialCognitionResult: {
+        confidence: 1,
+        intents: [
+          {
+            type: 'SEND_MESSAGE',
+            payload: { recipientId: 'history-reject-recipient', text: 'one replayed answer' },
+          },
+        ],
+        response: undefined,
+      },
+      commitSnapshot: async (tick, outbox) => {
+        committedOutbox.push(...outbox);
+        await replayStore.commitOwners(replayEpoch, tick, outbox);
+      },
+    });
+    try {
+      await waitForAsync(async () => {
+        const snapshot = await replayStore.read();
+        const pending = (snapshot?.sections.inbound as { pending?: unknown[] } | undefined)
+          ?.pending;
+        return (
+          historyAttempts === 3 && replay.cognition.calls.length === 1 && pending?.length === 0
+        );
+      }, 'all drained inputs replay and commit');
+      expect(historyAttempts).toBe(3);
+      for (const signal of [first, second]) {
+        const rows = await stores.postgres.query<{ count: string }>(
+          'SELECT count(*)::text AS count FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2',
+          ['history-reject-recipient', `inbound:${signal.id}`]
+        );
+        expect(rows.rows[0]?.count).toBe('1');
+      }
+      expect(replay.cognition.calls).toHaveLength(1);
+      expect(replay.cognition.triggerIds()).toEqual([first.id, second.id]);
+      expect(
+        committedOutbox.filter((event) => event.payload['text'] === 'one replayed answer')
+      ).toHaveLength(1);
+    } finally {
+      await replay.coreLoop.stop();
+      await rmDir(replayPath);
+    }
+    expect(commits).toBe(commitsAtFailure!);
   });
 
   it('awaits a held history write before snapshot commit and deduplicates a written row on replay', async () => {

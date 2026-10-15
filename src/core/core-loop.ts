@@ -167,6 +167,8 @@ export interface CoreLoopDeps {
   onStaleSnapshot?:
     | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
     | undefined;
+  /** Called after a drained input fails normalization and must replay on restart. */
+  onFatalError?: ((error: Error) => void) | undefined;
 }
 
 /**
@@ -176,6 +178,18 @@ interface PendingSignal {
   signal: Signal;
   timestamp: Date;
   streamId?: string;
+}
+
+class SignalNormalizationError extends Error {
+  constructor(
+    readonly step: string,
+    readonly signalId: string,
+    readonly inputIds: string[],
+    cause: unknown
+  ) {
+    super(`Signal normalization failed at ${step} for ${signalId}`, { cause });
+    this.name = 'SignalNormalizationError';
+  }
 }
 
 /**
@@ -404,6 +418,7 @@ export class CoreLoop {
   private readonly onStaleSnapshot:
     | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
     | undefined;
+  private readonly onFatalError: ((error: Error) => void) | undefined;
 
   /**
    * Set by haltForTest(): this object emulates a process that was killed. A
@@ -459,6 +474,7 @@ export class CoreLoop {
       throw new Error('A bus signal stream requires a snapshot commit callback');
     }
     this.onStaleSnapshot = deps.onStaleSnapshot;
+    this.onFatalError = deps.onFatalError;
     this.tickCount = deps.initialTickCount ?? 0;
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -1558,8 +1574,17 @@ export class CoreLoop {
       const incomingSignals: Signal[] = [];
       for (const signal of pendingSignals) {
         const signalCtx = createTraceContext(signal.id, { correlationId: tickId });
-        const normalized = await withTraceContext(signalCtx, () => this.normalizeSignal(signal));
-        incomingSignals.push(normalized);
+        try {
+          const normalized = await withTraceContext(signalCtx, () => this.normalizeSignal(signal));
+          incomingSignals.push(normalized);
+        } catch (error) {
+          throw new SignalNormalizationError(
+            `normalize ${signal.type}`,
+            signal.id,
+            pendingSignals.map(({ id }) => id),
+            error
+          );
+        }
       }
 
       // AUTONOMIC layer (batch processing, no per-signal context to prevent leakage)
@@ -1937,6 +1962,26 @@ export class CoreLoop {
         this.scheduleTick();
       });
     } catch (error) {
+      if (error instanceof SignalNormalizationError) {
+        this.running = false;
+        if (this.tickTimeout) clearTimeout(this.tickTimeout);
+        this.tickTimeout = null;
+        withTraceContext(tickCtx, () => {
+          this.logger.error(
+            {
+              error: error.message,
+              cause: error.cause instanceof Error ? error.cause.message : String(error.cause),
+              step: error.step,
+              failedSignalId: error.signalId,
+              inputIds: error.inputIds,
+              tick: this.tickCount,
+            },
+            'Durable signal normalization failed; stopping core so inputs replay'
+          );
+        });
+        setTimeout(() => this.onFatalError?.(error), 0);
+        return;
+      }
       const errorDetails =
         error instanceof Error
           ? { message: error.message, stack: error.stack, name: error.name }
