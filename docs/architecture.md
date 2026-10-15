@@ -195,10 +195,10 @@ src/
 ├── plugins/        # Modular extensions
 ├── channels/       # Channel contracts; external gateways use streams
 ├── ports/          # External service adapters
-├── storage/        # Persistence, memory (LanceDB VectorStore + GraphStore), conversations
+├── storage/        # Postgres persistence, pgvector + JSON graph memory, conversations
 ├── types/          # Signal, Intent, Cognition, Commitment, Desire, Perspective types
 ├── models/         # UserModel for preferences
-├── config/         # Configuration loading (the config file, and the model endpoint's shape)
+├── config/         # Configuration loading from Postgres and the model endpoint's shape
 └── settings/       # lifemodel's own web settings (the root host), and the restart code
 ```
 

@@ -42,7 +42,7 @@ This isn't just naming. The metaphor drives real architectural decisions — ene
 - **⚡ Signals, not events.** Everything that flows through the system — an inbound message, an internal urge, an overdue commitment — is a single unified `Signal` type. One model for all data flow.
 - **🧠 Two-speed thinking (System 1 + System 2).** A cheap **fast model** handles classification and quick reactions; an expensive **smart model** is escalated to only on low confidence (and only when it's safe to retry). Inspired by Kahneman's dual-process theory.
 - **💪 Sandboxed Motor Cortex.** When the agent needs to *act* (run code, fetch data, use a skill), it dispatches to a separate agentic runtime that executes inside **per-run Docker containers** — `--read-only`, `--network none`, `--cap-drop ALL`, strict resource limits. Results flow back as signals.
-- **🗂️ Dual-layer long-term memory.** A **vector store** (semantic recall, salience decay) backed by [LanceDB](https://lancedb.com/) combined with a **graph store** (entities, relations, spreading activation) for associative context.
+- **🗂️ Dual-layer long-term memory.** A **vector store** (semantic recall, salience decay) in Postgres with pgvector, combined with a **graph store** (entities, relations, spreading activation) for associative context.
 - **🧩 Strictly-isolated plugin system.** Core *never* imports plugin types. Plugins extend the agent (neurons, channels, tools, providers, filters) only through a small `PluginPrimitives` API.
 - **📜 Agent Skills standard.** Skills declare their own dependencies (`npm` / `pip` / `apt`) and are loaded into the sandbox with content-addressed dependency caching.
 
@@ -127,7 +127,7 @@ The supported deployment is the k3s platform. See the [platform installation gui
 
 ### Configuration
 
-lifemodel is configured via a `.env` file. The essentials:
+Process options can be set in a `.env` file. Durable lifemodel settings, including the model endpoint, are stored in Postgres. Process option essentials:
 
 | Variable | Description |
 |----------|-------------|
@@ -217,7 +217,7 @@ The codebase is heavily documented. Start here:
 
 **Language & runtime:** TypeScript (strict, ESM) on Node.js ≥ 24
 **LLM:** [Vercel AI SDK](https://sdk.vercel.ai/) · OpenAI-compatible providers
-**Memory:** [LanceDB](https://lancedb.com/) (vector store) + a custom graph store · [Transformers.js](https://huggingface.co/docs/transformers.js) embeddings
+**Memory:** Postgres with pgvector (vector store) + a custom JSON graph store · [Transformers.js](https://huggingface.co/docs/transformers.js) embeddings
 **Sandbox:** Docker-isolated runtime + IPC
 **Infra:** [Fastify](https://fastify.dev/) · [Pino](https://getpino.io/) logging · [Zod](https://zod.dev/) validation · [Luxon](https://moment.github.io/luxon/) time
 

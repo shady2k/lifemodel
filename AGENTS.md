@@ -61,7 +61,7 @@ tick), Energy & state are physiology. Start with `README.md` and
   provider (the endpoint names a model per role; no separate keyed provider
   and no fallback), tool-schema conversion, conversation-log writing
 - `src/storage/` — persistence: Postgres storage, conversations, the dual-layer memory
-  (LanceDB vector store + JSON graph store), the soul
+  (pgvector vector store + JSON graph store), the soul
 - `src/ports/` — the narrow interfaces plugins see (LLM, storage, scheduler, …)
 - `src/types/` — Signal, Intent, Plugin, Cognition and friends: the shared
   vocabulary
@@ -195,7 +195,7 @@ Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 
 Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
-`DATA_PATH` moves state, logs, plugins and models. Configuration is stored in the core Postgres schema `core.settings`; `src/config/config-loader.ts` does not read or write a config file. `resolveConfigDir` and `data/config/agent.json` are removed.
+`DATA_PATH` moves logs and plugin/runtime files, not durable application state. Configuration is stored in the core Postgres schema `core.settings`; `src/config/config-loader.ts` does not read or write a config file. `resolveConfigDir` and `data/config/agent.json` are removed.
 
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
@@ -273,7 +273,11 @@ Common issues:
   the prompt is clear.
 - **Poisoned history:** a bad response saved into conversation history gets
   copied by later turns. Check prior ASSISTANT messages in the conversation
-  log; fix by cleaning the conversation files under `data/state/`.
+  log. Conversation history lives in Postgres; inspect and recover it through
+  the Postgres-backed conversation store, after backing up the database. Tick
+  snapshots, bus offsets and inbound/outbound streams live in Valkey; inspect
+  or recover those through their Valkey-backed stores, after backing up Valkey.
+  Do not delete files under `data/` to recover durable state.
 - **Truncated response:** `finishReason: "length"` — the model hit the token
   limit. The loop retries: a truncated user-message response with no tool
   calls forces a retry, and failures escalate to the smart model.

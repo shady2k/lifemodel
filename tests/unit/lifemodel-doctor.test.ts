@@ -29,6 +29,10 @@ if [ "$1" = exec ]; then
 fi
 if [ "$1" = get ]; then
   case "$2" in *' '*) echo 'malformed resource token' >&2; exit 8;; esac
+  if [ "$2:$3" = statefulsets:core ] && [ "\${FAKE_CORE_MISSING:-0}" = 1 ]; then
+    echo 'Error from server (NotFound): statefulsets.apps "core" not found' >&2
+    exit 1
+  fi
   case "$2:$3" in
     ocirepositories:*) file=ocirepositories;; ocirepository:*) file=ocirepository;; gitrepositories:*) file=gitrepositories;; kustomizations:*) file=kustomizations;; deployments:*) file=deployments;; statefulsets:*) file=statefulset;; pods:*) file=pods;; events:*) file=events;; secrets:loader-bootstrap-state) file=secret;; secret:*) file=secret;; *) exit 9;;
   esac
@@ -135,6 +139,30 @@ describe('lifemodel doctor', () => {
     const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
     expect(run.status).toBe(1);
     expect(`${run.stdout}${run.stderr}`).toContain(expected);
+  });
+
+  it('keeps a missing core non-fatal and prints the summary during first-start bootstrap', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase: 'gitea-ready', status: 'running' })).toString('base64');
+    const env = setup(data);
+    env.env.FAKE_CORE_MISSING = '1';
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('StatefulSet/core: missing (expected; first start in progress at gitea-ready)');
+    expect(run.stdout).toContain('Deployment/loader ready=yes');
+  });
+
+  it('reports a missing core as a bootstrap failure and still prints the summary', () => {
+    const data = structuredClone(healthy) as Record<string, any>;
+    data.secret.data.phase = Buffer.from(JSON.stringify({ phase: 'source-credentials', status: 'failed' })).toString('base64');
+    const env = setup(data);
+    env.env.FAKE_CORE_MISSING = '1';
+    const run = spawnSync(process.execPath, [cli, 'doctor'], { env: env.env, encoding: 'utf8' });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('StatefulSet/core: missing (required after loader bootstrap failure or completion)');
+    expect(run.stdout).toContain('Deployment/loader ready=yes');
+    expect(run.stderr).toContain('Loader bootstrap phase source-credentials (failed)');
+    expect(run.stderr).toContain('StatefulSet/core (missing)');
   });
 
   it('reports a missing source as expected while first start is incomplete', () => {
