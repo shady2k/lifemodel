@@ -2570,12 +2570,14 @@ export class CoreLoop {
         result.intents
       );
       this.pendingCognition = null;
+      void this.publishCurrentCreatureState();
       // The turn is known here and nowhere later (see attributedToTurn): its
       // own result intents leave with their turn's trace.
       return { ...result, intents: this.attributedToTurn(resultIntents, pending) };
     } catch (error) {
       const errorIntents = this.resolveTurnCommit(pending.tickId, 'error', []);
       this.pendingCognition = null;
+      void this.publishCurrentCreatureState();
       if (errorIntents.length > 0) this.applyIntents(errorIntents, pending.traceContext);
       this.markResultApplicationsComplete();
       this.evaluateTurnCommits();
