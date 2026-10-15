@@ -347,3 +347,46 @@ jobs:
           scripts/build-core-image.sh main "$SHA"
           docker push "ghcr.io/shady2k/lifemodel-core:main"
           docker push "ghcr.io/shady2k/lifemodel-core:$SHA"
+
+  # Build the standalone web image on pull requests without a write token.
+  ci-web-image:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.product == 'true') && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the standalone web image
+        env:
+          SHA: ${{ github.sha }}
+        run: scripts/build-web-image.sh "ci-web-$SHA"
+
+  # Publish the standalone web image on main.
+  ci-web-image-publish:
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Log in to GitHub Container Registry
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build and publish the standalone web image
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          scripts/build-web-image.sh main "$SHA"
+          docker push "ghcr.io/shady2k/lifemodel-web:main"
+          docker push "ghcr.io/shady2k/lifemodel-web:$SHA"

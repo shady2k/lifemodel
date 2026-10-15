@@ -332,6 +332,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: lifemodel
       ports:
         - protocol: TCP
           port: 5432
@@ -339,6 +342,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: lifemodel-state
+          podSelector:
+            matchLabels:
+              app: valkey
       ports:
         - protocol: TCP
           port: 6379

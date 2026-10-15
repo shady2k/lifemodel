@@ -127,8 +127,12 @@ describe('platform web ingress and egress', () => {
       }));
     expect(allowed).toEqual([
       { namespace: 'kube-system', pod: { 'k8s-app': 'kube-dns' }, ports: ['TCP/53', 'UDP/53'] },
-      { namespace: 'lifemodel-state', pod: undefined, ports: ['TCP/5432'] },
-      { namespace: 'lifemodel-state', pod: undefined, ports: ['TCP/6379'] },
+      {
+        namespace: 'lifemodel-state',
+        pod: { 'cnpg.io/cluster': 'lifemodel' },
+        ports: ['TCP/5432'],
+      },
+      { namespace: 'lifemodel-state', pod: { app: 'valkey' }, ports: ['TCP/6379'] },
     ]);
   });
 });
