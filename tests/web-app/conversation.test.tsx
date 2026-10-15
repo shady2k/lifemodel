@@ -25,6 +25,10 @@ class FakeTransport implements WebTransport {
   onRead?: (before?: string) => void;
   constructor(private readonly rows: TranscriptMessage[]) {}
 
+  async sendMessage(): Promise<'accepted'> {
+    return 'accepted';
+  }
+
   async readTranscript(before?: string): Promise<TranscriptPage> {
     this.reads.push(before);
     this.onRead?.(before);

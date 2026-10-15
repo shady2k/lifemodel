@@ -18,7 +18,10 @@ export interface CreatureStateEvent {
   publishedAt: string;
 }
 
+export type SendResult = 'accepted' | 'conflict' | 'stale';
+
 export interface WebTransport {
+  sendMessage(input: { id: string; text: string; replyTo?: string }): Promise<SendResult>;
   readTranscript(before?: string): Promise<TranscriptPage>;
   subscribe(
     after: string,
@@ -28,6 +31,21 @@ export interface WebTransport {
 }
 
 export const httpTransport: WebTransport = {
+  async sendMessage(input) {
+    const response = await fetch('/api/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (response.status === 202) return 'accepted';
+    if (response.status === 409) {
+      const body = (await response.json()) as { reason?: string };
+      if (body.reason === 'stale') return 'stale';
+      if (body.reason === 'conflict') return 'conflict';
+      throw new Error('Message conflict response has no valid reason');
+    }
+    throw new Error(`Message request failed (${String(response.status)})`);
+  },
   async readTranscript(before) {
     const query = new URLSearchParams({ limit: '50' });
     if (before !== undefined) query.set('before', before);
