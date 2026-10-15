@@ -77,7 +77,7 @@ describe('durable owner-message intake on real Valkey', () => {
     });
   });
 
-  it('uses the durable owner row after receipt failure and dedup-ring eviction', async () => {
+  it('does not suppress an uncommitted retry merely because its history row exists', async () => {
     const id = uuidV7(Date.now());
     const recipientId = 'web-owner-recipient';
     const failedReceiptClient = redis.duplicate();
@@ -85,40 +85,13 @@ describe('durable owner-message intake on real Valkey', () => {
       scriptOverride: `local stream_id = redis.call('XADD', KEYS[1], '*', 'type', 'inbound.message', 'messageId', ARGV[1], 'recipientId', ARGV[2], 'text', ARGV[3], 'timestamp', ARGV[4], 'signal', ARGV[6]); return redis.error_reply('receipt write failed')`,
     });
     await expect(failure.acceptOwnerMessage(id, 'same text')).rejects.toThrow(/receipt/i);
-    const stream = new InboundMessageStream(
-      redis,
-      'inbound',
-      1_000,
-      async (recipient, messageId) => {
-        const found = await stores.postgres.query(
-          'SELECT 1 FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2',
-          [recipient, `inbound:${messageId}`]
-        );
-        return found.rowCount > 0;
-      }
-    );
-    for (const [index, text] of [
-      ['initial', 'same text'],
-      ...Array.from({ length: 1_001 }, (_, n) => [`later-${n}`, `later ${n}`] as [string, string]),
-    ] as [string, string][]) {
-      if (index === 'initial') {
-        // The append from the failed receipt write remains in the stream.
-      } else {
-        await intake.acceptOwnerMessage(uuidV7(Date.now()), text);
-      }
-      const accepted = await stream.readNew(true);
-      stream.settle(accepted.map((entry) => entry.signal.id));
-    }
-    expect(stream.exportSnapshot().recentMessageIds).not.toContain(id);
     await stores.postgres.query(
       `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
        VALUES ($1, $2, 'message', $3::jsonb)`,
       [recipientId, `inbound:${id}`, JSON.stringify({ role: 'user', content: 'same text' })]
     );
-    await expect(failure.acceptOwnerMessage(id, 'same text')).rejects.toThrow(/receipt/i);
-    await expect(failure.acceptOwnerMessage(id, 'different text')).rejects.toThrow(/receipt/i);
-    expect(await stream.readNew(true)).toEqual([]);
-    expect(stream.exportSnapshot().recentMessageIds).toContain(id);
+    const stream = new InboundMessageStream(redis);
+    expect((await stream.readNew(true)).map((entry) => entry.messageId)).toContain(id);
     await failedReceiptClient.quit();
   });
 
