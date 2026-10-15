@@ -1454,6 +1454,25 @@ export class CoreLoop {
       for (const entry of (await this.inboundStream?.readNew()) ?? []) {
         this.pendingSignals.push({ signal: entry.signal, timestamp: entry.signal.timestamp });
       }
+      const exhaustedInbound = this.inboundStream?.exhaustedEntries() ?? [];
+      for (const entry of exhaustedInbound) {
+        const data = entry.signal.data as { channel?: unknown };
+        const eventHash = createHash('sha256')
+          .update(`error-notice|${entry.recipientId}|${entry.messageId}|0`)
+          .digest('hex');
+        this.tickOutbox.push({
+          eventId: `error-notice:${eventHash}`,
+          type: 'send.command',
+          payload: {
+            recipientId: entry.recipientId,
+            channel: typeof data.channel === 'string' ? data.channel : 'unknown',
+            text: 'I could not complete that request after two attempts.',
+          },
+        });
+      }
+      if (exhaustedInbound.length > 0) {
+        this.inboundStream?.settle(exhaustedInbound.map((entry) => entry.signal.id));
+      }
 
       // ============================================================================
       // TICK-INITIATED OPERATIONS (run every tick regardless of signals)

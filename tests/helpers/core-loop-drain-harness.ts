@@ -363,6 +363,7 @@ export interface HarnessOptions {
   commitSnapshot?: CoreLoopDeps['commitSnapshot'];
   onStaleSnapshot?: CoreLoopDeps['onStaleSnapshot'];
   busSignalStream?: BusSignalStream;
+  inboundStream?: CoreLoopDeps['inboundStream'];
   initialBusOffset?: BusSnapshot;
 }
 
@@ -425,6 +426,7 @@ export async function startInstance(
       ...cognitionDeps,
       initialTickCount: opts.initialTickCount,
       busSignalStream: opts.busSignalStream,
+      inboundStream: opts.inboundStream,
       commitSnapshot: opts.commitSnapshot,
       onStaleSnapshot: opts.onStaleSnapshot,
     } as CoreLoopDeps
