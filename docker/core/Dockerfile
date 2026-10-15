@@ -8,7 +8,7 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 # Resolve and cache the exact local embedder model at build time. The application
-# copies this cache into its writable /tmp data path before starting.
+# reads this cache in place from /opt/model-cache at startup.
 FROM build AS model
 RUN node --input-type=module -e "import { pipeline, env } from '@huggingface/transformers'; env.cacheDir='/opt/model-cache'; env.allowLocalModels=true; await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {dtype:'fp32'});"
 

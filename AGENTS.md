@@ -60,8 +60,7 @@ tick), Energy & state are physiology. Start with `README.md` and
 - `src/llm/` — the provider interface, the single OpenAI-compatible endpoint
   provider (the endpoint names a model per role; no separate keyed provider
   and no fallback), tool-schema conversion, conversation-log writing
-- `src/storage/` — persistence: JSONStorage (atomic writes) behind
-  DeferredStorage (batched flush), conversations, the dual-layer memory
+- `src/storage/` — persistence: Postgres storage, conversations, the dual-layer memory
   (LanceDB vector store + JSON graph store), the soul
 - `src/ports/` — the narrow interfaces plugins see (LLM, storage, scheduler, …)
 - `src/types/` — Signal, Intent, Plugin, Cognition and friends: the shared

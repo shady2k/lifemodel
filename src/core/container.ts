@@ -338,8 +338,8 @@ export async function shutdownSequence(deps: ShutdownSequenceDeps): Promise<void
     }
   }
 
-  // 5. Fence durable writes before releasing the store connections. Store writes
-  //    are awaited at their call sites; there is no buffered filesystem flush.
+  // 5. Fence durable writes before releasing the store connections. coreLoop.stop()
+  //    drains tracked store-writing effects within the shared stop deadline.
   if (progress) progress.step = 'storage_flush';
   deps.coreLoop.closeDurableWrites();
 

@@ -47,6 +47,7 @@ import type { StatusUpdateService } from './status-update-service.js';
 import type { DomainTrackerService } from './domain-trackers.js';
 import type { Storage } from '../storage/storage.js';
 import type { PluginLoader } from './plugin-loader.js';
+import type { DurableEffectRegistry } from './durable-effect-registry.js';
 
 /**
  * Dependencies injected into IntentApplicator.
@@ -69,6 +70,7 @@ export interface IntentApplicatorDeps {
   running: () => boolean;
   storage?: Storage | undefined;
   pluginLoader?: PluginLoader | undefined;
+  durableEffects: DurableEffectRegistry;
   /**
    * Which durable-log turn a SEND_MESSAGE belongs to (lifemodel-ctc.2.1) and
    * what it does there (see SendTurnRef).
@@ -124,6 +126,10 @@ export interface SendOutcome {
  */
 export class IntentApplicator {
   private readonly deps: IntentApplicatorDeps;
+
+  private trackDurableEffect(name: string, effect: Promise<unknown>): void {
+    this.deps.durableEffects.track(name, effect);
+  }
 
   /** Timestamp of last message sent (for response timing) */
   private _lastMessageSentAt: number | null = null;
@@ -269,6 +275,7 @@ export class IntentApplicator {
                   'PLUGIN_CONTROL failed'
                 );
               });
+            this.trackDurableEffect('plugin control persistence', this.pluginControlChain);
             break;
         }
       });
@@ -394,7 +401,9 @@ export class IntentApplicator {
           metadata: fact ? { subject, predicate, object } : undefined,
         };
 
-        this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+        const save = this.deps.memoryProvider.save(entry);
+        this.trackDurableEffect('memory save', save);
+        save.catch((err: unknown) => {
           this.deps.logger.error(
             { error: err instanceof Error ? err.message : String(err) },
             'Failed to save to memory'
@@ -563,7 +572,10 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(memoryEntry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(memoryEntry);
+      this.trackDurableEffect('remembered fact', save);
+
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { error: err instanceof Error ? err.message : String(err) },
           'Failed to save remembered fact to memory'
@@ -583,17 +595,17 @@ export class IntentApplicator {
 
     if (rememberRecipientId && this.deps.conversationManager) {
       const summary = `${subject}.${attribute}="${value}"`;
-      this.deps.conversationManager
-        .addCompletedAction(rememberRecipientId, {
-          tool: 'core.remember',
-          summary,
-        })
-        .catch((err: unknown) => {
-          this.deps.logger.warn(
-            { error: err instanceof Error ? err.message : String(err) },
-            'Failed to record completed action for remember'
-          );
-        });
+      const actionWrite = this.deps.conversationManager.addCompletedAction(rememberRecipientId, {
+        tool: 'core.remember',
+        summary,
+      });
+      this.trackDurableEffect('remember conversation record', actionWrite);
+      actionWrite.catch((err: unknown) => {
+        this.deps.logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to record completed action for remember'
+        );
+      });
     }
 
     this.deps.metrics.counter('facts_remembered', { isUserFact: String(isUserFact) });
@@ -640,17 +652,17 @@ export class IntentApplicator {
 
     if (interestRecipientId && this.deps.conversationManager) {
       const summary = `topic="${topic}", intensity=${intensity}${urgent ? ', urgent' : ''}`;
-      this.deps.conversationManager
-        .addCompletedAction(interestRecipientId, {
-          tool: 'core.setInterest',
-          summary,
-        })
-        .catch((err: unknown) => {
-          this.deps.logger.warn(
-            { error: err instanceof Error ? err.message : String(err) },
-            'Failed to record completed action for setInterest'
-          );
-        });
+      const actionWrite = this.deps.conversationManager.addCompletedAction(interestRecipientId, {
+        tool: 'core.setInterest',
+        summary,
+      });
+      this.trackDurableEffect('interest conversation record', actionWrite);
+      actionWrite.catch((err: unknown) => {
+        this.deps.logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to record completed action for setInterest'
+        );
+      });
     }
 
     this.deps.logger.debug(
@@ -720,7 +732,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('commitment', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { commitmentId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save commitment'
@@ -731,7 +745,7 @@ export class IntentApplicator {
       if (commitmentRecipientId && this.deps.conversationManager) {
         const dueDate = new Date(dueAt);
         const summary = `promise: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}" (due ${dueDate.toLocaleDateString()})`;
-        this.deps.conversationManager
+        const actionWrite = this.deps.conversationManager
           .addCompletedAction(commitmentRecipientId, {
             tool: 'core.commitment',
             summary,
@@ -742,6 +756,7 @@ export class IntentApplicator {
               'Failed to record completed action for commitment'
             );
           });
+        this.trackDurableEffect('commitment conversation record', actionWrite);
       }
 
       this.deps.logger.info(
@@ -752,12 +767,15 @@ export class IntentApplicator {
     } else if (action === 'mark_kept') {
       // Update commitment status to kept
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'kept',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'kept',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId
+          )
         );
         this.deps.logger.info({ commitmentId }, 'Commitment marked as kept');
         this.deps.metrics.counter('commitments_kept');
@@ -765,13 +783,16 @@ export class IntentApplicator {
     } else if (action === 'mark_repaired') {
       // Update commitment status to repaired with note
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'repaired',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId,
-          repairNote
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'repaired',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId,
+            repairNote
+          )
         );
         this.deps.logger.info({ commitmentId, repairNote }, 'Commitment marked as repaired');
         this.deps.metrics.counter('commitments_repaired');
@@ -779,12 +800,15 @@ export class IntentApplicator {
     } else if (action === 'cancel') {
       // Update commitment status to cancelled
       if (commitmentId && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updateCommitmentStatus(
-          commitmentId,
-          'cancelled',
-          this.deps.domainTrackers.signaledDueCommitments,
-          this.deps.domainTrackers.signaledOverdueCommitments,
-          commitmentRecipientId
+        this.trackDurableEffect(
+          'commitment status update',
+          this.deps.statusUpdates.updateCommitmentStatus(
+            commitmentId,
+            'cancelled',
+            this.deps.domainTrackers.signaledDueCommitments,
+            this.deps.domainTrackers.signaledOverdueCommitments,
+            commitmentRecipientId
+          )
         );
         this.deps.logger.info({ commitmentId }, 'Commitment cancelled');
         this.deps.metrics.counter('commitments_cancelled');
@@ -835,7 +859,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('desire', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { desireId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save desire'
@@ -850,14 +876,20 @@ export class IntentApplicator {
     } else if (action === 'adjust') {
       // Update desire intensity
       if (desireId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateDesireStatus(desireId, 'active', intensity);
+        this.trackDurableEffect(
+          'desire status update',
+          this.deps.statusUpdates.updateDesireStatus(desireId, 'active', intensity)
+        );
         this.deps.logger.info({ desireId, intensity }, 'Desire intensity adjusted');
         this.deps.metrics.counter('desires_adjusted');
       }
     } else if (action === 'resolve') {
       // Mark desire as satisfied
       if (desireId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateDesireStatus(desireId, 'satisfied');
+        this.trackDurableEffect(
+          'desire status update',
+          this.deps.statusUpdates.updateDesireStatus(desireId, 'satisfied')
+        );
         this.deps.logger.info({ desireId }, 'Desire resolved');
         this.deps.metrics.counter('desires_resolved');
       }
@@ -915,7 +947,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('opinion', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { opinionId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save opinion'
@@ -957,7 +991,9 @@ export class IntentApplicator {
         parentSignalId: trace?.parentSignalId,
       };
 
-      this.deps.memoryProvider.save(entry).catch((err: unknown) => {
+      const save = this.deps.memoryProvider.save(entry);
+      this.trackDurableEffect('prediction', save);
+      save.catch((err: unknown) => {
         this.deps.logger.error(
           { predictionId, error: err instanceof Error ? err.message : String(err) },
           'Failed to save prediction'
@@ -971,17 +1007,23 @@ export class IntentApplicator {
       this.deps.metrics.counter('predictions_created');
     } else if (action === 'resolve_prediction') {
       if (predictionId && outcome && this.deps.statusUpdates && this.deps.domainTrackers) {
-        void this.deps.statusUpdates.updatePredictionStatus(
-          predictionId,
-          outcome,
-          this.deps.domainTrackers.signaledDuePredictions
+        this.trackDurableEffect(
+          'prediction status update',
+          this.deps.statusUpdates.updatePredictionStatus(
+            predictionId,
+            outcome,
+            this.deps.domainTrackers.signaledDuePredictions
+          )
         );
         this.deps.logger.info({ predictionId, outcome }, 'Prediction resolved');
         this.deps.metrics.counter('predictions_resolved', { outcome });
       }
     } else if (action === 'revise_opinion') {
       if (opinionId && this.deps.statusUpdates) {
-        void this.deps.statusUpdates.updateOpinionStatus(opinionId, stance, confidence);
+        this.trackDurableEffect(
+          'opinion status update',
+          this.deps.statusUpdates.updateOpinionStatus(opinionId, stance, confidence)
+        );
         this.deps.logger.info({ opinionId }, 'Opinion revised');
         this.deps.metrics.counter('opinions_revised');
       }
