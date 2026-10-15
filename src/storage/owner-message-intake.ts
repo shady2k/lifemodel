@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Redis } from 'iovalkey';
 import { Pool } from 'pg';
-import { PostgresTranscriptStore } from './postgres-transcript-store.js';
+import { closeTranscriptWakeBroker, PostgresTranscriptStore } from './postgres-transcript-store.js';
 import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
 import type { CreatureStateReader } from '../ports/creature-state.js';
@@ -145,11 +145,15 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
   private scriptSha(): Promise<string> {
     let sha = loadedScripts.get(this.redis);
     if (!sha) {
-      sha = this.redis.script('LOAD', this.script).then((value) => {
+      const loading = this.redis.script('LOAD', this.script).then((value) => {
         if (typeof value !== 'string') throw new Error('Valkey did not return intake script SHA');
         return value;
       });
-      loadedScripts.set(this.redis, sha);
+      sha = loading;
+      loadedScripts.set(this.redis, loading);
+      void loading.catch(() => {
+        if (loadedScripts.get(this.redis) === loading) loadedScripts.delete(this.redis);
+      });
     }
     return sha;
   }
@@ -177,6 +181,7 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
     transcript,
     creatureState,
     async close() {
+      await closeTranscriptWakeBroker(redis);
       await Promise.all([redis.quit(), pool.end()]);
     },
   };

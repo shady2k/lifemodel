@@ -282,9 +282,14 @@ The tab marks a message it could not send within 24 hours as not sent; a
 - the script appends first and writes the receipt second.
 
 If the receipt write fails after the append, the script returns an error
-and the module answers 503. The retry appends a second entry with the same
-`messageId`, which the core's dedup absorbs: the entry is fresh, so it is
-inside the ring. A receipt never exists without its entry.
+and the module answers 503. The retry may append a second entry with the same
+`messageId`. The core absorbs it through the dedup ring when present; before
+admitting an id absent from that ring, it also checks Postgres for the durable
+owner row `inbound:<id>`. If the row exists, the core completes the stream
+entry without starting a turn and logs a warning containing the id, never the
+text. This third line of defence covers retries of any age after receipt-write
+failure, including retries whose text conflicts with the original. A receipt
+never exists without its entry.
 
 ### 3. The web module and its routes (VHD-03, VHD-10, VHD-11)
 

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import Redis from 'iovalkey';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestStores, testStoreUrls, type TestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { OwnerMessageIntake } from '../../src/storage/owner-message-intake.js';
@@ -75,6 +75,51 @@ describe('durable owner-message intake on real Valkey', () => {
         text: 'hello',
       },
     });
+  });
+
+  it('uses the durable owner row after receipt failure and dedup-ring eviction', async () => {
+    const id = uuidV7(Date.now());
+    const recipientId = 'web-owner-recipient';
+    const failedReceiptClient = redis.duplicate();
+    const failure = new OwnerMessageIntake(failedReceiptClient, recipientId, {
+      scriptOverride: `local stream_id = redis.call('XADD', KEYS[1], '*', 'type', 'inbound.message', 'messageId', ARGV[1], 'recipientId', ARGV[2], 'text', ARGV[3], 'timestamp', ARGV[4], 'signal', ARGV[6]); return redis.error_reply('receipt write failed')`,
+    });
+    await expect(failure.acceptOwnerMessage(id, 'same text')).rejects.toThrow(/receipt/i);
+    const stream = new InboundMessageStream(
+      redis,
+      'inbound',
+      1_000,
+      async (recipient, messageId) => {
+        const found = await stores.postgres.query(
+          'SELECT 1 FROM core.conversation_messages WHERE recipient_id = $1 AND message_id = $2',
+          [recipient, `inbound:${messageId}`]
+        );
+        return found.rowCount > 0;
+      }
+    );
+    for (const [index, text] of [
+      ['initial', 'same text'],
+      ...Array.from({ length: 1_001 }, (_, n) => [`later-${n}`, `later ${n}`] as [string, string]),
+    ] as [string, string][]) {
+      if (index === 'initial') {
+        // The append from the failed receipt write remains in the stream.
+      } else {
+        await intake.acceptOwnerMessage(uuidV7(Date.now()), text);
+      }
+      const accepted = await stream.readNew(true);
+      stream.settle(accepted.map((entry) => entry.signal.id));
+    }
+    expect(stream.exportSnapshot().recentMessageIds).not.toContain(id);
+    await stores.postgres.query(
+      `INSERT INTO core.conversation_messages (recipient_id, message_id, kind, payload)
+       VALUES ($1, $2, 'message', $3::jsonb)`,
+      [recipientId, `inbound:${id}`, JSON.stringify({ role: 'user', content: 'same text' })]
+    );
+    await expect(failure.acceptOwnerMessage(id, 'same text')).rejects.toThrow(/receipt/i);
+    await expect(failure.acceptOwnerMessage(id, 'different text')).rejects.toThrow(/receipt/i);
+    expect(await stream.readNew(true)).toEqual([]);
+    expect(stream.exportSnapshot().recentMessageIds).toContain(id);
+    await failedReceiptClient.quit();
   });
 
   it('quotes only a visible transcript row and refuses unknown or invisible replies before append', async () => {
@@ -164,18 +209,59 @@ describe('durable owner-message intake on real Valkey', () => {
     );
   });
 
-  it('appends before receipt write and a retry remains a single logical input', async () => {
+  it('uses the production script ordering when XADD fails and when receipt SET fails', async () => {
     const id = uuidV7(Date.now());
-    const failureConnection = redis.duplicate();
-    const failing = new OwnerMessageIntake(failureConnection, 'web-owner-recipient', {
-      scriptOverride: `local stream_id = redis.call('XADD', KEYS[1], '*', 'type', 'inbound.message', 'messageId', ARGV[1], 'recipientId', ARGV[2], 'text', ARGV[3], 'timestamp', ARGV[4], 'signal', ARGV[6]); return redis.error_reply('receipt write failed')`,
-    });
-    await expect(failing.acceptOwnerMessage(id, 'retry me')).rejects.toThrow(/receipt/i);
-    await failureConnection.quit();
-    const retry = await intake.acceptOwnerMessage(id, 'retry me');
-    const stream = new InboundMessageStream(redis);
-    const messages = await stream.readNew(true);
+    const streamKey = `wrong-type:${id}`;
+    const wrongType = new OwnerMessageIntake(redis, 'web-owner-recipient', { streamKey });
+    await redis.set(streamKey, 'not-a-stream');
+    await expect(wrongType.acceptOwnerMessage(id, 'retry me')).rejects.toThrow(/WRONGTYPE/i);
+    expect(await redis.get(`inbound:receipt:${id}`)).toBeNull();
+    await redis.del(streamKey);
+    expect((await wrongType.acceptOwnerMessage(id, 'retry me')).status).toBe('accepted');
+
+    const blockedId = uuidV7(Date.now());
+    const username = `no-set-${blockedId}`;
+    const password = `pass-${blockedId}`;
+    await redis.call('ACL', 'SETUSER', username, 'on', `>${password}`, '~*', '+@all', '-set');
+    const url = new URL(testStoreUrls().valkeyUrl);
+    url.pathname = '/7';
+    url.username = username;
+    url.password = password;
+    const denied = new Redis(url.toString());
+    try {
+      await expect(
+        new OwnerMessageIntake(denied, 'web-owner-recipient').acceptOwnerMessage(
+          blockedId,
+          'receipt retry'
+        )
+      ).rejects.toThrow(/NOPERM|permission/i);
+      expect(await redis.get(`inbound:receipt:${blockedId}`)).toBeNull();
+    } finally {
+      denied.disconnect();
+      await redis.call('ACL', 'DELUSER', username);
+    }
+    const retry = await intake.acceptOwnerMessage(blockedId, 'receipt retry');
     expect(retry.status).toBe('accepted');
-    expect(messages.filter((message) => message.messageId === id)).toHaveLength(1);
+    const fields = await redis.xrange('inbound', '-', '+');
+    expect(fields.filter(([, values]) => values.includes(blockedId))).toHaveLength(2);
+  });
+
+  it('retries SCRIPT LOAD after its first rejection on the same Redis client', async () => {
+    const connection = redis.duplicate();
+    const load = vi.spyOn(connection, 'script');
+    load.mockRejectedValueOnce(new Error('temporary load failure'));
+    const sameClientIntake = new OwnerMessageIntake(connection, 'web-owner-recipient');
+    try {
+      await expect(
+        sameClientIntake.acceptOwnerMessage(uuidV7(Date.now()), 'first')
+      ).rejects.toThrow('temporary load failure');
+      expect((await sameClientIntake.acceptOwnerMessage(uuidV7(Date.now()), 'second')).status).toBe(
+        'accepted'
+      );
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      load.mockRestore();
+      await connection.quit();
+    }
   });
 });
