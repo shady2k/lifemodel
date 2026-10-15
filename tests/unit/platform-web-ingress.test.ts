@@ -67,7 +67,7 @@ describe('platform web ingress and egress', () => {
         expect(
           ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares'],
           `${host}${path.path} must use ForwardAuth`
-        ).toBe('lifemodel-system-loader-auth@kubernetescrd');
+        ).toBe(`${ingress.metadata.namespace}-loader-auth@kubernetescrd`);
       }
     }
     const privatePaths = privateRoutes.filter(
@@ -88,16 +88,21 @@ describe('platform web ingress and egress', () => {
           path.backend.service.name === 'web' &&
           path.backend.service.port.number === 8080 &&
           ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares'] ===
-            'lifemodel-system-loader-auth@kubernetescrd'
+            'lifemodel-loader-auth@kubernetescrd'
       )
     ).toBe(true);
-    const middleware = all.find(
+    const middlewares = all.filter(
       (item) => item.kind === 'Middleware' && item.metadata?.name === 'loader-auth'
     );
-    expect(middleware?.metadata?.namespace).toBe('lifemodel-system');
-    expect(middleware?.spec?.forwardAuth?.address).toBe(
-      'http://loader.lifemodel-system.svc.cluster.local:7000/_auth/verify'
-    );
+    expect(middlewares.map((item) => item.metadata?.namespace).sort()).toEqual([
+      'lifemodel',
+      'lifemodel-system',
+    ]);
+    for (const middleware of middlewares) {
+      expect(middleware.spec?.forwardAuth?.address).toBe(
+        'http://loader.lifemodel-system.svc.cluster.local:7000/_auth/verify'
+      );
+    }
   });
 
   it('limits web pod egress to Valkey, Postgres and DNS', () => {
