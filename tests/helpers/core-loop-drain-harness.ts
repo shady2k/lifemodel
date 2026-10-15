@@ -333,6 +333,7 @@ export interface CoreLoopInstance {
   aggregation: FakeAggregationLayer;
   channel: FakeTestChannel;
   recipientId: string;
+  registry: RecipientRegistry;
   logger: Logger;
 }
 
@@ -442,6 +443,7 @@ export async function startInstance(
     aggregation,
     channel,
     recipientId,
+    registry,
     recordedLogs,
     logger,
   };
