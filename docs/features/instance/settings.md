@@ -1,8 +1,10 @@
 # lifemodel's own settings
 
-The settings interface is part of the core (`src/settings/`). The platform
-routes the application web surface through ForwardAuth; lifemodel's settings
-server has no separate authentication layer.
+The settings interface is part of the core (`src/settings/`). The server
+currently binds to `127.0.0.1`; platform deployment has no settings Service or
+Ingress yet, so it is not externally routed. The settings route through the
+platform web surface is pending. The server has no separate authentication
+layer.
 
 The interface currently edits the OpenAI-compatible model endpoint and its
 fast, smart and motor model names. It holds no model key. Telegram bot and chat
