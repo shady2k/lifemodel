@@ -85,7 +85,12 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
   constructor(
     private readonly redis: Redis,
     private readonly streamKey = INBOUND_STREAM,
-    private readonly dedupLimit = DEFAULT_DEDUP_LIMIT
+    private readonly dedupLimit = DEFAULT_DEDUP_LIMIT,
+    private readonly durableOwnerRowExists?: (
+      recipientId: string,
+      messageId: string
+    ) => Promise<boolean>,
+    private readonly onDurableDuplicate?: (messageId: string) => void
   ) {
     if (!Number.isInteger(dedupLimit) || dedupLimit < 1)
       throw new Error('dedupLimit must be positive');
@@ -156,6 +161,15 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
         if (pending && oldData?.pendingPhoto != null && newData?.pendingPhoto == null) {
           pending.signal = signal;
         }
+        continue;
+      }
+      if (
+        this.durableOwnerRowExists &&
+        (await this.durableOwnerRowExists(recipientId, messageId))
+      ) {
+        this.onDurableDuplicate?.(messageId);
+        this.snapshot.recentMessageIds.push(messageId);
+        this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
         continue;
       }
       this.snapshot.pending.push({ streamId, messageId, recipientId, signal });

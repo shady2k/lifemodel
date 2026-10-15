@@ -557,7 +557,20 @@ export async function createContainerAsync(
 
   // Inbound offsets, pending entries and the bounded dedup ring are owned by
   // the Valkey snapshot. Existing stream entries replay from that snapshot.
-  const inboundStream = new InboundMessageStream(snapshotRedis, INBOUND_STREAM);
+  const inboundStream = new InboundMessageStream(
+    snapshotRedis,
+    INBOUND_STREAM,
+    undefined,
+    async (recipientId, messageId) => {
+      const result = await rawPostgres.query(
+        `SELECT 1 FROM core.conversation_messages
+         WHERE recipient_id = $1 AND message_id = $2 LIMIT 1`,
+        [recipientId, `inbound:${messageId}`]
+      );
+      return result.rowCount !== 0;
+    },
+    (messageId) => logger.warn({ messageId }, 'Inbound retry already has an owner history row')
+  );
   inboundStream.hydrateSnapshot(
     initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]
   );

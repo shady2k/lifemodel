@@ -145,11 +145,15 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
   private scriptSha(): Promise<string> {
     let sha = loadedScripts.get(this.redis);
     if (!sha) {
-      sha = this.redis.script('LOAD', this.script).then((value) => {
+      const loading = this.redis.script('LOAD', this.script).then((value) => {
         if (typeof value !== 'string') throw new Error('Valkey did not return intake script SHA');
         return value;
       });
-      loadedScripts.set(this.redis, sha);
+      sha = loading;
+      loadedScripts.set(this.redis, loading);
+      void loading.catch(() => {
+        if (loadedScripts.get(this.redis) === loading) loadedScripts.delete(this.redis);
+      });
     }
     return sha;
   }
