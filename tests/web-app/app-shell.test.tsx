@@ -89,6 +89,6 @@ describe('web app shell', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Open Now' }));
     const panel = screen.getByRole('dialog', { name: 'Now' });
-    expect(within(panel).getByText('here')).toBeTruthy();
+    expect(within(panel).getByText('no connection since --:--')).toBeTruthy();
   });
 });

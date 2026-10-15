@@ -145,14 +145,13 @@ messages, because the assistant has nowhere else to put progress.
 
 ## Built so far
 
-Nothing yet. The first module (lifemodel-vhd, ADR-011) builds:
+The first module (lifemodel-vhd, ADR-011) is in progress. Its frontend now has:
 
-- the conversation, with "↩ Ответить" on a message (binding layer 2 for
-  messages; binding to tasks and "@" come with tasks);
-- the creature's state ("•••", presence, "Прочитано");
-- the layout with Разговор and Система on the left and the "Сейчас" panel
-  with the state only;
-- login through the loader's password.
+- the English/Russian app shell, with a conversation header and fresh creature presence;
+- a virtualized transcript view that reads one latest page, loads earlier pages by cursor, and merges live message/state events through a transport seam;
+- owner and lifemodel bubbles, date/time labels, safe Markdown rendering and the history-based "Прочитано" receipt.
+
+The module's transcript and event HTTP routes are not implemented yet. The frontend transport targets the ADR-011 DTO and SSE event contract; this does not make the end-to-end module available. The composer and "↩ Ответить" (binding layer 2 for messages), and login through the loader's password, remain to be built. Binding to tasks and "@" come with tasks.
 
 Task chips and the drawer, Stop, "@", reactions, projects, memory and
 settings come with the features that create tasks and projects

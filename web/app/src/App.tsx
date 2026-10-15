@@ -26,11 +26,7 @@ import {
 } from '@/components/ui/sheet';
 import { useIsMobile } from '@/hooks/use-mobile';
 import i18n from './i18n';
-
-const initialCreatureState: CreaturePresenceValue = {
-  state: 'awake',
-  publishedAt: new Date().toISOString(),
-};
+import { Conversation } from './Conversation';
 
 function Creature() {
   return (
@@ -76,7 +72,7 @@ function Navigation() {
   );
 }
 
-function NowPanel() {
+function NowPanel({ creature }: { creature?: CreaturePresenceValue }) {
   const { t } = useTranslation();
   return (
     <section aria-labelledby="now-title" className="flex h-full min-h-0 flex-col bg-sidebar">
@@ -89,7 +85,7 @@ function NowPanel() {
         <Creature />
         <div className="flex min-w-0 flex-col gap-1">
           <span className="font-medium">lifemodel</span>
-          <CreaturePresence value={initialCreatureState} />
+          <CreaturePresence value={creature} />
         </div>
       </div>
     </section>
@@ -100,6 +96,7 @@ export default function App() {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
   const [nowOpen, setNowOpen] = useState(false);
+  const [creature, setCreature] = useState<CreaturePresenceValue>();
 
   useEffect(() => {
     const language = navigator.language.toLowerCase().startsWith('ru') ? 'ru' : 'en';
@@ -126,7 +123,7 @@ export default function App() {
           <Creature />
           <div className="flex min-w-0 flex-col">
             <span className="text-sm font-medium leading-tight">lifemodel</span>
-            <CreaturePresence value={initialCreatureState} />
+            <CreaturePresence value={creature} />
           </div>
           {isMobile && (
             <Button
@@ -151,9 +148,11 @@ export default function App() {
               id="conversation"
               aria-label={t('conversation')}
               className="min-h-0 min-w-0 flex-1"
-            />
+            >
+              <Conversation onState={setCreature} />
+            </section>
             <aside aria-label={t('now')} className="hidden w-80 shrink-0 border-l lg:block">
-              <NowPanel />
+              <NowPanel creature={creature} />
             </aside>
           </SidebarInset>
         </div>
@@ -163,7 +162,7 @@ export default function App() {
               <SheetTitle>{t('now')}</SheetTitle>
               <SheetDescription>{t('creatureDescription')}</SheetDescription>
             </SheetHeader>
-            <NowPanel />
+            <NowPanel creature={creature} />
           </SheetContent>
         </Sheet>
       </div>
