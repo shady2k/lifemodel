@@ -54,12 +54,14 @@ messages, because the assistant has nowhere else to put progress.
   - Messages with date and time separators. Links, lists and code are
     rendered.
   - The owner can write at any time, without waiting for an answer.
+  - "Прочитано" means lifemodel has taken the message into a turn.
   - A "•••" bubble shows while lifemodel thinks. "Прочитано" sits under the
     owner's last message once lifemodel has taken it.
   - A question that asks for permission carries buttons: Да / Нет /
     Ответить.
 - **Right: "Сейчас".**
-  - lifemodel's avatar and presence: thinking, awake, asleep.
+  - lifemodel's avatar and presence: thinking, awake, asleep, or "нет связи"
+    when its state is stale.
   - Running tasks, each with:
     - its project;
     - its stage;
