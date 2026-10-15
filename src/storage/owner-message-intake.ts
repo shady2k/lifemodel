@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Redis } from 'iovalkey';
+import { Redis } from 'iovalkey';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
 import type { TranscriptReader } from '../ports/transcript.js';
 import { createUserMessageSignal } from '../types/signal.js';
@@ -149,4 +149,24 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
     }
     return sha;
   }
+}
+
+/** Build the web module's domain operation from the configured durable stores. */
+export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process.env): {
+  intake: IOwnerMessageIntake;
+  close(): Promise<void>;
+} {
+  const valkeyUrl = env['LIFEMODEL_VALKEY_URL'];
+  const databaseUrl = env['LIFEMODEL_DATABASE_URL'];
+  if (!valkeyUrl) throw new Error('LIFEMODEL_VALKEY_URL is required');
+  if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
+  void new URL(databaseUrl);
+  const redis = new Redis(valkeyUrl);
+  const recipientId = `rcpt_${createHash('sha256').update('web\0owner').digest('hex').slice(0, 16)}`;
+  return {
+    intake: new OwnerMessageIntake(redis, recipientId),
+    async close() {
+      await redis.quit();
+    },
+  };
 }

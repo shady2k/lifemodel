@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc && npm run build:app",
+    "build": "tsc && npm run build:web-server && npm run build:app",
     "build:loader": "tsc -p loader/tsconfig.json",
     "postbuild": "cp -r src/runtime/builtin-skills dist/runtime/builtin-skills",
     "start": "node dist/index.js",
@@ -30,7 +30,8 @@
     "ready": "node .backlog/ready.mjs",
     "present": "node .backlog/rules/check-present.mjs --config .backlog/config.json --base \"${BASE:-$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse HEAD)}\"",
     "build:app": "vite build --config web/app/vite.config.ts",
-    "dev:web": "vite --config web/app/vite.config.ts"
+    "dev:web": "vite --config web/app/vite.config.ts",
+    "build:web-server": "esbuild src/web/index.ts --bundle --platform=node --format=esm --outfile=dist/web/server.mjs"
   },
   "keywords": [
     "ai",
@@ -72,7 +73,8 @@
     "jest-axe": "^10.0.0",
     "jsdom": "^27.3.0",
     "vite": "^7.2.2",
-    "@testing-library/dom": "^10.4.1"
+    "@testing-library/dom": "^10.4.1",
+    "esbuild": "0.27.2"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.27",

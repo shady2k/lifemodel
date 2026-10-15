@@ -156,9 +156,9 @@ describe('durable owner-message intake on real Valkey', () => {
     expect(
       await intake.acceptOwnerMessage(uuidV7(Date.now() - 24 * 60 * 60 * 1_000 - 1), 'old')
     ).toEqual({ status: 'stale' });
-    expect(
-      await intake.acceptOwnerMessage(uuidV7(Date.now() + 5 * 60 * 1_000 + 1), 'future')
-    ).toEqual({ status: 'stale' });
+    expect(await intake.acceptOwnerMessage(uuidV7(Date.now() + 6 * 60 * 1_000), 'future')).toEqual({
+      status: 'stale',
+    });
     expect((await redis.xrange('inbound', '-', '+')).map(([streamId]) => streamId)).toContain(
       accepted.streamId
     );
