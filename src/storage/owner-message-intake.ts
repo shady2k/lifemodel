@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { Redis } from 'iovalkey';
+import { Pool } from 'pg';
+import { PostgresTranscriptStore } from './postgres-transcript-store.js';
+import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
+import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader } from '../ports/transcript.js';
 import { createUserMessageSignal } from '../types/signal.js';
 
@@ -154,6 +158,8 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
 /** Build the web module's domain operation from the configured durable stores. */
 export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process.env): {
   intake: IOwnerMessageIntake;
+  transcript: TranscriptReader;
+  creatureState: CreatureStateReader;
   close(): Promise<void>;
 } {
   const valkeyUrl = env['LIFEMODEL_VALKEY_URL'];
@@ -162,11 +168,16 @@ export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process
   if (!databaseUrl) throw new Error('LIFEMODEL_DATABASE_URL is required');
   void new URL(databaseUrl);
   const redis = new Redis(valkeyUrl);
+  const pool = new Pool({ connectionString: databaseUrl, max: 5 });
   const recipientId = `rcpt_${createHash('sha256').update('web\0owner').digest('hex').slice(0, 16)}`;
+  const transcript = new PostgresTranscriptStore(pool, redis, recipientId);
+  const creatureState = new CreatureStateStore(redis);
   return {
-    intake: new OwnerMessageIntake(redis, recipientId),
+    intake: new OwnerMessageIntake(redis, recipientId, { transcript }),
+    transcript,
+    creatureState,
     async close() {
-      await redis.quit();
+      await Promise.all([redis.quit(), pool.end()]);
     },
   };
 }

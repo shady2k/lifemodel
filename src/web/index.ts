@@ -13,7 +13,13 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error('LIFEMODEL_WEB_PORT must be a valid TCP port');
   const stores = createOwnerMessageIntakeFromEnv();
-  const server = createWebServer({ allowedOrigin, intake: stores.intake, logger });
+  const server = createWebServer({
+    allowedOrigin,
+    intake: stores.intake,
+    transcript: stores.transcript,
+    creatureState: stores.creatureState,
+    logger,
+  });
   const close = async () => {
     await server.close();
     await stores.close();
