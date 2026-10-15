@@ -375,6 +375,8 @@ export interface HarnessOptions {
   initialBusOffset?: BusSnapshot;
   conversationManager?: ConversationManager;
   recipientRegistry?: IRecipientRegistry;
+  creatureStateEpoch?: number;
+  publishCreatureState?: CoreLoopDeps['publishCreatureState'];
 }
 
 const TEST_TICK_INTERVAL = 5;
@@ -442,6 +444,8 @@ export async function startInstance(
       onStaleSnapshot: opts.onStaleSnapshot,
       onFatalError: opts.onFatalError,
       conversationManager: opts.conversationManager,
+      creatureStateEpoch: opts.creatureStateEpoch,
+      publishCreatureState: opts.publishCreatureState,
     } as CoreLoopDeps
   );
   coreLoop.registerChannel(channel as never);

@@ -74,6 +74,8 @@ import type { PluginStatus } from '../layers/cognition/tools/core/manage.js';
 import type { InboundMessageStream } from './message-streams.js';
 import type { SnapshotOutboxEvent } from '../storage/snapshot-store.js';
 import { StaleSnapshotEpochError } from '../storage/snapshot-store.js';
+import type { CreatureState } from '../ports/creature-state.js';
+import { CREATURE_STATE_HEARTBEAT_MS } from '../storage/creature-state-store.js';
 import { StalePostgresEpochError } from '../storage/fenced-postgres.js';
 import type { BusSignalStream } from './bus-stream.js';
 
@@ -161,6 +163,8 @@ export interface CoreLoopDeps {
   /** Apply projections after the atomic snapshot/outbox commit succeeds. */
   afterSnapshotCommit?: (() => Promise<void>) | undefined;
   initialTickCount?: number | undefined;
+  creatureStateEpoch?: number | undefined;
+  publishCreatureState?: ((state: CreatureState, epoch: number) => Promise<void>) | undefined;
   onStaleSnapshot?:
     | ((error: StaleSnapshotEpochError | StalePostgresEpochError) => void)
     | undefined;
@@ -327,6 +331,10 @@ export class CoreLoop {
 
   private running = false;
   private tickCount = 0;
+  private readonly creatureStateEpoch: number | undefined;
+  private readonly publishCreatureState: CoreLoopDeps['publishCreatureState'];
+  private creatureStateHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private publishedCreatureState: CreatureState | null = null;
   private lastCommitAt = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
@@ -473,6 +481,8 @@ export class CoreLoop {
     this.onStaleSnapshot = deps.onStaleSnapshot;
     this.onFatalError = deps.onFatalError;
     this.tickCount = deps.initialTickCount ?? 0;
+    this.creatureStateEpoch = deps.creatureStateEpoch;
+    this.publishCreatureState = deps.publishCreatureState;
     this.metrics = metrics;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.conversationManager = deps.conversationManager;
@@ -1031,8 +1041,15 @@ export class CoreLoop {
 
     this.logger.info({ tickInterval: this.config.tickInterval }, 'Core loop started');
 
-    // Schedule first tick immediately
+    // Publish before the first tick without making core progress depend on Valkey.
+    void this.publishCurrentCreatureState(true);
     this.scheduleTick();
+    if (this.publishCreatureState && this.creatureStateEpoch !== undefined) {
+      this.creatureStateHeartbeat = setInterval(() => {
+        void this.publishCurrentCreatureState(true);
+      }, CREATURE_STATE_HEARTBEAT_MS);
+      this.creatureStateHeartbeat.unref?.();
+    }
   }
 
   /**
@@ -1051,6 +1068,10 @@ export class CoreLoop {
     }
 
     this.running = false;
+    if (this.creatureStateHeartbeat) {
+      clearInterval(this.creatureStateHeartbeat);
+      this.creatureStateHeartbeat = null;
+    }
 
     if (this.tickTimeout) {
       clearTimeout(this.tickTimeout);
@@ -1425,6 +1446,22 @@ export class CoreLoop {
         this.signalStreamIds.set(signal.id, id);
       });
       this.pendingBusWrites.push(write);
+    }
+  }
+
+  private async publishCurrentCreatureState(force = false): Promise<void> {
+    if (!this.publishCreatureState || this.creatureStateEpoch === undefined) return;
+    const state: CreatureState = this.pendingCognition
+      ? 'thinking'
+      : this.agent.getAlertnessMode() === 'sleeping'
+        ? 'asleep'
+        : 'awake';
+    if (!force && state === this.publishedCreatureState) return;
+    try {
+      await this.publishCreatureState(state, this.creatureStateEpoch);
+      this.publishedCreatureState = state;
+    } catch (error) {
+      this.logger.warn({ err: error }, 'Failed to publish creature state');
     }
   }
 
@@ -2005,6 +2042,7 @@ export class CoreLoop {
         this.scheduleTick();
       }
     } finally {
+      void this.publishCurrentCreatureState();
       this.tickInFlight--;
     }
   }
@@ -2415,6 +2453,7 @@ export class CoreLoop {
       traceContext,
     };
     this.registerTurnCommit(context.tickId, this.pendingCognition);
+    void this.publishCurrentCreatureState();
 
     promise
       .then(() => {
