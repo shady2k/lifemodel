@@ -1,4 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -24,6 +27,33 @@ describe('core image policy', () => {
     expect(buildScript).toContain('docker build');
     expect(buildScript).not.toContain('docker push');
     expect(buildScript).toContain('--tag \"$image:$tag\"');
+  });
+
+  it('assembles every core Dockerfile COPY source and release uses that context', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'core-image-context-'));
+    const context = join(directory, 'context');
+    try {
+      const prepare = spawnSync(
+        'sh',
+        [
+          fileURLToPath(new URL('../../../scripts/prepare-core-image-context.sh', import.meta.url)),
+          context,
+        ],
+        { encoding: 'utf8' }
+      );
+      expect(prepare.status, prepare.stderr).toBe(0);
+      const copySources = [...dockerfile.matchAll(/^COPY (?!\s*--from=)(?:--[^ ]+\s+)*(.+)$/gm)]
+        .flatMap((match) => match[1].split(/\s+/).slice(0, -1))
+        .filter((source) => !source.startsWith('--'));
+      for (const source of copySources) {
+        expect(existsSync(join(context, source)), source).toBe(true);
+      }
+      const workflow = readFileSync(`${root}/.github/workflows/release.yml`, 'utf8');
+      expect(workflow).toContain('scripts/prepare-core-image-context.sh .docker-core-context');
+      expect(workflow).toContain('context: .docker-core-context');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('bakes the embedder model into the image at a stable path', () => {
