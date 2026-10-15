@@ -2,13 +2,13 @@
 #
 # A platform-mode loader: the program Flux deploys into `lifemodel-system`
 # while the cluster has NO Docker socket and nothing to supervise. It carries
-# the loader and nothing else - no Caddy, no Agent Vault, no seed bundle, no
-# lifemodel - because in platform mode the loader reads none of them. It comes
-# up, serves its interface and login on one port, and waits.
+# the loader and a prepared full-history seed bundle, but no Caddy, Agent Vault
+# or lifemodel core image. The bundle seeds this release into Gitea on first
+# start; the loader then serves its interface and login on one port and waits.
 #
-# Build it from the checkout root (the context is the whole repository):
-#
-#   docker build -f docker/loader/Dockerfile -t lifemodel-loader:local .
+# Release builds first run scripts/release/prepare-loader-context.sh after
+# pinning the pushed core digest. This Dockerfile requires the prepared
+# .docker-context/seed.bundle; a bare checkout-root build is not sufficient.
 #
 # The runtime runs as a non-root user, holds a read-only root filesystem, and
 # writes only to /var/lib/loader (a volume: the password and session secret

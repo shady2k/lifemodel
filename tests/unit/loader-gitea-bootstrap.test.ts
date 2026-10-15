@@ -210,11 +210,21 @@ describe('Gitea first-start bootstrap', () => {
     await run(['init', '-b', 'main', preparerRoot]);
     await run(['config', 'user.email', 'test@example.invalid'], preparerRoot);
     await run(['config', 'user.name', 'test'], preparerRoot);
+    const seedDir = join(preparerRoot, 'deploy/platform/applications/lifemodel');
+    await mkdir(seedDir, { recursive: true });
+    await writeFile(
+      join(seedDir, 'kustomization.yaml'),
+      `images:\n  - name: ghcr.io/shady2k/lifemodel-core\n    digest: sha256:${'d'.repeat(64)}\n`
+    );
+    await run(['add', 'deploy'], preparerRoot);
     await writeFile(join(preparerRoot, 'history.txt'), 'release one\n');
     await run(['add', 'history.txt'], preparerRoot);
     await run(['commit', '-m', 'release one'], preparerRoot);
     await writeFile(join(preparerRoot, 'history.txt'), 'release two\n');
     await run(['commit', '-am', 'release two'], preparerRoot);
+    const sourceHead = (
+      await runner.run('git', ['rev-parse', 'HEAD'], { cwd: preparerRoot })
+    ).stdout.trim();
     const prepared = await runner.run(
       'sh',
       [join(preparerRoot, 'scripts/release/prepare-loader-context.sh')],
@@ -222,6 +232,16 @@ describe('Gitea first-start bootstrap', () => {
     );
     expect(prepared.code, prepared.stderr).toBe(0);
     const productionBundle = join(preparerRoot, '.docker-context/seed.bundle');
+    const bundleHead = (
+      await runner.run('git', ['bundle', 'list-heads', productionBundle, 'HEAD'])
+    ).stdout
+      .trim()
+      .split(/\s+/)[0];
+    expect(
+      (
+        await runner.run('git', ['rev-parse', `${bundleHead}^`], { cwd: preparerRoot })
+      ).stdout.trim()
+    ).toBe(sourceHead);
     await run(['init', '--bare', '-b', 'main', bare]);
     const seen: string[] = [];
     const protections = new Map<string, Record<string, unknown>>();
@@ -246,7 +266,10 @@ describe('Gitea first-start bootstrap', () => {
         } else if (req.method === 'POST' && req.url === '/api/v1/admin/users/admin/repos') {
           res.statusCode = 201;
           res.end('{}');
-        } else if (req.method === 'GET' && req.url === '/api/v1/repos/admin/lifemodel/branches/deploy') {
+        } else if (
+          req.method === 'GET' &&
+          req.url === '/api/v1/repos/admin/lifemodel/branches/deploy'
+        ) {
           res.statusCode = 404;
           res.end('{}');
         } else if (req.method === 'POST' && req.url === '/api/v1/repos/admin/lifemodel/branches') {
@@ -254,10 +277,14 @@ describe('Gitea first-start bootstrap', () => {
           res.end('{}');
         } else if (req.method === 'GET' && protection) {
           const value = protections.get(decodeURIComponent(protection[1]));
-          const observed = value && protectionReadbackDrift ? { ...value, enable_push: false } : value;
+          const observed =
+            value && protectionReadbackDrift ? { ...value, enable_push: false } : value;
           res.statusCode = value ? 200 : 404;
           res.end(JSON.stringify(observed ?? {}));
-        } else if (req.method === 'POST' && req.url === '/api/v1/repos/admin/lifemodel/branch_protections') {
+        } else if (
+          req.method === 'POST' &&
+          req.url === '/api/v1/repos/admin/lifemodel/branch_protections'
+        ) {
           const rule = body as Record<string, unknown>;
           protections.set(String(rule['rule_name']), rule);
           res.statusCode = 201;
@@ -309,14 +336,20 @@ describe('Gitea first-start bootstrap', () => {
       const remoteHead = (
         await runner.run('git', ['--git-dir', bare, 'rev-parse', 'refs/heads/main'])
       ).stdout.trim();
-      expect(remoteHead).toBe((await runner.run('git', ['rev-parse', 'HEAD'], { cwd: preparerRoot })).stdout.trim());
-      expect((await runner.run('git', ['rev-list', '--count', 'refs/heads/main'], { cwd: bare })).stdout.trim()).toBe('2');
+      expect(remoteHead).toBe(bundleHead);
+      expect(
+        (
+          await runner.run('git', ['rev-list', '--count', 'refs/heads/main'], { cwd: bare })
+        ).stdout.trim()
+      ).toBe('3');
       expect(seen).toContain('GET /api/v1/repos/admin/lifemodel/branch_protections/main');
       expect(seen).toContain('POST /api/v1/repos/admin/lifemodel/branch_protections');
       expect(seen).toContain('PATCH /api/v1/repos/admin/lifemodel/branch_protections/main');
       expect(seen).toContain('POST /api/v1/repos/admin/lifemodel/branch_protections');
       expect(seen).toContain('GET /api/v1/repos/admin/lifemodel/branch_protections/deploy');
-      expect(seen.filter((call) => call === 'GET /api/v1/repos/admin/lifemodel/branch_protections/main')).toHaveLength(6);
+      expect(
+        seen.filter((call) => call === 'GET /api/v1/repos/admin/lifemodel/branch_protections/main')
+      ).toHaveLength(6);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve()))
@@ -354,7 +387,6 @@ describe('Gitea first-start bootstrap', () => {
     }
   });
 
-
   it.each(['after user creation', 'after collaborator assignment'])(
     'resumes source-user setup after a cut %s using the persisted credential',
     async (cut) => {
@@ -375,20 +407,40 @@ describe('Gitea first-start bootstrap', () => {
           calls.push(route);
           const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
           const auth = req.headers.authorization;
-          const isSource = auth === `Basic ${Buffer.from(`lifemodel-source:${sourcePassword}`).toString('base64')}`;
-          const isAdmin = auth === `Basic ${Buffer.from(`${adminCredentials.username}:${adminCredentials.password}`).toString('base64')}`;
+          const isSource =
+            auth ===
+            `Basic ${Buffer.from(`lifemodel-source:${sourcePassword}`).toString('base64')}`;
+          const isAdmin =
+            auth ===
+            `Basic ${Buffer.from(`${adminCredentials.username}:${adminCredentials.password}`).toString('base64')}`;
           if (req.method === 'GET' && req.url === '/api/v1/user' && isAdmin) {
             res.statusCode = 200;
             res.end('{\"login\":\"admin\"}');
-          } else if (req.method === 'GET' && req.url === '/api/v1/users/lifemodel-source' && isAdmin) {
+          } else if (
+            req.method === 'GET' &&
+            req.url === '/api/v1/users/lifemodel-source' &&
+            isAdmin
+          ) {
             const password = users.get('lifemodel-source');
             res.statusCode = password === undefined ? 404 : 200;
-            res.end(password === undefined ? '{}' : JSON.stringify({ login: 'lifemodel-source', username: 'lifemodel-source', is_admin: false }));
+            res.end(
+              password === undefined
+                ? '{}'
+                : JSON.stringify({
+                    login: 'lifemodel-source',
+                    username: 'lifemodel-source',
+                    is_admin: false,
+                  })
+            );
           } else if (req.method === 'POST' && req.url === '/api/v1/admin/users' && isAdmin) {
             users.set(String(body['username']), String(body['password']));
             res.statusCode = 201;
             res.end('{}');
-          } else if (req.method === 'PUT' && req.url === '/api/v1/repos/admin/lifemodel/collaborators/lifemodel-source' && isAdmin) {
+          } else if (
+            req.method === 'PUT' &&
+            req.url === '/api/v1/repos/admin/lifemodel/collaborators/lifemodel-source' &&
+            isAdmin
+          ) {
             collaborators.add('lifemodel-source');
             if (armedCut === 'after user creation') {
               armedCut = 'done';
@@ -411,7 +463,12 @@ describe('Gitea first-start bootstrap', () => {
               res.statusCode = 200;
               res.end('{"login":"lifemodel-source"}');
             }
-          } else if (req.method === 'GET' && req.url === '/api/v1/repos/admin/lifemodel' && isSource && collaborators.has('lifemodel-source')) {
+          } else if (
+            req.method === 'GET' &&
+            req.url === '/api/v1/repos/admin/lifemodel' &&
+            isSource &&
+            collaborators.has('lifemodel-source')
+          ) {
             res.statusCode = 200;
             res.end('{"permissions":{"pull":true,"push":false}}');
           } else {
@@ -423,13 +480,19 @@ describe('Gitea first-start bootstrap', () => {
       });
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       const address = server.address();
-      if (address === null || typeof address === 'string') throw new Error('missing test server address');
+      if (address === null || typeof address === 'string')
+        throw new Error('missing test server address');
       const newApi = () => {
         const api = createGiteaHttpApi({
           address: `http://127.0.0.1:${address.port}`,
           seedBundle: '',
           runner: createNodeRunner(),
-          kubernetes: { apiServer: 'https://kubernetes.test', tokenFile: token, caFile: join(root, 'no-ca'), request: kubernetesRequest },
+          kubernetes: {
+            apiServer: 'https://kubernetes.test',
+            tokenFile: token,
+            caFile: join(root, 'no-ca'),
+            request: kubernetesRequest,
+          },
         });
         api.ensureAdminSecret = async () => adminCredentials;
         return api;
@@ -440,10 +503,12 @@ describe('Gitea first-start bootstrap', () => {
         if (method === 'GET' && url.pathname.endsWith('/deploy-source-credential')) {
           return {
             status: 200,
-            body: JSON.stringify({ data: {
-              username: Buffer.from('lifemodel-source').toString('base64'),
-              password: Buffer.from(sourcePassword).toString('base64'),
-            } }),
+            body: JSON.stringify({
+              data: {
+                username: Buffer.from('lifemodel-source').toString('base64'),
+                password: Buffer.from(sourcePassword).toString('base64'),
+              },
+            }),
           };
         }
         return { status: 404, body: '{}' };
@@ -462,7 +527,9 @@ describe('Gitea first-start bootstrap', () => {
         expect(calls).toContain('GET /api/v1/user');
         expect(calls).toContain('GET /api/v1/repos/admin/lifemodel');
       } finally {
-        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve()))
+        );
         await rm(root, { recursive: true, force: true });
       }
     }
@@ -484,7 +551,10 @@ describe('Gitea first-start bootstrap', () => {
           const namespace = path.includes('/lifemodel-motor/') ? 'lifemodel-motor' : 'lifemodel';
           const spec: Record<string, unknown> = {
             interval: '1m',
-            path: namespace === 'lifemodel' ? './deploy/platform/applications/lifemodel' : './deploy/platform/applications/lifemodel-motor',
+            path:
+              namespace === 'lifemodel'
+                ? './deploy/platform/applications/lifemodel'
+                : './deploy/platform/applications/lifemodel-motor',
             prune: true,
             force: false,
             serviceAccountName: `${namespace}-applier`,
@@ -500,13 +570,14 @@ describe('Gitea first-start bootstrap', () => {
     try {
       await makeApi(() => {}).ensureApplicationObjects();
       await expect(
-        makeApi((spec) => { spec['targetNamespace'] = 'default'; }).ensureApplicationObjects()
+        makeApi((spec) => {
+          spec['targetNamespace'] = 'default';
+        }).ensureApplicationObjects()
       ).rejects.toThrow(/differs from the pinned platform bootstrap spec/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
-
 
   it('rehydrates admin credentials into a fresh HTTP client for every persisted Gitea phase cut', async () => {
     const secret = { username: 'admin', password: 'durable-secret' };
@@ -546,7 +617,8 @@ describe('Gitea first-start bootstrap', () => {
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
-    if (address === null || typeof address === 'string') throw new Error('missing test server address');
+    if (address === null || typeof address === 'string')
+      throw new Error('missing test server address');
     try {
       for (const durableRecord of cuts) {
         // Every simulated restart constructs an entirely new API client while
@@ -567,12 +639,19 @@ describe('Gitea first-start bootstrap', () => {
         });
         await bootstrap.runInitial();
       }
-      expect(seen.filter((entry) => entry.startsWith('GET /api/v1/user admin'))).toHaveLength(cuts.length);
-      expect(seen.filter((entry) => entry.startsWith('GET /api/v1/repos/admin/lifemodel admin'))).toHaveLength(cuts.length);
-      expect(seen.some((entry) => entry.includes('no-auth') && !entry.startsWith('GET /api/v1/version'))).toBe(false);
+      expect(seen.filter((entry) => entry.startsWith('GET /api/v1/user admin'))).toHaveLength(
+        cuts.length
+      );
+      expect(
+        seen.filter((entry) => entry.startsWith('GET /api/v1/repos/admin/lifemodel admin'))
+      ).toHaveLength(cuts.length);
+      expect(
+        seen.some((entry) => entry.includes('no-auth') && !entry.startsWith('GET /api/v1/version'))
+      ).toBe(false);
     } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
     }
   });
-
 });

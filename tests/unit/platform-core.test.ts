@@ -41,6 +41,13 @@ describe('core application generation', () => {
       seccompProfile: { type: 'RuntimeDefault' },
     });
     expect(pod.automountServiceAccountToken).toBe(false);
+    const stopDeadlineMs = Number(
+      pod.containers[0].env.find((entry: any) => entry.name === 'LIFEMODEL_CORE_STOP_DEADLINE_MS')
+        ?.value
+    );
+    expect(Number.isFinite(stopDeadlineMs)).toBe(true);
+    expect(stopDeadlineMs).toBeGreaterThan(0);
+    expect(pod.terminationGracePeriodSeconds * 1000).toBeGreaterThan(stopDeadlineMs + 1000);
     expect(pod.containers[0].securityContext).toMatchObject({
       readOnlyRootFilesystem: true,
       allowPrivilegeEscalation: false,
