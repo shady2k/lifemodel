@@ -86,11 +86,8 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
     private readonly redis: Redis,
     private readonly streamKey = INBOUND_STREAM,
     private readonly dedupLimit = DEFAULT_DEDUP_LIMIT,
-    private readonly durableOwnerRowExists?: (
-      recipientId: string,
-      messageId: string
-    ) => Promise<boolean>,
-    private readonly onDurableDuplicate?: (messageId: string) => void
+    private readonly onDurableDuplicate?: (messageId: string) => void,
+    private readonly completedInboundKey = 'inbound:completed'
   ) {
     if (!Number.isInteger(dedupLimit) || dedupLimit < 1)
       throw new Error('dedupLimit must be positive');
@@ -138,13 +135,16 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
 
   async readNew(includePhotoReceipts = false): Promise<InboundMessage[]> {
     const rows = await this.redis.xrange(this.streamKey, `(${this.snapshot.readOffset}`, '+');
+    const pending = structuredClone(this.snapshot.pending);
     const known = new Set([
       ...this.snapshot.recentMessageIds,
-      ...this.snapshot.pending.map((message) => message.messageId),
+      ...pending.map((message) => message.messageId),
     ]);
+    let readOffset = this.snapshot.readOffset;
+    const completed: string[] = [];
+    const newlyPending: InboundMessage[] = [];
     for (const [streamId, fields] of rows) {
       const values = this.fields(fields);
-      this.snapshot.readOffset = streamId;
       if (values['type'] !== 'inbound.message')
         throw new Error(`Unexpected inbound event type: ${values['type'] ?? 'missing'}`);
       const messageId = values['messageId'];
@@ -155,25 +155,32 @@ export class InboundMessageStream implements SnapshotSectionOwner<InboundSnapsho
       if (signal.type !== 'user_message')
         throw new Error(`Inbound stream payload at ${streamId} is not a user_message`);
       if (known.has(messageId)) {
-        const pending = this.snapshot.pending.find((item) => item.messageId === messageId);
-        const oldData = pending?.signal.data as { pendingPhoto?: unknown } | undefined;
+        const pendingEntry = [...pending, ...newlyPending].find(
+          (item) => item.messageId === messageId
+        );
+        const oldData = pendingEntry?.signal.data as { pendingPhoto?: unknown } | undefined;
         const newData = signal.data as { pendingPhoto?: unknown } | undefined;
-        if (pending && oldData?.pendingPhoto != null && newData?.pendingPhoto == null) {
-          pending.signal = signal;
-        }
+        if (pendingEntry && oldData?.pendingPhoto != null && newData?.pendingPhoto == null)
+          pendingEntry.signal = signal;
+        else if (pendingEntry) pendingEntry.streamId = streamId;
+        readOffset = streamId;
         continue;
       }
-      if (
-        this.durableOwnerRowExists &&
-        (await this.durableOwnerRowExists(recipientId, messageId))
-      ) {
-        this.onDurableDuplicate?.(messageId);
-        this.snapshot.recentMessageIds.push(messageId);
-        this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+      if ((await this.redis.zscore(this.completedInboundKey, messageId)) !== null) {
+        completed.push(messageId);
+        readOffset = streamId;
         continue;
       }
-      this.snapshot.pending.push({ streamId, messageId, recipientId, signal });
+      newlyPending.push({ streamId, messageId, recipientId, signal });
       known.add(messageId);
+      readOffset = streamId;
+    }
+    this.snapshot.pending = [...pending, ...newlyPending];
+    this.snapshot.readOffset = readOffset;
+    if (completed.length) {
+      this.snapshot.recentMessageIds.push(...completed);
+      this.snapshot.recentMessageIds = this.snapshot.recentMessageIds.slice(-this.dedupLimit);
+      for (const id of completed) this.onDurableDuplicate?.(id);
     }
     return this.takeUndelivered(includePhotoReceipts);
   }

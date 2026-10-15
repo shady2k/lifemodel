@@ -503,15 +503,24 @@ export async function createContainerAsync(
   const rawPostgres = new Pool({ connectionString: databaseUrl });
 
   const snapshotRedis = new Redis(valkeyUrl);
-  const snapshotStore = createSnapshotStore(snapshotRedis, { outboundKey: OUTBOUND_STREAM });
+  const snapshotStore = createSnapshotStore(snapshotRedis, {
+    outboundKey: OUTBOUND_STREAM,
+    completedInboundKey: 'inbound:completed',
+  });
   const creatureStateStore = createCreatureStateStore(snapshotRedis);
   const busSignalStream = createBusSignalStream(snapshotRedis);
   snapshotStore.register(busSignalStream);
   const snapshotEpoch = await snapshotStore.takeEpoch();
   // Replace stale thinking state immediately after epoch takeover; this is
   // best-effort and must not delay startup if the projection store is down.
+  let resolveStartupLogger!: (logger: Logger) => void;
+  const startupLoggerReady = new Promise<Logger>((resolve) => {
+    resolveStartupLogger = resolve;
+  });
   void creatureStateStore.publishCreatureState('awake', snapshotEpoch).catch((error: unknown) => {
-    logger.warn({ err: error }, 'Failed to publish initial creature state');
+    void startupLoggerReady.then((logger) => {
+      logger.warn({ err: error }, 'Failed to publish initial creature state');
+    });
   });
   await rawPostgres.query(
     `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
@@ -535,6 +544,7 @@ export async function createContainerAsync(
 
   // Create logger
   const logger = createLogger(loggerConfig);
+  resolveStartupLogger(logger);
   logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
   logger.info('Loaded configuration');
   if (!mergedConfig.motorCortex.enabled) {
@@ -566,17 +576,10 @@ export async function createContainerAsync(
     snapshotRedis,
     INBOUND_STREAM,
     undefined,
-    async (recipientId, messageId) => {
-      const result = await rawPostgres.query(
-        `SELECT 1 FROM core.conversation_messages
-         WHERE recipient_id = $1 AND message_id = $2 LIMIT 1`,
-        [recipientId, `inbound:${messageId}`]
-      );
-      return result.rowCount !== 0;
-    },
     (messageId) => {
-      logger.warn({ messageId }, 'Inbound retry already has an owner history row');
-    }
+      logger.warn({ messageId }, 'Inbound retry already has a committed outcome');
+    },
+    'inbound:completed'
   );
   inboundStream.hydrateSnapshot(
     initialSnapshot?.sections['inbound'] as Parameters<typeof inboundStream.hydrateSnapshot>[0]

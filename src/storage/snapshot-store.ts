@@ -28,6 +28,15 @@ const COMMIT_SCRIPT = `
 local current_epoch = redis.call('GET', KEYS[1])
 if current_epoch ~= ARGV[1] then return 0 end
 local events = cjson.decode(ARGV[3])
+local envelope = cjson.decode(ARGV[2])
+local inbound = envelope.sections and envelope.sections.inbound
+if inbound and inbound.recentMessageIds then
+  local now = tonumber(ARGV[4])
+  for _, message_id in ipairs(inbound.recentMessageIds) do
+    redis.call('ZADD', KEYS[5], now, message_id)
+  end
+  redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - 90000000)
+end
 for _, event in ipairs(events) do
   if redis.call('HEXISTS', KEYS[4], event.eventId) == 0 then
     local stream_id = redis.call('XADD', KEYS[3], '*', 'eventId', event.eventId, 'event', cjson.encode(event))
@@ -54,6 +63,8 @@ export interface SnapshotStoreConfig {
   keyPrefix?: string;
   /** Outbound stream shared with the message consumers. */
   outboundKey?: string;
+  /** Durable identity set for committed inbound inputs. */
+  completedInboundKey?: string;
 }
 
 /** Atomic Valkey snapshot and epoch fencing for the core tick writer. */
@@ -62,6 +73,7 @@ export class SnapshotStore {
   private readonly snapshotKey: string;
   private readonly outboundKey: string;
   private readonly outboundKeysKey: string;
+  private readonly completedInboundKey: string;
   private readonly scriptSha: string;
   private readonly owners = new Map<string, SnapshotSectionOwner>();
 
@@ -74,6 +86,7 @@ export class SnapshotStore {
     this.snapshotKey = `${prefix}${SNAPSHOT_KEY}`;
     this.outboundKey = config.outboundKey ?? `${prefix}outbound`;
     this.outboundKeysKey = `${prefix}outbound:event-keys`;
+    this.completedInboundKey = config.completedInboundKey ?? 'inbound:completed';
     this.scriptSha = createHash('sha1').update(COMMIT_SCRIPT).digest('hex');
   }
 
@@ -134,14 +147,16 @@ export class SnapshotStore {
     try {
       const result = await this.redis.evalsha(
         this.scriptSha,
-        4,
+        5,
         this.epochKey,
         this.snapshotKey,
         this.outboundKey,
         this.outboundKeysKey,
+        this.completedInboundKey,
         String(epoch),
         serialized,
-        JSON.stringify(outbox)
+        JSON.stringify(outbox),
+        String(Date.now())
       );
       return Number(result) === 1;
     } catch (error) {
@@ -149,14 +164,16 @@ export class SnapshotStore {
       await this.redis.script('LOAD', COMMIT_SCRIPT);
       const result = await this.redis.evalsha(
         this.scriptSha,
-        4,
+        5,
         this.epochKey,
         this.snapshotKey,
         this.outboundKey,
         this.outboundKeysKey,
+        this.completedInboundKey,
         String(epoch),
         serialized,
-        JSON.stringify(outbox)
+        JSON.stringify(outbox),
+        String(Date.now())
       );
       return Number(result) === 1;
     }

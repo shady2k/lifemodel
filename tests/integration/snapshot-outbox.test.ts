@@ -452,6 +452,109 @@ describe('inbound message stream', () => {
     expect((await stream.readNew()).map((entry) => entry.signal.id)).toEqual([completed.id]);
   });
 
+  it('does not advance the admission offset when any entry in a batch is invalid', async () => {
+    const key = `inbound-invalid-batch:${stores.workerId}`;
+    const inbound = new InboundMessageStream(stores.redis, key);
+    await stores.redis.xadd(
+      key,
+      '*',
+      'type',
+      'inbound.message',
+      'messageId',
+      'valid',
+      'recipientId',
+      'r',
+      'signal',
+      JSON.stringify(
+        createUserMessageSignal({
+          text: 'valid',
+          recipientId: 'r',
+          channel: 'web',
+          updateId: 'valid',
+        })
+      )
+    );
+    const badId = await stores.redis.xadd(key, '*', 'type', 'unexpected');
+    await expect(inbound.readNew()).rejects.toThrow('Unexpected inbound event type');
+    expect(inbound.exportSnapshot().readOffset).toBe('0-0');
+    await stores.redis.xdel(key, badId);
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual(['valid']);
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual([]);
+    const restarted = new InboundMessageStream(stores.redis, key);
+    restarted.hydrateSnapshot(inbound.exportSnapshot());
+    expect((await restarted.readNew()).map((entry) => entry.messageId)).toEqual(['valid']);
+  });
+
+  it('retries the entire multi-entry read after a durable identity lookup fails', async () => {
+    const key = `inbound-lookup-retry:${stores.workerId}`;
+    const signals = ['lookup-a', 'lookup-b'].map((id) =>
+      createUserMessageSignal({ text: id, recipientId: 'r', channel: 'web', updateId: id })
+    );
+    const stream = `${key}:stream`;
+    for (const signal of signals)
+      await new InboundMessageStream(stores.redis, stream).append(signal);
+    let rejectLookup = true;
+    const failingRedis = new Proxy(stores.redis, {
+      get(target, property) {
+        if (property === 'zscore')
+          return async (...args: Parameters<typeof target.zscore>) => {
+            if (rejectLookup) throw new Error('injected completed identity lookup failure');
+            return target.zscore(...args);
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as typeof stores.redis;
+    const inbound = new InboundMessageStream(failingRedis, stream);
+    await expect(inbound.readNew()).rejects.toThrow('injected completed identity lookup failure');
+    expect(inbound.exportSnapshot().readOffset).toBe('0-0');
+    expect(inbound.exportSnapshot().pending).toEqual([]);
+    rejectLookup = false;
+    expect((await inbound.readNew()).map((entry) => entry.messageId)).toEqual([
+      'lookup-a',
+      'lookup-b',
+    ]);
+    inbound.settle(signals.map((signal) => signal.id));
+    const snapshot = createSnapshotStore(stores.redis, { keyPrefix: `${key}:snapshot:` });
+    const epoch = await snapshot.takeEpoch();
+    snapshot.register(inbound);
+    await snapshot.commitOwners(epoch, 1);
+    const restarted = new InboundMessageStream(stores.redis, stream);
+    restarted.hydrateSnapshot((await snapshot.read())?.sections['inbound'] as never);
+    expect(await restarted.readNew()).toEqual([]);
+  });
+
+  it('deduplicates a committed id after its bounded snapshot ring evicts it', async () => {
+    const key = `inbound-completed:${stores.workerId}`;
+    const completedKey = `${key}:completed`;
+    const snapshot = createSnapshotStore(stores.redis, {
+      keyPrefix: `${key}:`,
+      completedInboundKey: `${key}:completed`,
+    });
+    const epoch = await snapshot.takeEpoch();
+    const inbound = new InboundMessageStream(
+      stores.redis,
+      `${key}:stream`,
+      1,
+      undefined,
+      completedKey
+    );
+    snapshot.register(inbound);
+    const make = (id: string, text = id) =>
+      createUserMessageSignal({ text, recipientId: 'r', channel: 'web', updateId: id });
+    const ids = ['original', ...Array.from({ length: 1_001 }, (_, index) => `later-${index}`)];
+    for (const [index, id] of ids.entries()) {
+      const signal = make(id);
+      await inbound.append(signal);
+      const entries = await inbound.readNew();
+      inbound.settle(entries.map((entry) => entry.signal.id));
+      await snapshot.commitOwners(epoch, index + 1);
+    }
+    expect(inbound.exportSnapshot().recentMessageIds).toEqual(['later-1000']);
+    await inbound.append(make('original', 'conflicting retry text'));
+    expect(await inbound.readNew()).toEqual([]);
+  });
+
   it('XADDs one answer and row for a message, drops duplicate IDs, and replays only pre-commit input', async () => {
     const prefix = `inbound-e2e:${stores.workerId}:`;
     const store = createSnapshotStore(stores.redis, { keyPrefix: prefix });

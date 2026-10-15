@@ -9,6 +9,7 @@ import { createStoragePrimitive } from '../../src/core/storage-primitive.js';
 import { createTestStores } from '../helpers/test-stores.js';
 import { applyTestMigrations } from '../helpers/apply-test-migrations.js';
 import { createSnapshotStore } from '../../src/storage/snapshot-store.js';
+import { CREATURE_STATE_KEY } from '../../src/storage/creature-state-store.js';
 
 vi.mock('@huggingface/transformers', () => ({
   env: { cacheDir: '', allowLocalModels: true, allowRemoteModels: true },
@@ -49,7 +50,25 @@ describe('core state homes across restart', () => {
       process.env['NODE_ENV'] = 'production';
       process.env['MOTOR_CORTEX_ENABLED'] = 'false';
 
+      // Force the best-effort initial state EVAL to reject while Postgres
+      // startup awaits are still ahead of logger creation.
+      await stores.redis.hset(CREATURE_STATE_KEY, 'wrong-type', 'value');
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
       active = await createContainerAsync({ logLevel: 'error' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+      expect(unhandled).toEqual([]);
+      await stores.redis.del(CREATURE_STATE_KEY);
+      await active.shutdown();
+      active = undefined;
+      await stores.redis.set(
+        CREATURE_STATE_KEY,
+        JSON.stringify({ state: 'thinking', epoch: 1, publishedAt: Date.now() })
+      );
+      active = await createContainerAsync({ logLevel: 'error' });
+      expect((await active.creatureState.readCreatureState())?.state).toBe('awake');
       const first = active;
       const primaryRecipientId = first.recipientRegistry!.lookup('web', 'owner');
       expect(primaryRecipientId).not.toBeNull();

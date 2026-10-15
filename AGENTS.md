@@ -302,7 +302,10 @@ the epoch-checked snapshot before any effect, and reused when its owned entries
 replay; absorbing more triggers later does not change its effect keys. A tick
 commit atomically stores this ledger with the inbound read and per-recipient
 offsets, bounded recent-message-id dedup ring, pending inbound messages, and
-outbox events. An entry is completed only in the CAS that commits its outcome.
+outbox events. The same epoch-checked CAS records completed inbound ids in the
+Valkey sorted set `inbound:completed`, trimming entries older than 25 hours.
+Admission checks both this set and the ring; a conversation history row alone
+does not prove completion and cannot suppress replay. An entry is completed only in the CAS that commits its outcome.
 The watermark advances only over the contiguous completed prefix. The ledger
 admits at most 100 entries beyond the watermark. When full, later signals wait
 in the Valkey stream and are not admitted into the snapshot ledger until capacity

@@ -283,13 +283,17 @@ The tab marks a message it could not send within 24 hours as not sent; a
 
 If the receipt write fails after the append, the script returns an error
 and the module answers 503. The retry may append a second entry with the same
-`messageId`. The core absorbs it through the dedup ring when present; before
-admitting an id absent from that ring, it also checks Postgres for the durable
-owner row `inbound:<id>`. If the row exists, the core completes the stream
-entry without starting a turn and logs a warning containing the id, never the
-text. This third line of defence covers retries of any age after receipt-write
-failure, including retries whose text conflicts with the original. A receipt
-never exists without its entry.
+`messageId`. The snapshot CAS records every completed inbound id in the Valkey
+sorted set `inbound:completed`, in the same epoch-checked script that commits
+the snapshot and dedup ring. It trims ids older than 25 hours, longer than the
+24-hour acceptance window. Admission treats an id as duplicate if it is in the
+ring or this set. A history row alone is not completion: if receipt creation
+failed and the input has not committed, it replays, even if normalization
+already wrote its history row. Once the first entry settles, a retry is
+absorbed by id even after 1,001 later inputs evict it from the ring. If that
+retry carries different text, the original text wins. This is the documented
+residual of the receipt-write failure; only a misconfigured Valkey (ACL or
+wrong key type) can produce it. A receipt never exists without its entry.
 
 ### 3. The web module and its routes (VHD-03, VHD-10, VHD-11)
 
