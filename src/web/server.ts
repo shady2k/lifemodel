@@ -304,11 +304,11 @@ export function createWebServer(options: WebServerOptions): FastifyInstance {
 }
 
 function getSessionKey(cookie: string | undefined, ip: string): string {
-  const firstCookie = cookie
+  const sessionCookie = cookie
     ?.split(';')
     .map((part) => part.trim())
-    .find(Boolean);
-  return firstCookie ?? `client:${ip}`;
+    .find((part) => part.startsWith(`${SESSION_COOKIE_NAME}=`));
+  return sessionCookie ?? `client:${ip}`;
 }
 
 function isAllowedOrigin(origin: string, allowedOrigin: string): boolean {
