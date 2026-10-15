@@ -418,10 +418,26 @@ deploy branch):
 - **Themes:** light and dark from the start, following the system setting
   (`prefers-color-scheme`) and changing live with it. Both themes are sets
   of the same design tokens, and both meet WCAG 2.2 AA contrast.
+- **One UI kit, no components of our own** (the owner, 2026-10-15). Every
+  element of the interface comes from shadcn/ui's registry, kept in the
+  repository by its CLI:
+  - its base components (Sidebar, Sheet, Card, Badge, Button, Progress,
+    Tabs, Command, Avatar, Tooltip, Collapsible, Alert Dialog, Textarea);
+  - its chat components (MessageScroller, Message, Bubble, Marker);
+  - its AI Elements patterns (Prompt Input, Task, Subagent, Tool, Trace,
+    Confirmation, Queue) and Code Block.
+
+  The patterns are written around AI SDK message parts; we feed them our own
+  rows and events and take no AI SDK runtime dependency. Our own style is
+  the kit's theme only: its CSS variables for colours in both themes,
+  radius, fonts and density. A screen element with no kit component is a
+  composition of kit components in a product file, never a new primitive; a
+  kit component is changed only through its theme or its variants, so a
+  kit update can still be taken.
 - react-markdown without raw HTML. Links render only for `http` and `https`
   URLs and open in a new tab with `rel="noopener noreferrer"`; images are not
   fetched from model text.
-- CSS custom properties as design tokens; WCAG 2.2 AA.
+- The kit theme's CSS custom properties are the design tokens; WCAG 2.2 AA.
 - The layout of the target view:
   - left navigation (Разговор, Система);
   - the conversation in the middle;
