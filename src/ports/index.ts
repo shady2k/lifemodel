@@ -115,3 +115,6 @@ export type {
   CreatureStateSnapshot,
   CreatureStateReader,
 } from './creature-state.js';
+
+// Owner web-module operations
+export type { IOwnerMessageIntake, OwnerMessageAcceptance } from './owner-message-intake.js';
