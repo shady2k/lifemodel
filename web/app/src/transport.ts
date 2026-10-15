@@ -16,7 +16,6 @@ export interface CreatureStateEvent {
   state: 'thinking' | 'awake' | 'asleep';
   epoch: string;
   publishedAt: string;
-  asleepUntil?: string;
 }
 
 export interface WebTransport {
