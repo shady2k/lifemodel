@@ -31,6 +31,19 @@ delete them. Application Kustomizations must use their namespace's named
 GitRepository and applier, cannot use kubeconfig, and cannot target or depend
 on another namespace.
 
+## Web interface routes
+
+The signed platform artifact owns the Traefik routes. A0 installs the
+`loader-auth` ForwardAuth middleware, pointing at the loader Service's
+`/_auth/verify` endpoint. `boot.localhost` `/login` and `/setup` are exact
+routes with higher priority and no middleware; the rest of `boot.localhost`
+uses ForwardAuth. Step A routes all of `localhost` through the same ForwardAuth
+to the `web` Service on port 8080. The web Service is delivered by
+lifemodel-vhd.6.3. The web pod's NetworkPolicy admits Traefik ingress on 8080
+and allows egress only to DNS, Postgres and Valkey. `/api/events` must disable
+response buffering in Traefik if buffering is otherwise enabled for the
+cluster; the route itself does not add a buffering middleware.
+
 ## Step A: OpenBao, Gitea and applications
 
 Step A applies OpenBao and Gitea as committed rendered manifests, application

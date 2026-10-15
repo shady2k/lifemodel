@@ -218,7 +218,7 @@ describe('CloudNativePG platform state', () => {
     );
     expect(policy?.metadata.namespace).toBe('lifemodel');
     expect(policy?.spec).toEqual({
-      podSelector: {},
+      podSelector: { matchLabels: { 'app.kubernetes.io/name': 'core' } },
       policyTypes: ['Egress'],
       ingress: [],
       egress: [
