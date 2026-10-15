@@ -77,6 +77,9 @@ messages, because the assistant has nowhere else to put progress.
 - **Centre: the conversation.**
   - Messages with date and time separators. Links, lists and code are
     rendered.
+  - Both sides speak in bubbles (the owner, 2026-10-15): lifemodel's in the
+    theme's grey, with its avatar; the owner's on the right, tinted with the
+    accent.
   - The owner can write at any time, without waiting for an answer.
   - "Прочитано" means lifemodel has received the message and written it into
     its history; it answers when it gets to it.
