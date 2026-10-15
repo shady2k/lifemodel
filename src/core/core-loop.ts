@@ -947,7 +947,8 @@ export class CoreLoop {
       disposition !== 'no_reply' &&
       disposition !== 'defer' &&
       inboundIds.length > 0 &&
-      !hasAnswerIntent
+      !hasAnswerIntent &&
+      !state.anyDelivered
         ? 'error'
         : disposition;
     state.disposition = effectiveDisposition;
