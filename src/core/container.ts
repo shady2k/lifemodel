@@ -522,6 +522,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
 
   // Create logger
   const logger = createLogger(loggerConfig);
+  logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
   logger.info('Loaded configuration');
   if (!mergedConfig.motorCortex.enabled) {
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
@@ -1065,6 +1066,11 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
   const coreLoopConfig: Partial<CoreLoopConfig> = {
     ...configOverrides.coreLoop,
   };
+  const stopDeadlineMs = Number(process.env['LIFEMODEL_CORE_STOP_DEADLINE_MS'] ?? 5_000);
+  if (!Number.isSafeInteger(stopDeadlineMs) || stopDeadlineMs < 1) {
+    throw new Error('LIFEMODEL_CORE_STOP_DEADLINE_MS must be a positive integer');
+  }
+  coreLoopConfig.shutdownDrainTimeoutMs = stopDeadlineMs;
   if (primaryUserChatId) {
     coreLoopConfig.primaryUserChatId = primaryUserChatId;
   }
@@ -1090,6 +1096,7 @@ export async function createContainerAsync(configOverrides: AppConfig = {}): Pro
     ),
     commitSnapshot: async (tick, outbox) => {
       await snapshotStore.commitOwners(snapshotEpoch, tick, outbox);
+      logger.debug({ epoch: snapshotEpoch, tick }, 'Core snapshot committed');
     },
     afterSnapshotCommit: async () => {
       await applyCommittedOutboundEvents(

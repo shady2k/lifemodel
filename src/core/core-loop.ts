@@ -316,6 +316,7 @@ export class CoreLoop {
 
   private running = false;
   private tickCount = 0;
+  private lastTickAt = 0;
   private tickTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Promise for the in-flight tick (so stop() can wait for it to settle) */
   private tickPromise: Promise<void> | null = null;
@@ -1357,6 +1358,10 @@ export class CoreLoop {
     return this.tickCount;
   }
 
+  getLastTickAt(): number {
+    return this.lastTickAt;
+  }
+
   /**
    * Get current system health.
    */
@@ -1411,6 +1416,7 @@ export class CoreLoop {
     this.tickInFlight++;
     const tickStart = Date.now();
     this.tickCount++;
+    this.lastTickAt = tickStart;
     this.thoughtsThisTick = 0; // Reset per-tick thought budget
     const tickId = randomUUID();
     const tickCtx = createTraceContext(tickId, { spanId: `tick_${String(this.tickCount)}` });

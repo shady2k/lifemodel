@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: core
+  namespace: lifemodel
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: core
+  namespace: lifemodel
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: core
+  ports:
+    - name: health
+      port: 8081
+      targetPort: health
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: core
+  namespace: lifemodel
+spec:
+  serviceName: core
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: core
+    spec:
+      serviceAccountName: core
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: migrate
+          image: ghcr.io/shady2k/lifemodel-core:main
+          command: ['/usr/local/bin/lifemodel-core-entrypoint', 'migrate']
+          env:
+            - name: LIFEMODEL_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: lifemodel-db-credentials
+                  key: username
+            - name: LIFEMODEL_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lifemodel-db-credentials
+                  key: password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: 1, memory: 2Gi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: core
+          image: ghcr.io/shady2k/lifemodel-core:main
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: LIFEMODEL_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: lifemodel-db-credentials
+                  key: username
+            - name: LIFEMODEL_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lifemodel-db-credentials
+                  key: password
+            - name: LIFEMODEL_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lifemodel-valkey-credentials
+                  key: password
+            - name: LIFEMODEL_CORE_HEALTH_PORT
+              value: '8081'
+            - name: LIFEMODEL_CORE_STOP_DEADLINE_MS
+              value: '5000'
+            - name: MOTOR_CORTEX_ENABLED
+              value: 'false'
+            - name: LIFEMODEL_MODEL_DIR
+              value: /opt/model-cache
+          startupProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: 750m, memory: 1536Mi }
+            limits: { cpu: 1500m, memory: 3Gi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

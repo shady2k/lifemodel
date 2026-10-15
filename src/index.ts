@@ -6,6 +6,9 @@
 
 import 'dotenv/config';
 
+import type { Server } from 'node:http';
+import { startCoreHealthServer } from './core/health-server.js';
+
 import {
   createContainerAsync,
   createSettingsReloadHandler,
@@ -22,6 +25,7 @@ import {
 
 let container: Container | undefined;
 let settingsServer: SettingsServer | undefined;
+let healthServer: Server | undefined;
 let isShuttingDown = false;
 
 async function main(): Promise<void> {
@@ -59,6 +63,14 @@ async function main(): Promise<void> {
   }
 
   // This core has no delivery channel; outbound events remain committed for the gateway.
+
+  // The health endpoint is healthy only while ticks continue to start.
+  const healthPort = Number(process.env['LIFEMODEL_CORE_HEALTH_PORT'] ?? 8081);
+  if (!Number.isInteger(healthPort) || healthPort < 1 || healthPort > 65535) {
+    throw new Error('LIFEMODEL_CORE_HEALTH_PORT must be a valid TCP port');
+  }
+  healthServer = await startCoreHealthServer(coreLoop, healthPort);
+  logger.info({ port: healthPort }, 'Core tick health endpoint is up');
 
   // Start the core loop (heartbeat)
   coreLoop.start();
@@ -173,6 +185,16 @@ export async function runStopSequence(options: {
   } else {
     // eslint-disable-next-line no-console
     console.error(`Shutdown triggered: ${reason}`, error ?? '');
+  }
+
+  const activeHealthServer = healthServer;
+  if (activeHealthServer) {
+    await new Promise<void>((resolve) => {
+      activeHealthServer.close(() => {
+        resolve();
+      });
+    });
+    healthServer = undefined;
   }
 
   // Intake stops FIRST, as in the loader's own stop: no new settings save is

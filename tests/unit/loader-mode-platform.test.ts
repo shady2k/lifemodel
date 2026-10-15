@@ -61,10 +61,24 @@ describe('the platform loader', () => {
   });
 
   it('logs the failed platform phase before retrying', async () => {
-    const lines:RecordedLine[]=[]; const app=appFor({lines,runInitial:async()=>{throw new Error('bootstrap broke')}});
+    const lines:RecordedLine[]=[];
+    let resolveLogged!: (line: RecordedLine) => void;
+    const logged = new Promise<RecordedLine>((resolve) => { resolveLogged = resolve; });
+    lines.push = ((...items: RecordedLine[]) => {
+      const length = Array.prototype.push.apply(lines, items);
+      const failure = items.find((line) => line.level === 'error' && line.message.includes('platform bootstrap failed'));
+      if (failure) resolveLogged(failure);
+      return length;
+    }) as typeof lines.push;
+    const app=appFor({lines,runInitial:async()=>{throw new Error('bootstrap broke')}});
     await app.start();
-    for (let i=0;i<20 && !lines.some(line=>line.level==='error');i++) await new Promise(resolve=>setImmediate(resolve));
-    expect(lines.find(line=>line.level==='error')?.message).toContain('platform bootstrap failed');
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('timed out waiting for bootstrap failure log')), 2_000); });
+    try {
+      await expect(Promise.race([logged, timeout])).resolves.toMatchObject({ level: 'error', message: expect.stringContaining('platform bootstrap failed') });
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
     expect(await app.shutdown('test')).toBe(0);
   });
 });

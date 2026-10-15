@@ -44,6 +44,20 @@ jobs:
         if: always()
         run: rm -rf .docker-context
 
+      - name: Build and push core image
+        id: core
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
+        with:
+          context: .
+          file: docker/core/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/lifemodel-core:${{ github.ref_name }}
+
+      - name: Pin the core image to its pushed digest
+        env:
+          CORE_DIGEST: ${{ steps.core.outputs.digest }}
+        run: scripts/release/set-core-digest.sh "$CORE_DIGEST" deploy/platform/applications/lifemodel/kustomization.yaml
+
       - name: Pin the loader image to its pushed digest
         env:
           LOADER_DIGEST: ${{ steps.loader.outputs.digest }}

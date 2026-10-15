@@ -25,6 +25,8 @@ WORKDIR /opt/lifemodel
 COPY --from=build --chown=node:node /opt/lifemodel/package.json ./package.json
 COPY --from=build --chown=node:node /opt/lifemodel/node_modules ./node_modules
 COPY --from=build --chown=node:node /opt/lifemodel/dist ./dist
+COPY --chown=node:node scripts/apply-migrations.js ./scripts/apply-migrations.js
+COPY --chown=node:node db/migrations ./db/migrations
 COPY --from=model /opt/model-cache /opt/model-cache
 COPY docker/core/entrypoint.sh /usr/local/bin/lifemodel-core-entrypoint
 RUN chmod 0555 /usr/local/bin/lifemodel-core-entrypoint

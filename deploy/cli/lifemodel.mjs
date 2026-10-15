@@ -16,7 +16,7 @@ function help() {
   console.log(`Usage: lifemodel doctor [--repin previous|clear]
        lifemodel --help
 
-Diagnose Flux sources, Kustomizations and the lifemodel loader.
+Diagnose Flux sources, Kustomizations, the lifemodel loader and core.
   --repin previous  Persist an override to the previous successfully applied ref and rerun bootstrap.
   --repin clear     Remove the override and rerun bootstrap.`);
 }
@@ -150,6 +150,17 @@ function report() {
   const events=allEvents.filter(e=>pods.some(p=>e.involvedObject?.name===p.metadata?.name)).sort((a,b)=>eventTime(a)-eventTime(b));
   console.log(`Deployment/loader ready=${ready?'yes':'no'} generationCurrent=${generation?'yes':'no'} desiredReplicas=${desired} restarts=${restarts} lastEventReason=${clean(events.at(-1)?.reason||'none')}`);
   if(!ready) failures.push('Deployment/loader');
+  const coreStatefulSet = get('statefulsets', 'lifemodel', 'core');
+  const corePods = (get('pods', 'lifemodel').items || []).filter(p => p.metadata?.labels?.['app.kubernetes.io/name'] === 'core');
+  const coreDesired = coreStatefulSet.spec?.replicas ?? 1;
+  const coreGeneration = current(coreStatefulSet);
+  const coreRestarts = corePods.flatMap(p => p.status?.containerStatuses || []).reduce((n, s) => n + (s.restartCount || 0), 0);
+  const corePodReady = corePods.length === coreDesired && corePods.length > 0 && corePods.every(p => p.status?.phase === 'Running' && (p.status?.containerStatuses || []).length > 0 && (p.status?.containerStatuses || []).every(c => c.ready));
+  const coreReady = coreGeneration && coreDesired === 1 && (coreStatefulSet.status?.readyReplicas || 0) === 1 && corePodReady;
+  const coreRevision = corePods.map(p => p.metadata?.labels?.['controller-revision-hash']).filter(Boolean).join(',') || coreStatefulSet.status?.currentRevision || 'unknown';
+  console.log(`StatefulSet/core ready=${coreReady ? 'yes' : 'no'} generationCurrent=${coreGeneration ? 'yes' : 'no'} desiredReplicas=${coreDesired} restarts=${coreRestarts} revision=${clean(coreRevision)} snapshotCommitAge=not-queried (database credentials are not read by doctor)`);
+  for (const pod of corePods) console.log(`Pod/${clean(pod.metadata?.name)} phase=${clean(pod.status?.phase)} ready=${(pod.status?.containerStatuses || []).length > 0 && pod.status.containerStatuses.every(c => c.ready) ? 'yes' : 'no'} restarts=${(pod.status?.containerStatuses || []).reduce((n, s) => n + (s.restartCount || 0), 0)}`);
+  if (!coreReady) failures.push('StatefulSet/core');
   if(failures.length){console.error(`Not ready: ${failures.join(', ')}`);return 1;} return 0;
 }
 function readHistory() {
