@@ -188,6 +188,11 @@ export class FakeAggregationLayer {
   readonly batches: Signal[][] = [];
   /** When set, process() parks here (the tick has taken the batch already) */
   processGate: Promise<void> | null = null;
+  primaryRecipientId: string | undefined;
+
+  updateDeps(deps: { primaryRecipientId?: string }) {
+    this.primaryRecipientId = deps.primaryRecipientId;
+  }
 
   process(signals: Signal[], _state: unknown) {
     this.batches.push([...signals]);

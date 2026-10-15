@@ -55,6 +55,7 @@ describe('inbound user history restart durability', () => {
     const first = await startInstance(path, { tickIntervalMs: 10, recipientRegistry: registry });
     try {
       expect(getPrimaryRecipientId()).toBe(recipientId);
+      expect(first.aggregation.primaryRecipientId).toBe(recipientId);
       expect(first.registry.resolve(recipientId)).toEqual({
         channel: 'web',
         destination: 'owner',
