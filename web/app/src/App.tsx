@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Orbit } from 'lucide-react';
+import { CreaturePresence, type CreaturePresenceValue } from './components/CreaturePresence';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import {
@@ -25,16 +26,14 @@ import {
 } from '@/components/ui/sheet';
 import { useIsMobile } from '@/hooks/use-mobile';
 import i18n from './i18n';
+import { Conversation } from './Conversation';
 
-type CreatureState = 'awake';
-
-function Creature({ state }: { state: CreatureState }) {
+function Creature() {
   return (
     <Avatar className="bg-primary text-primary-foreground">
       <AvatarFallback className="bg-primary text-primary-foreground">
         <Orbit aria-hidden="true" className="size-4" />
       </AvatarFallback>
-      <span className="sr-only">{state}</span>
     </Avatar>
   );
 }
@@ -73,7 +72,7 @@ function Navigation() {
   );
 }
 
-function NowPanel() {
+function NowPanel({ creature }: { creature?: CreaturePresenceValue }) {
   const { t } = useTranslation();
   return (
     <section aria-labelledby="now-title" className="flex h-full min-h-0 flex-col bg-sidebar">
@@ -83,12 +82,10 @@ function NowPanel() {
         </h2>
       </header>
       <div className="flex items-center gap-3 p-4">
-        <Creature state="awake" />
+        <Creature />
         <div className="flex min-w-0 flex-col gap-1">
           <span className="font-medium">lifemodel</span>
-          <span role="status" aria-live="polite" className="text-sm text-muted-foreground">
-            {t('awake')}
-          </span>
+          <CreaturePresence value={creature} />
         </div>
       </div>
     </section>
@@ -99,6 +96,7 @@ export default function App() {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
   const [nowOpen, setNowOpen] = useState(false);
+  const [creature, setCreature] = useState<CreaturePresenceValue>();
 
   useEffect(() => {
     const language = navigator.language.toLowerCase().startsWith('ru') ? 'ru' : 'en';
@@ -122,12 +120,10 @@ export default function App() {
       <div className="flex h-svh min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
           {isMobile && <SidebarTrigger aria-label={t('openNavigation')} />}
-          <Creature state="awake" />
+          <Creature />
           <div className="flex min-w-0 flex-col">
             <span className="text-sm font-medium leading-tight">lifemodel</span>
-            <span role="status" className="text-xs text-muted-foreground">
-              {t('awake')}
-            </span>
+            <CreaturePresence value={creature} />
           </div>
           {isMobile && (
             <Button
@@ -152,9 +148,11 @@ export default function App() {
               id="conversation"
               aria-label={t('conversation')}
               className="min-h-0 min-w-0 flex-1"
-            />
+            >
+              <Conversation onState={setCreature} />
+            </section>
             <aside aria-label={t('now')} className="hidden w-80 shrink-0 border-l lg:block">
-              <NowPanel />
+              <NowPanel creature={creature} />
             </aside>
           </SidebarInset>
         </div>
@@ -164,7 +162,7 @@ export default function App() {
               <SheetTitle>{t('now')}</SheetTitle>
               <SheetDescription>{t('creatureDescription')}</SheetDescription>
             </SheetHeader>
-            <NowPanel />
+            <NowPanel creature={creature} />
           </SheetContent>
         </Sheet>
       </div>

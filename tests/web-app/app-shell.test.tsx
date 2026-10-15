@@ -39,13 +39,13 @@ afterEach(() => {
 
 describe('web app shell', () => {
   it.each([
-    ['en', false, 'Conversation', 'System'],
-    ['en', true, 'Conversation', 'System'],
-    ['ru', false, 'Разговор', 'Система'],
-    ['ru', true, 'Разговор', 'Система'],
+    ['en', false, 'Conversation', 'System', 'Now'],
+    ['en', true, 'Conversation', 'System', 'Now'],
+    ['ru', false, 'Разговор', 'Система', 'Сейчас'],
+    ['ru', true, 'Разговор', 'Система', 'Сейчас'],
   ])(
     'renders %s navigation in the %s theme without accessibility violations',
-    async (language, dark, conversation, system) => {
+    async (language, dark, conversation, system, now) => {
       Object.defineProperty(navigator, 'language', {
         configurable: true,
         value: language === 'ru' ? 'ru-RU' : 'en-US',
@@ -55,7 +55,7 @@ describe('web app shell', () => {
       const { container } = render(<App />);
       expect(screen.getByRole('link', { name: conversation })).toBeTruthy();
       expect(screen.getByRole('link', { name: system })).toBeTruthy();
-      expect(screen.getByRole('heading', { name: 'Сейчас' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: now })).toBeTruthy();
       expect(screen.getAllByText('lifemodel').length).toBeGreaterThan(0);
       expect(document.documentElement.lang).toBe(language);
       expect(document.documentElement.classList.contains('dark')).toBe(dark);
@@ -87,8 +87,8 @@ describe('web app shell', () => {
     expect(screen.getByRole('link', { name: 'Conversation' })).toBeTruthy();
     cleanup();
     render(<App />);
-    fireEvent.click(screen.getByRole('button', { name: 'Open Сейчас' }));
-    const panel = screen.getByRole('dialog', { name: 'Сейчас' });
-    expect(within(panel).getByText('Awake')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Now' }));
+    const panel = screen.getByRole('dialog', { name: 'Now' });
+    expect(within(panel).getByText('no connection since --:--')).toBeTruthy();
   });
 });
