@@ -235,6 +235,58 @@ describe('owner message HTTP route with real Valkey', () => {
     });
   });
 
+  it('resumes each row once after repeated drops in the middle of catch-up', async () => {
+    const recipient = 'web-owner-recipient';
+    const conversations = new PostgresConversationStore(stores.postgres);
+    const write = (messageId: string, content: string) =>
+      conversations.save(`conversation:${recipient}`, {
+        messages: [{ role: 'assistant', content, timestamp: new Date().toISOString(), messageId }],
+      });
+    const baseline = await new PostgresTranscriptStore(
+      stores.postgres,
+      redis,
+      recipient
+    ).readTranscript({ limit: 1 });
+    await write('repeated-drop-one', 'batch one');
+    await write('repeated-drop-two', 'batch two');
+    await write('repeated-drop-three', 'batch three');
+
+    const streamServer = createWebServer({
+      allowedOrigin: 'http://localhost',
+      intake,
+      transcript: new PostgresTranscriptStore(stores.postgres, redis, recipient),
+      creatureState: new CreatureStateStore(redis),
+      logger: { info: vi.fn() },
+    });
+    await streamServer.listen({ host: '127.0.0.1', port: 0 });
+    const address = streamServer.server.address();
+    if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+    const url = `http://127.0.0.1:${address.port}/api/events?after=${baseline.cursor ?? '0'}`;
+    const visible = new Map<string, string>();
+    let lastId = baseline.cursor ?? '0';
+    for (const expectedText of ['batch one', 'batch two', 'batch three']) {
+      const abort = new AbortController();
+      const response = await fetch(url, {
+        headers: { 'Last-Event-ID': lastId },
+        signal: abort.signal,
+      });
+      const reader = response.body!.getReader();
+      const buffer = { value: '' };
+      expect((await nextSseEvent(reader, buffer)).event).toBe('state');
+      const event = await nextSseEvent(reader, buffer);
+      expect(event.event).toBe('message');
+      const row = JSON.parse(event.data!) as { sequence: string; text: string };
+      expect(row.text).toBe(expectedText);
+      visible.set(row.sequence, row.text);
+      lastId = event.id!;
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+    expect([...visible.values()]).toEqual(['batch one', 'batch two', 'batch three']);
+    expect(visible.size).toBe(3);
+    await streamServer.close();
+  });
+
   it('sends state-only updates without SSE ids and limits streams to four per session', async () => {
     const stateStore = new CreatureStateStore(redis);
     const stateServer = createWebServer({
