@@ -173,6 +173,8 @@ one is reached through Agent Vault, which injects it.
 
 ## Deployment
 
+The core image requires an x86-64-v2 CPU or newer for memory search. On a VM, set the vCPU type to `host` or to an x86-64-v2 model; the hypervisor default `Common KVM processor` / `qemu64` may expose only x86-64-v1. `lifemodel doctor` warns when `/proc/cpuinfo` lacks the `sse4_2` or `popcnt` flags, because memory search may fail to load.
+
 The supported deployment target is the k3s platform installed through the
 NixOS module or the generic Linux installer. See the
 [platform installation guide](deploy/nixos/README.md) and
