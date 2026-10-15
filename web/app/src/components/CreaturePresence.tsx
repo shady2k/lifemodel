@@ -4,11 +4,11 @@ import { Check, LoaderCircle, Moon, WifiOff } from 'lucide-react';
 
 type CreatureState = 'thinking' | 'awake' | 'asleep';
 
-export type CreaturePresenceValue = {
+export interface CreaturePresenceValue {
   state: CreatureState;
   publishedAt: string;
   asleepUntil?: string;
-};
+}
 
 const FRESHNESS_MS = 15_000;
 
@@ -23,8 +23,12 @@ export function CreaturePresence({ value }: { value?: CreaturePresenceValue }) {
   const [, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(interval);
+    const interval = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(interval);
+    };
   }, []);
 
   const disconnected = !value || Date.now() - new Date(value.publishedAt).getTime() > FRESHNESS_MS;
