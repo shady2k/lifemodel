@@ -1,3 +1,4 @@
+import { randomUUID, createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import type { Redis } from 'iovalkey';
 import type {
@@ -11,6 +12,53 @@ const MAX_PAGE_SIZE = 50;
 const OUTBOUND_STREAM = 'outbound';
 const WAKE_POLL_MS = 1_000;
 const WAKE_CLOSE_TIMEOUT_MS = 100;
+const STREAM_LEASE_TTL_SECONDS = 15 * 60 + 30;
+const STREAM_LEASE_LIMIT = 4;
+const ACQUIRE_STREAM_LEASE_SCRIPT = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
+local count = redis.call('ZCARD', KEYS[1])
+if count >= tonumber(ARGV[1]) then return 0 end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[2]) + tonumber(ARGV[3]), ARGV[4])
+redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[3]) / 1000))
+return 1
+`;
+const RELEASE_STREAM_LEASE_SCRIPT = `redis.call('ZREM', KEYS[1], ARGV[1]); return 1`;
+
+function boundedStoreCall<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Transcript store operation timed out'));
+    }, timeoutMs);
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      cleanup();
+      reject(new Error('Transcript store operation aborted'));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
 
 class OutboundWakeBroker {
   private connection: Redis | null = null;
@@ -22,7 +70,11 @@ class OutboundWakeBroker {
   wait(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.resolve();
     return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        wake();
+      }, WAKE_POLL_MS);
       const wake = () => {
+        clearTimeout(timer);
         this.waiters.delete(wake);
         signal?.removeEventListener('abort', abort);
         resolve();
@@ -167,13 +219,56 @@ export class PostgresTranscriptStore implements TranscriptReader {
     };
   }
 
+  private readonly streamLeases = new Map<string, string[]>();
+
+  async acquireStreamLease(session: string): Promise<boolean> {
+    if (!session) throw new Error('Stream session is required');
+    const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
+    const leaseId = randomUUID();
+    const result = await this.redis.eval(
+      ACQUIRE_STREAM_LEASE_SCRIPT,
+      1,
+      sessionKey,
+      String(STREAM_LEASE_LIMIT),
+      String(Date.now()),
+      String(STREAM_LEASE_TTL_SECONDS * 1_000),
+      leaseId
+    );
+    if (Number(result) !== 1) return false;
+    const leases = this.streamLeases.get(session) ?? [];
+    leases.push(leaseId);
+    this.streamLeases.set(session, leases);
+    return true;
+  }
+
+  async releaseStreamLease(session: string): Promise<void> {
+    if (!session) throw new Error('Stream session is required');
+    const leases = this.streamLeases.get(session);
+    const leaseId = leases?.shift();
+    if (leases?.length === 0) this.streamLeases.delete(session);
+    if (leaseId) {
+      const sessionKey = `web:stream-leases:${createHash('sha256').update(session).digest('hex')}`;
+      await this.redis.eval(RELEASE_STREAM_LEASE_SCRIPT, 1, sessionKey, leaseId);
+    }
+  }
+
   async *watchTranscript(after: string, signal?: AbortSignal): AsyncIterable<TranscriptRow> {
     if (!/^(0|[1-9][0-9]*)$/.test(after))
       throw new Error('Transcript cursor must be a decimal sequence');
     let cursor = after;
     const broker = wakeBroker(this.redis);
     while (!signal?.aborted) {
-      const page = await this.readTranscript({ after: cursor, limit: MAX_PAGE_SIZE });
+      let page: TranscriptPage;
+      try {
+        page = await boundedStoreCall(
+          this.readTranscript({ after: cursor, limit: MAX_PAGE_SIZE }),
+          signal,
+          WAKE_POLL_MS
+        );
+      } catch (error) {
+        if (signal?.aborted) return;
+        throw error;
+      }
       if (page.rows.length) {
         for (const row of page.rows) {
           if (signal?.aborted) return;

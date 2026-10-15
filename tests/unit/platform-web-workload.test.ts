@@ -69,6 +69,9 @@ describe('web application generation', () => {
     expect(workload.find((item: any) => item.kind === 'Service').spec.ports).toEqual([
       { name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP' },
     ]);
+    expect(workload.find((item: any) => item.kind === 'Service').spec.ports).not.toContainEqual(
+      expect.objectContaining({ port: 8081, targetPort: 'internal' })
+    );
   });
 
   it('builds the web image in CI and pins its release digest before rendering the seed', () => {

@@ -16,6 +16,8 @@ function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(acce
     transcript: {
       readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
       watchTranscript: vi.fn(),
+      acquireStreamLease: vi.fn().mockResolvedValue(true),
+      releaseStreamLease: vi.fn().mockResolvedValue(undefined),
     },
     creatureState: { readCreatureState: vi.fn().mockResolvedValue(null) },
     logger: { info },
@@ -46,6 +48,22 @@ describe('POST /api/messages', () => {
     await server.close();
   });
 
+  it.each([
+    [undefined, '{'],
+    [undefined, '{not json'],
+  ])('refuses an invalid body before parsing when Origin is %s', async (origin, payload) => {
+    const { server, acceptOwnerMessage } = setup();
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/messages',
+      headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+      payload,
+    });
+    expect(response.statusCode).toBe(403);
+    expect(acceptOwnerMessage).not.toHaveBeenCalled();
+    await server.close();
+  });
+
   it('accepts a valid message and returns its stream id', async () => {
     const { server, acceptOwnerMessage } = setup();
     const response = await server.inject({
@@ -67,6 +85,12 @@ describe('POST /api/messages', () => {
     [{ id, text: 'x'.repeat(16 * 1024 + 1) }],
     [{ id, text: 'hello', replyTo: '0' }],
     [{ id, text: 'hello', recipientId: 'attacker', channel: 'telegram' }],
+    [{ id: 12, text: 'hello' }],
+    [{ id, text: 12 }],
+    [{ id, text: null, replyTo: '1' }],
+    [{ id, text: 'hello', replyTo: 12 }],
+    [{ id, text: 'hello', replyTo: null }],
+    [{ id, text: { value: 'hello' }, replyTo: {} }],
   ])('rejects invalid body %j', async (payload) => {
     const { server, acceptOwnerMessage } = setup();
     const response = await server.inject({
@@ -155,6 +179,73 @@ describe('POST /api/messages', () => {
 });
 
 describe('static application', () => {
+  it('publishes unavailable when a state read stalls and never starts another read concurrently', async () => {
+    let release!: (value: null) => void;
+    const pending = new Promise<null>((resolve) => {
+      release = resolve;
+    });
+    const readCreatureState = vi.fn(() => pending);
+    const { server } = setup();
+    // Replace the test server's state reader through a new server with the same real HTTP stream path.
+    await server.close();
+    const config = setup();
+    const stalledServer = createWebServer({
+      allowedOrigin: 'http://localhost',
+      appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
+      runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
+      intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
+      transcript: {
+        readTranscript: vi.fn().mockResolvedValue({ rows: [], cursor: null }),
+        watchTranscript: vi.fn(async function* () {
+          await new Promise<void>(() => {});
+        }),
+        acquireStreamLease: vi.fn().mockResolvedValue(true),
+        releaseStreamLease: vi.fn().mockResolvedValue(undefined),
+      },
+      creatureState: { readCreatureState },
+      logger: { info: vi.fn() },
+    });
+    const abort = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      await stalledServer.listen({ host: '127.0.0.1', port: 0 });
+      const address = stalledServer.server.address();
+      if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/events?after=0`, {
+        signal: abort.signal,
+      });
+      reader = response.body!.getReader();
+      const chunks = new TextDecoder();
+      let buffer = '';
+      while (!buffer.includes('event: state')) buffer += chunks.decode((await reader.read()).value);
+      expect(buffer).toContain('data: null');
+      expect(readCreatureState).toHaveBeenCalledOnce();
+      release(null);
+    } finally {
+      abort.abort();
+      await reader?.cancel().catch(() => undefined);
+      await stalledServer.close();
+      await config.server.close();
+    }
+  });
+
+  it('does not expose metrics or readiness details on the public listener', async () => {
+    const { server } = setup();
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address();
+    if (!address || typeof address === 'string') throw new Error('HTTP listener did not start');
+    try {
+      for (const route of ['/metrics', '/readyz']) {
+        const response = await fetch(`http://127.0.0.1:${address.port}${route}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toContain('text/html');
+        expect(await response.text()).toContain('fixture app');
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it('serves the built app and its assets with the exact CSP', async () => {
     const { server } = setup();
     const home = await server.inject({ method: 'GET', url: '/' });
@@ -163,8 +254,19 @@ describe('static application', () => {
     expect(home.body).toContain('<div id="app">fixture app</div>');
     expect(asset.statusCode).toBe(200);
     expect(asset.body.trim()).toBe('window.fixture = true;');
+    const hashedAsset = await server.inject({ method: 'GET', url: '/assets/app-12345678.js' });
+    expect(hashedAsset.headers['cache-control']).toBe('public, max-age=31536000, immutable');
     expect(home.headers['content-security-policy']).toBe(
       "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self'; connect-src 'self'"
+    );
+    expect(home.headers['cache-control']).toBe('no-store');
+    expect(asset.headers['cache-control']).toBe('no-store');
+    const unknown = await server.inject({ method: 'GET', url: '/api/unknown' });
+    const missingAsset = await server.inject({ method: 'GET', url: '/missing.js' });
+    expect(unknown.headers['cache-control']).toBe('no-store');
+    expect(missingAsset.headers['cache-control']).toBe('no-store');
+    expect(unknown.headers['content-security-policy']).toBe(
+      home.headers['content-security-policy']
     );
     await server.close();
   });
