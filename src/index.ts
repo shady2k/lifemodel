@@ -31,7 +31,14 @@ let isShuttingDown = false;
 async function main(): Promise<void> {
   // Create the application container with async initialization
   // This loads config, initializes storage, and restores state
-  const active = await createContainerAsync();
+  const active = await createContainerAsync(
+    {},
+    {
+      onFatalStop: (error) => {
+        void stopAndLeave('fatal core error', 1, error);
+      },
+    }
+  );
   boundStopContainer(active);
   container = active;
 
