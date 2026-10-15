@@ -513,12 +513,14 @@ export async function createContainerAsync(
   const snapshotEpoch = await snapshotStore.takeEpoch();
   // Replace stale thinking state immediately after epoch takeover; this is
   // best-effort and must not delay startup if the projection store is down.
-  let startupLogger: Logger | undefined;
-  let initialStatePublicationError: unknown;
+  let resolveStartupLogger!: (logger: Logger) => void;
+  const startupLoggerReady = new Promise<Logger>((resolve) => {
+    resolveStartupLogger = resolve;
+  });
   void creatureStateStore.publishCreatureState('awake', snapshotEpoch).catch((error: unknown) => {
-    if (startupLogger)
-      startupLogger.warn({ err: error }, 'Failed to publish initial creature state');
-    else initialStatePublicationError = error;
+    void startupLoggerReady.then((logger) => {
+      logger.warn({ err: error }, 'Failed to publish initial creature state');
+    });
   });
   await rawPostgres.query(
     `INSERT INTO core.active_holder (id, epoch) VALUES (true, $1)
@@ -542,12 +544,8 @@ export async function createContainerAsync(
 
   // Create logger
   const logger = createLogger(loggerConfig);
-  startupLogger = logger;
+  resolveStartupLogger(logger);
   logger.info({ epoch: snapshotEpoch }, 'Core snapshot epoch acquired');
-  if (initialStatePublicationError !== undefined) {
-    logger.warn({ err: initialStatePublicationError }, 'Failed to publish initial creature state');
-    initialStatePublicationError = undefined;
-  }
   logger.info('Loaded configuration');
   if (!mergedConfig.motorCortex.enabled) {
     logger.info({ reason: 'MOTOR_CORTEX_ENABLED=false' }, 'Motor Cortex disabled');
