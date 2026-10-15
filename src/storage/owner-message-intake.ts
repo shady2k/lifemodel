@@ -4,6 +4,7 @@ import { Pool } from 'pg';
 import { PostgresTranscriptStore } from './postgres-transcript-store.js';
 import { CreatureStateStore } from './creature-state-store.js';
 import type { IOwnerMessageIntake, OwnerMessageAcceptance } from '../ports/owner-message-intake.js';
+import type { CreatureStateReader } from '../ports/creature-state.js';
 import type { TranscriptReader } from '../ports/transcript.js';
 import { createUserMessageSignal } from '../types/signal.js';
 
@@ -157,8 +158,8 @@ export class OwnerMessageIntake implements IOwnerMessageIntake {
 /** Build the web module's domain operation from the configured durable stores. */
 export function createOwnerMessageIntakeFromEnv(env: NodeJS.ProcessEnv = process.env): {
   intake: IOwnerMessageIntake;
-  transcript: import('../ports/transcript.js').TranscriptReader;
-  creatureState: import('../ports/creature-state.js').CreatureStateReader;
+  transcript: TranscriptReader;
+  creatureState: CreatureStateReader;
   close(): Promise<void>;
 } {
   const valkeyUrl = env['LIFEMODEL_VALKEY_URL'];
