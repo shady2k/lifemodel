@@ -9,6 +9,7 @@ import { getEffectiveTimezone, formatTimestampPrefix } from '../../../utils/date
 import type { Message, ContentPart } from '../../../llm/provider.js';
 import type { LoopContext, PromptBuilders } from '../agentic-loop-types.js';
 import type { ToolContext } from '../tools/types.js';
+import { renderReplyQuote } from '../prompts/reply-quote.js';
 import type { ImageAttachment } from '../../../types/signal.js';
 
 /**
@@ -33,9 +34,13 @@ export function buildInitialMessages(
     const now = new Date();
 
     for (const histMsg of context.conversationHistory) {
+      const quote = histMsg.replyTo ? renderReplyQuote(histMsg.replyTo) : '';
       const msg: Message = {
         role: histMsg.role,
-        content: histMsg.content,
+        content:
+          quote && histMsg.content
+            ? `${quote}\n<user_input>${histMsg.content}</user_input>`
+            : histMsg.content,
       };
 
       // Prepend timestamp to user/assistant messages with non-null content
@@ -108,6 +113,17 @@ export function buildInitialMessages(
     messages.push({ role: 'user', content: triggerPrompt, contentParts: parts });
   } else {
     messages.push({ role: isUserInteraction ? 'user' : 'system', content: triggerPrompt });
+  }
+
+  if (context.triggerSignal.type === 'user_message') {
+    for (const signal of context.additionalTriggerSignals ?? []) {
+      const data = signal.data as { text: string; replyTo?: unknown };
+      const quote = renderReplyQuote(data.replyTo);
+      messages.push({
+        role: 'user',
+        content: `${quote ? `${quote}\n` : ''}<user_input>${data.text}</user_input>`,
+      });
+    }
   }
 
   return messages;

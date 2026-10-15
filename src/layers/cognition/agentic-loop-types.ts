@@ -138,6 +138,7 @@ export interface RuntimeConfig {
 export interface LoopContext {
   /** Trigger signal */
   triggerSignal: Signal;
+  additionalTriggerSignals?: Signal[];
 
   /** Current agent state */
   agentState: AgentState;
@@ -239,6 +240,7 @@ export interface ConversationMessage {
   tool_calls?: ConversationToolCall[];
   /** Tool call ID this message is responding to (only for role: 'tool') */
   tool_call_id?: string;
+  replyTo?: { sequence: string; role: 'user' | 'assistant'; excerpt: string };
 }
 
 /**
