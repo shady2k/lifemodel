@@ -7,6 +7,8 @@ export interface LoaderConfig {
   volumeRoot: string;
   loaderDir: string;
   httpPort: number;
+  /** Fixed DNS label for this installation. */
+  instanceName: string;
   /** OpenBao HTTP API endpoint used during platform bootstrap. */
   openBaoAddress: string;
 }
@@ -23,7 +25,15 @@ function readPort(env: NodeJS.ProcessEnv): number {
 
 export function loadConfig(env: NodeJS.ProcessEnv): LoaderConfig {
   const volumeRoot = env['LIFEMODEL_VOLUME_ROOT'] ?? '/var/lib/loader';
+  const instanceName = env['LIFEMODEL_NAME'];
+  if (
+    !instanceName ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,55}[a-z0-9])?$/.test(instanceName) ||
+    instanceName.length > 57
+  )
+    throw new LoaderFatalError('LIFEMODEL_NAME must be a DNS label of at most 57 characters');
   return {
+    instanceName,
     volumeRoot,
     loaderDir: join(volumeRoot, 'loader'),
     httpPort: readPort(env),

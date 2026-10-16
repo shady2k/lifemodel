@@ -40,7 +40,8 @@ describe('built web server artifact', () => {
       const child = spawn(process.execPath, [output], {
         env: {
           ...process.env,
-          LIFEMODEL_WEB_ALLOWED_ORIGIN: 'http://localhost',
+          LIFEMODEL_WEB_ALLOWED_ORIGIN: 'http://lifemodel.local',
+          LIFEMODEL_NAME: 'lifemodel',
           LIFEMODEL_WEB_APP_DIRECTORY: app,
           LIFEMODEL_WEB_PORT: '18080',
           LIFEMODEL_WEB_INTERNAL_PORT: '18081',

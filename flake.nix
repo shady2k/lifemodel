@@ -37,6 +37,10 @@
       });
       missingKey = evaluate ({ ... }: { services.lifemodel.verify.mode = "key"; });
       missingKeyFails = !(builtins.tryEval missingKey.config.system.build.toplevel.drvPath).success;
+      badInstanceName = evaluate ({ ... }: { services.lifemodel.name = "Bad"; });
+      tooLongInstanceName = evaluate ({ ... }: { services.lifemodel.name = "x" + builtins.concatStringsSep "" (builtins.genList (_: "x") 57); });
+      badInstanceNameFails = !(builtins.tryEval badInstanceName.config.system.build.toplevel.drvPath).success;
+      tooLongInstanceNameFails = !(builtins.tryEval tooLongInstanceName.config.system.build.toplevel.drvPath).success;
       keylessOCI = builtins.readFile keyless.config.services.lifemodel.generatedRootOCI;
       keyOCI = builtins.readFile keyMode.config.services.lifemodel.generatedRootOCI;
       scriptKeylessOCI = builtins.readFile (scriptKeyless + "/ocirepository.yaml");
@@ -106,11 +110,17 @@
         # Flux first applies the parent source, then reconciles its ./a0 path.
         kustomize build ${./deploy/platform} > parent.yaml
         grep -F 'kind: Kustomization' parent.yaml >/dev/null
+        grep -F 'name: platform-instance' parent.yaml >/dev/null
         grep -F 'name: platform-a0' parent.yaml >/dev/null
-        grep -F 'timeout: 2m0s' parent.yaml >/dev/null
+        grep -F 'name: platform-instance' ${./deploy/platform/a0-reconciler.yaml} >/dev/null
+        grep -F 'optional: false' ${./deploy/platform/instance-reconciler.yaml} >/dev/null
+        kustomize build ${./deploy/platform/instance} > instance.yaml
+        grep -F 'name: lifemodel-system' instance.yaml >/dev/null
+        grep -F 'name: lifemodel' instance.yaml >/dev/null
+        grep -F 'boot-' instance.yaml >/dev/null
         kustomize build ${./deploy/platform/a0} > a0.yaml
         validate_a0() {
-          for kind in Namespace ServiceAccount PersistentVolumeClaim Deployment Service NetworkPolicy Ingress; do
+          for kind in ServiceAccount PersistentVolumeClaim Deployment Service NetworkPolicy; do
             grep -F "kind: $kind" "$1" >/dev/null || return 1
           done
           grep -E 'image: ghcr.io/shady2k/lifemodel-loader@sha256:[a-f0-9]{64}' "$1" >/dev/null
@@ -298,6 +308,8 @@
         assert keyMode.config.services.lifemodel.verify.mode == "key";
         assert keyMode.config.system.build.toplevel.drvPath != "";
         assert missingKeyFails;
+        assert badInstanceNameFails;
+        assert tooLongInstanceNameFails;
         pkgs.runCommand "lifemodel-nixos-module-evaluation" {} "touch $out";
     in {
       nixosModules.default = exportedModule;

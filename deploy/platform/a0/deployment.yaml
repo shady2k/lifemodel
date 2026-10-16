@@ -24,6 +24,12 @@ spec:
         - name: loader
           image: ghcr.io/shady2k/lifemodel-loader:release-placeholder
           imagePullPolicy: IfNotPresent
+          env:
+            - name: LIFEMODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: lifemodel-instance
+                  key: LIFEMODEL_NAME
           ports:
             - name: http
               containerPort: 7000
@@ -39,19 +45,11 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           readinessProbe:
-            httpGet:
-              path: /login
+            tcpSocket:
               port: http
-              httpHeaders:
-                - name: Host
-                  value: boot.localhost
           livenessProbe:
-            httpGet:
-              path: /login
+            tcpSocket:
               port: http
-              httpHeaders:
-                - name: Host
-                  value: boot.localhost
           volumeMounts:
             - name: state
               mountPath: /var/lib/loader

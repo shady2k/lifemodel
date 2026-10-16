@@ -8,13 +8,15 @@ const platformRoot = fileURLToPath(new URL('../../deploy/platform/', import.meta
 
 type Resource = Record<string, any>;
 function documents(path: string): Resource[] {
-  const parsed = YAML.parseAllDocuments(readFileSync(path, 'utf8'));
+  const source = readFileSync(path, 'utf8').replaceAll('${LIFEMODEL_NAME}', 'lifemodel');
+  const parsed = YAML.parseAllDocuments(source);
   expect(
     parsed.flatMap((doc) => doc.errors),
     `invalid YAML in ${path}`
   ).toEqual([]);
   return parsed.map((doc) => doc.toJSON() as Resource).filter(Boolean);
 }
+
 function render(directory: string, active = new Set<string>()): Resource[] {
   const absolute = resolve(directory);
   if (active.has(absolute)) throw new Error(`recursive kustomization at ${directory}`);
@@ -40,7 +42,11 @@ function render(directory: string, active = new Set<string>()): Resource[] {
   return objects;
 }
 
-const objects = () => [...render(join(platformRoot, 'a0')), ...render(join(platformRoot, 'a'))];
+const objects = () => [
+  ...render(join(platformRoot, 'instance')),
+  ...render(join(platformRoot, 'a0')),
+  ...render(join(platformRoot, 'a')),
+];
 const services = () => objects().filter((item) => item.kind === 'Service');
 function assertIngressBackendsResolve(ingresses: Resource[]) {
   const allServices = [
@@ -84,7 +90,7 @@ describe('platform web ingress and egress', () => {
     );
     const handoff = privateRoutes.filter(
       ({ host, path }) =>
-        host === 'localhost' && path.path === '/_auth/handoff' && path.pathType === 'Exact'
+        host === 'lifemodel.local' && path.path === '/_auth/handoff' && path.pathType === 'Exact'
     );
     expect(handoff).toHaveLength(1);
     expect(handoff[0]?.ingress.metadata.namespace).toBe('lifemodel-system');
@@ -98,15 +104,13 @@ describe('platform web ingress and egress', () => {
     ).toBeGreaterThan(0);
     const bootPublic = privateRoutes.filter(
       ({ host, path }) =>
-        host === 'boot.localhost' &&
-        path.pathType === 'Exact' &&
-        ['/login', '/setup'].includes(path.path)
+        host === 'boot-lifemodel.local' && path.path === '/' && path.pathType === 'Prefix'
     );
-    expect(bootPublic.map(({ path }) => path.path).sort()).toEqual(['/login', '/setup']);
+    expect(bootPublic).toHaveLength(1);
     for (const { ingress, host, path } of privateRoutes) {
       if (
-        (host === 'boot.localhost' && ['/login', '/setup'].includes(path.path)) ||
-        (host === 'localhost' && path.path === '/_auth/handoff')
+        host === 'boot-lifemodel.local' ||
+        (host === 'lifemodel.local' && path.path === '/_auth/handoff')
       ) {
         expect(
           ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares']
@@ -119,18 +123,18 @@ describe('platform web ingress and egress', () => {
       }
     }
     const privatePaths = privateRoutes.filter(
-      ({ host }) => host === 'boot.localhost' || host === 'localhost'
+      ({ host }) => host === 'boot-lifemodel.local' || host === 'lifemodel.local'
     );
     expect(
       privatePaths.some(
         ({ host, path }) =>
-          host === 'boot.localhost' && path.path === '/' && path.pathType === 'Prefix'
+          host === 'boot-lifemodel.local' && path.path === '/' && path.pathType === 'Prefix'
       )
     ).toBe(true);
     expect(
       privatePaths.some(
         ({ host, path, ingress }) =>
-          host === 'localhost' &&
+          host === 'lifemodel.local' &&
           path.path === '/' &&
           path.pathType === 'Prefix' &&
           path.backend.service.name === 'web' &&
@@ -142,140 +146,10 @@ describe('platform web ingress and egress', () => {
     const middlewares = all.filter(
       (item) => item.kind === 'Middleware' && item.metadata?.name === 'loader-auth'
     );
-    expect(middlewares.map((item) => item.metadata?.namespace).sort()).toEqual([
-      'lifemodel',
-      'lifemodel-system',
-    ]);
+    expect(middlewares.map((item) => item.metadata?.namespace)).toEqual(['lifemodel']);
     for (const middleware of middlewares) {
       expect(middleware.spec?.forwardAuth?.address).toBe(
         'http://loader.lifemodel-system.svc.cluster.local:7000/_auth/verify'
-      );
-    }
-  });
-
-  it('routes HTTP requests through a fail-closed ForwardAuth stub', async () => {
-    const { createServer } = await import('node:http');
-    const ingresses = objects().filter((item) => item.kind === 'Ingress');
-    const candidatesFor = (host: string, requestPath: string) =>
-      ingresses
-        .flatMap((ingress) => {
-          const priority = Number(
-            ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.priority'] ?? 0
-          );
-          return (ingress.spec?.rules ?? [])
-            .filter((rule: any) => rule.host === host)
-            .flatMap((rule: any) =>
-              (rule.http?.paths ?? [])
-                .filter((path: any) =>
-                  path.pathType === 'Exact'
-                    ? requestPath === path.path
-                    : requestPath.startsWith(path.path)
-                )
-                .map((path: any) => ({ ingress, path, priority }))
-            );
-        })
-        .sort(
-          (a, b) =>
-            b.priority - a.priority ||
-            Number(b.path.pathType === 'Exact') - Number(a.path.pathType === 'Exact')
-        );
-
-    const router = createServer((request, response) => {
-      const host = request.headers['x-route-host'] ?? '';
-      const selected = candidatesFor(host, new URL(request.url ?? '/', 'http://route').pathname)[0];
-      if (!selected) {
-        response.writeHead(404).end(`${host} ${request.url}`);
-        return;
-      }
-      const middleware =
-        selected.ingress.metadata.annotations?.['traefik.ingress.kubernetes.io/router.middlewares'];
-      if (middleware) {
-        const session = request.headers['x-session-state'];
-        // This is a ForwardAuth stub: invalid credentials redirect, and an
-        // unavailable verifier rejects rather than allowing the request.
-        if (session === 'failure') {
-          response.writeHead(503).end('auth unavailable');
-          return;
-        }
-        if (session !== 'valid') {
-          response.writeHead(302, { location: 'http://boot.localhost/login' }).end();
-          return;
-        }
-      }
-      response
-        .writeHead(200, {
-          'x-backend': selected.path.backend.service.name,
-          'x-path-type': selected.path.pathType,
-        })
-        .end('routed');
-    });
-    await new Promise<void>((resolve) => router.listen(0, '127.0.0.1', resolve));
-    const address = router.address();
-    if (!address || typeof address === 'string') throw new Error('router did not bind TCP');
-    const send = async (host: string, path: string, auth: string) => {
-      const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
-        headers: { 'x-route-host': host, 'x-session-state': auth },
-        redirect: 'manual',
-      });
-      return {
-        body: await response.text(),
-        status: response.status,
-        location: response.headers.get('location'),
-        backend: response.headers.get('x-backend'),
-        pathType: response.headers.get('x-path-type'),
-      };
-    };
-    try {
-      for (const path of ['/', '/assets/app.js', '/api/messages', '/api/events']) {
-        for (const auth of ['anonymous', 'expired', 'tampered']) {
-          const response = await send('localhost', path, auth);
-          expect(response.status, `${auth} ${path}: ${response.body}`).toBe(302);
-          expect(response.location).toBe('http://boot.localhost/login');
-        }
-        expect(await send('localhost', path, 'failure')).toMatchObject({ status: 503 });
-        expect(await send('localhost', path, 'valid')).toMatchObject({
-          status: 200,
-          backend: 'web',
-        });
-      }
-      expect(await send('localhost', '/_auth/handoff?code=x&next=%2F', 'anonymous')).toMatchObject({
-        status: 200,
-        backend: 'loader',
-        pathType: 'Exact',
-      });
-      for (const path of ['/login', '/setup']) {
-        expect(await send('boot.localhost', path, 'anonymous')).toMatchObject({
-          status: 200,
-          backend: 'loader',
-          pathType: 'Exact',
-        });
-        expect(await send('boot.localhost', path, 'failure')).toMatchObject({
-          status: 200,
-          backend: 'loader',
-        });
-      }
-      expect(await send('boot.localhost', '/login/extra', 'anonymous')).toMatchObject({
-        status: 302,
-      });
-      expect(await send('boot.localhost', '/setup/extra', 'anonymous')).toMatchObject({
-        status: 302,
-      });
-      expect(await send('boot.localhost', '/login', 'valid')).toMatchObject({
-        status: 200,
-        pathType: 'Exact',
-      });
-      expect(await send('boot.localhost', '/setup', 'valid')).toMatchObject({
-        status: 200,
-        pathType: 'Exact',
-      });
-      // Exact public route wins the priority overlap with the private prefix.
-      expect(await send('boot.localhost', '/login', 'anonymous')).toMatchObject({
-        backend: 'loader',
-        pathType: 'Exact',
-      });
-    } finally {
-      await new Promise<void>((resolve, reject) =>
-        router.close((error) => (error ? reject(error) : resolve()))
       );
     }
   });

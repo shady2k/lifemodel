@@ -67,6 +67,7 @@ describe('owner message HTTP route with real Valkey', () => {
     intake = new OwnerMessageIntake(redis, 'web-owner-recipient', { transcript });
     server = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -186,6 +187,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await server.close();
     server = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -209,6 +211,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await write('server-stopped-two', 'while stopped two');
     const restarted = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -237,6 +240,7 @@ describe('owner message HTTP route with real Valkey', () => {
     await restarted.close();
     server = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -264,6 +268,7 @@ describe('owner message HTTP route with real Valkey', () => {
 
     const streamServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -304,6 +309,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const stateStore = new CreatureStateStore(redis);
     const stateServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -350,6 +356,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const recipient = 'web-owner-recipient';
     const stateServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -410,6 +417,7 @@ describe('owner message HTTP route with real Valkey', () => {
     const stateStore = new CreatureStateStore(redis);
     const stateServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake,
@@ -462,6 +470,7 @@ describe('owner message HTTP route with real Valkey', () => {
     });
     const brokenServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: broken,

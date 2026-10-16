@@ -17,6 +17,8 @@ let
       (builtins.readFile (rootDir + "/ocirepository.yaml")));
   renderedKustomization = pkgs.writeText "lifemodel-platform-kustomization.yaml"
     (builtins.readFile (rootDir + "/kustomization.yaml"));
+  renderedInstance = pkgs.writeText "lifemodel-platform-instance.yaml"
+    (builtins.replaceStrings [ ("$" + "{LIFEMODEL_NAME}") ] [ cfg.name ] (builtins.readFile (rootDir + "/instance.yaml")));
   fluxManifest = pkgs.fetchurl {
     url = "https://github.com/fluxcd/flux2/releases/download/v2.9.6/install.yaml";
     hash = "sha256-nB/afkAUKVMe0UePZ7oGs+3/ZRO3XafuR73p8cTUJRw=";
@@ -35,6 +37,7 @@ in
 {
   options.services.lifemodel = {
     enable = mkEnableOption "lifemodel GitOps platform bootstrap";
+    name = mkOption { type = types.strMatching "[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?"; default = "lifemodel"; description = "Fixed one-label instance name (max 57 characters)."; };
     platform = {
       url = mkOption { type = types.str; description = "OCI URL of the signed platform artifact."; };
       tag = mkOption { type = types.nullOr types.str; default = null; description = "OCI artifact tag (required unless digest is set)."; };
@@ -57,6 +60,7 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       { assertion = cfg.platform.url != ""; message = "services.lifemodel.platform.url is required"; }
+      { assertion = builtins.stringLength cfg.name <= 57; message = "services.lifemodel.name must be a DNS label of at most 57 characters"; }
       { assertion = cfg.platform.digest != null || cfg.platform.tag != null;
         message = "services.lifemodel.platform.tag or services.lifemodel.platform.digest is required"; }
       { assertion = (cfg.platform.tag == null || !(lib.hasInfix "\n" cfg.platform.tag))
@@ -128,8 +132,16 @@ in
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel render-ref ${renderedOCI} ${lib.escapeShellArg platformRef} > "$effectiveOCI"
         effectiveRef=$(LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel effective-ref ${lib.escapeShellArg platformRef})
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel assert-root-ownership
+        if [ -f /var/lib/lifemodel/instance-name ]; then
+          installed_name="$(cat /var/lib/lifemodel/instance-name)"
+          [ "$installed_name" = ${lib.escapeShellArg cfg.name} ] || { echo 'lifemodel instance name is fixed after install' >&2; exit 1; }
+        fi
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f "$effectiveOCI"
+        $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedInstance}
         $KUBECTL apply --server-side --field-manager=lifemodel-bootstrap -f ${renderedKustomization}
+        printf '%s\n' ${lib.escapeShellArg cfg.name} > /var/lib/lifemodel/instance-name.tmp
+        chmod 0600 /var/lib/lifemodel/instance-name.tmp
+        mv /var/lib/lifemodel/instance-name.tmp /var/lib/lifemodel/instance-name
         LIFEMODEL_LOCK_FD=9 LIFEMODEL_LOCK_HELD=1 lifemodel record-applied "$effectiveRef"
       '';
     };

@@ -7,6 +7,7 @@ Add this flake as an input and enable `services.lifemodel` on the dedicated VM:
   imports = [ inputs.lifemodel.nixosModules.default ];
   services.lifemodel = {
     enable = true;
+    name = "lifemodel"; # one DNS label, at most 57 characters
     platform.url = "oci://ghcr.io/shady2k/lifemodel-platform";
     platform.tag = "v1.0.0";
   };
@@ -17,7 +18,7 @@ The core image requires an x86-64-v2 CPU or newer for memory search. For a VM, c
 
 Then run `sudo nixos-rebuild switch --flake .#HOST`. The module starts k3s
 with embedded etcd and its bundled Traefik, installs Flux v2.9.6, and applies
-the verified platform source and root Kustomization. The bootstrap is a systemd
+the verified platform source, the instance ConfigMap, and root Kustomization. Set `services.lifemodel.name` before installation; it fixes `<name>.local` and `boot-<name>.local`. The bootstrap is a systemd
 oneshot: an unchanged switch does not rerun it. Changing the configured platform
 ref changes its unit script, so NixOS restarts the unit during the switch; a
 failed bootstrap makes the switch fail. To re-apply without changing the

@@ -5,11 +5,16 @@ import type { IOwnerMessageIntake } from '../../src/ports/owner-message-intake.j
 const id = '0199aabb-ccdd-7eef-8abc-0123456789ab';
 const accepted = { status: 'accepted' as const, streamId: '1-0' };
 
-function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(accepted)) {
+function setup(
+  result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(accepted),
+  instanceName = 'lifemodel'
+) {
   const acceptOwnerMessage = vi.fn(result);
   const info = vi.fn();
   const server = createWebServer({
-    allowedOrigin: 'http://localhost',
+    allowedOrigin:
+      instanceName === 'lifemodel' ? 'http://localhost' : `http://${instanceName}.local`,
+    instanceName,
     appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
     runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
     intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
@@ -26,6 +31,19 @@ function setup(result: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(acce
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('GET /api/instance', () => {
+  it('returns the configured instance and a matching loader URL', async () => {
+    const { server } = setup(undefined, 'home');
+    const response = await server.inject({ method: 'GET', url: '/api/instance' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      name: 'home',
+      loaderUrl: 'http://boot-home.local/',
+    });
+    await server.close();
+  });
+});
 
 describe('POST /api/messages', () => {
   it.each([
@@ -125,6 +143,7 @@ describe('POST /api/messages', () => {
     const acceptOwnerMessage = vi.fn().mockResolvedValue({ status: 'reply_not_found' });
     const server = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: { acceptOwnerMessage } as unknown as IOwnerMessageIntake,
@@ -183,6 +202,7 @@ describe('GET /api/events admission', () => {
     const acquireStreamLease = vi.fn().mockResolvedValue('lease-id');
     const server = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
@@ -224,6 +244,7 @@ describe('GET /api/events admission', () => {
     await server.close();
     const unavailable = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 17, reconnects: 0 },
       intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,
@@ -257,6 +278,7 @@ describe('static application', () => {
     const config = setup();
     const stalledServer = createWebServer({
       allowedOrigin: 'http://localhost',
+      instanceName: 'lifemodel',
       appDirectory: new URL('../fixtures/web-app/', import.meta.url).pathname,
       runtimeMetrics: { intakeFailures: 0, sseLag: 0, reconnects: 0 },
       intake: { acceptOwnerMessage: vi.fn() } as unknown as IOwnerMessageIntake,

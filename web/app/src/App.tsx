@@ -39,7 +39,7 @@ function Creature() {
   );
 }
 
-function Navigation() {
+function Navigation({ loaderUrl }: { loaderUrl: string | null }) {
   const { t } = useTranslation();
   return (
     <Sidebar collapsible="none" className="hidden border-r border-sidebar-border md:flex">
@@ -63,7 +63,7 @@ function Navigation() {
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton asChild>
-                  <a href="http://boot.localhost/" target="_blank" rel="noopener noreferrer">
+                  <a href={loaderUrl ?? '#'} target="_blank" rel="noopener noreferrer">
                     <span>{t('loader')}</span>
                   </a>
                 </SidebarMenuButton>
@@ -116,6 +116,18 @@ export default function App() {
   const [nowOpen, setNowOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [creature, setCreature] = useState<CreaturePresenceValue>();
+  const [loaderUrl, setLoaderUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void fetch('/api/instance', { cache: 'no-store' })
+      .then((response) => response.json())
+      .then((instance: { loaderUrl?: string }) => {
+        if (active && typeof instance.loaderUrl === 'string') setLoaderUrl(instance.loaderUrl);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const language = languageFor(navigator.language);
@@ -169,7 +181,7 @@ export default function App() {
           )}
         </header>
         <div className="flex min-h-0 flex-1">
-          <Navigation />
+          <Navigation loaderUrl={loaderUrl} />
           <SidebarInset
             aria-label={t('conversation')}
             className="flex min-h-0 min-w-0 flex-1 flex-row bg-background"
@@ -202,7 +214,7 @@ export default function App() {
                 {t('conversation')}
               </a>
               <h2 className="mt-4 font-medium">{t('system')}</h2>
-              <a href="http://boot.localhost/" target="_blank" rel="noopener noreferrer">
+              <a href={loaderUrl ?? '#'} target="_blank" rel="noopener noreferrer">
                 {t('loader')}
               </a>
             </nav>

@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
-  ALLOWED_HOSTS,
+  configureInstanceName,
   clearSessionCookie,
   HANDOFF_TTL_MS,
   HANDOFF_CODE_BYTES,
@@ -32,6 +32,7 @@ export interface LoaderHttpDeps {
   state: LoaderState;
   logger: LoaderLogger;
   clock: Clock;
+  instanceName: string;
 }
 export interface LoaderHttp {
   server: Server;
@@ -109,7 +110,8 @@ function formPage(
 }
 
 export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
-  const { state, logger, clock } = deps;
+  const { state, logger, clock, instanceName } = deps;
+  configureInstanceName(instanceName);
   // Single loader replica: short-lived codes remain process-local by design.
   interface HandoffEntry {
     session: string;
@@ -165,7 +167,46 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       path === '/_auth/verify' &&
       hostName(req.headers.host ?? '') === 'loader.lifemodel-system.svc.cluster.local';
     if (!serviceVerify && !isAllowedHost(req.headers.host)) {
-      sendText(res, 400, `the loader answers only ${ALLOWED_HOSTS.join(', ')}`);
+      sendText(res, 404, 'not found');
+      return;
+    }
+    const requestHost = hostName(req.headers.host ?? '');
+    const bootHost = `boot-${instanceName}.local`;
+    const appHost = `${instanceName}.local`;
+    if (
+      !serviceVerify &&
+      requestHost === appHost &&
+      (path !== '/_auth/handoff' || method !== 'GET')
+    ) {
+      sendText(res, 404, 'not found');
+      return;
+    }
+    if (!serviceVerify && requestHost === bootHost && path === '/_auth/handoff') {
+      sendText(res, 404, 'not found');
+      return;
+    }
+    const bootRouteAllowed =
+      (method === 'GET' &&
+        (path === '/' ||
+          path === '/login' ||
+          path === '/setup' ||
+          path === '/ca.crt' ||
+          path === '/api/state' ||
+          path === '/api/model' ||
+          path.startsWith('/assets/'))) ||
+      (method === 'POST' &&
+        (path === '/login' ||
+          path === '/setup' ||
+          path === '/logout' ||
+          path === '/api/setup' ||
+          path === '/api/login')) ||
+      (['POST', 'PUT', 'DELETE'].includes(method) && path.startsWith('/api/'));
+    if (requestHost === bootHost && !bootRouteAllowed) {
+      sendText(res, 404, 'not found');
+      return;
+    }
+    if (requestHost !== bootHost && requestHost !== appHost && !serviceVerify) {
+      sendText(res, 404, 'not found');
       return;
     }
     if (path === '/_auth/handoff') {
@@ -183,7 +224,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         nextParam?.startsWith('/') && !nextParam.startsWith('//')
           ? vettedNext(`http://${host}${nextParam}`, host)
           : null;
-      const boot = 'http://boot.localhost/login';
+      const boot = `http://boot-${instanceName}.local/login`;
       if (
         entry === undefined ||
         entry.expires <= now ||
@@ -258,7 +299,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         return;
       }
       logger.info({}, "the loader's password is set: platform authentication is ready");
-      const host = req.headers.host ?? 'localhost';
+      const host = req.headers.host ?? '';
       const token = createSession(record, clock.now());
       const next = vettedNext(setupForm['next'], host);
       redirect(res, next === null ? '/' : handoffRedirect(token, next, host), {
@@ -310,7 +351,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
         );
         return;
       }
-      const host = req.headers.host ?? 'localhost';
+      const host = req.headers.host ?? '';
       const issued = await withAuthTransition(async () => {
         const current = await state.readAuth();
         if (current === null || !(await verifyPassword(password, current))) return null;
@@ -370,7 +411,7 @@ export function createLoaderHttp(deps: LoaderHttpDeps): LoaderHttp {
       }
       logger.info({}, 'the owner logged out');
       redirect(res, '/login', {
-        'set-cookie': clearSessionCookie(req.headers.host ?? 'localhost'),
+        'set-cookie': clearSessionCookie(req.headers.host ?? ''),
       });
       return;
     }

@@ -8,15 +8,15 @@ This directory is the root of the signed platform OCI artifact. The root
 can start. Step B installs CloudNativePG with its CRDs in a default-deny operator namespace;
 its only opened routes are DNS, the documented Kubernetes API port, Postgres
 instance ports and API-server webhook ingress. Step C depends on B and applies
-shared state resources, including the Postgres Cluster and Valkey StatefulSet. A0 creates no namespace that step A creates. This order
+shared state resources, including the Postgres Cluster and Valkey StatefulSet.  This order
 lets the loader initialize OpenBao rather than requiring an already running
 Bao. See [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
 ## A0: loader and admission
 
-A0 creates the restricted `lifemodel-system` and `lifemodel-git` namespaces,
+A0 consumes the `lifemodel-system` namespace owned by `platform-instance` and creates restricted `lifemodel-git`,
 the loader ServiceAccount and its narrowly scoped bootstrap permissions, the
-loader Deployment, Service and `boot.localhost` Ingress. The loader image is
+loader Deployment, Service and `boot-<name>.local` Ingress. The loader image is
 pinned by digest in `a0/kustomization.yaml`; its zero digest is a release
 placeholder. The loader Deployment runs non-root with a read-only root
 filesystem. `loader-default-deny` denies ingress and egress except Traefik to
@@ -33,15 +33,13 @@ on another namespace.
 
 ## Web interface routes
 
-The signed platform artifact owns the Traefik routes. A0 installs the
-`loader-auth` ForwardAuth middleware, pointing at the loader Service's
-`/_auth/verify` endpoint. `boot.localhost` `/login` and `/setup` are exact
-routes with higher priority and no middleware; the rest of `boot.localhost`
-uses ForwardAuth. Step A routes the exact `localhost/_auth/handoff` path directly to the loader at higher priority, without ForwardAuth; all other `localhost` paths use ForwardAuth to the `web` Service on port 8080. Login cookies are host-only, with a short-lived signed handoff for crossing from `boot.localhost` to `localhost`. Browsers refuse `Domain=localhost`, so cookies cannot safely be shared with that Domain. The web Service is delivered by
-lifemodel-vhd.6.3. The web pod's NetworkPolicy admits Traefik ingress on 8080
-and allows egress only to DNS, Postgres and Valkey. `/api/events` must disable
-response buffering in Traefik if buffering is otherwise enabled for the
-cluster; the route itself does not add a buffering middleware.
+`platform-instance` owns the public routes and their namespace-local ConfigMaps.
+`boot-<name>.local` routes every path directly to the loader without ForwardAuth.
+The app host `<name>.local` routes through ForwardAuth except exact
+`/_auth/handoff`, which goes to the loader. The loader rejects all other
+host/path combinations. The app origin and chat's loader link derive from the
+instance ConfigMap. HTTP remains in this stage; HTTPS and the Traefik redirect
+are lifemodel-3wi9.3.4.
 
 ## Step A: OpenBao, Gitea and applications
 
@@ -87,15 +85,15 @@ tmp=$(mktemp deploy/platform/a/gitea/rendered.yaml.XXXXXX) && nix shell --inputs
 The release workflow builds and pushes the loader image, substitutes its
 immutable digest in the platform manifests, and signs the OCI artifact. A0's
 digest is therefore resolved from the release image, not from a mutable tag.
-The owner cuts a release by pushing a version tag; the workflow verifies its
-signature against the pinned release-workflow identity. The `boot.localhost`
+The generic installer accepts `--name home` (default `lifemodel`), a lowercase DNS label up to 57 characters; the value is fixed by the installed ConfigMap. The owner cuts a release by pushing a version tag; the workflow verifies its
+signature against the pinned release-workflow identity. The `boot-<name>.local`
 loader is reached on a test VM with:
 
 ```sh
-curl --resolve boot.localhost:80:VM_IP http://boot.localhost/login
+curl http://boot-<name>.local/login
 ```
 
-Replace `VM_IP` with the VM's reachable IP, or map `boot.localhost` to that IP
+Replace `VM_IP` with the VM's reachable IP, or map `boot-<name>.local` to that IP
 in the browser host file. Traefik publishes this host to port 7000.
 
 The A0 reconciler uses the Flux v2.9.6 Kustomization API, which supports

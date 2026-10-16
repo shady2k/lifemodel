@@ -38,7 +38,11 @@ describe('web application generation', () => {
     ]);
     expect(container.env).toEqual(
       expect.arrayContaining([
-        { name: 'LIFEMODEL_WEB_ALLOWED_ORIGIN', value: 'http://localhost' },
+        {
+          name: 'LIFEMODEL_NAME',
+          valueFrom: { configMapKeyRef: { name: 'lifemodel-instance', key: 'LIFEMODEL_NAME' } },
+        },
+        { name: 'LIFEMODEL_WEB_ALLOWED_ORIGIN', value: 'http://$(LIFEMODEL_NAME).local' },
         { name: 'LIFEMODEL_WEB_PORT', value: '8080' },
         { name: 'LIFEMODEL_WEB_INTERNAL_PORT', value: '8081' },
         { name: 'LIFEMODEL_WEB_APP_DIRECTORY', value: '/opt/lifemodel/web/app' },

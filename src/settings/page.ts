@@ -25,15 +25,9 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-/** The loader's address for the same instance: the pinned boot host, same port. */
-export function loaderUrl(host: string | undefined): string {
-  // The port comes from the request (the instance may be published on any
-  // port); the NAME is pinned to `boot.localhost`, never taken from the Host
-  // header - the loader's own login does the same, and a name a request
-  // supplies must never decide a link (docs/features/instance/loader.md).
-  const groups = /:(?<port>\d+)$/.exec(host ?? '')?.groups;
-  const port = groups?.['port'];
-  return port === undefined ? 'http://boot.localhost/' : `http://boot.localhost:${port}/`;
+/** The loader's address is instance-specific and supplied by the web configuration. */
+export function loaderUrl(instanceName = 'lifemodel'): string {
+  return `http://boot-${instanceName}.local/`;
 }
 
 const STYLE = `

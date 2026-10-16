@@ -17,6 +17,8 @@ function requiredPort(name: string): number {
 async function main(): Promise<void> {
   const allowedOrigin = process.env['LIFEMODEL_WEB_ALLOWED_ORIGIN'];
   if (!allowedOrigin) throw new Error('LIFEMODEL_WEB_ALLOWED_ORIGIN is required');
+  const instanceName = process.env['LIFEMODEL_NAME'];
+  if (!instanceName) throw new Error('LIFEMODEL_NAME is required');
   const appDirectory = process.env['LIFEMODEL_WEB_APP_DIRECTORY'];
   if (!appDirectory) throw new Error('LIFEMODEL_WEB_APP_DIRECTORY is required');
   const port = requiredPort('LIFEMODEL_WEB_PORT');
@@ -27,6 +29,7 @@ async function main(): Promise<void> {
   const runtimeMetrics: WebRuntimeMetrics = { intakeFailures: 0, sseLag: 0, reconnects: 0 };
   const server = createWebServer({
     allowedOrigin,
+    instanceName,
     appDirectory,
     runtimeMetrics,
     intake: stores.intake,

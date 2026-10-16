@@ -119,12 +119,10 @@ export function verifySession(token: string, record: PasswordRecord, nowMs: numb
 }
 
 /** The hosts the loader answers on. */
-export const ALLOWED_HOSTS = [
-  'localhost',
-  'boot.localhost',
-  'vault.localhost',
-  '127.0.0.1',
-] as const;
+let configuredInstanceName = 'lifemodel';
+export function configureInstanceName(name: string): void {
+  configuredInstanceName = name;
+}
 
 /** The name part of a Host header (or of any `host:port` string), lowercased. */
 export function hostName(host: string): string {
@@ -133,12 +131,23 @@ export function hostName(host: string): string {
 
 /** Is this a Host the loader answers on at all? */
 export function isAllowedHost(host: string | undefined): boolean {
-  return host !== undefined && (ALLOWED_HOSTS as readonly string[]).includes(hostName(host));
+  const name = hostName(host ?? '');
+  return (
+    host !== undefined &&
+    (name === '127.0.0.1' ||
+      name === `${configuredInstanceName}.local` ||
+      name === `boot-${configuredInstanceName}.local` ||
+      name === `vault-${configuredInstanceName}.local`)
+  );
 }
 
 /** The hosts a browser reaches: the pinned ones, the CLI's loopback literal excluded. */
 function isBrowserHost(name: string): boolean {
-  return name !== '127.0.0.1' && (ALLOWED_HOSTS as readonly string[]).includes(name);
+  return (
+    name === `${configuredInstanceName}.local` ||
+    name === `boot-${configuredInstanceName}.local` ||
+    name === `vault-${configuredInstanceName}.local`
+  );
 }
 
 /** The port of a `host:port` string, or '' when it names none (or names nonsense). */
@@ -158,15 +167,12 @@ function hostPort(host: string): string {
 export function loginLocation(forwardedHost: string, forwardedUri: string): string | null {
   const name = hostName(forwardedHost);
   if (!isBrowserHost(name)) return null;
-  const domain =
-    name.startsWith('boot.') || name.startsWith('vault.')
-      ? name.slice(name.indexOf('.') + 1)
-      : name;
+  const domain = configuredInstanceName;
   const port = hostPort(forwardedHost);
   const authority = (host: string): string => (port === '' ? host : `${host}:${port}`);
   const path = forwardedUri.startsWith('/') && !forwardedUri.startsWith('//') ? forwardedUri : '/';
   const next = `http://${authority(name)}${path}`;
-  return `http://${authority(`boot.${domain}`)}/login?next=${encodeURIComponent(next)}`;
+  return `http://${authority(`boot-${domain}.local`)}/login?next=${encodeURIComponent(next)}`;
 }
 
 /**
@@ -191,9 +197,7 @@ export function vettedNext(next: string | undefined, requestHost: string): strin
   } catch {
     return null;
   }
-  // http only: the login itself is served over http in this stage, and an
-  // https URL on the same host has another default port - another service
-  // (rework 3, review round 4 finding 2). HTTPS comes with lifemodel-sd2.
+  // HTTP remains the platform scheme in this stage.
   if (url.protocol !== 'http:') return null;
   if (url.username !== '' || url.password !== '') return null;
   if (!isBrowserHost(url.hostname.toLowerCase())) return null;

@@ -20,7 +20,7 @@ the places named under "Amendments".
 
 The owner's first look at the platform (2026-10-16) failed in three ways:
 
-- the instance answered only on `localhost` and `boot.localhost`, names a
+- the instance answered only on `<name>.local` and `boot-<name>.local`, names a
   browser resolves to its own machine, so another computer needed an SSH
   tunnel to port 80;
 - the loader's pages are bare server-rendered HTML, not the kit the web chat
@@ -93,7 +93,7 @@ model access, checked) → the chat, answered by the owner's real model
   host, allowed origin and redirect from it. The chat learns the loader's
   address at runtime from `GET /api/instance` of the web module, not from a
   build-time constant.
-- The `*.localhost` names are removed everywhere (no compatibility path).
+- The localhost-suffixed names are removed everywhere (no compatibility path).
 
 ### 2. mDNS on the node [ADR12-13]
 
@@ -316,7 +316,7 @@ safe from cross-site forms before a session exists.
 
 ## Considered options
 
-- **Names:** `*.localhost` + tunnel (rejected — unreachable from the LAN);
+- **Names:** localhost-suffixed names + tunnel (rejected — unreachable from the LAN);
   `boot.<name>.local` (rejected after review — three labels fail nss-mdns by
   default; owner chose the hyphen); one host with the loader under `/boot`
   (rejected — loses origin isolation); own domain (later, lifemodel-sd2);
@@ -345,7 +345,7 @@ safe from cross-site forms before a session exists.
   addresses for the model check, and the Bao grant `loader-model`; the loader
   Deployment is `Recreate`.
 - ADR-011: hosts `<name>.local`/`boot-<name>.local` replace
-  `localhost`/`boot.localhost`; cookies are host-only `__Host-` and `Secure`;
+  the prior local-only names; cookies are host-only `__Host-` and `Secure`;
   Origin is exact `https://`; the kit lives in `web/kit`; the chat reads the
   loader's address from `/api/instance`.
 
@@ -366,7 +366,7 @@ Unit and integration checks in the isolated suite:
 - A Flux-equivalent post-build render of `platform-instance` for names
   `lifemodel` and `home`: only intended fields change, no placeholder remains,
   and the OpenBao and Gitea manifests are byte-identical before and after.
-- Hosts, origins and redirects derive from the name; `localhost` is refused;
+- Hosts, origins and redirects derive from the name; `<name>.local` is refused;
   a bad or too-long name fails install and evaluation.
 - Certificate bootstrap: first start creates CA, identity and leaf in that
   order; a restart reuses them; a missing leaf is reissued from the same CA; a
