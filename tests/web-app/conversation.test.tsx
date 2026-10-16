@@ -187,9 +187,15 @@ describe('conversation transcript', () => {
     await screen.findByText('row 9950');
     expect(transport.reads[1]).toBe('9951');
     expect((scroller as HTMLDivElement).scrollTop).toBe(500);
-    act(() => transport.emit(row('10001', 'assistant', 'live after page')));
+    act(() => {
+      transport.emit(row('10001', 'assistant', 'live after page'));
+      transport.emit(row('10001', 'assistant', 'live after page'));
+    });
     expect(screen.getByText('live after page')).toBeTruthy();
-    expect(transport.reads).toEqual([undefined, '9951']);
+    Object.defineProperty(scroller, 'scrollTop', { configurable: true, value: 0, writable: true });
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(transport.reads).toHaveLength(3));
+    expect(transport.reads).toEqual([undefined, '9951', '9901']);
   });
 
   it('announces fresh thinking state and renders the owner and lifemodel in distinct bubbles', async () => {
